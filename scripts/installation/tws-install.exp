@@ -1,0 +1,13 @@
+#!/usr/bin/expect
+
+set timeout 120
+
+spawn sh -c {
+    DISPLAY= /home/trader/tws-latest-standalone-linux-x64.sh
+}
+
+expect "Where should"
+send "\r"
+
+expect "Run Trader"
+send "n\r"

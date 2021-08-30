@@ -1,0 +1,5 @@
+# Ignore everything in this directory
+history.txt
+# Except this file
+!.gitignore
+

@@ -1,0 +1,11 @@
+*.pyc
+.mypy_cache/
+*.csv
+*.tar*
+!mongodb.conf
+__pycache__
+.ipynb_checkpoints
+.pytest_cache/
+anbox-work/*
+.vscode
+scratch/

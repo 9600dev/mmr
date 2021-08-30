@@ -1,0 +1,96 @@
+root_directory: /home/trader/mmr
+port: 8081
+health_check_eval:
+  - "exec('sys.path.append(\"scripts\")') or exec('from trader_check import health_check') or health_check('configs/trader.yaml')"
+jobs:
+    - name: xvfb
+      description: starts a virtual display
+      command: /usr/bin/Xvfb
+      arguments: :1 -ac -screen 0 2560x1600x24 &
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_found: False
+    - name: x0vncserver
+      description: starts x0vncserver
+      command: /usr/bin/x0vncserver
+      arguments: -display :1 -fg -SecurityTypes VncAuth -PasswordFile /home/trader/.vnc/passwd -localhost no -verbose
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_found: False
+      depends_on:
+        - xvfb
+      delay: 5
+    - name: awesome
+      description: start a window manager
+      command: DISPLAY=:1 /usr/bin/awesome
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_found: False
+      depends_on:
+        - xvfb
+      delay: 10
+    - name: tws
+      description: make sure tws is continuously running, and force restart/reauth on Sunday
+      command: DISPLAY=:1 ../ibc/twsstart.sh
+      arguments: -inline
+      eval:
+        - "exec('sys.path.append(\"scripts\")') or exec('from ib_status import ib_status') or ib_status()"
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_found: True
+      restart_if_finished: True
+      depends_on:
+        - xvfb
+      delay: 10
+    - name: mongodb
+      description: ensures mongodb is running
+      command: /usr/bin/mongod
+      arguments: --config configs/mongodb.conf
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_found: True
+    - name: messaging server
+      description: zeromq messaging for trader
+      command: /usr/bin/python3
+      arguments: trader/messaging/messaging_server.py
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_found: True
+      restart_if_finished: True
+    - name: redis
+      description: redis server
+      command: /usr/bin/redis-server
+      arguments: configs/redis.conf
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_finished: True
+    - name: trader_host
+      description: the host service for all algo trading
+      command: /usr/bin/python3
+      arguments: trader_host.py
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_found: True
+      restart_if_finished: True
+      depends_on:
+        - tws
+      delay: 5
+    - name: ib-history
+      description: starts the batch worker for interactive brokers history download
+      command: /usr/bin/python3
+      arguments: /usr/local/bin/rq worker history
+      start: 50 18 * * *
+      stop: 40 17 * * *
+      eval:
+        - "exec('sys.path.append(\"scripts\")') or exec('from ib_status import ib_status') or ib_status()"
+      start_on_pycron_start: True
+      restart_if_found: True
+      delay: 5
+    - name: polygon-history
+      description: starts the batch worker for polygon.io
+      command: /usr/bin/python3
+      arguments: /usr/local/bin/rq worker polygonhistory
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_found: True
+      delay: 5

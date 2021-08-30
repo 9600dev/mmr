@@ -1,0 +1,16 @@
+bus:
+  schema:
+    transport:
+      redis:
+        url: "redis://127.0.0.1:6379/0"
+apis:
+  default:
+    event_transport:
+      redis:
+        url: "redis://127.0.0.1:6379/0"
+    rpc_transport:
+      redis:
+        url: "redis://127.0.0.1:6379/0"
+    result_transport:
+      redis:
+        url: "redis://127.0.0.1:6379/0"

@@ -1,0 +1,25 @@
+root_directory: /home/trader/mmr
+sms: False
+port: 8081
+jobs:
+  - name: test_pycron1
+    description: tests the starting and stopping of pycron
+    command: /usr/bin/python3
+    arguments: scripts/test_pycron_sync.py 1
+    start: "* * * * *"
+    start_on_pycron_start: True
+  - name: test_pycron2
+    description: tests the starting and stopping of pycron
+    command: /usr/bin/python3
+    arguments: scripts/test_pycron_sync.py 2
+    start: "* * * * *"
+    depends_on:
+      - test_pycron1
+  - name: test_pycron3
+    description: tests the starting and stopping of pycron
+    command: /usr/bin/python3
+    arguments: scripts/test_pycron_sync.py 3
+    start: "* * * * *"
+    depends_on:
+      - test_pycron1
+      - test_pycron2

@@ -1,0 +1,48 @@
+import click
+import nest_asyncio
+import asyncio
+
+from trader.common.logging_helper import setup_logging
+logging = setup_logging(module_name='trading_runtime')
+
+from trader.container import Container
+from trader.trading.trading_runtime import Trader
+from trader.common.helpers import get_network_ip
+from trader.messaging.bus_server import start_lightbus
+
+@click.command()
+@click.option('--simulation', required=False, default=False, help='load with historical data')
+@click.option('--config_file', required=False, default='/home/trader/mmr/configs/trader.yaml',
+              help='trader.yaml config file location')
+def main(simulation: bool,
+         config_file: str):
+    # required for nested asyncio calls and avoids RuntimeError: This event loop is already running
+    nest_asyncio.apply()
+    loop = asyncio.get_event_loop()
+
+    if simulation:
+        raise ValueError('not implemented yet')
+        # ib_client = HistoricalIB(logger=logging)
+
+    container = Container(config_file)
+    trader = container.resolve(Trader, simulation=simulation)
+    trader.connect()
+
+    ip_address = get_network_ip()
+    logging.debug('starting trading_runtime at network address: {}'.format(ip_address))
+
+    # setup the lightbus
+    start_lightbus(container.config()['lightbus_config_file'],
+                   container.config()['lightbus_module'],
+                   loop)
+    logging.debug('started lightbus successfully')
+
+    # start the trader
+    logging.debug('starting trader run() loop')
+    trader.run()
+
+    asyncio.get_event_loop().run_forever()
+
+
+if __name__ == '__main__':
+    main()

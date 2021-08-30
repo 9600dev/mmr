@@ -1,0 +1,1 @@
+/home/trader/start_trader.sh
