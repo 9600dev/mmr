@@ -54,9 +54,11 @@ Enter your Trader Workstation username and password. The script will proceed to 
 After this has completed, it will start a tmux session with two commands:
 
 * "pycron" (MMR's process spawner and scheduler) which handles the process scheduling, maintenance and uptime of ArcticDB, Redis, X Windows, and Trader Workstation, ready for automatic trading.
-* "cli" which is command line interface to interact with the trading system (check portfolio, check systems, manually create orders etc)
+* "cli" which is command line interface to interact with the trading system (check portfolio, check systems, manually create orders etc). You can manually call this using ```python3 cli.py```.
 
-You can VNC into the Docker container also, as it will show you a running instance of TWS workstation.
+![mmr cli](docs/cli.png)
+
+You can VNC into the Docker container also, which will allow you to interact with the running instance of TWS workstation.
 
 ### Manual Installation
 
