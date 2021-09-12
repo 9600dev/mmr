@@ -41,6 +41,7 @@ from typing import (
     Generic,
     TypeVar,
     Union,
+    AsyncGenerator,
     cast,
 )
 
@@ -216,10 +217,12 @@ class IBAIORx():
                                         report_type: ReportType = ReportType.ReportSnapshot) -> rx.AsyncObservable[str]:
         return rx.from_async(self.ib.reqFundamentalDataAsync(contract, reportType=str(report_type)))
 
-    def get_matching_symbols(self, symbol: str) -> List[ContractDescription]:
-        return self.ib.reqMatchingSymbols(symbol)
+    async def get_matching_symbols(self, symbol: str) -> List[ContractDescription]:
+        result = await self.ib.reqMatchingSymbolsAsync(symbol)
+        if not result: return []
+        else: return result
 
-    def get_conid_sync(
+    async def get_conid(
         self,
         symbols: Union[str, List[str]],
         secType: str = "STK",
@@ -244,10 +247,10 @@ class IBAIORx():
             * 'FUND'= Mutual fund
         """
 
-        def get_conid_helper(
+        async def get_conid_helper(
             symbol: str, secType: str, primaryExchange: str, currency: str
         ) -> Optional[Contract]:
-            contract_desc: List[ContractDescription] = self.get_matching_symbols(symbol)
+            contract_desc: List[ContractDescription] = await self.get_matching_symbols(symbol)
             f: List[ContractDescription] = []
             if len(contract_desc) == 1 and contract_desc[0].contract:
                 return contract_desc[0].contract
@@ -274,40 +277,52 @@ class IBAIORx():
 
         if type(symbols) is list:
             result = [
-                get_conid_helper(symbol, secType, primaryExchange, currency)
+                await get_conid_helper(symbol, secType, primaryExchange, currency)
                 for symbol in symbols
             ]
             return [r for r in result if r]
         else:
-            return get_conid_helper(str(symbols), secType, primaryExchange, currency)
+            return await get_conid_helper(str(symbols), secType, primaryExchange, currency)
 
-    def get_contract_history(
+    async def __get_contract_history(
         self,
         contract: Contract,
         start_date: dt.datetime,
         end_date: dt.datetime = dt.datetime.now(),
-        bar_size_setting: str = "5 secs",
-        to_pandas: bool = False,
+        bar_size_setting: str = '1 min',
+        what_to_show: WhatToShow = WhatToShow.MIDPOINT,
     ) -> List[BarData]:
         dt = end_date
         bars_list = []
 
         while dt >= start_date:
-            bars = self.ib.reqHistoricalData(
+            bars = await self.ib.reqHistoricalDataAsync(
                 contract,
                 endDateTime=dt,
-                durationStr="1 D",
+                durationStr='1 D',
                 barSizeSetting=bar_size_setting,
-                whatToShow="MIDPOINT",
+                whatToShow=str(what_to_show),
                 useRTH=True,
                 formatDate=1,
             )
+
             if not bars:
                 break
             for bar in bars:
                 bars_list.append(bar)
-            dt = bars[0].date
+            dt = bars[0].date  # type: ignore
+        return bars_list
 
+    async def get_contract_history(
+        self,
+        contract: Contract,
+        start_date: dt.datetime,
+        end_date: dt.datetime = dt.datetime.now(),
+        bar_size_setting: str = '1 min',
+        what_to_show: WhatToShow = WhatToShow.TRADES,
+        to_pandas: bool = False,
+    ) -> List[BarData]:
+        bars_list = await self.__get_contract_history(contract, start_date, end_date, bar_size_setting, what_to_show)
         if to_pandas:
             return df(bars_list)
         else:

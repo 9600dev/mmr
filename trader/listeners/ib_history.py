@@ -121,7 +121,7 @@ class IBHistoryWorker():
             joined: pd.DataFrame = reduce(lambda left, right: left.join(right), current_date_bars)
 
             # arctic requires timezone to be set
-            joined.index = pd.to_datetime(joined.index)
+            joined.index = pd.to_datetime(joined.index)  # type: ignore
             joined.index = joined.index.tz_localize(tz_info)  # type: ignore
 
             # get rid of any columns that has -1 or -1.0

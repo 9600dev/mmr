@@ -37,6 +37,7 @@ from ib_insync import IB, Stock, PortfolioItem
 from rx.scheduler.eventloop import AsyncIOThreadSafeScheduler
 from tabulate import tabulate
 from trader.common.helpers import rich_table, rich_dict, rich_json, DictHelper
+from trader.listeners.ibaiorx import WhatToShow
 from trader.common.helpers import *
 from IPython import get_ipython
 from pyfiglet import Figlet
@@ -113,6 +114,7 @@ class CLIDispatcher():
         ])
         if not csv:
             rich_table(df.groupby(by=['currency'])['marketValue'].sum().reset_index(), financial=True)
+            rich_table(df.groupby(by=['currency'])['unrealizedPNL'].sum().reset_index(), financial=True)
 
     def positions(self, csv: bool = False):
         positions: List[Dict] = cast(List[Dict], bus.service.get_positions())
@@ -142,6 +144,12 @@ class CLIDispatcher():
         if not csv:
             rich_table(df.groupby(by=['currency'])['total'].sum().reset_index(), financial=True)
 
+    def universe(self, exchange: str = 'NASDAQ'):
+        data = container.resolve(TickData, arctic_library='Historical')
+
+    def reconnect(self):
+        bus.service.reconnect()
+
     def exit(self):
         sys.exit(0)
 
@@ -170,6 +178,14 @@ class CLIDispatcher():
         if len(res) > 0:
             conId = res.iloc[0].conId
             rich_table(financials.read(financials.symbol_to_contract(conId)).financials, csv)
+
+    # def data(self, symbol: str, csv: bool = False):
+    #     data = container.resolve(TickData, arctic_library='Historical')
+    #     symbols = {}
+    #     if symbol:
+    #         contract = data.symbol_to_contract(symbol)
+    #         min_date, max_date = data.date_summary(contract)
+    #         symbols[contract] =
 
     def status(self):
         result = health_check(self.config_file)

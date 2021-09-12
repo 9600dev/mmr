@@ -25,6 +25,8 @@ class TraderServiceApi(Api):
     async def get_portfolio(self) -> List[PortfolioItem]:
         return self.trader.portfolio.get_portfolio_items()
 
+    async def reconnect(self):
+        return self.trader.reconnect()
 
 bus = lightbus.create(config_file=Container().config()['lightbus_config_file'])
 bus.client.register_api(TraderServiceApi())

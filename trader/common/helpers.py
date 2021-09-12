@@ -213,8 +213,9 @@ def dateify(date_time: Optional[Union[dt.datetime, dt.date, Timestamp]] = None,
         else:
             # if we have an already existing timezone in the datetime
             # and the user has passed a timezone, let's convert!
+            date_time = date_time.astimezone(zone)
             date_time = date_time.replace(hour=0, minute=0, second=0, microsecond=0)
-            return date_time.astimezone(zone)
+            return date_time
     else:
         return dt.datetime.now(zone).replace(hour=0, minute=0, second=0, microsecond=0)
 

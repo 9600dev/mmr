@@ -62,6 +62,8 @@ class Trader(metaclass=Singleton):
         self.arctic_library = arctic_library
         self.simulation: bool = simulation
         self.paper_trading = paper_trading
+        self.redis_server_address = redis_server_address
+        self.redis_server_port = redis_server_port
 
         # todo I think you can have up to 24 connections to TWS (and have multiple TWS instances running)
         # so we need to take this from single client, to multiple client
@@ -85,7 +87,12 @@ class Trader(metaclass=Singleton):
         self.data = TickData(self.arctic_server_address, self.arctic_library)
         self.contract_subscriptions = {}
         self.client.ib.connectedEvent += self.connected_event
+        self.client.ib.disconnectedEvent += self.disconnected_event
         self.client.connect()
+
+    def reconnect(self):
+        # this will force a reconnect through the disconnected event
+        self.client.ib.disconnect()
 
     async def __update_positions(self, positions: List[Position]):
         logging.debug('__update_positions')
@@ -124,6 +131,10 @@ class Trader(metaclass=Singleton):
     async def connected_event(self):
         logging.debug('connected_event')
         await self.setup_subscriptions()
+
+    async def disconnected_event(self):
+        logging.debug('disconnected_event')
+        self.connect()
 
     def is_ib_connected(self) -> bool:
         return self.client.ib.isConnected()
