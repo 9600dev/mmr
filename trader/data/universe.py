@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import os
 from types import resolve_bases
 import numpy as np
@@ -27,10 +28,36 @@ from trader.data.contract_metadata import ContractMetadata
 from trader.data.data_access import DictData
 
 
+# follows quantrocket definition: https://www.quantrocket.com/codeload/moonshot-intro/intro_moonshot/Part2-Universe-Selection.ipynb.html
+@dataclass
+class SecurityDefinition():
+    conId: int
+    symbol: str
+    exchange: str
+    primaryExchange: str
+    currency: str
+    country: str
+    secType: str
+    etf: bool
+    timezone: str
+    name: str
+    delisted: bool
+    dateDelisted: Optional[dt.datetime]
+    rolloverDate: Optional[dt.datetime]
+    tradeable: bool
+
+
 class Universe():
-    def __init__(self, name: str, contracts: List[Contract] = []):
+    def __init__(self, name: str, security_definitions: List[SecurityDefinition] = []):
         self.name: str = name
-        self.contracts: List[Contract] = contracts
+        self.security_definitions: List[SecurityDefinition] = security_definitions
+
+    @staticmethod
+    def to_contract(definition: SecurityDefinition) -> Contract:
+        contract = Contract(secType=definition.secType, conId=definition.conId, symbol=definition.symbol,
+                            currency=definition.currency, exchange=definition.exchange,
+                            primaryExchange=definition.primaryExchange)
+        return contract
 
 
 class UniverseAccessor():

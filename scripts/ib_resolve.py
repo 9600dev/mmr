@@ -33,6 +33,42 @@ def contract_dict(contract: Contract):
         'currency': contract.currency,
     }
 
+def contractdetails_dict(details: ContractDetails):
+    return {
+        'symbol': details.contract.symbol,
+        'conId': int(details.contract.conId),
+        'secType': details.contract.secType,
+        'exchange': details.contract.exchange,
+        'primaryExchange': details.contract.primaryExchange,
+        'currency': details.contract.currency,
+        'marketName': details.marketName,
+        'minTick': details.minTick,
+        'orderTypes': details.orderTypes,
+        'validExchanges': details.validExchanges,
+        'priceMagnifier': details.priceMagnifier,
+        'longName': details.longName,
+        'industry': details.industry,
+        'category': details.category,
+        'subcategory': details.subcategory,
+        'tradingHours': details.tradingHours,
+        'timeZoneId': details.timeZoneId,
+        'liquidHours': details.liquidHours,
+        'stockType': details.stockType,
+        'bondType': details.bondType,
+        'couponType': details.couponType,
+        'callable': details.callable,
+        'putable': details.putable,
+        'coupon': details.coupon,
+        'convertable': details.convertible,
+        'maturity': details.maturity,
+        'issueDate': details.issueDate,
+        'nextOptionDate': details.nextOptionDate,
+        'nextOptionPartial': details.nextOptionPartial,
+        'nextOptionType': details.nextOptionType,
+        'marketRuleIds': details.marketRuleIds
+    }
+
+
 
 def resolve_symbol(ib: IBRx,
                    symbol: str,
@@ -55,6 +91,8 @@ def resolve_symbol(ib: IBRx,
         logging.info('no matching results found for {}'.format(symbol))
         return None
     else:
+        c = result[0]
+        logging.info('{} {} {}'.format(c.contract.conId, c.contract.symbol, c.longName))
         return result[0]
 
 
@@ -90,25 +128,26 @@ def fill_csv(ib: IBRx,
              exchange: str = 'SMART',
              primary_exchange: str = 'NASDAQ',
              currency: str = 'USD'):
-    def resolve(symbol: str) -> Contract:
+    def resolve(symbol: str) -> ContractDetails:
         contract_detail = resolve_symbol(ib, symbol, sec_type, exchange, primary_exchange, currency)
-        if contract_detail and contract_detail.contract:
-            return contract_detail.contract
+        if contract_detail:
+            return contract_detail
         else:
-            return Contract(conId=-1)
+            return ContractDetails()
 
     df = pd.read_csv(csv_file)
     if not csv_output_file:
         csv_output_file = csv_file
 
     if not full:
-        df['conId'] = df['symbol'].apply(lambda x: resolve(x).conId)
+        df['conId'] = df['symbol'].apply(lambda x: resolve(x).contract.conId)
     else:
         list_contracts = []
         for index, row in df.iterrows():
             result = resolve(row.symbol)
             if result:
-                d = contract_dict(result)
+                # d = contract_dict(result)
+                d = contractdetails_dict(result)
                 list_contracts.append(d)
         df = pd.merge(df, pd.DataFrame.from_dict(list_contracts), how='left', on='symbol')
 

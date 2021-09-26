@@ -6,7 +6,6 @@ import coloredlogs
 import click
 from bs4 import BeautifulSoup
 from typing import List, Dict
-from tabulate import tabulate
 
 class EodDataScraper():
     def scrape_page(self, exchange: str, url: str):
@@ -53,13 +52,13 @@ class EodDataScraper():
         table = pd.DataFrame.from_dict(symbols)
         # add total volume
         table['total_traded'] = table.close * table.volume
-        table = table.rename(columns={'name': 'company name'})
+        table = table.rename(columns={'name': 'company_name'})
         return table
 
 
 @click.command()
 @click.option('--exchange', required=True, default='NASDAQ', help='NASDAQ')
-@click.option('--csv_output_file', required=False, help='csv output file')
+@click.option('--csv_output_file', required=True, help='csv output file')
 def main(exchange: str, csv_output_file: str):
     coloredlogs.install(level='INFO')
     pd.set_option('display.float_format', str)
@@ -68,8 +67,6 @@ def main(exchange: str, csv_output_file: str):
 
     if csv_output_file:
         result.to_csv(csv_output_file, header=True, index=False)
-    else:
-        print(tabulate(result, headers=list(result.columns), tablefmt='psql', floatfmt='.3f'))
 
 
 if __name__ == '__main__':

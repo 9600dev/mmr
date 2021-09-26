@@ -32,11 +32,11 @@ def ib_maintenance() -> bool:
     date_time = dt.datetime.now(tz=tz)
 
     # special case Friday/Sat morning 23:00 - 03:00 ET
-    if (date_time.weekday() == 5 or date_time.weekday() == 6) and time_in_range(dt.time(23), dt.time(3), date_time.time()):
+    if (date_time.weekday() == 4 or date_time.weekday() == 5) and time_in_range(dt.time(23), dt.time(3), date_time.time()):
         return True
     # Sunday's there are no reboots
-    elif (date_time.weekday() == 7):
-        return True
+    elif (date_time.weekday() == 6):
+        return False
     # otherwise, 23:45 - 00:45 ET
     elif time_in_range(dt.time(23, 45), dt.time(0, 45), date_time.time()):
         return True
