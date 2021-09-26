@@ -26,7 +26,8 @@ from rq import Queue
 from rq.job import Job
 from redis import Redis
 from trader.container import Container
-from trader.common.data import TickData, DictData
+from trader.data.data_access import TickData, DictData
+from trader.data.universe import Universe, UniverseAccessor
 from trader.common.logging_helper import setup_logging, set_all_log_level
 from trader.listeners.ibrx import IBRx
 from trader.listeners.polygon_listener import PolygonListener
@@ -36,7 +37,7 @@ from ib_insync.contract import Contract, ContractDescription
 from ib_insync import IB, Stock, PortfolioItem
 from rx.scheduler.eventloop import AsyncIOThreadSafeScheduler
 from tabulate import tabulate
-from trader.common.helpers import rich_table, rich_dict, rich_json, DictHelper
+from trader.common.helpers import rich_table, rich_dict, rich_json, DictHelper, symbol_to_contract
 from trader.listeners.ibaiorx import WhatToShow
 from trader.common.helpers import *
 from IPython import get_ipython
@@ -83,7 +84,7 @@ class CLIDispatcher():
         rich_json(response.json())
 
     def portfolio(self, csv: bool = False):
-        portfolio: List[Dict] = cast(List[Dict], bus.service.get_portfolio())
+        portfolio: List[Dict] = cast(List[Dict], self.bus_client.service.get_portfolio())
 
         def mapper(portfolio_dict: Dict) -> List:
             portfolio = DictHelper[PortfolioItem].to_object(portfolio_dict)
@@ -117,7 +118,7 @@ class CLIDispatcher():
             rich_table(df.groupby(by=['currency'])['unrealizedPNL'].sum().reset_index(), financial=True)
 
     def positions(self, csv: bool = False):
-        positions: List[Dict] = cast(List[Dict], bus.service.get_positions())
+        positions: List[Dict] = cast(List[Dict], self.bus_client.service.get_positions())
 
         def mapper(position_dict: Dict) -> List:
             # this DictHelper thingy is required because lightbus is deserializing
@@ -144,8 +145,16 @@ class CLIDispatcher():
         if not csv:
             rich_table(df.groupby(by=['currency'])['total'].sum().reset_index(), financial=True)
 
-    def universe(self, exchange: str = 'NASDAQ'):
-        data = container.resolve(TickData, arctic_library='Historical')
+    def universe(self, action: Optional[str] = None, argument: Optional[str] = None):
+        accessor = self.container.resolve(UniverseAccessor)
+
+        # listing the universes
+        if not action:
+            universes = cast(List[Universe], self.bus_client.service.get_universes())
+            result = {}
+            for un in universes:
+                result[un.name] = len(un.contracts)
+            rich_dict(result)
 
     def reconnect(self):
         bus.service.reconnect()
@@ -176,8 +185,8 @@ class CLIDispatcher():
         res = self.__resolve(symbol)
         conId = 0
         if len(res) > 0:
-            conId = res.iloc[0].conId
-            rich_table(financials.read(financials.symbol_to_contract(conId)).financials, csv)
+            conId = res.iloc[0].conId  # type: ignore
+            rich_table(financials.read(symbol_to_contract(conId)).financials, csv)  # type: ignore
 
     # def data(self, symbol: str, csv: bool = False):
     #     data = container.resolve(TickData, arctic_library='Historical')

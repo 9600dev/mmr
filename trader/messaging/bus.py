@@ -5,6 +5,7 @@ from ib_insync.objects import Position, PortfolioItem
 from ib_insync.contract import Contract
 from trader.container import Container
 from trader.trading.trading_runtime import Trader
+from trader.data.universe import Universe
 
 from typing import List
 
@@ -23,7 +24,15 @@ class TraderServiceApi(Api):
         return self.trader.portfolio.get_positions()
 
     async def get_portfolio(self) -> List[PortfolioItem]:
-        return self.trader.portfolio.get_portfolio_items()
+        return self.trader.client.ib.portfolio()
+        # return self.trader.portfolio.get_portfolio_items()
+
+    async def get_universes(self) -> List[Universe]:
+        return self.trader.universes
+
+    async def update_universe(self, universe: Universe) -> bool:
+        self.trader.universe_accessor.update(universe)
+        return True
 
     async def reconnect(self):
         return self.trader.reconnect()

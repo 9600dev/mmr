@@ -37,7 +37,8 @@ from trader.listeners.ibrx import IBRx
 from trader.common.contract_sink import ContractSink
 from trader.common.listener_helpers import Helpers
 from trader.common.observers import ConsoleObserver, ArcticObserver, ComplexConsoleObserver, ContractSinkObserver, NullObserver
-from trader.common.data import TickData
+from trader.data.data_access import TickData
+from trader.common.helpers import get_contract_from_csv
 
 
 class Trader():
@@ -70,7 +71,7 @@ class Trader():
         contract_sink.subscribe(ContractSinkObserver())
 
     def subscribe_contracts(self, csv_file: str):
-        contracts = Helpers.contracts_from_df(self.data.get_contract_from_csv(csv_file))
+        contracts = Helpers.contracts_from_df(get_contract_from_csv(csv_file))
 
         for contract in contracts:
             print(contract)

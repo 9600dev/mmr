@@ -18,9 +18,9 @@ from ib_insync import Stock, IB, Index, Contract, Ticker, BarDataList
 from dateutil.tz import tzlocal
 from typing import Tuple, List, Optional
 
-from trader.common.data import TickData
+from trader.data.data_access import TickData
 from trader.common.logging_helper import setup_logging
-from trader.common.helpers import date_range, dateify
+from trader.common.helpers import date_range, dateify, symbol_to_contract
 from trader.common.listener_helpers import Helpers
 from trader.batch.ib_history_batch import IBHistoryQueuer, IBHistoryWorker
 
@@ -34,7 +34,7 @@ logging = setup_logging(module_name='ib_history_queuer')
 @click.option('--ib_client_id', required=False, default=5, help='ib client id: 5')
 @click.option('--bar_size', required=False, default='1 min', help='IB bar size: 1 min')
 @click.option('--arctic_server_address', required=False, default='127.0.0.1', help='arctic server ip address: 127.0.0.1')
-@click.option('--arctic_library', required=False, default='Historical', help='tick store library name: Historical')
+@click.option('--arctic_library', required=True, help='tick store library name, eg: IB_NASDAQ_TOP_500_1min')
 @click.option('--redis_server_address', required=False, default='127.0.0.1', help='redis server ip address: 127.0.0.1')
 @click.option('--redis_server_port', required=False, default=6379, help='redis server port: 6379')
 @click.option('--enqueue', required=False, is_flag=True, default=False, help='queue up history work')
@@ -78,7 +78,7 @@ def main(contracts: str,
         elif ',' in contracts:
             data = TickData(arctic_server_address, arctic_library)
             temp_symbols = contracts.split(',')
-            list_contracts = [data.symbol_to_contract(s) for s in temp_symbols]
+            list_contracts = [symbol_to_contract(s) for s in temp_symbols]
             queuer.queue_history(list_contracts, bar_size=bar_size, start_date=start_date)
         else:
             raise ValueError('contract file, or comma seperated list of conids not found or defined')

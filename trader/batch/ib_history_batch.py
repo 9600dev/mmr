@@ -11,6 +11,7 @@ import ib_insync as ibapi
 import pandas as pd
 import random
 import warnings
+import asyncio
 
 from redis import Redis
 from rq import Queue
@@ -25,12 +26,14 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 from arctic.exceptions import OverlappingDataException
 from arctic.date import DateRange
 
-from trader.common.data import TickData, DictData, ContractMetadata
+from trader.data.data_access import TickData, DictData
+from trader.data.contract_metadata import ContractMetadata
 from trader.common.logging_helper import setup_logging
 from trader.common.helpers import date_range, dateify, day_iter, get_exchange_calendar, pdt
 from trader.common.listener_helpers import Helpers
-from trader.listeners.ib_history import IBHistory
+from trader.listeners.ib_history_worker import IBHistoryWorker
 from trader.batch.queuer import Queuer
+from trader.listeners.ibaiorx import WhatToShow
 
 logging = setup_logging(module_name='ib_history_batch')
 
@@ -40,7 +43,7 @@ class IBHistoryQueuer(Queuer):
                  ib_server_port: int = 7496,
                  ib_client_id: int = 5,
                  arctic_server_address: str = '127.0.0.1',
-                 arctic_library: str = 'Historical',
+                 arctic_library: str = 'IB_NASDAQ_1_MIN',
                  redis_server_address: str = '127.0.0.1',
                  redis_server_port: int = 6379):
         super().__init__(redis_queue='history',
@@ -56,11 +59,11 @@ class IBHistoryQueuer(Queuer):
     def queue_history(self,
                       contracts: List[Contract],
                       bar_size: str = '1 min',
-                      start_date: dt.datetime = dateify(dt.datetime(2021, 1, 1), timezone='America/New_York'),
+                      start_date: dt.datetime = dateify(dt.datetime.now() - dt.timedelta(days=5), timezone='America/New_York'),
                       end_date: dt.datetime = dateify(dt.datetime.now() - dt.timedelta(days=1), timezone='America/New_York')):
         for contract in contracts:
             # find the missing dates between start_date and end_date, and queue them up
-            exchange_calendar = exchange_calendars.get_calendar(contract.exchange)
+            exchange_calendar = exchange_calendars.get_calendar(contract.primaryExchange)
             date_ranges = self.data.missing(contract,
                                             exchange_calendar,
                                             date_range=DateRange(start=start_date, end=end_date))
@@ -71,7 +74,7 @@ class IBHistoryQueuer(Queuer):
                         not self.is_job_queued(self.args_id([contract, date_time, date_time, bar_size]))
                     ):
                         logging.info('enqueing {} at {}'.format(contract, pdt(date_time)))
-                        history_worker = IBHistoryWorker(
+                        history_worker = BatchIBHistoryWorker(
                             ib_server_address=self.ib_server_address,
                             ib_server_port=self.ib_server_port,
                             ib_client_id=self.ib_client_id + random.randint(0, 50),
@@ -82,7 +85,7 @@ class IBHistoryQueuer(Queuer):
 
                         self.enqueue(history_worker.do_work, [contract, date_time, date_time, bar_size])
 
-class IBHistoryWorker():
+class BatchIBHistoryWorker():
     def __init__(self,
                  ib_server_address: str,
                  ib_server_port: int,
@@ -98,17 +101,26 @@ class IBHistoryWorker():
         self.arctic_library = arctic_library
         self.redis_server_address = redis_server_address
         self.redis_server_port = redis_server_port
+        self.data: TickData
 
-    def do_work(self, contract: Contract, start_date: dt.datetime, end_date: dt.datetime, bar_size: str):
+    def do_work(self, contract: Contract, start_date: dt.datetime, end_date: dt.datetime, bar_size: str) -> bool:
         setup_logging(module_name='batch_ib_history_worker', suppress_external_info=True)
 
-        self.ib_history = IBHistory(self.ib_server_address,
-                                    self.ib_server_port,
-                                    self.ib_client_id,
-                                    self.arctic_server_address,
-                                    self.arctic_library,
-                                    self.redis_server_address,
-                                    self.redis_server_port)
+        ib = IB()
+        ib.connect(host=self.ib_server_address, port=self.ib_server_port, clientId=self.ib_client_id)
+        self.ib_history = IBHistoryWorker(ib)
+        self.data = TickData(self.arctic_server_address, self.arctic_library)
+
         logging.info('do_work: {} {} {} {}'.format(contract.symbol, pdt(start_date), pdt(end_date), bar_size))
-        result = self.ib_history.get_and_populate_stock_history(cast(Stock, contract), bar_size, start_date, end_date)
-        return result
+        # result = self.ib_history.get_and_populate_stock_history(cast(Stock, contract), bar_size, start_date, end_date)
+        result = asyncio.run(self.ib_history.get_contract_history(
+            contract=contract,
+            what_to_show=WhatToShow.TRADES,
+            start_date=start_date,
+            end_date=end_date,
+            bar_size=bar_size,
+            filter_between_dates=True
+        ))
+
+        self.data.write(contract, result)
+        return True

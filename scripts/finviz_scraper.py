@@ -21,7 +21,7 @@ from ib_insync import Stock, IB, Contract, Forex, BarData, Future
 
 from tabulate import tabulate
 from trader.listeners.ibrx import IBRx
-from trader.common.data import Data, TickData
+from trader.data.data_access import Data, TickData
 from finviz.screener import Screener
 
 class FinvizScraper():

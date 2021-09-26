@@ -1,6 +1,7 @@
 from re import I
 import sys
 import os
+from trader.data.universe import UniverseAccessor
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
 PACKAGE_PARENT = '../..'
@@ -32,7 +33,8 @@ from trader.listeners.ibaiorx import IBAIORx
 from trader.common.contract_sink import ContractSink
 from trader.common.listener_helpers import Helpers
 from trader.common.observers import ConsoleObserver, ArcticObserver, ComplexConsoleObserver, ContractSinkObserver, NullObserver
-from trader.common.data import TickData
+from trader.data.data_access import TickData
+from trader.data.universe import UniverseAccessor, Universe
 from trader.container import Container
 from trader.trading.book import Book
 from trader.trading.algo import Algo
@@ -52,6 +54,7 @@ class Trader(metaclass=Singleton):
                  ib_server_port: int,
                  arctic_server_address: str,
                  arctic_library: str,
+                 arctic_universe_library: str,
                  redis_server_address: str,
                  redis_server_port: str,
                  paper_trading: bool = False,
@@ -60,6 +63,7 @@ class Trader(metaclass=Singleton):
         self.ib_server_port = ib_server_port
         self.arctic_server_address = arctic_server_address
         self.arctic_library = arctic_library
+        self.arctic_universe_library = arctic_universe_library
         self.simulation: bool = simulation
         self.paper_trading = paper_trading
         self.redis_server_address = redis_server_address
@@ -69,6 +73,7 @@ class Trader(metaclass=Singleton):
         # so we need to take this from single client, to multiple client
         self.client: IBAIORx
         self.data: TickData
+        self.universe_accessor: UniverseAccessor
 
         # the live ticker data streams we have
         self.contract_subscriptions: Dict[Contract, ContractSink] = {}
@@ -80,11 +85,15 @@ class Trader(metaclass=Singleton):
         self.portfolio: Portfolio = Portfolio()
         # takes care of execution of orders
         self.executioner: Executioner
+        # a list of all the universes of stocks we have registered
+        self.universes: List[Universe]
 
     @backoff.on_exception(backoff.expo, ConnectionRefusedError, max_tries=10, max_time=120)
     def connect(self):
         self.client = IBAIORx(self.ib_server_address, self.ib_server_port)
         self.data = TickData(self.arctic_server_address, self.arctic_library)
+        self.universe_accessor = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
+        self.universes = self.universe_accessor.get_all()
         self.contract_subscriptions = {}
         self.client.ib.connectedEvent += self.connected_event
         self.client.ib.disconnectedEvent += self.disconnected_event

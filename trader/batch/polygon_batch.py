@@ -21,7 +21,7 @@ from typing import Tuple, List, Optional, Dict
 from arctic.date import DateRange
 from arctic.exceptions import NoDataFoundException
 
-from trader.common.data import TickData, DictData
+from trader.data.data_access import TickData, DictData
 from trader.common.helpers import date_range, dateify, day_iter, get_exchange_calendar, pdt
 from trader.listeners.polygon_listener import PolygonListener
 from trader.common.listener_helpers import Helpers

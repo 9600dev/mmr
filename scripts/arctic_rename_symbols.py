@@ -21,7 +21,7 @@ from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar,
 from ib_insync import Stock, IB, Contract, Forex, BarData, Future
 
 from trader.listeners.ibrx import IBRx
-from trader.common.data import Data, TickData
+from trader.data.data_access import Data, TickData
 
 def rename_symbols(csv_file: str,
                    arctic_server_address: str,

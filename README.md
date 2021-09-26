@@ -149,6 +149,7 @@ Pycron deals with scheduling, starting, stopping and restarting processes, servi
 
 # Scratch notes
 
+* [Market in-and-out - good screener](https://www.marketinout.com/correlation/stock-correlation.php?symbol=MSFT&period=30&sorting=cor&desc=1)
 * [Stock Returns forecasting using Bayesian methods](https://github.com/yxue02/Stock-returns-forecasting-using-Bayesian-methods)
 * [Hacker News discussion on the harmonic paper](https://news.ycombinator.com/item?id=19214650)
 * [Portfolio Visualizer](https://www.portfoliovisualizer.com/backtest-asset-class-allocation?s=y&mode=1&timePeriod=4&startYear=1972&firstMonth=1&endYear=2020&lastMonth=12&calendarAligned=true&includeYTD=false&initialAmount=10000&annualOperation=0&annualAdjustment=0&inflationAdjusted=true&annualPercentage=0.0&frequency=4&rebalanceType=1&absoluteDeviation=5.0&relativeDeviation=25.0&portfolioNames=true&portfolioName1=Harry+Browne+Permanent+Portfolio&portfolioName2=Ray+Dalio+All+Weather&portfolioName3=TIPS&asset1=TotalStockMarket&allocation1_1=25&allocation1_2=30&asset2=LongTreasury&allocation2_1=25&allocation2_2=40&asset3=TreasuryBills&allocation3_1=25&asset4=Gold&allocation4_1=25&allocation4_2=7.50&asset5=IntermediateTreasury&allocation5_2=15&asset6=Commodities&allocation6_2=7.50&asset7=TIPS&allocation7_3=100&fbclid=IwAR11LDUb5XkQ2Er4LdHkT21wglIBpmogVHOCFjUyhTe-wWOqIBgP7nBdKqA)
@@ -160,6 +161,8 @@ Pycron deals with scheduling, starting, stopping and restarting processes, servi
 
 ### Links
 
+* [Alpha Architect - White Papers](https://alphaarchitect.com/alpha-architect-white-papers/)
+* [Trading Economics - good flat, simple data site](https://tradingeconomics.com/)
 * [Spectre - GPU based backtester](https://github.com/Heerozh/spectre)
 * [Tradytics - AI stock tool](https://tradytics.com/overall-market)
 * [Redtide - yahoo finance scraper](https://github.com/qks1lver/redtide)

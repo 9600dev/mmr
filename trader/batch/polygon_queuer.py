@@ -23,7 +23,7 @@ from ib_insync import Stock, IB, Index, Contract, Ticker, BarDataList
 from dateutil.tz import tzlocal
 from typing import Tuple, List, Optional
 
-from trader.common.data import TickData
+from trader.data.data_access import TickData
 from trader.common.helpers import date_range, dateify, day_iter, get_exchange_calendar, pdt
 from trader.listeners.polygon_listener import PolygonListener
 from trader.common.listener_helpers import Helpers

@@ -22,7 +22,7 @@ from ib_insync import Stock, IB, Contract, Forex, BarData, Future, contract
 
 from trader.listeners.ibrx import IBRx
 from trader.container import Container
-from trader.common.data import TickData
+from trader.data.data_access import TickData
 from redis import Redis
 from rq import Queue
 

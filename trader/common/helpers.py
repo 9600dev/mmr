@@ -29,6 +29,21 @@ from pypager.pager import Pager
 from rich.console import Console
 from rich.table import Table
 
+
+def symbol_to_contract(symbol: str) -> Contract:
+    if type(symbol) is int or type(symbol) is np.int or type(symbol) is np.int64:
+        return Contract(conId=int(symbol))
+    if type(symbol) is str and symbol.isnumeric():
+        return Contract(conId=int(symbol))
+    raise ValueError('todo implement this')
+
+
+def get_contract_from_csv(contract_csv_file: str = '/home/trader/mmr/data/symbols_historical.csv') -> pd.DataFrame:
+    if not os.path.exists(contract_csv_file):
+        raise ValueError('csv_file {} not found'.format(contract_csv_file))
+    return pd.read_csv(contract_csv_file)
+
+
 T = TypeVar('T')
 class DictHelper(Generic[T]):
     @classmethod

@@ -12,7 +12,8 @@ from dateutil.tz import tzlocal, gettz
 from typing import Tuple, List, Optional, cast
 from functools import reduce
 
-from trader.common.data import TickData, ContractMetadata
+from trader.data.data_access import TickData
+from trader.data.contract_metadata import ContractMetadata
 from trader.common.logging_helper import setup_logging
 from trader.common.helpers import dateify, day_iter, pdt
 from trader.common.listener_helpers import Helpers

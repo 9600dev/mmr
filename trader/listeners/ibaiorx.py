@@ -290,7 +290,7 @@ class IBAIORx():
         start_date: dt.datetime,
         end_date: dt.datetime = dt.datetime.now(),
         bar_size_setting: str = '1 min',
-        what_to_show: WhatToShow = WhatToShow.MIDPOINT,
+        what_to_show: WhatToShow = WhatToShow.TRADES,
     ) -> List[BarData]:
         dt = end_date
         bars_list = []
