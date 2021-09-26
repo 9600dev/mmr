@@ -145,7 +145,7 @@ def fill_csv(ib: IBRx,
         list_contracts = []
         for index, row in df.iterrows():
             result = resolve(row.symbol)
-            if result:
+            if result and result.contract:
                 # d = contract_dict(result)
                 d = contractdetails_dict(result)
                 list_contracts.append(d)
