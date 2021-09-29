@@ -413,7 +413,7 @@ class MainHandler(RequestHandler):
             self.write(json.dumps([ob.__dict__() for ob in self.job_scheduler.jobs]))
 
 
-def main(config_file: str, only_list: List[str]):
+def main(config_file: str, only_list: List[str], except_list: List[str]):
     def get_network_ip() -> str:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -442,6 +442,8 @@ def main(config_file: str, only_list: List[str]):
         job = Job(j)
         if only_list and job.name not in only_list:
             continue
+        if except_list and job.name in except_list:
+            continue
         jobs.append(job)
         log.debug('adding job: {}'.format(job))
 
@@ -464,14 +466,15 @@ def main(config_file: str, only_list: List[str]):
 
 @click.command()
 @click.option('--config_file', required=True, help='yaml configuration file')
-@click.option('--only', '-o', multiple=True, required=False, help='process name(s) to start [repeat option for more]')
-def bootstrap(config_file: str, only):
+@click.option('--start', '-s', multiple=True, required=False, help='process name(s) to start [repeat option for more]')
+@click.option('--butnot', '-n', multiple=True, required=False, help='process names(s) not to start [repeat option for more]')
+def bootstrap(config_file: str, only, butnot):
     coloredlogs.install(level='INFO')
     if not os.path.exists(config_file):
         log.error('config_file does not exist')
         sys.exit(1)
 
-    main(config_file, only)
+    main(config_file, only, butnot)
 
 
 if __name__ == '__main__':

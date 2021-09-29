@@ -151,9 +151,10 @@ class CLIDispatcher():
         # listing the universes
         if not action:
             universes = cast(List[Universe], self.bus_client.service.get_universes())
+            print(universes)
             result = {}
-            for un in universes:
-                result[un.name] = len(un.contracts)
+            for universe in universes:
+                result[universe.name] = len(universe.security_definitions)
             rich_dict(result)
 
     def reconnect(self):
