@@ -24,7 +24,7 @@ class EodDataScraper():
             symbol = {
                 'symbol': columns[0].a.text,
                 'name': columns[1].text,
-                'exchange': exchange,
+                'eoddata_exchange': exchange,
                 'high': float(strip(columns[2].text)),
                 'low': float(strip(columns[3].text)),
                 'close': float(strip(columns[4].text)),

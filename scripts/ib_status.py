@@ -55,6 +55,10 @@ def ib_status() -> bool:
         ]
         if 'No problems' in soup.text:
             return True
+        elif 'System status information currently not available' in soup.text:
+            # todo figure out the correct thing to do here. Rarely this shows up, but
+            # I'm betting the best thing to do is soldier on like nothing is happening.
+            return True
         elif len(status_nodes) >= 1:
             status = status_nodes[0]
             color_cell = status.find('td', {'class': 'centeritem'})  # type: ignore
