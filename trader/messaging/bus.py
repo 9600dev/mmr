@@ -7,7 +7,7 @@ from trader.container import Container
 from trader.trading.trading_runtime import Trader
 from trader.data.universe import Universe
 
-from typing import List
+from typing import List, Dict
 
 class TraderServiceApi(Api):
     # this resolves a singleton trader instance, which if instantiated from
@@ -27,12 +27,8 @@ class TraderServiceApi(Api):
         return self.trader.client.ib.portfolio()
         # return self.trader.portfolio.get_portfolio_items()
 
-    async def get_universes(self) -> List[Universe]:
-        return self.trader.universes
-
-    async def update_universe(self, universe: Universe) -> bool:
-        self.trader.universe_accessor.update(universe)
-        return True
+    async def get_universes(self) -> Dict[str, int]:
+        return self.trader.universe_accessor.list_universes_count()
 
     async def reconnect(self):
         return self.trader.reconnect()

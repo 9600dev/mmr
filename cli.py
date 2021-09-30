@@ -145,17 +145,11 @@ class CLIDispatcher():
         if not csv:
             rich_table(df.groupby(by=['currency'])['total'].sum().reset_index(), financial=True)
 
-    def universe(self, action: Optional[str] = None, argument: Optional[str] = None):
-        accessor = self.container.resolve(UniverseAccessor)
-
+    def universes(self, action: Optional[str] = None, argument: Optional[str] = None):
         # listing the universes
         if not action:
-            universes = cast(List[Universe], self.bus_client.service.get_universes())
-            print(universes)
-            result = {}
-            for universe in universes:
-                result[universe.name] = len(universe.security_definitions)
-            rich_dict(result)
+            universes = cast(Dict[str, int], self.bus_client.service.get_universes())
+            rich_dict(universes)
 
     def reconnect(self):
         bus.service.reconnect()

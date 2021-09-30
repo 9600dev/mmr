@@ -156,5 +156,8 @@ class Trader(metaclass=Singleton):
         }
         return status
 
+    def get_universes(self) -> List[Universe]:
+        return self.universes
+
     def run(self):
         self.client.run()
