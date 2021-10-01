@@ -24,6 +24,7 @@ from pandas import DatetimeIndex
 from ib_insync.contract import Contract
 from trader.common.helpers import dateify, daily_close, daily_open, market_hours, get_contract_from_csv, symbol_to_contract
 from trader.data.contract_metadata import ContractMetadata
+from trader.data.universe import SecurityDefinition
 
 
 class Data():
@@ -46,34 +47,37 @@ class Data():
         data_frame.index = data_frame.index.tz_convert(self.zone)  # type: ignore
         return data_frame
 
-    def _contract_to_symbol(self, contract: Union[Contract, int]) -> str:
+    def _to_symbol(self, contract: Union[Contract, SecurityDefinition, int]) -> str:
         if type(contract) == int:
             return str(contract)
         elif type(contract) is Contract:
             return str(cast(Contract, contract).conId)
+        elif type(contract) is SecurityDefinition:
+            definition = cast(SecurityDefinition, contract)
+            return str(definition.conId)
         else:
-            raise ValueError('not supported')
+            raise ValueError('cast not supported')
 
     def get_date_range_from_datetime(self, day: dt.datetime):
         date_time = dateify(day)
         return DateRange(start=date_time, end=date_time + dt.timedelta(days=1))
 
     def read(self,
-             contract: Union[Contract, int],
+             contract: Union[Contract, SecurityDefinition, int],
              date_range: DateRange = DateRange(dt.datetime(1970, 1, 1), dt.datetime.now())) -> pd.DataFrame:
         try:
-            return self._fix_df_timezone(self.library.read(self._contract_to_symbol(contract), date_range))
+            return self._fix_df_timezone(self.library.read(self._to_symbol(contract), date_range))
         except NoDataFoundException:
             return pd.DataFrame()
 
     def write(self,
-              contract: Union[Contract, int],
+              contract: Union[Contract, SecurityDefinition, int],
               data_frame: pd.DataFrame):
-        self.library.write(self._contract_to_symbol(contract), data_frame)
+        self.library.write(self._to_symbol(contract), data_frame)
 
     def delete(self,
-               contract: Union[Contract, int]):
-        self.library.delete(self._contract_to_symbol(contract))
+               contract: Union[Contract, SecurityDefinition, int]):
+        self.library.delete(self._to_symbol(contract))
 
     def list_symbols(self) -> List[str]:
         return self.library.list_symbols()
@@ -91,20 +95,20 @@ class DictData(Data, Generic[T]):
                          lib_type=VERSION_STORE)
 
     def read(self,
-             contract: Union[Contract, int],
+             contract: Union[Contract, SecurityDefinition, int],
              date_range: DateRange = DateRange(dt.datetime(1970, 1, 1), dt.datetime.now())) -> Optional[T]:
         try:
-            return self.library.read(self._contract_to_symbol(contract)).data
+            return self.library.read(self._to_symbol(contract)).data
         except NoDataFoundException:
             return None
 
-    def write(self, contract: Union[Contract, int], data: T) -> None:
+    def write(self, contract: Union[Contract, SecurityDefinition, int], data: T) -> None:
         logging.info('DictData writing contract {}'.format(contract))
-        self.library.write(self._contract_to_symbol(contract), data, prune_previous_version=True)
+        self.library.write(self._to_symbol(contract), data, prune_previous_version=True)
 
-    def delete(self, contract: Union[Contract, int]) -> None:
+    def delete(self, contract: Union[Contract, SecurityDefinition, int]) -> None:
         logging.info('DictData deleting contract {}'.format(contract))
-        self.library.delete(self._contract_to_symbol(contract))
+        self.library.delete(self._to_symbol(contract))
 
 
 class TickData(Data):
@@ -124,21 +128,21 @@ class TickData(Data):
     def get_schema(self) -> Set[str]:
         return {'date', 'open', 'high', 'low', 'close', 'volume', 'average', 'bar_count', 'bar_size'}
 
-    def date_summary(self, contract: Union[Contract, int]) -> Tuple[dt.datetime, dt.datetime]:
+    def date_summary(self, contract: Union[Contract, SecurityDefinition, int]) -> Tuple[dt.datetime, dt.datetime]:
         if type(contract) is int:
             contract = Contract(conId=cast(int, contract))
         contract = cast(Contract, contract)
-        min_date = dateify(self.library.min_date(symbol=self._contract_to_symbol(contract)), timezone=self.zone)
-        max_date = dateify(self.library.max_date(symbol=self._contract_to_symbol(contract)), timezone=self.zone)
+        min_date = dateify(self.library.min_date(symbol=self._to_symbol(contract)), timezone=self.zone)
+        max_date = dateify(self.library.max_date(symbol=self._to_symbol(contract)), timezone=self.zone)
         return (min_date, max_date)
 
-    def summary(self, contract: Union[Contract, int]) -> Tuple[dt.datetime, dt.datetime, pd.Series, pd.Series]:
+    def summary(self, contract: Union[Contract, SecurityDefinition, int]) -> Tuple[dt.datetime, dt.datetime, pd.Series, pd.Series]:
         if type(contract) is int:
             contract = Contract(conId=cast(int, contract))
 
         contract = cast(Contract, contract)
-        min_date = self.library.min_date(symbol=self._contract_to_symbol(contract))
-        max_date = self.library.max_date(symbol=self._contract_to_symbol(contract))
+        min_date = self.library.min_date(symbol=self._to_symbol(contract))
+        max_date = self.library.max_date(symbol=self._to_symbol(contract))
         min_date_range = DateRange(min_date, min_date)
         max_date_range = DateRange(max_date, max_date + dt.timedelta(days=1))
 
@@ -147,10 +151,10 @@ class TickData(Data):
                 self.read(contract, date_range=min_date_range).iloc[0],
                 self.read(contract, date_range=max_date_range).iloc[-1])
 
-    def read_metadata(self, contract: Union[Contract, int]) -> ContractMetadata:
+    def read_metadata(self, contract: Union[Contract, SecurityDefinition, int]) -> ContractMetadata:
         metadata = self.metadata.read(contract)
         if not metadata:
-            return ContractMetadata(contract=Contract(conId=int(self._contract_to_symbol(contract))),
+            return ContractMetadata(contract=Contract(conId=int(self._to_symbol(contract))),
                                     history_no_data_dates=[], history_overlapping_data_dates=[])
         else:
             return metadata
@@ -159,7 +163,7 @@ class TickData(Data):
         self.metadata.write(contract, metadata)
 
     def read(self,
-             contract: Union[Contract, int],
+             contract: Union[Contract, SecurityDefinition, int],
              date_range: DateRange = DateRange(dt.datetime(1970, 1, 1), dt.datetime.now())) -> pd.DataFrame:
         return self.get_data(contract, date_range=date_range)
 
@@ -182,7 +186,7 @@ class TickData(Data):
 
     # https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliases
     def get_data(self,
-                 contract: Union[Contract, int],
+                 contract: Union[Contract, SecurityDefinition, int],
                  pd_offset: Optional[str] = None,
                  period: Optional[str] = None,
                  date_range: Optional[DateRange] = None) -> pd.DataFrame:
@@ -190,11 +194,11 @@ class TickData(Data):
         if period or date_range:
             actual_date_range = self.get_date_range(period, date_range)
         else:
-            actual_date_range = DateRange(self.library.min_date(symbol=self._contract_to_symbol(contract)),
-                                          self.library.max_date(symbol=self._contract_to_symbol(contract)))
+            actual_date_range = DateRange(self.library.min_date(symbol=self._to_symbol(contract)),
+                                          self.library.max_date(symbol=self._to_symbol(contract)))
 
         try:
-            df = self._fix_df_timezone(self.library.read(symbol=self._contract_to_symbol(contract),
+            df = self._fix_df_timezone(self.library.read(symbol=self._to_symbol(contract),
                                                          date_range=actual_date_range))
         except NoDataFoundException:
             return pd.DataFrame()
@@ -205,14 +209,14 @@ class TickData(Data):
             return df
 
     def history(self,
-                contract: Union[Contract, int],
+                contract: Union[Contract, SecurityDefinition, int],
                 pd_offset: Optional[str] = None,
                 period: Optional[str] = None,
                 date_range: Optional[DateRange] = None) -> pd.DataFrame:
         return self.get_data(contract, pd_offset, period, date_range)
 
     def date_exists(self,
-                    contract: Union[Contract, int],
+                    contract: Union[Contract, SecurityDefinition, int],
                     date_time: dt.datetime) -> bool:
         date_range = DateRange(date_time, date_time + dt.timedelta(days=1))
         try:
@@ -222,13 +226,13 @@ class TickData(Data):
             return False
 
     def missing(self,
-                contract: Union[Contract, int],
+                contract: Union[Contract, SecurityDefinition, int],
                 exchange_calendar: ExchangeCalendar,
                 pd_offset: Optional[str] = None,
                 period: Optional[str] = None,
                 date_range: Optional[DateRange] = None) -> List[DateRange]:
         if not pd_offset and not period and not date_range:
-            date_range = DateRange(dateify(self.library.min_date(symbol=self._contract_to_symbol(contract))),
+            date_range = DateRange(dateify(self.library.min_date(symbol=self._to_symbol(contract))),
                                    dateify() - dt.timedelta(days=1))
 
         df = self.get_data(contract, pd_offset, period, date_range)

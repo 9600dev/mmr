@@ -8,14 +8,12 @@ apis:
     event_transport:
       redis:
         url: "redis://127.0.0.1:6379/0"
-        rpc_timeout: 15 
+        max_stream_length: null
     rpc_transport:
       redis:
         url: "redis://127.0.0.1:6379/0"
         rpc_timeout: 15 
-        rpc_retry_delay: 1
     result_transport:
       redis:
         url: "redis://127.0.0.1:6379/0"
         rpc_timeout: 15 
-        rpc_retry_delay: 1

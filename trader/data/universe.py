@@ -16,6 +16,7 @@ from arctic.store.version_store import VersionStore
 from arctic.exceptions import NoDataFoundException
 from typing import Tuple, List, Optional, Dict, TypeVar, Generic, Type, Union, cast, Set
 from ib_insync.contract import Contract
+from trader.data.data_access import TickData
 
 # generally follows quantrocket definition: https://www.quantrocket.com/codeload/moonshot-intro/intro_moonshot/Part2-Universe-Selection.ipynb.html
 @dataclass

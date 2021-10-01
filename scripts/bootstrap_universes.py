@@ -67,13 +67,17 @@ def refresh_bootstrap(arctic_server_address: str, arctic_universe_library: str):
 @click.option('--bootstrap', required=False, is_flag=True, default=False, help='delete, and re-bootstrap NASDAQ, ASX, LSE startup universes')
 @click.option('--list', required=False, is_flag=True, default=False, help='list universes')
 @click.option('--get', required=False, help='get all security definitions for given universe')
+@click.option('--create_universe', required=False, help='create a new universe and load it from --load_csv file')
+@click.option('--load_csv', required=False, help='read csv file containing symbols for universe')
 def main(ib_server_address: str,
          ib_server_port: int,
          arctic_server_address: str,
          arctic_universe_library: str,
          bootstrap: bool,
          list: bool,
-         get: str):
+         get: str,
+         create_universe: str,
+         load_csv: str):
 
     if list:
         universes = UniverseAccessor(arctic_server_address, arctic_universe_library).list_universes_count()
