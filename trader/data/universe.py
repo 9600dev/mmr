@@ -16,25 +16,21 @@ from arctic.store.version_store import VersionStore
 from arctic.exceptions import NoDataFoundException
 from typing import Tuple, List, Optional, Dict, TypeVar, Generic, Type, Union, cast, Set
 from ib_insync.contract import Contract
-from trader.data.data_access import TickData
 
 # generally follows quantrocket definition: https://www.quantrocket.com/codeload/moonshot-intro/intro_moonshot/Part2-Universe-Selection.ipynb.html
 @dataclass
 class SecurityDefinition():
     symbol: str
-    company_name: str
     exchange: str
     conId: int
     secType: str
     primaryExchange: str
     currency: str
-    marketName: str
     minTick: float
     orderTypes: str
     validExchanges: str
     priceMagnifier: float
     longName: str
-    industry: str
     category: str
     subcategory: str
     tradingHours: str
@@ -53,6 +49,8 @@ class SecurityDefinition():
     nextOptionPartial: str
     nextOptionType: str
     marketRuleIds: str
+    company_name: str = ''
+    industry: str = ''
 
     def __init__(self):
         pass
@@ -61,6 +59,7 @@ class SecurityDefinition():
 class Universe():
     def __init__(self, name: str, security_definitions: List[SecurityDefinition] = []):
         self.name: str = name
+        self.arctic_library_name: str = name
         self.security_definitions: List[SecurityDefinition] = security_definitions
 
     @staticmethod
@@ -109,9 +108,10 @@ class UniverseAccessor():
     def delete(self, name: str) -> None:
         self.library.delete(name)
 
-    def update_from_csv_str(self, name: str, csv_str: str) -> None:
+    def update_from_csv_str(self, name: str, csv_str: str) -> int:
         reader = csv.DictReader(csv_str.splitlines())
         defs: List[SecurityDefinition] = []
+        counter = 0
         for row in reader:
             security_definition = SecurityDefinition()
             for n in [field.name for field in fields(SecurityDefinition)]:
@@ -120,4 +120,6 @@ class UniverseAccessor():
                 except KeyError:
                     continue
             defs.append(security_definition)
+            counter += 1
         self.update(Universe(name, defs))
+        return counter

@@ -1,3 +1,4 @@
+import tempfile
 import pandas as pd
 import numpy as np
 import scipy.stats as st
@@ -142,13 +143,16 @@ def rich_json(json_str: str):
         rich_dict(json_str)  # type: ignore
 
 
-def rich_table(df, csv=False, financial: bool = False, financial_columns: List[str] = []):
+def rich_table(df, csv: bool = False, financial: bool = False, financial_columns: List[str] = []):
+    if type(df) is list:
+        df = pd.DataFrame(df)
+
     if csv:
         if which('vd'):
-            df.to_csv('temp_financial.csv', index=False)
-            os.system('vd temp_financial.csv')
-            os.remove('temp_financial.csv')
-            return
+            temp_file = tempfile.NamedTemporaryFile(suffix='.csv')
+            df.to_csv(temp_file.name, index=False)
+            os.system('vd {}'.format(temp_file.name))
+            return None
         else:
             print(df.to_csv(index=False))
         return

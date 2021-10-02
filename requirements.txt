@@ -52,4 +52,5 @@ rich-dataframe>=0.1.9.7
 tabview>=1.4.4
 visidata>=2.2.1
 finfiz>=1.4.2
+click-option-group>=0.5.3
 git+https://github.com/9600dev/arctic.git

@@ -1,8 +1,8 @@
 import sys
 import os
-import csv
 import click
 import tempfile
+import asyncio
 from dataclasses import asdict
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
@@ -13,6 +13,9 @@ sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 import logging
 import coloredlogs
 from trader.data.universe import Universe, UniverseAccessor
+from trader.listeners.ibaiorx import IBAIORx
+from trader.common.helpers import rich_table
+from scripts.ib_resolve import IBResolver
 from eoddata_scraper import EodDataScraper
 from ib_resolve import main as ib_resolve_main
 
@@ -25,33 +28,28 @@ def build_and_load(
     exchange: str,
     primary_exchange: str,
     currency: str,
-    csv_file: str
+    csv_output_file: str
 ):
-    print('starting {} universe bootstrap temp file {}'.format(primary_exchange, csv_file))
+    print('starting {} universe bootstrap temp file'.format(primary_exchange))
     n = EodDataScraper()
     result = n.scrape(primary_exchange)
     securities = len(result)
-    result.to_csv(csv_file, header=True, index=False)
+    result.to_csv(csv_output_file, header=True, index=False)
 
-    print(securities)
-
-    cli = '--ib_server_address {} --full --sectype {} --exchange {} --primary_exchange {} --currency {} --csv_file {}'.format(
-        ib_server_address, sectype, exchange, primary_exchange, currency, csv_file
-    )
-
-    os.system('python3 ib_resolve.py {}'.format(cli))
-    # ib_resolve_main(cli.split(' '))
+    client = IBAIORx(ib_server_address, ib_server_port)
+    client.connect()
+    resolver = IBResolver(client)
+    asyncio.run(resolver.fill_csv(csv_output_file, csv_output_file, sectype, exchange, primary_exchange, currency))
 
     u = UniverseAccessor(arctic_server_address, arctic_universe_library)
-    print('got here')
-    with open(csv_file, 'r') as f:
+    with open(csv_output_file, 'r') as f:
         csv_string = f.read()
         print('updating trader host with new universe')
         u.update_from_csv_str(primary_exchange, csv_string)
     print('finished {} bootstrap, with {} securities loaded'.format(primary_exchange, str(securities)))
 
 
-def refresh_bootstrap(arctic_server_address: str, arctic_universe_library: str):
+def delete_bootstrap(arctic_server_address: str, arctic_universe_library: str):
     u = UniverseAccessor(arctic_server_address, arctic_universe_library)
     names = u.list_universes()
     for n in names:
@@ -79,6 +77,9 @@ def main(ib_server_address: str,
          create_universe: str,
          load_csv: str):
 
+    if create_universe and not load_csv:
+        raise ValueError('--create_universe and --load_csv are both required')
+
     if list:
         universes = UniverseAccessor(arctic_server_address, arctic_universe_library).list_universes_count()
         for name, count in universes.items():
@@ -88,14 +89,31 @@ def main(ib_server_address: str,
     if get:
         accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
         universe = accessor.get(get)
-        for security in universe.security_definitions:
-            print(asdict(security))
+        list_definitions = [asdict(security) for security in universe.security_definitions]
+        rich_table(list_definitions, True)
         return 0
 
-    if bootstrap:
-        refresh_bootstrap(arctic_server_address, arctic_universe_library)
+    if create_universe and load_csv:
+        client = IBAIORx(ib_server_address, ib_server_port)
+        client.connect()
 
-        tf = tempfile.NamedTemporaryFile()
+        resolver = IBResolver(client)
+        temp_file = tempfile.NamedTemporaryFile(suffix='.csv')
+        print('resolving to {}'.format(temp_file.name))
+        asyncio.run(resolver.fill_csv(load_csv, temp_file.name))
+
+        u = UniverseAccessor(arctic_server_address, arctic_universe_library)
+        with open(temp_file.name, 'r') as f:
+            csv_string = f.read()
+            print('updating trader host with new universe')
+            counter = u.update_from_csv_str(create_universe, csv_string)
+        print('finished loading {}, with {} securities loaded'.format(create_universe, str(counter)))
+
+    # use EODData site to bootstrap the NASDAQ, ASX and LSE exchanges
+    if bootstrap:
+        delete_bootstrap(arctic_server_address, arctic_universe_library)
+
+        tf = tempfile.NamedTemporaryFile(suffix='.csv')
         build_and_load(
             ib_server_address,
             ib_server_port,
@@ -108,7 +126,7 @@ def main(ib_server_address: str,
             tf.name
         )
 
-        tf = tempfile.NamedTemporaryFile()
+        tf = tempfile.NamedTemporaryFile(suffix='.csv')
         build_and_load(
             ib_server_address,
             ib_server_port,
@@ -121,7 +139,7 @@ def main(ib_server_address: str,
             tf.name
         )
 
-        tf = tempfile.NamedTemporaryFile()
+        tf = tempfile.NamedTemporaryFile(suffix='.csv')
         build_and_load(
             ib_server_address,
             ib_server_port,
