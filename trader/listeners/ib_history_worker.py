@@ -2,12 +2,13 @@ from re import I
 import datetime as dt
 import ib_insync
 import pandas as pd
+import numpy as np
 import backoff
 
 from redis import Redis
 from rq import Queue
 from arctic.exceptions import OverlappingDataException
-from ib_insync import Stock, IB, Index, Contract, Ticker, BarDataList
+from ib_insync.contract import Contract
 from dateutil.tz import tzlocal, gettz
 from typing import Tuple, List, Optional, cast
 from functools import reduce
@@ -18,6 +19,7 @@ from trader.common.logging_helper import setup_logging
 from trader.common.helpers import dateify, day_iter, pdt
 from trader.common.listener_helpers import Helpers
 from trader.listeners.ibaiorx import IBAIORx, WhatToShow
+from ib_insync.ib import IB
 
 logging = setup_logging(module_name='ibhistoryworker')
 
@@ -106,10 +108,49 @@ class IBHistoryWorker():
             df_result.index = df_result.index.tz_convert(tz_info)
             df_result.sort_index(ascending=True, inplace=True)
 
+            pd_date = pd.to_datetime(df_result.index[0])
+            earliest_date = dt.datetime(
+                pd_date.year,
+                pd_date.month,
+                pd_date.day,
+                pd_date.hour,
+                pd_date.minute,
+                pd_date.second,
+                tzinfo=gettz(tz_info)
+            )
+
+            # ib doesn't have a way of differentiating between a weekend where there is no data,
+            # and a trading day, where there were no trades.
+            # inject null rows to cover these cases
+            missing_dates = pd.date_range(start=earliest_date, end=current_date).difference(df_result.index)
+            for d in missing_dates:
+                null_row = {
+                    'date': [d],
+                    'open': [np.nan],
+                    'high': [np.nan],
+                    'low': [np.nan],
+                    'close': [np.nan],
+                    'volume': [np.nan],
+                    'average': [np.nan],
+                    'bar_count': [np.nan],
+                    'bar_size': [bar_size]
+                }
+                temp_row = pd.DataFrame.from_dict(null_row)
+                temp_row = temp_row.set_index('date')
+                df_result = pd.concat([df_result, temp_row])
+
             # add to the bars list
             bars.append(df_result)
             pd_date = pd.to_datetime(df_result.index[0])
-            current_date = dt.datetime(pd_date.year, pd_date.month, pd_date.day, pd_date.hour, pd_date.minute, pd_date.second, tzinfo=gettz(tz_info))
+            current_date = dt.datetime(
+                pd_date.year,
+                pd_date.month,
+                pd_date.day,
+                pd_date.hour,
+                pd_date.minute,
+                pd_date.second,
+                tzinfo=gettz(tz_info)
+            )
 
         all_data: pd.DataFrame = pd.concat(bars)
         if filter_between_dates:

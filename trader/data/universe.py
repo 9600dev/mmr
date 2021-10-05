@@ -16,50 +16,13 @@ from arctic.store.version_store import VersionStore
 from arctic.exceptions import NoDataFoundException
 from typing import Tuple, List, Optional, Dict, TypeVar, Generic, Type, Union, cast, Set
 from ib_insync.contract import Contract
-
-# generally follows quantrocket definition: https://www.quantrocket.com/codeload/moonshot-intro/intro_moonshot/Part2-Universe-Selection.ipynb.html
-@dataclass
-class SecurityDefinition():
-    symbol: str
-    exchange: str
-    conId: int
-    secType: str
-    primaryExchange: str
-    currency: str
-    minTick: float
-    orderTypes: str
-    validExchanges: str
-    priceMagnifier: float
-    longName: str
-    category: str
-    subcategory: str
-    tradingHours: str
-    timeZoneId: str
-    liquidHours: str
-    stockType: str
-    bondType: str
-    couponType: str
-    callable: str
-    putable: str
-    coupon: str
-    convertable: str
-    maturity: str
-    issueDate: str
-    nextOptionDate: str
-    nextOptionPartial: str
-    nextOptionType: str
-    marketRuleIds: str
-    company_name: str = ''
-    industry: str = ''
-
-    def __init__(self):
-        pass
+from trader.data.data_access import SecurityDefinition
 
 
 class Universe():
     def __init__(self, name: str, security_definitions: List[SecurityDefinition] = []):
         self.name: str = name
-        self.arctic_library_name: str = name
+        self.historical_tick_store: str = name
         self.security_definitions: List[SecurityDefinition] = security_definitions
 
     @staticmethod

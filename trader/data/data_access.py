@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import vectorbt as vbt
 import datetime as dt
+from dataclasses import dataclass, fields
 from dateutil.tz import tzlocal, gettz
 from dateutil.tz.tz import tzfile
 
@@ -24,7 +25,43 @@ from pandas import DatetimeIndex
 from ib_insync.contract import Contract
 from trader.common.helpers import dateify, daily_close, daily_open, market_hours, get_contract_from_csv, symbol_to_contract
 from trader.data.contract_metadata import ContractMetadata
-from trader.data.universe import SecurityDefinition
+
+@dataclass
+class SecurityDefinition():
+    symbol: str
+    exchange: str
+    conId: int
+    secType: str
+    primaryExchange: str
+    currency: str
+    minTick: float
+    orderTypes: str
+    validExchanges: str
+    priceMagnifier: float
+    longName: str
+    category: str
+    subcategory: str
+    tradingHours: str
+    timeZoneId: str
+    liquidHours: str
+    stockType: str
+    bondType: str
+    couponType: str
+    callable: str
+    putable: str
+    coupon: str
+    convertable: str
+    maturity: str
+    issueDate: str
+    nextOptionDate: str
+    nextOptionPartial: str
+    nextOptionType: str
+    marketRuleIds: str
+    company_name: str = ''
+    industry: str = ''
+
+    def __init__(self):
+        pass
 
 
 class Data():

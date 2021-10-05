@@ -15,6 +15,7 @@ import io
 import json
 import locale
 import os
+import click
 from bs4 import BeautifulSoup
 from dateutil.tz import gettz, tzlocal
 from dateutil.tz.tz import tzfile
@@ -23,7 +24,7 @@ from collections import deque
 from rx.disposable import Disposable
 from rx import Observable
 from pandas import Timestamp
-from ib_insync import Contract
+from ib_insync.contract import Contract
 from exchange_calendars import ExchangeCalendar
 from pypager.source import GeneratorSource
 from pypager.pager import Pager
