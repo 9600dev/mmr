@@ -2,6 +2,7 @@ import sys
 import os
 import click
 import tempfile
+import click_repl
 import asyncio
 from dataclasses import asdict
 
@@ -15,9 +16,11 @@ import coloredlogs
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibaiorx import IBAIORx
 from trader.common.helpers import rich_table
+from trader.common.command_line import common_options, default_config, cli
 from scripts.ib_resolve import IBResolver
 from eoddata_scraper import EodDataScraper
 from ib_resolve import main as ib_resolve_main
+from prompt_toolkit.history import FileHistory
 
 def build_and_load(
     ib_server_address: str,
@@ -57,101 +60,108 @@ def delete_bootstrap(arctic_server_address: str, arctic_universe_library: str):
         u.delete(n)
 
 
-@click.command()
-@click.option('--ib_server_address', required=False, default='127.0.0.1', help='127.0.0.1 ib server address')
-@click.option('--ib_server_port', required=False, default=7496, help='port for tws server api: 7496')
-@click.option('--arctic_server_address', required=False, default='127.0.0.1', help='arctic server address: 127.0.0.1')
-@click.option('--arctic_universe_library', required=False, default='Universes', help='arctic universe library: Universes')
-@click.option('--bootstrap', required=False, is_flag=True, default=False, help='delete, and re-bootstrap NASDAQ, ASX, LSE startup universes')
-@click.option('--list', required=False, is_flag=True, default=False, help='list universes')
-@click.option('--get', required=False, help='get all security definitions for given universe')
-@click.option('--create_universe', required=False, help='create a new universe and load it from --load_csv file')
-@click.option('--load_csv', required=False, help='read csv file containing symbols for universe')
-def main(ib_server_address: str,
-         ib_server_port: int,
-         arctic_server_address: str,
-         arctic_universe_library: str,
-         bootstrap: bool,
-         list: bool,
-         get: str,
-         create_universe: str,
-         load_csv: str):
+@cli.command()
+@common_options()
+@default_config()
+def bootstrap(
+    ib_server_address: str,
+    ib_server_port: int,
+    arctic_server_address: str,
+    arctic_universe_library: str, **args
+):
+    delete_bootstrap(arctic_server_address, arctic_universe_library)
 
-    if create_universe and not load_csv:
-        raise ValueError('--create_universe and --load_csv are both required')
+    tf = tempfile.NamedTemporaryFile(suffix='.csv')
+    build_and_load(
+        ib_server_address,
+        ib_server_port,
+        arctic_server_address,
+        arctic_universe_library,
+        'STK',
+        'SMART',
+        'NASDAQ',
+        'USD',
+        tf.name
+    )
 
-    if list:
-        universes = UniverseAccessor(arctic_server_address, arctic_universe_library).list_universes_count()
-        for name, count in universes.items():
-            print('universe: {}, symbols {}'.format(name, str(count)))
-        return 0
+    tf = tempfile.NamedTemporaryFile(suffix='.csv')
+    build_and_load(
+        ib_server_address,
+        ib_server_port,
+        arctic_server_address,
+        arctic_universe_library,
+        'STK',
+        'SMART',
+        'ASX',
+        'AUD',
+        tf.name
+    )
 
+    tf = tempfile.NamedTemporaryFile(suffix='.csv')
+    build_and_load(
+        ib_server_address,
+        ib_server_port,
+        arctic_server_address,
+        arctic_universe_library,
+        'STK',
+        'SMART',
+        'LSE',
+        'GBP',
+        tf.name
+    )
+
+
+@cli.command('list')
+@common_options()
+@default_config()
+def list_universe(arctic_server_address: str, arctic_universe_library: str, **args):
+    universes = UniverseAccessor(arctic_server_address, arctic_universe_library).list_universes_count()
+    for name, count in universes.items():
+        print('universe: {}, symbols {}'.format(name, str(count)))
+    return 0
+
+
+@cli.command()
+@click.option('--name', required=True, help='Name of universe')
+@common_options()
+@default_config()
+def get(name: str, arctic_server_address: str, arctic_universe_library: str, **args):
     if get:
         accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
-        universe = accessor.get(get)
+        universe = accessor.get(name)
         list_definitions = [asdict(security) for security in universe.security_definitions]
         rich_table(list_definitions, True)
         return 0
 
-    if create_universe and load_csv:
-        client = IBAIORx(ib_server_address, ib_server_port)
-        client.connect()
 
-        resolver = IBResolver(client)
-        temp_file = tempfile.NamedTemporaryFile(suffix='.csv')
-        print('resolving to {}'.format(temp_file.name))
-        asyncio.run(resolver.fill_csv(load_csv, temp_file.name))
+@cli.command()
+@click.option('--name', help='Name of the universe to create')
+@click.option('--csv_file', help='Csv file of securities to load into universe')
+@common_options()
+@default_config()
+def create(
+    name: str,
+    csv_file: str,
+    ib_server_address: str,
+    ib_server_port: int,
+    arctic_server_address: str,
+    arctic_universe_library: str
+):
+    client = IBAIORx(ib_server_address, ib_server_port)
+    client.connect()
 
-        u = UniverseAccessor(arctic_server_address, arctic_universe_library)
-        with open(temp_file.name, 'r') as f:
-            csv_string = f.read()
-            print('updating trader host with new universe')
-            counter = u.update_from_csv_str(create_universe, csv_string)
-        print('finished loading {}, with {} securities loaded'.format(create_universe, str(counter)))
+    resolver = IBResolver(client)
+    temp_file = tempfile.NamedTemporaryFile(suffix='.csv')
+    print('resolving to {}'.format(temp_file.name))
+    asyncio.run(resolver.fill_csv(csv_file, temp_file.name))
 
-    # use EODData site to bootstrap the NASDAQ, ASX and LSE exchanges
-    if bootstrap:
-        delete_bootstrap(arctic_server_address, arctic_universe_library)
-
-        tf = tempfile.NamedTemporaryFile(suffix='.csv')
-        build_and_load(
-            ib_server_address,
-            ib_server_port,
-            arctic_server_address,
-            arctic_universe_library,
-            'STK',
-            'SMART',
-            'NASDAQ',
-            'USD',
-            tf.name
-        )
-
-        tf = tempfile.NamedTemporaryFile(suffix='.csv')
-        build_and_load(
-            ib_server_address,
-            ib_server_port,
-            arctic_server_address,
-            arctic_universe_library,
-            'STK',
-            'SMART',
-            'ASX',
-            'AUD',
-            tf.name
-        )
-
-        tf = tempfile.NamedTemporaryFile(suffix='.csv')
-        build_and_load(
-            ib_server_address,
-            ib_server_port,
-            arctic_server_address,
-            arctic_universe_library,
-            'STK',
-            'SMART',
-            'LSE',
-            'GBP',
-            tf.name
-        )
+    u = UniverseAccessor(arctic_server_address, arctic_universe_library)
+    with open(temp_file.name, 'r') as f:
+        csv_string = f.read()
+        print('updating trader host with new universe')
+        counter = u.update_from_csv_str(name, csv_string)
+    print('finished loading {}, with {} securities loaded'.format(create, str(counter)))
 
 
 if __name__ == '__main__':
-    main()
+    cli(obj={})

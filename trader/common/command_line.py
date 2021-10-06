@@ -4,9 +4,10 @@ import json
 import yaml
 import configobj
 import functools
+import click_repl
 from click.decorators import help_option
 from click_help_colors import HelpColorsGroup
-
+from prompt_toolkit.history import FileHistory
 
 __all__ = ('configobj_provider', 'configuration_option')
 
@@ -98,7 +99,7 @@ def configuration_callback(cmd_name, option_name, config_file_name,
     return saved_callback(ctx, param, value) if saved_callback else value
 
 
-def configuration_option(*param_decls, **attrs):
+def default_config(*param_decls, **attrs):
     """
     Adds configuration file support to a click application.
 
@@ -144,7 +145,7 @@ def configuration_option(*param_decls, **attrs):
         implicit = attrs.pop('implicit', True)
         cmd_name = attrs.pop('cmd_name', None)
         config_file_name = attrs.pop('config_file_name', 'config')
-        provider = attrs.pop('provider', configobj_provider())
+        provider = default_config_provider  # attrs.pop('provider', configobj_provider())
         path_default_params = {
             'exists': False,
             'file_okay': True,
@@ -205,6 +206,10 @@ class NotRequiredIf(click.Option):
 def common_options():
     def inner_func(function):
         function = click.option(
+            '--arctic_universe_library',
+            help='arctic library that describes securities universes, eg: Universes'
+        )(function)
+        function = click.option(
             '--arctic_server_address',
             help='arctic server address, eg: 127.0.0.1'
         )(function)
@@ -228,3 +233,35 @@ def common_options():
         )(function)
         return function
     return inner_func
+
+
+@click.group(
+    invoke_without_command=True,
+    cls=HelpColorsGroup,
+    help_headers_color='yellow',
+    help_options_color='green')
+@click.pass_context
+def cli(ctx):
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(repl)
+
+
+@cli.command()
+def repl():
+    prompt_kwargs = {
+        'history': FileHistory(os.path.expanduser('/tmp/.trader.history')),
+        'vi_mode': True,
+        'message': 'mmr> '
+    }
+    click.echo('Ctrl-D to exit')
+    click_repl.repl(click.get_current_context(), prompt_kwargs=prompt_kwargs)
+
+
+@click.group(
+    invoke_without_command=True,
+    cls=HelpColorsGroup,
+    help_headers_color='yellow',
+    help_options_color='green')
+@click.pass_context
+def cli_norepl(ctx):
+    pass

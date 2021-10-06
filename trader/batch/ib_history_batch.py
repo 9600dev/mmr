@@ -43,7 +43,6 @@ class IBHistoryQueuer(Queuer):
         self,
         ib_server_address: str,
         ib_server_port: int,
-        ib_client_id: int,
         arctic_server_address: str,
         arctic_library: str,
         redis_server_address: str,
@@ -55,7 +54,6 @@ class IBHistoryQueuer(Queuer):
         self.data = TickData(arctic_server_address, arctic_library)
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
-        self.ib_client_id = ib_client_id
         self.arctic_server_address = arctic_server_address
         self.arctic_library = arctic_library
 
@@ -80,7 +78,7 @@ class IBHistoryQueuer(Queuer):
                     history_worker = BatchIBHistoryWorker(
                         ib_server_address=self.ib_server_address,
                         ib_server_port=self.ib_server_port,
-                        ib_client_id=self.ib_client_id + random.randint(10, 100),
+                        ib_client_id=random.randint(10, 100),
                         arctic_server_address=self.arctic_server_address,
                         arctic_library=self.arctic_library,
                         redis_server_address=self.redis_server_address,

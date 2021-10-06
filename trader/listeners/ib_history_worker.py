@@ -10,10 +10,11 @@ from rq import Queue
 from arctic.exceptions import OverlappingDataException
 from ib_insync.contract import Contract
 from dateutil.tz import tzlocal, gettz
-from typing import Tuple, List, Optional, cast
+from typing import Tuple, List, Optional, cast, Union
 from functools import reduce
 
-from trader.data.data_access import TickData
+from trader.data.data_access import SecurityDefinition, TickData
+from trader.data.universe import Universe
 from trader.data.contract_metadata import ContractMetadata
 from trader.common.logging_helper import setup_logging
 from trader.common.helpers import dateify, day_iter, pdt
@@ -42,7 +43,7 @@ class IBHistoryWorker():
     # @backoff.on_exception(backoff.expo, Exception, max_tries=3, max_time=240)
     async def get_contract_history(
         self,
-        contract: Contract,
+        security: Union[Contract, SecurityDefinition],
         what_to_show: WhatToShow,
         bar_size: str,
         start_date: dt.datetime,
@@ -51,6 +52,7 @@ class IBHistoryWorker():
         tz_info: str = 'America/New_York'
     ) -> pd.DataFrame:
 
+        contract = Universe.to_contract(security)
         global has_error
         error_code = 0
 

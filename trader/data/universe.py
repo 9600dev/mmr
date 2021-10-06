@@ -26,11 +26,16 @@ class Universe():
         self.security_definitions: List[SecurityDefinition] = security_definitions
 
     @staticmethod
-    def to_contract(definition: SecurityDefinition) -> Contract:
-        contract = Contract(secType=definition.secType, conId=definition.conId, symbol=definition.symbol,
-                            currency=definition.currency, exchange=definition.exchange,
-                            primaryExchange=definition.primaryExchange)
-        return contract
+    def to_contract(definition: Union[SecurityDefinition, Contract]) -> Contract:
+        if type(definition) is SecurityDefinition:
+            contract = Contract(secType=definition.secType, conId=definition.conId, symbol=definition.symbol,
+                                currency=definition.currency, exchange=definition.exchange,
+                                primaryExchange=definition.primaryExchange)
+            return contract
+        elif type(definition) is Contract:
+            return definition
+        else:
+            raise ValueError('unable to cast type to Contract')
 
 
 class UniverseAccessor():
