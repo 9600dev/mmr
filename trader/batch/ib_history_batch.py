@@ -115,7 +115,7 @@ class BatchIBHistoryWorker():
         logging.info('do_work: {} {} {} {}'.format(security.symbol, pdt(start_date), pdt(end_date), bar_size))
         # result = self.ib_history.get_and_populate_stock_history(cast(Stock, contract), bar_size, start_date, end_date)
         result = asyncio.run(self.ib_history.get_contract_history(
-            contract=Universe.to_contract(security),
+            security=Universe.to_contract(security),
             what_to_show=WhatToShow.TRADES,
             start_date=start_date,
             end_date=end_date,
