@@ -56,4 +56,5 @@ setproctitle>=1.2.1
 click-repl>=0.2.0
 click-help-colors>=0.9.1
 click-option-group>=0.5.3
+configobj>=5.0.6
 git+https://github.com/9600dev/arctic.git
