@@ -2,23 +2,14 @@ import inspect
 from re import I
 import sys
 import os
-from trader.listeners.ibaiorx import IBAIORx
 import requests
 import click
-import yaml
-import json
-import pathlib
 import pandas as pd
 import pandas.util as u
 import plotille as plt
-import asyncio
 import shlex
-import io
 import time
 import logging
-import tabview as t
-import expression
-import locale
 
 from collections import namedtuple
 from typing import Type, TypeVar, Dict, Optional, List, cast
@@ -29,17 +20,21 @@ from trader.container import Container
 from trader.data.data_access import TickData, DictData
 from trader.data.universe import Universe, UniverseAccessor
 from trader.common.logging_helper import setup_logging, set_all_log_level
-from trader.listeners.ibrx import IBRx
 from trader.listeners.polygon_listener import PolygonListener
 from trader.batch.polygon_batch import PolygonQueuer
 from scripts.trader_check import health_check
-from ib_insync.contract import Contract, ContractDescription
-from ib_insync import IB, Stock, PortfolioItem
-from rx.scheduler.eventloop import AsyncIOThreadSafeScheduler
+from ib_insync.ib import IB
+from ib_insync.contract import Contract, ContractDescription, Stock
+from ib_insync.objects import PortfolioItem
+from arctic import Arctic, TICK_STORE, VERSION_STORE
+from arctic.date import DateRange, string_to_daterange
+from arctic.tickstore.tickstore import TickStore
+from arctic.store.version_store import VersionStore
+from arctic.exceptions import NoDataFoundException
+
 from tabulate import tabulate
 from trader.common.helpers import rich_table, rich_dict, rich_json, DictHelper, symbol_to_contract
-from trader.listeners.ibaiorx import WhatToShow
-from trader.common.helpers import *
+from trader.listeners.ibaiorx import WhatToShow, IBAIORx
 from IPython import get_ipython
 from pyfiglet import Figlet
 from prompt_toolkit import prompt
@@ -50,12 +45,12 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.shortcuts import CompleteStyle
 from pygments.lexers.sql import SqlLexer
 from lightbus import BusPath
-from trader.messaging.bus import *
 from ib_insync.objects import Position
 from expression.collections import Seq, seq
 from expression import Nothing, Option, Some, effect, option, pipe
 from types import SimpleNamespace
-
+from trader.messaging.bus import *
+from trader.common.helpers import *
 
 class CLIDispatcher():
     def __init__(self,
@@ -295,34 +290,34 @@ def command_line(args, config_file: str = '/home/trader/mmr/configs/trader.yaml'
 
 # globals for ipython
 setup = False
+store = None
 container: Container = None
 dispatch = None
 amd = None
 symbols = None
+arctic_server_address = None
 symbols_cache: Dict[str, str] = {}
 poly = None
 t = None
 p = None
 d = None
 f = None
-rq = None
-ib = None
-client = None
-arx = None
 r = None
+rq = None
+client = None
 
 def setup_ipython_environment(config_file: str = '/home/trader/mmr/configs/trader.yaml'):
     global setup
     global dispatch
     global container
     global amd
+    global store
     global symbols
+    global arctic_server_address
     global symbols_cache
     global poly
     global t, p, d, rq, f, r
-    global ib
     global client
-    global arx
 
     if setup:
         return
@@ -338,19 +333,24 @@ def setup_ipython_environment(config_file: str = '/home/trader/mmr/configs/trade
     for index, value in symbols[['symbol', 'conId']].iterrows():
         symbols_cache[value[0]] = value[1]  # type: ignore
     poly = PolygonListener()
-    t = container.resolve(TickData)  # (arctic_server_address=container.config()['arctic_server_address'])
+    t = container.resolve(TickData)
     p = container.resolve(TickData, arctic_library='HistoricalPolygon')
     d = container.resolve(DictData, arctic_library='HistoricalMetadata')
     f = container.resolve(DictData, arctic_library='HistoricalPolygonFinancials')
     r = container.resolve(Redis, host=container.config()['redis_server_address'], port=container.config()['redis_server_port'])
     rq = Queue('history', connection=r)
+
+    arctic_server_address = container.config()['arctic_server_address']
+    arctic_library = container.config()['arctic_library']
+    arctic_universe_library = container.config()['arctic_server_address']
+
+    store = Arctic(arctic_server_address)
+
     ib_server_address = container.config()['ib_server_address']
     ib_server_port = container.config()['ib_server_port']
 
-    ib = IB()
-    client = IBRx(ib, scheduler=AsyncIOThreadSafeScheduler(asyncio.get_event_loop()))
-    arx = IBAIORx(ib_server_address=ib_server_address, ib_server_port=ib_server_port)
-    client.connect(ib_server_address=ib_server_address, ib_server_port=ib_server_port)
+    client = IBAIORx(ib_server_address=ib_server_address, ib_server_port=ib_server_port)
+    client.connect()
 
 def main(args):
     set_all_log_level(logging.INFO)

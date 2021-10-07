@@ -119,6 +119,9 @@ class Data():
     def list_symbols(self) -> List[str]:
         return self.library.list_symbols()
 
+    def arctic_list_libraries(self) -> List[str]:
+        return self.store.list_libraries(1)
+
 T = TypeVar('T')
 
 class DictData(Data, Generic[T]):
