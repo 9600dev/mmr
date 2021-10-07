@@ -286,8 +286,8 @@ class TickData(Data):
             dates = no_data_dates
         else:
             # make sure we have all the trading days
-            dates = df.resample('D').first().dropna().index.date
-            dates = dates + no_data_dates
+            dates = df.resample('D').first().index.date
+            dates = list(dates) + no_data_dates
 
         # filter
         actual_range = self.get_date_range(period, date_range)

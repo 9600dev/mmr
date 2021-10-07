@@ -35,6 +35,7 @@ from trader.common.listener_helpers import Helpers
 from trader.listeners.ib_history_worker import IBHistoryWorker
 from trader.batch.queuer import Queuer
 from trader.listeners.ibaiorx import WhatToShow
+from trader.container import Container
 
 logging = setup_logging(module_name='ib_history_batch')
 
@@ -61,13 +62,19 @@ class IBHistoryQueuer(Queuer):
                       security_definitions: List[SecurityDefinition],
                       bar_size: str = '1 min',
                       start_date: dt.datetime = dateify(dt.datetime.now() - dt.timedelta(days=5), timezone='America/New_York'),
-                      end_date: dt.datetime = dateify(dt.datetime.now() - dt.timedelta(days=1), timezone='America/New_York')):
+                      end_date: dt.datetime = dateify(
+                          dt.datetime.now() - dt.timedelta(days=1),
+                          timezone='America/New_York',
+                          make_eod=True
+                      )):
         for security in security_definitions:
             # find the missing dates between start_date and end_date, and queue them up
             exchange_calendar = exchange_calendars.get_calendar(security.primaryExchange)
             date_ranges = self.data.missing(security,
                                             exchange_calendar,
                                             date_range=DateRange(start=start_date, end=end_date))
+
+            logging.debug('missing dates for {}: {}'.format(security.symbol, date_ranges))
 
             for date_dr in date_ranges:
                 if (
@@ -107,8 +114,12 @@ class BatchIBHistoryWorker():
     def do_work(self, security: SecurityDefinition, start_date: dt.datetime, end_date: dt.datetime, bar_size: str) -> bool:
         setup_logging(module_name='batch_ib_history_worker', suppress_external_info=True)
 
-        ib = IB()
-        ib.connect(host=self.ib_server_address, port=self.ib_server_port, clientId=self.ib_client_id)
+        # hacky way of reusing ib connections
+        ib = cast(IB, Container().resolve_cache(IB))
+
+        if not ib.isConnected():
+            ib.connect(host=self.ib_server_address, port=self.ib_server_port, clientId=self.ib_client_id)
+
         self.ib_history = IBHistoryWorker(ib)
         self.data = TickData(self.arctic_server_address, self.arctic_library)
 

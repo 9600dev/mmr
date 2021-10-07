@@ -64,6 +64,17 @@ jobs:
       start: "* * * * *"
       start_on_pycron_start: True
       restart_if_finished: True
+    - name: worker_service 
+      description: worker service for batch job 
+      command: /usr/bin/python3 
+      arguments: trader/batch/worker_service.py start --queue_name history 
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_found: True
+      restart_if_finished: True
+      depends_on:
+        tws
+      delay: 5
     - name: trader_host
       description: the host service for all algo trading
       command: /usr/bin/python3
@@ -74,23 +85,4 @@ jobs:
       restart_if_finished: True
       depends_on:
         - tws
-      delay: 5
-    - name: ib-history
-      description: starts the batch worker for interactive brokers history download
-      command: /usr/bin/python3
-      arguments: /usr/local/bin/rq worker history
-      start: 50 18 * * *
-      stop: 40 17 * * *
-      eval:
-        - "exec('sys.path.append(\"scripts\")') or exec('from ib_status import ib_status') or ib_status()"
-      start_on_pycron_start: True
-      restart_if_found: True
-      delay: 5
-    - name: polygon-history
-      description: starts the batch worker for polygon.io
-      command: /usr/bin/python3
-      arguments: /usr/local/bin/rq worker polygonhistory
-      start: "* * * * *"
-      start_on_pycron_start: True
-      restart_if_found: True
       delay: 5

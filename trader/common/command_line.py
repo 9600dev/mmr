@@ -258,7 +258,7 @@ def repl():
 
 
 @click.group(
-    invoke_without_command=True,
+    invoke_without_command=False,
     cls=HelpColorsGroup,
     help_headers_color='yellow',
     help_options_color='green')

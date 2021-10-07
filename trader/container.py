@@ -20,6 +20,7 @@ class Container(metaclass=Singleton):
 
         conf_file = open(self.config_file, 'r')
         self.configuration: Dict = yaml.load(conf_file, Loader=yaml.FullLoader)
+        self.type_instance_cache: Dict[Type, object] = {}
 
     def resolve(self, t: Type, **extra_args):
         args = {}
@@ -34,3 +35,10 @@ class Container(metaclass=Singleton):
 
     def config(self) -> Dict:
         return self.configuration
+
+    def resolve_cache(self, t: Type, **extra_args):
+        if t in self.type_instance_cache:
+            return self.type_instance_cache[t]
+        else:
+            self.type_instance_cache[t] = self.resolve(t, extra_args=extra_args)
+            return self.type_instance_cache[t]

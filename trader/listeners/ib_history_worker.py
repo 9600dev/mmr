@@ -100,34 +100,38 @@ class IBHistoryWorker():
             if error_code > 0 and error_code != 162:
                 raise Exception('error_code: {}'.format(error_code))
 
-            df_result = ib_insync.util.df(result).set_index('date')
-            df_result['bar_size'] = bar_size
-            df_result.rename({'barCount': 'bar_count'}, inplace=True)
+            if result:
+                df_result = ib_insync.util.df(result).set_index('date')
+                df_result['bar_size'] = bar_size
+                df_result.rename({'barCount': 'bar_count'}, inplace=True)
 
-            # arctic requires timezone to be set
-            df_result.index = pd.to_datetime(df_result.index)  # type: ignore
-            df_result.index = df_result.index.tz_localize(local_tz)  # type: ignore
-            df_result.index = df_result.index.tz_convert(tz_info)
-            df_result.sort_index(ascending=True, inplace=True)
+                # arctic requires timezone to be set
+                df_result.index = pd.to_datetime(df_result.index)  # type: ignore
+                df_result.index = df_result.index.tz_localize(local_tz)  # type: ignore
+                df_result.index = df_result.index.tz_convert(tz_info)
+                df_result.sort_index(ascending=True, inplace=True)
 
-            pd_date = pd.to_datetime(df_result.index[0])
-            earliest_date = dt.datetime(
-                pd_date.year,
-                pd_date.month,
-                pd_date.day,
-                pd_date.hour,
-                pd_date.minute,
-                pd_date.second,
-                tzinfo=gettz(tz_info)
-            )
+                pd_date = pd.to_datetime(df_result.index[0])
+                earliest_date = dt.datetime(
+                    pd_date.year,
+                    pd_date.month,
+                    pd_date.day,
+                    pd_date.hour,
+                    pd_date.minute,
+                    pd_date.second,
+                    tzinfo=gettz(tz_info)
+                )
+            else:
+                df_result = pd.DataFrame()
 
             # ib doesn't have a way of differentiating between a weekend where there is no data,
             # and a trading day, where there were no trades.
             # inject null rows to cover these cases
             missing_dates = pd.date_range(start=earliest_date, end=current_date).difference(df_result.index)
             for d in missing_dates:
+                local_date = d.to_pydatetime().replace(tzinfo=None)
                 null_row = {
-                    'date': [d],
+                    'date': [local_date],
                     'open': [np.nan],
                     'high': [np.nan],
                     'low': [np.nan],
@@ -139,6 +143,8 @@ class IBHistoryWorker():
                 }
                 temp_row = pd.DataFrame.from_dict(null_row)
                 temp_row = temp_row.set_index('date')
+                temp_row.index = temp_row.index.tz_localize(local_tz)  # type: ignore
+                temp_row.index = temp_row.index.tz_convert(tz_info)
                 df_result = pd.concat([df_result, temp_row])
 
             # add to the bars list
@@ -155,6 +161,7 @@ class IBHistoryWorker():
             )
 
         all_data: pd.DataFrame = pd.concat(bars)
+
         if filter_between_dates:
             all_data = all_data[(all_data.index >= start_date.replace(tzinfo=gettz(tz_info)))  # type: ignore
                                 & (all_data.index <= end_date_offset.replace(tzinfo=gettz(tz_info)))]  # type: ignore

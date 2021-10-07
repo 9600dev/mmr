@@ -195,6 +195,13 @@ def rich_dict(d: Dict):
     console.print(table)
 
 
+def rich_list(list_source: List):
+    d = {}
+    for counter in range(0, len(list_source)):
+        d[counter] = list_source[counter]
+    rich_dict(d)
+
+
 def paginate(content: str):
     def generate_content(content: str):
         for line in io.StringIO(content).readlines():
@@ -206,7 +213,7 @@ def paginate(content: str):
 
 
 def dateify(date_time: Optional[Union[dt.datetime, dt.date, Timestamp]] = None,
-            timezone: Optional[Union[str, tzfile]] = None) -> dt.datetime:
+            timezone: Optional[Union[str, tzfile]] = None, make_eod: bool = False) -> dt.datetime:
     zone = None
 
     if not timezone:
@@ -219,6 +226,8 @@ def dateify(date_time: Optional[Union[dt.datetime, dt.date, Timestamp]] = None,
     if isinstance(date_time, dt.date) and not isinstance(date_time, dt.datetime):
         # dt.date's don't have timezone's
         result = dt.datetime(year=date_time.year, month=date_time.month, day=date_time.day, tzinfo=zone)
+        if make_eod:
+            result = result.replace(hour=23, minute=59, second=59)
         return result
 
     if date_time:
@@ -229,12 +238,16 @@ def dateify(date_time: Optional[Union[dt.datetime, dt.date, Timestamp]] = None,
 
         # check to see if there is already a tzinfo
         if date_time.tzinfo and not timezone:
+            if make_eod:
+                date_time = date_time.replace(hour=23, minute=59, second=59)
             return date_time.replace(hour=0, minute=0, second=0, microsecond=0)
         else:
             # if we have an already existing timezone in the datetime
             # and the user has passed a timezone, let's convert!
             date_time = date_time.astimezone(zone)
             date_time = date_time.replace(hour=0, minute=0, second=0, microsecond=0)
+            if make_eod:
+                date_time = date_time.replace(hour=23, minute=59, second=59)
             return date_time
     else:
         return dt.datetime.now(zone).replace(hour=0, minute=0, second=0, microsecond=0)
