@@ -75,10 +75,10 @@ jobs:
       depends_on:
         - tws
       delay: 5
-    - name: trader_host
+    - name: trader_service 
       description: the host service for all algo trading
       command: /usr/bin/python3
-      arguments: trader_host.py
+      arguments: trader_service.py
       start: "* * * * *"
       start_on_pycron_start: True
       restart_if_found: True

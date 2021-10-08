@@ -18,8 +18,8 @@ from trader.listeners.ibaiorx import IBAIORx
 from trader.common.helpers import rich_table
 from trader.common.command_line import common_options, default_config, cli
 from scripts.ib_resolve import IBResolver
-from eoddata_scraper import EodDataScraper
-from ib_resolve import main as ib_resolve_main
+from scripts.eoddata_scraper import EodDataScraper
+from scripts.ib_resolve import main as ib_resolve_main
 from prompt_toolkit.history import FileHistory
 
 def build_and_load(

@@ -19,7 +19,6 @@ class NonForkWorker(rq.Worker):
 
     def work(self, burst=False, logging_level="INFO", date_format=DEFAULT_LOGGING_DATE_FORMAT,
              log_format=DEFAULT_LOGGING_FORMAT, max_jobs=None, with_scheduler=False):
-        self.log.info('Using rq_win.WindowsWorker (experimental)')
         self.default_worker_ttl = 2
         return super(NonForkWorker, self).work(
             burst=burst,

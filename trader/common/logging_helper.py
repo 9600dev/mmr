@@ -17,6 +17,11 @@ def setup_logging(default_path='/home/trader/mmr/configs/logging.yaml',
                   suppress_external_info=False):
     global global_loggers
 
+    # ipython repl has a nasty habit of being polluted with debug crap from parso
+    logging.getLogger('parso.python.diff').setLevel(logging.WARNING)
+    logging.getLogger('parso').setLevel(logging.WARNING)
+    logging.getLogger('parso.cache.pickle').setLevel(logging.WARNING)
+
     if module_name in global_loggers:
         return global_loggers[module_name]
 

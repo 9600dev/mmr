@@ -164,7 +164,7 @@ def rich_table(df, csv: bool = False, financial: bool = False, financial_columns
     cols: List[str] = list(df.columns)
     table = Table()
     for column in df.columns:
-        table.add_column(column)
+        table.add_column(str(column))
     for row in df.itertuples():
         r = []
         for i in range(1, len(row)):

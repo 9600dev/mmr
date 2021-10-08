@@ -12,7 +12,7 @@ from trader.messaging.bus_server import start_lightbus
 
 @click.command()
 @click.option('--simulation', required=False, default=False, help='load with historical data')
-@click.option('--config_file', required=False, default='/home/trader/mmr/configs/trader.yaml',
+@click.option('--config', required=False, default='/home/trader/mmr/configs/trader.yaml',
               help='trader.yaml config file location')
 def main(simulation: bool,
          config_file: str):

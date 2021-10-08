@@ -28,22 +28,24 @@ from trader.data.universe import UniverseAccessor, Universe
 logging = setup_logging(module_name='ib_history_queuer')
 
 @cli_norepl.command()
-@common_options()
 @click.option('--universe', required=True, help='name of universe to grab history for')
 @click.option('--arctic_universe_library', required=True, help='arctic library that contains universe definitions')
 @click.option('--bar_size', required=True, default='1 min', help='IB bar size: 1 min')
 @click.option('--prev_days', required=True, default=5, help='Enqueue today minus prev_days: default 5 days')
+@common_options()
 @default_config()
-def main(ib_server_address: str,
-         ib_server_port: int,
-         arctic_server_address: str,
-         redis_server_address: str,
-         redis_server_port: int,
-         universe: str,
-         arctic_universe_library: str,
-         bar_size: str,
-         prev_days: int,
-         **args):
+def ib_history(
+    ib_server_address: str,
+    ib_server_port: int,
+    arctic_server_address: str,
+    redis_server_address: str,
+    redis_server_port: int,
+    universe: str,
+    arctic_universe_library: str,
+    bar_size: str,
+    prev_days: int,
+    **args
+):
 
     # queue up history
     queuer = IBHistoryQueuer(
@@ -64,4 +66,4 @@ def main(ib_server_address: str,
 
 
 if __name__ == '__main__':
-    main()
+    ib_history()
