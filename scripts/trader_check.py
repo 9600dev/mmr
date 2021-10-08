@@ -94,14 +94,14 @@ def health_check(config_file) -> bool:
 
 
 @click.command()
-@click.option('--config_file', required=False, default='/home/trader/mmr/configs/trader.yaml')
+@click.option('--config', required=False, default='/home/trader/mmr/configs/trader.yaml')
 @click.option('--ib_server_address', required=False, default='127.0.0.1', help='tws trader api address')
 @click.option('--ib_server_port', required=False, default=7496, help='port for tws server api')
 @click.option('--arctic_server_address', required=False, default='127.0.0.1', help='arctic server ip address: 127.0.0.1')
 @click.option('--arctic_library', required=False, default='Historical', help='tick store library name: Historical')
 @click.option('--redis_server_address', required=False, default='127.0.0.1', help='redis server ip address: 127.0.0.1')
 @click.option('--redis_server_port', required=False, default=6379, help='redis server port: 6379')
-def main(config_file: str,
+def main(config: str,
          ib_server_address: str,
          ib_server_port: int,
          arctic_server_address: str,
@@ -110,8 +110,8 @@ def main(config_file: str,
          redis_server_port: int):
 
     result = False
-    if config_file:
-        result = test_platform_config(config_file)
+    if config:
+        result = test_platform_config(config)
     else:
         result = test_platform(ib_server_address, ib_server_port, arctic_server_address,
                                arctic_library, redis_server_address, redis_server_port)

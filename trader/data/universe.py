@@ -37,6 +37,12 @@ class Universe():
         else:
             raise ValueError('unable to cast type to Contract')
 
+    def find_contract(self, contract: Contract) -> Optional[SecurityDefinition]:
+        for definition in self.security_definitions:
+            if definition.conId == contract.conId:
+                return definition
+        return None
+
 
 class UniverseAccessor():
     def __init__(self, arctic_server_address: str, arctic_universe_library: str):
@@ -47,7 +53,12 @@ class UniverseAccessor():
         self.library: VersionStore = self.store[self.arctic_library]
 
     def list_universes(self) -> List[str]:
-        return self.library.list_symbols()
+        result = self.library.list_symbols()
+        # move the portfolio universe to the front
+        if 'portfolio' in result:
+            result.remove('portfolio')
+            result.insert(0, 'portfolio')
+        return result
 
     def list_universes_count(self) -> Dict[str, int]:
         universes = self.get_all()
@@ -70,6 +81,13 @@ class UniverseAccessor():
         except NoDataFoundException:
             return Universe(name)
 
+    def find_contract(self, contract: Contract) -> Optional[Universe]:
+        for universe in self.get_all():
+            for definition in universe.security_definitions:
+                if contract.conId == definition.conId:
+                    return universe
+        return None
+
     def update(self, universe: Universe) -> None:
         self.library.write(universe.name, universe)
 
@@ -81,12 +99,13 @@ class UniverseAccessor():
         defs: List[SecurityDefinition] = []
         counter = 0
         for row in reader:
-            security_definition = SecurityDefinition()
+            args = {}
             for n in [field.name for field in fields(SecurityDefinition)]:
                 try:
-                    security_definition.__setattr__(n, row[n])
+                    args[n] = row[n]
                 except KeyError:
-                    continue
+                    args[n] = ''
+            security_definition = SecurityDefinition(**args)
             defs.append(security_definition)
             counter += 1
         self.update(Universe(name, defs))

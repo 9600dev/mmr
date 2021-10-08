@@ -15,7 +15,7 @@ from trader.messaging.bus_server import start_lightbus
 @click.option('--config', required=False, default='/home/trader/mmr/configs/trader.yaml',
               help='trader.yaml config file location')
 def main(simulation: bool,
-         config_file: str):
+         config: str):
     # required for nested asyncio calls and avoids RuntimeError: This event loop is already running
     nest_asyncio.apply()
     loop = asyncio.get_event_loop()
@@ -24,7 +24,7 @@ def main(simulation: bool,
         raise ValueError('not implemented yet')
         # ib_client = HistoricalIB(logger=logging)
 
-    container = Container(config_file)
+    container = Container(config)
     trader = container.resolve(Trader, simulation=simulation)
     trader.connect()
 

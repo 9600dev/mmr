@@ -22,12 +22,13 @@ from typing import Tuple, List, Optional, Dict, TypeVar, Generic, Type, Union, c
 from durations import Duration
 from exchange_calendars import ExchangeCalendar
 from pandas import DatetimeIndex
-from ib_insync.contract import Contract
+from ib_insync.contract import Contract, ContractDetails
 from trader.common.helpers import dateify, daily_close, daily_open, market_hours, get_contract_from_csv, symbol_to_contract
 from trader.data.contract_metadata import ContractMetadata
 
+
 @dataclass
-class SecurityDefinition():
+class SecurityDefinition:
     symbol: str
     exchange: str
     conId: int
@@ -47,22 +48,54 @@ class SecurityDefinition():
     stockType: str
     bondType: str
     couponType: str
-    callable: str
-    putable: str
-    coupon: str
-    convertable: str
+    callable: bool
+    putable: bool
+    coupon: int
+    convertable: bool
     maturity: str
     issueDate: str
     nextOptionDate: str
-    nextOptionPartial: str
+    nextOptionPartial: bool
     nextOptionType: str
     marketRuleIds: str
     company_name: str = ''
     industry: str = ''
 
-    def __init__(self):
-        pass
-
+    @staticmethod
+    def from_contract_details(d: ContractDetails):
+        return SecurityDefinition(
+            symbol=d.contract.symbol if d.contract else '',
+            exchange=d.contract.exchange if d.contract else '',
+            conId=d.contract.conId if d.contract else -1,
+            secType=d.contract.secIdType if d.contract else '',
+            primaryExchange=d.contract.primaryExchange if d.contract else '',
+            currency=d.contract.currency if d.contract else '',
+            minTick=d.minTick,
+            orderTypes=d.orderTypes,
+            validExchanges=d.validExchanges,
+            priceMagnifier=d.priceMagnifier,
+            longName=d.longName,
+            category=d.category,
+            subcategory=d.subcategory,
+            tradingHours=d.tradingHours,
+            timeZoneId=d.timeZoneId,
+            liquidHours=d.liquidHours,
+            stockType=d.stockType,
+            bondType=d.bondType,
+            couponType=d.couponType,
+            callable=d.callable,
+            putable=d.putable,
+            coupon=d.coupon,
+            convertable=d.convertible,
+            maturity=d.maturity,
+            issueDate=d.issueDate,
+            nextOptionDate=d.nextOptionDate,
+            nextOptionPartial=d.nextOptionPartial,
+            nextOptionType=d.nextOptionType,
+            marketRuleIds=d.marketRuleIds,
+            company_name=d.longName,
+            industry=d.industry,
+        )
 
 class Data():
     def __init__(self,

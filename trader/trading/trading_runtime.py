@@ -1,7 +1,6 @@
 from re import I
 import sys
 import os
-from trader.data.universe import UniverseAccessor
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
 PACKAGE_PARENT = '../..'
@@ -16,8 +15,6 @@ import nest_asyncio
 
 from asyncio.events import AbstractEventLoop
 from aioreactive.observers import AsyncAnonymousObserver
-from aioreactive.combine import pipe
-from aioreactive import AsyncObservable, AsyncObserver
 
 from trader.common.logging_helper import setup_logging
 logging = setup_logging(module_name='trading_runtime')
@@ -33,7 +30,7 @@ from trader.listeners.ibaiorx import IBAIORx
 from trader.common.contract_sink import ContractSink
 from trader.common.listener_helpers import Helpers
 from trader.common.observers import ConsoleObserver, ArcticObserver, ComplexConsoleObserver, ContractSinkObserver, NullObserver
-from trader.data.data_access import TickData
+from trader.data.data_access import SecurityDefinition, TickData
 from trader.data.universe import UniverseAccessor, Universe
 from trader.container import Container
 from trader.trading.book import Book
@@ -111,6 +108,7 @@ class Trader(metaclass=Singleton):
     async def __update_portfolio(self, portfolio_item: PortfolioItem):
         logging.debug('__update_portfolio')
         self.portfolio.add_portfolio_item(portfolio_item=portfolio_item)
+        await self.update_portfolio_universe()
 
     async def setup_subscriptions(self):
         if not self.is_ib_connected():
@@ -144,6 +142,24 @@ class Trader(metaclass=Singleton):
     async def disconnected_event(self):
         logging.debug('disconnected_event')
         self.connect()
+
+    async def update_portfolio_universe(self):
+        universe = self.universe_accessor.get('portfolio')
+
+        # find missing contracts
+        missing_contract_list: List[Contract] = []
+        for portfolio_item in self.portfolio.get_portfolio_items():
+            if not universe.find_contract(portfolio_item.contract):
+                missing_contract_list.append(portfolio_item.contract)
+
+        for contract in missing_contract_list:
+            contract_details = await self.client.get_contract_details(contract)
+            if contract_details and len(contract_details) >= 1:
+                universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details[0]))
+
+        if len(missing_contract_list) > 0:
+            logging.debug('updating portfolio universe with {} securities'.format(str(len(missing_contract_list))))
+            self.universe_accessor.update(universe)
 
     def is_ib_connected(self) -> bool:
         return self.client.ib.isConnected()

@@ -3,7 +3,7 @@ import itertools
 from expression import pipe
 from expression.collections import seq, Seq
 from ib_insync.objects import Position, PortfolioItem
-from ib_insync import Contract
+from ib_insync.contract import Contract
 from trader.common.logging_helper import setup_logging
 from trader.common.helpers import ListHelper
 
@@ -35,3 +35,4 @@ class Portfolio():
 
     def get_portfolio_items(self) -> List[PortfolioItem]:
         return list(self.portfolio_items.values())
+

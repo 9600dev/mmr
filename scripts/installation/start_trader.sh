@@ -68,4 +68,4 @@ fi
 
 echo "Starting or attaching to tmux session to host pycron and start the command line interface."
 cd /home/trader/mmr
-/usr/bin/tmux attach || /usr/bin/tmux new-session -d python3 pycron/pycron.py --config_file ./configs/pycron.yaml \; split-window python3 cli.py \; attach
+/usr/bin/tmux attach || /usr/bin/tmux new-session -d python3 pycron/pycron.py --config ./configs/pycron.yaml \; split-window python3 cli.py \; attach

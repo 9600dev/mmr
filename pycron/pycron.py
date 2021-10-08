@@ -465,16 +465,16 @@ def main(config_file: str, only_list: List[str], except_list: List[str]):
 
 
 @click.command()
-@click.option('--config_file', required=True, help='yaml configuration file')
+@click.option('--config', required=True, help='yaml configuration file')
 @click.option('--start', '-s', multiple=True, required=False, help='process name(s) to start [repeat option for more]')
 @click.option('--butnot', '-n', multiple=True, required=False, help='process names(s) not to start [repeat option for more]')
-def bootstrap(config_file: str, start, butnot):
+def bootstrap(config: str, start, butnot):
     coloredlogs.install(level='INFO')
-    if not os.path.exists(config_file):
+    if not os.path.exists(config):
         log.error('config_file does not exist')
         sys.exit(1)
 
-    main(config_file, start, butnot)
+    main(config, start, butnot)
 
 
 if __name__ == '__main__':
