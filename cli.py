@@ -34,7 +34,7 @@ from trader.messaging.bus import *
 from trader.common.helpers import *
 
 logging = setup_logging(module_name='cli')
-
+is_repl = False
 bus_client: BusPath = bus
 
 @click.group(
@@ -61,11 +61,14 @@ def help(ctx, subcommand):
 
 @cli.command()
 def repl():
+    global is_repl
+
     prompt_kwargs = {
         'history': FileHistory(os.path.expanduser('/tmp/.trader.history')),
         'vi_mode': True,
         'message': 'mmr> '
     }
+    is_repl = True
     f = Figlet(font='starwars')
     click.echo(f.renderText('MMR'))
     click.echo(click.get_current_context().find_root().get_help())
@@ -92,8 +95,7 @@ batch.add_command(ib_history_queuer.ib_history)
 
 
 @main.command()
-@click.option('--csv', default=True, required=True, help='display in csv format')
-def portfolio(csv: bool = False):
+def portfolio():
     portfolio: List[Dict] = cast(List[Dict], bus_client.service.get_portfolio())
 
     def mapper(portfolio_dict: Dict) -> List:
@@ -120,16 +122,16 @@ def portfolio(csv: bool = False):
         'account', 'conId', 'localSymbol', 'currency',
         'position', 'marketPrice', 'marketValue', 'averageCost', 'unrealizedPNL', 'realizedPNL'
     ])
-    rich_table(df.sort_values(by='currency'), csv=csv, financial=True, financial_columns=[
+
+    rich_table(df.sort_values(by='currency'), csv=is_repl, financial=True, financial_columns=[
         'marketPrice', 'marketValue', 'averageCost', 'unrealizedPNL', 'realizedPNL'
     ])
-    if not csv:
-        rich_table(df.groupby(by=['currency'])['marketValue'].sum().reset_index(), financial=True)
-        rich_table(df.groupby(by=['currency'])['unrealizedPNL'].sum().reset_index(), financial=True)
+
+    rich_table(df.groupby(by=['currency'])['marketValue'].sum().reset_index(), financial=True, csv=False)
+    rich_table(df.groupby(by=['currency'])['unrealizedPNL'].sum().reset_index(), financial=True, csv=False)
 
 @main.command()
-@click.option('--csv', default=True, required=True, help='display in csv format')
-def positions(csv: bool = False):
+def positions():
     positions: List[Dict] = cast(List[Dict], bus_client.service.get_positions())
 
     def mapper(position_dict: Dict) -> List:
@@ -153,8 +155,8 @@ def positions(csv: bool = False):
     )
 
     df = pd.DataFrame(data=list(xs), columns=['account', 'conId', 'localSymbol', 'exchange', 'position', 'avgCost', 'currency', 'total'])
-    rich_table(df.sort_values(by='currency'), financial=True, financial_columns=['total', 'avgCost'], csv=csv)
-    if not csv:
+    rich_table(df.sort_values(by='currency'), financial=True, financial_columns=['total', 'avgCost'], csv=is_repl)
+    if is_repl:
         rich_table(df.groupby(by=['currency'])['total'].sum().reset_index(), financial=True)
 
 

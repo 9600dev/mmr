@@ -151,7 +151,7 @@ def rich_table(df, csv: bool = False, financial: bool = False, financial_columns
     if csv:
         if which('vd'):
             temp_file = tempfile.NamedTemporaryFile(suffix='.csv')
-            df.to_csv(temp_file.name, index=False)
+            df.to_csv(temp_file.name, index=False, float_format='%.2f')
             os.system('vd {}'.format(temp_file.name))
             return None
         else:
