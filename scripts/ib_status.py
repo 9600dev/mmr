@@ -45,6 +45,8 @@ def ib_maintenance() -> bool:
 
 
 def ib_status() -> bool:
+    if os.getenv('TRADER_CHECK') and os.getenv('TRADER_CHECK') == 'False':
+        return True
     if ib_maintenance():
         return False
     try:

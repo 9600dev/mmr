@@ -129,6 +129,9 @@ class IBAIORx():
 
         return self
 
+    def is_connected(self):
+        return self.ib.isConnected()
+
     def _filter_contract(self, contract: Contract, data) -> bool:
         if data.contract:
             return data.contract.conId == contract.conId
