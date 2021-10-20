@@ -14,15 +14,20 @@ import aioreactive as rx
 import nest_asyncio
 
 from asyncio.events import AbstractEventLoop
+from aioreactive.types import Projection
+from expression.core import pipe
 from aioreactive.observers import AsyncAnonymousObserver
+from enum import Enum
 
 from trader.common.logging_helper import setup_logging
 logging = setup_logging(module_name='trading_runtime')
 
 from arctic import Arctic, TICK_STORE
 from arctic.tickstore.tickstore import TickStore
-from ib_insync import Stock, IB, Contract, Forex, BarData, Future
-from ib_insync.objects import PortfolioItem, Position
+from ib_insync.ib import IB
+from ib_insync.contract import Contract, Forex, Future, Stock
+from ib_insync.objects import PortfolioItem, Position, BarData
+from ib_insync.order import LimitOrder, Order, Trade
 from ib_insync.util import df
 from ib_insync.ticker import Ticker
 
@@ -40,10 +45,19 @@ from trader.trading.executioner import Executioner
 from trader.trading.strategy import Strategy
 from trader.common.reactive import AsyncCachedObserver, AsyncEventSubject, AsyncCachedSubject
 from trader.common.singleton import Singleton
-from trader.common.helpers import get_network_ip
+from trader.common.helpers import get_network_ip, Pipe
 from trader.messaging.bus_server import start_lightbus
 
 from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar, cast, Union
+
+class Action(Enum):
+    BUY = 1
+    SELL = 2
+
+    def __str__(self):
+        if self.value == 1: return 'BUY'
+        if self.value == 2: return 'SELL'
+
 
 class Trader(metaclass=Singleton):
     def __init__(self,
@@ -110,6 +124,10 @@ class Trader(metaclass=Singleton):
         self.portfolio.add_portfolio_item(portfolio_item=portfolio_item)
         await self.update_portfolio_universe()
 
+    async def __update_book(self, trade: Trade):
+        logging.debug('__update_book')
+        self.book.add_update_trade(trade)
+
     async def setup_subscriptions(self):
         if not self.is_ib_connected():
             raise ConnectionError('not connected to interactive brokers')
@@ -134,6 +152,9 @@ class Trader(metaclass=Singleton):
         # as the ib.portfolio() method is called, so call it again
         for p in self.client.ib.portfolio():
             await self.client.portfolio_subject.asend(p)
+
+        # make sure we're getting either live, or delayed data
+        await self.client.ib.reqMarketDataType(3)
 
     async def connected_event(self):
         logging.debug('connected_event')
@@ -161,8 +182,49 @@ class Trader(metaclass=Singleton):
             logging.debug('updating portfolio universe with {} securities'.format(str(len(missing_contract_list))))
             self.universe_accessor.update(universe)
 
+    async def place_order(self, contract: Contract, order: Order) -> AsyncCachedSubject[Trade]:
+        async def handle_exception(ex):
+            logging.exception(ex)
+            # todo sort out the book here
+
+        order_stream = await self.client.subscribe_place_order(contract, order)
+        await order_stream.subscribe_async(AsyncCachedObserver(self.__update_book,
+                                                               athrow=handle_exception,
+                                                               capture_asend_exception=True))
+        return order_stream
+
+    async def handle_order(
+        self,
+        contract: Contract,
+        action: Action,
+        amount: float
+    ) -> AsyncCachedObserver[Trade]:
+        # todo make sure amount is less than outstanding profit
+
+        # grab the latest price of instrument
+        subject = await self.client.subscribe_contract(contract=contract, snapshot=True)
+
+        xs = pipe(
+            subject,
+            Pipe[Ticker].take(1)
+        )
+
+        observer = AsyncCachedObserver[Ticker]()
+        await xs.subscribe_async(observer)
+        tick = await observer.wait_value()
+
+        # assess if we should trade
+        quantity = amount / tick.bid
+
+        # put an order in
+        order = LimitOrder(action=str(action), totalQuantity=quantity, lmtPrice=tick.bid)
+        return await self.client.subscribe_place_order(contract=contract, order=order)
+
     def is_ib_connected(self) -> bool:
         return self.client.ib.isConnected()
+
+    def red_button(self):
+        self.client.ib.reqGlobalCancel()
 
     def status(self) -> Dict[str, bool]:
         # todo lots of work here

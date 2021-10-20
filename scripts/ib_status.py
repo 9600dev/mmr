@@ -53,6 +53,11 @@ def ib_status() -> bool:
             node for node in
             soup.find_all('table', {'class': 'TableOutline'}) if 'System Availability' in node.text  # type: ignore
         ]
+        status_nodes += [
+            node for node in
+            soup.find_all('table', {'class': 'TableOutline'}) if 'Exchange Availability' in node.text  # type: ignore
+        ]
+
         if 'No problems' in soup.text:
             return True
         elif 'System status information currently not available' in soup.text:
@@ -60,12 +65,13 @@ def ib_status() -> bool:
             # I'm betting the best thing to do is soldier on like nothing is happening.
             return True
         elif len(status_nodes) >= 1:
-            status = status_nodes[0]
-            color_cell = status.find('td', {'class': 'centeritem'})  # type: ignore
-            if color_cell:
-                # aqua color == General info, and should be return "True"
-                # todo, do the rest
-                return str(color_cell['bgcolor']) == '#99cccc'
+            for status in status_nodes:
+                color_cell = status.find('td', {'class': 'centeritem'})  # type: ignore
+                if color_cell:
+                    # aqua color == General info, and should be return "True"
+                    # todo, do the rest
+                    return str(color_cell['bgcolor']) == '#99cccc' or str(color_cell['bgcolor']) == '#66cc33'
+            return False
         else:
             return False
     except Exception as ex:

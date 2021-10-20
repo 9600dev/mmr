@@ -1,5 +1,6 @@
 import expression
 import itertools
+import pandas as pd
 from expression import pipe
 from expression.collections import seq, Seq
 from ib_insync.objects import Position, PortfolioItem
@@ -10,6 +11,7 @@ from trader.common.helpers import ListHelper
 logging = setup_logging(module_name='portfolio')
 
 from typing import List, Dict, Tuple
+
 
 class Portfolio():
     def __init__(self):

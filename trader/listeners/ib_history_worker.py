@@ -19,7 +19,7 @@ from trader.data.contract_metadata import ContractMetadata
 from trader.common.logging_helper import setup_logging
 from trader.common.helpers import dateify, day_iter, pdt
 from trader.common.listener_helpers import Helpers
-from trader.listeners.ibaiorx import IBAIORx, WhatToShow
+from trader.objects import WhatToShow
 from ib_insync.ib import IB
 
 logging = setup_logging(module_name='ibhistoryworker')

@@ -4,7 +4,7 @@ import asyncio
 from asyncio import iscoroutinefunction
 from aioreactive import AsyncObserver
 from aioreactive.subject import AsyncMultiSubject
-from typing import TypeVar, Optional, Callable, Awaitable, Tuple, Generic, Dict
+from typing import TypeVar, Optional, Callable, Awaitable, Tuple, Generic, Dict, cast
 from functools import wraps
 from eventkit import Event
 
@@ -36,27 +36,41 @@ class AsyncCachedObserver(AsyncObserver[TSource]):
         self._aclose = aclose
         self._value: Optional[TSource] = None
         self._dt: Optional[dt.datetime] = None
-        self.capture_ex = capture_asend_exception
+        self._capture_ex = capture_asend_exception
+        self._task: asyncio.Event = asyncio.Event()
 
     async def asend(self, value: TSource) -> None:
         self._value = value
         self._dt = dt.datetime.now()
-        if self.capture_ex:
+        if self._capture_ex:
             try:
+                self._task.set()
                 await self._asend(value)
             except Exception as ex:
+                self._task.clear()
                 await self._athrow(ex)
         else:
+            self._task.set()
             await self._asend(value)
 
     async def athrow(self, error: Exception) -> None:
+        self._task.clear()
         await self._athrow(error)
 
     async def aclose(self) -> None:
+        self._task.clear()
         await self._aclose()
 
     def value(self) -> Optional[TSource]:
         return self._value
+
+    async def wait_value(self) -> TSource:
+        if self._value:
+            return self._value
+        else:
+            await self._task.wait()
+            self._task.clear()
+            return cast(TSource, self._value)
 
     def dt(self) -> Optional[dt.datetime]:
         return self._dt
@@ -65,8 +79,9 @@ class AsyncCachedObserver(AsyncObserver[TSource]):
 class AsyncCachedSubject(AsyncMultiSubject[TSource]):
     def __init__(self):
         super().__init__()
-        self.value: Optional[TSource] = None
-        self.datetime: Optional[dt.datetime] = None
+        self._value: Optional[TSource] = None
+        self._datetime: Optional[dt.datetime] = None
+        self._task: asyncio.Event = asyncio.Event()
 
     async def asend(self, value: TSource) -> None:
         self.check_disposed()
@@ -74,7 +89,8 @@ class AsyncCachedSubject(AsyncMultiSubject[TSource]):
         if self._is_stopped:
             return
 
-        self.value = value
+        self._task.set()
+        self._value = value
         self.datetime = dt.datetime.now()
 
         for obv in list(self._observers):
@@ -92,16 +108,23 @@ class AsyncCachedSubject(AsyncMultiSubject[TSource]):
         result = AsyncDisposable.create(dispose)
 
         # send the last cached result
-        if self.value:
-            await observer.asend(self.value)
+        if self._value:
+            await observer.asend(self._value)
         return result
 
-    def get_value(self) -> Optional[TSource]:
-        return self.value
+    def value(self) -> Optional[TSource]:
+        return self._value
 
-    def get_value_dt(self) -> Optional[Tuple[TSource, dt.datetime]]:
-        if self.value and self.datetime:
-            return (self.value, self.datetime)
+    async def wait_value(self) -> TSource:
+        if self._value:
+            return self._value
+        else:
+            await self._task.wait()
+            return cast(TSource, self.value)
+
+    def value_dt(self) -> Optional[Tuple[TSource, dt.datetime]]:
+        if self._value and self._datetime:
+            return (self._value, self._datetime)
         else:
             return None
 

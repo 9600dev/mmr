@@ -161,6 +161,7 @@ Pycron deals with scheduling, starting, stopping and restarting processes, servi
 
 ### Links
 
+* [Trader's Notes -- TWS API notes](https://dimon.ca/dmitrys-tws-api-faq/)
 * [Alpha Architect - White Papers](https://alphaarchitect.com/alpha-architect-white-papers/)
 * [Trading Economics - good flat, simple data site](https://tradingeconomics.com/)
 * [Spectre - GPU based backtester](https://github.com/Heerozh/spectre)

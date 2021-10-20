@@ -1,5 +1,6 @@
 import os
 import sys
+from ib_insync.order import LimitOrder
 from prompt_toolkit.shortcuts import prompt
 import requests
 import click
@@ -123,12 +124,12 @@ def portfolio():
         'position', 'marketPrice', 'marketValue', 'averageCost', 'unrealizedPNL', 'realizedPNL'
     ])
 
-    rich_table(df.sort_values(by='currency'), csv=is_repl, financial=True, financial_columns=[
+    rich_table(df.sort_values(by='unrealizedPNL', ascending=False), csv=is_repl, financial=True, financial_columns=[
         'marketPrice', 'marketValue', 'averageCost', 'unrealizedPNL', 'realizedPNL'
     ])
 
-    rich_table(df.groupby(by=['currency'])['marketValue'].sum().reset_index(), financial=True, csv=False)
-    rich_table(df.groupby(by=['currency'])['unrealizedPNL'].sum().reset_index(), financial=True, csv=False)
+    rich_table(df.groupby(by=['unrealizedPNL'])['marketValue'].sum().reset_index(), financial=True, csv=False)
+    rich_table(df.groupby(by=['unrealizedPNL'])['unrealizedPNL'].sum().reset_index(), financial=True, csv=False)
 
 @main.command()
 def positions():
@@ -240,6 +241,29 @@ def company_info(symbol: str):
                 if info:
                     rich_table(financials.read(definition).financials, True)  # type: ignore
                     return
+
+@main.command()
+@click.option('--buy/--sell', default=True, help='buy or sell')
+@click.option('--conId', required=True, help='IB conId for security')
+@click.option('--market', default=False, help='accept current market price')
+@click.option('--limit', required=True, help='limit price for security')
+@click.option('--amount', required=True, help='total amount to buy/sell')
+def trade(
+    buy: bool,
+    conId: int,
+    market: bool,
+    limit: float,
+    amount: float
+):
+    action = 'BUY' if buy else 'SELL'
+
+    # # grab the latest price
+    # bus_client.service.
+
+    # if limit:
+    #     limit_order = LimitOrder(action, totalQuantity=)
+    #     order = Order()
+    #     bus_client.service.place_order()
 
 
 @main.command()

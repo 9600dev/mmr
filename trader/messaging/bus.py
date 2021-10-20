@@ -3,6 +3,7 @@ from lightbus.api import Api, Event
 from dataclasses import dataclass
 from ib_insync.objects import Position, PortfolioItem
 from ib_insync.contract import Contract
+from ib_insync.order import Order, Trade
 from trader.container import Container
 from trader.trading.trading_runtime import Trader
 from trader.data.universe import Universe
@@ -29,6 +30,10 @@ class TraderServiceApi(Api):
 
     async def get_universes(self) -> Dict[str, int]:
         return self.trader.universe_accessor.list_universes_count()
+
+    async def place_order(self, contract: Contract, order: Order) -> Trade:
+        cached_subject = await self.trader.place_order(contract, order)
+        return await cached_subject.wait_value()
 
     async def reconnect(self):
         return self.trader.reconnect()

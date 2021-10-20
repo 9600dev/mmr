@@ -34,8 +34,8 @@ from trader.common.helpers import date_range, dateify, day_iter, get_exchange_ca
 from trader.common.listener_helpers import Helpers
 from trader.listeners.ib_history_worker import IBHistoryWorker
 from trader.batch.queuer import Queuer
-from trader.listeners.ibaiorx import WhatToShow
 from trader.container import Container
+from trader.objects import WhatToShow
 
 logging = setup_logging(module_name='ib_history_batch')
 

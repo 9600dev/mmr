@@ -13,7 +13,6 @@ from asyncio import iscoroutinefunction
 from aioreactive import AsyncObserver
 from aioreactive.subject import AsyncMultiSubject
 from expression.core import pipe
-from trader.listeners.ibaiorx import IBAIORx
 from trader.common.reactive import AsyncCachedObserver, AsyncCachedSubject, awaitify
 from ib_insync import Stock, Contract
 from ib_insync.contract import ContractDetails
@@ -38,6 +37,30 @@ T = TypeVar('T')
 def list_flattener(input_list: List[T]) -> rx.AsyncObservable[T]:
     return rx.from_iterable(input_list)
 
+
+global_subject = AsyncCachedSubject[str]()
+
+async def test_take():
+    async def sink(value):
+        print(value)
+
+    xs = rx.from_iterable([[1, 2], [3, 4], [5, 6]])
+    xs = rx.from_iterable([])
+
+    xs = pipe(
+        global_subject,
+        rx.take(1)
+    )  # type: ignore
+
+    observer = AsyncCachedObserver[str]()
+
+    print('test_take ready')
+    await xs.subscribe_async(observer)
+    result = await observer.wait_value()
+    print(result)
+    print('test_take done')
+
+
 async def some_set():
     xs = rx.single({"apple", "banana", "cherry"})
 
@@ -58,7 +81,7 @@ async def some_set():
     await subject.subscribe_async(AsyncCachedObserver(sink))
     await subject.subscribe_async(AsyncCachedObserver(sink))
     await rx.run(xs)
-    print(subject.get_value())
+    print(subject.value())
 
 
 async def subject():
@@ -93,10 +116,22 @@ async def main():
     print(cvo.value())
 
 
+async def sleep_send():
+    print('sleep_send here')
+    await asyncio.sleep(2)
+    print('sleep_send slept')
+    await global_subject.asend('sleep send')
 
+async def test_two():
+    await sleep_send()
+    await test_take()
+    await some_set()
+    await global_subject.asend('testing')
 
 loop = asyncio.get_event_loop()
-loop.run_until_complete(some_set())
+loop.create_task(sleep_send())
+loop.create_task(test_take())
+loop.create_task(some_set())
 try:
     loop.run_forever()
 except KeyboardInterrupt:
