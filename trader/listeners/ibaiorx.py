@@ -4,6 +4,7 @@ import os
 import asyncio
 import datetime
 from re import I
+from aioreactive.observables import AsyncAnonymousObservable
 
 from eventkit import event
 import aiohttp
@@ -11,6 +12,7 @@ import datetime as dt
 import aioreactive as rx
 from aioreactive.subject import AsyncMultiSubject
 from aioreactive.types import AsyncObservable, AsyncObserver
+from expression.system.disposable import Disposable, AsyncDisposable
 import pandas as pd
 import ib_insync as ibapi
 import backoff
@@ -48,8 +50,9 @@ from typing import (
 )
 
 from trader.common.listener_helpers import Helpers
+from trader.common.helpers import Pipe
 from trader.common.logging_helper import setup_logging
-from trader.common.reactive import AsyncCachedSubject, AsyncCachedObserver, awaitify, AsyncEventSubject
+from trader.common.reactive import AsyncCachedSubject, AsyncCachedObserver, AsyncCachedObservable, awaitify, AsyncEventSubject
 from trader.listeners.ib_history_worker import IBHistoryWorker
 from trader.objects import WhatToShow, ReportType
 
@@ -59,6 +62,7 @@ TAny = TypeVar('TAny')
 TKey = TypeVar('TKey')
 TValue = TypeVar('TValue')
 
+# With aioreactive you subscribe observers to observables,
 
 class IBAIORx():
     client_id_counter = random.randint(5, 35)
@@ -139,39 +143,61 @@ class IBAIORx():
             logging.debug('_filter_contract failed, as there is no contract object')
             return False
 
-    async def subscribe_place_order(self, contract: Contract, order: Order) -> AsyncCachedObserver[Trade]:
-        self.orders_subject.call_event_subscriber_sync(lambda: {self.ib.placeOrder(contract, order)})
+    # one shot, rather than hot observable like the other subscribe_ functions
+    # hence, we return disposable, and we hook it up before calling the placeOrder sync method
+    async def subscribe_place_order(
+        self,
+        contract: Contract,
+        order: Order,
+        observer: rx.AsyncObserver[Trade]
+    ) -> AsyncDisposable:
 
         xs = pipe(
             self.orders_subject,
             rx.filter(lambda trade: self._filter_contract(contract, order)),  # type: ignore
         )
-        return cast(AsyncCachedObserver[Trade], xs)
 
-    async def subscribe_contract(
+        disposable = await xs.subscribe_async(observer)
+        self.orders_subject.call_event_subscriber_sync(lambda: {self.ib.placeOrder(contract, order)})
+        return disposable
+
+    async def __subscribe_contract(
         self,
         contract: Contract,
-        snapshot: bool = False
+        one_time_snapshot: bool = False,
+        delayed: bool = False,
     ) -> rx.AsyncObservable[Ticker]:
-        if contract in self.contracts_cache:
-            return self.contracts_cache[contract]
+        if delayed:
+            self.ib.reqMarketDataType(4)
 
         self._contracts_source.call_event_subscriber_sync(
             lambda: {self.ib.reqMktData(
                 contract=contract,
                 genericTickList='',
-                snapshot=snapshot,
+                snapshot=one_time_snapshot,
                 regulatorySnapshot=False,
                 mktDataOptions=None
             )})
+
+        if delayed:
+            self.ib.reqMarketDataType(1)
 
         xs = pipe(
             self.contracts_subject,
             rx.filter(lambda ticker: self._filter_contract(contract, ticker)),  # type: ignore
         )
 
-        self.contracts_cache[contract] = xs
         return xs
+
+    async def subscribe_contract(
+        self,
+        contract: Contract,
+        one_time_snapshot: bool = False,
+        delayed: bool = False,
+    ) -> rx.AsyncObservable[Ticker]:
+        if contract not in self.contracts_cache:
+            self.contracts_cache[contract] = await self.__subscribe_contract(contract, one_time_snapshot, delayed)
+        return self.contracts_cache[contract]
 
     def unsubscribe_contract(self, contract: Contract):
         raise ValueError('not implemented')
@@ -214,6 +240,30 @@ class IBAIORx():
         for item in portfolio_items:
             await self.portfolio_subject.asend(item)
         return self.portfolio_subject
+
+    async def get_snapshot(self, contract: Contract, delayed: bool = False) -> Ticker:
+        populated_ticker: Ticker = Ticker()
+
+        async def update_ticker(ticker: Ticker):
+            populated_ticker = ticker
+
+        # we've got to subscribe, then wait for the first Ticker to arrive in the events
+        # cachedeventsource, subscribers get the last value after calling subscribe
+        observable = await self.__subscribe_contract(
+            contract=contract,
+            one_time_snapshot=True,
+            delayed=delayed,
+        )
+
+        cached_observer = AsyncCachedObserver(asend=update_ticker)
+
+        xs = pipe(
+            observable,
+            Pipe[Ticker].take(1)
+        )
+
+        disposable = await xs.subscribe_async(cached_observer)
+        return await cached_observer.wait_value()
 
     async def get_contract_details(self, contract: Contract) -> List[ContractDetails]:
         result = await self.ib.reqContractDetailsAsync(contract)

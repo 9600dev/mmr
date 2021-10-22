@@ -1,6 +1,7 @@
 from re import I
 import sys
 import os
+from expression.system.disposable import AsyncDisposable
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
 PACKAGE_PARENT = '../..'
@@ -14,7 +15,7 @@ import aioreactive as rx
 import nest_asyncio
 
 from asyncio.events import AbstractEventLoop
-from aioreactive.types import Projection
+from aioreactive.types import AsyncObservable, Projection
 from expression.core import pipe
 from aioreactive.observers import AsyncAnonymousObserver
 from enum import Enum
@@ -124,10 +125,6 @@ class Trader(metaclass=Singleton):
         self.portfolio.add_portfolio_item(portfolio_item=portfolio_item)
         await self.update_portfolio_universe()
 
-    async def __update_book(self, trade: Trade):
-        logging.debug('__update_book')
-        self.book.add_update_trade(trade)
-
     async def setup_subscriptions(self):
         if not self.is_ib_connected():
             raise ConnectionError('not connected to interactive brokers')
@@ -182,22 +179,32 @@ class Trader(metaclass=Singleton):
             logging.debug('updating portfolio universe with {} securities'.format(str(len(missing_contract_list))))
             self.universe_accessor.update(universe)
 
-    async def place_order(self, contract: Contract, order: Order) -> AsyncCachedSubject[Trade]:
+    async def place_order(
+        self,
+        contract: Contract,
+        order: Order
+    ):
         async def handle_exception(ex):
             logging.exception(ex)
             # todo sort out the book here
 
-        order_stream = await self.client.subscribe_place_order(contract, order)
-        await order_stream.subscribe_async(AsyncCachedObserver(self.__update_book,
-                                                               athrow=handle_exception,
-                                                               capture_asend_exception=True))
-        return order_stream
+        async def handle_trade(trade: Trade):
+            logging.debug('handle_trade {}'.format(trade))
+            self.book.add_update_trade(trade)
+
+        observer = AsyncCachedObserver(asend=handle_trade,
+                                       athrow=handle_exception,
+                                       capture_asend_exception=True)
+
+        disposable = await self.client.subscribe_place_order(contract, order, observer)
+        await disposable.dispose_async()
 
     async def handle_order(
         self,
         contract: Contract,
         action: Action,
-        amount: float
+        amount: float,
+        delayed: bool = False,
     ) -> AsyncCachedObserver[Trade]:
         # todo make sure amount is less than outstanding profit
 

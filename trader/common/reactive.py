@@ -1,8 +1,9 @@
+from abc import abstractmethod
 import aioreactive as rx
 import datetime as dt
 import asyncio
 from asyncio import iscoroutinefunction
-from aioreactive import AsyncObserver
+from aioreactive import AsyncObserver, AsyncObservable
 from aioreactive.subject import AsyncMultiSubject
 from typing import TypeVar, Optional, Callable, Awaitable, Tuple, Generic, Dict, cast
 from functools import wraps
@@ -10,6 +11,8 @@ from eventkit import Event
 
 from expression.system.disposable import AsyncDisposable
 
+
+# With aioreactive you subscribe observers to observables
 
 TSource = TypeVar('TSource')
 TResult = TypeVar('TResult')
@@ -19,6 +22,7 @@ Any = TypeVar('Any')
 async def anoop(value: Optional[Any] = None):
     pass
 
+# With aioreactive you subscribe observers to observables
 class AsyncCachedObserver(AsyncObserver[TSource]):
     def __init__(self,
                  asend: Callable[[TSource], Awaitable[None]] = anoop,
@@ -76,7 +80,21 @@ class AsyncCachedObserver(AsyncObserver[TSource]):
         return self._dt
 
 
-class AsyncCachedSubject(AsyncMultiSubject[TSource]):
+class AsyncCachedObservable(AsyncObservable[TSource]):
+    @abstractmethod
+    async def subscribe_async(self, observer: AsyncObserver[TSource]) -> AsyncDisposable:
+        raise NotImplementedError
+
+    @abstractmethod
+    def value(self) -> Optional[TSource]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def value_dt(self) -> Optional[Tuple[TSource, dt.datetime]]:
+        raise NotImplementedError
+
+
+class AsyncCachedSubject(AsyncMultiSubject[TSource], AsyncCachedObservable[TSource]):
     def __init__(self):
         super().__init__()
         self._value: Optional[TSource] = None

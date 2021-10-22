@@ -52,6 +52,8 @@ class IBHistoryWorker():
         tz_info: str = 'America/New_York'
     ) -> pd.DataFrame:
 
+        # todo doing this with 'asx' based stocks gives us a dataframe with the incorrect timezone
+        # figure this out
         contract = Universe.to_contract(security)
         global has_error
         error_code = 0
@@ -123,6 +125,8 @@ class IBHistoryWorker():
                 )
             else:
                 df_result = pd.DataFrame()
+                # we didn't get any data for this particular date, so subtract a day
+                earliest_date = dateify(current_date, timezone=tz_info) - dt.timedelta(days=1)
 
             # ib doesn't have a way of differentiating between a weekend where there is no data,
             # and a trading day, where there were no trades.

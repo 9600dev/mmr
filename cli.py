@@ -1,5 +1,6 @@
 import os
 import sys
+import asyncio
 from ib_insync.order import LimitOrder
 from prompt_toolkit.shortcuts import prompt
 import requests
@@ -128,8 +129,6 @@ def portfolio():
         'marketPrice', 'marketValue', 'averageCost', 'unrealizedPNL', 'realizedPNL'
     ])
 
-    rich_table(df.groupby(by=['unrealizedPNL'])['marketValue'].sum().reset_index(), financial=True, csv=False)
-    rich_table(df.groupby(by=['unrealizedPNL'])['unrealizedPNL'].sum().reset_index(), financial=True, csv=False)
 
 @main.command()
 def positions():
@@ -171,6 +170,32 @@ def clear():
     print(chr(27) + "[2J")
 
 
+def __resolve(
+    symbol: str,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+):
+    symbol = symbol.lower()
+    accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
+    results = []
+    for universe in accessor.get_all():
+        for definition in universe.security_definitions:
+            if symbol in definition.symbol.lower():
+                results.append({
+                    'universe': universe.name,
+                    'conId': definition.conId,
+                    'symbol': definition.symbol,
+                    'exchange': definition.exchange,
+                    'primaryExchange': definition.primaryExchange,
+                    'currency': definition.currency,
+                    'longName': definition.longName,
+                    'category': definition.category,
+                    'subcategory': definition.subcategory,
+                    'minTick': definition.minTick,
+                })
+    return results
+
+
 @main.command()
 @click.option('--symbol', required=True, help='symbol to resolve to conId')
 @common_options()
@@ -181,22 +206,57 @@ def resolve(
     arctic_universe_library: str,
     **args,
 ):
-    symbol = symbol.lower()
-    accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
-    results = []
-    for universe in accessor.get_all():
-        for definition in universe.security_definitions:
-            if symbol in definition.symbol.lower():
-                results.append({
-                    'universe': universe.name,
-                    'symbol': definition.symbol,
-                    'exchange': definition.exchange,
-                    'primaryExchange': definition.primaryExchange,
-                    'currency': definition.currency,
-                    'longName': definition.longName,
-                    'category': definition.category,
-                })
+    results = __resolve(symbol, arctic_server_address, arctic_universe_library)
     rich_table(results, False)
+
+
+@main.command()
+@click.option('--symbol', required=True, help='symbol to snapshot')
+@click.option('--delayed', required=False, default=False, help='use delayed data?')
+@common_options()
+@default_config()
+def snapshot(
+    symbol: str,
+    delayed: bool,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    **args,
+):
+    container = Container()
+    client = container.resolve(IBAIORx)
+    client.connect()
+    result = __resolve(symbol, arctic_server_address, arctic_universe_library)
+    if len(result) >= 1:
+        r = result[0]
+        contract = Contract(
+            conId=r['conId'],
+            symbol=r['symbol'],
+            exchange=r['exchange'],
+            primaryExchange=r['primaryExchange'],
+            currency=r['currency']
+        )
+        ticker = asyncio.run(client.get_snapshot(contract, True))
+        snap = {
+            'symbol': ticker.contract.symbol if ticker.contract else '',
+            'exchange': ticker.contract.exchange if ticker.contract else '',
+            'primaryExchange': ticker.contract.primaryExchange if ticker.contract else '',
+            'currency': ticker.contract.currency if ticker.contract else '',
+            'time': ticker.time,
+            'bid': ticker.bid,
+            'bidSize': ticker.bidSize,
+            'ask': ticker.ask,
+            'askSize': ticker.askSize,
+            'last': ticker.last,
+            'lastSize': ticker.lastSize,
+            'open': ticker.open,
+            'high': ticker.high,
+            'low': ticker.low,
+            'close': ticker.close,
+            'halted': ticker.halted
+        }
+        rich_dict(snap)
+    else:
+        print('no results found')
 
 
 @main.group()
@@ -278,6 +338,7 @@ def def_exit():
 
 container: Container
 amd = Contract(symbol='AMD', conId=4391, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
+a2m = Contract(symbol='A2M', conId=189114468, exchange='SMART', primaryExchange='ASX', currency='AUD')
 accessor: UniverseAccessor
 client: IBAIORx
 store: Arctic
