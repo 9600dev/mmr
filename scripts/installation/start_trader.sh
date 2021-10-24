@@ -1,5 +1,6 @@
 #!/bin/bash
 
+export TRADER_CONFIG="/home/trader/mmr/configs/trader.yaml"
 RED=`tput setaf 1`
 GREEN=`tput setaf 2`
 BLUE=`tput setaf 4`
