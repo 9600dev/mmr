@@ -9,18 +9,20 @@ import pandas as pd
 import scripts.universes_cli as universes_cli
 import trader.batch.ib_history_queuer as ib_history_queuer
 import click_repl
+import aioreactive as rx
 
-from typing import Type, TypeVar, Dict, Optional, List, cast, Tuple
+from typing import Type, TypeVar, Dict, Optional, List, cast, Tuple, Any
 from trader.container import Container
 from trader.data.data_access import SecurityDefinition, TickData, DictData
 from trader.data.universe import Universe, UniverseAccessor
 from scripts.trader_check import health_check
 from ib_insync.ib import IB
+from ib_insync.order import Trade, Order
 from ib_insync.contract import Contract, ContractDescription, Stock
 from ib_insync.objects import PortfolioItem
 
 from arctic import Arctic
-from trader.common.helpers import rich_table, rich_dict, rich_json, DictHelper
+from trader.common.helpers import rich_table, rich_dict, rich_json, DictHelper, rich_list
 from IPython import get_ipython
 from pyfiglet import Figlet
 from prompt_toolkit.history import FileHistory, InMemoryHistory
@@ -33,6 +35,7 @@ from trader.listeners.ibaiorx import IBAIORx
 from click_help_colors import HelpColorsGroup
 from trader.common.logging_helper import setup_logging, suppress_external
 from trader.messaging.bus import *
+from trader.common.helpers import contract_from_dict
 from trader.common.helpers import *
 
 logging = setup_logging(module_name='cli')
@@ -101,7 +104,7 @@ def portfolio():
     portfolio: List[Dict] = cast(List[Dict], bus_client.service.get_portfolio())
 
     def mapper(portfolio_dict: Dict) -> List:
-        portfolio = DictHelper[PortfolioItem].to_object(portfolio_dict)
+        portfolio = DictHelper[Any, PortfolioItem].to_object(portfolio_dict)
         return [
             portfolio.account,
             portfolio.contract.conId,
@@ -137,7 +140,7 @@ def positions():
     def mapper(position_dict: Dict) -> List:
         # this DictHelper thingy is required because lightbus is deserializing
         # RPC calls to Dicts for whatever reason. todo
-        position = DictHelper[Position].to_object(position_dict)
+        position = DictHelper[Any, Position].to_object(position_dict)
         return [
             position.account,
             position.contract.conId,
@@ -154,7 +157,9 @@ def positions():
         seq.map(mapper)
     )
 
-    df = pd.DataFrame(data=list(xs), columns=['account', 'conId', 'localSymbol', 'exchange', 'position', 'avgCost', 'currency', 'total'])
+    df = pd.DataFrame(data=list(xs), columns=[
+        'account', 'conId', 'localSymbol', 'exchange', 'position', 'avgCost', 'currency', 'total'
+    ])
     rich_table(df.sort_values(by='currency'), financial=True, financial_columns=['total', 'avgCost'], csv=is_repl)
     if is_repl:
         rich_table(df.groupby(by=['currency'])['total'].sum().reset_index(), financial=True)
@@ -174,7 +179,9 @@ def __resolve(
     symbol: str,
     arctic_server_address: str,
     arctic_universe_library: str,
-):
+    primary_exchange: Optional[str] = ''
+) -> List[Dict[str, Any]]:
+    if not primary_exchange: primary_exchange = ''
     symbol = symbol.lower()
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
     results = []
@@ -193,26 +200,29 @@ def __resolve(
                     'subcategory': definition.subcategory,
                     'minTick': definition.minTick,
                 })
-    return results
+    return [r for r in results if primary_exchange in r['primaryExchange']]
 
 
 @main.command()
 @click.option('--symbol', required=True, help='symbol to resolve to conId')
+@click.option('--primary_exchange', required=False, default='', help='exchange for symbol [not required]')
 @common_options()
 @default_config()
 def resolve(
     symbol: str,
     arctic_server_address: str,
     arctic_universe_library: str,
+    primary_exchange: str,
     **args,
 ):
-    results = __resolve(symbol, arctic_server_address, arctic_universe_library)
+    results = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
     rich_table(results, False)
 
 
 @main.command()
 @click.option('--symbol', required=True, help='symbol to snapshot')
-@click.option('--delayed', required=False, default=False, help='use delayed data?')
+@click.option('--delayed', required=False, default=False, is_flag=True, help='use delayed data?')
+@click.option('--primary_exchange', required=False, help='primary exchange for symbol')
 @common_options()
 @default_config()
 def snapshot(
@@ -220,12 +230,13 @@ def snapshot(
     delayed: bool,
     arctic_server_address: str,
     arctic_universe_library: str,
+    primary_exchange: str,
     **args,
 ):
     container = Container()
     client = container.resolve(IBAIORx)
     client.connect()
-    result = __resolve(symbol, arctic_server_address, arctic_universe_library)
+    result = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
     if len(result) >= 1:
         r = result[0]
         contract = Contract(
@@ -256,7 +267,48 @@ def snapshot(
         }
         rich_dict(snap)
     else:
-        print('no results found')
+        click.echo('no results found')
+
+
+@main.group()
+def book():
+    pass
+
+
+@book.command('trades')
+def book_trades():
+    trades = cast(Dict[int, List[Trade]], bus_client.service.get_trades())
+    columns = [
+        'symbol', 'primaryExchange', 'currency', 'orderId',
+        'action', 'status', 'orderType', 'lmtPrice', 'totalQuantity'
+    ]
+    table = []
+    for trade_id, trade_list in trades.items():
+        table.append(DictHelper[str, str].dict_from_object(trade_list[0], columns))
+    rich_table(table)
+
+
+@book.command('orders')
+def book_orders():
+    orders = cast(Dict[int, List[Order]], bus_client.service.get_orders())
+    columns = [
+        'orderId', 'clientId', 'parentId', 'action',
+        'status', 'orderType', 'allOrNone', 'lmtPrice', 'totalQuantity'
+    ]
+    table = []
+    for order_id, trade_list in orders.items():
+        table.append(DictHelper[str, str].dict_from_object(trade_list[0], columns))
+    rich_table(table)
+
+
+@book.command('cancel')
+@click.option('--order_id', required=True, type=int, help='order_id to cancel')
+def book_order_cancel(order_id: int):
+    order = cast(Optional[Trade], bus_client.service.cancel_order(order_id=order_id))
+    if order:
+        click.echo(order)
+    else:
+        click.echo('no Trade object returned')
 
 
 @main.group()
@@ -281,7 +333,7 @@ def pycron_restart(
     pycron_server_address = Container().config()['pycron_server_address']
     pycron_server_port = Container().config()['pycron_server_port']
     response = requests.get('http://{}:{}/?restart={}'.format(pycron_server_address, pycron_server_port, service))
-    print(response.json())
+    click.echo(response.json())
     rich_json(response.json())
 
 
@@ -304,26 +356,43 @@ def company_info(symbol: str):
 
 @main.command()
 @click.option('--buy/--sell', default=True, help='buy or sell')
-@click.option('--conId', required=True, help='IB conId for security')
+@click.option('--symbol', required=True, type=str, help='IB conId for security')
+@click.option('--primary_exchange', required=False, default='', type=str, help='exchange [not required]')
 @click.option('--market', default=False, help='accept current market price')
-@click.option('--limit', required=True, help='limit price for security')
-@click.option('--amount', required=True, help='total amount to buy/sell')
+@click.option('--limit', required=True, type=float, help='limit price for security')
+@click.option('--amount', required=True, type=float, help='total amount to buy/sell')
+@common_options()
+@default_config()
 def trade(
     buy: bool,
-    conId: int,
+    symbol: str,
+    primary_exchange: str,
     market: bool,
     limit: float,
-    amount: float
+    amount: float,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    **args,
 ):
+    contracts = __resolve(
+        symbol=symbol,
+        arctic_server_address=arctic_server_address,
+        arctic_universe_library=arctic_universe_library,
+        primary_exchange=primary_exchange
+    )
+
+    if len(contracts) == 0:
+        click.echo('no contract found for symbol {}'.format(symbol))
+    elif len(contracts) > 1:
+        click.echo('multiple contracts found for symbol {}, aborting'.format(symbol))
+
     action = 'BUY' if buy else 'SELL'
-
-    # # grab the latest price
-    # bus_client.service.
-
-    # if limit:
-    #     limit_order = LimitOrder(action, totalQuantity=)
-    #     order = Order()
-    #     bus_client.service.place_order()
+    trade = bus_client.service.temp_place_order(
+        contract=contract_from_dict(contracts[0]),
+        action=action,
+        equity_amount=amount
+    )
+    click.echo(trade)
 
 
 @main.command()
@@ -362,4 +431,3 @@ if get_ipython().__class__.__name__ == 'TerminalInteractiveShell':  # type: igno
 
 if __name__ == '__main__':
     main(obj={})
-

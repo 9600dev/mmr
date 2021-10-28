@@ -5,9 +5,9 @@ import asyncio
 from asyncio import iscoroutinefunction
 from aioreactive import AsyncObserver, AsyncObservable
 from aioreactive.subject import AsyncMultiSubject
-from typing import TypeVar, Optional, Callable, Awaitable, Tuple, Generic, Dict, cast
+from typing import TypeVar, Optional, Callable, Awaitable, Tuple, Generic, Dict, cast, List, Union
 from functools import wraps
-from eventkit import Event
+from eventkit import Event, event
 
 from expression.system.disposable import AsyncDisposable
 
@@ -148,12 +148,28 @@ class AsyncCachedSubject(AsyncMultiSubject[TSource], AsyncCachedObservable[TSour
 
 
 class AsyncEventSubject(AsyncCachedSubject[TSource]):
-    def __init__(self, eventkit_event: Event):
+    def __init__(self, eventkit_event: Optional[Union[Event, List[Event]]] = None):
         super().__init__()
-        self.eventkit_event = eventkit_event
-        eventkit_event += self.on_eventkit_update
+        self.eventkit_event: List[Event] = []
+        if eventkit_event and type(eventkit_event) is list:
+            self.eventkit_event = eventkit_event
+            for e in eventkit_event:
+                e += self.on_eventkit_update
+        elif eventkit_event and type(eventkit_event) is Event:
+            self.eventkit_event += [eventkit_event]
+            e = cast(Event, eventkit_event)
+            e += self.on_eventkit_update
 
-    async def call_event_subscriber(self, awaitable_event_subscriber: Awaitable[TSource]):
+    async def subscribe_to_eventkit_event(self, eventkit: Union[List[Event], Event]) -> None:
+        if type(eventkit) is Event:
+            self.eventkit_event += [eventkit]
+            eventkit = cast(Event, eventkit)
+            eventkit += self.on_eventkit_update
+        elif type(eventkit) is list:
+            for e in eventkit:
+                e += self.on_eventkit_update
+
+    async def call_event_subscriber(self, awaitable_event_subscriber: Awaitable[TSource]) -> None:
         result = await awaitable_event_subscriber
         # todo this doesn't feel right. I want isinstance(result, TSource) but that doesn't work
         if result:

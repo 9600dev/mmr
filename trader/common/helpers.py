@@ -5,7 +5,6 @@ import scipy.stats as st
 import logging
 import functools
 import asyncio
-import rx
 import datetime as dt
 import exchange_calendars as ec
 import plotille as plt
@@ -16,15 +15,14 @@ import json
 import locale
 import os
 import click
+import collections
 import aioreactive as aiorx
 from bs4 import BeautifulSoup
 from dateutil.tz import gettz, tzlocal
 from dateutil.tz.tz import tzfile
-from typing import Tuple, Optional, Union, cast, List, Dict, TypeVar, Generic, Callable
+from typing import Tuple, Optional, Union, cast, List, Dict, TypeVar, Generic, Callable, Any, Tuple
 from collections import deque
-from rx.disposable import Disposable
 from aioreactive.types import Projection
-from rx import Observable
 from pandas import Timestamp
 from ib_insync.contract import Contract
 from exchange_calendars import ExchangeCalendar
@@ -32,6 +30,18 @@ from pypager.source import GeneratorSource
 from pypager.pager import Pager
 from rich.console import Console
 from rich.table import Table
+
+def flatten_dict(d, parent_key='', sep='_'):
+    items = []
+    for k, v in d.items():
+        new_key = parent_key + sep + k if parent_key else k
+        if isinstance(v, collections.MutableMapping):
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
+
+
 
 def flatten_json(y):
     out = {}
@@ -51,11 +61,23 @@ def flatten_json(y):
     flatten(y)
     return out
 
+
 TPipe = TypeVar('TPipe')
 class Pipe(Generic[TPipe]):
     @classmethod
     def take(cls, count: int) -> Projection[TPipe, TPipe]:
         return cast(Projection[TPipe, TPipe], aiorx.take(count))
+
+
+def contract_from_dict(d: Dict[str, Any]) -> Contract:
+    contract = Contract(
+        conId=d['conId'],
+        symbol=d['symbol'],
+        exchange=d['exchange'],
+        primaryExchange=d['primaryExchange'],
+        currency=d['currency']
+    )
+    return contract
 
 
 def symbol_to_contract(symbol: str) -> Contract:
@@ -73,12 +95,14 @@ def get_contract_from_csv(contract_csv_file: str = '/home/trader/mmr/data/symbol
 
 
 T = TypeVar('T')
-class DictHelper(Generic[T]):
+K = TypeVar('K')
+V = TypeVar('V')
+class DictHelper(Generic[K, V]):
     @classmethod
-    def to_object(cls, item: Dict) -> T:
+    def to_object(cls, item: Dict[K, V]) -> V:
         def convert(item):
             if isinstance(item, dict):
-                return type('faked_' + str(type(T)), (), {k: convert(v) for k, v in item.items()})
+                return type('faked_' + str(type(V)), (), {k: convert(v) for k, v in item.items()})
             if isinstance(item, list):
                 def yield_convert(item):
                     for index, value in enumerate(item):
@@ -86,11 +110,47 @@ class DictHelper(Generic[T]):
                 return list(yield_convert(item))
             else:
                 return item
-        return cast(T, convert(item))
+        return cast(V, convert(item))
 
     @classmethod
     def to_series(cls, item: Dict) -> pd.Series:
         return pd.Series(item)
+
+    @classmethod
+    def dict_to_tuple_list(cls, d: Dict[K, V]) -> List[Tuple[K, V]]:
+        result: List[Tuple[K, V]] = []
+        for k, v in d.items():
+            result.append((k, v))
+        return result
+
+    @classmethod
+    def dict_from_object(cls, obj, columns: Optional[List[str]]):
+        if type(obj) is not dict and not hasattr(obj, '__dict__'):
+            return {str(obj): str(obj)}
+
+        result: Dict = {}
+        if type(obj) is dict:
+            result = obj
+        else:
+            result = obj.__dict__
+
+        for k, v in result.items():
+            if isinstance(obj, (int, float, complex)):
+                continue
+            elif type(v) is list:
+                result[k] = str(v)
+            elif type(v) is dict:
+                result = result | DictHelper[K, V].dict_from_object(v, columns)
+            elif hasattr(v, '__class__'):
+                result = result | DictHelper[K, V].dict_from_object(v, columns)
+
+        if columns and len(columns) > 0:
+            new_result = {}
+            for c in columns:
+                if c in result:
+                    new_result[c] = result[c]
+            return new_result
+        return result
 
 
 class ListHelper(Generic[T]):
@@ -346,21 +406,21 @@ def pdt(date_time: dt.datetime) -> str:
     return date_time.strftime('%Y-%m-%d')
 
 
-def from_aiter(iter, loop) -> Observable:
-    def on_subscribe(observer, scheduler):
-        async def _aio_sub():
-            try:
-                async for i in iter:
-                    observer.on_next(i)
-                loop.call_soon(
-                    observer.on_completed)
-            except Exception as e:
-                loop.call_soon(
-                    functools.partial(observer.on_error, e))
+# def from_aiter(iter, loop) -> Observable:
+#     def on_subscribe(observer, scheduler):
+#         async def _aio_sub():
+#             try:
+#                 async for i in iter:
+#                     observer.on_next(i)
+#                 loop.call_soon(
+#                     observer.on_completed)
+#             except Exception as e:
+#                 loop.call_soon(
+#                     functools.partial(observer.on_error, e))
 
-        task = asyncio.ensure_future(_aio_sub(), loop=loop)
-        return Disposable(lambda: task.cancel())  # type: ignore
-    return rx.create(on_subscribe)
+#         task = asyncio.ensure_future(_aio_sub(), loop=loop)
+#         return Disposable(lambda: task.cancel())  # type: ignore
+#     return rx.create(on_subscribe)
 
 
 def date_range(start_date: dt.datetime,

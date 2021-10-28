@@ -16,7 +16,7 @@ Features include:
 - [x] Interactive brokers historical data collection
 - [x] Login; logoff; get positions; get portfolio;
 - [x] Subscribe to bars, subscribe to ticks
-- [ ] Place, cancel, update orders
+- [*] Place, cancel, update orders (partially working)
 - [ ] Backtesting
 - [ ] Risk analysis
 - [ ] Add/remove strategies

@@ -37,6 +37,8 @@ def ib_maintenance() -> bool:
     # Sunday's there are no reboots
     elif (date_time.weekday() == 6):
         return False
+    elif (date_time.weekday() == 0) and date_time.time() < dt.time(23):
+        return False
     # otherwise, 23:45 - 00:45 ET
     elif time_in_range(dt.time(23, 45), dt.time(0, 45), date_time.time()):
         return True

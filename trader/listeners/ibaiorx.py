@@ -21,7 +21,7 @@ import random
 
 from ib_insync.ib import IB
 from ib_insync.contract import ContractDescription, ContractDetails, Stock, Contract, Forex, Future
-from ib_insync.objects import PortfolioItem, Position, RealTimeBarList, BarData, BarDataList, RealTimeBar
+from ib_insync.objects import PortfolioItem, Position, RealTimeBarList, BarData, BarDataList, RealTimeBar, Fill
 from ib_insync.order import Order, BracketOrder, LimitOrder, StopOrder, OrderStatus, MarketOrder, ExecutionCondition, Trade
 from ib_insync.order import StopLimitOrder
 from ib_insync.util import df
@@ -65,7 +65,8 @@ TValue = TypeVar('TValue')
 # With aioreactive you subscribe observers to observables,
 
 class IBAIORx():
-    client_id_counter = random.randint(5, 35)
+    # master client id should be set to 5 (incremented on the call to connect())
+    client_id_counter = 4
 
     def __init__(
         self,
@@ -88,6 +89,7 @@ class IBAIORx():
         self.bars_data_subject = AsyncEventSubject[RealTimeBarList](eventkit_event=self.ib.barUpdateEvent)
         self.positions_subject = AsyncEventSubject[List[Position]](eventkit_event=self.ib.positionEvent)
         self.portfolio_subject = AsyncEventSubject[PortfolioItem](eventkit_event=self.ib.updatePortfolioEvent)
+        self.trades_subject = AsyncEventSubject[Trade](eventkit_event=self.ib.orderStatusEvent)
         self._contracts_source = AsyncEventSubject[Set[Ticker]](eventkit_event=self.ib.pendingTickersEvent)
         # we have to flatten from Set[Ticker] to a single stream of tickers
         # that each subscriber can filter on
@@ -95,7 +97,6 @@ class IBAIORx():
             self._contracts_source,
             rx.flat_map(mapper)
         )
-        self.orders_subject = AsyncEventSubject[Trade](eventkit_event=self.ib.orderStatusEvent)
 
         self.contracts_cache: Dict[Contract, rx.AsyncObservable] = {}
         self.bars_cache: Dict[Contract, rx.AsyncObservable[RealTimeBarList]] = {}
@@ -117,7 +118,7 @@ class IBAIORx():
 
     @backoff.on_exception(backoff.expo, Exception, max_tries=3, max_time=30)
     def connect(self):
-        # we often have client_id clashes, so try incrementally updating a static counter
+        # todo set in the readme that the master client ID has to be set to 5
         IBAIORx.client_id_counter += 1
 
         if self.__handle_error not in self.ib.errorEvent:
@@ -151,14 +152,35 @@ class IBAIORx():
         order: Order,
         observer: rx.AsyncObserver[Trade]
     ) -> AsyncDisposable:
+        # the order object gets filled with the order details (clientId, orderId etc)
+        # the trade object returned from 'placeOrder' gets filled later, but we don't return it
+        # as we want the subscription stream to contain all relevant trade details
 
         xs = pipe(
-            self.orders_subject,
-            rx.filter(lambda trade: self._filter_contract(contract, order)),  # type: ignore
+            self.trades_subject,
+            rx.filter(lambda trade: self._filter_contract(contract, trade)),  # type: ignore
         )
 
         disposable = await xs.subscribe_async(observer)
-        self.orders_subject.call_event_subscriber_sync(lambda: {self.ib.placeOrder(contract, order)})
+        self.trades_subject.call_event_subscriber_sync(lambda: self.ib.placeOrder(contract, order))
+        # todo, figure out what to do here with the disposable
+        # should it cancel the order, or just stop listening?
+        return disposable
+
+    async def subscribe_cancel_order(
+        self,
+        contract: Contract,
+        order: Order,
+        observer: rx.AsyncObserver[Trade]
+    ) -> AsyncDisposable:
+        xs = pipe(
+            self.trades_subject,
+            rx.filter(lambda trade: self._filter_contract(contract, trade)),  # type: ignore
+        )
+
+        disposable = await xs.subscribe_async(observer)
+        self.trades_subject.call_event_subscriber_sync(lambda: self.ib.cancelOrder(order))
+
         return disposable
 
     async def __subscribe_contract(
@@ -171,13 +193,13 @@ class IBAIORx():
             self.ib.reqMarketDataType(4)
 
         self._contracts_source.call_event_subscriber_sync(
-            lambda: {self.ib.reqMktData(
+            lambda: self.ib.reqMktData(
                 contract=contract,
                 genericTickList='',
                 snapshot=one_time_snapshot,
                 regulatorySnapshot=False,
                 mktDataOptions=None
-            )})
+            ))
 
         if delayed:
             self.ib.reqMarketDataType(1)
@@ -240,6 +262,15 @@ class IBAIORx():
         for item in portfolio_items:
             await self.portfolio_subject.asend(item)
         return self.portfolio_subject
+
+    async def get_open_orders(self) -> List[Order]:
+        return await self.ib.reqAllOpenOrdersAsync()
+
+    async def get_completed_orders(self) -> List[Trade]:
+        return await self.ib.reqCompletedOrdersAsync(apiOnly=True)
+
+    async def get_executions(self) -> List[Fill]:
+        return await self.ib.reqExecutionsAsync()
 
     async def get_snapshot(self, contract: Contract, delayed: bool = False) -> Ticker:
         populated_ticker: Ticker = Ticker()

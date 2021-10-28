@@ -61,15 +61,13 @@ class Job():
             self.crontab_stop = CronTab(self.stop)
 
     def __str__(self):
-        return '{} {} {} {} {} {} {}: {} {}'.format(self.name,
-                                                    self.command,
-                                                    self.arguments,
-                                                    self.pid,
-                                                    self.start_count,
-                                                    self.restart_if_finished,
-                                                    self.depends_on,
-                                                    self.start,
-                                                    self.stop)
+        return '{} {} {} {} {}: {} {}'.format(self.name,
+                                              self.command,
+                                              self.arguments,
+                                              self.pid,
+                                              self.start_count,
+                                              self.start,
+                                              self.stop)
 
     def __dict__(self):
         return {

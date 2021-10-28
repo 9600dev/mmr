@@ -31,6 +31,7 @@ from ib_insync.objects import PortfolioItem, Position, BarData
 from ib_insync.order import LimitOrder, Order, Trade
 from ib_insync.util import df
 from ib_insync.ticker import Ticker
+from eventkit import Event
 
 from trader.listeners.ibaiorx import IBAIORx
 from trader.common.contract_sink import ContractSink
@@ -50,6 +51,10 @@ from trader.common.helpers import get_network_ip, Pipe
 from trader.messaging.bus_server import start_lightbus
 
 from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar, cast, Union
+
+# notes
+# https://groups.io/g/insync/topic/using_reqallopenorders/27261173?p=,,,20,0,0,0::recentpostdate%2Fsticky,,,20,2,0,27261173
+# talks about trades/orders being tied to clientId, which means we'll need to always have a consistent clientid
 
 class Action(Enum):
     BUY = 1
@@ -91,7 +96,7 @@ class Trader(metaclass=Singleton):
         self.contract_subscriptions: Dict[Contract, ContractSink] = {}
         # the strategies we're using
         self.strategies: List[Strategy] = []
-        # current order book (outstanding orders)
+        # current order book (outstanding orders, trades etc)
         self.book: Book = Book()
         # portfolio (current and past positions)
         self.portfolio: Portfolio = Portfolio()
@@ -99,6 +104,7 @@ class Trader(metaclass=Singleton):
         self.executioner: Executioner
         # a list of all the universes of stocks we have registered
         self.universes: List[Universe]
+        self.market_data = 3
 
     @backoff.on_exception(backoff.expo, ConnectionRefusedError, max_tries=10, max_time=120)
     def connect(self):
@@ -135,6 +141,17 @@ class Trader(metaclass=Singleton):
             logging.exception(ex)
             error = True
 
+        # have the book subscribe to all relevant trade events
+        await self.book.subscribe_to_eventkit_event(
+            [
+                self.client.ib.orderStatusEvent,
+                self.client.ib.orderModifyEvent,
+                self.client.ib.newOrderEvent,
+                self.client.ib.cancelOrderEvent,
+                self.client.ib.openOrderEvent,
+            ]
+        )
+
         positions = await self.client.subscribe_positions()
         await positions.subscribe_async(AsyncCachedObserver(self.__update_positions,
                                                             athrow=handle_subscription_exception,
@@ -151,7 +168,11 @@ class Trader(metaclass=Singleton):
             await self.client.portfolio_subject.asend(p)
 
         # make sure we're getting either live, or delayed data
-        await self.client.ib.reqMarketDataType(3)
+        self.client.ib.reqMarketDataType(self.market_data)
+
+        orders = await self.client.ib.reqAllOpenOrdersAsync()
+        for o in orders:
+            await self.book.asend(o)
 
     async def connected_event(self):
         logging.debug('connected_event')
@@ -179,37 +200,38 @@ class Trader(metaclass=Singleton):
             logging.debug('updating portfolio universe with {} securities'.format(str(len(missing_contract_list))))
             self.universe_accessor.update(universe)
 
-    async def place_order(
+    async def temp_place_order(
         self,
         contract: Contract,
         order: Order
-    ):
+    ) -> AsyncCachedObserver[Trade]:
         async def handle_exception(ex):
             logging.exception(ex)
             # todo sort out the book here
 
         async def handle_trade(trade: Trade):
             logging.debug('handle_trade {}'.format(trade))
-            self.book.add_update_trade(trade)
+            # todo figure out what we want to do here
 
         observer = AsyncCachedObserver(asend=handle_trade,
                                        athrow=handle_exception,
                                        capture_asend_exception=True)
 
         disposable = await self.client.subscribe_place_order(contract, order, observer)
-        await disposable.dispose_async()
+        return observer
 
-    async def handle_order(
+    async def temp_handle_order(
         self,
         contract: Contract,
         action: Action,
-        amount: float,
+        equity_amount: float,
         delayed: bool = False,
+        debug: bool = False,
     ) -> AsyncCachedObserver[Trade]:
         # todo make sure amount is less than outstanding profit
 
         # grab the latest price of instrument
-        subject = await self.client.subscribe_contract(contract=contract, snapshot=True)
+        subject = await self.client.subscribe_contract(contract=contract, one_time_snapshot=True)
 
         xs = pipe(
             subject,
@@ -218,14 +240,46 @@ class Trader(metaclass=Singleton):
 
         observer = AsyncCachedObserver[Ticker]()
         await xs.subscribe_async(observer)
-        tick = await observer.wait_value()
+        latest_tick = await observer.wait_value()
+
+        # todo perform tick sanity checks
 
         # assess if we should trade
-        quantity = amount / tick.bid
+        quantity = equity_amount / latest_tick.bid
+
+        if quantity < 1 and quantity > 0:
+            quantity = 1.0
+
+        # round the quantity
+        quantity_int = round(quantity)
+
+        logging.debug('temp_handle_order assessed quantity: {} on bid: {}'.format(
+            quantity_int, latest_tick.bid
+        ))
+
+        limit_price = latest_tick.bid
+        # if debug, move the buy/sell by 10%
+        if debug and action == Action.BUY:
+            limit_price = limit_price * 0.9
+            limit_price = round(limit_price * 0.9, ndigits=2)
+        if debug and action == Action.SELL:
+            limit_price = round(limit_price * 1.1, ndigits=2)
 
         # put an order in
-        order = LimitOrder(action=str(action), totalQuantity=quantity, lmtPrice=tick.bid)
-        return await self.client.subscribe_place_order(contract=contract, order=order)
+        order = LimitOrder(action=str(action), totalQuantity=quantity_int, lmtPrice=limit_price)
+        return await self.temp_place_order(contract=contract, order=order)
+
+    def cancel_order(self, order_id: int) -> Optional[Trade]:
+        # get the Order
+        order = self.book.get_order(order_id)
+        if order and order.clientId == self.client.client_id_counter:
+            logging.info('cancelling order {}'.format(order))
+            trade = self.client.ib.cancelOrder(order)
+            return trade
+        else:
+            logging.error('either order does not exist, or originating client_id is different: {} {}'
+                          .format(order, self.client.client_id_counter))
+            return None
 
     def is_ib_connected(self) -> bool:
         return self.client.ib.isConnected()
