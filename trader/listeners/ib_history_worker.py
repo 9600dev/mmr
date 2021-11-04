@@ -105,7 +105,7 @@ class IBHistoryWorker():
             if result:
                 df_result = ib_insync.util.df(result).set_index('date')
                 df_result['bar_size'] = bar_size
-                df_result.rename({'barCount': 'bar_count'}, inplace=True)
+                df_result.rename({'barCount': 'bar_count'}, inplace=True, axis=1)
 
                 # arctic requires timezone to be set
                 df_result.index = pd.to_datetime(df_result.index)  # type: ignore

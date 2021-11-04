@@ -49,14 +49,6 @@ jobs:
       start: "* * * * *"
       start_on_pycron_start: True
       restart_if_found: True
-    - name: messaging server
-      description: zeromq messaging for trader
-      command: /usr/bin/python3
-      arguments: trader/messaging/messaging_server.py
-      start: "* * * * *"
-      start_on_pycron_start: True
-      restart_if_found: True
-      restart_if_finished: True
     - name: redis
       description: redis server
       command: /usr/bin/redis-server
@@ -64,10 +56,10 @@ jobs:
       start: "* * * * *"
       start_on_pycron_start: True
       restart_if_finished: True
-    - name: worker_service 
-      description: worker service for batch job 
-      command: /usr/bin/python3 
-      arguments: trader/batch/worker_service.py start --config configs/trader.yaml --queue_name history 
+    - name: worker_service
+      description: worker service for batch job
+      command: /usr/bin/python3
+      arguments: trader/batch/worker_service.py start --config configs/trader.yaml --queue_name history
       start: "* * * * *"
       start_on_pycron_start: True
       restart_if_found: True
@@ -75,7 +67,7 @@ jobs:
       depends_on:
         - tws
       delay: 5
-    - name: trader_service 
+    - name: trader_service
       description: the host service for all algo trading
       command: /usr/bin/python3
       arguments: trader_service.py
