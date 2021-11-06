@@ -1,7 +1,7 @@
-from re import I
 import sys
 import os
-from expression.system.disposable import AsyncDisposable
+import nest_asyncio
+nest_asyncio.apply()
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
 PACKAGE_PARENT = '../..'
@@ -12,7 +12,6 @@ import pandas as pd
 import datetime as dt
 import backoff
 import aioreactive as rx
-import nest_asyncio
 
 from asyncio.events import AbstractEventLoop
 from aioreactive.types import AsyncObservable, Projection

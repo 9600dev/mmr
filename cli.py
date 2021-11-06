@@ -1,4 +1,5 @@
 import os
+from random import randint
 import sys
 import asyncio
 from ib_insync.order import LimitOrder
@@ -9,8 +10,9 @@ import pandas as pd
 import scripts.universes_cli as universes_cli
 import trader.batch.ib_history_queuer as ib_history_queuer
 import click_repl
-import aioreactive as rx
+import aioreactive
 
+from aioreactive import AsyncAnonymousObservable, AsyncAwaitableObserver, AsyncAnonymousObserver
 from typing import Type, TypeVar, Dict, Optional, List, cast, Tuple, Any
 from trader.container import Container
 from trader.data.data_access import SecurityDefinition, TickData, DictData
@@ -34,6 +36,7 @@ from trader.common.command_line import cli, common_options, default_config
 from trader.listeners.ibaiorx import IBAIORx
 from click_help_colors import HelpColorsGroup
 from trader.common.logging_helper import setup_logging, suppress_external
+from trader.listeners.ibaiorx import WhatToShow
 from trader.messaging.bus import *
 from trader.common.helpers import contract_from_dict
 from trader.common.helpers import *
@@ -187,7 +190,7 @@ def __resolve(
     results = []
     for universe in accessor.get_all():
         for definition in universe.security_definitions:
-            if symbol in definition.symbol.lower():
+            if definition.symbol.lower().startswith(symbol):
                 results.append({
                     'universe': universe.name,
                     'conId': definition.conId,
@@ -205,7 +208,10 @@ def __resolve(
 
 @main.command()
 @click.option('--symbol', required=True, help='symbol to resolve to conId')
-@click.option('--primary_exchange', required=False, default='', help='exchange for symbol [not required]')
+@click.option('--primary_exchange', required=False, default='NASDAQ', help='exchange for symbol [not required]')
+@click.option('--ib', required=False, default=False, is_flag=True, help='force resolution from IB')
+@click.option('--sec_type', required=False, default='STK', help='IB security type [STK is default]')
+@click.option('--currency', required=False, default='USD', help='IB security currency')
 @common_options()
 @default_config()
 def resolve(
@@ -213,10 +219,29 @@ def resolve(
     arctic_server_address: str,
     arctic_universe_library: str,
     primary_exchange: str,
+    ib: bool,
+    sec_type: str,
+    currency: str,
     **args,
 ):
-    results = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
-    rich_table(results, False)
+    if ib:
+        container = Container()
+        client = container.resolve(IBAIORx)
+        IBAIORx.client_id_counter = randint(20, 99)
+        client.connect()
+        contract = asyncio.run(client.get_conid(
+            symbols=symbol,
+            secType=sec_type,
+            primaryExchange=primary_exchange,
+            currency=currency
+        ))
+        if contract and type(contract) is list:
+            rich_list(contract)
+        elif contract and type(contract) is Contract:
+            rich_dict(contract.__dict__)
+    else:
+        results = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
+        rich_table(results, False)
 
 
 @main.command()
@@ -235,6 +260,7 @@ def snapshot(
 ):
     container = Container()
     client = container.resolve(IBAIORx)
+    IBAIORx.client_id_counter = randint(20, 99)
     client.connect()
     result = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
     if len(result) >= 1:
@@ -411,6 +437,7 @@ a2m = Contract(symbol='A2M', conId=189114468, exchange='SMART', primaryExchange=
 accessor: UniverseAccessor
 client: IBAIORx
 store: Arctic
+bardata: TickData
 
 
 def setup_ipython():
@@ -418,12 +445,14 @@ def setup_ipython():
     global accessor
     global client
     global store
+    global bardata
 
     container = Container()
     accessor = container.resolve(UniverseAccessor)
     client = container.resolve(IBAIORx)
     client.connect()
     store = Arctic(mongo_host=container.config()['arctic_server_address'])
+    bardata = container.resolve(TickData)
 
 
 if get_ipython().__class__.__name__ == 'TerminalInteractiveShell':  # type: ignore

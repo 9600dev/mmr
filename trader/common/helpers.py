@@ -298,6 +298,23 @@ def paginate(content: str):
     p.run()
 
 
+def timezoneify(date_time: Union[dt.datetime, Timestamp], timezone: Union[str, tzfile]):
+    zone = None
+
+    if isinstance(date_time, Timestamp):
+        date_time = cast(Timestamp, date_time).to_pydatetime()
+
+    if isinstance(timezone, str):
+        zone = gettz(timezone)  # type: ignore
+    elif isinstance(timezone, tzfile):
+        zone = timezone  # type: ignore
+    else:
+        raise ValueError('timezone should be either string or tzfile')
+
+    date_time = date_time.astimezone(zone)
+    return date_time
+
+
 def dateify(date_time: Optional[Union[dt.datetime, dt.date, Timestamp]] = None,
             timezone: Optional[Union[str, tzfile]] = None, make_eod: bool = False) -> dt.datetime:
     zone = None

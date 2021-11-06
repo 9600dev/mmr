@@ -20,6 +20,8 @@ import nest_asyncio
 import random
 
 from ib_insync.ib import IB
+from ib_insync.util import schedule
+from ib_insync.client import Client
 from ib_insync.contract import ContractDescription, ContractDetails, Stock, Contract, Forex, Future
 from ib_insync.objects import PortfolioItem, Position, RealTimeBarList, BarData, BarDataList, RealTimeBar, Fill
 from ib_insync.order import Order, BracketOrder, LimitOrder, StopOrder, OrderStatus, MarketOrder, ExecutionCondition, Trade
@@ -52,7 +54,8 @@ from typing import (
 from trader.common.listener_helpers import Helpers
 from trader.common.helpers import Pipe
 from trader.common.logging_helper import setup_logging
-from trader.common.reactive import AsyncCachedSubject, AsyncCachedObserver, AsyncCachedObservable, awaitify, AsyncEventSubject
+from trader.common.reactive import AsyncCachedSubject, AsyncCachedPandasSubject, AsyncCachedObserver
+from trader.common.reactive import AsyncCachedObservable, awaitify, AsyncEventSubject
 from trader.listeners.ib_history_worker import IBHistoryWorker
 from trader.objects import WhatToShow, ReportType
 
@@ -81,11 +84,12 @@ class IBAIORx():
         nest_asyncio.apply()
 
         self.ib = IB()
-        self.market_data_subject: rx.AsyncSubject[Ticker] = rx.AsyncSubject[Ticker]()
 
         def mapper(tickers: Set[Ticker]) -> rx.AsyncObservable[Ticker]:
             return rx.from_iterable(tickers)
 
+        self.market_data_subject: rx.AsyncSubject[Ticker] = rx.AsyncSubject[Ticker]()
+        self.historical_data_subject: rx.AsyncSubject[pd.DataFrame] = rx.AsyncSubject[pd.DataFrame]()
         self.bars_data_subject = AsyncEventSubject[RealTimeBarList](eventkit_event=self.ib.barUpdateEvent)
         self.positions_subject = AsyncEventSubject[List[Position]](eventkit_event=self.ib.positionEvent)
         self.portfolio_subject = AsyncEventSubject[PortfolioItem](eventkit_event=self.ib.updatePortfolioEvent)
@@ -100,6 +104,7 @@ class IBAIORx():
 
         self.contracts_cache: Dict[Contract, rx.AsyncObservable] = {}
         self.bars_cache: Dict[Contract, rx.AsyncObservable[RealTimeBarList]] = {}
+        self.historical_subscribers: Dict[Contract, int] = {}
 
         # try binding helper methods to things we care about
         Contract.to_df = Helpers.to_df  # type: ignore
@@ -118,11 +123,19 @@ class IBAIORx():
 
     @backoff.on_exception(backoff.expo, Exception, max_tries=3, max_time=30)
     def connect(self):
+        def __handle_client_id_error(msg):
+            logging.error('clientId already in use, randomizing and trying again')
+            IBAIORx.client_id_counter = random.randint(10, 99)
+            raise ValueError('clientId')
+
         # todo set in the readme that the master client ID has to be set to 5
         IBAIORx.client_id_counter += 1
 
         if self.__handle_error not in self.ib.errorEvent:
             self.ib.errorEvent += self.__handle_error
+
+        net_client = cast(Client, self.ib.client)
+        net_client.conn.disconnected += __handle_client_id_error
 
         self.ib.connect(
             self.ib_server_address,
@@ -132,7 +145,12 @@ class IBAIORx():
             readonly=self.read_only
         )
 
+        net_client.conn.disconnected -= __handle_client_id_error
+
         return self
+
+    def disconnect(self):
+        self.ib.disconnect()
 
     def is_connected(self):
         return self.ib.isConnected()
@@ -224,9 +242,11 @@ class IBAIORx():
     def unsubscribe_contract(self, contract: Contract):
         raise ValueError('not implemented')
 
-    async def subscribe_barlist(self,
-                                contract: Contract,
-                                wts: WhatToShow = WhatToShow.MIDPOINT) -> rx.AsyncObservable[RealTimeBarList]:
+    async def subscribe_barlist(
+        self,
+        contract: Contract,
+        wts: WhatToShow = WhatToShow.MIDPOINT
+    ) -> rx.AsyncObservable[RealTimeBarList]:
         # todo this method subscribes and populates a RealTimeBarsList object,
         # which I'm sure will end up being a memory leak
         bar_size = 5
@@ -303,9 +323,11 @@ class IBAIORx():
         else:
             return cast(List[ContractDetails], result)
 
-    async def get_fundamental_data_sync(self,
-                                        contract: Contract,
-                                        report_type: ReportType = ReportType.ReportSnapshot) -> rx.AsyncObservable[str]:
+    async def get_fundamental_data_sync(
+        self,
+        contract: Contract,
+        report_type: ReportType = ReportType.ReportSnapshot
+    ) -> rx.AsyncObservable[str]:
         return rx.from_async(self.ib.reqFundamentalDataAsync(contract, reportType=str(report_type)))
 
     async def get_matching_symbols(self, symbol: str) -> List[ContractDescription]:
@@ -381,7 +403,7 @@ class IBAIORx():
         start_date: dt.datetime,
         end_date: dt.datetime = dt.datetime.now(),
         bar_size: str = '1 min',
-        what_to_show: WhatToShow = WhatToShow.TRADES
+        what_to_show: WhatToShow = WhatToShow.MIDPOINT,
     ) -> pd.DataFrame:
         history_worker = IBHistoryWorker(self.ib)
         return await history_worker.get_contract_history(
@@ -392,6 +414,37 @@ class IBAIORx():
             end_date=end_date,
             filter_between_dates=True
         )
+
+    async def subscribe_contract_history(
+        self,
+        contract: Contract,
+        start_date: dt.datetime,
+        what_to_show: WhatToShow,
+        observer: AsyncObserver[pd.DataFrame],
+    ) -> AsyncDisposable:
+        async def __update(contract: Contract, start_date: dt.datetime, end_date: dt.datetime):
+            if subject._is_disposed:
+                return
+
+            data = await self.get_contract_history(
+                contract=contract,
+                start_date=start_date,
+                end_date=end_date,
+                what_to_show=what_to_show,
+            )
+            await subject.asend(data)
+
+            start_date = end_date
+            end_date = end_date + dt.timedelta(minutes=1)
+            loop = asyncio.get_event_loop()
+            loop.call_later(60, asyncio.create_task, __update(contract, start_date, end_date))
+
+        subject = AsyncCachedPandasSubject()
+
+        end_date = dt.datetime.now()
+        loop = asyncio.get_event_loop()
+        loop.call_later(1, asyncio.create_task, __update(contract, start_date, end_date))
+        return await subject.subscribe_async(observer)
 
     def sleep(self, seconds: float):
         self.ib.sleep(seconds)

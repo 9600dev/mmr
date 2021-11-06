@@ -48,30 +48,18 @@ class SecurityDataStream(AsyncMultiSubject[pd.DataFrame]):
         self.date_range: DateRange
         self.df: pd.DataFrame = pd.DataFrame([], columns=self.columns)
         self.is_being_backfilled: bool = True
-        if existing_data:
+        if existing_data is not None:
             self.df = existing_data
         self.bar_size = bar_size
 
-    async def asend(self, value: RealTimeBar) -> None:
+    async def asend(self, value: pd.DataFrame) -> None:
         self.check_disposed()
 
         if self._is_stopped:
             return
 
-        row = {
-            'date': value.endTime,
-            'open': value.open_,
-            'high': value.high,
-            'low': value.low,
-            'close': value.close,
-            'volume': value.volume,
-            'average': value.average,
-            'bar_count': value.barCount,
-            'bar_size': self.bar_size
-        }
-
         # todo: gotta be a faster way here
-        self.df.append(pd.DataFrame([row]))
+        self.df.append(value)
 
         for obv in list(self._observers):
             await obv.asend(self.df)
@@ -112,30 +100,44 @@ class MarketData():
         self,
         security: SecurityDefinition,
         bar_size: str,
-        date_range: DateRange,
+        start_date: dt.datetime,
         back_fill: bool,
     ) -> SecurityDataStream:
-        # grab the existing data we have
-        history_worker = IBHistoryWorker(self.client.ib)
+        # if we backfill, this essentially awaits until back_fill is complete
+        end_date = dt.datetime.now()
+        date_range = DateRange(start=start_date, end=end_date)
 
-        # todo we need to use the ib_history batch infrastructure here and have it
-        # notify via events, but for now we'll just grab the data ourselves.
-        calendar = exchange_calendars.get_calendar(security.primaryExchange)
-        date_ranges = self.data.missing(contract=security, exchange_calendar=calendar, date_range=date_range)
-        for date_dr in date_ranges:
-            result = await history_worker.get_contract_history(
-                security=security,
-                what_to_show=WhatToShow.MIDPOINT,
-                bar_size=bar_size,
-                start_date=date_range.start,
-                end_date=date_range.end,
-                filter_between_dates=True,
-                tz_info='America/New_York'
+        if back_fill:
+            # grab the existing data we have
+            history_worker = IBHistoryWorker(self.client.ib)
+            # todo we need to use the ib_history batch infrastructure here and have it
+            # notify via events, but for now we'll just grab the data ourselves.
+            calendar = exchange_calendars.get_calendar(security.primaryExchange)
+            date_ranges = self.data.missing(
+                contract=security,
+                exchange_calendar=calendar,
+                date_range=date_range
             )
-            self.data.write(security, data_frame=result)
+            for date_dr in date_ranges:
+                result = await history_worker.get_contract_history(
+                    security=security,
+                    what_to_show=WhatToShow.MIDPOINT,
+                    bar_size=bar_size,
+                    start_date=start_date,
+                    end_date=end_date,
+                    filter_between_dates=True,
+                    tz_info='America/New_York'
+                )
+                logging.info('writing backfill data for {} {}'.format(security, date_dr))
+                self.data.write_resolve_overlap(security, data_frame=result)
 
         df = self.data.get_data(security, date_range=date_range)
         stream = SecurityDataStream(security=security, bar_size=bar_size, date_range=date_range, existing_data=df)
-        self.client.subscribe_barlist(
+        disposable = await self.client.subscribe_contract_history(
             contract=Universe.to_contract(security),
-            wts=WhatToShow.MIDPOINT)
+            start_date=df.index[-1].to_pydatetime(),  # type: ignore
+            what_to_show=WhatToShow.MIDPOINT,
+            observer=stream
+        )
+
+        return stream

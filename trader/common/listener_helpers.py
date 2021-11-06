@@ -3,7 +3,6 @@ import ib_insync as ibapi
 from ib_insync.contract import ContractDescription
 import pandas as pd
 import rx
-import rx.disposable as disposable
 import datetime as dt
 import numpy as np
 import json
@@ -12,12 +11,8 @@ from bson import json_util
 from enum import Enum
 from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar, cast, Union
 from asyncio import BaseEventLoop
-from rx import operators as ops
-from rx.subject import Subject
-from rx.scheduler import ThreadPoolScheduler, CatchScheduler, CurrentThreadScheduler
-from rx.scheduler.eventloop import AsyncIOThreadSafeScheduler
-from rx.core.typing import Observable, Observer, Disposable, Scheduler
-from ib_insync import Stock, IB, Contract, Forex, BarData, Future, Position
+from ib_insync.ib import IB
+from ib_insync.contract import Stock, Contract, Forex
 from ib_insync.contract import ContractDetails
 from ib_insync.util import df
 from ib_insync.ticker import Ticker
@@ -145,32 +140,6 @@ class Helpers():
         return df([t])
 
     @staticmethod
-    def noop_transformer(observable: Observable) -> Observable:
-        return observable
-
-    @staticmethod
-    def pandas_transformer(observable) -> Observable:  # type: ignore
-        if issubclass(type(observable), Observable):
-            return observable.pipe(ops.map(lambda ticker: Helpers.df_complex(ticker)))  # type: ignore
-        else:
-            return observable.data()  # type: ignore
-
-    @staticmethod
-    def contract_sink_to_pandas(observable) -> Observable:  # type: ignore
-        if issubclass(type(observable), Observable):
-            return observable.pipe(ops.map(lambda sink: sink.latest_tick_df()))  # type: ignore
-        else:
-            return observable.data()  # type: ignore
-
-    @staticmethod
-    def dict_transformer(observable: Observable) -> Observable:
-        return observable.pipe(ops.map(lambda ticker: Helpers.dict_complex(ticker)))  # type: ignore
-
-    @staticmethod
-    def json_transformer(observable: Observable) -> Observable:
-        return observable.pipe(ops.map(lambda ticker: Helpers.json_complex(Helpers.dict_complex(ticker))))  # type: ignore
-
-    @staticmethod
     def rolling_linreg(df, window=90):
         '''
         Does linear regression on columns in df and returns two frames.
@@ -213,7 +182,11 @@ class Helpers():
         last = df.tail(1)
         time_index = time_delta
         if not time_index:
-            time_index = last.index - pd.Timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
+            time_index = last.index - pd.Timedelta(
+                days=days,
+                hours=hours,
+                minutes=minutes,
+                seconds=seconds)  # type: ignore
         return df[df.index >= time_index.item()]  # type: ignore
 
     @staticmethod

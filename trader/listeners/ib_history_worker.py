@@ -17,7 +17,7 @@ from trader.data.data_access import SecurityDefinition, TickData
 from trader.data.universe import Universe
 from trader.data.contract_metadata import ContractMetadata
 from trader.common.logging_helper import setup_logging
-from trader.common.helpers import dateify, day_iter, pdt
+from trader.common.helpers import dateify, day_iter, pdt, timezoneify
 from trader.common.listener_helpers import Helpers
 from trader.objects import WhatToShow
 from ib_insync.ib import IB
@@ -77,8 +77,10 @@ class IBHistoryWorker():
             duration_step_size = '1 Y'
 
         # we say that the 'end date' is the start of the day after
-        start_date = dateify(start_date, timezone=tz_info)
-        end_date_offset = dateify(end_date, timezone=tz_info) + dt.timedelta(days=1)
+        # start_date = dateify(start_date, timezone=tz_info)
+        # end_date_offset = dateify(end_date, timezone=tz_info) + dt.timedelta(days=1)
+        start_date = timezoneify(start_date, timezone=tz_info)
+        end_date_offset = timezoneify(end_date, timezone=tz_info)
         current_date = end_date_offset
         local_tz = dt.datetime.now(dt.timezone.utc).astimezone().tzinfo
 

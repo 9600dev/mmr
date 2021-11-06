@@ -2,8 +2,9 @@ from abc import abstractmethod
 import aioreactive as rx
 import datetime as dt
 import asyncio
+import pandas as pd
 from asyncio import iscoroutinefunction
-from aioreactive import AsyncObserver, AsyncObservable
+from aioreactive.types import AsyncObserver, AsyncObservable
 from aioreactive.subject import AsyncMultiSubject
 from typing import TypeVar, Optional, Callable, Awaitable, Tuple, Generic, Dict, cast, List, Union
 from functools import wraps
@@ -112,7 +113,7 @@ class AsyncCachedSubject(AsyncMultiSubject[TSource], AsyncCachedObservable[TSour
         self.datetime = dt.datetime.now()
 
         for obv in list(self._observers):
-            await obv.asend(value)
+            await obv.asend(self._value)
 
     async def subscribe_async(self, observer: AsyncObserver[TSource]) -> AsyncDisposable:
         self.check_disposed()
@@ -145,6 +146,27 @@ class AsyncCachedSubject(AsyncMultiSubject[TSource], AsyncCachedObservable[TSour
             return (self._value, self._datetime)
         else:
             return None
+
+
+class AsyncCachedPandasSubject(AsyncCachedSubject[pd.DataFrame]):
+    def __init__(self):
+        super().__init__()
+
+    async def asend(self, value: pd.DataFrame) -> None:
+        self.check_disposed()
+
+        if self._is_stopped:
+            return
+
+        self._task.set()
+        # if self._value is not None:
+        #     self._value = self._value.append(value)
+        # else:
+        self._value = value
+        self.datetime = dt.datetime.now()
+
+        for obv in list(self._observers):
+            await obv.asend(self._value)
 
 
 class AsyncEventSubject(AsyncCachedSubject[TSource]):

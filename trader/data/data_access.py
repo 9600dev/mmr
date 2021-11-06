@@ -17,7 +17,7 @@ from arctic import Arctic, TICK_STORE, VERSION_STORE
 from arctic.date import DateRange, string_to_daterange
 from arctic.tickstore.tickstore import TickStore
 from arctic.store.version_store import VersionStore
-from arctic.exceptions import NoDataFoundException
+from arctic.exceptions import NoDataFoundException, OverlappingDataException
 from typing import Tuple, List, Optional, Dict, TypeVar, Generic, Type, Union, cast, Set
 from durations import Duration
 from exchange_calendars import ExchangeCalendar
@@ -26,6 +26,8 @@ from ib_insync.contract import Contract, ContractDetails
 from trader.common.helpers import dateify, daily_close, daily_open, market_hours, get_contract_from_csv, symbol_to_contract
 from trader.data.contract_metadata import ContractMetadata
 
+# todo make sure all writes are monotonically ordered, as TickStore assumes this
+# right now, I don't think this is the case
 
 @dataclass
 class SecurityDefinition:
@@ -209,7 +211,10 @@ class TickData(Data):
         max_date = dateify(self.library.max_date(symbol=self._to_symbol(contract)), timezone=self.zone)
         return (min_date, max_date)
 
-    def summary(self, contract: Union[Contract, SecurityDefinition, int]) -> Tuple[dt.datetime, dt.datetime, pd.Series, pd.Series]:
+    def summary(
+        self,
+        contract: Union[Contract, SecurityDefinition, int]
+    ) -> Tuple[dt.datetime, dt.datetime, pd.Series, pd.Series]:
         if type(contract) is int:
             contract = Contract(conId=cast(int, contract))
 
@@ -234,6 +239,25 @@ class TickData(Data):
 
     def write_metadata(self, contract: Contract, metadata: ContractMetadata):
         self.metadata.write(contract, metadata)
+
+    def write_resolve_overlap(
+        self,
+        contract: Union[Contract, SecurityDefinition, int],
+        data_frame: pd.DataFrame
+    ):
+        try:
+            super().write(contract, data_frame)
+        except OverlappingDataException:
+            # grab all the existing data
+            # merge it with the data_frame
+            # then rewrite it
+            logging.debug('OverlappingDataException, re-writing dataframe')
+            existing_data = self.read(contract)
+            temp_df = existing_data.append(data_frame)
+            result = cast(pd.DataFrame, temp_df[~temp_df.index.duplicated(keep='first')])
+            result.sort_index(inplace=True)
+            super().delete(contract=contract)
+            self.write(contract=contract, data_frame=result)  # type: ignore
 
     def read(self,
              contract: Union[Contract, SecurityDefinition, int],

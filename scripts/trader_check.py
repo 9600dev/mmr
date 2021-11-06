@@ -18,9 +18,8 @@ import asyncio
 import time
 
 from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar, cast, Union
-from ib_insync import Stock, IB, Contract, Forex, BarData, Future, contract
-
-from trader.listeners.ibrx import IBRx
+from ib_insync.ib import IB
+from trader.listeners.ibaiorx import IBAIORx
 from trader.container import Container
 from trader.data.data_access import TickData
 from redis import Redis
@@ -38,13 +37,12 @@ def test_platform(ib_server_address: str,
                   redis_server_port: int) -> bool:
     succeeded = True
     try:
-        ib_client = IB()
-        ib_client.connect(ib_server_address, ib_server_port, clientId=101)
-        ibrx = IBRx(ib_client)
-        result = ibrx.get_conid_sync(['AMD'])
+        ibrx = IBAIORx(ib_server_address, ib_server_port)
+        ibrx.connect()
+        result = ibrx.get_conid(['AMD'])
         if not result:
             raise Exception('cannot get AMD Contract details')
-        ib_client.disconnect()
+        ibrx.disconnect()
     except Exception as ex:
         logging.error('interactive brokers connection could not be made: {}'.format(ex))
         succeeded = False
