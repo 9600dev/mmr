@@ -69,7 +69,8 @@ TValue = TypeVar('TValue')
 
 class IBAIORx():
     # master client id should be set to 5 (incremented on the call to connect())
-    client_id_counter = 4
+    # todo moving this to random for now, will find a global sync solution later
+    client_id_counter = random.randint(4, 98)
 
     def __init__(
         self,
