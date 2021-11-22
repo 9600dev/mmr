@@ -256,7 +256,14 @@ class TickData(Data):
             temp_df = existing_data.append(data_frame)
             result = cast(pd.DataFrame, temp_df[~temp_df.index.duplicated(keep='first')])
             result.sort_index(inplace=True)
-            super().delete(contract=contract)
+            self.delete(contract=contract)
+
+            # todo this probably shouldn't go here -- there's a bug upstream
+            # somewhere which kicks out a 'Timestamp' object has no attribute 'astype' exception
+            try:
+                result.index = pd.to_datetime(result.index)  # type: ignore
+            except ValueError as ve:
+                logging.debug('pd.to_datetime failed with {}'.format(ve))
             self.write(contract=contract, data_frame=result)  # type: ignore
 
     def read(self,

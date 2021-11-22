@@ -421,8 +421,14 @@ class IBAIORx():
         start_date: dt.datetime,
         what_to_show: WhatToShow,
         observer: AsyncObserver[pd.DataFrame],
+        refresh_interval: int = 60,
     ) -> AsyncDisposable:
-        async def __update(contract: Contract, start_date: dt.datetime, end_date: dt.datetime):
+        async def __update(
+            subject: AsyncCachedPandasSubject,
+            contract: Contract,
+            start_date: dt.datetime,
+            end_date: dt.datetime
+        ):
             if subject._is_disposed:
                 return
 
@@ -432,18 +438,25 @@ class IBAIORx():
                 end_date=end_date,
                 what_to_show=what_to_show,
             )
+
+            print(data)
             await subject.asend(data)
 
             start_date = end_date
             end_date = end_date + dt.timedelta(minutes=1)
             loop = asyncio.get_event_loop()
-            loop.call_later(60, asyncio.create_task, __update(contract, start_date, end_date))
+            loop.call_later(
+                refresh_interval,
+                asyncio.create_task,
+                __update(subject, contract, start_date, end_date)
+            )
 
         subject = AsyncCachedPandasSubject()
 
-        end_date = dt.datetime.now()
+        end_date = dt.datetime.now(dt.timezone.utc).astimezone(start_date.tzinfo)
+
         loop = asyncio.get_event_loop()
-        loop.call_later(1, asyncio.create_task, __update(contract, start_date, end_date))
+        loop.call_later(1, asyncio.create_task, __update(subject, contract, start_date, end_date))
         return await subject.subscribe_async(observer)
 
     def sleep(self, seconds: float):

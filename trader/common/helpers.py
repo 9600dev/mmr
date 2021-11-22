@@ -298,7 +298,7 @@ def paginate(content: str):
     p.run()
 
 
-def timezoneify(date_time: Union[dt.datetime, Timestamp], timezone: Union[str, tzfile]):
+def timezoneify(date_time: Union[dt.datetime, Timestamp], timezone: Union[str, tzfile]) -> dt.datetime:
     zone = None
 
     if isinstance(date_time, Timestamp):
@@ -311,7 +311,7 @@ def timezoneify(date_time: Union[dt.datetime, Timestamp], timezone: Union[str, t
     else:
         raise ValueError('timezone should be either string or tzfile')
 
-    date_time = date_time.astimezone(zone)
+    date_time = cast(dt.datetime, date_time.astimezone(zone))  # not sure if I should be casting here
     return date_time
 
 

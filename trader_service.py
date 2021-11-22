@@ -1,5 +1,6 @@
 import click
 import nest_asyncio
+nest_asyncio.apply()
 import asyncio
 
 from trader.common.logging_helper import setup_logging
@@ -17,7 +18,6 @@ from trader.messaging.bus_server import start_lightbus
 def main(simulation: bool,
          config: str):
     # required for nested asyncio calls and avoids RuntimeError: This event loop is already running
-    nest_asyncio.apply()
     loop = asyncio.get_event_loop()
 
     if simulation:

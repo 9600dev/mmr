@@ -51,7 +51,6 @@ class IBHistoryWorker():
         filter_between_dates: bool = True,
         tz_info: str = 'America/New_York'
     ) -> pd.DataFrame:
-
         # todo doing this with 'asx' based stocks gives us a dataframe with the incorrect timezone
         # figure this out
         contract = Universe.to_contract(security)
@@ -84,7 +83,12 @@ class IBHistoryWorker():
         current_date = end_date_offset
         local_tz = dt.datetime.now(dt.timezone.utc).astimezone().tzinfo
 
-        logging.info('get_contract_history {} {} {} {}'.format(contract.conId, str(what_to_show), pdt(start_date), pdt(end_date)))
+        logging.info('get_contract_history {} {} {} {}'.format(
+            contract.conId,
+            str(what_to_show),
+            start_date,
+            end_date
+        ))
 
         bars: List[pd.DataFrame] = []
 

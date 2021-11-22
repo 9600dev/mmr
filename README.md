@@ -16,7 +16,7 @@ Features include:
 - [x] Interactive brokers historical data collection
 - [x] Login; logoff; get positions; get portfolio;
 - [x] Subscribe to bars, subscribe to ticks
-- [*] Place, cancel, update orders (partially working)
+- [ ] Place, cancel, update orders (partially working)
 - [ ] Backtesting
 - [ ] Risk analysis
 - [ ] Add/remove strategies
@@ -139,6 +139,8 @@ Pycron deals with scheduling, starting, stopping and restarting processes, servi
 
 # Backlog
 
+* timezonify should move everything that's deailing with internal timezones to timezone.utc
+* Move timezoneify logic to the SecurityDefinition class, so that timezone updates to dt.datetime's are local to the security/market
 * ```listener_helpers.py``` and ```helpers.py``` need to be consolidated.
 * The batch queuing stuff is a bit wonky (there's a subclass there ```queuer.py``` but it's doesn't have the right abstraction). Given batch data downloads is going to be important, should probably clean all this up.
 * aioreactive performance needs to be analyzed. If we're going to have a full replay system (i.e. running historical data through an Interactive Brokers simulator) then RxPy needs to be super fast to do back-testing efficiently.

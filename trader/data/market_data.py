@@ -59,7 +59,7 @@ class SecurityDataStream(AsyncMultiSubject[pd.DataFrame]):
             return
 
         # todo: gotta be a faster way here
-        self.df.append(value)
+        self.df = self.df.append(value)
 
         for obv in list(self._observers):
             await obv.asend(self.df)
@@ -104,7 +104,10 @@ class MarketData():
         back_fill: bool,
     ) -> SecurityDataStream:
         # if we backfill, this essentially awaits until back_fill is complete
-        end_date = dt.datetime.now()
+        if not start_date.tzinfo:
+            raise ValueError('start_date must specify a timezone (start_date.tzinfo)')
+
+        end_date = dt.datetime.now().astimezone(start_date.tzinfo)
         date_range = DateRange(start=start_date, end=end_date)
 
         if back_fill:
@@ -121,7 +124,7 @@ class MarketData():
             for date_dr in date_ranges:
                 result = await history_worker.get_contract_history(
                     security=security,
-                    what_to_show=WhatToShow.MIDPOINT,
+                    what_to_show=WhatToShow.TRADES,
                     bar_size=bar_size,
                     start_date=start_date,
                     end_date=end_date,
@@ -136,7 +139,7 @@ class MarketData():
         disposable = await self.client.subscribe_contract_history(
             contract=Universe.to_contract(security),
             start_date=df.index[-1].to_pydatetime(),  # type: ignore
-            what_to_show=WhatToShow.MIDPOINT,
+            what_to_show=WhatToShow.TRADES,
             observer=stream
         )
 
