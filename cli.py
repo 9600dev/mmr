@@ -37,6 +37,7 @@ from trader.listeners.ibaiorx import IBAIORx
 from click_help_colors import HelpColorsGroup
 from trader.common.logging_helper import setup_logging, suppress_external
 from trader.listeners.ibaiorx import WhatToShow
+from trader.data.market_data import MarketData
 from trader.messaging.bus import *
 from trader.common.helpers import contract_from_dict
 from trader.common.helpers import *
@@ -435,6 +436,7 @@ container: Container
 amd = Contract(symbol='AMD', conId=4391, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
 nvda = Contract(symbol='NVDA', conId=4815747, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
 a2m = Contract(symbol='A2M', conId=189114468, exchange='SMART', primaryExchange='ASX', currency='AUD')
+marketdata: MarketData
 accessor: UniverseAccessor
 client: IBAIORx
 store: Arctic
@@ -447,6 +449,7 @@ def setup_ipython():
     global client
     global store
     global bardata
+    global marketdata
 
     container = Container()
     accessor = container.resolve(UniverseAccessor)
@@ -454,6 +457,7 @@ def setup_ipython():
     client.connect()
     store = Arctic(mongo_host=container.config()['arctic_server_address'])
     bardata = container.resolve(TickData)
+    marketdata = container.resolve(MarketData, **{'client': client})
 
 
 if get_ipython().__class__.__name__ == 'TerminalInteractiveShell':  # type: ignore

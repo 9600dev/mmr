@@ -75,25 +75,28 @@ run_docker() {
 
 trap clean_up 1 2 3 4 9 15
 
-while [ $# -gt 0 ]; do
-       case "$1" in
-               -c|--containername)
-                       [ -n "$2" ] && CONTNAME=$2 shift || usage
-                       ;;
-               -i|--imagename)
-                       [ -n "$2" ] && IMGNAME=$2 shift || usage
-                       ;;
-               -r)
-                       container_clean
-                       run_docker
-                       exit 0
-                       ;;
-               -h|--help)
-                       usage
-                       ;;
-       esac
-       shift
-done
+# while [ $# -gt 0 ]; do
+#        case "$1" in
+#                -c|--containername)
+#                        [ -n "$2" ] && CONTNAME=$2 shift || usage
+#                        ;;
+#                -i|--imagename)
+#                        [ -n "$2" ] && IMGNAME=$2 shift || usage
+#                        ;;
+#                -r)
+#                        container_clean
+#                        run_docker
+#                        exit 0
+#                        ;;
+#                -h|--help)
+#                        usage
+#                        ;;
+#                *)
+#                        usage
+#                        ;;
+#        esac
+#        shift
+# done
 
 # remove existing containers
 container_clean

@@ -39,7 +39,7 @@ def test_platform(ib_server_address: str,
     try:
         ibrx = IBAIORx(ib_server_address, ib_server_port)
         ibrx.connect()
-        result = ibrx.get_conid(['AMD'])
+        result = asyncio.run(ibrx.get_conid(['AMD']))
         if not result:
             raise Exception('cannot get AMD Contract details')
         ibrx.disconnect()

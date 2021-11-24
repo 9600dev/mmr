@@ -56,9 +56,21 @@ After this has completed, it will start a tmux session with two commands:
 * "pycron" (MMR's process spawner and scheduler) which handles the process scheduling, maintenance and uptime of ArcticDB, Redis, X Windows, and Trader Workstation, ready for automatic trading.
 * "cli" which is command line interface to interact with the trading system (check portfolio, check systems, manually create orders etc). You can manually call this using ```python3 cli.py```.
 
-![mmr cli](docs/cli.png)
+![mmr cli](docs/tmux.png)
 
-You can VNC into the Docker container also, which will allow you to interact with the running instance of TWS workstation.
+First thing you should do is populate the symbols universe. By default, it grabs the symbols and Interactive Brokers contract id's [conId] for NASDAQ and ASX exchanges):
+
+* ```universes bootstrap```
+
+![universes cli](docs/universes.png)
+
+A Universe is a collection of symbols/conIds to which you can apply your trading algo's to. You can resolve a symbol to universe via:
+
+* ```resolve --symbol AMD```
+
+![mmr resolve](docs/resolve.png)
+
+You can also VNC into the Docker container also, which will allow you to interact with the running instance of TWS workstation.
 
 ### Manual Installation
 
@@ -80,6 +92,11 @@ If you want to YOLO the install, and you're on Ubuntu or a derivative, run the `
  	* ```python3 pycron.py ../configs/pycron.yaml```
 
 
+## Implementing an Algo
+
+TODO:// explain how to do this once it's coded.
+
+
 ## Other Stuff
 
 TODO:// explain how all this stuff works.
@@ -99,6 +116,12 @@ TODO:// explain how all this stuff works.
   * ```cat NASDAQ.CSV NYSE.csv > complete.csv```
   * Add the Interactive Brokers 'conId' column:
   * ```python3 ib_resolve.py --csv_file complete.csv --csv_output_file ib_symbols_nyse_nasdaq.csv```
+* Docker build failing, not being able to resolve DNS? Try:
+  * sudo pkill docker
+  * sudo iptables -t nat -F
+  * sudo ifconfig docker0 down
+  * sudo brctl delbr docker0
+  * sudo service docker restart
 
 # Direction
 
