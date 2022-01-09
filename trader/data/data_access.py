@@ -29,7 +29,7 @@ from trader.data.contract_metadata import ContractMetadata
 # todo make sure all writes are monotonically ordered, as TickStore assumes this
 # right now, I don't think this is the case
 
-@dataclass
+@dataclass(eq=True, frozen=True)
 class SecurityDefinition:
     symbol: str
     exchange: str

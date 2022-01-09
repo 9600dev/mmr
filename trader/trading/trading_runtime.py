@@ -1,6 +1,8 @@
 import sys
 import os
 import nest_asyncio
+
+from trader.objects import WhatToShow
 nest_asyncio.apply()
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
@@ -23,6 +25,7 @@ from trader.common.logging_helper import setup_logging
 logging = setup_logging(module_name='trading_runtime')
 
 from arctic import Arctic, TICK_STORE
+from arctic.date import DateRange
 from arctic.tickstore.tickstore import TickStore
 from ib_insync.ib import IB
 from ib_insync.contract import Contract, Forex, Future, Stock
@@ -46,8 +49,9 @@ from trader.trading.executioner import Executioner
 from trader.trading.strategy import Strategy
 from trader.common.reactive import AsyncCachedObserver, AsyncEventSubject, AsyncCachedSubject
 from trader.common.singleton import Singleton
-from trader.common.helpers import get_network_ip, Pipe
+from trader.common.helpers import get_network_ip, Pipe, dateify, timezoneify
 from trader.messaging.bus_server import start_lightbus
+from trader.data.market_data import MarketData, SecurityDataStream
 
 from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar, cast, Union
 
@@ -93,6 +97,8 @@ class Trader(metaclass=Singleton):
 
         # the live ticker data streams we have
         self.contract_subscriptions: Dict[Contract, ContractSink] = {}
+        # the minute-by-minute MarketData stream's we're subscribed to
+        self.market_data_subscriptions: Dict[SecurityDefinition, SecurityDataStream] = {}
         # the strategies we're using
         self.strategies: List[Strategy] = []
         # current order book (outstanding orders, trades etc)
@@ -112,6 +118,7 @@ class Trader(metaclass=Singleton):
         self.universe_accessor = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
         self.universes = self.universe_accessor.get_all()
         self.contract_subscriptions = {}
+        self.market_data_subscriptions = {}
         self.client.ib.connectedEvent += self.connected_event
         self.client.ib.disconnectedEvent += self.disconnected_event
         self.client.connect()
@@ -198,6 +205,29 @@ class Trader(metaclass=Singleton):
         if len(missing_contract_list) > 0:
             logging.debug('updating portfolio universe with {} securities'.format(str(len(missing_contract_list))))
             self.universe_accessor.update(universe)
+
+        # make sure we have MarketData subscriptions for all portfolio items right now
+        for portfolio_item in self.portfolio.get_portfolio_items():
+            logging.debug('subscribing to market data stream for portfolio item {}'.format(portfolio_item.contract))
+            if len([s for s in self.market_data_subscriptions if s.conId == portfolio_item.contract.conId]) == 0:
+                security = cast(SecurityDefinition, universe.find_contract(portfolio_item.contract))
+                date_range = DateRange(
+                    start=dateify(dt.datetime.now() - dt.timedelta(days=30)),
+                    end=timezoneify(dt.datetime.now(), timezone='America/New_York')
+                )
+                security_stream = SecurityDataStream(
+                    security=security,
+                    bar_size='1 min',
+                    date_range=date_range,
+                    existing_data=None
+                )
+                await self.client.subscribe_contract_history(
+                    contract=portfolio_item.contract,
+                    start_date=dateify(dt.datetime.now() - dt.timedelta(days=30)),
+                    what_to_show=WhatToShow.TRADES,
+                    observer=security_stream
+                )
+                self.market_data_subscriptions[security] = security_stream
 
     async def temp_place_order(
         self,
