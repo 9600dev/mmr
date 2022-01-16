@@ -63,9 +63,9 @@ RUN mkdir /home/trader/mmr/data/mongodb
 RUN mkdir /home/trader/mmr/logs
 
 # install IBC
-RUN wget https://github.com/IbcAlpha/IBC/releases/download/3.8.7/IBCLinux-3.8.7.zip -P /home/trader
-RUN unzip /home/trader/IBCLinux-3.8.7.zip -d /home/trader/ibc
-RUN rm /home/trader/IBCLinux-3.8.7.zip
+RUN wget https://github.com/IbcAlpha/IBC/releases/download/3.12.0/IBCLinux-3.12.0.zip -P /home/trader
+RUN unzip /home/trader/IBCLinux-3.12.0.zip -d /home/trader/ibc
+RUN rm /home/trader/IBCLinux-3.12.0.zip
 RUN chmod +x /home/trader/ibc/*.sh
 
 # download TWS offline installer
