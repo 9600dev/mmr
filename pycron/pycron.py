@@ -21,6 +21,7 @@ from tornado.platform.asyncio import AsyncIOMainLoop
 from tornado.web import RequestHandler, Application, url
 
 from rx.scheduler.eventloop.asynciothreadsafescheduler import AsyncIOThreadSafeScheduler
+from rich.logging import RichHandler
 
 log = logging.getLogger('pycron')
 
@@ -466,8 +467,13 @@ def main(config_file: str, only_list: List[str], except_list: List[str]):
 @click.option('--config', required=True, help='yaml configuration file')
 @click.option('--start', '-s', multiple=True, required=False, help='process name(s) to start [repeat option for more]')
 @click.option('--butnot', '-n', multiple=True, required=False, help='process names(s) not to start [repeat option for more]')
-def bootstrap(config: str, start, butnot):
-    coloredlogs.install(level='INFO')
+@click.option('--debug', is_flag=True, required=False, help='show debug output')
+def bootstrap(config: str, start, butnot, debug):
+    debug_level = 'DEBUG' if debug else 'INFO'
+    logging.basicConfig(
+        level=debug_level, format='%(message)s', datefmt='[%X]', handlers=[RichHandler()]
+    )
+
     if not os.path.exists(config):
         log.error('config_file does not exist')
         sys.exit(1)
@@ -476,4 +482,4 @@ def bootstrap(config: str, start, butnot):
 
 
 if __name__ == '__main__':
-    bootstrap()
+    bootstrap()  # type: ignore
