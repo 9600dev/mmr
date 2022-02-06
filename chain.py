@@ -3,8 +3,12 @@ import matplotlib.pyplot as plt
 import yfinance as yf
 import datetime as dt
 import numpy as np
+import click
 from scipy.stats import norm
 from typing import List, cast, Tuple, Any, Dict
+import logging
+import coloredlogs
+from uniplot.uniplot import plot
 
 
 def monte_carlo_binary(S, K, T, r, sigma, Q,
@@ -21,20 +25,21 @@ def monte_carlo_binary(S, K, T, r, sigma, Q,
 
 
 def d2(S, K, T, r, sigma):
-    return (np.log(S/K) + (r - sigma**2 / 2) * T) / (sigma * np.sqrt(T))
+    return (np.log(S / K) + (r - sigma**2 / 2) * T) / (sigma * np.sqrt(T))
 
 
 def binary_call(S, K, T, r, sigma, Q=1):
     N = norm.cdf
-    return np.exp(-r*T) * N(d2(S, K, T, r, sigma)) * Q
+    return np.exp(-r * T) * N(d2(S, K, T, r, sigma)) * Q
 
 
 def binary_put(S, K, T, r, sigma, Q=1):
     N = norm.cdf
-    return np.exp(-r*T)* N(-d2(S, K, T, r, sigma)) * Q
+    return np.exp(-r * T) * N(-d2(S, K, T, r, sigma)) * Q
 
 
 def get_option_dates(symbol) -> List[str]:
+    logging.info('getting option dates for symbol {}'.format(symbol))
     return cast(List[str], yf.Ticker(symbol).options)
 
 
@@ -46,6 +51,7 @@ def get_chains(symbol: str, date: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         df['K'] = df.strike
         return df
 
+    logging.info('getting option chain data for {}'.format(symbol))
     ticker = yf.Ticker(symbol)  # type: ignore
     bid = ticker.get_info()['bid']  # type: ignore
     ask = ticker.get_info()['ask']  # type: ignore
@@ -70,7 +76,8 @@ def vol_by_strike(polymdl, K):
 
 def new_K(chain: pd.DataFrame):
     # newK = np.arange(chain.K.iloc[0], chain.K.iloc[-1], 0.0001) # new higher resolution strikes
-    newK = np.arange(1.0, chain.K.iloc[-1], 0.0001)
+    # newK = np.arange(1.0, chain.K.iloc[-1], 0.0001)
+    newK = np.arange(1.0, chain.K.iloc[-1], 0.1)
     return newK
 
 
@@ -121,6 +128,7 @@ def implied_constant_helper(chain: pd.DataFrame, risk_free_rate: float = 0.001):
 
     r = risk_free_rate
 
+    logging.info('calculating implied and constant distributions')
     vols = chain.IV.values  # volatility values
     Ks = chain.K.values  # strikes
     poly = np.polyfit(Ks, vols, 5)  # create implied vol fit
@@ -145,11 +153,13 @@ def implied_constant_helper(chain: pd.DataFrame, risk_free_rate: float = 0.001):
         p = binaries_const[i] - binaries_const[i - 1]
         const_p.append(p)
 
+    logging.debug('finished calculating')
     return {
         'x': newK,
         'market_implied': PsT,
         'constant': const_p,
     }
+
 
 def plot_market_implied_vs_constant_helper(x, market_implied, constant):
     plt.plot(x[1:], market_implied, color='red', label='Market Implied')
@@ -161,13 +171,65 @@ def plot_market_implied_vs_constant_helper(x, market_implied, constant):
     plt.show()
 
 
+def plot_market_implied_vs_constant_console(x, market_implied, constant, title):
+    plot(
+        [x[1:], x[1:]],
+        [constant, market_implied],
+        lines=True,
+        color=True,
+        interactive=True,
+        height=55,
+        width=100,
+        legend_labels=['constant, market_implied'],
+        title=title
+    )
+
 
 def implied_constant(symbol: str, date: str, risk_free_rate: float = 0.001) -> Dict[str, Any]:
     calls, puts = get_chains(symbol, date)
     return implied_constant_helper(calls, risk_free_rate)
 
 
-def plot_implied_constant(symbol, date: str, risk_free_rate: float = 0.001):
+def plot_implied_constant(symbol, date: str, risk_free_rate: float = 0.001, console = False):
     data = implied_constant(symbol, date, risk_free_rate)
-    plot_market_implied_vs_constant_helper(data['x'], data['market_implied'], data['constant'])
+    if console:
+        plot_market_implied_vs_constant_console(
+            data['x'], data['market_implied'],
+            data['constant'],
+            '{} for {}, constant vs market implied'.format(symbol, date)
+        )
+    else:
+        plot_market_implied_vs_constant_helper(data['x'], data['market_implied'], data['constant'])
 
+
+@click.command()
+@click.option('--symbol', required=True, help='ticker symbol e.g. FB')
+@click.option('--list_dates', required=False, is_flag=True, default=False, help='get the list of expirary dates')
+@click.option('--date', required=False, help='option expiry date, format YYYY-MM-DD')
+@click.option('--console', required=False, default=False, is_flag=True, help='print histogram to console [default: false]')
+@click.option('--risk_free_rate', required=False, default=0.001, help='risk free rate [default 0.001]')
+def main(
+    symbol: str,
+    list_dates: bool,
+    date: str,
+    console: bool,
+    risk_free_rate: float,
+):
+    if list_dates:
+        dates = get_option_dates(symbol)
+        for d in dates:
+            option_date = dt.datetime.strptime(d, '%Y-%m-%d')
+            print('{} [{}]   {} days from today'.format(symbol, d, (option_date - dt.datetime.now()).days))
+        return
+
+    if not date:
+        dates = get_option_dates(symbol)
+        date = dates[0]
+
+    option_date = dt.datetime.strptime(date, '%Y-%m-%d')
+    plot_implied_constant(symbol, date, risk_free_rate, console)
+
+
+if __name__ == '__main__':
+    coloredlogs.install('INFO')
+    main()
