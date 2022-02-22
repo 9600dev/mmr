@@ -20,7 +20,7 @@ from trader.data.universe import Universe, UniverseAccessor
 from scripts.trader_check import health_check
 from ib_insync.ib import IB
 from ib_insync.order import Trade, Order
-from ib_insync.contract import Contract, ContractDescription, Stock
+from ib_insync.contract import Contract, ContractDescription, Stock, Option
 from ib_insync.objects import PortfolioItem
 
 from arctic import Arctic
@@ -31,13 +31,14 @@ from prompt_toolkit.history import FileHistory, InMemoryHistory
 from lightbus import BusPath
 from ib_insync.objects import Position
 from expression.collections import Seq, seq
-from expression import Nothing, Option, Some, effect, option, pipe
+from expression import Nothing, Some, effect, pipe
 from trader.common.command_line import cli, common_options, default_config
 from trader.listeners.ibaiorx import IBAIORx
 from click_help_colors import HelpColorsGroup
 from trader.common.logging_helper import setup_logging, suppress_external
 from trader.listeners.ibaiorx import WhatToShow
 from trader.data.market_data import MarketData
+from scripts.chain import plot_chain
 from trader.messaging.bus import *
 from trader.common.helpers import contract_from_dict
 from trader.common.helpers import *
@@ -295,6 +296,38 @@ def snapshot(
         rich_dict(snap)
     else:
         click.echo('no results found')
+
+
+@main.group()
+def option():
+    pass
+
+@option.command('plot')
+@click.option('--symbol', required=True, help='ticker symbol e.g. FB')
+@click.option('--list_dates', required=False, is_flag=True, default=False, help='get the list of expirary dates')
+@click.option('--date', required=False, help='option expiry date, format YYYY-MM-DD')
+@click.option('--risk_free_rate', required=False, default=0.001, help='risk free rate [default 0.001]')
+@common_options()
+@default_config()
+def options(
+    symbol: str,
+    list_dates: bool,
+    date: str,
+    risk_free_rate: float,
+    **args,
+):
+    plot_chain(symbol, list_dates, date, True, risk_free_rate)
+
+
+def snapshot(
+    symbol: str,
+    delayed: bool,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    primary_exchange: str,
+    **args,
+):
+    container = Container()
 
 
 @main.group()

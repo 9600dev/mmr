@@ -1,5 +1,4 @@
 import pandas as pd
-import matplotlib.pyplot as plt
 import yfinance as yf
 import datetime as dt
 import numpy as np
@@ -82,6 +81,8 @@ def new_K(chain: pd.DataFrame):
 
 
 def plot_implied_vol(chain: pd.DataFrame):
+    import matplotlib.pyplot as plt
+
     vols = chain.IV.values  # vol
     Ks = chain.K.values  # strikes
 
@@ -98,6 +99,8 @@ def plot_implied_vol(chain: pd.DataFrame):
 
 
 def plot_expiration_cdf(chain: pd.DataFrame, risk_free_rate: float = 0.001):
+    import matplotlib.pyplot as plt
+
     df = chain
     S = df.S[0]  # extract S_0
     T = df['T'][0]  # extract T
@@ -162,6 +165,8 @@ def implied_constant_helper(chain: pd.DataFrame, risk_free_rate: float = 0.001):
 
 
 def plot_market_implied_vs_constant_helper(x, market_implied, constant):
+    import matplotlib.pyplot as plt
+
     plt.plot(x[1:], market_implied, color='red', label='Market Implied')
     plt.plot(x[1:], constant, color='black', label='Constant Vol')
     plt.ylabel('$\mathbb{P}$')
@@ -202,18 +207,12 @@ def plot_implied_constant(symbol, date: str, risk_free_rate: float = 0.001, cons
         plot_market_implied_vs_constant_helper(data['x'], data['market_implied'], data['constant'])
 
 
-@click.command()
-@click.option('--symbol', required=True, help='ticker symbol e.g. FB')
-@click.option('--list_dates', required=False, is_flag=True, default=False, help='get the list of expirary dates')
-@click.option('--date', required=False, help='option expiry date, format YYYY-MM-DD')
-@click.option('--console', required=False, default=False, is_flag=True, help='print histogram to console [default: false]')
-@click.option('--risk_free_rate', required=False, default=0.001, help='risk free rate [default 0.001]')
-def main(
+def plot_chain(
     symbol: str,
     list_dates: bool,
     date: str,
     console: bool,
-    risk_free_rate: float,
+    risk_free_rate: float = 0.001
 ):
     if list_dates:
         dates = get_option_dates(symbol)
@@ -228,6 +227,22 @@ def main(
 
     option_date = dt.datetime.strptime(date, '%Y-%m-%d')
     plot_implied_constant(symbol, date, risk_free_rate, console)
+
+
+@click.command()
+@click.option('--symbol', required=True, help='ticker symbol e.g. FB')
+@click.option('--list_dates', required=False, is_flag=True, default=False, help='get the list of expirary dates')
+@click.option('--date', required=False, help='option expiry date, format YYYY-MM-DD')
+@click.option('--console', required=False, default=False, is_flag=True, help='print histogram to console [default: false]')
+@click.option('--risk_free_rate', required=False, default=0.001, help='risk free rate [default 0.001]')
+def main(
+    symbol: str,
+    list_dates: bool,
+    date: str,
+    console: bool,
+    risk_free_rate: float,
+):
+    plot_chain(symbol, list_dates, date, console, risk_free_rate)
 
 
 if __name__ == '__main__':

@@ -22,7 +22,7 @@ import random
 from ib_insync.ib import IB
 from ib_insync.util import schedule
 from ib_insync.client import Client
-from ib_insync.contract import ContractDescription, ContractDetails, Stock, Contract, Forex, Future
+from ib_insync.contract import ContractDescription, ContractDetails, Stock, Contract, Forex, Future, Option
 from ib_insync.objects import PortfolioItem, Position, RealTimeBarList, BarData, BarDataList, RealTimeBar, Fill
 from ib_insync.order import Order, BracketOrder, LimitOrder, StopOrder, OrderStatus, MarketOrder, ExecutionCondition, Trade
 from ib_insync.order import StopLimitOrder
@@ -209,7 +209,12 @@ class IBAIORx():
         delayed: bool = False,
     ) -> rx.AsyncObservable[Ticker]:
         if delayed:
-            self.ib.reqMarketDataType(4)
+            # 1 = Live
+            # 2 = Frozen
+            # 3 = Delayed
+            # 4 = Delayed frozen
+            logging.debug('reqMarketDataType(3)')
+            self.ib.reqMarketDataType(3)
 
         self._contracts_source.call_event_subscriber_sync(
             lambda: self.ib.reqMktData(
@@ -222,6 +227,7 @@ class IBAIORx():
 
         if delayed:
             self.ib.reqMarketDataType(1)
+            logging.debug('reqMarketDataType(1)')
 
         xs = pipe(
             self.contracts_subject,
@@ -315,6 +321,7 @@ class IBAIORx():
         )
 
         disposable = await xs.subscribe_async(cached_observer)
+        # todo if we error out here, we're waiting forever.
         return await cached_observer.wait_value()
 
     async def get_contract_details(self, contract: Contract) -> List[ContractDetails]:
@@ -336,12 +343,73 @@ class IBAIORx():
         if not result: return []
         else: return result
 
+    async def __get_contract_description_helper(
+        self, symbol: str, secType: str, primaryExchange: str, currency: str
+    ) -> Optional[ContractDescription]:
+        contract_desc: List[ContractDescription] = await self.get_matching_symbols(symbol)
+        f: List[ContractDescription] = []
+        if len(contract_desc) == 1 and contract_desc[0].contract:
+            return contract_desc[0]
+        elif len(contract_desc) > 0:
+            if secType:
+                f = f + [
+                    desc
+                    for desc in contract_desc
+                    if desc.contract and desc.contract.secType == secType
+                ]
+            if currency:
+                f = f + [
+                    desc
+                    for desc in contract_desc
+                    if desc.contract and desc.contract.currency == currency
+                ]
+            if len(f) > 0:
+                return f[0]
+            else:
+                return None
+        else:
+            logging.info("get_contract_description_helper {} returned nothing".format(symbol))
+            return None
+
+    async def get_contract_description(
+        self,
+        symbols: Union[str, List[str]],
+        secType: str = 'STK',
+        primaryExchange: str = 'SMART',
+        currency: str = 'USD'
+    ) -> Union[Optional[ContractDescription], List[ContractDescription]]:
+        """
+        Args:
+            secType (str): the security type
+            * 'STK' = Stock (or ETF)
+            * 'OPT' = Option
+            * 'FUT' = Future
+            * 'IND' = Index
+            * 'FOP' = Futures option
+            * 'CASH' = Forex pair
+            * 'CFD' = CFD
+            * 'BAG' = Combo
+            * 'WAR' = Warrant
+            * 'BOND'= Bond
+            * 'CMDTY'= Commodity
+            * 'NEWS' = News
+            * 'FUND'= Mutual fund
+        """
+        if type(symbols) is list:
+            result = [
+                await self.__get_contract_description_helper(symbol, secType, primaryExchange, currency)
+                for symbol in symbols
+            ]
+            return [r for r in result if r]
+        else:
+            return await self.__get_contract_description_helper(str(symbols), secType, primaryExchange, currency)
+
     async def get_conid(
         self,
         symbols: Union[str, List[str]],
-        secType: str = "STK",
-        primaryExchange: str = "SMART",
-        currency: str = "USD",
+        secType: str = 'STK',
+        primaryExchange: str = 'SMART',
+        currency: str = 'USD',
     ) -> Union[Optional[Contract], List[Contract]]:
         """
         Args:
@@ -360,43 +428,17 @@ class IBAIORx():
             * 'NEWS' = News
             * 'FUND'= Mutual fund
         """
-
-        async def get_conid_helper(
-            symbol: str, secType: str, primaryExchange: str, currency: str
-        ) -> Optional[Contract]:
-            contract_desc: List[ContractDescription] = await self.get_matching_symbols(symbol)
-            f: List[ContractDescription] = []
-            if len(contract_desc) == 1 and contract_desc[0].contract:
-                return contract_desc[0].contract
-            elif len(contract_desc) > 0:
-                if secType:
-                    f = f + [
-                        desc
-                        for desc in contract_desc
-                        if desc.contract and desc.contract.secType == secType
-                    ]
-                if currency:
-                    f = f + [
-                        desc
-                        for desc in contract_desc
-                        if desc.contract and desc.contract.currency == currency
-                    ]
-                if len(f) > 0:
-                    return f[0].contract
-                else:
-                    return None
-            else:
-                logging.info("get_conid_helper for {} returned nothing".format(symbol))
-                return None
-
         if type(symbols) is list:
             result = [
-                await get_conid_helper(symbol, secType, primaryExchange, currency)
+                await self.__get_contract_description_helper(symbol, secType, primaryExchange, currency)
                 for symbol in symbols
             ]
-            return [r for r in result if r]
+            if result: return [r.contract for r in result if r and r.contract]
+            else: return None
         else:
-            return await get_conid_helper(str(symbols), secType, primaryExchange, currency)
+            single_result = await self.__get_contract_description_helper(str(symbols), secType, primaryExchange, currency)
+            if single_result and single_result.contract: return single_result.contract
+            else: return None
 
     async def get_contract_history(
         self,

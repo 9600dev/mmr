@@ -1,5 +1,5 @@
 aioredis==1.3.1
-ib-insync>=0.9.65
+ib-insync>=0.9.70
 Rx>=3.1.1
 tabulate>=0.8.9
 coloredlogs>=14.0

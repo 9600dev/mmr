@@ -3,6 +3,7 @@ import aioreactive as rx
 import datetime as dt
 import asyncio
 import pandas as pd
+import contextlib
 from asyncio import iscoroutinefunction
 from aioreactive.types import AsyncObserver, AsyncObservable
 from aioreactive.subject import AsyncMultiSubject
@@ -69,11 +70,21 @@ class AsyncCachedObserver(AsyncObserver[TSource]):
     def value(self) -> Optional[TSource]:
         return self._value
 
-    async def wait_value(self) -> TSource:
+    async def wait_value(self, wait_timeout: Optional[float] = None) -> TSource:
+        async def event_wait(evt, timeout):
+            # suppress TimeoutError because we'll return False in case of timeout
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(evt.wait(), timeout)
+            return evt.is_set()
+
         if self._value:
             return self._value
         else:
-            await self._task.wait()
+            # await self._task.wait()
+            if wait_timeout:
+                await event_wait(self._task, wait_timeout)
+            else:
+                await self._task.wait()
             self._task.clear()
             return cast(TSource, self._value)
 
@@ -200,7 +211,9 @@ class AsyncEventSubject(AsyncCachedSubject[TSource]):
     def call_event_subscriber_sync(self, callable_lambda: Callable):
         result = callable_lambda()
         if result:
+            print('call_event_subscriber_sync')
             test = asyncio.run(self.asend(result))
+            print('done')
 
     async def call_cancel_subscription(self, awaitable_canceller: Awaitable):
         await awaitable_canceller

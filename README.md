@@ -177,6 +177,10 @@ Pycron deals with scheduling, starting, stopping and restarting processes, servi
 
 ## Random Finance Links
 
+* [Worldwide bond yield curves](http://www.worldgovernmentbonds.com/inverted-yield-curves/)
+* [IB Product Listings](https://www.interactivebrokers.com/en/index.php?f=1563&p=fut)
+* [Interactive Brokers Format Guide](https://www.sierrachart.com/index.php?page=doc/IBSymbols.html)
+* [IB Symbol Guide](https://www.linnsoft.com/support/symbol-guide-ib)
 * [Ming Zhao - Hidden Intel trapped in Options Chain Data (amazing thread)](https://twitter.com/FabiusMercurius/status/1474855205728501760)
 * [Ming Zhao - what to sell](https://twitter.com/FabiusMercurius/status/1479915943576813568)
 * [The fed and inflation](https://twitter.com/krugermacro/status/1480081861124804612)
