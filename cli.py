@@ -319,17 +319,6 @@ def options(
     plot_chain(symbol, list_dates, date, True, risk_free_rate)
 
 
-def snapshot(
-    symbol: str,
-    delayed: bool,
-    arctic_server_address: str,
-    arctic_universe_library: str,
-    primary_exchange: str,
-    **args,
-):
-    container = Container()
-
-
 @main.group()
 def book():
     pass
