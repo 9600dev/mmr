@@ -49,7 +49,7 @@ from trader.trading.executioner import Executioner
 from trader.trading.strategy import Strategy
 from trader.common.reactive import AsyncCachedObserver, AsyncEventSubject, AsyncCachedSubject
 from trader.common.singleton import Singleton
-from trader.common.helpers import get_network_ip, Pipe, dateify, timezoneify
+from trader.common.helpers import get_network_ip, Pipe, dateify, timezoneify, ListHelper
 from trader.messaging.bus_server import start_lightbus
 from trader.data.market_data import MarketData, SecurityDataStream
 
@@ -117,6 +117,7 @@ class Trader(metaclass=Singleton):
         self.data = TickData(self.arctic_server_address, self.arctic_library)
         self.universe_accessor = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
         self.universes = self.universe_accessor.get_all()
+        self.clear_portfolio_universe()
         self.contract_subscriptions = {}
         self.market_data_subscriptions = {}
         self.client.ib.connectedEvent += self.connected_event
@@ -135,7 +136,7 @@ class Trader(metaclass=Singleton):
     async def __update_portfolio(self, portfolio_item: PortfolioItem):
         logging.debug('__update_portfolio')
         self.portfolio.add_portfolio_item(portfolio_item=portfolio_item)
-        await self.update_portfolio_universe()
+        await self.update_portfolio_universe(portfolio_item)
 
     async def setup_subscriptions(self):
         if not self.is_ib_connected():
@@ -188,28 +189,36 @@ class Trader(metaclass=Singleton):
         logging.debug('disconnected_event')
         self.connect()
 
-    async def update_portfolio_universe(self):
+    def clear_portfolio_universe(self):
+        logging.debug('clearing portfolio universe')
         universe = self.universe_accessor.get('portfolio')
+        universe.security_definitions.clear()
+        self.universe_accessor.update(universe)
 
-        # find missing contracts
-        missing_contract_list: List[Contract] = []
-        for portfolio_item in self.portfolio.get_portfolio_items():
-            if not universe.find_contract(portfolio_item.contract):
-                missing_contract_list.append(portfolio_item.contract)
-
-        for contract in missing_contract_list:
+    async def update_portfolio_universe(self, portfolio_item: PortfolioItem):
+        """
+        Grabs the current portfolio from TWS and adds a new version to the 'portfolio' table.
+        """
+        universe = self.universe_accessor.get('portfolio')
+        if not ListHelper.isin(
+            universe.security_definitions,
+            lambda definition: definition.conId == portfolio_item.contract.conId
+        ):
+            contract = portfolio_item.contract
             contract_details = await self.client.get_contract_details(contract)
             if contract_details and len(contract_details) >= 1:
-                universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details[0]))
+                universe.security_definitions.append(
+                    SecurityDefinition.from_contract_details(contract_details[0])
+                )
 
-        if len(missing_contract_list) > 0:
-            logging.debug('updating portfolio universe with {} securities'.format(str(len(missing_contract_list))))
+            logging.debug('updating portfolio universe with {}'.format(portfolio_item))
             self.universe_accessor.update(universe)
 
-        # make sure we have MarketData subscriptions for all portfolio items right now
-        for portfolio_item in self.portfolio.get_portfolio_items():
-            logging.debug('subscribing to market data stream for portfolio item {}'.format(portfolio_item.contract))
-            if len([s for s in self.market_data_subscriptions if s.conId == portfolio_item.contract.conId]) == 0:
+            if not ListHelper.isin(
+                list(self.market_data_subscriptions.keys()),
+                lambda subscription: subscription.conId == portfolio_item.contract.conId
+            ):
+                logging.debug('subscribing to market data stream for portfolio item {}'.format(portfolio_item.contract))
                 security = cast(SecurityDefinition, universe.find_contract(portfolio_item.contract))
                 date_range = DateRange(
                     start=dateify(dt.datetime.now() - dt.timedelta(days=30)),

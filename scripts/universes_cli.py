@@ -136,7 +136,7 @@ def get(name: str, arctic_server_address: str, arctic_universe_library: str, **a
 
 @cli.command()
 @click.option('--name', help='Name of the universe to create')
-@click.option('--csv_file', help='Csv file of securities to load into universe')
+@click.option('--csv_file', help='csv file of securities to load into universe')
 @common_options()
 @default_config()
 def create(

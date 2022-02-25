@@ -31,6 +31,7 @@ from pypager.pager import Pager
 from rich.console import Console
 from rich.table import Table
 
+
 def flatten_dict(d, parent_key='', sep='_'):
     items = []
     for k, v in d.items():
@@ -40,7 +41,6 @@ def flatten_dict(d, parent_key='', sep='_'):
         else:
             items.append((new_key, v))
     return dict(items)
-
 
 
 def flatten_json(y):
@@ -160,6 +160,13 @@ class ListHelper(Generic[T]):
             if filter(item):
                 return item
         return None
+
+    @classmethod
+    def isin(cls, lst: List[T], expr: Callable[[T], bool]) -> bool:
+        for item in lst:
+            if expr(item):
+                return True
+        return False
 
 
 def parse_fundamentals(xml: str) -> Dict:

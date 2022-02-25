@@ -58,3 +58,5 @@ click-help-colors>=0.9.1
 click-option-group>=0.5.3
 configobj>=5.0.6
 git+https://github.com/9600dev/arctic.git
+yfinance>=0.1.69
+uniplot>=0.5.0

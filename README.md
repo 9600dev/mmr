@@ -164,6 +164,7 @@ Pycron deals with scheduling, starting, stopping and restarting processes, servi
 # Backlog
 
 * timezonify should move everything that's deailing with internal timezones to timezone.utc
+* there's a timezoneTWS property on IB that gives you the TWS instance timeframe, use that.
 * Move timezoneify logic to the SecurityDefinition class, so that timezone updates to dt.datetime's are local to the security/market
 * ```listener_helpers.py``` and ```helpers.py``` need to be consolidated.
 * The batch queuing stuff is a bit wonky (there's a subclass there ```queuer.py``` but it's doesn't have the right abstraction). Given batch data downloads is going to be important, should probably clean all this up.

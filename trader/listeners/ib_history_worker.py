@@ -27,18 +27,28 @@ logging = setup_logging(module_name='ibhistoryworker')
 class IBHistoryWorker():
     def __init__(self, ib_client: IB):
         self.ib_client = ib_client
+        self.error_code: int = 0
+        self.error_string: str = ''
+        self.error_contract: Optional[Contract] = None
+
+    def __clear_error(self):
+        self.error_code = 0
+        self.error_string = ''
+        self.error_contract = None
 
     def __handle_error(self, reqId, errorCode, errorString, contract):
-        global error_code
+        self.error_code = errorCode
+        self.error_string = errorString
+        self.error_contract = contract
 
         # ignore the following:
         # ib error reqId: -1 errorCode 2104 errorString Market data farm connection is OK:usfarm.nj contract None
         if errorCode == 2104 or errorCode == 2158 or errorCode == 2106:
             return
-        logging.warning('ib error reqId: {} errorCode {} errorString {} contract {}'.format(reqId,
-                                                                                            errorCode,
-                                                                                            errorString,
-                                                                                            contract))
+        logging.error('ib error reqId: {} errorCode {} errorString {} contract {}'.format(reqId,
+                                                                                          errorCode,
+                                                                                          errorString,
+                                                                                          contract))
 
     # @backoff.on_exception(backoff.expo, Exception, max_tries=3, max_time=240)
     async def get_contract_history(
@@ -53,9 +63,12 @@ class IBHistoryWorker():
     ) -> pd.DataFrame:
         # todo doing this with 'asx' based stocks gives us a dataframe with the incorrect timezone
         # figure this out
+        self.__clear_error()
         contract = Universe.to_contract(security)
-        global has_error
-        error_code = 0
+
+        # solves for errorCode 321 "please enter exchange"
+        if not contract.exchange:
+            contract.exchange = 'SMART'
 
         if self.__handle_error not in self.ib_client.errorEvent:
             self.ib_client.errorEvent += self.__handle_error
@@ -105,8 +118,8 @@ class IBHistoryWorker():
             )
 
             # skip if 'no data' returned
-            if error_code > 0 and error_code != 162:
-                raise Exception('error_code: {}'.format(error_code))
+            if self.error_code > 0 and self.error_code != 162:
+                raise Exception('error_code: {}'.format(self.error_code))
 
             if result:
                 df_result = ib_insync.util.df(result).set_index('date')
