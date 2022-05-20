@@ -160,7 +160,6 @@ Pycron deals with scheduling, starting, stopping and restarting processes, servi
 * Has a small tornado based webservice that allows for remote control of processes
 
 
-
 # Backlog
 
 * right now, we use EOD data to gather instrument names, we should instead scrape: https://www.interactivebrokers.com/en/index.php?f=products
@@ -175,10 +174,92 @@ Pycron deals with scheduling, starting, stopping and restarting processes, servi
 * There's no testing framework setup, and no test coverage. Setup test framework. Add tests.
 * For all the command line tools, we have switches that are 'defaulted' to 127.0.0.1 etc, but we also have ```configs/trader.yaml``` configuration file. Reconcile these two. We probably need some sort of dependency injection/configuration injection style thing, I dunno.
 
-# Scratch notes
+## License
+
+This work is [fair-code](http://faircode.io/) distributed under [Apache 2.0 with Commons Clause](LICENSE.md) license.
+The source code is open and everyone (individuals and organizations) can use it for free.
+However, it is not allowed to sell products and services that are mostly just this software.
+
+If you have any questions about this or want to apply for a license exception, please contact the author.
+
+Installing optional dependencies may be subject to a more restrictive license.
+
+## Disclaimer
+
+This software is for educational purposes only. Do not risk money which you are afraid to lose.
+USE THE SOFTWARE AT YOUR OWN RISK. THE AUTHORS AND ALL AFFILIATES ASSUME NO RESPONSIBILITY FOR YOUR TRADING RESULTS.
+
+...
+...
+
+# Scratch Notes and Links
+
+## Macro
+
+* [Thread on compounding](https://twitter.com/10kdiver/status/1482367267291553799)
+* [Quit while you're ahead](https://www.hussmanfunds.com/comment/mc220325/): "The problem with simple P/E ratios (or even P/E ratios based on year-ahead estimates of “forward” earnings) is that stocks are not claims on a single year of earnings. A good valuation measure is just shorthand for a proper discounted cash flow analysis, and relates the current price with observable fundamentals that are representative of decades of likely future cash flows. High P/E multiples on earnings that rely on elevated profit margins. Once a high P/E and a high profit margin are embedded into price, both have to be sustained indefinitely in order for prices to avoid very strong headwinds."
+* [The Greatest Predictor of Future Stock Market Returns](http://www.philosophicaleconomics.com/2013/12/the-single-greatest-predictor-of-future-stock-market-returns/): Total Return = Price Return from Change in Aggregate Investor Allocation to Stocks + Price Return from Increase in Cash-Bond Supply (Realized if Aggregate Investor Allocation to Stocks Were to Stay Constant) + Dividend Return.
+* [My Investing Nightmare](https://ofdollarsanddata.com/my-investing-nightmare/): "While the Great Depression was objectively more damaging to capital markets, it happened over a much shorter time period. I cannot imagine seeing stocks decline consistently for four years only to be followed by a weak four year rally, then two more years of declines."
+* [Modern Financial System and Constant Growth, a thread](https://twitter.com/LynAldenContact/status/1507391873379454981): "A high-leverage system can't take shocks. If businesses, households, and sovereigns are all highly-levered, it requires constant growth to avoid a systemic meltdown."
+* [Great thread on poker and trading](https://twitter.com/NeckarValue/status/1506268234995187712): "Trading decisions should be based on conditional
+probability."; "Information doesn’t exactly flow perfectly, like they teach you in Finance 101. Frequently, the information will show up first in the option market. A lot of these insider trading cases involve options, and we’re the
+people who lose the money."
+* [Minksy Moments in Venture Capital](https://pivotal.substack.com/p/minsky-moments-in-venture-capital?s=r)
+* [Lecture on Minsky Moments](https://www.youtube.com/watch?v=G9_nqc-A5_Y)
+* [The Oil Market in six tweets](https://twitter.com/BurggrabenH/status/1504945787637227520): "The industry needs to replace ONE North Sea each year (3mbpd) just to stay still (more in future due to base declines). That needs $600bn. Industry didn’t and does not invest it. Meanwhile demand is back at pre-Covid levels."
+* [Another good oil thread](https://twitter.com/PauloMacro/status/1505229277444325380)
+* [Oil and the USD, good thread](https://twitter.com/UrbanKaoboy/status/1471531050396307462)
+* [Asset bubbles and interest rates thread](https://twitter.com/INArteCarloDoss/status/1495475236980068360)
+* [Gold and the USD](https://twitter.com/WifeyAlpha/status/1497879761330257922)
+* [Does not compute](https://www.collaborativefund.com/blog/does-not-compute/): "To suppose that the value of a common stock is determined purely by a corporation’s earnings discounted by the relevant interest rates and adjusted for the marginal tax rate is to forget that people have burned witches, gone to war on a whim, risen to the defense of Joseph Stalin and believed Orson Welles when he told them over the radio that the Martians had landed."
+* [Geopolitics Megathread](https://twitter.com/UrbanKaoboy/status/1403757685225390087)
+* [Everything must be paid for twice](https://www.raptitude.com/2022/01/everything-must-be-paid-for-twice/)
+* [The Fed and Crashing Markets - Thread](https://twitter.com/krugermacro/status/1480081861124804612)
+* [The Volatility Tax - Thread](https://twitter.com/10kdiver/status/1479881189217296386)
+* [The folly of ruling out a collapse](https://www.hussmanfunds.com/comment/mc210808/)
+* [Carl Icahn's Alpha - a thread](https://twitter.com/FabiusMercurius/status/1426203313263890441)
+* [The Roaring 20's](https://roaring20s.substack.com/p/august-8-1921?s=r)
+* [Cultural and Economical Collapses](https://mobile.twitter.com/svalver/status/1414864136299847682)
+
+
+## Analysis
+
+* [Ten threads that teach you accounting](https://twitter.com/thealexbanks/status/1500876409731903489)
+* [Learning to trade options, a thread](https://twitter.com/FabiusMercurius/status/1502680794204016642)
+* [Mental Models: Financial Assets as Levers (thread)](https://twitter.com/UrbanKaoboy/status/1467174640162279425): “stocks as bonds,” why “duration of CFs” matter, and why many tech stocks resemble “30-year zero-coupon bonds” – how even a small shift in rate expectations can move valuations A LOT.
+* [Pricing long dated options, a thread](https://twitter.com/intothegossan/status/1514260835618623494)
+* [How discount rates impact valuation, a thread](https://twitter.com/CharlieMunger00/status/1511577720308006912): “Interest rates are to asset prices what gravity is to the apple. When there are low interest rates, there is a very low gravitational pull on asset prices"
+* [Factor based investing](https://twitter.com/FabiusMercurius/status/1510322281758617601)
+* [Ten investing books that changed my life and P&L](https://twitter.com/FabiusMercurius/status/1500190848943681539)
+* [Minksy Moments in Venture Capital](https://pivotal.substack.com/p/minsky-moments-in-venture-capital?s=r)
+* [Retained Earnings Thread](https://twitter.com/10kdiver/status/1485006207832051715)
+* [A Summary of Factor Investing](https://twitter.com/ReformedTrader/status/1195450353472303104)
+
+## Structure
+
+* [Options Market Structure - 101](https://frontmonth.substack.com/p/options-market-structure-101-b18?s=r)
+* [Carbon footprint of crypto](https://blog.dshr.org/2022/02/ee380-talk.html)
+* [Hidden Intel Trapped in Options Chain Data](https://threadreaderapp.com/thread/1474855205728501760.html)
+* [Turning Networks into Economies](https://twitter.com/cdixon/status/1429585831899983876)
+* [Generating Functions, a thread](https://twitter.com/10kdiver/status/1426597150993965057)
+* [Thread on how clearing houses work, and what happened in the RH GME debarcle](https://twitter.com/compound248/status/1355274739351248898)
+
+## Trading Ideas
+
+* [10 Under-the-cover Trading Hacks](https://twitter.com/FabiusMercurius/status/1492569620569489409)
+
+## Tools
+
+* [Fintopea](https://www.fintopea.com/quote/AAPL/income-statement): Visualize 30+ years of company balance sheets and income statements for free.
+* [The book of secret knowledge - a long list of tools](https://github.com/trimstray/the-book-of-secret-knowledge)
+* [Random notes about Trader Workstation TWS](https://dimon.ca/dmitrys-tws-api-faq/)
+
 
 ## Random Finance Links
 
+* [Bloomberg terminal overview](https://www.optionsbro.com/bloomberg-terminal-review/)
+* [Percentage Changes, logarithmic returns discussion](https://www.reddit.com/r/algotrading/comments/uduv5s/a_mathematical_consideration_that_is_stumping_me/)
+* [Superinvestors - list of hedge fund portfolio changes](https://www.dataroma.com/m/home.php)
 * [Worldwide bond yield curves](http://www.worldgovernmentbonds.com/inverted-yield-curves/)
 * [IB Product Listings](https://www.interactivebrokers.com/en/index.php?f=1563&p=fut)
 * [Interactive Brokers Format Guide](https://www.sierrachart.com/index.php?page=doc/IBSymbols.html)
@@ -207,6 +288,9 @@ Pycron deals with scheduling, starting, stopping and restarting processes, servi
 * [Vangaurd Nest Egg Calculator](https://retirementplans.vanguard.com/VGApp/pe/pubeducation/calculators/RetirementNestEggCalc.jsf)
 * [Minafi.com](https://minafi.com/interactive-guide-early-retirement-financial-independence#part-2)
 * [Financial Mentor](https://financialmentor.com/calculator/best-retirement-calculator)
+* [Machine Learning and Data Landscape](https://mattturck.com/data2021/)
+* [Semi-controversial career advice](https://twitter.com/FabiusMercurius/status/1408883428712321024)
+
 
 ## The same old boom notes:
 * [Same old boom link](https://investoramnesia.com/2020/09/13/the-same-old-boom/)
@@ -233,6 +317,7 @@ Pycron deals with scheduling, starting, stopping and restarting processes, servi
 * [A better pickle](https://github.com/uqfoundation/dill)
 
 ## Trading Systems
+
 * (https://github.com/robcarver17/pysystemtrade/blob/master/docs/introduction.md)
 * (http://pmorissette.github.io/bt/index.html#what-is-bt)
 * (https://qtpylib.io/docs/latest/algo.html)
@@ -244,28 +329,4 @@ Pycron deals with scheduling, starting, stopping and restarting processes, servi
 * (https://github.com/quantopian/trading_calendars)
 * (https://github.com/litl/backoff)
 
-## Interesting Information
 
-* [Thread on how clearing houses work, and what happened in the RH GME debarcle](https://twitter.com/compound248/status/1355274739351248898)
-* [vectorbt blog - Stop Loss, Trailing Stop or Take Profit?](https://polakowo.medium.com/)
-* [random notes about tws](https://dimon.ca/dmitrys-tws-api-faq/)
-
-## Books
-
-* [Statistical Rethinking - comes with examples in Pyro](https://xcelab.net/rm/statistical-rethinking/)
-
-
-## License
-
-This work is [fair-code](http://faircode.io/) distributed under [Apache 2.0 with Commons Clause](LICENSE.md) license.
-The source code is open and everyone (individuals and organizations) can use it for free.
-However, it is not allowed to sell products and services that are mostly just this software.
-
-If you have any questions about this or want to apply for a license exception, please contact the author.
-
-Installing optional dependencies may be subject to a more restrictive license.
-
-## Disclaimer
-
-This software is for educational purposes only. Do not risk money which you are afraid to lose.
-USE THE SOFTWARE AT YOUR OWN RISK. THE AUTHORS AND ALL AFFILIATES ASSUME NO RESPONSIBILITY FOR YOUR TRADING RESULTS.
