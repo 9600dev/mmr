@@ -174,7 +174,7 @@ Pycron deals with scheduling, starting, stopping and restarting processes, servi
 * There's no testing framework setup, and no test coverage. Setup test framework. Add tests.
 * For all the command line tools, we have switches that are 'defaulted' to 127.0.0.1 etc, but we also have ```configs/trader.yaml``` configuration file. Reconcile these two. We probably need some sort of dependency injection/configuration injection style thing, I dunno.
 
-## License
+# License
 
 This work is [fair-code](http://faircode.io/) distributed under [Apache 2.0 with Commons Clause](LICENSE.md) license.
 The source code is open and everyone (individuals and organizations) can use it for free.
@@ -184,7 +184,7 @@ If you have any questions about this or want to apply for a license exception, p
 
 Installing optional dependencies may be subject to a more restrictive license.
 
-## Disclaimer
+# Disclaimer
 
 This software is for educational purposes only. Do not risk money which you are afraid to lose.
 USE THE SOFTWARE AT YOUR OWN RISK. THE AUTHORS AND ALL AFFILIATES ASSUME NO RESPONSIBILITY FOR YOUR TRADING RESULTS.
@@ -254,6 +254,9 @@ people who lose the money."
 * [The book of secret knowledge - a long list of tools](https://github.com/trimstray/the-book-of-secret-knowledge)
 * [Random notes about Trader Workstation TWS](https://dimon.ca/dmitrys-tws-api-faq/)
 
+## Finance Math
+
+* [Common Statistical Tests are Linear Models](https://lindeloev.github.io/tests-as-linear/#51_independent_t-test_and_mann-whitney_u)
 
 ## Random Finance Links
 
@@ -318,6 +321,7 @@ people who lose the money."
 
 ## Trading Systems
 
+* (https://app.breakingequity.com/#/tradings/live)
 * (https://github.com/robcarver17/pysystemtrade/blob/master/docs/introduction.md)
 * (http://pmorissette.github.io/bt/index.html#what-is-bt)
 * (https://qtpylib.io/docs/latest/algo.html)
@@ -328,5 +332,3 @@ people who lose the money."
 * (https://github.com/jankrepl/deepdow)
 * (https://github.com/quantopian/trading_calendars)
 * (https://github.com/litl/backoff)
-
-
