@@ -20,9 +20,10 @@ jobs:
       depends_on:
         - xvfb
       delay: 5
-    - name: awesome
-      description: start a window manager
-      command: DISPLAY=:1 /usr/bin/awesome
+    - name: qtile
+      description: qtile window manager
+      command: DISPLAY=:1 /usr/local/bin/qtile
+      arguments: start
       start: "* * * * *"
       start_on_pycron_start: True
       restart_if_found: False
@@ -31,7 +32,7 @@ jobs:
       delay: 10
     - name: tws
       description: make sure tws is continuously running, and force restart/reauth on Sunday
-      command: DISPLAY=:1 ../ibc/twsstart.sh
+      command: DISPLAY=:1 TRADER_CHECK=False ../ibc/twsstart.sh
       arguments: -inline
       eval:
         - "exec('sys.path.append(\"scripts\")') or exec('from ib_status import ib_status') or ib_status()"
@@ -40,7 +41,7 @@ jobs:
       restart_if_found: True
       restart_if_finished: True
       depends_on:
-        - xvfb
+        - qtile
       delay: 10
     - name: mongodb
       description: ensures mongodb is running

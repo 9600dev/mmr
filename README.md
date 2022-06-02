@@ -27,7 +27,7 @@ Features include:
 
 ### Docker Installation (easiest)
 
-The simplest way to install and run MMR trader is via Docker. It will use an Ubuntu 21.04 image, install Python 3.9, install all requirements, and automatically install the Interactive Brokers Trader Workstation.
+The simplest way to install and run MMR trader is via Docker. It will use an Ubuntu 21.04 image, install Python 3.9, install all requirements, and automatically install the latest version of Interactive Brokers Trader Workstation.
 
 ```
 $ git clone https://github.com/9600dev/mmr.git
@@ -43,9 +43,9 @@ Once it's built and running, ssh into the container to continue the installation
 
 ```
 >> build complete
->> ssh into container via trader:trader@172.17.0.2
+>> ssh into container via trader@localhost -p 2222, password 'trader'
 
-$ ssh trader@172.17.0.2
+$ ssh trader@localhost -p 2222
 ```
 
 ![ssh](docs/ssh.png)
@@ -54,8 +54,8 @@ Enter your Trader Workstation username and password. The script will proceed to 
 
 After this has completed, it will start a tmux session with two commands:
 
-* "pycron" (MMR's process spawner and scheduler) which handles the process scheduling, maintenance and uptime of ArcticDB, Redis, X Windows, and Trader Workstation, ready for automatic trading.
-* "cli" which is command line interface to interact with the trading system (check portfolio, check systems, manually create orders etc). You can manually call this using ```python3 cli.py```.
+* `pycron` (MMR's process spawner and scheduler) which handles the process scheduling, maintenance and uptime of ArcticDB, Redis, X Windows, and Trader Workstation, ready for automatic trading.
+* `cli` which is command line interface to interact with the trading system (check portfolio, check systems, manually create orders etc). You can manually call this using ```python3 cli.py```.
 
 ![mmr cli](docs/tmux.png)
 
@@ -96,7 +96,6 @@ If you want to YOLO the install, and you're on Ubuntu or a derivative, run the `
 ## Implementing an Algo
 
 TODO:// explain how to do this once it's coded.
-
 
 ## Other Stuff
 

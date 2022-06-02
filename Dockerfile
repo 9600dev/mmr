@@ -10,6 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN useradd -m -d /home/trader -s /bin/bash -G sudo trader
 RUN mkdir -p /var/run/sshd
 RUN mkdir -p /run/sshd
+RUN mkdir -p /tmp
 RUN apt-get update
 RUN apt-get install dialog apt-utils -y
 RUN apt-get install -y python3
@@ -17,8 +18,15 @@ RUN apt-get install -y python3-pip
 RUN apt-get install -y git
 RUN apt-get install -y wget
 RUN apt-get install -y vim
-RUN wget -qO - https://www.mongodb.org/static/pgp/server-4.4.asc | apt-key add -
-RUN echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/4.4 multiverse" | tee /etc/apt/sources.list.d/mongodb-org-4.4.list
+RUN apt-get install dpkg
+# RUN apt-get install gnupg
+# RUN echo "deb http://security.ubuntu.com/ubuntu impish-security main" | tee /etc/apt/sources.list.d/impish-security.list
+# RUN apt-get update
+# RUN apt-get install libssl1.1
+# RUN wget http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.0g-2ubuntu4_amd64.deb -P /tmp
+# RUN dpkg -i /tmp/libssl1.1_1.1.0g-2ubuntu4_amd64.deb
+RUN wget -qO - https://www.mongodb.org/static/pgp/server-5.0.asc | apt-key add -
+RUN echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/5.0 multiverse" | tee /etc/apt/sources.list.d/mongodb-org-5.0.list
 RUN apt-get update -y
 RUN apt-get install -y mongodb-org
 RUN apt-get install -y linux-headers-generic
@@ -63,9 +71,9 @@ RUN mkdir /home/trader/mmr/data/mongodb
 RUN mkdir /home/trader/mmr/logs
 
 # install IBC
-RUN wget https://github.com/IbcAlpha/IBC/releases/download/3.12.0/IBCLinux-3.12.0.zip -P /home/trader
-RUN unzip /home/trader/IBCLinux-3.12.0.zip -d /home/trader/ibc
-RUN rm /home/trader/IBCLinux-3.12.0.zip
+RUN wget https://github.com/IbcAlpha/IBC/releases/download/3.13.0/IBCLinux-3.13.0.zip -P /home/trader
+RUN unzip /home/trader/IBCLinux-3.13.0.zip -d /home/trader/ibc
+RUN rm /home/trader/IBCLinux-3.13.0.zip
 RUN chmod +x /home/trader/ibc/*.sh
 
 # download TWS offline installer
@@ -82,7 +90,8 @@ RUN --mount=type=cache,target=/root/.cache \
 
 # install window managers, Xvfb and vnc
 RUN apt-get install -y tigervnc-scraping-server
-RUN apt-get install -y awesome
+# RUN apt-get install -y awesome
+RUN apt-get install -y python3-cairocffi
 RUN apt-get install -y xvfb
 RUN apt-get install -y xterm
 RUN apt-get install -y language-pack-en-base
@@ -91,17 +100,21 @@ RUN mkdir /home/trader/.vnc
 RUN echo 'trader' | vncpasswd -f > /home/trader/.vnc/passwd
 
 RUN mkdir /home/trader/.config
-RUN mkdir /home/trader/.config/awesome
+# RUN mkdir /home/trader/.config/awesome
+RUN mkdir /home/trader/.config/qtile
 
 COPY ./scripts/installation/.bash_profile /home/trader
 COPY ./scripts/installation/start_trader.sh /home/trader
 COPY ./configs/twsstart.sh /home/trader/ibc/twsstart.sh
 COPY ./configs/config.ini /home/trader/ibc/config.ini
+COPY ./configs/config.py /home/trader/.configs/qtile
+
+RUN --mount=type=cache,target=/root/.cache \
+   pip3 install qtile
 
 # data needs to be copied manually?
 # COPY ./data/ib_symbols_nyse_nasdaq.csv /home/trader/mmr/data/ib_symbols_nyse_nasdaq.csv
 # COPY ./data/symbols_historical.csv /home/trader/mmr/data/symbols_historical.csv
-
 
 RUN chown -R trader:trader /home/trader
 WORKDIR /home/trader

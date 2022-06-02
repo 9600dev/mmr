@@ -74,8 +74,10 @@ pip3 install -r requirements.txt
 # install window managers, Xvfb and vnc
 echo "installing xvfb frame buffer window manager to run TWS"
 sudo apt-get install -y tigervnc-scraping-server
-sudo apt-get install -y awesome
+# sudo apt-get install -y awesome
+sudo apt-get install -y python3-cairocffi
 sudo apt-get install -y xvfb
+pip3 install qtile
 
 mkdir /home/trader/.vnc
 echo 'trader' | vncpasswd -f > /home/trader/.vnc/passwd

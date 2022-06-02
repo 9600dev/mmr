@@ -59,8 +59,8 @@ run_docker() {
         -p 7496:7496 \
         -p 6379:6379 \
         -p 27017:27017 \
-        -p 5910:5900 \
-        -p 5911:5901 \
+        -p 5900:5900 \
+        -p 5901:5901 \
         -p 8081:8081 \
         --tmpfs /run \
         --tmpfs /run/lock \
@@ -69,7 +69,9 @@ run_docker() {
         -d $IMGNAME || clean_up
 
     echo ""
-    echo ssh into container via trader:trader@$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $CONTNAME)
+    # echo ssh into container via ssh trader:trader@$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $CONTNAME)
+    echo "ip address: $(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $CONTNAME)"
+    echo "ssh into container via ssh trader@localhost -p 2222, password is 'trader'"
     echo ""
 }
 
