@@ -9,3 +9,4 @@ __pycache__
 anbox-work/*
 .vscode
 scratch/
+.python-version

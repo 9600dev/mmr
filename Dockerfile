@@ -40,6 +40,11 @@ RUN apt-get install -y iproute2
 RUN apt-get install -y net-tools
 RUN apt-get install -y rsync
 RUN apt-get install -y iputils-ping
+# required for pyenv to build 3.9.5 properly
+RUN apt-get install -y libbz2-dev
+RUN apt-get install -y libsqlite3-dev
+RUN apt-get install -y libreadline-dev
+RUN apt-get install -y python3-venv
 
 RUN echo 'trader:trader' | chpasswd
 RUN service ssh start

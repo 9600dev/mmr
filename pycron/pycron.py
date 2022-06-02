@@ -31,6 +31,7 @@ class Job():
         self.description: str = ''
         self.command: str = ''
         self.arguments: str = ''
+        self.env: str = ''
         self.working_directory: str = ''
         self.start: str = ''
         self.stop: str = ''
@@ -76,6 +77,7 @@ class Job():
             'description': self.description,
             'command': self.command,
             'arguments': self.arguments,
+            'env': self.env,
             'working_directory': self.working_directory,
             'start': self.start,
             'stop': self.stop,
@@ -177,9 +179,15 @@ class JobScheduler():
         # delay start (default is 0)
         await asyncio.sleep(job.delay)
 
+        env = os.environ.copy()
+        if job.env:
+            for env_variable in job.env.split(' '):
+                var, val = env_variable.split('=')
+                env[var] = val
+
         process = await asyncio.create_subprocess_shell(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            cwd=cwd
+            cwd=cwd, env=env
         )
         job.trying_to_start = False
         job.process = process
