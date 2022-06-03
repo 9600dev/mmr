@@ -1,0 +1,153 @@
+#!/bin/bash
+
+set -o errexit -o pipefail -o noclobber -o nounset
+
+CONTNAME=mmr-container
+IMGNAME=mmr-image
+RELEASE=21.04
+
+# usually /home/trader/mmr
+BUILDDIR=$(cd $(dirname "$0")/..; pwd)
+
+echo_usage() {
+    echo "usage: docker.sh"
+    echo
+    echo "  -b (build image and container from Dockerfile)"
+    echo "  -c (clean docker [remove all images named mmr-image and containers named mmr-container])"
+    echo "  -r (run container)"
+    echo "  -s (sync code to running container)"
+    echo "  -r (run container and ssh into it)"
+    echo "  -n|--container_name <name> (default: mmr-container)"
+    echo "  -i|--image_name <name> (default: mmr-trader)"
+    echo ""
+}
+
+b=n c=n r=n s=n outFile=-
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -b|--build)
+      b=y
+      shift # past argument
+      ;;
+    -c|--clean)
+      c=y
+      shift # past argument
+      ;;
+    -r|--run)
+      r=y
+      shift # past argument
+      ;;
+    -s|--sync)
+      s=y
+      shift
+      ;;
+
+    -i|--image_name)
+      IMGNAME="$2"
+      shift
+      shift
+      ;;
+    -n|--container_name)
+      CONTNAME="$2"
+      shift
+      shift
+      ;;
+    -*|--*)
+      echo "Unknown option $1"
+      echo_usage
+      exit 1
+      ;;
+    *)
+      POSITIONAL_ARGS+=("$1") # save positional arg
+      shift # past argument
+      ;;
+  esac
+done
+
+# handle non-option arguments
+if [[ $# -ne 1 ]]; then
+    echo_usage
+fi
+
+clean() {
+    echo "Cleaning images and containers"
+    if [ -n "$(docker ps -f name=$CONTNAME -q)" ]; then
+        echo "Container $CONTNAME already running, removing anyway"
+        docker rm -f $CONTNAME
+    fi
+
+    if [ -n "$(docker container ls -a | grep $CONTNAME)" ]; then
+        echo "Container $CONTNAME exists, removing"
+        docker rm -f $CONTNAME
+    fi
+
+    if [ -n "$(docker images ls -a | grep $CONTNAME)" ]; then
+        echo "Image $IMGNAME exists, removing"
+        docker image prune -f
+        docker image rm -f $CONTNAME
+    fi
+}
+
+run() {
+    echo "running container $CONTNAME with this command:"
+    echo ""
+    echo "docker run --name $CONTNAME -ti -e TRADER_CONFIG='/home/trader/mmr/configs/trader.yaml -p 2222:22 -p starting -p 7496:7496 -p 6379:6379 -p 27017:27017 -p 5900:5900 -p 5901:5901 -p 8081:8081 --tmpfs /run --tmpfs /run/lock --tmpfs /tmp -v /lib/modules:/lib/modules:ro -d $IMGNAME"
+    echo ""
+
+    docker run \
+        --name $CONTNAME \
+        -ti \
+        -p 2222:22 \
+        -p 7496:7496 \
+        -p 6379:6379 \
+        -p 27017:27017 \
+        -p 5910:5900 \
+        -p 5911:5901 \
+        -p 8081:8081 \
+        --tmpfs /run \
+        --tmpfs /run/lock \
+        --tmpfs /tmp \
+        -v /lib/modules:/lib/modules:ro \
+        -d $IMGNAME
+
+    echo ""
+    # echo ssh into container via ssh trader:trader@$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $CONTNAME)
+    echo "container: $CONTNAME"
+    echo "ip address: $(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $CONTNAME)"
+    echo "ssh into container via ssh trader@localhost -p 2222, password is 'trader'"
+    echo ""
+}
+
+build() {
+    echo "building mmr into image $IMGNAME and container $CONTNAME"
+    echo ""
+    echo "DOCKER_BUILDKIT=1 docker build -t $IMGNAME --force-rm=true --rm=true $BUILDDIR"
+    echo ""
+    DOCKER_BUILDKIT=1 docker build -t $IMGNAME --force-rm=true --rm=true $BUILDDIR
+}
+
+sync() {
+    echo "syncing code directory to $CONTNAME"
+    echo ""
+    CONTID="$(docker ps -aqf name=$CONTNAME)"
+    echo "container id: $CONTID"
+    echo "rsync -e 'docker exec -i' -av $BUILDDIR/../mmr/ $CONTID:/home/trader/mmr/ --exclude='$BUILDDIR/.git' --filter=\"dir-merge,- $BUILDDIR/.gitignore\""
+    echo ""
+    rsync -e 'docker exec -i' -av $BUILDDIR/ $CONTID:/home/trader/mmr/ --exclude='$BUILDDIR/.git' --filter="dir-merge,- $BUILDDIR/.gitignore"
+}
+
+echo "build: $b, clean: $c, run: $r, sync: $s, image_name: $IMGNAME, container_name: $CONTNAME"
+
+if [[ $b == "y" ]]; then
+    build
+fi
+if [[ $c == "y" ]]; then
+    clean
+fi
+if [[ $r == "y" ]]; then
+    run
+fi
+if [[ $s == "y" ]]; then
+    sync
+fi

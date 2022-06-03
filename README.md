@@ -21,6 +21,7 @@ Features include:
 - [ ] Backtesting
 - [ ] Risk analysis
 - [ ] Add/remove strategies
+- [ ] Find strategies
 - [ ] ... and everything else.
 
 ## Installation
