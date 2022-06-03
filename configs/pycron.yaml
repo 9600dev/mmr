@@ -1,5 +1,6 @@
 root_directory: /home/trader/mmr
 port: 8081
+env: TRADER_CHECK=False
 health_check_eval:
   - "exec('sys.path.append(\"scripts\")') or exec('from trader_check import health_check') or health_check('configs/trader.yaml')"
 jobs:
@@ -34,7 +35,6 @@ jobs:
       description: make sure tws is continuously running, and force restart/reauth on Sunday
       command: DISPLAY=:1 ../ibc/twsstart.sh
       arguments: -inline
-      env: TRADER_CHECK=False
       eval:
         - "exec('sys.path.append(\"scripts\")') or exec('from ib_status import ib_status') or ib_status()"
       start: "* * * * *"

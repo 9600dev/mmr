@@ -6,7 +6,7 @@ Python based algorithmic trading platform similar to QuantRocket (www.quantrocke
 Features include:
 
 * [aioreactive](https://github.com/dbrattli/aioreactive) for asyncio pipelining and programming abstraction, and [vectorbt](https://github.com/polakowo/vectorbt) for algorithm programmability and backtesting.
-* Batch download of instrument data from [Interactive Brokers](https://www.interactivebrokers.com/en/home.php) and Polygon.io
+* Batch download of instrument data from [Interactive Brokers](https://www.interactivebrokers.com/en/home.php) and [Polygon.io](https://www.polygon.io)
 * [Arctic Timeseries and Tick Store](https://github.com/man-group/arctic) for tick data storage
 * and more...
 

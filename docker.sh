@@ -7,12 +7,12 @@ IMGNAME=mmr-image
 RELEASE=21.04
 
 # usually /home/trader/mmr
-BUILDDIR=$(cd $(dirname "$0")/..; pwd)
+BUILDDIR=$(cd $(dirname "$0"); pwd)
 
 echo_usage() {
-    echo "usage: docker.sh"
+    echo "usage: docker.sh -- helper script to manage building and deploying MMR into docker containers"
     echo
-    echo "  -b (build image and container from Dockerfile)"
+    echo "  -b (build image from Dockerfile)"
     echo "  -c (clean docker [remove all images named mmr-image and containers named mmr-container])"
     echo "  -r (run container)"
     echo "  -s (sync code to running container)"
@@ -82,7 +82,7 @@ clean() {
         docker rm -f $CONTNAME
     fi
 
-    if [ -n "$(docker images ls -a | grep $CONTNAME)" ]; then
+    if [ -n "$(docker image ls -a | grep $CONTNAME)" ]; then
         echo "Image $IMGNAME exists, removing"
         docker image prune -f
         docker image rm -f $CONTNAME
@@ -92,8 +92,13 @@ clean() {
 run() {
     echo "running container $CONTNAME with this command:"
     echo ""
-    echo "docker run --name $CONTNAME -ti -e TRADER_CONFIG='/home/trader/mmr/configs/trader.yaml -p 2222:22 -p starting -p 7496:7496 -p 6379:6379 -p 27017:27017 -p 5900:5900 -p 5901:5901 -p 8081:8081 --tmpfs /run --tmpfs /run/lock --tmpfs /tmp -v /lib/modules:/lib/modules:ro -d $IMGNAME"
+    echo " $ docker run --name $CONTNAME -ti -e TRADER_CONFIG='/home/trader/mmr/configs/trader.yaml -p 2222:22 -p starting -p 7496:7496 -p 6379:6379 -p 27017:27017 -p 5900:5900 -p 5901:5901 -p 8081:8081 --tmpfs /run --tmpfs /run/lock --tmpfs /tmp -v /lib/modules:/lib/modules:ro -d $IMGNAME"
     echo ""
+
+    if [ ! "$(docker image ls -a | grep $IMGNAME)" ]; then
+      echo "cant find image named $IMGNAME to run"
+      exit 1
+    fi
 
     docker run \
         --name $CONTNAME \
@@ -102,8 +107,8 @@ run() {
         -p 7496:7496 \
         -p 6379:6379 \
         -p 27017:27017 \
-        -p 5910:5900 \
-        -p 5911:5901 \
+        -p 5900:5900 \
+        -p 5901:5901 \
         -p 8081:8081 \
         --tmpfs /run \
         --tmpfs /run/lock \
@@ -115,14 +120,15 @@ run() {
     # echo ssh into container via ssh trader:trader@$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $CONTNAME)
     echo "container: $CONTNAME"
     echo "ip address: $(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $CONTNAME)"
-    echo "ssh into container via ssh trader@localhost -p 2222, password is 'trader'"
+    echo "ssh'ing into container via ssh trader@localhost -p 2222, password is 'trader'"
     echo ""
+    ssh trader@localhost -p 2222
 }
 
 build() {
     echo "building mmr into image $IMGNAME and container $CONTNAME"
     echo ""
-    echo "DOCKER_BUILDKIT=1 docker build -t $IMGNAME --force-rm=true --rm=true $BUILDDIR"
+    echo " $ DOCKER_BUILDKIT=1 docker build -t $IMGNAME --force-rm=true --rm=true $BUILDDIR"
     echo ""
     DOCKER_BUILDKIT=1 docker build -t $IMGNAME --force-rm=true --rm=true $BUILDDIR
 }
@@ -131,10 +137,14 @@ sync() {
     echo "syncing code directory to $CONTNAME"
     echo ""
     CONTID="$(docker ps -aqf name=$CONTNAME)"
+    if [[ $CONTID == "" ]]; then
+      echo "cant find running container that matches name $CONTNAME"
+      exit 1
+    fi
     echo "container id: $CONTID"
-    echo "rsync -e 'docker exec -i' -av $BUILDDIR/../mmr/ $CONTID:/home/trader/mmr/ --exclude='$BUILDDIR/.git' --filter=\"dir-merge,- $BUILDDIR/.gitignore\""
+    echo " $ rsync -e 'docker exec -i' -av --delete $BUILDDIR/ $CONTID:/home/trader/mmr/ --exclude='.git' --filter=\"dir-merge,- .gitignore\""
     echo ""
-    rsync -e 'docker exec -i' -av $BUILDDIR/ $CONTID:/home/trader/mmr/ --exclude='$BUILDDIR/.git' --filter="dir-merge,- $BUILDDIR/.gitignore"
+    rsync -e 'docker exec -i' -av --delete $BUILDDIR/ $CONTID:/home/trader/mmr/ --exclude='.git' --filter="dir-merge,- .gitignore"
 }
 
 echo "build: $b, clean: $c, run: $r, sync: $s, image_name: $IMGNAME, container_name: $CONTNAME"

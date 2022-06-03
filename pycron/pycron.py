@@ -31,7 +31,6 @@ class Job():
         self.description: str = ''
         self.command: str = ''
         self.arguments: str = ''
-        self.env: str = ''
         self.working_directory: str = ''
         self.start: str = ''
         self.stop: str = ''
@@ -63,11 +62,10 @@ class Job():
             self.crontab_stop = CronTab(self.stop)
 
     def __str__(self):
-        return '{} {} {} {} {} {}: {} {}'.format(
+        return '{} {} {} {} {}: {} {}'.format(
             self.name,
             self.command,
             self.arguments,
-            self.env,
             self.pid,
             self.start_count,
             self.start,
@@ -80,7 +78,6 @@ class Job():
             'description': self.description,
             'command': self.command,
             'arguments': self.arguments,
-            'env': self.env,
             'working_directory': self.working_directory,
             'start': self.start,
             'stop': self.stop,
@@ -182,15 +179,9 @@ class JobScheduler():
         # delay start (default is 0)
         await asyncio.sleep(job.delay)
 
-        env = os.environ.copy()
-        if job.env:
-            for env_variable in job.env.split(' '):
-                var, val = env_variable.split('=')
-                env[var] = val
-
         process = await asyncio.create_subprocess_shell(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            cwd=cwd, env=env
+            cwd=cwd
         )
         job.trying_to_start = False
         job.process = process
@@ -445,6 +436,12 @@ def main(config_file: str, only_list: List[str], except_list: List[str]):
 
     port = config['port']
     health_check_eval = config['health_check_eval']
+    env = config['env']
+    if env:
+        for env_line in env.split(' '):
+            key, val = env_line.split('=')
+            os.environ[key] = val
+
     conf_file.close()
 
     jobs: List[Job] = []
