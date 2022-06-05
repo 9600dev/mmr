@@ -16,13 +16,14 @@ echo_usage() {
     echo "  -c (clean docker [remove all images named mmr-image and containers named mmr-container])"
     echo "  -r (run container)"
     echo "  -s (sync code to running container)"
+    echo "  -a (sync all files in mmr to running container)"
     echo "  -r (run container and ssh into it)"
     echo "  -n|--container_name <name> (default: mmr-container)"
     echo "  -i|--image_name <name> (default: mmr-trader)"
     echo ""
 }
 
-b=n c=n r=n s=n outFile=-
+b=n c=n r=n s=n a=n
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -42,7 +43,10 @@ while [[ $# -gt 0 ]]; do
       s=y
       shift
       ;;
-
+    -a|--sync_all)
+      a=y
+      shift
+      ;;
     -i|--image_name)
       IMGNAME="$2"
       shift
@@ -82,10 +86,10 @@ clean() {
         docker rm -f $CONTNAME
     fi
 
-    if [ -n "$(docker image ls -a | grep $CONTNAME)" ]; then
+    if [ -n "$(docker image ls -a | grep $IMGNAME)" ]; then
         echo "Image $IMGNAME exists, removing"
         docker image prune -f
-        docker image rm -f $CONTNAME
+        docker image rm -f $IMGNAME
     fi
 }
 
@@ -147,7 +151,21 @@ sync() {
     rsync -e 'docker exec -i' -av --delete $BUILDDIR/ $CONTID:/home/trader/mmr/ --exclude='.git' --filter="dir-merge,- .gitignore"
 }
 
-echo "build: $b, clean: $c, run: $r, sync: $s, image_name: $IMGNAME, container_name: $CONTNAME"
+sync_all() {
+    echo "syncing entire mmr directory to $CONTNAME"
+    echo ""
+    CONTID="$(docker ps -aqf name=$CONTNAME)"
+    if [[ $CONTID == "" ]]; then
+      echo "cant find running container that matches name $CONTNAME"
+      exit 1
+    fi
+    echo "container id: $CONTID"
+    echo " $ rsync -e 'docker exec -i' -av $BUILDDIR/ $CONTID:/home/trader/mmr/ --exclude='.git'"
+    echo ""
+    rsync -e 'docker exec -i' -av --delete $BUILDDIR/ $CONTID:/home/trader/mmr/ --exclude='.git'
+}
+
+echo "build: $b, clean: $c, run: $r, sync: $s, sync_all: $a, image_name: $IMGNAME, container_name: $CONTNAME"
 
 if [[ $b == "y" ]]; then
     build
@@ -160,4 +178,7 @@ if [[ $r == "y" ]]; then
 fi
 if [[ $s == "y" ]]; then
     sync
+fi
+if [[ $a == "y" ]]; then
+    sync_all
 fi

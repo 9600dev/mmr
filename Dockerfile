@@ -12,19 +12,20 @@ RUN mkdir -p /var/run/sshd
 RUN mkdir -p /run/sshd
 RUN mkdir -p /tmp
 RUN apt-get update
-RUN apt-get install dialog apt-utils -y
+RUN apt-get install -y dialog apt-utils
 RUN apt-get install -y python3
 RUN apt-get install -y python3-pip
 RUN apt-get install -y git
 RUN apt-get install -y wget
 RUN apt-get install -y vim
-RUN apt-get install dpkg
-# RUN apt-get install gnupg
-# RUN echo "deb http://security.ubuntu.com/ubuntu impish-security main" | tee /etc/apt/sources.list.d/impish-security.list
-# RUN apt-get update
-# RUN apt-get install libssl1.1
-# RUN wget http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.0g-2ubuntu4_amd64.deb -P /tmp
-# RUN dpkg -i /tmp/libssl1.1_1.1.0g-2ubuntu4_amd64.deb
+RUN apt-get install -y dpkg
+
+# set to New York timezone, can override with docker run -e TZ=Europe/London etc.
+ENV TZ=America/New_York
+RUN apt-get install -y tzdata
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# mongo
 RUN wget -qO - https://www.mongodb.org/static/pgp/server-5.0.asc | apt-key add -
 RUN echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/5.0 multiverse" | tee /etc/apt/sources.list.d/mongodb-org-5.0.list
 RUN apt-get update -y

@@ -33,12 +33,13 @@ The simplest way to install and run MMR trader is via Docker. It will use an Ubu
 ```
 $ git clone https://github.com/9600dev/mmr.git
 $ cd mmr/
-$ scripts/build_docker.sh
+$ ./docker.sh --build  # builds the mmr image (default name mmr-image)
+$ ./docker.sh --run    # runs the mmr image in a container (default name mmr-container); automatically ssh'es into the container to continue TWS configuration
 ```
 
 ![Docker build](docs/docker_build.png)
 
-This script will build the docker image and run a container instance for you.
+The script will build the docker image and run a container instance for you.
 
 Once it's built and running, ssh into the container to continue the installation and configuration of Trader Workstation:
 
@@ -72,7 +73,9 @@ A Universe is a collection of symbols/conIds to which you can apply your trading
 
 ![mmr resolve](docs/resolve.png)
 
-You can also VNC into the Docker container also, which will allow you to interact with the running instance of TWS workstation.
+You can also VNC into the Docker container also, which will allow you to interact with the running instance of TWS workstation. Screenshot below shows [TigerVNC](https://tigervnc.org/) viewing a stalled TWS instance waiting for authentication.
+
+![](docs/2022-06-03-08-58-08.png)
 
 ### Manual Installation
 
