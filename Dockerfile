@@ -111,9 +111,9 @@ RUN mkdir /home/trader/.config/qtile
 
 COPY ./scripts/installation/.bash_profile /home/trader
 COPY ./scripts/installation/start_trader.sh /home/trader
-COPY ./configs/twsstart.sh /home/trader/ibc/twsstart.sh
-COPY ./configs/config.ini /home/trader/ibc/config.ini
-COPY ./configs/config.py /home/trader/.configs/qtile
+COPY ./scripts/installation/twsstart.sh /home/trader/ibc/twsstart.sh
+COPY ./scripts/installation/config.ini /home/trader/ibc/config.ini
+COPY ./scripts/installation/config.py /home/trader/.configs/qtile
 
 RUN --mount=type=cache,target=/root/.cache \
    pip3 install qtile

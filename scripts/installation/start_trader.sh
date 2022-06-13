@@ -34,11 +34,27 @@ if [ ! -d /home/trader/Jts ]; then
     echo -n "Please enter Interactive Brokers password: "
     read -s PASSWORD;
 
-    sed -i "s/{username}/$USERNAME/g" /home/trader/ibc/twsstart.sh
-    sed -i "s/{username}/$USERNAME/g" /home/trader/ibc/config.ini
+    if [ -z "$USERNAME" ]
+    then
+        echo "Username is empty, script will fail, exiting"
+        exit 1
+    fi
 
-    sed -i "s/{password}/$PASSWORD/g" /home/trader/ibc/twsstart.sh
-    sed -i "s/{password}/$PASSWORD/g" /home/trader/ibc/config.ini
+    if [ -z "$PASSWORD" ]
+    then
+        echo "Password is empty, script will fail, exiting"
+        exit 1
+    fi
+
+    # we already do this in Dockerfile and native_installation.sh but we should redo it anyway
+    /bin/cp /home/trader/mmr/scripts/installation/config.ini /home/trader/ibc/config.ini
+    /bin/cp /home/trader/mmr/scripts/installation/twsstart.sh /home/trader/ibc/twsstart.sh
+
+    /bin/sed -i "s/{username}/$USERNAME/g" /home/trader/ibc/twsstart.sh
+    /bin/sed -i "s/{username}/$USERNAME/g" /home/trader/ibc/config.ini
+
+    /bin/sed -i "s/{password}/$PASSWORD/g" /home/trader/ibc/twsstart.sh
+    /bin/sed -i "s/{password}/$PASSWORD/g" /home/trader/ibc/config.ini
 
     echo ""
     echo "Automating the installation of Trader Workstation to /home/trader/Jts..."
@@ -57,12 +73,12 @@ if [ ! -d /home/trader/Jts ]; then
         mv ~/Jts /home/trader
     fi
 
-    TWS_VERSION=$(ls -m /home/trader/Jts)
-    sed -i "s/{tws_version}/$TWS_VERSION/g" /home/trader/ibc/twsstart.sh
+    TWS_VERSION=$(/bin/ls -m /home/trader/Jts | /bin/head -n 1 | /bin/sed 's/,.*$//')
+    /bin/sed -i "s/{tws_version}/$TWS_VERSION/g" /home/trader/ibc/twsstart.sh
 
     # move the default jts.ini settings over
     # this prevents the 'do you want to use SSL dialog' from popping
-    cp /home/trader/mmr/configs/jts.ini /home/trader/Jts
+    cp /home/trader/mmr/scripts/installation/jts.ini /home/trader/Jts
 
     read NULL;
 fi

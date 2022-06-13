@@ -1,0 +1,54 @@
+# fires up all the services minus the docker based ones (X, qtile, vnc etc)
+root_directory: /home/trader/mmr
+port: 8081
+env: TRADER_CHECK=False
+health_check_eval:
+  - "exec('sys.path.append(\"scripts\")') or exec('from trader_check import health_check') or health_check('configs/trader.yaml')"
+jobs:
+    - name: tws
+      description: make sure tws is continuously running, and force restart/reauth on Sunday
+      command: ../ibc/twsstart.sh
+      arguments: -inline
+      eval:
+        - "exec('sys.path.append(\"scripts\")') or exec('from ib_status import ib_status') or ib_status()"
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_found: True
+      restart_if_finished: True
+      delay: 10
+    - name: mongodb
+      description: ensures mongodb is running
+      command: /usr/bin/mongod
+      arguments: --config configs/mongodb.conf
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_found: True
+    - name: redis
+      description: redis server
+      command: /usr/bin/redis-server
+      arguments: configs/redis.conf
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_finished: True
+    - name: worker_service
+      description: worker service for batch job
+      command: /usr/bin/python3
+      arguments: trader/batch/worker_service.py start --config configs/trader.yaml --queue_name history
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_found: True
+      restart_if_finished: True
+      depends_on:
+        - tws
+      delay: 5
+    - name: trader_service
+      description: the host service for all algo trading
+      command: /usr/bin/python3
+      arguments: trader_service.py
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_found: True
+      restart_if_finished: True
+      depends_on:
+        - tws
+      delay: 5

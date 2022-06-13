@@ -14,6 +14,9 @@ echo ""
 
 echo "This script will install the dependences for mmr trader on this machine."
 echo "Docker install is the preferred installation method: scripts/build_docker.sh"
+echo ""
+echo "We recommend you install pyenv and the Python 3.9.5 runtime before continuing."
+echo ""
 echo "Press enter to continue."
 
 read NULL;
@@ -32,8 +35,8 @@ sudo apt-get install -y python3
 sudo apt-get install -y python3-pip
 sudo apt-get install -y git
 sudo apt-get install -y wget
-sudo wget -qO - https://www.mongodb.org/static/pgp/server-4.4.asc | apt-key add -
-sudo echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/4.4 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-4.4.list
+sudo wget -qO - https://www.mongodb.org/static/pgp/server-5.0.asc | sudo apt-key add -
+sudo echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/5.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-5.0.list
 sudo apt-get update -y
 sudo apt-get install -y mongodb-org
 sudo apt-get install -y lzip curl
@@ -42,6 +45,10 @@ sudo apt-get install -y unzip
 sudo apt-get install -y expect
 sudo apt-get install -y iputils-ping
 sudo apt-get install -y language-pack-en-base
+
+# install poetry
+echo "installing poetry"
+curl -sSL https://raw.githubusercontent.com/python-poetry/poetry/master/get-poetry.py | python3 -
 
 echo "creating required directories in /home/trader"
 mkdir /home/trader/ibc
@@ -53,8 +60,8 @@ mkdir /home/trader/mmr/logs
 
 echo "installing IBC (Trader Workstation login automation)"
 # install IBC
-wget https://github.com/IbcAlpha/IBC/releases/download/3.8.7/IBCLinux-3.8.7.zip -P /home/trader
-unzip /home/trader/IBCLinux-3.8.7.zip -d /home/trader/ibc
+wget https://github.com/IbcAlpha/IBC/releases/download/3.13.0/IBCLinux-3.13.0.zip -P /home/trader
+unzip /home/trader/IBCLinux-3.13.0.zip -d /home/trader/ibc
 rm /home/trader/IBCLinux-3.8.7.zip
 chmod +x /home/trader/ibc/*.sh
 
@@ -68,8 +75,8 @@ chmod +x /home/trader/mmr/scripts/installation/install_tws.sh
 sudo pip3 install rq
 
 # pip install packages
-echo "installing python requirements from requirements.txt"
-pip3 install -r requirements.txt
+echo "installing python requirements from poetry file"
+poetry install
 
 # install window managers, Xvfb and vnc
 echo "installing xvfb frame buffer window manager to run TWS"
@@ -82,10 +89,13 @@ pip3 install qtile
 mkdir /home/trader/.vnc
 echo 'trader' | vncpasswd -f > /home/trader/.vnc/passwd
 
-cp ./configs/twsstart.sh /home/trader/ibc/twsstart.sh
-cp ./configs/config.ini /home/trader/ibc/config.ini
+cp ./scripts/installation/twsstart.sh /home/trader/ibc/twsstart.sh
+cp ./scripts/installation/config.ini /home/trader/ibc/config.ini
+cp ./scripts/installation/config.py /home/trader/.configs/qtile
+cp ./scripts/installation/start_trader.sh /home/trader
 
-scripts/installation/start_trader.sh
+cd /home/trader
+./start_trader.sh
 
 
 
