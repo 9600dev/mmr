@@ -18,15 +18,15 @@ async def gogo():
     await client.connect()
 
     for i in range(0, 10):
-        # stock = list(client.rpc().get_stock())
-        # print(stock)
-        # print()
+        stock = list(client.rpc(return_type=list[Stock]).get_stock())
+        print(stock)
+        print()
 
-        # df = client.rpc().df()
-        # print(df)
-        # print()
+        df = client.rpc().df()
+        print(df)
+        print()
 
-        portfolio = client.rpc().get_portfolio()
+        portfolio = client.rpc(return_type=PortfolioItem).get_portfolio()
         print(portfolio)
         print('done')
 

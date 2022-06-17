@@ -1,4 +1,5 @@
 import asyncio
+from re import I
 import aiozmq.rpc
 import inspect
 import pandas as pd
@@ -17,7 +18,7 @@ from functools import partial
 from pickle import dumps, loads, HIGHEST_PROTOCOL
 from itertools import count
 from functools import wraps
-from typing import TypeVar, Generic, Tuple, Callable, Dict, Optional, List, Any
+from typing import TypeVar, Generic, Tuple, Callable, Dict, Optional, List, Any, Type
 from aioreactive.types import AsyncObservable, AsyncObserver
 from aioreactive.subject import AsyncMultiSubject
 from expression.system import AsyncDisposable, ObjectDisposedException
@@ -29,6 +30,7 @@ from ib_insync import PortfolioItem
 from types import SimpleNamespace
 
 T = TypeVar('T')
+TSub = TypeVar('TSub')
 
 
 def df_dumps(df: pd.DataFrame):
@@ -62,6 +64,50 @@ def exception_hijack(self, fut, name, args, kwargs):
         fut.result()
     except Exception as exc:
         asyncio.get_event_loop().run_until_complete(self.subject.athrow(exc))
+
+
+class _AwaitedMethodCall():
+    __slots__ = ('_proto', '_timeout', '_names', '_return_type')
+
+    def __init__(self, proto, timeout=None, names=(), return_type: Optional[Type] = None):
+        self._proto = proto
+        self._timeout = timeout
+        self._names = names
+        self._return_type = return_type
+
+    def __getattr__(self, name):
+        return self.__class__(self._proto, self._timeout,
+                              self._names + (name,), self._return_type)
+
+    def __call__(self, *args, **kwargs):
+        if not self._names:
+            raise ValueError('RPC method name is empty')
+        fut = self._proto.call('.'.join(self._names), args, kwargs)
+        loop = self._proto.loop
+
+        # return asyncio.get_event_l
+        rpc_result = asyncio.get_event_loop().run_until_complete(asyncio.Task(
+            asyncio.wait_for(
+                fut,
+                timeout=self._timeout,
+                loop=loop
+            ),
+            loop=loop
+        ))
+
+        # msgpack is pretty wonky when it comes to lists, converting them to tuples
+        # so we have the 'return_type' argument to help with the casting etc.
+        if isinstance(rpc_result, tuple) and self._return_type:
+            # generic list
+            if hasattr(self._return_type, '__origin__') and self._return_type.__origin__ == list:
+                return list(rpc_result)
+            # non-generic list
+            if self._return_type == type(list):
+                return list(rpc_result)
+
+            return self._return_type(*rpc_result)
+
+        return rpc_result
 
 
 class RPCHandler(aiozmq.rpc.AttrHandler):
@@ -219,36 +265,8 @@ class RemotedClient(Generic[T]):
     async def awaitable_rpc(self) -> T:
         return self.client.call  # type: ignore
 
-    def rpc(self) -> T:
-        # we need this class to fool vscodes intellisense autocomple, and not require the user to 'await'
-        # the return
-        class _AwaitedMethodCall:
-            __slots__ = ('_proto', '_timeout', '_names')
-
-            def __init__(self, proto, timeout=None, names=()):
-                self._proto = proto
-                self._timeout = timeout
-                self._names = names
-
-            def __getattr__(self, name):
-                return self.__class__(self._proto, self._timeout,
-                                      self._names + (name,))
-
-            def __call__(self, *args, **kwargs):
-                if not self._names:
-                    raise ValueError('RPC method name is empty')
-                fut = self._proto.call('.'.join(self._names), args, kwargs)
-                loop = self._proto.loop
-                return asyncio.get_event_loop().run_until_complete(asyncio.Task(
-                    asyncio.wait_for(
-                        fut,
-                        timeout=self._timeout,
-                        loop=loop
-                    ),
-                    loop=loop
-                ))
-
+    def rpc(self, return_type: Optional[Type] = None) -> T:
         if self.client and self.connected:
-            return _AwaitedMethodCall(self.client._proto, timeout=self.client._timeout)  # type: ignore
+            return _AwaitedMethodCall(self.client._proto, timeout=self.client._timeout, return_type=return_type)  # type: ignore
         else:
             raise ConnectionError('not connected')
