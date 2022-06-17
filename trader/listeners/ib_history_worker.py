@@ -26,10 +26,13 @@ logging = setup_logging(module_name='ibhistoryworker')
 
 class IBHistoryWorker():
     def __init__(self, ib_client: IB):
-        self.ib_client = ib_client
+        # self.ib_client = ib_client
+        self.ib_client = IB()
+        self.ib_client_parent = ib_client
         self.error_code: int = 0
         self.error_string: str = ''
         self.error_contract: Optional[Contract] = None
+        self.connected: bool = False
 
     def __clear_error(self):
         self.error_code = 0
@@ -50,6 +53,28 @@ class IBHistoryWorker():
                                                                                           errorString,
                                                                                           contract))
 
+    def connect(self):
+        def __handle_client_id_error(msg):
+            logging.error('clientId already in use, randomizing and trying again')
+            raise ValueError('clientId')
+
+        self.connected = True
+
+        # todo set in the readme that the master client ID has to be set to 5
+        if self.__handle_error not in self.ib_client.errorEvent:
+            self.ib_client.errorEvent += self.__handle_error
+
+        self.ib_client.connect(
+            self.ib_client_parent.client.host,
+            self.ib_client_parent.client.port,
+            clientId=self.ib_client_parent.client.clientId + 5,
+            timeout=15,
+            readonly=True
+        )
+
+        self.ib_client.client.conn.disconnected -= __handle_client_id_error
+        return self
+
     # @backoff.on_exception(backoff.expo, Exception, max_tries=3, max_time=240)
     async def get_contract_history(
         self,
@@ -65,6 +90,9 @@ class IBHistoryWorker():
         # figure this out
         self.__clear_error()
         contract = Universe.to_contract(security)
+
+        if not self.connected:
+            self.connect()
 
         # solves for errorCode 321 "please enter exchange"
         if not contract.exchange:

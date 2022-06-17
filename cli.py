@@ -42,10 +42,14 @@ from scripts.chain import plot_chain
 from trader.messaging.bus import *
 from trader.common.helpers import contract_from_dict
 from trader.common.helpers import *
+from trader.messaging.clientserver import RemotedClient
+from trader.messaging.new_bus import NewTraderServiceApi
+
 
 logging = setup_logging(module_name='cli')
 is_repl = False
 bus_client: BusPath = bus
+remoted_client = RemotedClient[NewTraderServiceApi]()
 
 @click.group(
     invoke_without_command=True,
@@ -110,6 +114,41 @@ def portfolio():
 
     def mapper(portfolio_dict: Dict) -> List:
         portfolio = DictHelper[Any, PortfolioItem].to_object(portfolio_dict)
+        return [
+            portfolio.account,
+            portfolio.contract.conId,
+            portfolio.contract.localSymbol,
+            portfolio.contract.currency,
+            portfolio.position,
+            portfolio.marketPrice,
+            portfolio.marketValue,
+            portfolio.averageCost,
+            portfolio.unrealizedPNL,
+            portfolio.realizedPNL,
+        ]
+
+    xs = pipe(
+        portfolio,
+        seq.map(mapper)
+    )
+
+    df = pd.DataFrame(data=list(xs), columns=[
+        'account', 'conId', 'localSymbol', 'currency',
+        'position', 'marketPrice', 'marketValue', 'averageCost', 'unrealizedPNL', 'realizedPNL'
+    ])
+
+    rich_table(df.sort_values(by='unrealizedPNL', ascending=False), csv=is_repl, financial=True, financial_columns=[
+        'marketPrice', 'marketValue', 'averageCost', 'unrealizedPNL', 'realizedPNL'
+    ])
+
+
+@main.command()
+def portfolio2():
+    asyncio.run(remoted_client.connect())
+    portfolio: List[PortfolioItem] = cast(List[PortfolioItem], remoted_client.rpc().get_portfolio())
+
+    def mapper(portfolio: PortfolioItem) -> List:
+        # portfolio = PortfolioItem(*portfolio)
         return [
             portfolio.account,
             portfolio.contract.conId,

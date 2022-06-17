@@ -505,8 +505,8 @@ class IBAIORx():
     def sleep(self, seconds: float):
         self.ib.sleep(seconds)
 
-    def run(self):
-        self.ib.run()
+    def run(self, *args):
+        self.ib.run(*args)
 
     def client(self):
         return self.ib

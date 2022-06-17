@@ -14,6 +14,7 @@ import pandas as pd
 import datetime as dt
 import backoff
 import aioreactive as rx
+import trader.messaging.new_bus as new_bus
 
 from asyncio.events import AbstractEventLoop
 from aioreactive.types import AsyncObservable, Projection
@@ -47,11 +48,12 @@ from trader.trading.algo import Algo
 from trader.trading.portfolio import Portfolio
 from trader.trading.executioner import Executioner
 from trader.trading.strategy import Strategy
-from trader.common.reactive import AsyncCachedObserver, AsyncEventSubject, AsyncCachedSubject
+from trader.common.reactive import AsyncCachedObserver, AsyncEventSubject, AsyncCachedSubject, awaitify
 from trader.common.singleton import Singleton
 from trader.common.helpers import get_network_ip, Pipe, dateify, timezoneify, ListHelper
 from trader.messaging.bus_server import start_lightbus
 from trader.data.market_data import MarketData, SecurityDataStream
+from trader.messaging.clientserver import RPCServer
 
 from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar, cast, Union
 
@@ -77,6 +79,10 @@ class Trader(metaclass=Singleton):
                  arctic_universe_library: str,
                  redis_server_address: str,
                  redis_server_port: str,
+                 zmq_pubsub_server_address: str,
+                 zmq_pubsub_server_port: int,
+                 zmq_rpc_server_address: str,
+                 zmq_rpc_server_port: int,
                  paper_trading: bool = False,
                  simulation: bool = False):
         self.ib_server_address = ib_server_address
@@ -88,6 +94,10 @@ class Trader(metaclass=Singleton):
         self.paper_trading = paper_trading
         self.redis_server_address = redis_server_address
         self.redis_server_port = redis_server_port
+        self.zmq_pubsub_server_address = zmq_pubsub_server_address
+        self.zmq_pubsub_server_port = zmq_pubsub_server_port
+        self.zmq_rpc_server_address = zmq_rpc_server_address
+        self.zmq_rpc_server_port = zmq_rpc_server_port
 
         # todo I think you can have up to 24 connections to TWS (and have multiple TWS instances running)
         # so we need to take this from single client, to multiple client
@@ -110,6 +120,7 @@ class Trader(metaclass=Singleton):
         # a list of all the universes of stocks we have registered
         self.universes: List[Universe]
         self.market_data = 3
+        self.zmq_rpc_server: RPCServer[new_bus.NewTraderServiceApi]
 
     @backoff.on_exception(backoff.expo, ConnectionRefusedError, max_tries=10, max_time=120)
     def connect(self):
@@ -123,6 +134,8 @@ class Trader(metaclass=Singleton):
         self.client.ib.connectedEvent += self.connected_event
         self.client.ib.disconnectedEvent += self.disconnected_event
         self.client.connect()
+        self.zmq_rpc_server = RPCServer[new_bus.NewTraderServiceApi](new_bus.NewTraderServiceApi(self))
+        self.run(self.zmq_rpc_server.serve())
 
     def reconnect(self):
         # this will force a reconnect through the disconnected event
@@ -230,12 +243,12 @@ class Trader(metaclass=Singleton):
                     date_range=date_range,
                     existing_data=None
                 )
-                await self.client.subscribe_contract_history(
-                    contract=portfolio_item.contract,
-                    start_date=dateify(dt.datetime.now() - dt.timedelta(days=30)),
-                    what_to_show=WhatToShow.TRADES,
-                    observer=security_stream
-                )
+                # await self.client.subscribe_contract_history(
+                #     contract=portfolio_item.contract,
+                #     start_date=dateify(dt.datetime.now() - dt.timedelta(days=30)),
+                #     what_to_show=WhatToShow.TRADES,
+                #     observer=security_stream
+                # )
                 self.market_data_subscriptions[security] = security_stream
 
     async def temp_place_order(
@@ -336,5 +349,5 @@ class Trader(metaclass=Singleton):
     def get_universes(self) -> List[Universe]:
         return self.universes
 
-    def run(self):
-        self.client.run()
+    def run(self, *args):
+        self.client.run(*args)

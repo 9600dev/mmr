@@ -32,7 +32,7 @@ jobs:
       restart_if_finished: True
     - name: worker_service
       description: worker service for batch job
-      command: /usr/bin/python3
+      command: python
       arguments: trader/batch/worker_service.py start --config configs/trader.yaml --queue_name history
       start: "* * * * *"
       start_on_pycron_start: True
@@ -43,7 +43,7 @@ jobs:
       delay: 5
     - name: trader_service
       description: the host service for all algo trading
-      command: /usr/bin/python3
+      command: python
       arguments: trader_service.py
       start: "* * * * *"
       start_on_pycron_start: True

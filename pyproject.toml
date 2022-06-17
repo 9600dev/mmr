@@ -17,7 +17,6 @@ PyYAML = ">=5.4.1"
 crontab = ">=0.23.0"
 psutil = ">=5.7.2"
 tornado = ">=6.1"
-zmq = ">=0.0.0"
 vectorbt = ">=0.23.3"
 durations = ">=0.3.3"
 bs4 = ">=0.0.1"
@@ -71,6 +70,9 @@ types-requests = "^2.27.30"
 flake8 = "^4.0.1"
 mypy = "^0.960"
 click = "^8.1.3"
+aiozmq = "^0.9.0"
+dill = "^0.3.5"
+pyarrow = "^8.0.0"
 
 [tool.poetry.dev-dependencies]
 
