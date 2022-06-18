@@ -1,5 +1,6 @@
 import asyncio
 from re import I
+from struct import unpack
 import aiozmq.rpc
 import inspect
 import pandas as pd
@@ -13,6 +14,9 @@ import json
 import nest_asyncio
 import dataclasses
 import dill
+import typing
+import time as time_
+from inspect import Parameter
 from datetime import timedelta, time, date, tzinfo
 from functools import partial
 from pickle import dumps, loads, HIGHEST_PROTOCOL
@@ -23,11 +27,11 @@ from aioreactive.types import AsyncObservable, AsyncObserver
 from aioreactive.subject import AsyncMultiSubject
 from expression.system import AsyncDisposable, ObjectDisposedException
 from aiozmq.rpc.pubsub import PubSubClient, PubSubService
-from aiozmq.rpc.base import Service
-from aiozmq.rpc.rpc import RPCClient
+from aiozmq.rpc.base import Service, ParametersError, NotFoundError
+from aiozmq.rpc.rpc import RPCClient, _BaseServerProtocol, _ServerProtocol
+from aiozmq.rpc.packer import _Packer
 from dataclasses_serialization.json import JSONSerializer
-from ib_insync import PortfolioItem
-from types import SimpleNamespace
+from msgpack import unpackb
 
 T = TypeVar('T')
 TSub = TypeVar('TSub')
@@ -59,11 +63,67 @@ translation_table = {
 }
 
 
-def exception_hijack(self, fut, name, args, kwargs):
+def exception_monkeypatch(self, fut, name, args, kwargs):
     try:
         fut.result()
     except Exception as exc:
         asyncio.get_event_loop().run_until_complete(self.subject.athrow(exc))
+
+
+def check_args_monkeypatch(self, func, args, kwargs):
+    try:
+        sig = inspect.signature(func)
+        bargs = sig.bind(*args, **kwargs)
+    except TypeError as exc:
+        raise ParametersError(repr(exc)) from exc
+    else:
+        arguments = bargs.arguments
+        marker = object()
+        for name, param in sig.parameters.items():
+            if param.annotation is param.empty:
+                continue
+            val = arguments.get(name, marker)
+            if val is marker:
+                continue  # Skip default value
+            try:
+                # I don't think we need to do this
+                arguments[name] = val  # param.annotation(val)
+            except (TypeError, ValueError) as exc:
+                raise ParametersError(
+                    'Invalid value for argument {!r}: {!r}'
+                    .format(name, exc)) from exc
+        if sig.return_annotation is not sig.empty:
+            return bargs.args, bargs.kwargs, sig.return_annotation
+        return bargs.args, bargs.kwargs, None
+
+
+def process_call_result_monkeypatch(self, fut, *, req_id, pre, name,
+                                    args, kwargs,
+                                    return_annotation=None):
+    self.discard_pending(fut)
+    self.try_log(fut, name, args, kwargs)
+    if self.transport is None:
+        return
+    try:
+        ret = fut.result()
+        # if return_annotation is not None:
+        #    ret = return_annotation(ret)
+        prefix = self.prefix + self.RESP_SUFFIX.pack(req_id,
+                                                     time_.time(), False)
+        self.transport.write(pre + [prefix, self.packer.packb(ret)])
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        prefix = self.prefix + self.RESP_SUFFIX.pack(req_id,
+                                                     time_.time(), True)
+        exc_type = exc.__class__
+        exc_info = (exc_type.__module__ + '.' + exc_type.__qualname__,
+                    exc.args, repr(exc))
+        self.transport.write(pre + [prefix, self.packer.packb(exc_info)])
+
+
+def unpackb_monkeypatch(self, packed):
+    return unpackb(packed, use_list=False, strict_map_key=False, raw=False, ext_hook=self.ext_type_unpack_hook)
 
 
 class _AwaitedMethodCall():
@@ -95,18 +155,21 @@ class _AwaitedMethodCall():
             loop=loop
         ))
 
+        def return_type_converter(obj, return_type):
+            if isinstance(obj, tuple) and hasattr(return_type, '__origin__') and return_type.__origin__ == list:
+                list_result = [return_type_converter(o, typing.get_args(return_type)[0]) for o in obj]
+                return list_result
+            elif self._return_type == type(list):
+                return list(obj)
+            elif isinstance(obj, tuple):
+                return return_type(*obj)
+            else:
+                return obj
+
         # msgpack is pretty wonky when it comes to lists, converting them to tuples
         # so we have the 'return_type' argument to help with the casting etc.
-        if isinstance(rpc_result, tuple) and self._return_type:
-            # generic list
-            if hasattr(self._return_type, '__origin__') and self._return_type.__origin__ == list:
-                return list(rpc_result)
-            # non-generic list
-            if self._return_type == type(list):
-                return list(rpc_result)
-
-            return self._return_type(*rpc_result)
-
+        if self._return_type:
+            return return_type_converter(rpc_result, self._return_type)
         return rpc_result
 
 
@@ -182,8 +245,7 @@ class TopicPubSub(Generic[T]):
             # we're going to hijack the exception handling mechanism
             proto = self.zmq_subscriber._proto
             proto.subject = self.handler.subject
-            proto.try_log = types.MethodType(exception_hijack, proto)
-            # proto.try_log = exception_hijack
+            proto.try_log = types.MethodType(exception_monkeypatch, proto)
 
         return self.handler.get_subject()
 
@@ -219,7 +281,11 @@ class RPCServer(Generic[T]):
         zmq_rpc_server_port: int = 42001,
         translation_table: Dict[int, Tuple[Any, partial[Any], Callable]] = translation_table  # type: ignore
     ):
+
         nest_asyncio.apply()
+        _BaseServerProtocol.check_args = check_args_monkeypatch
+        _ServerProtocol.process_call_result = process_call_result_monkeypatch
+        _Packer.unpackb = unpackb_monkeypatch
         self.zmq_server_address = zmq_rpc_server_address
         self.zmq_server_port = zmq_rpc_server_port
         self.translation_table = translation_table
@@ -245,6 +311,7 @@ class RemotedClient(Generic[T]):
         timeout: Optional[int] = None,
     ):
         nest_asyncio.apply()
+        _Packer.unpackb = unpackb_monkeypatch
         self.zmq_server_address = zmq_server_address
         self.zmq_server_port = zmq_server_port
         self.translation_table = translation_table

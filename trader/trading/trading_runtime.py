@@ -14,8 +14,7 @@ import pandas as pd
 import datetime as dt
 import backoff
 import aioreactive as rx
-import trader.messaging.new_bus as new_bus
-
+import trader.messaging.trader_service_api as bus
 from asyncio.events import AbstractEventLoop
 from aioreactive.types import AsyncObservable, Projection
 from expression.core import pipe
@@ -51,7 +50,6 @@ from trader.trading.strategy import Strategy
 from trader.common.reactive import AsyncCachedObserver, AsyncEventSubject, AsyncCachedSubject, awaitify
 from trader.common.singleton import Singleton
 from trader.common.helpers import get_network_ip, Pipe, dateify, timezoneify, ListHelper
-from trader.messaging.bus_server import start_lightbus
 from trader.data.market_data import MarketData, SecurityDataStream
 from trader.messaging.clientserver import RPCServer
 
@@ -120,7 +118,7 @@ class Trader(metaclass=Singleton):
         # a list of all the universes of stocks we have registered
         self.universes: List[Universe]
         self.market_data = 3
-        self.zmq_rpc_server: RPCServer[new_bus.NewTraderServiceApi]
+        self.zmq_rpc_server: RPCServer[bus.TraderServiceApi]
 
     @backoff.on_exception(backoff.expo, ConnectionRefusedError, max_tries=10, max_time=120)
     def connect(self):
@@ -134,7 +132,7 @@ class Trader(metaclass=Singleton):
         self.client.ib.connectedEvent += self.connected_event
         self.client.ib.disconnectedEvent += self.disconnected_event
         self.client.connect()
-        self.zmq_rpc_server = RPCServer[new_bus.NewTraderServiceApi](new_bus.NewTraderServiceApi(self))
+        self.zmq_rpc_server = RPCServer[bus.TraderServiceApi](bus.TraderServiceApi(self))
         self.run(self.zmq_rpc_server.serve())
 
     def reconnect(self):

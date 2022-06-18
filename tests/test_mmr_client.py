@@ -28,7 +28,10 @@ async def gogo():
 
         portfolio = client.rpc(return_type=PortfolioItem).get_portfolio()
         print(portfolio)
-        print('done')
+
+        portfolio_list = client.rpc(return_type=list[PortfolioItem]).get_portfolio_list()
+        print(portfolio_list)
+        print('type: {}, inner: {}'.format(type(portfolio_list), type(portfolio_list[0])))
 
 
 def main():

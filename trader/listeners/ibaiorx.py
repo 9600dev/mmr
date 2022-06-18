@@ -216,13 +216,14 @@ class IBAIORx():
             logging.debug('reqMarketDataType(3)')
             self.ib.reqMarketDataType(3)
 
+        # reqMktData immediately returns with an empty ticker
+        # and starts the subscription
         self._contracts_source.call_event_subscriber_sync(
             lambda: self.ib.reqMktData(
                 contract=contract,
                 genericTickList='',
                 snapshot=one_time_snapshot,
                 regulatorySnapshot=False,
-                mktDataOptions=None
             ))
 
         if delayed:

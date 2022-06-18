@@ -9,7 +9,6 @@ logging = setup_logging(module_name='trading_runtime')
 from trader.container import Container
 from trader.trading.trading_runtime import Trader
 from trader.common.helpers import get_network_ip
-from trader.messaging.bus_server import start_lightbus
 
 @click.command()
 @click.option('--simulation', required=False, default=False, help='load with historical data')
@@ -30,12 +29,6 @@ def main(simulation: bool,
 
     ip_address = get_network_ip()
     logging.debug('starting trading_runtime at network address: {}'.format(ip_address))
-
-    # setup the lightbus
-    start_lightbus(container.config()['lightbus_config_file'],
-                   container.config()['lightbus_module'],
-                   loop)
-    logging.debug('started lightbus successfully')
 
     # start the trader
     logging.debug('starting trader run() loop')

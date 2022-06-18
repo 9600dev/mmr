@@ -28,8 +28,8 @@ from trader.common.helpers import rich_table, rich_dict, rich_json, DictHelper, 
 from IPython import get_ipython
 from pyfiglet import Figlet
 from prompt_toolkit.history import FileHistory, InMemoryHistory
-from lightbus import BusPath
 from ib_insync.objects import Position
+from ib_insync.ticker import Ticker
 from expression.collections import Seq, seq
 from expression import Nothing, Some, effect, pipe
 from trader.common.command_line import cli, common_options, default_config
@@ -39,17 +39,22 @@ from trader.common.logging_helper import setup_logging, suppress_external
 from trader.listeners.ibaiorx import WhatToShow
 from trader.data.market_data import MarketData
 from scripts.chain import plot_chain
-from trader.messaging.bus import *
 from trader.common.helpers import contract_from_dict
-from trader.common.helpers import *
 from trader.messaging.clientserver import RemotedClient
-from trader.messaging.new_bus import NewTraderServiceApi
+from trader.messaging.trader_service_api import TraderServiceApi
+from trader.common.helpers import *
 
 
 logging = setup_logging(module_name='cli')
 is_repl = False
-bus_client: BusPath = bus
-remoted_client = RemotedClient[NewTraderServiceApi]()
+
+
+def connect():
+    if not remoted_client.connected:
+        asyncio.run(remoted_client.connect())
+
+remoted_client = RemotedClient[TraderServiceApi]()
+connect()
 
 @click.group(
     invoke_without_command=True,
@@ -110,42 +115,8 @@ batch.add_command(ib_history_queuer.ib_history)
 
 @main.command()
 def portfolio():
-    portfolio: List[Dict] = cast(List[Dict], bus_client.service.get_portfolio())
-
-    def mapper(portfolio_dict: Dict) -> List:
-        portfolio = DictHelper[Any, PortfolioItem].to_object(portfolio_dict)
-        return [
-            portfolio.account,
-            portfolio.contract.conId,
-            portfolio.contract.localSymbol,
-            portfolio.contract.currency,
-            portfolio.position,
-            portfolio.marketPrice,
-            portfolio.marketValue,
-            portfolio.averageCost,
-            portfolio.unrealizedPNL,
-            portfolio.realizedPNL,
-        ]
-
-    xs = pipe(
-        portfolio,
-        seq.map(mapper)
-    )
-
-    df = pd.DataFrame(data=list(xs), columns=[
-        'account', 'conId', 'localSymbol', 'currency',
-        'position', 'marketPrice', 'marketValue', 'averageCost', 'unrealizedPNL', 'realizedPNL'
-    ])
-
-    rich_table(df.sort_values(by='unrealizedPNL', ascending=False), csv=is_repl, financial=True, financial_columns=[
-        'marketPrice', 'marketValue', 'averageCost', 'unrealizedPNL', 'realizedPNL'
-    ])
-
-
-@main.command()
-def portfolio2():
-    asyncio.run(remoted_client.connect())
-    portfolio: List[PortfolioItem] = cast(List[PortfolioItem], remoted_client.rpc().get_portfolio())
+    connect()
+    portfolio: list[PortfolioItem] = remoted_client.rpc(return_type=list[PortfolioItem]).get_portfolio()
 
     def mapper(portfolio: PortfolioItem) -> List:
         # portfolio = PortfolioItem(*portfolio)
@@ -179,12 +150,10 @@ def portfolio2():
 
 @main.command()
 def positions():
-    positions: List[Dict] = cast(List[Dict], bus_client.service.get_positions())
+    connect()
+    positions: list[Position] = remoted_client.rpc(return_type=list[Position]).get_positions()
 
-    def mapper(position_dict: Dict) -> List:
-        # this DictHelper thingy is required because lightbus is deserializing
-        # RPC calls to Dicts for whatever reason. todo
-        position = DictHelper[Any, Position].to_object(position_dict)
+    def mapper(position: Position) -> List:
         return [
             position.account,
             position.contract.conId,
@@ -211,7 +180,7 @@ def positions():
 
 @main.command()
 def reconnect():
-    bus_client.service.reconnect()
+    connect()
 
 
 @main.command()
@@ -299,10 +268,6 @@ def snapshot(
     primary_exchange: str,
     **args,
 ):
-    container = Container()
-    client = container.resolve(IBAIORx)
-    IBAIORx.client_id_counter = randint(20, 99)
-    client.connect()
     result = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
     if len(result) >= 1:
         r = result[0]
@@ -313,7 +278,8 @@ def snapshot(
             primaryExchange=r['primaryExchange'],
             currency=r['currency']
         )
-        ticker = asyncio.run(client.get_snapshot(contract, True))
+
+        ticker = remoted_client.rpc(return_type=Ticker).get_snapshot(contract, True)
         snap = {
             'symbol': ticker.contract.symbol if ticker.contract else '',
             'exchange': ticker.contract.exchange if ticker.contract else '',
@@ -365,7 +331,7 @@ def book():
 
 @book.command('trades')
 def book_trades():
-    trades = cast(Dict[int, List[Trade]], bus_client.service.get_trades())
+    trades = remoted_client.rpc(return_type=dict[int, list[Trade]]).get_trades()
     columns = [
         'symbol', 'primaryExchange', 'currency', 'orderId',
         'action', 'status', 'orderType', 'lmtPrice', 'totalQuantity'
@@ -378,7 +344,7 @@ def book_trades():
 
 @book.command('orders')
 def book_orders():
-    orders = cast(Dict[int, List[Order]], bus_client.service.get_orders())
+    orders: dict[int, list[Order]] = remoted_client.rpc(return_type=dict[int, list[Order]]).get_orders()
     columns = [
         'orderId', 'clientId', 'parentId', 'action',
         'status', 'orderType', 'allOrNone', 'lmtPrice', 'totalQuantity'
@@ -392,7 +358,8 @@ def book_orders():
 @book.command('cancel')
 @click.option('--order_id', required=True, type=int, help='order_id to cancel')
 def book_order_cancel(order_id: int):
-    order = cast(Optional[Trade], bus_client.service.cancel_order(order_id=order_id))
+    # todo: untested
+    order: Optional[Trade] = remoted_client.rpc(return_type=Optional[Trade]).cancel_order(order_id)
     if order:
         click.echo(order)
     else:
@@ -475,7 +442,7 @@ def trade(
         click.echo('multiple contracts found for symbol {}, aborting'.format(symbol))
 
     action = 'BUY' if buy else 'SELL'
-    trade = bus_client.service.temp_place_order(
+    trade: Trade = remoted_client.rpc(return_type=Trade).temp_place_order(
         contract=contract_from_dict(contracts[0]),
         action=action,
         equity_amount=amount

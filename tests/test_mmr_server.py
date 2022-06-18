@@ -17,8 +17,8 @@ import aiozmq.rpc
 from trader.messaging.clientserver import RPCServer, RPCHandler
 from typing import List
 from aiozmq.rpc import method
-from ib_insync.objects import Contract, PortfolioItem, Position
-from ib_insync import Stock
+from ib_insync.objects import PortfolioItem, Position
+from ib_insync import Stock, Contract
 
 class MyService(RPCHandler):
     @classmethod
@@ -40,6 +40,22 @@ class MyService(RPCHandler):
             realizedPNL=0.0,
             unrealizedPNL=0.0,
         )
+
+    @classmethod
+    @aiozmq.rpc.method
+    def get_portfolio_list(cls):
+        return [PortfolioItem(
+            account='asdf',
+            averageCost=2.3,
+            contract=Contract(),
+            marketPrice=2.3,
+            marketValue=3.2,
+            position=200.0,
+            realizedPNL=0.0,
+            unrealizedPNL=0.0,
+        )]
+
+
 
     @classmethod
     @aiozmq.rpc.method
