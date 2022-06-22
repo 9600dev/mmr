@@ -4,6 +4,7 @@ import ib_insync
 import pandas as pd
 import numpy as np
 import backoff
+import asyncio
 
 from redis import Redis
 from rq import Queue
@@ -33,6 +34,7 @@ class IBHistoryWorker():
         self.error_string: str = ''
         self.error_contract: Optional[Contract] = None
         self.connected: bool = False
+        self.lock: asyncio.Lock = asyncio.Lock()
 
     def __clear_error(self):
         self.error_code = 0
@@ -47,33 +49,49 @@ class IBHistoryWorker():
         # ignore the following:
         # ib error reqId: -1 errorCode 2104 errorString Market data farm connection is OK:usfarm.nj contract None
         if errorCode == 2104 or errorCode == 2158 or errorCode == 2106:
+            self.error_code = 0
+            self.error_string = ''
+            self.error_contract = None
             return
         logging.error('ib error reqId: {} errorCode {} errorString {} contract {}'.format(reqId,
                                                                                           errorCode,
                                                                                           errorString,
                                                                                           contract))
 
-    def connect(self):
-        def __handle_client_id_error(msg):
-            logging.error('clientId already in use, randomizing and trying again')
-            raise ValueError('clientId')
+    async def connect(self):
+        async with self.lock:
+            if self.connected:
+                return self
 
-        self.connected = True
+            def __handle_client_id_error(msg):
+                logging.error('clientId already in use, randomizing and trying again')
+                raise ValueError('clientId')
 
-        # todo set in the readme that the master client ID has to be set to 5
-        if self.__handle_error not in self.ib_client.errorEvent:
-            self.ib_client.errorEvent += self.__handle_error
+            # todo set in the readme that the master client ID has to be set to 5
+            if self.__handle_error not in self.ib_client.errorEvent:
+                self.ib_client.errorEvent += self.__handle_error
 
-        self.ib_client.connect(
-            self.ib_client_parent.client.host,
-            self.ib_client_parent.client.port,
-            clientId=self.ib_client_parent.client.clientId + 5,
-            timeout=15,
-            readonly=True
-        )
+            self.ib_client.connect(
+                self.ib_client_parent.client.host,
+                self.ib_client_parent.client.port,
+                clientId=self.ib_client_parent.client.clientId + 5,
+                timeout=15,
+                readonly=True
+            )
 
-        self.ib_client.client.conn.disconnected -= __handle_client_id_error
-        return self
+            self.error_code = 0
+            self.error_string = ''
+            self.error_contract = None
+            self.ib_client.client.conn.disconnected -= __handle_client_id_error
+            self.connected = True
+            return self
+
+    async def disconnect(self):
+        self.ib_client.disconnect()
+        self.error_code = 0
+        self.error_string = ''
+        self.error_contract = None
+        self.connected = False
 
     # @backoff.on_exception(backoff.expo, Exception, max_tries=3, max_time=240)
     async def get_contract_history(
@@ -92,7 +110,7 @@ class IBHistoryWorker():
         contract = Universe.to_contract(security)
 
         if not self.connected:
-            self.connect()
+            await asyncio.wait_for(self.connect(), timeout=20.0)
 
         # solves for errorCode 321 "please enter exchange"
         if not contract.exchange:

@@ -10,3 +10,4 @@ anbox-work/*
 .vscode
 scratch/
 .python-version
+.devcontainer/

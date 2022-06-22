@@ -106,6 +106,7 @@ class IBAIORx():
         self.contracts_cache: Dict[Contract, rx.AsyncObservable] = {}
         self.bars_cache: Dict[Contract, rx.AsyncObservable[RealTimeBarList]] = {}
         self.historical_subscribers: Dict[Contract, int] = {}
+        self.history_worker: Optional[IBHistoryWorker] = None
 
         # try binding helper methods to things we care about
         Contract.to_df = Helpers.to_df  # type: ignore
@@ -147,6 +148,7 @@ class IBAIORx():
         )
 
         net_client.conn.disconnected -= __handle_client_id_error
+        self.history_worker = IBHistoryWorker(self.ib)
 
         return self
 
@@ -449,8 +451,10 @@ class IBAIORx():
         bar_size: str = '1 min',
         what_to_show: WhatToShow = WhatToShow.MIDPOINT,
     ) -> pd.DataFrame:
-        history_worker = IBHistoryWorker(self.ib)
-        return await history_worker.get_contract_history(
+        if self.history_worker and not self.history_worker.connected:
+            await asyncio.wait_for(self.history_worker.connect(), timeout=20.0)
+
+        return await self.history_worker.get_contract_history(  # type: ignore
             security=contract,
             what_to_show=what_to_show,
             bar_size=bar_size,

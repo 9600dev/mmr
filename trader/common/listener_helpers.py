@@ -1,15 +1,19 @@
 import datetime
 import ib_insync as ibapi
-from ib_insync.contract import ContractDescription
 import pandas as pd
+import asyncio
+import logging
+import functools
+import warnings
 import rx
 import datetime as dt
 import numpy as np
 import json
-from bson import json_util
 
+from bson import json_util
+from ib_insync.contract import ContractDescription
 from enum import Enum
-from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar, cast, Union
+from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar, cast, Union, Awaitable, Any
 from asyncio import BaseEventLoop
 from ib_insync.ib import IB
 from ib_insync.contract import Stock, Contract, Forex
@@ -17,6 +21,9 @@ from ib_insync.contract import ContractDetails
 from ib_insync.util import df
 from ib_insync.ticker import Ticker
 from trader.common.contract_sink import ContractSink
+from logging import Logger
+from asyncio import Task
+
 
 class Helpers():
     @staticmethod
@@ -196,3 +203,51 @@ class Helpers():
     @staticmethod
     def sod(df):
         return df.iloc[df.reset_index().groupby(df.index.to_period('D'))['index'].idxmin()]
+
+    T = TypeVar('T')
+
+    @staticmethod
+    def _handle_task_result(
+        task: asyncio.Task,
+        *,
+        logger: logging.Logger,
+        message: str,
+        message_args: Tuple[Any, ...] = (),
+    ) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass  # Task cancellation should not be logged as an error.
+        # Ad the pylint ignore: we want to handle all exceptions here so that the result of the task
+        # is properly logged. There is no point re-raising the exception in this callback.
+        except Exception:  # pylint: disable=broad-except
+            logger.exception(message, *message_args)
+
+    @staticmethod
+    def create_task(
+        coroutine: Awaitable[T],
+        *,
+        logger: logging.Logger,
+        message: str,
+        message_args: Tuple[Any, ...] = (),
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+    ) -> asyncio.Task[T]:
+        '''
+        This helper function wraps a ``loop.create_task(coroutine())`` call and ensures there is
+        an exception handler added to the resulting task. If the task raises an exception it is logged
+        using the provided ``logger``, with additional context provided by ``message`` and optionally
+        ``message_args``.
+        '''
+        if loop is None:
+            loop = asyncio.get_running_loop()
+        task = loop.create_task(coroutine)  # type: ignore
+        task.add_done_callback(
+            functools.partial(
+                Helpers._handle_task_result,
+                logger=logger,
+                message=message,
+                message_args=message_args
+            )
+        )
+        return task
+
