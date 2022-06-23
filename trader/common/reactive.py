@@ -131,8 +131,8 @@ class AsyncCachedSubject(AsyncMultiSubject[TSource], AsyncCachedObservable[TSour
 
         async def dispose() -> None:
             if observer in self._observers:
+                await observer.aclose()
                 self._observers.remove(observer)
-            return await self.dispose_async()
 
         result = AsyncDisposable.create(dispose)
 
@@ -219,10 +219,35 @@ class AsyncEventSubject(AsyncCachedSubject[TSource]):
 
     def call_cancel_subscription_sync(self, callable_lambda: Callable):
         callable_lambda()
-        asyncio.run(self.aclose())
+        asyncio.get_event_loop().run_until_complete(self.aclose())
 
     async def on_eventkit_update(self, e: TSource, *args):
         await self.asend(e)
+
+    async def subscribe_async(self, observer: AsyncObserver[TSource]) -> AsyncDisposable:
+        self.check_disposed()
+
+        self._observers.append(observer)
+
+        async def dispose() -> None:
+            if observer in self._observers:
+                await observer.aclose()
+                self._observers.remove(observer)
+
+        result = AsyncDisposable.create(dispose)
+
+        # send the last cached result
+        if self._value:
+            await observer.asend(self._value)
+        return result
+
+    async def dispose_async(self) -> None:
+        # I think we need to call close on all the observers
+        for observer in self._observers:
+            await observer.aclose()
+            self._observers.remove(observer)
+
+        self._is_disposed = True
 
 
 def awaitify(sync_func):

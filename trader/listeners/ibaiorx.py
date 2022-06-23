@@ -16,7 +16,6 @@ from expression.system.disposable import Disposable, AsyncDisposable
 import pandas as pd
 import ib_insync as ibapi
 import backoff
-import nest_asyncio
 import random
 
 from ib_insync.ib import IB
@@ -81,8 +80,6 @@ class IBAIORx():
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
         self.read_only = read_only
-
-        nest_asyncio.apply()
 
         self.ib = IB()
 
@@ -330,12 +327,7 @@ class IBAIORx():
         )
 
         cached_observer = AsyncCachedObserver(asend=update_ticker)
-
-        # xs = pipe(
-        #     observable,
-        #     Pipe[Ticker].take(1)
-        # )
-
+        # no tasks created here.
         disposable = await observable.subscribe_async(cached_observer)
         # todo if we error out here, we're waiting forever.
         value = await cached_observer.wait_value()

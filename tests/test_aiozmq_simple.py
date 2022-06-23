@@ -48,7 +48,6 @@ async def go():
     except Exception as ex:
         print(ex)
 
-
     server.close()
     await server.wait_closed()
     client.close()

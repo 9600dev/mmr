@@ -1,9 +1,7 @@
 import sys
 import os
-import nest_asyncio
 
 from trader.objects import WhatToShow
-nest_asyncio.apply()
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
 PACKAGE_PARENT = '../..'

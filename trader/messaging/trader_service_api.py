@@ -44,14 +44,14 @@ class TraderServiceApi(RPCHandler):
         from trader.trading.trading_runtime import Action, Trader
         # todo: need to figure out the async stuff here
         act = Action.BUY if 'BUY' in action else Action.SELL
-        cached_observer = asyncio.run(self.trader.temp_handle_order(
+        cached_observer = asyncio.get_event_loop().run_until_complete(self.trader.temp_handle_order(
             contract=contract,
             action=act,
             equity_amount=equity_amount,
             delayed=True,
             debug=True
         ))
-        return asyncio.run(cached_observer.wait_value())
+        return asyncio.get_event_loop().run_until_complete(cached_observer.wait_value())
 
     @RPCHandler.rpcmethod
     def cancel_order(self, order_id: int) -> Optional[Trade]:

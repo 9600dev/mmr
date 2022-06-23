@@ -1,14 +1,12 @@
 import click
-import nest_asyncio
 import signal
-nest_asyncio.apply()
 import asyncio
 import aioreactive as rx
 
 from trader.common.logging_helper import setup_logging, log_callstack_debug
 logging = setup_logging(module_name='trading_runtime')
 
-from asyncio import iscoroutinefunction
+from asyncio import iscoroutinefunction, AbstractEventLoop
 from trader.container import Container
 from trader.trading.trading_runtime import Trader
 from trader.common.helpers import get_network_ip
@@ -47,25 +45,26 @@ def main(simulation: bool,
     # useful to find out where rogue subscriptions that aren't disposed of are
     # rx.observers.AsyncAnonymousObserver.__init__ = monkeypatch_asyncanonymousobserver  # type: ignore
 
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     container = Container(config)
     trader = container.resolve(Trader, simulation=simulation)
 
-    def stop_loop(loop):
+    def stop_loop(loop: AbstractEventLoop):
         if loop.is_running():
             loop.run_until_complete(trader.shutdown())
             pending_tasks = [
                 task for task in asyncio.all_tasks() if not task.done()
             ]
 
-            for task in pending_tasks:
-                logging.debug(task.print_stack())
+            if len(pending_tasks) > 0:
+                for task in pending_tasks:
+                    logging.debug(task.get_stack())
 
-            logging.debug('waiting five seconds for pending tasks')
-            asyncio.run(asyncio.wait(pending_tasks, timeout=5))
+                logging.debug('waiting five seconds for pending tasks')
+                loop.run_until_complete(asyncio.wait(pending_tasks, timeout=5))
             loop.stop()
-
-    # required for nested asyncio calls and avoids RuntimeError: This event loop is already running
-    loop = asyncio.get_event_loop()
 
     if simulation:
         # ib_client = HistoricalIB(logger=logging)
@@ -73,7 +72,7 @@ def main(simulation: bool,
 
     try:
         loop.set_debug(enabled=True)
-        # loop.add_signal_handler(signal.SIGINT, stop_loop, loop)
+        loop.add_signal_handler(signal.SIGINT, stop_loop, loop)
 
         trader.connect()
 
@@ -83,8 +82,6 @@ def main(simulation: bool,
         # start the trader
         logging.debug('starting trader run() loop')
         trader.run()
-
-        asyncio.get_event_loop().run_forever()
 
     except KeyboardInterrupt:
         logging.info('KeyboardInterrupt')

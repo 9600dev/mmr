@@ -51,7 +51,7 @@ is_repl = False
 
 def connect():
     if not remoted_client.connected:
-        asyncio.run(remoted_client.connect())
+        asyncio.get_event_loop().run_until_complete(remoted_client.connect())
 
 remoted_client = RemotedClient[TraderServiceApi]()
 connect()
@@ -239,7 +239,7 @@ def resolve(
         client = container.resolve(IBAIORx)
         IBAIORx.client_id_counter = randint(20, 99)
         client.connect()
-        contract = asyncio.run(client.get_conid(
+        contract = asyncio.get_event_loop().run_until_complete(client.get_conid(
             symbols=symbol,
             secType=sec_type,
             primaryExchange=primary_exchange,
