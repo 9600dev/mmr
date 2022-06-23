@@ -4,9 +4,11 @@ import logging.config
 import logging
 import coloredlogs
 import warnings
+import inspect
 from rich.logging import RichHandler
 from logging import Logger
-from typing import Dict
+from typing import Dict, cast, List
+from types import FrameType
 
 global_loggers: Dict[str, Logger] = {}
 
@@ -71,3 +73,27 @@ def suppress_all():
 
 def verbose():
     set_all_log_level(logging.DEBUG)
+
+def get_callstack(frames: int = 0):
+    def walk_stack(frame: FrameType, counter: int = 1) -> List[str]:
+        mod = inspect.getmodule(frame)
+        m = mod.__name__ if mod else ''
+        if frames > 0 and counter == frames:
+            return [str(m + '.' + frame.f_code.co_name)]
+
+        if frame.f_back:
+            return [str(m + '.' + frame.f_code.co_name)] + walk_stack(frame.f_back, counter + 1)
+        else:
+            return [m + '.' + str(frame.f_code.co_name)]
+
+    current_frame = inspect.currentframe()
+    if current_frame and current_frame.f_back:
+        return walk_stack(cast(FrameType, current_frame.f_back))
+
+def log_callstack_debug(frames: int = 0, module_filter: str = ''):
+    callstack = get_callstack(frames)
+    if callstack:
+        if module_filter:
+            callstack = [a for a in callstack if module_filter in a]
+        result = ' <- '.join(callstack)
+        logging.debug(result)

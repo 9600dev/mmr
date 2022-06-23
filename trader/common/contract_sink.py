@@ -49,7 +49,7 @@ class ContractSink(rx.Observable, Observer):
         return self.subject
 
     def dispose(self):
-        print('dispose')
+        self.subject.dispose()
 
     # todo this is a duplicate from the Helpers class because we can't have circular imports
     def symbol_from_contract(self, contract: Contract) -> int:

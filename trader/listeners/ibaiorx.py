@@ -152,8 +152,21 @@ class IBAIORx():
 
         return self
 
-    def disconnect(self):
+    async def shutdown(self):
+        logging.debug('ibaiorx.shutdown(), disconnecting clients and disposing aioreactive subscriptions')
         self.ib.disconnect()
+
+        if self.history_worker:
+            await self.history_worker.disconnect()
+
+        await self.market_data_subject.dispose_async()
+        await self.historical_data_subject.dispose_async()
+        await self.bars_data_subject.dispose_async()
+        await self.positions_subject.dispose_async()
+        await self.portfolio_subject.dispose_async()
+        await self.trades_subject.dispose_async()
+        await self._contracts_source.dispose_async()
+
 
     def is_connected(self):
         return self.ib.isConnected()
@@ -183,7 +196,7 @@ class IBAIORx():
         )
 
         disposable = await xs.subscribe_async(observer)
-        self.trades_subject.call_event_subscriber_sync(lambda: self.ib.placeOrder(contract, order))
+        await self.trades_subject.call_event_subscriber_sync(lambda: self.ib.placeOrder(contract, order))
         # todo, figure out what to do here with the disposable
         # should it cancel the order, or just stop listening?
         return disposable
@@ -200,7 +213,7 @@ class IBAIORx():
         )
 
         disposable = await xs.subscribe_async(observer)
-        self.trades_subject.call_event_subscriber_sync(lambda: self.ib.cancelOrder(order))
+        await self.trades_subject.call_event_subscriber_sync(lambda: self.ib.cancelOrder(order))
 
         return disposable
 
@@ -220,7 +233,7 @@ class IBAIORx():
 
         # reqMktData immediately returns with an empty ticker
         # and starts the subscription
-        self._contracts_source.call_event_subscriber_sync(
+        await self._contracts_source.call_event_subscriber_sync(
             lambda: self.ib.reqMktData(
                 contract=contract,
                 genericTickList='',
@@ -264,7 +277,7 @@ class IBAIORx():
         if contract in self.bars_cache:
             return self.bars_cache[contract]
 
-        self.bars_data_subject.call_event_subscriber_sync(
+        await self.bars_data_subject.call_event_subscriber_sync(
             lambda: self.ib.reqRealTimeBars(contract, bar_size, str(wts), False)
         )
 
@@ -318,14 +331,16 @@ class IBAIORx():
 
         cached_observer = AsyncCachedObserver(asend=update_ticker)
 
-        xs = pipe(
-            observable,
-            Pipe[Ticker].take(1)
-        )
+        # xs = pipe(
+        #     observable,
+        #     Pipe[Ticker].take(1)
+        # )
 
-        disposable = await xs.subscribe_async(cached_observer)
+        disposable = await observable.subscribe_async(cached_observer)
         # todo if we error out here, we're waiting forever.
-        return await cached_observer.wait_value()
+        value = await cached_observer.wait_value()
+        await disposable.dispose_async()
+        return value
 
     async def get_contract_details(self, contract: Contract) -> List[ContractDetails]:
         result = await self.ib.reqContractDetailsAsync(contract)

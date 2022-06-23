@@ -13,18 +13,16 @@ from eventkit import Event, event
 
 from expression.system.disposable import AsyncDisposable
 
-
 # With aioreactive you subscribe observers to observables
-
 TSource = TypeVar('TSource')
 TResult = TypeVar('TResult')
 TKey = TypeVar('TKey')
 Any = TypeVar('Any')
 
-async def anoop(value: Optional[Any] = None):
+async def anoop(value: Optional[Any] = None):  # type: ignore
     pass
 
-# With aioreactive you subscribe observers to observables
+
 class AsyncCachedObserver(AsyncObserver[TSource]):
     def __init__(self,
                  asend: Callable[[TSource], Awaitable[None]] = anoop,
@@ -134,6 +132,7 @@ class AsyncCachedSubject(AsyncMultiSubject[TSource], AsyncCachedObservable[TSour
         async def dispose() -> None:
             if observer in self._observers:
                 self._observers.remove(observer)
+            return await self.dispose_async()
 
         result = AsyncDisposable.create(dispose)
 
@@ -208,12 +207,11 @@ class AsyncEventSubject(AsyncCachedSubject[TSource]):
         if result:
             await self.asend(result)
 
-    def call_event_subscriber_sync(self, callable_lambda: Callable):
+    async def call_event_subscriber_sync(self, callable_lambda: Callable):
         result = callable_lambda()
         if result:
-            print('call_event_subscriber_sync')
-            test = asyncio.run(self.asend(result))
-            print('done')
+            await self.asend(result)
+            return result
 
     async def call_cancel_subscription(self, awaitable_canceller: Awaitable):
         await awaitable_canceller
@@ -232,32 +230,3 @@ def awaitify(sync_func):
     async def async_func(*args, **kwargs):
         return sync_func(*args, **kwargs)
     return async_func
-
-
-# class SubscribeEventHelper(Generic[TKey, TValue]):
-#     def __init__(self, source: AsyncEventSubject[TValue]):
-#         self.cache: Dict[TKey, rx.AsyncObservable[TValue]] = {}
-#         self.source: AsyncEventSubject[TValue] = source
-#         self.subject = AsyncCachedSubject[TValue]()
-
-#     async def subscribe(self, key: TKey,
-#                         source: AsyncEventSubject[TValue],
-#                         filter_function: Callable[[AsyncObservable[TValue]], AsyncObservable[TValue]]
-#                         ) -> rx.AsyncObservable[TValue]:
-
-#         if key in self.cache:
-#             return self.cache[key]
-#         else:
-#             # call, then attach a filter to the result
-#             await source.subscribe_async(self.subject)
-
-#             xs = pipe(
-#                 self.subject,
-#                 filter_function
-#             )
-#             self.cache[key] = xs
-#             return self.cache[key]
-
-#     async def on_event_update(self, event_update: TValue):
-#         await self.subject.asend(event_update)
-

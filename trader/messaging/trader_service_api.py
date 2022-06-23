@@ -58,5 +58,5 @@ class TraderServiceApi(RPCHandler):
         return self.trader.cancel_order(order_id)
 
     @RPCHandler.rpcmethod
-    def get_snapshot(self, contract: Contract, delayed: bool) -> Ticker:
-        return asyncio.run(self.trader.client.get_snapshot(contract=contract, delayed=delayed))
+    async def get_snapshot(self, contract: Contract, delayed: bool) -> Ticker:
+        return await self.trader.client.get_snapshot(contract=contract, delayed=delayed)

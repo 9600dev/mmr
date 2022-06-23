@@ -42,7 +42,7 @@ def test_platform(ib_server_address: str,
         result = asyncio.run(ibrx.get_conid(['AMD']))
         if not result:
             raise Exception('cannot get AMD Contract details')
-        ibrx.disconnect()
+        asyncio.run(ibrx.shutdown())
     except Exception as ex:
         logging.error('interactive brokers connection could not be made: {}'.format(ex))
         succeeded = False

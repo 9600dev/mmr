@@ -14,7 +14,7 @@ logging = setup_logging(module_name='book')
 
 from typing import List, Dict, Tuple, Union, cast, Optional
 
-class Book(AsyncEventSubject[Union[Trade, Order]]):
+class BookSubject(AsyncEventSubject[Union[Trade, Order]]):
     def __init__(self):
         self.orders: Dict[int, List[Order]] = {}
         self.trades: Dict[int, List[Trade]] = {}

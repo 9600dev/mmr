@@ -41,8 +41,15 @@
 ## aioreactive
 
 * Must dispose of disposables, otherwise the Mailbox processor used for processing messages passed through to Observables will continue to hold asyncio tasks. This causes the dreaded "Task was destroyed, but still PENDING" exception when closing down the loop.
+* observable = rx.from_async(client.get_contract_history(..))
+* await observable.subscribe_async(rx.AsyncAnonymousObserver(my_asend))
+    * subscribe_async sets up a disposable, and a token (cancellation token?), then calls safe_observer
+    * save_observer sets up a MailboxProcessor and calls start, passing in the worker() message_loop
+    * this message_loop waits for inbox.receive() not sure what this does yet
+    * MsgKind.ON_NEXT calls msg.accept_observer (which calls 'obv.asend(self.value)')
 
 ## Devenv reading
+
 
 * https://realpython.com/dependency-management-python-poetry/#add-poetry-to-an-existing-project
 *

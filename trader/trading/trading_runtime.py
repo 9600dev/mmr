@@ -42,7 +42,7 @@ from trader.common.observers import ConsoleObserver, ArcticObserver, ComplexCons
 from trader.data.data_access import SecurityDefinition, TickData
 from trader.data.universe import UniverseAccessor, Universe
 from trader.container import Container
-from trader.trading.book import Book
+from trader.trading.book import BookSubject
 from trader.trading.algo import Algo
 from trader.trading.portfolio import Portfolio
 from trader.trading.executioner import Executioner
@@ -110,7 +110,7 @@ class Trader(metaclass=Singleton):
         # the strategies we're using
         self.strategies: List[Strategy] = []
         # current order book (outstanding orders, trades etc)
-        self.book: Book = Book()
+        self.book: BookSubject = BookSubject()
         # portfolio (current and past positions)
         self.portfolio: Portfolio = Portfolio()
         # takes care of execution of orders
@@ -134,6 +134,22 @@ class Trader(metaclass=Singleton):
         self.client.connect()
         self.zmq_rpc_server = RPCServer[bus.TraderServiceApi](bus.TraderServiceApi(self))
         self.run(self.zmq_rpc_server.serve())
+
+    async def shutdown(self):
+        logging.debug('trading_runtime.shutdown()')
+        self.client.ib.connectedEvent -= self.connected_event
+        self.client.ib.disconnectedEvent -= self.disconnected_event
+        self.client.ib.disconnect()
+
+        for contract, sink in self.contract_subscriptions.items():
+            sink.dispose()
+
+        for security_definition, security_datastream in self.market_data_subscriptions.items():
+            await security_datastream.dispose_async()
+
+        await self.book.dispose_async()
+
+        await self.client.shutdown()
 
     def reconnect(self):
         # this will force a reconnect through the disconnected event
