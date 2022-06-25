@@ -12,6 +12,8 @@ import datetime as dt
 import aioreactive as rx
 from aioreactive.subject import AsyncMultiSubject
 from aioreactive.types import AsyncObservable, AsyncObserver
+from aioreactive.observers import AsyncAnonymousObserver, auto_detach_observer, safe_observer
+from aioreactive.observables import AsyncAnonymousObservable
 from expression.system.disposable import Disposable, AsyncDisposable
 import pandas as pd
 import ib_insync as ibapi
@@ -83,8 +85,21 @@ class IBAIORx():
 
         self.ib = IB()
 
+        # def mapper(tickers: Set[Ticker]) -> rx.AsyncObservable[Ticker]:
+        #     return rx.from_iterable(tickers)
+
         def mapper(tickers: Set[Ticker]) -> rx.AsyncObservable[Ticker]:
-            return rx.from_iterable(tickers)
+            # warning: for whatever reason, we can get either a Set of tickers or a single ticker.
+            # if this raises an exception, all hell brakes loose - we get multiple Tasks
+            # that sit around pending, and all sorts...
+            if isinstance(tickers, Set):
+                t = tickers.pop()
+                return rx.from_iterable(t)
+            elif isinstance(tickers, Ticker):
+                return rx.from_iterable(tickers)
+                return rx.single(tickers)
+            else:
+                raise ValueError(tickers)
 
         self.market_data_subject: rx.AsyncSubject[Ticker] = rx.AsyncSubject[Ticker]()
         self.historical_data_subject: rx.AsyncSubject[pd.DataFrame] = rx.AsyncSubject[pd.DataFrame]()
@@ -93,17 +108,19 @@ class IBAIORx():
         self.portfolio_subject = AsyncEventSubject[PortfolioItem](eventkit_event=self.ib.updatePortfolioEvent)
         self.trades_subject = AsyncEventSubject[Trade](eventkit_event=self.ib.orderStatusEvent)
         self._contracts_source = AsyncEventSubject[Set[Ticker]](eventkit_event=self.ib.pendingTickersEvent)
-        # we have to flatten from Set[Ticker] to a single stream of tickers
-        # that each subscriber can filter on
-        self.contracts_subject = pipe(
+
+        mapped: AsyncObservable[Ticker] = pipe(
             self._contracts_source,
             rx.flat_map(mapper)
         )
+
+        self.contracts_subject = AsyncAnonymousObservable(mapped.subscribe_async)
 
         self.contracts_cache: Dict[Contract, rx.AsyncObservable] = {}
         self.bars_cache: Dict[Contract, rx.AsyncObservable[RealTimeBarList]] = {}
         self.historical_subscribers: Dict[Contract, int] = {}
         self.history_worker: Optional[IBHistoryWorker] = None
+        self._shutdown: bool = True
 
         # try binding helper methods to things we care about
         Contract.to_df = Helpers.to_df  # type: ignore
@@ -129,6 +146,7 @@ class IBAIORx():
 
         # todo set in the readme that the master client ID has to be set to 5
         IBAIORx.client_id_counter += 1
+        self._shutdown = False
 
         if self.__handle_error not in self.ib.errorEvent:
             self.ib.errorEvent += self.__handle_error
@@ -150,8 +168,11 @@ class IBAIORx():
         return self
 
     async def shutdown(self):
+        if self._shutdown:
+            logging.debug('ibaiorx is already shutdown')
+            return
+
         logging.debug('ibaiorx.shutdown(), disconnecting clients and disposing aioreactive subscriptions')
-        self.ib.disconnect()
 
         if self.history_worker:
             await self.history_worker.disconnect()
@@ -164,6 +185,8 @@ class IBAIORx():
         await self.trades_subject.dispose_async()
         await self._contracts_source.dispose_async()
 
+        self.ib.disconnect()
+        self._shutdown = True
 
     def is_connected(self):
         return self.ib.isConnected()
@@ -219,7 +242,7 @@ class IBAIORx():
         contract: Contract,
         one_time_snapshot: bool = False,
         delayed: bool = False,
-    ) -> rx.AsyncObservable[Ticker]:
+    ) -> rx.AsyncAnonymousObservable[Ticker]:
         if delayed:
             # 1 = Live
             # 2 = Frozen
@@ -242,7 +265,7 @@ class IBAIORx():
             self.ib.reqMarketDataType(1)
             logging.debug('reqMarketDataType(1)')
 
-        xs = pipe(
+        xs: AsyncAnonymousObservable[Ticker] = pipe(
             self.contracts_subject,
             rx.filter(lambda ticker: self._filter_contract(contract, ticker)),  # type: ignore
         )
@@ -313,26 +336,43 @@ class IBAIORx():
         return await self.ib.reqExecutionsAsync()
 
     async def get_snapshot(self, contract: Contract, delayed: bool = False) -> Ticker:
-        populated_ticker: Ticker = Ticker()
+        _task: asyncio.Event = asyncio.Event()
+        populated_ticker: Optional[Ticker] = None
 
         async def update_ticker(ticker: Ticker):
+            nonlocal populated_ticker
             populated_ticker = ticker
+            _task.set()
+
+        async def athrow(ex):
+            logging.debug(ex)
+            _task.set()
+            raise ex
+
+        async def aclose():
+            logging.debug('get_snapshot() aclose')
 
         # we've got to subscribe, then wait for the first Ticker to arrive in the events
         # cachedeventsource, subscribers get the last value after calling subscribe
-        observable = await self.__subscribe_contract(
+        observable: AsyncAnonymousObservable[Ticker] = await self.__subscribe_contract(
             contract=contract,
             one_time_snapshot=True,
             delayed=delayed,
         )
 
-        cached_observer = AsyncCachedObserver(asend=update_ticker)
-        # no tasks created here.
-        disposable = await observable.subscribe_async(cached_observer)
-        # todo if we error out here, we're waiting forever.
-        value = await cached_observer.wait_value()
-        await disposable.dispose_async()
-        return value
+        xs: AsyncAnonymousObservable[Ticker] = pipe(
+            observable,
+            rx.take(1)  # type: ignore
+        )
+
+        observer = AsyncAnonymousObserver(asend=update_ticker, athrow=athrow, aclose=aclose)
+        safe_obv, auto_detach = auto_detach_observer(obv=observer)
+        subscription = await pipe(safe_obv, xs.subscribe_async, auto_detach)
+
+        await _task.wait()
+        await safe_obv.aclose()
+        await asyncio.sleep(0.2)
+        return cast(Ticker, populated_ticker)
 
     async def get_contract_details(self, contract: Contract) -> List[ContractDetails]:
         result = await self.ib.reqContractDetailsAsync(contract)

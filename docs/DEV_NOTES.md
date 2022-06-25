@@ -47,9 +47,53 @@
     * save_observer sets up a MailboxProcessor and calls start, passing in the worker() message_loop
     * this message_loop waits for inbox.receive() not sure what this does yet
     * MsgKind.ON_NEXT calls msg.accept_observer (which calls 'obv.asend(self.value)')
+    * aioreactive 3x filter: total (ms): 2388.098
+    * inline if else: total (ms): 850.931
+
 
 ## Devenv reading
 
 
 * https://realpython.com/dependency-management-python-poetry/#add-poetry-to-an-existing-project
 *
+
+## Random
+
+
+Observable xs = pipe(
+    subject
+    rx.take(2)
+)
+
+* MailboxProcessor.start is ultimately the reason why we're starting tasks.
+
+* safe_observer() takes a observer, and an action to do on dispose_async()
+    * safe_observer creates and AnonymousObservable which "sits on top of" the passed in observer. Passing through the asend/athrow/aclose, but injects the passed in action to dispose/cancel. In our case: cts.cancel(), which calls task.close()
+    * I think safe_observer is doing all the heavy lifting of starting and stopping the tasks.
+    * if the worker loop of safe_observer (started by a task) is no longer running, the task presumably completes. Close or Error is required for that.
+
+* auto_detach_observer
+
+
+* take(Observable) -> Observable
+* take() takes an observable (subject), builds a subscribe_async method
+    * the subscribe_async method OBSERVES that observable and takes only the required elements
+    * it wraps the passed in Observer in safe_obv via auto_detach
+    * it creates an AsyncAnonymousObserver, wiring up its own asend() method to do the /take/ filtering, but wires through athrow and aclose to the passed in observer.
+    * pipe wires up the subject, through the anonymousobserver, through to auto_detach.
+    *
+
+* start_immediate() wires up the "task.cancel()" method to the CancellationToken "listeners", sounds like you can have multiple actions if you want to hit the "cancel" button on the CancellationToken
+    * Calling "dispose" on a CancellationTokenSource will eventually find that token and invoke the listener, which is task.cancel()
+*
+
+* rx.take(1) call's "aclose()" or OnCompleted when it hits
+* just having a "rx.filter" with no asend doesn't spin up any tasks - not calling asend/aclose doesn't make a difference
+* rx.take(3) calling subject.asend(5) once leaves the task open
+* rx.take(3) calling subject.asned(5) once then a aclose() closes the task
+* auto_detatch_observer calls "cancel()"
+    * CancellationTokenSource -> cancel() self.dispose()
+    * dispose() for all listeners?? call the continuation
+    * which in this case is cb() task.cancel()
+
+

@@ -2,16 +2,30 @@ from abc import abstractmethod
 import aioreactive as rx
 import datetime as dt
 import asyncio
+import datetime
 import pandas as pd
 import contextlib
 from asyncio import iscoroutinefunction
 from aioreactive.types import AsyncObserver, AsyncObservable
 from aioreactive.subject import AsyncMultiSubject
+from aioreactive.create import canceller
+from aioreactive.observers import safe_observer, auto_detach_observer, AsyncAnonymousObserver
+from aioreactive.observables import AsyncAnonymousObservable
 from typing import TypeVar, Optional, Callable, Awaitable, Tuple, Generic, Dict, cast, List, Union
 from functools import wraps
 from eventkit import Event, event
-
-from expression.system.disposable import AsyncDisposable
+from expression.system import CancellationTokenSource
+from expression.core import (
+    MailboxProcessor,
+    TailCall,
+    TailCallResult,
+    aiotools,
+    fst,
+    match,
+    pipe,
+    tailrec_async,
+)
+from expression.system.disposable import AsyncDisposable, AsyncAnonymousDisposable
 
 # With aioreactive you subscribe observers to observables
 TSource = TypeVar('TSource')
@@ -242,12 +256,92 @@ class AsyncEventSubject(AsyncCachedSubject[TSource]):
         return result
 
     async def dispose_async(self) -> None:
-        # I think we need to call close on all the observers
+        await self.aclose()
+
         for observer in self._observers:
-            await observer.aclose()
             self._observers.remove(observer)
 
         self._is_disposed = True
+
+
+# _TSource = TypeVar("_TSource")
+
+# class AsyncEventSubject(Generic[TSource]):
+#     def __init__(self, eventkit_event: Optional[Union[Event, List[Event]]] = None):
+#         self.cts = CancellationTokenSource()
+#         self.token = self.cts.token
+#         self.observers: List[AsyncObserver] = []
+
+#         super().__init__()
+#         self.eventkit_event: List[Event] = []
+#         if eventkit_event and type(eventkit_event) is list:
+#             self.eventkit_event = eventkit_event
+#             for e in eventkit_event:
+#                 e += self.on_eventkit_update
+#         elif eventkit_event and type(eventkit_event) is Event:
+#             self.eventkit_event += [eventkit_event]
+#             e = cast(Event, eventkit_event)
+#             e += self.on_eventkit_update
+
+#     async def subscribe_to_eventkit_event(self, eventkit: Union[List[Event], Event]) -> None:
+#         if type(eventkit) is Event:
+#             self.eventkit_event += [eventkit]
+#             eventkit = cast(Event, eventkit)
+#             eventkit += self.on_eventkit_update
+#         elif type(eventkit) is list:
+#             for e in eventkit:
+#                 e += self.on_eventkit_update
+
+#     async def call_event_subscriber(self, awaitable_event_subscriber: Awaitable[TSource]) -> None:
+#         result = await awaitable_event_subscriber
+#         # todo this doesn't feel right. I want isinstance(result, TSource) but that doesn't work
+#         if result:
+#             await self.asend(result)
+
+#     async def call_event_subscriber_sync(self, callable_lambda: Callable):
+#         result = callable_lambda()
+#         if result:
+#             await self.asend(result)
+#             return result
+
+#     async def call_cancel_subscription(self, awaitable_canceller: Awaitable):
+#         await awaitable_canceller
+#         await self.aclose()
+
+#     def call_cancel_subscription_sync(self, callable_lambda: Callable):
+#         callable_lambda()
+#         asyncio.get_event_loop().run_until_complete(self.aclose())
+
+#     async def on_eventkit_update(self, e: TSource, *args):
+#         await self.asend(e)
+
+#     async def asend(self, val: TSource):
+#         for observer in self.observers:
+#             await observer.asend(val)
+
+#     async def dispose_async(self) -> None:
+#         for observer in self.observers:
+#             await observer.aclose()
+
+#     async def subscribe_async(self, observer: AsyncObserver[TSource]) -> AsyncDisposable:
+#         async def dispose() -> None:
+#             if observer in self.observers:
+#                 await observer.aclose()
+#                 self.observers.remove(observer)
+
+#         async def _subscribe_async(observer: AsyncObserver[TSource]) -> AsyncDisposable:
+#             self.observers.append(obv)
+#             return AsyncAnonymousDisposable(dispose)
+
+#         safe_obs, auto_detach_disposable = auto_detach_observer(observer)
+
+#         async def asend(value: TSource) -> None:
+#             await safe_obs.asend(value)
+
+#         obv = AsyncAnonymousObserver(asend, safe_obs.athrow, safe_obs.aclose)
+#         # self.observers.append(obv)
+
+#         return await pipe(obv, _subscribe_async, auto_detach_disposable)
 
 
 def awaitify(sync_func):
