@@ -16,7 +16,7 @@ def setup_logging(default_path='/home/trader/mmr/configs/logging.yaml',
                   module_name='root',
                   default_level=logging.DEBUG,
                   env_key='LOG_CFG',
-                  suppress_external_info=False):
+                  suppress_external_info=False) -> Logger:
     global global_loggers
 
     # ipython repl has a nasty habit of being polluted with debug crap from parso

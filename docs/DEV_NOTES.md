@@ -55,7 +55,7 @@
 
 
 * https://realpython.com/dependency-management-python-poetry/#add-poetry-to-an-existing-project
-*
+* https://jsvine.github.io/visidata-cheat-sheet/en/
 
 ## Random
 

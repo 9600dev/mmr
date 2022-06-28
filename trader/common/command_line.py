@@ -206,6 +206,22 @@ class NotRequiredIf(click.Option):
 def common_options():
     def inner_func(function):
         function = click.option(
+            '--zmq_pubsub_server_address',
+            help='zero mq publish/subscribe ticker update server address, eg: 127.0.0.1'
+        )(function)
+        function = click.option(
+            '--zmq_pubsub_server_port',
+            help='zero mq publish/subscribe ticker update server port, eg: 42002'
+        )(function)
+        function = click.option(
+            '--zmq_rpc_server_address',
+            help='zero mq rpc server address, eg: 127.0.0.1'
+        )(function)
+        function = click.option(
+            '--zmq_rpc_server_port',
+            help='zero mq rpc server port, eg: 42001'
+        )(function)
+        function = click.option(
             '--arctic_universe_library',
             help='arctic library that describes securities universes, eg: Universes'
         )(function)

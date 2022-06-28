@@ -16,7 +16,7 @@ import trader.messaging.trader_service_api as bus
 from asyncio.events import AbstractEventLoop
 from aioreactive.types import AsyncObservable, Projection
 from expression.core import pipe
-from aioreactive.observers import AsyncAnonymousObserver
+from aioreactive.observers import AsyncAnonymousObserver, auto_detach_observer, safe_observer
 from enum import Enum
 
 from trader.common.logging_helper import setup_logging
@@ -49,7 +49,7 @@ from trader.common.reactive import AsyncCachedObserver, AsyncEventSubject, Async
 from trader.common.singleton import Singleton
 from trader.common.helpers import get_network_ip, Pipe, dateify, timezoneify, ListHelper
 from trader.data.market_data import MarketData, SecurityDataStream
-from trader.messaging.clientserver import RPCServer
+from trader.messaging.clientserver import RPCServer, TopicPubSub
 
 from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar, cast, Union
 
@@ -117,6 +117,7 @@ class Trader(metaclass=Singleton):
         self.universes: List[Universe]
         self.market_data = 3
         self.zmq_rpc_server: RPCServer[bus.TraderServiceApi]
+        self.zmq_pubsub_server: TopicPubSub[Ticker]
 
     @backoff.on_exception(backoff.expo, ConnectionRefusedError, max_tries=10, max_time=120)
     def connect(self):
@@ -131,6 +132,10 @@ class Trader(metaclass=Singleton):
         self.client.ib.disconnectedEvent += self.disconnected_event
         self.client.connect()
         self.zmq_rpc_server = RPCServer[bus.TraderServiceApi](bus.TraderServiceApi(self))
+        self.zmq_pubsub_server = TopicPubSub[Ticker](
+            zmq_pubsub_server_address=self.zmq_pubsub_server_address,
+            zmq_pubsub_server_port=self.zmq_pubsub_server_port
+        )
         self.run(self.zmq_rpc_server.serve())
 
     async def shutdown(self):
@@ -219,6 +224,27 @@ class Trader(metaclass=Singleton):
         universe = self.universe_accessor.get('portfolio')
         universe.security_definitions.clear()
         self.universe_accessor.update(universe)
+
+    async def publish_contract(self, contract: Contract, delayed: bool) -> bool:
+        async def asend(ticker: Ticker):
+            await self.zmq_pubsub_server.publisher(ticker)
+
+        async def aclose():
+            logging.debug('subscribe_contract.aclose()')
+
+        async def athrow(ex):
+            logging.debug('subscribe_contract.athrow()')
+
+        observable: rx.AsyncObservable[Ticker] = await self.client.subscribe_contract(
+            contract=contract,
+            one_time_snapshot=False,
+            delayed=delayed,
+        )
+
+        observer = AsyncAnonymousObserver(asend=asend, aclose=aclose, athrow=athrow)
+        safe_obs, auto_detach = auto_detach_observer(observer)
+        subscription = pipe(safe_obs, observable.subscribe_async, auto_detach)
+        return True
 
     async def update_portfolio_universe(self, portfolio_item: PortfolioItem):
         """

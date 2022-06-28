@@ -10,9 +10,11 @@ import pandas as pd
 import scripts.universes_cli as universes_cli
 import trader.batch.ib_history_queuer as ib_history_queuer
 import click_repl
-import aioreactive
+import aioreactive as rx
 
 from aioreactive import AsyncAnonymousObservable, AsyncAwaitableObserver, AsyncAnonymousObserver
+from aioreactive.types import AsyncObservable, AsyncObserver
+from aioreactive.observers import auto_detach_observer
 from typing import Type, TypeVar, Dict, Optional, List, cast, Tuple, Any
 from trader.container import Container
 from trader.data.data_access import SecurityDefinition, TickData, DictData
@@ -40,7 +42,7 @@ from trader.listeners.ibaiorx import WhatToShow
 from trader.data.market_data import MarketData
 from scripts.chain import plot_chain
 from trader.common.helpers import contract_from_dict
-from trader.messaging.clientserver import RemotedClient
+from trader.messaging.clientserver import RemotedClient, TopicPubSub
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.common.helpers import *
 
@@ -279,7 +281,7 @@ def snapshot(
             currency=r['currency']
         )
 
-        ticker = remoted_client.rpc(return_type=Ticker).get_snapshot(contract, True)
+        ticker = asyncio.run(remoted_client.rpc(return_type=Ticker).get_snapshot(contract, True))
         snap = {
             'symbol': ticker.contract.symbol if ticker.contract else '',
             'exchange': ticker.contract.exchange if ticker.contract else '',
@@ -301,6 +303,89 @@ def snapshot(
         rich_dict(snap)
     else:
         click.echo('no results found')
+
+
+
+@main.group()
+def subscribe():
+    pass
+
+
+@subscribe.command('start')
+@click.option('--symbol', required=True, help='symbol to snapshot')
+@click.option('--delayed', required=False, default=False, is_flag=True, help='use delayed data?')
+@click.option('--primary_exchange', required=False, help='primary exchange for symbol')
+@common_options()
+@default_config()
+def subscribe_start(
+    symbol: str,
+    delayed: bool,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    primary_exchange: str,
+    **args,
+):
+    result = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
+    if len(result) >= 1:
+        r = result[0]
+        contract = Contract(
+            conId=r['conId'],
+            symbol=r['symbol'],
+            exchange=r['exchange'],
+            primaryExchange=r['primaryExchange'],
+            currency=r['currency']
+        )
+        remoted_client.rpc(return_type=Ticker).publish_contract(contract, delayed)
+    else:
+        click.echo('no results found')
+
+
+@subscribe.command('listen')
+@common_options()
+@default_config()
+def subscribe_listen(
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    zmq_pubsub_server_address: str,
+    zmq_pubsub_server_port: int,
+    primary_exchange: str,
+    **args,
+):
+    pass
+
+        # sub = TopicPubSub(
+        #     zmq_pubsub_server_address=zmq_pubsub_server_address,
+        #     zmq_pubsub_server_port=zmq_pubsub_server_port
+        # )
+
+        # async def _subscribe():
+        #     async def asend(ticker: Ticker):
+        #         snap = {
+        #             'symbol': ticker.contract.symbol if ticker.contract else '',
+        #             'exchange': ticker.contract.exchange if ticker.contract else '',
+        #             'primaryExchange': ticker.contract.primaryExchange if ticker.contract else '',
+        #             'currency': ticker.contract.currency if ticker.contract else '',
+        #             'time': ticker.time,
+        #             'bid': ticker.bid,
+        #             'bidSize': ticker.bidSize,
+        #             'ask': ticker.ask,
+        #             'askSize': ticker.askSize,
+        #             'last': ticker.last,
+        #             'lastSize': ticker.lastSize,
+        #             'open': ticker.open,
+        #             'high': ticker.high,
+        #             'low': ticker.low,
+        #             'close': ticker.close,
+        #             'halted': ticker.halted
+        #         }
+        #         rich_dict(snap)
+
+        #     observable: AsyncObservable[Ticker] = await sub.subscriber()
+        #     observer = AsyncAnonymousObserver(asend=asend)
+        #     safe_obv, auto_detach = auto_detach_observer(observer)
+        #     subscription = pipe(safe_obv, observable.subscribe_async, auto_detach)
+
+        # await _subscribe()
 
 
 @main.group()

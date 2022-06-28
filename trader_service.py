@@ -23,7 +23,7 @@ def monkeypatch_asyncanonymousobserver(
         asend: Callable[[_TSource], Awaitable[None]] = anoop,
         athrow: Callable[[Exception], Awaitable[None]] = anoop,
         aclose: Callable[[], Awaitable[None]] = anoop
-    ) -> None:
+) -> None:
     log_callstack_debug(frames=0, module_filter='')
     assert iscoroutinefunction(asend)
     self._asend = asend
@@ -62,7 +62,7 @@ def main(simulation: bool,
                 for task in pending_tasks:
                     logging.debug(task.get_stack())
 
-                logging.debug('waiting five seconds for pending tasks')
+                logging.debug('waiting five seconds for {} pending tasks'.format(len(pending_tasks)))
                 loop.run_until_complete(asyncio.wait(pending_tasks, timeout=5))
             loop.stop()
 

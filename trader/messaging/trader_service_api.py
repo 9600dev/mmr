@@ -1,10 +1,22 @@
 import asyncio
+import sys
+import os
+import aioreactive as rx
+
+# in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
+# PACKAGE_PARENT = '../..'
+# SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
+# sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
+
 from dataclasses import dataclass
 from ib_insync.objects import Position, PortfolioItem
 from ib_insync.contract import Contract
 from ib_insync.order import Order, Trade
 from ib_insync.ticker import Ticker
 from trader.container import Container
+from aioreactive.observables import AsyncAnonymousObservable
+from aioreactive.observers import AsyncAnonymousObserver, safe_observer, auto_detach_observer
+from expression.core import pipe
 
 import trader.trading.trading_runtime as runtime
 from trader.data.universe import Universe
@@ -12,6 +24,10 @@ from trader.common.helpers import DictHelper
 
 from typing import List, Dict, Tuple, Optional
 from trader.messaging.clientserver import RPCHandler
+
+from trader.common.logging_helper import setup_logging
+logging = setup_logging(module_name='trader_service_api')
+
 
 class TraderServiceApi(RPCHandler):
     def __init__(self, trader):
@@ -60,3 +76,7 @@ class TraderServiceApi(RPCHandler):
     @RPCHandler.rpcmethod
     async def get_snapshot(self, contract: Contract, delayed: bool) -> Ticker:
         return await self.trader.client.get_snapshot(contract=contract, delayed=delayed)
+
+    @RPCHandler.rpcmethod
+    def publish_contract(self, contract: Contract, delayed: bool) -> bool:
+        return asyncio.run(self.trader.publish_contract(contract, delayed))
