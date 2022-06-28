@@ -250,6 +250,7 @@ people who lose the money."
 ## Trading Ideas
 
 * [10 Under-the-cover Trading Hacks](https://twitter.com/FabiusMercurius/status/1492569620569489409)
+* [Systematic Trading blog](https://qoppac.blogspot.com/p/systematic-trading-start-here.html)
 
 ## Tools
 

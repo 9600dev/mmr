@@ -16,6 +16,7 @@ import trader.messaging.trader_service_api as bus
 from asyncio.events import AbstractEventLoop
 from aioreactive.types import AsyncObservable, Projection
 from expression.core import pipe
+from expression.system import AsyncAnonymousDisposable, AsyncDisposable
 from aioreactive.observers import AsyncAnonymousObserver, auto_detach_observer, safe_observer
 from enum import Enum
 
@@ -118,6 +119,7 @@ class Trader(metaclass=Singleton):
         self.market_data = 3
         self.zmq_rpc_server: RPCServer[bus.TraderServiceApi]
         self.zmq_pubsub_server: TopicPubSub[Ticker]
+        self.zmq_pubsub_contracts: Dict[Contract, AsyncDisposable] = {}
 
     @backoff.on_exception(backoff.expo, ConnectionRefusedError, max_tries=10, max_time=120)
     def connect(self):
@@ -136,6 +138,8 @@ class Trader(metaclass=Singleton):
             zmq_pubsub_server_address=self.zmq_pubsub_server_address,
             zmq_pubsub_server_port=self.zmq_pubsub_server_port
         )
+        self.zmq_pubsub_contracts: Dict[Contract, AsyncDisposable] = {}
+
         self.run(self.zmq_rpc_server.serve())
 
     async def shutdown(self):
@@ -235,6 +239,9 @@ class Trader(metaclass=Singleton):
         async def athrow(ex):
             logging.debug('subscribe_contract.athrow()')
 
+        if contract in self.zmq_pubsub_contracts:
+            return True
+
         observable: rx.AsyncObservable[Ticker] = await self.client.subscribe_contract(
             contract=contract,
             one_time_snapshot=False,
@@ -243,7 +250,8 @@ class Trader(metaclass=Singleton):
 
         observer = AsyncAnonymousObserver(asend=asend, aclose=aclose, athrow=athrow)
         safe_obs, auto_detach = auto_detach_observer(observer)
-        subscription = pipe(safe_obs, observable.subscribe_async, auto_detach)
+        subscription = await pipe(safe_obs, observable.subscribe_async, auto_detach)
+        self.zmq_pubsub_contracts[contract] = subscription
         return True
 
     async def update_portfolio_universe(self, portfolio_item: PortfolioItem):

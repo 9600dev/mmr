@@ -340,6 +340,15 @@ def subscribe_start(
         click.echo('no results found')
 
 
+@subscribe.command('list')
+@common_options()
+@default_config()
+def subscribe_list(
+    **args,
+):
+    rich_list(remoted_client.rpc(return_type=list[Contract]).get_published_contracts())
+
+
 @subscribe.command('listen')
 @common_options()
 @default_config()

@@ -79,4 +79,9 @@ class TraderServiceApi(RPCHandler):
 
     @RPCHandler.rpcmethod
     def publish_contract(self, contract: Contract, delayed: bool) -> bool:
-        return asyncio.run(self.trader.publish_contract(contract, delayed))
+        loop = asyncio.get_event_loop()
+        return loop.run_until_complete(self.trader.publish_contract(contract, delayed))
+
+    @RPCHandler.rpcmethod
+    def get_published_contracts(self) -> list[Contract]:
+        return list(self.trader.zmq_pubsub_contracts.keys())

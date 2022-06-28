@@ -93,10 +93,8 @@ class IBAIORx():
             # if this raises an exception, all hell brakes loose - we get multiple Tasks
             # that sit around pending, and all sorts...
             if isinstance(tickers, Set):
-                t = tickers.pop()
-                return rx.from_iterable(t)
-            elif isinstance(tickers, Ticker):
                 return rx.from_iterable(tickers)
+            elif isinstance(tickers, Ticker):
                 return rx.single(tickers)
             else:
                 raise ValueError(tickers)
