@@ -218,7 +218,7 @@ class TopicPubSub(Generic[T]):
         zmq_pubsub_server_address: str = 'tcp://127.0.0.1',
         zmq_pubsub_server_port: int = 42002,
         topic: str = 'default',
-        translation_table: Dict[int, Tuple[Any, partial[Any], Callable]] = translation_table  # type: ignore
+        translation_table: Dict[int, Tuple[Any, partial[Any], Callable]] = translation_table,  # type: ignore
     ):
         nest_asyncio.apply()
         self.zmq_server_address = zmq_pubsub_server_address
@@ -309,6 +309,7 @@ class RemotedClient(Generic[T]):
         zmq_server_port: int = 42001,
         translation_table: Dict[int, Tuple[Any, partial[Any], Callable]] = translation_table,  # type: ignore
         timeout: Optional[int] = None,
+        error_table: Optional[Dict[str, Exception]] = None,
     ):
         nest_asyncio.apply()
         _Packer.unpackb = unpackb_monkeypatch
@@ -318,6 +319,7 @@ class RemotedClient(Generic[T]):
         self.client: Optional[aiozmq.rpc.rpc.RPCClient] = None
         self.timeout: Optional[int] = timeout
         self.connected: bool = False
+        self.error_table: Optional[Dict[str, Exception]] = error_table
 
     async def connect(self):
         if not self.client:
@@ -325,7 +327,8 @@ class RemotedClient(Generic[T]):
             self.client = await aiozmq.rpc.connect_rpc(
                 connect=bind,
                 timeout=self.timeout,
-                translation_table=self.translation_table
+                translation_table=self.translation_table,
+                error_table=self.error_table
             )  # type: ignore
             self.connected = True
 

@@ -74,7 +74,7 @@ def suppress_all():
 def verbose():
     set_all_log_level(logging.DEBUG)
 
-def get_callstack(frames: int = 0):
+def get_callstack(frames: int = 0) -> List[str]:
     def walk_stack(frame: FrameType, counter: int = 1) -> List[str]:
         mod = inspect.getmodule(frame)
         m = mod.__name__ if mod else ''
@@ -89,6 +89,8 @@ def get_callstack(frames: int = 0):
     current_frame = inspect.currentframe()
     if current_frame and current_frame.f_back:
         return walk_stack(cast(FrameType, current_frame.f_back))
+    return []
+
 
 def log_callstack_debug(frames: int = 0, module_filter: str = ''):
     callstack = get_callstack(frames)

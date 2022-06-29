@@ -20,7 +20,7 @@ from expression.system import AsyncAnonymousDisposable, AsyncDisposable
 from aioreactive.observers import AsyncAnonymousObserver, auto_detach_observer, safe_observer
 from enum import Enum
 
-from trader.common.logging_helper import setup_logging
+from trader.common.logging_helper import setup_logging, get_callstack
 logging = setup_logging(module_name='trading_runtime')
 
 from arctic import Arctic, TICK_STORE
@@ -38,6 +38,7 @@ from trader.listeners.ibaiorx import IBAIORx
 from trader.common.contract_sink import ContractSink
 from trader.common.listener_helpers import Helpers
 from trader.common.observers import ConsoleObserver, ArcticObserver, ComplexConsoleObserver, ContractSinkObserver, NullObserver
+from trader.common.exceptions import TraderException, TraderConnectionException
 from trader.data.data_access import SecurityDefinition, TickData
 from trader.data.universe import UniverseAccessor, Universe
 from trader.container import Container
@@ -120,27 +121,52 @@ class Trader(metaclass=Singleton):
         self.zmq_rpc_server: RPCServer[bus.TraderServiceApi]
         self.zmq_pubsub_server: TopicPubSub[Ticker]
         self.zmq_pubsub_contracts: Dict[Contract, AsyncDisposable] = {}
+        self.startup_time: dt.datetime = dt.datetime.now()
+        self.last_connect_time: dt.datetime
+
+    def raise_trader_exception(self, exception_type: type, message: str, inner: Optional[Exception]):
+        # todo use reflection here to automatically populate trader runtime vars that we care about
+        # given a particular exception type
+        data = self.data if hasattr(self, 'data') else None
+        client = self.client.is_connected() if hasattr(self, 'client') else False
+        last_connect_time = self.last_connect_time if hasattr(self, 'last_connect_time') else dt.datetime.min
+
+        exception = exception_type(
+            data is not None,
+            client,
+            self.startup_time,
+            last_connect_time,
+            message,
+            inner,
+            get_callstack(10)
+        )
+        logging.exception(exception)
+        return exception
 
     @backoff.on_exception(backoff.expo, ConnectionRefusedError, max_tries=10, max_time=120)
     def connect(self):
-        self.client = IBAIORx(self.ib_server_address, self.ib_server_port)
-        self.data = TickData(self.arctic_server_address, self.arctic_library)
-        self.universe_accessor = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
-        self.universes = self.universe_accessor.get_all()
-        self.clear_portfolio_universe()
-        self.contract_subscriptions = {}
-        self.market_data_subscriptions = {}
-        self.client.ib.connectedEvent += self.connected_event
-        self.client.ib.disconnectedEvent += self.disconnected_event
-        self.client.connect()
-        self.zmq_rpc_server = RPCServer[bus.TraderServiceApi](bus.TraderServiceApi(self))
-        self.zmq_pubsub_server = TopicPubSub[Ticker](
-            zmq_pubsub_server_address=self.zmq_pubsub_server_address,
-            zmq_pubsub_server_port=self.zmq_pubsub_server_port
-        )
-        self.zmq_pubsub_contracts: Dict[Contract, AsyncDisposable] = {}
+        try:
+            self.client = IBAIORx(self.ib_server_address, self.ib_server_port)
+            self.data = TickData(self.arctic_server_address, self.arctic_library)
+            self.universe_accessor = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
+            self.universes = self.universe_accessor.get_all()
+            self.clear_portfolio_universe()
+            self.contract_subscriptions = {}
+            self.market_data_subscriptions = {}
+            self.client.ib.connectedEvent += self.connected_event
+            self.client.ib.disconnectedEvent += self.disconnected_event
+            self.client.connect()
+            self.last_connect_time = dt.datetime.now()
+            self.zmq_rpc_server = RPCServer[bus.TraderServiceApi](bus.TraderServiceApi(self))
+            self.zmq_pubsub_server = TopicPubSub[Ticker](
+                zmq_pubsub_server_address=self.zmq_pubsub_server_address,
+                zmq_pubsub_server_port=self.zmq_pubsub_server_port
+            )
+            self.zmq_pubsub_contracts: Dict[Contract, AsyncDisposable] = {}
 
-        self.run(self.zmq_rpc_server.serve())
+            self.run(self.zmq_rpc_server.serve())
+        except Exception as ex:
+            raise self.raise_trader_exception(type(TraderConnectionException), message='connect() exception', inner=ex)
 
     async def shutdown(self):
         logging.debug('trading_runtime.shutdown()')
@@ -158,7 +184,6 @@ class Trader(metaclass=Singleton):
             await security_datastream.dispose_async()
 
         await self.book.dispose_async()
-
         await self.client.shutdown()
 
     def reconnect(self):
@@ -251,10 +276,13 @@ class Trader(metaclass=Singleton):
             delayed=delayed,
         )
 
-        observer = AsyncAnonymousObserver(asend=asend, aclose=aclose, athrow=athrow)
-        safe_obs, auto_detach = auto_detach_observer(observer)
-        subscription = await pipe(safe_obs, observable.subscribe_async, auto_detach)
-        self.zmq_pubsub_contracts[contract] = subscription
+        try:
+            observer = AsyncAnonymousObserver(asend=asend, aclose=aclose, athrow=athrow)
+            safe_obs, auto_detach = auto_detach_observer(observer)
+            subscription = await pipe(safe_obs, observable.subscribe_async, auto_detach)
+            self.zmq_pubsub_contracts[contract] = subscription
+        except Exception as ex:
+            raise self.raise_trader_exception(TraderException, message='publish_contract()', inner=ex)
         return True
 
     async def update_portfolio_universe(self, portfolio_item: PortfolioItem):

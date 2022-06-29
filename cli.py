@@ -45,6 +45,7 @@ from scripts.chain import plot_chain
 from trader.common.helpers import contract_from_dict
 from trader.messaging.clientserver import RemotedClient, TopicPubSub
 from trader.messaging.trader_service_api import TraderServiceApi
+from trader.common.exceptions import TraderException, TraderConnectionException
 from trader.common.helpers import *
 
 
@@ -52,11 +53,16 @@ logging = setup_logging(module_name='cli')
 is_repl = False
 
 
+error_table = {
+    'trader.common.exceptions.TraderException': TraderException,
+    'trader.common.exceptions.TraderConnectionException': TraderConnectionException
+}
+
 def connect():
     if not remoted_client.connected:
         asyncio.get_event_loop().run_until_complete(remoted_client.connect())
 
-remoted_client = RemotedClient[TraderServiceApi]()
+remoted_client = RemotedClient[TraderServiceApi](error_table=error_table)
 connect()
 
 @click.group(
@@ -358,7 +364,7 @@ def subscribe_listen(
     zmq_pubsub_server_port: int,
     **args,
 ):
-    printer = ZmqPrettyPrinter(zmq_pubsub_server_address, zmq_pubsub_server_port)
+    printer = ZmqPrettyPrinter(zmq_pubsub_server_address, zmq_pubsub_server_port, csv=not (is_repl))
     printer.console_listener()
 
 
