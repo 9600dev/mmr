@@ -20,6 +20,7 @@ from trader.container import Container
 from trader.data.data_access import SecurityDefinition, TickData, DictData
 from trader.data.universe import Universe, UniverseAccessor
 from scripts.trader_check import health_check
+from scripts.zmq_pub_listener import ZmqPrettyPrinter
 from ib_insync.ib import IB
 from ib_insync.order import Trade, Order
 from ib_insync.contract import Contract, ContractDescription, Stock, Option
@@ -353,48 +354,12 @@ def subscribe_list(
 @common_options()
 @default_config()
 def subscribe_listen(
-    arctic_server_address: str,
-    arctic_universe_library: str,
     zmq_pubsub_server_address: str,
     zmq_pubsub_server_port: int,
-    primary_exchange: str,
     **args,
 ):
-    pass
-
-        # sub = TopicPubSub(
-        #     zmq_pubsub_server_address=zmq_pubsub_server_address,
-        #     zmq_pubsub_server_port=zmq_pubsub_server_port
-        # )
-
-        # async def _subscribe():
-        #     async def asend(ticker: Ticker):
-        #         snap = {
-        #             'symbol': ticker.contract.symbol if ticker.contract else '',
-        #             'exchange': ticker.contract.exchange if ticker.contract else '',
-        #             'primaryExchange': ticker.contract.primaryExchange if ticker.contract else '',
-        #             'currency': ticker.contract.currency if ticker.contract else '',
-        #             'time': ticker.time,
-        #             'bid': ticker.bid,
-        #             'bidSize': ticker.bidSize,
-        #             'ask': ticker.ask,
-        #             'askSize': ticker.askSize,
-        #             'last': ticker.last,
-        #             'lastSize': ticker.lastSize,
-        #             'open': ticker.open,
-        #             'high': ticker.high,
-        #             'low': ticker.low,
-        #             'close': ticker.close,
-        #             'halted': ticker.halted
-        #         }
-        #         rich_dict(snap)
-
-        #     observable: AsyncObservable[Ticker] = await sub.subscriber()
-        #     observer = AsyncAnonymousObserver(asend=asend)
-        #     safe_obv, auto_detach = auto_detach_observer(observer)
-        #     subscription = pipe(safe_obv, observable.subscribe_async, auto_detach)
-
-        # await _subscribe()
+    printer = ZmqPrettyPrinter(zmq_pubsub_server_address, zmq_pubsub_server_port)
+    printer.console_listener()
 
 
 @main.group()

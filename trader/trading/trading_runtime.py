@@ -151,6 +151,9 @@ class Trader(metaclass=Singleton):
         for contract, sink in self.contract_subscriptions.items():
             sink.dispose()
 
+        for contract, subscription in self.zmq_pubsub_contracts.items():
+            await subscription.dispose_async()
+
         for security_definition, security_datastream in self.market_data_subscriptions.items():
             await security_datastream.dispose_async()
 

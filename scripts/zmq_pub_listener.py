@@ -46,8 +46,16 @@ class RichLiveDataFrame():
         self.table = Table()
         self.live = Live()
         self.console = console
+        self.first: bool = True
 
-    def print_console(self, df: pd.DataFrame, rebuild: bool = False):
+    def print_console(self, df: pd.DataFrame, title: Optional[str] = None):
+        def move(y, x):
+            print("\033[%d;%dH" % (y, x))
+
+        if self.first:
+            self.console.clear()
+            self.first = False
+
         self.table = Table()
         for column in df.columns:
             self.table.add_column(column)
@@ -56,7 +64,10 @@ class RichLiveDataFrame():
             row = [str(x) for x in value_list]
             self.table.add_row(*row)
 
-        self.console.clear()
+        # self.console.clear()
+        move(0, 0)
+        if title:
+            self.console.print(title)
         self.console.print(self.table)
 
 
@@ -77,34 +88,38 @@ class ZmqPrettyPrinter():
         self.subscription: AsyncDisposable
         self.observer: AsyncObserver
         self.csv = csv
+        self.counter = 0
+        self.zmq_subscriber: TopicPubSub
 
     def print_console(self, ticker: Optional[Ticker] = None):
         def get_snap(ticker: Ticker):
+            date_time_str = ticker.time.strftime('%H:%M.%S') if ticker.time else ''
             return {
                 'symbol': ticker.contract.symbol if ticker.contract else '',
-                'exchange': ticker.contract.exchange if ticker.contract else '',
                 'primaryExchange': ticker.contract.primaryExchange if ticker.contract else '',
                 'currency': ticker.contract.currency if ticker.contract else '',
-                'time': ticker.time,
-                'bid': ticker.bid,
-                'bidSize': ticker.bidSize,
-                'ask': ticker.ask,
-                'askSize': ticker.askSize,
-                'last': ticker.last,
-                'lastSize': ticker.lastSize,
-                'open': ticker.open,
-                'high': ticker.high,
-                'low': ticker.low,
-                'close': ticker.close,
-                'halted': ticker.halted
+                'time': date_time_str,
+                'bid': '%.2f' % ticker.bid,
+                'ask': '%.2f' % ticker.ask,
+                'last': '%.2f' % ticker.last,
+                'lastSize': int(ticker.lastSize),
+                'open': '%.2f' % ticker.open,
+                'high': '%.2f' % ticker.high,
+                'low': '%.2f' % ticker.low,
+                'close': '%.2f' % ticker.close,
+                'halted': int(ticker.halted)
             }
 
         # self.console.clear(True)
         # rich_table(data_frame, False, True, ['currency', 'bid', 'ask', 'last', 'open', 'high', 'low', 'close'])
         if not self.csv:
+            self.counter += 1
             data = [get_snap(ticker) for contract, ticker in self.contract_ticks.items()]
             data_frame = pd.DataFrame(data)
-            self.rich_live.print_console(data_frame)
+            self.rich_live.print_console(data_frame, 'Ctrl-c to stop...')
+            if self.counter % 1000 == 0:
+                self.console.clear()
+                self.contract_ticks.clear()
         else:
             t = get_snap(ticker)  # type: ignore
             str_values = [str(v) for v in t.values()]
@@ -122,18 +137,19 @@ class ZmqPrettyPrinter():
             self.zmq_topic
         ))
 
-        sub = TopicPubSub[Ticker](
+        self.zmq_subscriber = TopicPubSub[Ticker](
             self.zmq_pubsub_server_address,
             self.zmq_pubsub_server_port,
             self.zmq_topic
         )
 
-        observable = await sub.subscriber()
+        observable = await self.zmq_subscriber.subscriber()
         observer = AsyncAnonymousObserver(asend=self.asend)
         self.observer, auto_detach = auto_detach_observer(observer)
         self.subscription = await pipe(self.observer, observable.subscribe_async, auto_detach)
 
     async def shutdown(self):
+        await self.zmq_subscriber.subscriber_close()
         await self.observer.aclose()
         await self.subscription.dispose_async()
 
