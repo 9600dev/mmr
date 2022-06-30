@@ -3,23 +3,21 @@
 import os
 import asyncio
 import datetime
-from re import I
-from aioreactive.observables import AsyncAnonymousObservable
-
-from eventkit import event
-import aiohttp
 import datetime as dt
 import aioreactive as rx
+import pandas as pd
+import ib_insync as ibapi
+import backoff
+import random
+import aiohttp
 from aioreactive.subject import AsyncMultiSubject
 from aioreactive.types import AsyncObservable, AsyncObserver
 from aioreactive.observers import AsyncAnonymousObserver, auto_detach_observer, safe_observer
 from aioreactive.observables import AsyncAnonymousObservable
 from expression.system.disposable import Disposable, AsyncDisposable
-import pandas as pd
-import ib_insync as ibapi
-import backoff
-import random
 
+from re import I
+from eventkit import event
 from ib_insync.ib import IB
 from ib_insync.util import schedule
 from ib_insync.client import Client
@@ -68,6 +66,23 @@ TValue = TypeVar('TValue')
 
 # With aioreactive you subscribe observers to observables,
 
+
+class IBAIORxError():
+    def __init__(self, reqId: int, errorCode: int, errorString: str, contract: Contract):
+        self.reqId = reqId
+        self.errorCode = errorCode
+        self.errorString = errorString
+        self.contract = contract
+
+    def __str__(self):
+        return 'reqId: {}, errorCode: {}, errorString: {}, contract: {}'.format(
+            self.reqId,
+            self.errorCode,
+            self.errorString,
+            self.contract
+        )
+
+
 class IBAIORx():
     # master client id should be set to 5 (incremented on the call to connect())
     # todo moving this to random for now, will find a global sync solution later
@@ -106,6 +121,8 @@ class IBAIORx():
         self.portfolio_subject = AsyncEventSubject[PortfolioItem](eventkit_event=self.ib.updatePortfolioEvent)
         self.trades_subject = AsyncEventSubject[Trade](eventkit_event=self.ib.orderStatusEvent)
         self._contracts_source = AsyncEventSubject[Set[Ticker]](eventkit_event=self.ib.pendingTickersEvent)
+        self.error_subject = AsyncMultiSubject[IBAIORxError]()
+        self.error_disposables: Dict[int, AsyncDisposable] = {}
 
         mapped: AsyncObservable[Ticker] = pipe(
             self._contracts_source,
@@ -123,17 +140,18 @@ class IBAIORx():
         # try binding helper methods to things we care about
         Contract.to_df = Helpers.to_df  # type: ignore
 
-    def __handle_error(self, reqId, errorCode, errorString, contract):
+    async def __handle_error(self, reqId, errorCode, errorString, contract):
         global error_code
 
         if errorCode == 2104 or errorCode == 2158 or errorCode == 2106:
             return
 
-        logging.warning(
+        logging.error(
             "ibrx reqId: {} errorCode {} errorString {} contract {}".format(
                 reqId, errorCode, errorString, contract
             )
         )
+        await self.error_subject.asend(IBAIORxError(reqId, errorCode, errorString, contract))
 
     @backoff.on_exception(backoff.expo, Exception, max_tries=3, max_time=30)
     def connect(self):
@@ -141,6 +159,9 @@ class IBAIORx():
             logging.error('clientId already in use, randomizing and trying again')
             IBAIORx.client_id_counter = random.randint(10, 99)
             raise ValueError('clientId')
+
+        if self.ib.isConnected():
+            return self
 
         # todo set in the readme that the master client ID has to be set to 5
         IBAIORx.client_id_counter += 1
@@ -182,6 +203,10 @@ class IBAIORx():
         await self.portfolio_subject.dispose_async()
         await self.trades_subject.dispose_async()
         await self._contracts_source.dispose_async()
+        await self.error_subject.dispose_async()
+
+        for reqId, disposable in self.error_disposables.items():
+            await disposable.dispose_async()
 
         self.ib.disconnect()
         self._shutdown = True
@@ -251,24 +276,49 @@ class IBAIORx():
 
         # reqMktData immediately returns with an empty ticker
         # and starts the subscription
-        await self._contracts_source.call_event_subscriber_sync(
+
+        reqId = self.ib.client._reqIdSeq
+        result = await self._contracts_source.call_event_subscriber_sync(
             lambda: self.ib.reqMktData(
                 contract=contract,
                 genericTickList='',
                 snapshot=one_time_snapshot,
                 regulatorySnapshot=False,
-            ))
+            ),
+            asend_result=False
+        )
 
         if delayed:
             self.ib.reqMarketDataType(1)
             logging.debug('reqMarketDataType(1)')
 
-        xs: AsyncAnonymousObservable[Ticker] = pipe(
+        contract_filter: AsyncAnonymousObservable[Ticker] = pipe(
             self.contracts_subject,
             rx.filter(lambda ticker: self._filter_contract(contract, ticker)),  # type: ignore
         )
 
-        return xs
+        xs: AsyncMultiSubject = AsyncMultiSubject()
+        await contract_filter.subscribe_async(xs)
+
+        # error handling, which will listen to the error source, and pipe
+        # any errors through to the subscriber
+        async def handle_error(error: IBAIORxError):
+            logging.error('__subscribe_snapshot() had error: {}'.format(error))
+            await xs.athrow(Exception(error))
+
+        async def handle_exception(exception: Exception):
+            logging.error('__subscribe_snapshot() threw {}'.format(exception))
+            await xs.athrow(exception)
+
+        error_observer = AsyncAnonymousObserver(asend=handle_error, athrow=handle_exception)
+        err = pipe(
+            self.error_subject,
+            rx.filter(lambda error: error.reqId == reqId)  # type: ignore
+        )
+        safe_obv, auto_detach = auto_detach_observer(obv=error_observer)
+        self.error_disposables[reqId] = await pipe(safe_obv, err.subscribe_async, auto_detach)
+
+        return AsyncAnonymousObservable(xs.subscribe_async)
 
     async def subscribe_contract(
         self,
@@ -334,18 +384,20 @@ class IBAIORx():
         return await self.ib.reqExecutionsAsync()
 
     async def get_snapshot(self, contract: Contract, delayed: bool = False) -> Ticker:
+        # trying to do this stuff synchronously in rx is a nightmare
         _task: asyncio.Event = asyncio.Event()
         populated_ticker: Optional[Ticker] = None
+        thrown_exception: Optional[Exception] = None
 
         async def update_ticker(ticker: Ticker):
             nonlocal populated_ticker
             populated_ticker = ticker
             _task.set()
 
-        async def athrow(ex):
-            logging.debug(ex)
+        async def athrow(ex: Exception):
+            nonlocal thrown_exception
+            thrown_exception = ex
             _task.set()
-            raise ex
 
         async def aclose():
             logging.debug('get_snapshot() aclose')
@@ -369,7 +421,11 @@ class IBAIORx():
 
         await _task.wait()
         await safe_obv.aclose()
-        await asyncio.sleep(0.2)
+        await subscription.dispose_async()
+        await asyncio.sleep(0.1)
+        if thrown_exception is not None:
+            ex = cast(Exception, thrown_exception)
+            raise ex
         return cast(Ticker, populated_ticker)
 
     async def get_contract_details(self, contract: Contract) -> List[ContractDetails]:

@@ -215,16 +215,21 @@ class AsyncEventSubject(AsyncCachedSubject[TSource]):
             for e in eventkit:
                 e += self.on_eventkit_update
 
-    async def call_event_subscriber(self, awaitable_event_subscriber: Awaitable[TSource]) -> None:
+    async def call_event_subscriber(self, awaitable_event_subscriber: Awaitable[TSource], asend_result: bool = True):
         result = await awaitable_event_subscriber
         # todo this doesn't feel right. I want isinstance(result, TSource) but that doesn't work
-        if result:
+        if result and asend_result:
             await self.asend(result)
+            return result
+        if result:
+            return result
 
-    async def call_event_subscriber_sync(self, callable_lambda: Callable):
+    async def call_event_subscriber_sync(self, callable_lambda: Callable, asend_result: bool = True):
         result = callable_lambda()
-        if result:
+        if result and asend_result:
             await self.asend(result)
+            return result
+        if result:
             return result
 
     async def call_cancel_subscription(self, awaitable_canceller: Awaitable):
