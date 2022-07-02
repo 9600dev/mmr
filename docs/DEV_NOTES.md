@@ -97,3 +97,4 @@ Observable xs = pipe(
     * which in this case is cb() task.cancel()
 
 
+![](2022-07-02-10-35-01.png)

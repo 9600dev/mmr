@@ -106,3 +106,17 @@ class TraderServiceApi(RPCHandler):
     @RPCHandler.rpcmethod
     def get_published_contracts(self) -> list[Contract]:
         return list(self.trader.zmq_pubsub_contracts.keys())
+
+    @RPCHandler.rpcmethod
+    def start_load_test(self) -> int:
+        logging.debug('start_load_test()')
+        self.trader.start_load_test()
+        return 0
+
+    @RPCHandler.rpcmethod
+    def stop_load_test(self) -> int:
+        logging.debug('stop_load_test()')
+        self.trader.load_test = False
+        return 0
+
+

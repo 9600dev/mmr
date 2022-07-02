@@ -76,12 +76,10 @@ class ZmqPrettyPrinter():
         self,
         zmq_pubsub_server_address: str,
         zmq_pubsub_server_port: int,
-        zmq_topic: str = 'ticker',
         csv: bool = False,
     ):
         self.zmq_pubsub_server_address = zmq_pubsub_server_address
         self.zmq_pubsub_server_port = zmq_pubsub_server_port
-        self.zmq_topic = zmq_topic
         self.contract_ticks: Dict[Contract, Ticker] = {}
         self.console = rich.console.Console()
         self.rich_live = RichLiveDataFrame(self.console)
@@ -142,12 +140,12 @@ class ZmqPrettyPrinter():
         self.wait_handle.set()
         raise ex
 
-    async def listen(self):
+    async def listen(self, topic: str):
         try:
-            logging.debug('zmq_pub_listener listen({}, {}, {}'.format(
+            logging.debug('zmq_pub_listener listen({}, {}, {})'.format(
                 self.zmq_pubsub_server_address,
                 self.zmq_pubsub_server_port,
-                self.zmq_topic
+                topic
             ))
 
             self.zmq_subscriber = TopicPubSub[Ticker](
@@ -155,7 +153,7 @@ class ZmqPrettyPrinter():
                 self.zmq_pubsub_server_port,
             )
 
-            observable = await self.zmq_subscriber.subscriber()
+            observable = await self.zmq_subscriber.subscriber(topic=topic)
             observer = AsyncAnonymousObserver(asend=self.asend, athrow=self.athrow)
             self.observer, auto_detach = auto_detach_observer(observer)
             self.subscription = await pipe(self.observer, observable.subscribe_async, auto_detach)
@@ -189,7 +187,7 @@ def main(
     zmq_pubsub_server_address: str,
     zmq_pubsub_server_port: int
 ):
-    printer = ZmqPrettyPrinter(zmq_pubsub_server_address, zmq_pubsub_server_port, csv=csv, zmq_topic=topic)
+    printer = ZmqPrettyPrinter(zmq_pubsub_server_address, zmq_pubsub_server_port, csv=csv)
 
     def stop_loop(loop: AbstractEventLoop):
         loop.run_until_complete(printer.shutdown())
@@ -197,7 +195,7 @@ def main(
     loop = asyncio.get_event_loop()
     loop.set_debug(enabled=True)
     loop.add_signal_handler(signal.SIGINT, stop_loop, loop)
-    loop.run_until_complete(printer.listen())
+    loop.run_until_complete(printer.listen(topic=topic))
 
 if __name__ == '__main__':
     main()

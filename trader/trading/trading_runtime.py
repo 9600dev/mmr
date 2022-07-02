@@ -13,6 +13,7 @@ import datetime as dt
 import backoff
 import aioreactive as rx
 import trader.messaging.trader_service_api as bus
+import asyncio
 from asyncio.events import AbstractEventLoop
 from aioreactive.types import AsyncObservable, Projection, AsyncObserver
 from expression.core import pipe
@@ -125,6 +126,7 @@ class Trader(metaclass=Singleton):
         self.zmq_pubsub_contracts: Dict[Contract, AsyncDisposable] = {}
         self.startup_time: dt.datetime = dt.datetime.now()
         self.last_connect_time: dt.datetime
+        self.load_test: bool = False
 
     def raise_trader_exception(self, exception_type: type, message: str, inner: Optional[Exception]):
         # todo use reflection here to automatically populate trader runtime vars that we care about
@@ -338,6 +340,52 @@ class Trader(metaclass=Singleton):
                 #     observer=security_stream
                 # )
                 self.market_data_subscriptions[security] = security_stream
+
+
+    def start_load_test(self):
+        async def _load_test_helper():
+            amd = Contract(symbol='AMD', conId=4391, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
+            ticker = Ticker(
+                contract=amd,
+                time=dt.datetime.now(),
+                bid=87.05,
+                ask=87.06,
+                prevBid=87.05,
+                prevAsk=87.06,
+                askSize=100.0,
+                bidSize=100.0,
+                prevAskSize=100.0,
+                prevBidSize=100.0,
+                lastSize=0,
+                halted=0,
+                close=85.00,
+                low=84.00,
+                high=86.00,
+                open=85.50,
+                last=87.05,
+            )
+            counter = 0
+            timer = dt.datetime.now()
+            while self.load_test:
+                await self.client._contracts_source.asend(set([ticker]))
+                await asyncio.sleep(0)
+                # any asyncio.sleep here seems to give us a 100x slowdown.
+                # await asyncio.sleep(0.000001)
+                # sleep 0.000001 give us about 9000 /sec.
+                # asyncio.sleep(0) gives us about 29k tickers/sec
+                # no sleep gives us 400k/sec but no active control over the process
+                counter = counter + 1
+                delta = dt.datetime.now() - timer
+                if delta.seconds >= 10:
+                    task_num = len(asyncio.all_tasks())
+                    logging.critical('{} tickers per second, {} tasks'.format(float(counter) / 10.0, task_num))
+                    counter = 0
+                    timer = dt.datetime.now()
+            logging.debug('load test stopped')
+
+        self.load_test = True
+        logging.critical('starting start_load_test()')
+        task = asyncio.create_task(_load_test_helper())
 
     async def temp_place_order(
         self,

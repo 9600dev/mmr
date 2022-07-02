@@ -411,6 +411,21 @@ def options(
 
 
 @main.group()
+def loadtest():
+    pass
+
+
+@loadtest.command('start')
+def load_test_start():
+    remoted_client.rpc().start_load_test()
+
+
+@loadtest.command('stop')
+def load_test_stop():
+    remoted_client.rpc().stop_load_test()
+
+
+@main.group()
 def book():
     pass
 
