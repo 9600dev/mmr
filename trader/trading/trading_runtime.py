@@ -267,7 +267,7 @@ class Trader(metaclass=Singleton):
 
         async def asend(ticker: Ticker):
             nonlocal subject
-            await self.zmq_pubsub_server.publisher(ticker)
+            await self.zmq_pubsub_server.publisher(ticker, topic='ticker')
             await subject.success()
 
         async def aclose():

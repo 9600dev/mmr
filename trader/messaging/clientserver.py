@@ -221,13 +221,11 @@ class TopicPubSub(Generic[T]):
         self,
         zmq_pubsub_server_address: str = 'tcp://127.0.0.1',
         zmq_pubsub_server_port: int = 42002,
-        topic: str = 'default',
         translation_table: Dict[int, Tuple[Any, partial[Any], Callable]] = translation_table,  # type: ignore
     ):
         nest_asyncio.apply()
         self.zmq_server_address = zmq_pubsub_server_address
         self.zmq_server_port = zmq_pubsub_server_port
-        self.topic = topic
         self.translation_table = translation_table
         self.handler: Optional[_Handler[T]] = None
         self.zmq_subscriber: Optional[PubSubService] = None
@@ -235,13 +233,14 @@ class TopicPubSub(Generic[T]):
 
     async def subscriber(
         self,
+        topic: str = 'default',
     ) -> rx.AsyncObservable[T]:
         if not self.handler:
             self.handler = _Handler[T]()
             self.zmq_subscriber = await aiozmq.rpc.serve_pubsub(
                 self.handler,
                 translation_table=self.translation_table,
-                subscribe=self.topic,
+                subscribe=topic,
                 connect='{}:{}'.format(self.zmq_server_address, self.zmq_server_port),
                 log_exceptions=True,
             )  # type: ignore
@@ -262,6 +261,7 @@ class TopicPubSub(Generic[T]):
     async def publisher(
         self,
         obj: T,
+        topic: str = 'default'
     ):
         if not self.zmq_publisher:
             self.zmq_publisher = await aiozmq.rpc.connect_pubsub(
@@ -271,7 +271,7 @@ class TopicPubSub(Generic[T]):
             )  # type: ignore
 
         logging.debug('publisher()')
-        await self.zmq_publisher.publish(self.topic).on_message(obj)
+        await self.zmq_publisher.publish(topic).on_message(obj)
 
     async def publisher_close(self):
         if self.zmq_publisher:

@@ -76,7 +76,7 @@ class ZmqPrettyPrinter():
         self,
         zmq_pubsub_server_address: str,
         zmq_pubsub_server_port: int,
-        zmq_topic: str = 'default',
+        zmq_topic: str = 'ticker',
         csv: bool = False,
     ):
         self.zmq_pubsub_server_address = zmq_pubsub_server_address
@@ -153,7 +153,6 @@ class ZmqPrettyPrinter():
             self.zmq_subscriber = TopicPubSub[Ticker](
                 self.zmq_pubsub_server_address,
                 self.zmq_pubsub_server_port,
-                self.zmq_topic
             )
 
             observable = await self.zmq_subscriber.subscriber()
@@ -181,14 +180,16 @@ class ZmqPrettyPrinter():
 
 @click.command()
 @click.option('--csv', required=True, is_flag=True, default=False)
+@click.option('--topic', required=True, default='ticker')
 @click.option('--zmq_pubsub_server_address', required=True, default='tcp://127.0.0.1')
 @click.option('--zmq_pubsub_server_port', required=True, default=42002)
 def main(
     csv: bool,
+    topic: str,
     zmq_pubsub_server_address: str,
     zmq_pubsub_server_port: int
 ):
-    printer = ZmqPrettyPrinter(zmq_pubsub_server_address, zmq_pubsub_server_port, csv=csv)
+    printer = ZmqPrettyPrinter(zmq_pubsub_server_address, zmq_pubsub_server_port, csv=csv, zmq_topic=topic)
 
     def stop_loop(loop: AbstractEventLoop):
         loop.run_until_complete(printer.shutdown())
