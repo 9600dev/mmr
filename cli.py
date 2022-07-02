@@ -16,6 +16,7 @@ from aioreactive import AsyncAnonymousObservable, AsyncAwaitableObserver, AsyncA
 from aioreactive.types import AsyncObservable, AsyncObserver
 from aioreactive.observers import auto_detach_observer
 from typing import Type, TypeVar, Dict, Optional, List, cast, Tuple, Any
+from trader.common.reactive import SuccessFailEnum
 from trader.container import Container
 from trader.data.data_access import SecurityDefinition, TickData, DictData
 from trader.data.universe import Universe, UniverseAccessor
@@ -288,7 +289,8 @@ def snapshot(
             currency=r['currency']
         )
 
-        ticker = asyncio.run(remoted_client.rpc(return_type=Ticker).get_snapshot(contract, True))
+        # awaitable = remoted_client.rpc(return_type=Ticker).get_snapshot(contract, delayed)
+        ticker = remoted_client.rpc(return_type=Ticker).get_snapshot(contract, delayed)
         snap = {
             'symbol': ticker.contract.symbol if ticker.contract else '',
             'exchange': ticker.contract.exchange if ticker.contract else '',
@@ -309,7 +311,7 @@ def snapshot(
         }
         rich_dict(snap)
     else:
-        click.echo('no results found')
+        click.echo('could not resolve symbol from symbol database')
 
 
 
@@ -342,9 +344,28 @@ def subscribe_start(
             primaryExchange=r['primaryExchange'],
             currency=r['currency']
         )
+        click.echo('subscribing to {}'.format(contract.symbol))
         remoted_client.rpc(return_type=Ticker).publish_contract(contract, delayed)
     else:
         click.echo('no results found')
+
+
+@subscribe.command('portfolio')
+@common_options()
+@default_config()
+def subscribe_portfolio(
+    **args,
+):
+    portfolio: list[PortfolioItem] = remoted_client.rpc(return_type=list[PortfolioItem]).get_portfolio()
+    for portfolio_item in portfolio:
+        if not portfolio_item.contract.exchange:
+            portfolio_item.contract.exchange = 'SMART'
+
+        click.echo('subscribing to {}'.format(portfolio_item.contract.symbol))
+        success_fail = remoted_client.rpc().publish_contract(portfolio_item.contract, delayed=False)
+        if success_fail.success_fail == SuccessFailEnum.FAIL:
+            click.echo('contract subscription failed on {}'.format(portfolio_item.contract))
+            click.echo(success_fail.exception)
 
 
 @subscribe.command('list')

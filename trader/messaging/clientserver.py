@@ -33,6 +33,10 @@ from aiozmq.rpc.packer import _Packer
 from dataclasses_serialization.json import JSONSerializer
 from msgpack import unpackb
 
+from trader.common.logging_helper import setup_logging, get_callstack
+logging = setup_logging(module_name='trader.messaging.clientserver')
+
+
 T = TypeVar('T')
 TSub = TypeVar('TSub')
 
@@ -251,6 +255,7 @@ class TopicPubSub(Generic[T]):
 
     async def subscriber_close(self):
         if self.zmq_subscriber:
+            logging.debug('subscriber_close()')
             self.zmq_subscriber.close()
             self.zmq_subscriber.wait_closed()
 
@@ -265,10 +270,12 @@ class TopicPubSub(Generic[T]):
                 translation_table=self.translation_table
             )  # type: ignore
 
+        logging.debug('publisher()')
         await self.zmq_publisher.publish(self.topic).on_message(obj)
 
     async def publisher_close(self):
         if self.zmq_publisher:
+            logging.debug('publisher_close()')
             self.zmq_publisher.close()
             self.zmq_publisher.wait_closed()
 
@@ -323,6 +330,7 @@ class RemotedClient(Generic[T]):
 
     async def connect(self):
         if not self.client:
+            logging.debug('connect()')
             bind = '{}:{}'.format(self.zmq_server_address, self.zmq_server_port)
             self.client = await aiozmq.rpc.connect_rpc(
                 connect=bind,

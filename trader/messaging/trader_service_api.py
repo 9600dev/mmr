@@ -14,9 +14,11 @@ from ib_insync.contract import Contract
 from ib_insync.order import Order, Trade
 from ib_insync.ticker import Ticker
 from trader.container import Container
+from trader.common.reactive import SuccessFail, SuccessFailObservable, SuccessFailEnum
 from aioreactive.observables import AsyncAnonymousObservable
 from aioreactive.observers import AsyncAnonymousObserver, safe_observer, auto_detach_observer
 from expression.core import pipe
+from expression.system.disposable import AsyncDisposable
 
 import trader.trading.trading_runtime as runtime
 from trader.data.universe import Universe
@@ -74,13 +76,32 @@ class TraderServiceApi(RPCHandler):
         return self.trader.cancel_order(order_id)
 
     @RPCHandler.rpcmethod
-    async def get_snapshot(self, contract: Contract, delayed: bool) -> Ticker:
-        return await self.trader.client.get_snapshot(contract=contract, delayed=delayed)
+    def get_snapshot(self, contract: Contract, delayed: bool) -> Ticker:
+        loop = asyncio.get_event_loop()
+        return loop.run_until_complete(self.trader.client.get_snapshot(contract=contract, delayed=delayed))
 
     @RPCHandler.rpcmethod
-    def publish_contract(self, contract: Contract, delayed: bool) -> bool:
+    def publish_contract(self, contract: Contract, delayed: bool) -> SuccessFail:
+        task = asyncio.Event()
+        disposable: AsyncDisposable = AsyncDisposable.empty()
+        result: Optional[SuccessFail] = None
+
+        async def asend(val: SuccessFail):
+            nonlocal result
+            result = val
+            task.set()
+
+        async def wait_for_subscription():
+            nonlocal disposable
+            success_fail = await self.trader.publish_contract(contract, delayed)
+            disposable = await success_fail.subscribe_async(AsyncAnonymousObserver(asend=asend))
+
         loop = asyncio.get_event_loop()
-        return loop.run_until_complete(self.trader.publish_contract(contract, delayed))
+        loop.run_until_complete(wait_for_subscription())
+        loop.run_until_complete(task.wait())
+        loop.run_until_complete(disposable.dispose_async())
+
+        return result if result else SuccessFail(SuccessFailEnum.FAIL)
 
     @RPCHandler.rpcmethod
     def get_published_contracts(self) -> list[Contract]:

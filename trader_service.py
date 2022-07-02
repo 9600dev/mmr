@@ -1,9 +1,11 @@
+import os
 import click
 import signal
 import asyncio
 import aioreactive as rx
+import logging as log
 
-from trader.common.logging_helper import setup_logging, log_callstack_debug
+from trader.common.logging_helper import setup_logging, log_callstack_debug, set_all_log_level
 logging = setup_logging(module_name='trading_runtime')
 
 from asyncio import iscoroutinefunction, AbstractEventLoop
@@ -44,7 +46,7 @@ def main(simulation: bool,
 
     # useful to find out where rogue subscriptions that aren't disposed of are
     # rx.observers.AsyncAnonymousObserver.__init__ = monkeypatch_asyncanonymousobserver  # type: ignore
-
+    is_stopping = False
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -52,7 +54,9 @@ def main(simulation: bool,
     trader = container.resolve(Trader, simulation=simulation)
 
     def stop_loop(loop: AbstractEventLoop):
-        if loop.is_running():
+        nonlocal is_stopping
+        if loop.is_running() and not is_stopping:
+            is_stopping = True
             loop.run_until_complete(trader.shutdown())
             pending_tasks = [
                 task for task in asyncio.all_tasks() if not task.done()
@@ -73,6 +77,9 @@ def main(simulation: bool,
     try:
         loop.set_debug(enabled=True)
         loop.add_signal_handler(signal.SIGINT, stop_loop, loop)
+
+        if os.environ.get('TRADER_NODEBUG'):
+            set_all_log_level(log.CRITICAL)
 
         trader.connect()
 

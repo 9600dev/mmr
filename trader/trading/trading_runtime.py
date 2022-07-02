@@ -14,10 +14,11 @@ import backoff
 import aioreactive as rx
 import trader.messaging.trader_service_api as bus
 from asyncio.events import AbstractEventLoop
-from aioreactive.types import AsyncObservable, Projection
+from aioreactive.types import AsyncObservable, Projection, AsyncObserver
 from expression.core import pipe
 from expression.system import AsyncAnonymousDisposable, AsyncDisposable
 from aioreactive.observers import AsyncAnonymousObserver, auto_detach_observer, safe_observer
+from aioreactive.subject import AsyncMultiSubject
 from enum import Enum
 
 from trader.common.logging_helper import setup_logging, get_callstack
@@ -34,7 +35,7 @@ from ib_insync.util import df
 from ib_insync.ticker import Ticker
 from eventkit import Event
 
-from trader.listeners.ibaiorx import IBAIORx
+from trader.listeners.ibaiorx import IBAIORx, IBAIORxError
 from trader.common.contract_sink import ContractSink
 from trader.common.listener_helpers import Helpers
 from trader.common.observers import ConsoleObserver, ArcticObserver, ComplexConsoleObserver, ContractSinkObserver, NullObserver
@@ -47,7 +48,8 @@ from trader.trading.algo import Algo
 from trader.trading.portfolio import Portfolio
 from trader.trading.executioner import Executioner
 from trader.trading.strategy import Strategy
-from trader.common.reactive import AsyncCachedObserver, AsyncEventSubject, AsyncCachedSubject, awaitify
+from trader.common.reactive import AsyncCachedObserver, AsyncEventSubject, AsyncCachedSubject, awaitify, SuccessFail
+from trader.common.reactive import SuccessFailEnum, SuccessFailObservable
 from trader.common.singleton import Singleton
 from trader.common.helpers import get_network_ip, Pipe, dateify, timezoneify, ListHelper
 from trader.data.market_data import MarketData, SecurityDataStream
@@ -257,20 +259,28 @@ class Trader(metaclass=Singleton):
         universe.security_definitions.clear()
         self.universe_accessor.update(universe)
 
-    async def publish_contract(self, contract: Contract, delayed: bool) -> bool:
+    async def publish_contract(self, contract: Contract, delayed: bool) -> SuccessFailObservable:
+        if contract in self.zmq_pubsub_contracts:
+            return SuccessFailObservable(SuccessFail.success())
+
+        subject = SuccessFailObservable()
+
         async def asend(ticker: Ticker):
+            nonlocal subject
             await self.zmq_pubsub_server.publisher(ticker)
+            await subject.success()
 
         async def aclose():
-            logging.debug('subscribe_contract.aclose()')
+            nonlocal subject
+            await subject.success()
+            logging.debug('publish_contract.aclose()')
 
         async def athrow(ex):
-            logging.debug('subscribe_contract.athrow()')
+            nonlocal subject
+            exception = self.raise_trader_exception(TraderException, message='publish_contract() athrow', inner=ex)
+            await subject.failure(SuccessFail(SuccessFailEnum.FAIL, exception=ex))
 
-        if contract in self.zmq_pubsub_contracts:
-            return True
-
-        observable: rx.AsyncObservable[Ticker] = await self.client.subscribe_contract(
+        observable = await self.client.subscribe_contract(
             contract=contract,
             one_time_snapshot=False,
             delayed=delayed,
@@ -281,9 +291,10 @@ class Trader(metaclass=Singleton):
             safe_obs, auto_detach = auto_detach_observer(observer)
             subscription = await pipe(safe_obs, observable.subscribe_async, auto_detach)
             self.zmq_pubsub_contracts[contract] = subscription
+            return subject
         except Exception as ex:
+            # todo not sure how to deal with this error condition yet
             raise self.raise_trader_exception(TraderException, message='publish_contract()', inner=ex)
-        return True
 
     async def update_portfolio_universe(self, portfolio_item: PortfolioItem):
         """

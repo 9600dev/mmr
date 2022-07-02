@@ -90,6 +90,8 @@ class ZmqPrettyPrinter():
         self.csv = csv
         self.counter = 0
         self.zmq_subscriber: TopicPubSub
+        self.wait_handle: asyncio.Event = asyncio.Event()
+        self.being_shutdown = False
 
     def print_console(self, ticker: Optional[Ticker] = None):
         def get_snap(ticker: Ticker):
@@ -128,55 +130,53 @@ class ZmqPrettyPrinter():
     async def asend(self, ticker: Ticker):
         if ticker.contract:
             self.contract_ticks[ticker.contract] = ticker
-            self.print_console(ticker)
+            try:
+                self.print_console(ticker)
+            except Exception as ex:
+                logging.exception(ex)
+                self.wait_handle.set()
+                raise ex
+
+    async def athrow(self, ex: Exception):
+        logging.exception(ex)
+        self.wait_handle.set()
+        raise ex
 
     async def listen(self):
-        logging.debug('zmq_pub_listener listen({}, {}, {}'.format(
-            self.zmq_pubsub_server_address,
-            self.zmq_pubsub_server_port,
-            self.zmq_topic
-        ))
-
-        self.zmq_subscriber = TopicPubSub[Ticker](
-            self.zmq_pubsub_server_address,
-            self.zmq_pubsub_server_port,
-            self.zmq_topic
-        )
-
-        observable = await self.zmq_subscriber.subscriber()
-        observer = AsyncAnonymousObserver(asend=self.asend)
-        self.observer, auto_detach = auto_detach_observer(observer)
-        self.subscription = await pipe(self.observer, observable.subscribe_async, auto_detach)
-
-    async def shutdown(self):
-        await self.zmq_subscriber.subscriber_close()
-        await self.observer.aclose()
-        await self.subscription.dispose_async()
-
-    def console_listener(self):
-        def stop_loop(loop: AbstractEventLoop):
-            if loop.is_running():
-                loop.run_until_complete(self.shutdown())
-                pending_tasks = [
-                    task for task in asyncio.all_tasks() if not task.done()
-                ]
-
-                if len(pending_tasks) > 0:
-                    for task in pending_tasks:
-                        logging.debug(task.get_stack())
-
-                    logging.debug('waiting five seconds for {} pending tasks'.format(len(pending_tasks)))
-                    loop.run_until_complete(asyncio.wait(pending_tasks, timeout=5))
-                loop.stop()
-
-        loop = asyncio.new_event_loop()
-        loop.add_signal_handler(signal.SIGINT, stop_loop, loop)
         try:
-            loop.create_task(self.listen())
-            loop.run_forever()
+            logging.debug('zmq_pub_listener listen({}, {}, {}'.format(
+                self.zmq_pubsub_server_address,
+                self.zmq_pubsub_server_port,
+                self.zmq_topic
+            ))
+
+            self.zmq_subscriber = TopicPubSub[Ticker](
+                self.zmq_pubsub_server_address,
+                self.zmq_pubsub_server_port,
+                self.zmq_topic
+            )
+
+            observable = await self.zmq_subscriber.subscriber()
+            observer = AsyncAnonymousObserver(asend=self.asend, athrow=self.athrow)
+            self.observer, auto_detach = auto_detach_observer(observer)
+            self.subscription = await pipe(self.observer, observable.subscribe_async, auto_detach)
+
+            await self.wait_handle.wait()
         except KeyboardInterrupt:
-            logging.info('KeyboardInterrupt')
-            stop_loop(loop)
+            logging.debug('KeyboardInterrupt')
+            self.wait_handle.set()
+        finally:
+            await self.shutdown()
+
+    # https://www.joeltok.com/blog/2020-10/python-asyncio-create-task-fails-silently
+    async def shutdown(self):
+        logging.debug('shutdown()')
+        self.wait_handle.set()
+        if not self.being_shutdown:
+            self.being_shutdown = True
+            await self.zmq_subscriber.subscriber_close()
+            await self.observer.aclose()
+            await self.subscription.dispose_async()
 
 
 @click.command()
@@ -189,7 +189,14 @@ def main(
     zmq_pubsub_server_port: int
 ):
     printer = ZmqPrettyPrinter(zmq_pubsub_server_address, zmq_pubsub_server_port, csv=csv)
-    printer.console_listener()
+
+    def stop_loop(loop: AbstractEventLoop):
+        loop.run_until_complete(printer.shutdown())
+
+    loop = asyncio.get_event_loop()
+    loop.set_debug(enabled=True)
+    loop.add_signal_handler(signal.SIGINT, stop_loop, loop)
+    loop.run_until_complete(printer.listen())
 
 if __name__ == '__main__':
     main()

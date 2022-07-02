@@ -5,6 +5,7 @@ import asyncio
 import datetime
 import pandas as pd
 import contextlib
+from enum import Enum
 from asyncio import iscoroutinefunction
 from aioreactive.types import AsyncObserver, AsyncObservable
 from aioreactive.subject import AsyncMultiSubject
@@ -35,6 +36,62 @@ Any = TypeVar('Any')
 
 async def anoop(value: Optional[Any] = None):  # type: ignore
     pass
+
+
+class SuccessFailEnum(Enum):
+    SUCCESS = 0
+    FAIL = 1
+
+    def __str__(self):
+        if self.value == 0: return 'SUCCESS'
+        if self.value == 1: return 'FAIL'
+
+
+class SuccessFail():
+    def __init__(self, success_fail: SuccessFailEnum, error=None, exception=None, obj=None, disposable=None):
+        self.success_fail = success_fail
+        self.error = error
+        self.exception = exception
+        self.obj = obj
+        self.disposable = disposable
+
+    @staticmethod
+    def success():
+        return SuccessFail(SuccessFailEnum.SUCCESS)
+
+
+class SuccessFailObservable(AsyncObservable[SuccessFail], AsyncDisposable):
+    def __init__(self, success_fail: Optional[SuccessFail] = None):
+        super().__init__()
+        self.success_fail = success_fail
+        self.is_disposed: bool = False
+        self.observer: Optional[AsyncObserver] = None
+
+    async def success(self):
+        if not self.is_disposed and self.observer:
+            await self.observer.asend(SuccessFail(SuccessFailEnum.SUCCESS))
+            await self.observer.aclose()
+
+    async def failure(self, success_fail: SuccessFail):
+        if not self.is_disposed and self.observer:
+            await self.observer.asend(success_fail)
+            await self.observer.aclose()
+
+    async def subscribe_async(self, observer: AsyncObserver) -> AsyncDisposable:
+        async def disposer() -> None:
+            self.observer = None
+
+        if self.success_fail:
+            await observer.asend(self.success_fail)
+            await observer.aclose()
+            return AsyncDisposable.empty()
+        else:
+            self.observer = observer
+            return AsyncDisposable.create(disposer)
+
+    async def dispose_async(self) -> None:
+        # we don't throw if we're disposed
+        self.is_disposed = True
 
 
 class AsyncCachedObserver(AsyncObserver[TSource]):
