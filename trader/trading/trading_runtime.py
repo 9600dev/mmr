@@ -1,5 +1,6 @@
 import sys
 import os
+import time
 
 from trader.objects import WhatToShow
 
@@ -11,15 +12,13 @@ sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 import pandas as pd
 import datetime as dt
 import backoff
-import aioreactive as rx
+import reactivex as rx
+import reactivex.operators as ops
+import threading
+
 import trader.messaging.trader_service_api as bus
 import asyncio
 from asyncio.events import AbstractEventLoop
-from aioreactive.types import AsyncObservable, Projection, AsyncObserver
-from expression.core import pipe
-from expression.system import AsyncAnonymousDisposable, AsyncDisposable
-from aioreactive.observers import AsyncAnonymousObserver, auto_detach_observer, safe_observer
-from aioreactive.subject import AsyncMultiSubject
 from enum import Enum
 
 from trader.common.logging_helper import setup_logging, get_callstack
@@ -36,7 +35,13 @@ from ib_insync.util import df
 from ib_insync.ticker import Ticker
 from eventkit import Event
 
-from trader.listeners.ibaiorx import IBAIORx, IBAIORxError
+# from trader.listeners.ibaiorx import IBAIORx, IBAIORxError
+from trader.listeners.ibreactive import IBAIORx, IBAIORxError
+from reactivex.abc import DisposableBase
+from reactivex.observable import Observable
+from reactivex.observer import Observer, AutoDetachObserver
+from reactivex.scheduler import ThreadPoolScheduler, NewThreadScheduler
+
 from trader.common.contract_sink import ContractSink
 from trader.common.listener_helpers import Helpers
 from trader.common.observers import ConsoleObserver, ArcticObserver, ComplexConsoleObserver, ContractSinkObserver, NullObserver
@@ -49,8 +54,7 @@ from trader.trading.algo import Algo
 from trader.trading.portfolio import Portfolio
 from trader.trading.executioner import Executioner
 from trader.trading.strategy import Strategy
-from trader.common.reactive import AsyncCachedObserver, AsyncEventSubject, AsyncCachedSubject, awaitify, SuccessFail
-from trader.common.reactive import SuccessFailEnum, SuccessFailObservable
+from trader.common.reactivex import SuccessFailEnum, SuccessFailObservable, SuccessFail
 from trader.common.singleton import Singleton
 from trader.common.helpers import get_network_ip, Pipe, dateify, timezoneify, ListHelper
 from trader.data.market_data import MarketData, SecurityDataStream
@@ -123,7 +127,7 @@ class Trader(metaclass=Singleton):
         self.market_data = 3
         self.zmq_rpc_server: RPCServer[bus.TraderServiceApi]
         self.zmq_pubsub_server: TopicPubSub[Ticker]
-        self.zmq_pubsub_contracts: Dict[Contract, AsyncDisposable] = {}
+        self.zmq_pubsub_contracts: Dict[Contract, DisposableBase] = {}
         self.startup_time: dt.datetime = dt.datetime.now()
         self.last_connect_time: dt.datetime
         self.load_test: bool = False
@@ -166,7 +170,7 @@ class Trader(metaclass=Singleton):
                 zmq_pubsub_server_address=self.zmq_pubsub_server_address,
                 zmq_pubsub_server_port=self.zmq_pubsub_server_port
             )
-            self.zmq_pubsub_contracts: Dict[Contract, AsyncDisposable] = {}
+            self.zmq_pubsub_contracts = {}
 
             self.run(self.zmq_rpc_server.serve())
         except Exception as ex:
@@ -182,10 +186,10 @@ class Trader(metaclass=Singleton):
             sink.dispose()
 
         for contract, subscription in self.zmq_pubsub_contracts.items():
-            await subscription.dispose_async()
+            subscription.dispose()
 
-        for security_definition, security_datastream in self.market_data_subscriptions.items():
-            await security_datastream.dispose_async()
+        # for security_definition, security_datastream in self.market_data_subscriptions.items():
+            # security_datastream.dispose()
 
         await self.book.dispose_async()
         await self.client.shutdown()
@@ -194,15 +198,15 @@ class Trader(metaclass=Singleton):
         # this will force a reconnect through the disconnected event
         self.client.ib.disconnect()
 
-    async def __update_positions(self, positions: List[Position]):
+    def __update_positions(self, positions: List[Position]):
         logging.debug('__update_positions')
         for position in positions:
             self.portfolio.add_position(position)
 
-    async def __update_portfolio(self, portfolio_item: PortfolioItem):
+    def __update_portfolio(self, portfolio_item: PortfolioItem):
         logging.debug('__update_portfolio')
         self.portfolio.add_portfolio_item(portfolio_item=portfolio_item)
-        await self.update_portfolio_universe(portfolio_item)
+        self.update_portfolio_universe(portfolio_item)
 
     async def setup_subscriptions(self):
         if not self.is_ib_connected():
@@ -210,9 +214,12 @@ class Trader(metaclass=Singleton):
 
         error = False
 
-        async def handle_subscription_exception(ex):
+        def handle_subscription_exception(ex):
             logging.exception(ex)
             error = True
+
+        def handle_completed():
+            logging.debug('handle_completed()')
 
         # have the book subscribe to all relevant trade events
         await self.book.subscribe_to_eventkit_event(
@@ -226,19 +233,21 @@ class Trader(metaclass=Singleton):
         )
 
         positions = await self.client.subscribe_positions()
-        await positions.subscribe_async(AsyncCachedObserver(self.__update_positions,
-                                                            athrow=handle_subscription_exception,
-                                                            capture_asend_exception=True))
-
+        positions.subscribe(Observer(
+            on_next=self.__update_positions,
+            on_error=handle_subscription_exception,
+            on_completed=handle_completed
+        ))
         portfolio = await self.client.subscribe_portfolio()
-        await portfolio.subscribe_async(AsyncCachedObserver(self.__update_portfolio,
-                                                            athrow=handle_subscription_exception,
-                                                            capture_asend_exception=True))
+        portfolio.subscribe(Observer(
+            on_next=self.__update_portfolio,
+            on_error=handle_subscription_exception,
+        ))
 
         # because the portfolio subscription is synchronous, an observer isn't attached
         # as the ib.portfolio() method is called, so call it again
         for p in self.client.ib.portfolio():
-            await self.client.portfolio_subject.asend(p)
+            self.client.portfolio_subject.on_next(p)
 
         # make sure we're getting either live, or delayed data
         self.client.ib.reqMarketDataType(self.market_data)
@@ -261,44 +270,46 @@ class Trader(metaclass=Singleton):
         universe.security_definitions.clear()
         self.universe_accessor.update(universe)
 
-    async def publish_contract(self, contract: Contract, delayed: bool) -> SuccessFailObservable:
+    def publish_contract(self, contract: Contract, delayed: bool) -> SuccessFailObservable:
         if contract in self.zmq_pubsub_contracts:
             return SuccessFailObservable(SuccessFail.success())
 
         subject = SuccessFailObservable()
 
-        async def asend(ticker: Ticker):
+        def asend(ticker: Ticker):
             nonlocal subject
-            await self.zmq_pubsub_server.publisher(ticker, topic='ticker')
-            await subject.success()
+            # todo fix this
+            # loop = asyncio.get_event_loop()
+            # loop.run_until_complete(self.zmq_pubsub_server.publisher(ticker, topic='ticker'))
+            asyncio.run(self.zmq_pubsub_server.publisher(ticker, topic='ticker'))
+            subject.success()
 
-        async def aclose():
+        def aclose():
             nonlocal subject
-            await subject.success()
+            subject.success()
             logging.debug('publish_contract.aclose()')
 
-        async def athrow(ex):
+        def athrow(ex):
             nonlocal subject
             exception = self.raise_trader_exception(TraderException, message='publish_contract() athrow', inner=ex)
-            await subject.failure(SuccessFail(SuccessFailEnum.FAIL, exception=ex))
+            subject.failure(SuccessFail(SuccessFailEnum.FAIL, exception=ex))
 
-        observable = await self.client.subscribe_contract(
+        observable = self.client.subscribe_contract(
             contract=contract,
             one_time_snapshot=False,
             delayed=delayed,
         )
 
         try:
-            observer = AsyncAnonymousObserver(asend=asend, aclose=aclose, athrow=athrow)
-            safe_obs, auto_detach = auto_detach_observer(observer)
-            subscription = await pipe(safe_obs, observable.subscribe_async, auto_detach)
+            auto_detach = AutoDetachObserver(on_next=asend, on_completed=aclose, on_error=athrow)
+            subscription = observable.subscribe(auto_detach, scheduler=NewThreadScheduler())
             self.zmq_pubsub_contracts[contract] = subscription
             return subject
         except Exception as ex:
             # todo not sure how to deal with this error condition yet
             raise self.raise_trader_exception(TraderException, message='publish_contract()', inner=ex)
 
-    async def update_portfolio_universe(self, portfolio_item: PortfolioItem):
+    def update_portfolio_universe(self, portfolio_item: PortfolioItem):
         """
         Grabs the current portfolio from TWS and adds a new version to the 'portfolio' table.
         """
@@ -308,7 +319,7 @@ class Trader(metaclass=Singleton):
             lambda definition: definition.conId == portfolio_item.contract.conId
         ):
             contract = portfolio_item.contract
-            contract_details = await self.client.get_contract_details(contract)
+            contract_details = self.client.get_contract_details(contract)
             if contract_details and len(contract_details) >= 1:
                 universe.security_definitions.append(
                     SecurityDefinition.from_contract_details(contract_details[0])
@@ -341,7 +352,6 @@ class Trader(metaclass=Singleton):
                 # )
                 self.market_data_subscriptions[security] = security_stream
 
-
     def start_load_test(self):
         async def _load_test_helper():
             amd = Contract(symbol='AMD', conId=4391, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
@@ -367,8 +377,9 @@ class Trader(metaclass=Singleton):
             counter = 0
             timer = dt.datetime.now()
             while self.load_test:
-                await self.client._contracts_source.asend(set([ticker]))
-                await asyncio.sleep(0)
+                self.client._contracts_source.on_next(set([ticker]))
+
+                # asyncio.sleep(0)
                 # any asyncio.sleep here seems to give us a 100x slowdown.
                 # await asyncio.sleep(0.000001)
                 # sleep 0.000001 give us about 9000 /sec.
@@ -378,7 +389,8 @@ class Trader(metaclass=Singleton):
                 delta = dt.datetime.now() - timer
                 if delta.seconds >= 10:
                     task_num = len(asyncio.all_tasks())
-                    logging.critical('{} tickers per second, {} tasks'.format(float(counter) / 10.0, task_num))
+                    threading_num = threading.active_count()
+                    logging.critical('{} tickers per second, {} tasks, {} threads'.format(float(counter) / 10.0, task_num, threading_num))
                     counter = 0
                     timer = dt.datetime.now()
             logging.debug('load test stopped')
@@ -387,74 +399,74 @@ class Trader(metaclass=Singleton):
         logging.critical('starting start_load_test()')
         task = asyncio.create_task(_load_test_helper())
 
-    async def temp_place_order(
-        self,
-        contract: Contract,
-        order: Order
-    ) -> AsyncCachedObserver[Trade]:
-        async def handle_exception(ex):
-            logging.exception(ex)
-            # todo sort out the book here
+    # async def temp_place_order(
+    #     self,
+    #     contract: Contract,
+    #     order: Order
+    # ) -> AsyncCachedObserver[Trade]:
+    #     async def handle_exception(ex):
+    #         logging.exception(ex)
+    #         # todo sort out the book here
 
-        async def handle_trade(trade: Trade):
-            logging.debug('handle_trade {}'.format(trade))
-            # todo figure out what we want to do here
+    #     async def handle_trade(trade: Trade):
+    #         logging.debug('handle_trade {}'.format(trade))
+    #         # todo figure out what we want to do here
 
-        observer = AsyncCachedObserver(asend=handle_trade,
-                                       athrow=handle_exception,
-                                       capture_asend_exception=True)
+    #     observer = AsyncCachedObserver(asend=handle_trade,
+    #                                    athrow=handle_exception,
+    #                                    capture_asend_exception=True)
 
-        disposable = await self.client.subscribe_place_order(contract, order, observer)
-        return observer
+    #     disposable = await self.client.subscribe_place_order(contract, order, observer)
+    #     return observer
 
-    async def temp_handle_order(
-        self,
-        contract: Contract,
-        action: Action,
-        equity_amount: float,
-        delayed: bool = False,
-        debug: bool = False,
-    ) -> AsyncCachedObserver[Trade]:
-        # todo make sure amount is less than outstanding profit
+    # async def temp_handle_order(
+    #     self,
+    #     contract: Contract,
+    #     action: Action,
+    #     equity_amount: float,
+    #     delayed: bool = False,
+    #     debug: bool = False,
+    # ) -> AsyncCachedObserver[Trade]:
+    #     # todo make sure amount is less than outstanding profit
 
-        # grab the latest price of instrument
-        subject = await self.client.subscribe_contract(contract=contract, one_time_snapshot=True)
+    #     # grab the latest price of instrument
+    #     subject = await self.client.subscribe_contract(contract=contract, one_time_snapshot=True)
 
-        xs = pipe(
-            subject,
-            Pipe[Ticker].take(1)
-        )
+    #     xs = pipe(
+    #         subject,
+    #         Pipe[Ticker].take(1)
+    #     )
 
-        observer = AsyncCachedObserver[Ticker]()
-        await xs.subscribe_async(observer)
-        latest_tick = await observer.wait_value()
+    #     observer = AsyncCachedObserver[Ticker]()
+    #     await xs.subscribe_async(observer)
+    #     latest_tick = await observer.wait_value()
 
-        # todo perform tick sanity checks
+    #     # todo perform tick sanity checks
 
-        # assess if we should trade
-        quantity = equity_amount / latest_tick.bid
+    #     # assess if we should trade
+    #     quantity = equity_amount / latest_tick.bid
 
-        if quantity < 1 and quantity > 0:
-            quantity = 1.0
+    #     if quantity < 1 and quantity > 0:
+    #         quantity = 1.0
 
-        # round the quantity
-        quantity_int = round(quantity)
+    #     # round the quantity
+    #     quantity_int = round(quantity)
 
-        logging.debug('temp_handle_order assessed quantity: {} on bid: {}'.format(
-            quantity_int, latest_tick.bid
-        ))
+    #     logging.debug('temp_handle_order assessed quantity: {} on bid: {}'.format(
+    #         quantity_int, latest_tick.bid
+    #     ))
 
-        limit_price = latest_tick.bid
-        # if debug, move the buy/sell by 10%
-        if debug and action == Action.BUY:
-            limit_price = limit_price * 0.9
-            limit_price = round(limit_price * 0.9, ndigits=2)
-        if debug and action == Action.SELL:
-            limit_price = round(limit_price * 1.1, ndigits=2)
+    #     limit_price = latest_tick.bid
+    #     # if debug, move the buy/sell by 10%
+    #     if debug and action == Action.BUY:
+    #         limit_price = limit_price * 0.9
+    #         limit_price = round(limit_price * 0.9, ndigits=2)
+    #     if debug and action == Action.SELL:
+    #         limit_price = round(limit_price * 1.1, ndigits=2)
 
-        # put an order in
-        order = LimitOrder(action=str(action), totalQuantity=quantity_int, lmtPrice=limit_price)
-        return await self.temp_place_order(contract=contract, order=order)
+    #     # put an order in
+    #     order = LimitOrder(action=str(action), totalQuantity=quantity_int, lmtPrice=limit_price)
+    #     return await self.temp_place_order(contract=contract, order=order)
 
     def cancel_order(self, order_id: int) -> Optional[Trade]:
         # get the Order

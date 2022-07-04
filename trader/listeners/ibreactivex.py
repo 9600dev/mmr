@@ -4,20 +4,14 @@ import os
 import asyncio
 import datetime
 import datetime as dt
-import aioreactive as rx
+import reactivex as rx
+from reactivex import operators as ops
+from reactivex.subject import Subject
+
 import pandas as pd
-import ib_insync as ibapi
 import backoff
 import random
-import aiohttp
-from aioreactive.subject import AsyncMultiSubject
-from aioreactive.types import AsyncObservable, AsyncObserver
-from aioreactive.observers import AsyncAnonymousObserver, auto_detach_observer, safe_observer
-from aioreactive.observables import AsyncAnonymousObservable
-from expression.system.disposable import Disposable, AsyncDisposable
 
-from re import I
-from eventkit import event
 from ib_insync.ib import IB
 from ib_insync.util import schedule
 from ib_insync.client import Client
@@ -31,11 +25,8 @@ from eventkit.event import Event
 
 from asyncio import BaseEventLoop
 from asyncio.events import AbstractEventLoop
-from expression.core import pipe
-from expression.core import aiotools
-from expression.system import CancellationToken, CancellationTokenSource
-
 from enum import Enum
+
 from typing import (
     List,
     Dict,
@@ -61,7 +52,7 @@ from trader.common.reactive import AsyncCachedObservable, awaitify, AsyncEventSu
 from trader.listeners.ib_history_worker import IBHistoryWorker
 from trader.objects import WhatToShow, ReportType
 
-logging = setup_logging(module_name="ibaiorx")
+logging = setup_logging(module_name="ibreactivex")
 
 TAny = TypeVar('TAny')
 TKey = TypeVar('TKey')
@@ -325,7 +316,7 @@ class IBAIORx():
         contract: Contract,
         one_time_snapshot: bool = False,
         delayed: bool = False,
-    ) -> rx.AsyncObservable[Ticker]:
+    ) -> Observable[Ticker]:
         if contract not in self.contracts_cache:
             self.contracts_cache[contract] = await self.__subscribe_contract(contract, one_time_snapshot, delayed)
         return self.contracts_cache[contract]

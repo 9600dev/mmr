@@ -270,7 +270,6 @@ class TopicPubSub(Generic[T]):
                 translation_table=self.translation_table
             )  # type: ignore
 
-        logging.debug('publisher()')
         await self.zmq_publisher.publish(topic).on_message(obj)
 
     async def publisher_close(self):

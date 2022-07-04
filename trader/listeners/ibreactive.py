@@ -4,20 +4,19 @@ import os
 import asyncio
 import datetime
 import datetime as dt
-import aioreactive as rx
+import reactivex as rx
+from reactivex import operators as ops
+from reactivex.subject import Subject
+from reactivex.observable import Observable
+from reactivex.observer import Observer, AutoDetachObserver
+from reactivex.disposable import Disposable
+from reactivex.abc import DisposableBase
+
 import pandas as pd
-import ib_insync as ibapi
 import backoff
 import random
-import aiohttp
-from aioreactive.subject import AsyncMultiSubject
-from aioreactive.types import AsyncObservable, AsyncObserver
-from aioreactive.observers import AsyncAnonymousObserver, auto_detach_observer, safe_observer
-from aioreactive.observables import AsyncAnonymousObservable
-from expression.system.disposable import Disposable, AsyncDisposable
 
-from re import I
-from eventkit import event
+from functools import partial
 from ib_insync.ib import IB
 from ib_insync.util import schedule
 from ib_insync.client import Client
@@ -31,11 +30,8 @@ from eventkit.event import Event
 
 from asyncio import BaseEventLoop
 from asyncio.events import AbstractEventLoop
-from expression.core import pipe
-from expression.core import aiotools
-from expression.system import CancellationToken, CancellationTokenSource
-
 from enum import Enum
+
 from typing import (
     List,
     Dict,
@@ -58,10 +54,11 @@ from trader.common.helpers import Pipe
 from trader.common.logging_helper import setup_logging
 from trader.common.reactive import AsyncCachedSubject, AsyncCachedPandasSubject, AsyncCachedObserver
 from trader.common.reactive import AsyncCachedObservable, awaitify, AsyncEventSubject
+from trader.common.reactivex import EventSubject
 from trader.listeners.ib_history_worker import IBHistoryWorker
 from trader.objects import WhatToShow, ReportType
 
-logging = setup_logging(module_name="ibaiorx")
+logging = setup_logging(module_name="ibreactivex")
 
 TAny = TypeVar('TAny')
 TKey = TypeVar('TKey')
@@ -103,36 +100,33 @@ class IBAIORx():
 
         self.ib = IB()
 
-        def mapper(tickers: Set[Ticker]) -> rx.AsyncObservable[Ticker]:
+        def mapper(tickers: Set[Ticker]) -> Observable[Ticker]:
             # warning: for whatever reason, we can get either a Set of tickers or a single ticker.
             # if this raises an exception, all hell brakes loose - we get multiple Tasks
             # that sit around pending, and all sorts...
             if isinstance(tickers, Set):
                 return rx.from_iterable(tickers)
             elif isinstance(tickers, Ticker):
-                return rx.single(tickers)
+                return rx.of(tickers)
             else:
                 raise ValueError(tickers)
 
-        self.market_data_subject: rx.AsyncSubject[Ticker] = rx.AsyncSubject[Ticker]()
-        self.historical_data_subject: rx.AsyncSubject[pd.DataFrame] = rx.AsyncSubject[pd.DataFrame]()
-        self.bars_data_subject = AsyncEventSubject[RealTimeBarList](eventkit_event=self.ib.barUpdateEvent)
-        self.positions_subject = AsyncEventSubject[List[Position]](eventkit_event=self.ib.positionEvent)
-        self.portfolio_subject = AsyncEventSubject[PortfolioItem](eventkit_event=self.ib.updatePortfolioEvent)
-        self.trades_subject = AsyncEventSubject[Trade](eventkit_event=self.ib.orderStatusEvent)
-        self._contracts_source = AsyncEventSubject[Set[Ticker]](eventkit_event=self.ib.pendingTickersEvent)
-        self.error_subject = AsyncMultiSubject[IBAIORxError]()
-        self.error_disposables: Dict[int, AsyncDisposable] = {}
+        self.market_data_subject: Subject[Ticker] = Subject[Ticker]()
+        self.historical_data_subject: Subject[pd.DataFrame] = Subject[pd.DataFrame]()
+        self.bars_data_subject = EventSubject[RealTimeBarList](eventkit_event=self.ib.barUpdateEvent)
+        self.positions_subject = EventSubject[List[Position]](eventkit_event=self.ib.positionEvent)
+        self.portfolio_subject = EventSubject[PortfolioItem](eventkit_event=self.ib.updatePortfolioEvent)
+        self.trades_subject = EventSubject[Trade](eventkit_event=self.ib.orderStatusEvent)
+        self._contracts_source = EventSubject[Set[Ticker]](eventkit_event=self.ib.pendingTickersEvent)
+        self.error_subject = Subject[IBAIORxError]()
+        self.error_disposables: Dict[int, DisposableBase] = {}
 
-        mapped: AsyncObservable[Ticker] = pipe(
-            self._contracts_source,
-            rx.flat_map(mapper)
+        self.contracts_subject: Observable[Ticker] = self._contracts_source.pipe(
+            ops.flat_map(mapper)
         )
 
-        self.contracts_subject = AsyncAnonymousObservable(mapped.subscribe_async)
-
-        self.contracts_cache: Dict[Contract, rx.AsyncObservable] = {}
-        self.bars_cache: Dict[Contract, rx.AsyncObservable[RealTimeBarList]] = {}
+        self.contracts_cache: Dict[Contract, Observable] = {}
+        self.bars_cache: Dict[Contract, Observable[RealTimeBarList]] = {}
         self.historical_subscribers: Dict[Contract, int] = {}
         self.history_worker: Optional[IBHistoryWorker] = None
         self._shutdown: bool = True
@@ -151,7 +145,7 @@ class IBAIORx():
                 reqId, errorCode, errorString, contract
             )
         )
-        await self.error_subject.asend(IBAIORxError(reqId, errorCode, errorString, contract))
+        self.error_subject.on_next(IBAIORxError(reqId, errorCode, errorString, contract))
 
     @backoff.on_exception(backoff.expo, Exception, max_tries=3, max_time=30)
     def connect(self):
@@ -196,17 +190,17 @@ class IBAIORx():
         if self.history_worker:
             await self.history_worker.disconnect()
 
-        await self.market_data_subject.dispose_async()
-        await self.historical_data_subject.dispose_async()
-        await self.bars_data_subject.dispose_async()
-        await self.positions_subject.dispose_async()
-        await self.portfolio_subject.dispose_async()
-        await self.trades_subject.dispose_async()
-        await self._contracts_source.dispose_async()
-        await self.error_subject.dispose_async()
+        self.market_data_subject.dispose()
+        self.historical_data_subject.dispose()
+        self.bars_data_subject.dispose()
+        self.positions_subject.dispose()
+        self.portfolio_subject.dispose()
+        self.trades_subject.dispose()
+        self._contracts_source.dispose()
+        self.error_subject.dispose()
 
         for reqId, disposable in self.error_disposables.items():
-            await disposable.dispose_async()
+            disposable.dispose()
 
         self.ib.disconnect()
         self._shutdown = True
@@ -227,45 +221,46 @@ class IBAIORx():
         self,
         contract: Contract,
         order: Order,
-        observer: rx.AsyncObserver[Trade]
-    ) -> AsyncDisposable:
+        observer: Observer[Trade]
+    ) -> DisposableBase:
         # the order object gets filled with the order details (clientId, orderId etc)
         # the trade object returned from 'placeOrder' gets filled later, but we don't return it
         # as we want the subscription stream to contain all relevant trade details
+        def filter_trade(trade: Trade):
+            return self._filter_contract(contract, trade)
 
-        xs = pipe(
-            self.trades_subject,
-            rx.filter(lambda trade: self._filter_contract(contract, trade)),  # type: ignore
+        xs = self.trades_subject.pipe(
+            ops.filter(filter_trade)
         )
 
-        disposable = await xs.subscribe_async(observer)
-        await self.trades_subject.call_event_subscriber_sync(lambda: self.ib.placeOrder(contract, order))
+        disposable = xs.subscribe(observer)
+        self.trades_subject.call_event_subscriber_sync(lambda: self.ib.placeOrder(contract, order))
         # todo, figure out what to do here with the disposable
         # should it cancel the order, or just stop listening?
         return disposable
 
-    async def subscribe_cancel_order(
-        self,
-        contract: Contract,
-        order: Order,
-        observer: rx.AsyncObserver[Trade]
-    ) -> AsyncDisposable:
-        xs = pipe(
-            self.trades_subject,
-            rx.filter(lambda trade: self._filter_contract(contract, trade)),  # type: ignore
-        )
+    # async def subscribe_cancel_order(
+    #     self,
+    #     contract: Contract,
+    #     order: Order,
+    #     observer: rx.AsyncObserver[Trade]
+    # ) -> AsyncDisposable:
+    #     xs = pipe(
+    #         self.trades_subject,
+    #         rx.filter(lambda trade: self._filter_contract(contract, trade)),  # type: ignore
+    #     )
 
-        disposable = await xs.subscribe_async(observer)
-        await self.trades_subject.call_event_subscriber_sync(lambda: self.ib.cancelOrder(order))
+    #     disposable = await xs.subscribe_async(observer)
+    #     await self.trades_subject.call_event_subscriber_sync(lambda: self.ib.cancelOrder(order))
 
-        return disposable
+    #     return disposable
 
-    async def __subscribe_contract(
+    def __subscribe_contract(
         self,
         contract: Contract,
         one_time_snapshot: bool = False,
         delayed: bool = False,
-    ) -> rx.AsyncAnonymousObservable[Ticker]:
+    ) -> Observable[Ticker]:
         if delayed:
             # 1 = Live
             # 2 = Frozen
@@ -278,7 +273,7 @@ class IBAIORx():
         # and starts the subscription
 
         reqId = self.ib.client._reqIdSeq
-        result = await self._contracts_source.call_event_subscriber_sync(
+        result = self._contracts_source.call_event_subscriber_sync(
             lambda: self.ib.reqMktData(
                 contract=contract,
                 genericTickList='',
@@ -292,86 +287,92 @@ class IBAIORx():
             self.ib.reqMarketDataType(1)
             logging.debug('reqMarketDataType(1)')
 
-        contract_filter: AsyncAnonymousObservable[Ticker] = pipe(
-            self.contracts_subject,
-            rx.filter(lambda ticker: self._filter_contract(contract, ticker)),  # type: ignore
+        def filter_contract(ticker):
+            return self._filter_contract(contract, ticker)
+
+        contract_filter: Observable[Ticker] = self.contracts_subject.pipe(
+            ops.filter(filter_contract)
         )
 
-        xs: AsyncMultiSubject = AsyncMultiSubject()
-        await contract_filter.subscribe_async(xs)
+        xs: Subject = Subject()
+        contract_filter.subscribe(xs)
 
         # error handling, which will listen to the error source, and pipe
         # any errors through to the subscriber
-        async def handle_error(error: IBAIORxError):
+        def handle_error(error: IBAIORxError):
             logging.error('__subscribe_snapshot() had error: {}'.format(error))
-            await xs.athrow(Exception(error))
+            xs.on_error(Exception(error))
 
-        async def handle_exception(exception: Exception):
+        def handle_exception(exception: Exception):
             logging.error('__subscribe_snapshot() threw {}'.format(exception))
-            await xs.athrow(exception)
+            xs.on_error(exception)
 
-        error_observer = AsyncAnonymousObserver(asend=handle_error, athrow=handle_exception)
-        err = pipe(
-            self.error_subject,
-            rx.filter(lambda error: error.reqId == reqId)  # type: ignore
+        error_observer = AutoDetachObserver(on_next=handle_error, on_error=handle_exception)
+
+        def filter_reqid(error: IBAIORxError):
+            return error.reqId == reqId
+
+        err = self.error_subject.pipe(
+            ops.filter(filter_reqid)
         )
-        safe_obv, auto_detach = auto_detach_observer(obv=error_observer)
-        self.error_disposables[reqId] = await pipe(safe_obv, err.subscribe_async, auto_detach)
 
-        return AsyncAnonymousObservable(xs.subscribe_async)
+        self.error_disposables[reqId] = err.subscribe(error_observer)
 
-    async def subscribe_contract(
+        # self.error_disposables[reqId] = await pipe(safe_obv, err.subscribe_async, auto_detach)
+        return xs
+
+    def subscribe_contract(
         self,
         contract: Contract,
         one_time_snapshot: bool = False,
         delayed: bool = False,
-    ) -> rx.AsyncObservable[Ticker]:
+    ) -> Observable[Ticker]:
         if contract not in self.contracts_cache:
-            self.contracts_cache[contract] = await self.__subscribe_contract(contract, one_time_snapshot, delayed)
+            self.contracts_cache[contract] = self.__subscribe_contract(contract, one_time_snapshot, delayed)
         return self.contracts_cache[contract]
 
     def unsubscribe_contract(self, contract: Contract):
         raise ValueError('not implemented')
 
-    async def subscribe_barlist(
-        self,
-        contract: Contract,
-        wts: WhatToShow = WhatToShow.MIDPOINT
-    ) -> rx.AsyncObservable[RealTimeBarList]:
-        # todo this method subscribes and populates a RealTimeBarsList object,
-        # which I'm sure will end up being a memory leak
-        bar_size = 5
+    # async def subscribe_barlist(
+    #     self,
+    #     contract: Contract,
+    #     wts: WhatToShow = WhatToShow.MIDPOINT
+    # ) -> Obser[RealTimeBarList]:
+    #     # todo this method subscribes and populates a RealTimeBarsList object,
+    #     # which I'm sure will end up being a memory leak
+    #     bar_size = 5
 
-        if contract in self.bars_cache:
-            return self.bars_cache[contract]
+    #     if contract in self.bars_cache:
+    #         return self.bars_cache[contract]
 
-        await self.bars_data_subject.call_event_subscriber_sync(
-            lambda: self.ib.reqRealTimeBars(contract, bar_size, str(wts), False)
-        )
+    #     await self.bars_data_subject.call_event_subscriber_sync(
+    #         lambda: self.ib.reqRealTimeBars(contract, bar_size, str(wts), False)
+    #     )
 
-        xs = pipe(
-            self.bars_data_subject,
-            rx.filter(lambda bar_data_list: self._filter_contract(contract, bar_data_list)),  # type: ignore
-        )
+    #     xs = pipe(
+    #         self.bars_data_subject,
+    #         rx.filter(lambda bar_data_list: self._filter_contract(contract, bar_data_list)),  # type: ignore
+    #     )
 
-        self.bars_cache[contract] = xs
-        return xs
+    #     self.bars_cache[contract] = xs
+    #     return xs
 
-    def unsubscribe_barlist(self, contract: Contract):
-        if contract in self.bars_cache and self.bars_data_subject.value():
-            self.ib.cancelRealTimeBars(cast(RealTimeBarList, self.bars_data_subject.value()))
-            del self.bars_cache[contract]
-        else:
-            logging.debug('unsubscribe_barlist failed for {}'.format(contract))
+    # def unsubscribe_barlist(self, contract: Contract):
+    #     if contract in self.bars_cache and self.bars_data_subject.value():
+    #         self.ib.cancelRealTimeBars(cast(RealTimeBarList, self.bars_data_subject.value()))
+    #         del self.bars_cache[contract]
+    #     else:
+    #         logging.debug('unsubscribe_barlist failed for {}'.format(contract))
 
-    async def subscribe_positions(self) -> rx.AsyncObservable[List[Position]]:
+    async def subscribe_positions(self) -> Observable[List[Position]]:
         await self.positions_subject.call_event_subscriber(self.ib.reqPositionsAsync())
         return self.positions_subject
 
-    async def subscribe_portfolio(self) -> rx.AsyncObservable[PortfolioItem]:
+    async def subscribe_portfolio(self) -> Observable[PortfolioItem]:
         portfolio_items = self.ib.portfolio()
         for item in portfolio_items:
-            await self.portfolio_subject.asend(item)
+            self.portfolio_subject.on_next(item)
         return self.portfolio_subject
 
     async def get_open_orders(self) -> List[Order]:
@@ -389,58 +390,56 @@ class IBAIORx():
         populated_ticker: Optional[Ticker] = None
         thrown_exception: Optional[Exception] = None
 
-        async def update_ticker(ticker: Ticker):
+        def update_ticker(ticker: Ticker):
             nonlocal populated_ticker
             populated_ticker = ticker
             _task.set()
 
-        async def athrow(ex: Exception):
+        def athrow(ex: Exception):
             nonlocal thrown_exception
             thrown_exception = ex
             _task.set()
 
-        async def aclose():
+        def aclose():
             logging.debug('get_snapshot() aclose')
 
         # we've got to subscribe, then wait for the first Ticker to arrive in the events
         # cachedeventsource, subscribers get the last value after calling subscribe
-        observable: AsyncAnonymousObservable[Ticker] = await self.__subscribe_contract(
+        observable: Observable[Ticker] = self.__subscribe_contract(
             contract=contract,
             one_time_snapshot=True,
             delayed=delayed,
         )
 
-        xs: AsyncAnonymousObservable[Ticker] = pipe(
-            observable,
-            rx.take(1)  # type: ignore
+        xs: Observable[Ticker] = observable.pipe(
+            ops.take(1)
         )
 
-        observer = AsyncAnonymousObserver(asend=update_ticker, athrow=athrow, aclose=aclose)
-        safe_obv, auto_detach = auto_detach_observer(obv=observer)
-        subscription = await pipe(safe_obv, xs.subscribe_async, auto_detach)
+        observer = AutoDetachObserver[Ticker](on_next=update_ticker, on_error=athrow, on_completed=aclose)
+        subscription = xs.subscribe(observer)
 
         await _task.wait()
-        await safe_obv.aclose()
-        await subscription.dispose_async()
+        observer.on_completed()
+        subscription.dispose()
         await asyncio.sleep(0.1)
         if thrown_exception is not None:
             ex = cast(Exception, thrown_exception)
             raise ex
         return cast(Ticker, populated_ticker)
 
-    async def get_contract_details(self, contract: Contract) -> List[ContractDetails]:
-        result = await self.ib.reqContractDetailsAsync(contract)
+    def get_contract_details(self, contract: Contract) -> List[ContractDetails]:
+        result = self.ib.reqContractDetails(contract)
         if not result:
             return []
         else:
             return cast(List[ContractDetails], result)
 
-    async def get_fundamental_data_sync(
-        self,
-        contract: Contract,
-        report_type: ReportType = ReportType.ReportSnapshot
-    ) -> rx.AsyncObservable[str]:
-        return rx.from_async(self.ib.reqFundamentalDataAsync(contract, reportType=str(report_type)))
+    # async def get_fundamental_data_sync(
+    #     self,
+    #     contract: Contract,
+    #     report_type: ReportType = ReportType.ReportSnapshot
+    # ) -> rx.AsyncObservable[str]:
+    #     return rx.from_async(self.ib.reqFundamentalDataAsync(contract, reportType=str(report_type)))
 
     async def get_matching_symbols(self, symbol: str) -> List[ContractDescription]:
         result = await self.ib.reqMatchingSymbolsAsync(symbol)
@@ -569,16 +568,16 @@ class IBAIORx():
         contract: Contract,
         start_date: dt.datetime,
         what_to_show: WhatToShow,
-        observer: AsyncObserver[pd.DataFrame],
+        observer: Observer[pd.DataFrame],
         refresh_interval: int = 60,
-    ) -> AsyncDisposable:
+    ) -> DisposableBase:
         async def __update(
-            subject: AsyncCachedPandasSubject,
+            subject: Subject,
             contract: Contract,
             start_date: dt.datetime,
             end_date: dt.datetime
         ):
-            if subject._is_disposed:
+            if subject.is_disposed:
                 return
 
             data = await self.get_contract_history(
@@ -589,7 +588,7 @@ class IBAIORx():
             )
 
             print(data)
-            await subject.asend(data)
+            subject.on_next(data)
 
             start_date = end_date
             end_date = end_date + dt.timedelta(minutes=1)
@@ -600,13 +599,13 @@ class IBAIORx():
                 __update(subject, contract, start_date, end_date)
             )
 
-        subject = AsyncCachedPandasSubject()
+        subject = Subject[pd.DataFrame]()
 
         end_date = dt.datetime.now(dt.timezone.utc).astimezone(start_date.tzinfo)
 
         loop = asyncio.get_event_loop()
         loop.call_later(1, asyncio.create_task, __update(subject, contract, start_date, end_date))
-        return await subject.subscribe_async(observer)
+        return subject.subscribe(observer)
 
     def sleep(self, seconds: float):
         self.ib.sleep(seconds)

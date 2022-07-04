@@ -1,12 +1,18 @@
 import asyncio
 import sys
 import os
-import aioreactive as rx
+import reactivex as rx
+import reactivex.operators as ops
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
 # PACKAGE_PARENT = '../..'
 # SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
 # sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
+
+from reactivex.abc import DisposableBase
+from reactivex.observable import Observable
+from reactivex.observer import Observer
+from reactivex.disposable import Disposable
 
 from dataclasses import dataclass
 from ib_insync.objects import Position, PortfolioItem
@@ -14,11 +20,7 @@ from ib_insync.contract import Contract
 from ib_insync.order import Order, Trade
 from ib_insync.ticker import Ticker
 from trader.container import Container
-from trader.common.reactive import SuccessFail, SuccessFailObservable, SuccessFailEnum
-from aioreactive.observables import AsyncAnonymousObservable
-from aioreactive.observers import AsyncAnonymousObserver, safe_observer, auto_detach_observer
-from expression.core import pipe
-from expression.system.disposable import AsyncDisposable
+from trader.common.reactivex import SuccessFail, SuccessFailObservable, SuccessFailEnum
 
 import trader.trading.trading_runtime as runtime
 from trader.data.universe import Universe
@@ -57,19 +59,19 @@ class TraderServiceApi(RPCHandler):
     def get_orders(self) -> dict[int, list[Order]]:
         return self.trader.book.get_orders()
 
-    @RPCHandler.rpcmethod
-    def temp_place_order(self, contract: Contract, action: str, equity_amount: float) -> Trade:
-        from trader.trading.trading_runtime import Action, Trader
-        # todo: need to figure out the async stuff here
-        act = Action.BUY if 'BUY' in action else Action.SELL
-        cached_observer = asyncio.get_event_loop().run_until_complete(self.trader.temp_handle_order(
-            contract=contract,
-            action=act,
-            equity_amount=equity_amount,
-            delayed=True,
-            debug=True
-        ))
-        return asyncio.get_event_loop().run_until_complete(cached_observer.wait_value())
+    # @RPCHandler.rpcmethod
+    # def temp_place_order(self, contract: Contract, action: str, equity_amount: float) -> Trade:
+    #     from trader.trading.trading_runtime import Action, Trader
+    #     # todo: need to figure out the async stuff here
+    #     act = Action.BUY if 'BUY' in action else Action.SELL
+    #     cached_observer = asyncio.get_event_loop().run_until_complete(self.trader.temp_handle_order(
+    #         contract=contract,
+    #         action=act,
+    #         equity_amount=equity_amount,
+    #         delayed=True,
+    #         debug=True
+    #     ))
+    #     return asyncio.get_event_loop().run_until_complete(cached_observer.wait_value())
 
     @RPCHandler.rpcmethod
     def cancel_order(self, order_id: int) -> Optional[Trade]:
@@ -83,23 +85,26 @@ class TraderServiceApi(RPCHandler):
     @RPCHandler.rpcmethod
     def publish_contract(self, contract: Contract, delayed: bool) -> SuccessFail:
         task = asyncio.Event()
-        disposable: AsyncDisposable = AsyncDisposable.empty()
+        disposable: DisposableBase = Disposable()
         result: Optional[SuccessFail] = None
 
-        async def asend(val: SuccessFail):
+        def asend(val: SuccessFail):
             nonlocal result
             result = val
             task.set()
 
-        async def wait_for_subscription():
+        def wait_for_subscription():
             nonlocal disposable
-            success_fail = await self.trader.publish_contract(contract, delayed)
-            disposable = await success_fail.subscribe_async(AsyncAnonymousObserver(asend=asend))
+            success_fail = self.trader.publish_contract(contract, delayed)
+            disposable = success_fail.subscribe(Observer(on_next=asend))
 
         loop = asyncio.get_event_loop()
-        loop.run_until_complete(wait_for_subscription())
+        # loop.run_until_complete(wait_for_subscription())
+        # loop.run_until_complete(task.wait())
+        # loop.run_until_complete(disposable.dispose_async())
+        wait_for_subscription()
         loop.run_until_complete(task.wait())
-        loop.run_until_complete(disposable.dispose_async())
+        disposable.dispose()
 
         return result if result else SuccessFail(SuccessFailEnum.FAIL)
 

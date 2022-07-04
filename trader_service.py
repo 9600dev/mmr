@@ -4,14 +4,22 @@ import signal
 import asyncio
 import aioreactive as rx
 import logging as log
+import expression
+import pytest
+from _pytest.monkeypatch import MonkeyPatch
 
 from trader.common.logging_helper import setup_logging, log_callstack_debug, set_all_log_level
 logging = setup_logging(module_name='trading_runtime')
 
 from asyncio import iscoroutinefunction, AbstractEventLoop
 from trader.container import Container
+from expression.system import CancellationToken, CancellationTokenSource
 from trader.trading.trading_runtime import Trader
 from trader.common.helpers import get_network_ip
+from expression.core.mailbox import MailboxProcessor
+
+# from expression.core import aiotools
+
 from typing import TypeVar, Callable, Awaitable, Optional, Any
 
 _TSource = TypeVar('_TSource')
@@ -46,6 +54,7 @@ def main(simulation: bool,
 
     # useful to find out where rogue subscriptions that aren't disposed of are
     # rx.observers.AsyncAnonymousObserver.__init__ = monkeypatch_asyncanonymousobserver  # type: ignore
+
     is_stopping = False
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -75,11 +84,12 @@ def main(simulation: bool,
         raise ValueError('simulation not implemented yet')
 
     try:
-        loop.set_debug(enabled=True)
-        loop.add_signal_handler(signal.SIGINT, stop_loop, loop)
-
         if os.environ.get('TRADER_NODEBUG'):
             set_all_log_level(log.CRITICAL)
+        else:
+            loop.set_debug(enabled=True)
+
+        loop.add_signal_handler(signal.SIGINT, stop_loop, loop)
 
         trader.connect()
 
