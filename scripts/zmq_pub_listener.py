@@ -15,6 +15,7 @@ import signal
 import click
 import rich
 import time
+import numpy as np
 from rich.console import Console
 from asyncio.events import AbstractEventLoop
 from aioreactive.types import AsyncObservable, Projection, AsyncObserver
@@ -102,12 +103,12 @@ class ZmqPrettyPrinter():
                 'bid': '%.2f' % ticker.bid,
                 'ask': '%.2f' % ticker.ask,
                 'last': '%.2f' % ticker.last,
-                'lastSize': int(ticker.lastSize),
+                'lastSize': int(ticker.lastSize) if not np.isnan(ticker.lastSize) else -1,
                 'open': '%.2f' % ticker.open,
                 'high': '%.2f' % ticker.high,
                 'low': '%.2f' % ticker.low,
                 'close': '%.2f' % ticker.close,
-                'halted': int(ticker.halted)
+                'halted': int(ticker.halted) if not np.isnan(ticker.halted) else -1
             }
 
         # self.console.clear(True)

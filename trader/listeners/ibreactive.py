@@ -255,6 +255,47 @@ class IBAIORx():
 
     #     return disposable
 
+    def subscribe_contract_direct(
+        self,
+        contract: Contract,
+        one_time_snapshot: bool = False,
+        delayed: bool = False,
+    ) -> Observable[IBAIORxError]:
+        if delayed:
+            # 1 = Live
+            # 2 = Frozen
+            # 3 = Delayed
+            # 4 = Delayed frozen
+            logging.debug('reqMarketDataType(3)')
+            self.ib.reqMarketDataType(3)
+
+        # reqMktData immediately returns with an empty ticker
+        # and starts the subscription
+
+        reqId = self.ib.client._reqIdSeq
+        self._contracts_source.call_event_subscriber_sync(
+            lambda: self.ib.reqMktData(
+                contract=contract,
+                genericTickList='',
+                snapshot=one_time_snapshot,
+                regulatorySnapshot=False,
+            ),
+            asend_result=False
+        )
+
+        if delayed:
+            self.ib.reqMarketDataType(1)
+            logging.debug('reqMarketDataType(1)')
+
+        def filter_reqid(error: IBAIORxError):
+            return error.reqId == reqId
+
+        err = self.error_subject.pipe(
+            ops.filter(filter_reqid)
+        )
+
+        return err
+
     def __subscribe_contract(
         self,
         contract: Contract,
@@ -317,8 +358,6 @@ class IBAIORx():
         )
 
         self.error_disposables[reqId] = err.subscribe(error_observer)
-
-        # self.error_disposables[reqId] = await pipe(safe_obv, err.subscribe_async, auto_detach)
         return xs
 
     def subscribe_contract(

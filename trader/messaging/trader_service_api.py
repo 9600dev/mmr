@@ -82,31 +82,36 @@ class TraderServiceApi(RPCHandler):
         loop = asyncio.get_event_loop()
         return loop.run_until_complete(self.trader.client.get_snapshot(contract=contract, delayed=delayed))
 
+    # @RPCHandler.rpcmethod
+    # def publish_contract(self, contract: Contract, delayed: bool) -> SuccessFail:
+    #     task = asyncio.Event()
+    #     disposable: DisposableBase = Disposable()
+    #     result: Optional[SuccessFail] = None
+
+    #     def asend(val: SuccessFail):
+    #         nonlocal result
+    #         result = val
+    #         task.set()
+
+    #     def wait_for_subscription():
+    #         nonlocal disposable
+    #         success_fail = self.trader.publish_contract(contract, delayed)
+    #         disposable = success_fail.subscribe(Observer(on_next=asend))
+
+    #     loop = asyncio.get_event_loop()
+    #     # loop.run_until_complete(wait_for_subscription())
+    #     # loop.run_until_complete(task.wait())
+    #     # loop.run_until_complete(disposable.dispose_async())
+    #     wait_for_subscription()
+    #     loop.run_until_complete(task.wait())
+    #     disposable.dispose()
+
+    #     return result if result else SuccessFail(SuccessFailEnum.FAIL)
+
     @RPCHandler.rpcmethod
-    def publish_contract(self, contract: Contract, delayed: bool) -> SuccessFail:
-        task = asyncio.Event()
-        disposable: DisposableBase = Disposable()
-        result: Optional[SuccessFail] = None
-
-        def asend(val: SuccessFail):
-            nonlocal result
-            result = val
-            task.set()
-
-        def wait_for_subscription():
-            nonlocal disposable
-            success_fail = self.trader.publish_contract(contract, delayed)
-            disposable = success_fail.subscribe(Observer(on_next=asend))
-
-        loop = asyncio.get_event_loop()
-        # loop.run_until_complete(wait_for_subscription())
-        # loop.run_until_complete(task.wait())
-        # loop.run_until_complete(disposable.dispose_async())
-        wait_for_subscription()
-        loop.run_until_complete(task.wait())
-        disposable.dispose()
-
-        return result if result else SuccessFail(SuccessFailEnum.FAIL)
+    def publish_contract(self, contract: Contract, delayed: bool) -> bool:
+        self.trader.publish_contract(contract, delayed)
+        return True
 
     @RPCHandler.rpcmethod
     def get_published_contracts(self) -> list[Contract]:

@@ -16,13 +16,18 @@ import dataclasses
 import dill
 import typing
 import time as time_
+import collections
+import threading
+import functools
+import queue
+from collections import deque
 from inspect import Parameter
 from datetime import timedelta, time, date, tzinfo
 from functools import partial
 from pickle import dumps, loads, HIGHEST_PROTOCOL
 from itertools import count
 from functools import wraps
-from typing import TypeVar, Generic, Tuple, Callable, Dict, Optional, List, Any, Type
+from typing import TypeVar, Generic, Tuple, Callable, Dict, Optional, List, Any, Type, cast
 from aioreactive.types import AsyncObservable, AsyncObserver
 from aioreactive.subject import AsyncMultiSubject
 from expression.system import AsyncDisposable, ObjectDisposedException
@@ -277,6 +282,60 @@ class TopicPubSub(Generic[T]):
             logging.debug('publisher_close()')
             self.zmq_publisher.close()
             self.zmq_publisher.wait_closed()
+
+
+class MultithreadedTopicPubSub(Generic[T], TopicPubSub[T]):
+    def __init__(
+        self,
+        zmq_pubsub_server_address: str = 'tcp://127.0.0.1',
+        zmq_pubsub_server_port: int = 42002,
+        translation_table: Dict[int, Tuple[Any, partial[Any], Callable]] = translation_table,  # type: ignore
+    ):
+        super().__init__(
+            zmq_pubsub_server_address,
+            zmq_pubsub_server_port,
+            translation_table
+        )
+        self.wait_handle = threading.Event()
+        self._sentinel = ('stop', 'stop')
+
+    def put(self, topic_item: Tuple[str, T]):
+        self.wait_handle.loop.call_soon_threadsafe(self.wait_handle.queue.put_nowait, topic_item)  # type: ignore
+        # this is faster:
+        # self.wait_handle.queue.put_nowait(topic_item)  # type: ignore
+
+    def _publisher_loop(self, wait_handle: threading.Event):
+
+        async def main():
+            wait_handle.loop = asyncio.get_running_loop()  # type: ignore
+            wait_handle.queue = task_queue = asyncio.Queue()  # type: ignore
+            wait_handle.set()
+
+            while True:
+                item = await task_queue.get()
+                if item == self._sentinel:
+                    task_queue.task_done()
+                    break
+                topic = item[0]
+                val = item[1]
+
+                task = asyncio.create_task(self.publisher(val, topic))
+                task.add_done_callback(lambda _: task_queue.task_done())
+            await task_queue.join()
+
+        asyncio.run(main())
+
+    def start(self):
+        logging.debug('starting _publisher_loop')
+        self.wait_handle = threading.Event()
+
+        th = threading.Thread(target=self._publisher_loop, args=(self.wait_handle,))
+        th.start()
+        self.wait_handle.wait()
+        logging.debug('started _publisher_loop')
+
+    def stop(self):
+        self.put(self._sentinel)  # type: ignore
 
 
 class RPCServer(Generic[T]):

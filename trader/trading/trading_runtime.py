@@ -1,3 +1,4 @@
+from distutils.log import error
 import sys
 import os
 import time
@@ -41,6 +42,7 @@ from reactivex.abc import DisposableBase
 from reactivex.observable import Observable
 from reactivex.observer import Observer, AutoDetachObserver
 from reactivex.scheduler import ThreadPoolScheduler, NewThreadScheduler
+from reactivex.disposable import Disposable
 
 from trader.common.contract_sink import ContractSink
 from trader.common.listener_helpers import Helpers
@@ -58,7 +60,7 @@ from trader.common.reactivex import SuccessFailEnum, SuccessFailObservable, Succ
 from trader.common.singleton import Singleton
 from trader.common.helpers import get_network_ip, Pipe, dateify, timezoneify, ListHelper
 from trader.data.market_data import MarketData, SecurityDataStream
-from trader.messaging.clientserver import RPCServer, TopicPubSub
+from trader.messaging.clientserver import RPCServer, MultithreadedTopicPubSub
 
 from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar, cast, Union
 
@@ -126,13 +128,15 @@ class Trader(metaclass=Singleton):
         self.universes: List[Universe]
         self.market_data = 3
         self.zmq_rpc_server: RPCServer[bus.TraderServiceApi]
-        self.zmq_pubsub_server: TopicPubSub[Ticker]
-        self.zmq_pubsub_contracts: Dict[Contract, DisposableBase] = {}
+        self.zmq_pubsub_server: MultithreadedTopicPubSub[Ticker]
+        self.zmq_pubsub_contracts: Dict[int, Observable[IBAIORxError]] = {}
+        self.zmq_pubsub_contract_filters: Dict[int, bool] = {}
+        self.zmq_pubsub_contract_subscription: DisposableBase = Disposable()
         self.startup_time: dt.datetime = dt.datetime.now()
         self.last_connect_time: dt.datetime
         self.load_test: bool = False
 
-    def raise_trader_exception(self, exception_type: type, message: str, inner: Optional[Exception]):
+    def create_trader_exception(self, exception_type: type, message: str, inner: Optional[Exception]):
         # todo use reflection here to automatically populate trader runtime vars that we care about
         # given a particular exception type
         data = self.data if hasattr(self, 'data') else None
@@ -166,15 +170,18 @@ class Trader(metaclass=Singleton):
             self.client.connect()
             self.last_connect_time = dt.datetime.now()
             self.zmq_rpc_server = RPCServer[bus.TraderServiceApi](bus.TraderServiceApi(self))
-            self.zmq_pubsub_server = TopicPubSub[Ticker](
+            self.zmq_pubsub_server = MultithreadedTopicPubSub[Ticker](
                 zmq_pubsub_server_address=self.zmq_pubsub_server_address,
                 zmq_pubsub_server_port=self.zmq_pubsub_server_port
             )
+            self.zmq_pubsub_server.start()
             self.zmq_pubsub_contracts = {}
+            self.zmq_pubsub_contract_filters = {}
+            self.zmq_pubsub_contract_subscription = Disposable()
 
             self.run(self.zmq_rpc_server.serve())
         except Exception as ex:
-            raise self.raise_trader_exception(type(TraderConnectionException), message='connect() exception', inner=ex)
+            raise self.create_trader_exception(type(TraderConnectionException), message='connect() exception', inner=ex)
 
     async def shutdown(self):
         logging.debug('trading_runtime.shutdown()')
@@ -185,11 +192,10 @@ class Trader(metaclass=Singleton):
         for contract, sink in self.contract_subscriptions.items():
             sink.dispose()
 
-        for contract, subscription in self.zmq_pubsub_contracts.items():
-            subscription.dispose()
+        self.zmq_pubsub_contract_subscription.dispose()
 
         # for security_definition, security_datastream in self.market_data_subscriptions.items():
-            # security_datastream.dispose()
+        #   security_datastream.dispose()
 
         await self.book.dispose_async()
         await self.client.shutdown()
@@ -212,11 +218,9 @@ class Trader(metaclass=Singleton):
         if not self.is_ib_connected():
             raise ConnectionError('not connected to interactive brokers')
 
-        error = False
-
         def handle_subscription_exception(ex):
-            logging.exception(ex)
-            error = True
+            exception = self.create_trader_exception(TraderException, message='setup_subscriptions()', inner=ex)
+            raise exception
 
         def handle_completed():
             logging.debug('handle_completed()')
@@ -270,44 +274,37 @@ class Trader(metaclass=Singleton):
         universe.security_definitions.clear()
         self.universe_accessor.update(universe)
 
-    def publish_contract(self, contract: Contract, delayed: bool) -> SuccessFailObservable:
-        if contract in self.zmq_pubsub_contracts:
-            return SuccessFailObservable(SuccessFail.success())
+    def publish_contract(self, contract: Contract, delayed: bool) -> Observable[IBAIORxError]:
+        if contract.conId in self.zmq_pubsub_contract_filters:
+            return self.zmq_pubsub_contracts[contract.conId]
 
-        subject = SuccessFailObservable()
+        def on_next(ticker: Ticker):
+            self.zmq_pubsub_server.put(('ticker', ticker))
 
-        def asend(ticker: Ticker):
-            nonlocal subject
-            # todo fix this
-            # loop = asyncio.get_event_loop()
-            # loop.run_until_complete(self.zmq_pubsub_server.publisher(ticker, topic='ticker'))
-            asyncio.run(self.zmq_pubsub_server.publisher(ticker, topic='ticker'))
-            subject.success()
+        def on_completed():
+            del self.zmq_pubsub_contracts[contract.conId]
+            del self.zmq_pubsub_contract_filters[contract.conId]
+            logging.debug('publish_contract.aclose() for {}'.format(contract))
 
-        def aclose():
-            nonlocal subject
-            subject.success()
-            logging.debug('publish_contract.aclose()')
+        def on_error(ex):
+            del self.zmq_pubsub_contracts[contract.conId]
+            del self.zmq_pubsub_contract_filters[contract.conId]
+            raise self.create_trader_exception(TraderException, message='publish_contract() on_error', inner=ex)
 
-        def athrow(ex):
-            nonlocal subject
-            exception = self.raise_trader_exception(TraderException, message='publish_contract() athrow', inner=ex)
-            subject.failure(SuccessFail(SuccessFailEnum.FAIL, exception=ex))
+        if len(self.zmq_pubsub_contract_filters) == 0:
+            # setup the observable for the first time
+            try:
+                auto_detach = AutoDetachObserver(on_next=on_next, on_completed=on_completed, on_error=on_error)
+                subscription = self.client.contracts_subject.subscribe(auto_detach)  # , scheduler=NewThreadScheduler())
+                self.zmq_pubsub_contract_subscription = subscription
+            except Exception as ex:
+                # todo not sure how to deal with this error condition yet
+                raise self.create_trader_exception(TraderException, message='publish_contract()', inner=ex)
 
-        observable = self.client.subscribe_contract(
-            contract=contract,
-            one_time_snapshot=False,
-            delayed=delayed,
-        )
-
-        try:
-            auto_detach = AutoDetachObserver(on_next=asend, on_completed=aclose, on_error=athrow)
-            subscription = observable.subscribe(auto_detach, scheduler=NewThreadScheduler())
-            self.zmq_pubsub_contracts[contract] = subscription
-            return subject
-        except Exception as ex:
-            # todo not sure how to deal with this error condition yet
-            raise self.raise_trader_exception(TraderException, message='publish_contract()', inner=ex)
+        error_observable = self.client.subscribe_contract_direct(contract, delayed=delayed)
+        self.zmq_pubsub_contract_filters[contract.conId] = True
+        self.zmq_pubsub_contracts[contract.conId] = error_observable
+        return error_observable
 
     def update_portfolio_universe(self, portfolio_item: PortfolioItem):
         """

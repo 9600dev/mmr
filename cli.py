@@ -345,7 +345,7 @@ def subscribe_start(
             currency=r['currency']
         )
         click.echo('subscribing to {}'.format(contract.symbol))
-        remoted_client.rpc(return_type=Ticker).publish_contract(contract, delayed)
+        remoted_client.rpc().publish_contract(contract, delayed)
     else:
         click.echo('no results found')
 
@@ -362,11 +362,7 @@ def subscribe_portfolio(
             portfolio_item.contract.exchange = 'SMART'
 
         click.echo('subscribing to {}'.format(portfolio_item.contract.symbol))
-        success_fail = remoted_client.rpc().publish_contract(portfolio_item.contract, delayed=False)
-        if success_fail.success_fail == SuccessFailEnum.FAIL:
-            click.echo('contract subscription failed on {}'.format(portfolio_item.contract))
-            click.echo(success_fail.exception)
-
+        remoted_client.rpc().publish_contract(portfolio_item.contract, delayed=False)
 
 @subscribe.command('list')
 @common_options()
