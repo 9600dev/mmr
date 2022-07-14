@@ -118,6 +118,17 @@ class IBResolver():
             if result:
                 yield result
 
+    async def resolve_contract(self, contract: Contract) -> Optional[ContractDetails]:
+        result = await self.resolve_symbol(
+            symbol=contract.symbol,
+            sec_type=contract.secType,
+            exchange=contract.exchange,
+            primary_exchange=contract.primaryExchange,
+            currency=contract.currency
+        )
+
+        return result
+
     async def resolve_contracts(self, contracts: List[Contract]) -> AsyncIterator[ContractDetails]:
         for contract in contracts:
             result = await self.resolve_symbol(

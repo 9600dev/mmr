@@ -11,16 +11,51 @@ PACKAGE_PARENT = '../'
 SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
-import logging
-import coloredlogs
-from trader.data.universe import Universe, UniverseAccessor
+from trader.data.universe import Universe, UniverseAccessor, SecurityDefinition
+from trader.common.logging_helper import setup_logging, suppress_external
 from trader.listeners.ibaiorx import IBAIORx
 from trader.common.helpers import rich_table
 from trader.common.command_line import common_options, default_config, cli
 from scripts.ib_resolve import IBResolver
 from scripts.eoddata_scraper import EodDataScraper
 from scripts.ib_resolve import main as ib_resolve_main
+from scripts.ib_instrument_scraper import scrape_products, IBInstrument
 from prompt_toolkit.history import FileHistory
+from typing import List, Dict
+
+logging = setup_logging(module_name='cli')
+
+def build_and_load_ib(
+    ib_server_address: str,
+    ib_server_port: int,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+):
+    logging.debug('build_and_load_ib()')
+
+    product_pages = {
+        'NASDAQ': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=nasdaq&showcategories=STK',
+        'NYSE': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=nyse&showcategories=ETF',
+        'LSE': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=lse&showcategories=ETF',
+        'ASX': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=asx&showcategories=ETF',
+    }
+
+    u = UniverseAccessor(arctic_server_address, arctic_universe_library)
+    client = IBAIORx(ib_server_address, ib_server_port)
+    client.connect()
+    resolver = IBResolver(client)
+
+    instruments: List[IBInstrument] = []
+    for key, value in product_pages.items():
+        logging.debug('scrape_products() {}'.format(key))
+        instruments += scrape_products(key, value)
+
+        for instrument in instruments:
+            if not u.find_contract(instrument.to_contract()):
+                contract_details = asyncio.run(resolver.resolve_contract(instrument.to_contract()))
+                if contract_details:
+                    u.insert(key, SecurityDefinition.from_contract_details(contract_details))
+
 
 def build_and_load(
     ib_server_address: str,
@@ -70,6 +105,9 @@ def bootstrap(
     arctic_universe_library: str, **args
 ):
     delete_bootstrap(arctic_server_address, arctic_universe_library)
+    build_and_load_ib(ib_server_address, ib_server_port, arctic_server_address, arctic_universe_library)
+
+    return
 
     tf = tempfile.NamedTemporaryFile(suffix='.csv')
     build_and_load(

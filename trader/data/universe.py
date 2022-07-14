@@ -4,7 +4,6 @@ import csv
 from types import resolve_bases
 import numpy as np
 import pandas as pd
-import vectorbt as vbt
 import datetime as dt
 from dateutil.tz import tzlocal, gettz
 from dateutil.tz.tz import tzfile
@@ -90,6 +89,11 @@ class UniverseAccessor():
 
     def update(self, universe: Universe) -> None:
         self.library.write(universe.name, universe, prune_previous_version=False)
+
+    def insert(self, universe_name: str, security_definition: SecurityDefinition):
+        universe = self.get(universe_name)
+        universe.security_definitions.append(security_definition)
+        self.update(universe)
 
     def delete(self, name: str) -> None:
         self.library.delete(name)

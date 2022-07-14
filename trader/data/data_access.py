@@ -2,7 +2,6 @@ import os
 from types import resolve_bases
 import numpy as np
 import pandas as pd
-import vectorbt as vbt
 import datetime as dt
 from dataclasses import dataclass, fields
 from dateutil.tz import tzlocal, gettz
