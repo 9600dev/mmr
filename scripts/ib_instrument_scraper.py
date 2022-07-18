@@ -94,6 +94,15 @@ def scrape_product_page(exchange: str, url: str) -> Tuple[List[IBInstrument], st
     instrument_type = soup.find('div', {'class': 'btn-selectors'}).find('a', {'class': 'active'}).text.strip()
     sec_type = __readstr(url, 'showcategories=')
 
+    if 'ETF' in sec_type:
+        sec_type = 'STK'
+
+    if 'OPTGRP' in sec_type:
+        sec_type = 'OPT'
+
+    # we seem to get pacing violations pretty easily for warrants -- potentially
+    # ignore them?
+
     for tr in trs:
         ahref = tr.find('a', {'class': 'linkexternal'})
         if hasattr(ahref, 'href') and 'conid' in ahref['href']:
@@ -116,20 +125,25 @@ def scrape_product_page(exchange: str, url: str) -> Tuple[List[IBInstrument], st
 
     # check to see if there is a next page, otherwise, return
     next_page = soup.find('ul', {'class': 'pagination'})
-    if not next_page:
-        return instruments, ''
-
-    next_page = next_page.find('li', {'class': 'active'}).next_sibling.next_sibling
-    if next_page.has_attr('class') and len(next_page['class']) >= 1 and next_page['class'][0] == 'disabled':
+    if next_page:
+        next_page = next_page.find('li', {'class': 'active'}).next_sibling.next_sibling
+        if next_page.has_attr('class') and len(next_page['class']) >= 1 and next_page['class'][0] == 'disabled':
         # now we have to see if there are extra classes of instrument to search before returning empty string
-        instrument_class = soup.find('div', {'class': 'btn-selectors'}).find('a', {'class': 'active'})
-        if instrument_class.parent.next_sibling.next_sibling:
-            return instruments, instrument_class.parent.next_sibling.next_sibling.a['href']
+            instrument_class = soup.find('div', {'class': 'btn-selectors'}).find('a', {'class': 'active'})
+            if instrument_class.parent.next_sibling.next_sibling:
+                return instruments, instrument_class.parent.next_sibling.next_sibling.a['href']
+            else:
+                return instruments, ''
         else:
-            return instruments, ''
+            return instruments, next_page.a['href']
     else:
-        return instruments, next_page.a['href']
-
+        instrument_class = soup.find('div', {'class': 'btn-selectors'})
+        if instrument_class:
+            instrument_class = instrument_class.find('a', {'class': 'active'})
+            if instrument_class.parent.next_sibling.next_sibling:
+                return instruments, instrument_class.parent.next_sibling.next_sibling.a['href']
+            else:
+                return instruments, ''
 
 def scrape_products(exchange: str, exchange_url: str) -> List[IBInstrument]:
     instruments: List[IBInstrument] = []

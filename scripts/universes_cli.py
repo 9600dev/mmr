@@ -51,7 +51,7 @@ def build_and_load_ib(
         instruments += scrape_products(key, value)
 
         for instrument in instruments:
-            if not u.find_contract(instrument.to_contract()):
+            if not u.find_contract(instrument.to_contract()) and instrument.secType != 'OPT' and instrument.secType != 'WAR':
                 contract_details = asyncio.run(resolver.resolve_contract(instrument.to_contract()))
                 if contract_details:
                     u.insert(key, SecurityDefinition.from_contract_details(contract_details))
@@ -68,7 +68,7 @@ def build_and_load(
     currency: str,
     csv_output_file: str
 ):
-    print('starting {} universe bootstrap temp file'.format(primary_exchange))
+    click.echo('starting {} universe bootstrap temp file'.format(primary_exchange))
     n = EodDataScraper()
     result = n.scrape(primary_exchange)
     securities = len(result)
@@ -82,17 +82,27 @@ def build_and_load(
     u = UniverseAccessor(arctic_server_address, arctic_universe_library)
     with open(csv_output_file, 'r') as f:
         csv_string = f.read()
-        print('updating trader host with new universe')
+        click.echo('updating trader host with new universe')
         u.update_from_csv_str(primary_exchange, csv_string)
-    print('finished {} bootstrap, with {} securities loaded'.format(primary_exchange, str(securities)))
+    click.echo('finished {} bootstrap, with {} securities loaded'.format(primary_exchange, str(securities)))
 
 
-def delete_bootstrap(arctic_server_address: str, arctic_universe_library: str):
+@cli.command()
+@click.option('--name', required=True, help='Name of universe')
+@common_options()
+@default_config()
+def delete(
+    name: str,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    **args
+):
     u = UniverseAccessor(arctic_server_address, arctic_universe_library)
-    names = u.list_universes()
-    for n in names:
-        print('deleting {}'.format(n))
-        u.delete(n)
+    if name not in u.list_universes():
+        click.echo('Universe {} cannot be deleted, not found'.format(name))
+    else:
+        click.echo('deleting {}'.format(name))
+        u.delete(name)
 
 
 @cli.command()
@@ -104,49 +114,7 @@ def bootstrap(
     arctic_server_address: str,
     arctic_universe_library: str, **args
 ):
-    delete_bootstrap(arctic_server_address, arctic_universe_library)
     build_and_load_ib(ib_server_address, ib_server_port, arctic_server_address, arctic_universe_library)
-
-    return
-
-    tf = tempfile.NamedTemporaryFile(suffix='.csv')
-    build_and_load(
-        ib_server_address,
-        ib_server_port,
-        arctic_server_address,
-        arctic_universe_library,
-        'STK',
-        'SMART',
-        'NASDAQ',
-        'USD',
-        tf.name
-    )
-
-    tf = tempfile.NamedTemporaryFile(suffix='.csv')
-    build_and_load(
-        ib_server_address,
-        ib_server_port,
-        arctic_server_address,
-        arctic_universe_library,
-        'STK',
-        'SMART',
-        'ASX',
-        'AUD',
-        tf.name
-    )
-
-    tf = tempfile.NamedTemporaryFile(suffix='.csv')
-    build_and_load(
-        ib_server_address,
-        ib_server_port,
-        arctic_server_address,
-        arctic_universe_library,
-        'STK',
-        'SMART',
-        'LSE',
-        'GBP',
-        tf.name
-    )
 
 
 @cli.command('list')
@@ -155,7 +123,7 @@ def bootstrap(
 def list_universe(arctic_server_address: str, arctic_universe_library: str, **args):
     universes = UniverseAccessor(arctic_server_address, arctic_universe_library).list_universes_count()
     for name, count in universes.items():
-        print('universe: {}, symbols {}'.format(name, str(count)))
+        click.echo('universe: {}, symbols {}'.format(name, str(count)))
     return 0
 
 
@@ -190,15 +158,15 @@ def create(
 
     resolver = IBResolver(client)
     temp_file = tempfile.NamedTemporaryFile(suffix='.csv')
-    print('resolving to {}'.format(temp_file.name))
+    click.echo('resolving to {}'.format(temp_file.name))
     asyncio.run(resolver.fill_csv(csv_file, temp_file.name))
 
     u = UniverseAccessor(arctic_server_address, arctic_universe_library)
     with open(temp_file.name, 'r') as f:
         csv_string = f.read()
-        print('updating trader host with new universe')
+        click.echo('updating trader host with new universe')
         counter = u.update_from_csv_str(name, csv_string)
-    print('finished loading {}, with {} securities loaded'.format(create, str(counter)))
+    click.echo('finished loading {}, with {} securities loaded'.format(create, str(counter)))
 
 
 if __name__ == '__main__':

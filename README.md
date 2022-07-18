@@ -73,6 +73,12 @@ A Universe is a collection of symbols/conIds to which you can apply your trading
 
 ![mmr resolve](docs/resolve.png)
 
+Bootstrapping the universe full of symbols and the respective Interactive Broker conId's for those symbols is straightforward. It takes an hour or two, and will populate the NASDAQ, NYSE, LSE and ASX universes with stocks, indicies and etf's:
+
+* ```universes bootstrap```
+
+![](docs/2022-07-14-08-26-54.png)
+
 You can also VNC into the Docker container also, which will allow you to interact with the running instance of TWS workstation. Screenshot below shows [TigerVNC](https://tigervnc.org/) viewing a stalled TWS instance waiting for authentication.
 
 ![](docs/2022-06-03-08-58-08.png)

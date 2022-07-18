@@ -119,24 +119,25 @@ class IBResolver():
                 yield result
 
     async def resolve_contract(self, contract: Contract) -> Optional[ContractDetails]:
-        result = await self.resolve_symbol(
-            symbol=contract.symbol,
-            sec_type=contract.secType,
-            exchange=contract.exchange,
-            primary_exchange=contract.primaryExchange,
-            currency=contract.currency
-        )
+        result = await self.client.get_contract_details(contract)
+        if len(result) > 1:
+            logging.info('found multiple results for {}:'.format(contract))
+            for d in result:
+                logging.info('  {}'.format(d))
+            return result[0]
+        elif len(result) == 0:
+            logging.info('no matching results found for {}'.format(contract))
+            return None
+        else:
+            c = result[0]
+            logging.info('{} {} {}'.format(c.contract.conId, c.contract.symbol, c.longName))
+            return result[0]
 
         return result
 
     async def resolve_contracts(self, contracts: List[Contract]) -> AsyncIterator[ContractDetails]:
         for contract in contracts:
-            result = await self.resolve_symbol(
-                contract.symbol,
-                contract.secType,
-                contract.exchange,
-                contract.currency
-            )
+            result = await self.resolve_contract(contract)
             if result:
                 yield result
 
