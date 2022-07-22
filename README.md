@@ -267,6 +267,7 @@ people who lose the money."
 ## Finance Math
 
 * [Common Statistical Tests are Linear Models](https://lindeloev.github.io/tests-as-linear/#51_independent_t-test_and_mann-whitney_u)
+* [Portfolio correlation](https://alpaca.markets/learn/correlation-portfolio-python/)
 
 ## Random Finance Links
 
@@ -282,6 +283,7 @@ people who lose the money."
 * [The fed and inflation](https://twitter.com/krugermacro/status/1480081861124804612)
 * [Great thread on Volatility Tax](https://twitter.com/10kdiver/status/1479881189217296386)
 * [Trader's Notes -- TWS API notes](https://dimon.ca/dmitrys-tws-api-faq/)
+* [Split the spread, TWS orders](https://www.clientam.com/en/index.php?f=26817)
 * [Alpha Architect - White Papers](https://alphaarchitect.com/alpha-architect-white-papers/)
 * [Trading Economics - good flat, simple data site](https://tradingeconomics.com/)
 * [Spectre - GPU based backtester](https://github.com/Heerozh/spectre)
@@ -343,3 +345,4 @@ people who lose the money."
 * (https://github.com/quantopian/trading_calendars)
 * (https://github.com/litl/backoff)
 * (https://databento.com/pricing)
+* (https://github.com/jialuechen/strats)

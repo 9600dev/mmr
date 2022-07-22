@@ -17,7 +17,7 @@ from arctic.date import DateRange, string_to_daterange
 from arctic.tickstore.tickstore import TickStore
 from arctic.store.version_store import VersionStore
 from arctic.exceptions import NoDataFoundException, OverlappingDataException
-from typing import Tuple, List, Optional, Dict, TypeVar, Generic, Type, Union, cast, Set
+from typing import Tuple, List, Optional, Dict, TypeVar, Generic, Type, Union, cast, Set, NamedTuple
 from durations import Duration
 from exchange_calendars import ExchangeCalendar
 from pandas import DatetimeIndex
@@ -97,6 +97,176 @@ class SecurityDefinition:
             company_name=d.longName,
             industry=d.industry,
         )
+
+
+class IBTradeConfirm(NamedTuple):
+    accountId: str
+    acctAlias: str
+    model: str
+    currency: str
+    assetCategory: str
+    symbol: str
+    description: str
+    conid: str
+    securityID: str
+    securityIDType: str
+    cusip: str
+    isin: str
+    listingExchange: str
+    underlyingConid: str
+    underlyingSymbol: str
+    underlyingSecurityID: str
+    underlyingListingExchange: str
+    issuer: str
+    multiplier: str
+    strike: str
+    expiry: str
+    putCall: str
+    principalAdjustFactor: str
+    transactionType: str
+    tradeID: str
+    orderID: str
+    execID: str
+    brokerageOrderID: str
+    orderReference: str
+    volatilityOrderLink: str
+    clearingFirmID: str
+    origTradePrice: str
+    origTradeDate: str
+    origTradeID: str
+    orderTime: str
+    dateTime: str
+    reportDate: str
+    settleDate: str
+    tradeDate: str
+    exchange: str
+    buySell: str
+    quantity: str
+    price: str
+    amount: str
+    proceeds: str
+    commission: str
+    brokerExecutionCommission: str
+    brokerClearingCommission: str
+    thirdPartyExecutionCommission: str
+    thirdPartyClearingCommission: str
+    thirdPartyRegulatoryCommission: str
+    otherCommission: str
+    commissionCurrency: str
+    tax: str
+    code: str
+    orderType: str
+    levelOfDetail: str
+    traderID: str
+    isAPIOrder: str
+    allocatedTo: str
+    accruedInt: str
+    rfqID: str
+    serialNumber: str
+    deliveryType: str
+    commodityType: str
+    fineness: str
+    weight: str
+
+
+class IBChangeInDividendAccrual(NamedTuple):
+    accountId: str
+    acctAlias: str
+    model: str
+    currency: str
+    fxRateToBase: str
+    assetCategory: str
+    symbol: str
+    description: str
+    conid: str
+    securityID: str
+    securityIDType: str
+    cusip: str
+    isin: str
+    listingExchange: str
+    underlyingConid: str
+    underlyingSymbol: str
+    underlyingSecurityID: str
+    underlyingListingExchange: str
+    issuer: str
+    multiplier: str
+    strike: str
+    expiry: str
+    putCall: str
+    principalAdjustFactor: str
+    reportDate: str
+    date: str
+    exDate: str
+    payDate: str
+    quantity: str
+    tax: str
+    fee: str
+    grossRate: str
+    grossAmount: str
+    netAmount: str
+    code: str
+    fromAcct: str
+    toAcct: str
+
+
+class IBInterestAccrualsCurrency(NamedTuple):
+    accountId: str
+    acctAlias: str
+    model: str
+    currency: str
+    fromDate: str
+    toDate: str
+    startingAccrualBalance: str
+    interestAccrued: str
+    accrualReversal: str
+    fxTranslation: str
+    endingAccrualBalance: str
+
+
+class IBSLBFee(NamedTuple):
+    accountId: str
+    acctAlias: str
+    model: str
+    currency: str
+    fxRateToBase: str
+    assetCategory: str
+    symbol: str
+    description: str
+    conid: str
+    securityID: str
+    securityIDType: str
+    cusip: str
+    isin: str
+    listingExchange: str
+    underlyingConid: str
+    underlyingSymbol: str
+    underlyingSecurityID: str
+    underlyingListingExchange: str
+    issuer: str
+    multiplier: str
+    strike: str
+    expiry: str
+    putCall: str
+    principalAdjustFactor: str
+    valueDate: str
+    startDate: str
+    type: str
+    exchange: str
+    quantity: str
+    collateralAmount: str
+    feeRate: str
+    fee: str
+    carryCharge: str
+    ticketCharge: str
+    totalCharges: str
+    marketFeeRate: str
+    grossLendFee: str
+    netLendFeeRate: str
+    netLendFee: str
+    code: str
+    fromAcct: str
+    toAcct: str
+
 
 class Data():
     def __init__(self,

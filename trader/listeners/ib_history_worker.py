@@ -152,6 +152,7 @@ class IBHistoryWorker():
         bars: List[pd.DataFrame] = []
 
         while current_date >= start_date:
+            logging.debug('self.ib_client.reqHistoricalDataAsync {} {}'.format(security, current_date))
             result = await self.ib_client.reqHistoricalDataAsync(
                 contract,
                 endDateTime=current_date,
