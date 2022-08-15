@@ -22,10 +22,18 @@ import os
 import glob
 import vectorbt as vbt
 
-from typing import AsyncIterator, List, Optional
+from typing import AsyncIterator, List, Optional, Dict
 from ib_insync.contract import Contract, ContractDetails
 from trader.listeners.ibaiorx import IBAIORx
 from ib_insync.flexreport import FlexReport
+from tabulate import tabulate
+from pandas.core.series import Series
+
+def pretty(df):
+    if type(df) is Series:
+        df = pd.DataFrame(df)
+
+    print(tabulate(df, headers='keys'))
 
 class Reporting():
     def __init__(
@@ -36,6 +44,20 @@ class Reporting():
         self.fees_taxes: pd.DataFrame = pd.DataFrame()
         self.cash: pd.DataFrame = pd.DataFrame()
         self.interest: pd.DataFrame = pd.DataFrame()
+        self.corporate_actions: pd.DataFrame = pd.DataFrame()
+        self.tables = ['trades', 'dividends', 'fees_taxes', 'cash', 'interest', 'corporate_actions']
+
+    def query(self, query):
+        reporting = Reporting()
+        for table in self.tables:
+            setattr(reporting, table, getattr(self, table).query(query))
+        return reporting
+
+    def date_filter(self, start: dt.datetime, end: dt.datetime = dt.datetime.now()):
+        reporting = Reporting()
+        for table in self.tables:
+            setattr(reporting, table, getattr(self, table)[start:end])
+        return reporting
 
     def load_report(self, flex: FlexReport):
         def date_parser(date_str: str):
@@ -58,7 +80,10 @@ class Reporting():
             df = df.sort_values(by='date_time', ascending=True)
             df = df.set_index('date_time')  # type: ignore
             df.index = df.index.tz_localize('America/New_York')  # type: ignore
+            df['date'] = df.index
             return df
+
+        logging.debug('load_report() with topics: {}'.format(flex.topics))
 
         # grab all the orders
         if 'Order' in flex.topics():
@@ -83,6 +108,11 @@ class Reporting():
         if 'ChangeInDividendAccrual' in flex.topics():
             self.dividends = add_and_clean(self.dividends, flex.df('ChangeInDividendAccrual'), '', 'payDate')  # type: ignore
 
+        # grab stock splits and post-hoc apply them to price and quantity
+        # todo: hack
+        if 'CorporateAction' in flex.topics():
+            self.corporate_actions = add_and_clean(self.corporate_actions, flex.df('CorporateAction'), 'transactionID')  # type: ignore
+
     def load_xml_reports_glob(self, glob_str: str):
         files = glob.glob(glob_str)
         return self.load_xml_reports(files)
@@ -106,25 +136,69 @@ class TradeAnalysis():
     def prepare_analysis(self):
         pass
 
-    def filter(self, df: pd.DataFrame) -> pd.DataFrame:
-        return df[df.symbol == 'AMD']  # type: ignore
+    def group(self, symbols: List[str], report: Reporting, column: str):
+        d = {}
+        for symbol in symbols:
+            if report.trades.symbol.str.contains(symbol).any():
+                d[symbol] = report.trades.groupby(['symbol']).get_group(symbol)[column].rename(symbol)
 
-    def run_analysis(self) -> vbt.Portfolio:
-        # init_cash = float(self.reporting.cash.head(1).amount)
-        init_cash = 1000000.0
-        cash_deposits = self.reporting.cash.amount
-        close = self.filter(self.reporting.trades).price
-        size = self.filter(self.reporting.trades).quantity
-        fees = self.filter(self.reporting.trades).commission * -1
+        return pd.concat(list(d.values()), axis=1)
 
+    def run_analysis(self, symbols: List[str]) -> Dict[str, vbt.Portfolio]:
+        logging.debug('run_analysis')
+        currencies = (self.reporting.trades.currency.unique())
+        portfolios = {}
 
-        portfolio = vbt.Portfolio.from_orders(
-            init_cash=init_cash,
-            close=close,
-            size=size,
-            fixed_fees=fees,
-            direction='both'
-        )
+        def build_portfolio(symbols, report):
+            # init_cash = float(self.reporting.cash.head(1).amount)
+            init_cash = 100000.0
+            cash_deposits = self.reporting.cash.amount
+            close = self.group(symbols, report, 'price')
+            size = self.group(symbols, report, 'quantity')
+            fees = self.group(symbols, report, 'commission') * -1
 
-        return portfolio
+            portfolio = vbt.Portfolio.from_orders(
+                # init_cash=init_cash,
+                init_cash='auto',
+                close=close,
+                size=size,
+                fixed_fees=fees,
+                direction='both',
+                cash_sharing=True,
+                group_by=True,
+            )
+            return portfolio
 
+        for currency in currencies:
+            report = self.reporting.query('currency == "{}"'.format(currency))
+            portfolio = build_portfolio(symbols, report)
+
+            if len(report.corporate_actions) > 0:
+                logging.debug('checking for stock splits')
+                for index, row in report.corporate_actions.iterrows():
+                    date = row['date']
+                    symbol = row['symbol']
+                    quantity = row['quantity']
+                    action_type = row['type']
+                    security_id = row['securityID']
+                    if 'FS' in action_type and symbol in portfolio.assets().columns:
+                        logging.debug('found stock split in {}, warning hacky code here'.format(symbol))
+                        # todo: fix the SettingWithCopyWarning problem here
+                        view = report.trades[(report.trades.securityID == security_id) & (report.trades.date <= date)].copy()
+
+                        # grab the current asset level
+                        previous = pd.DataFrame(portfolio.assets()[symbol])
+                        last_quantity = previous[previous.index <= date].iloc[-1].item()
+                        multiplier = quantity / last_quantity
+
+                        view['quantity'] = view['quantity'].multiply(multiplier)
+                        view['price'] = view['price'].divide(multiplier)
+                        report.trades.update(view)
+                        portfolio = build_portfolio(symbols, report)
+
+            portfolios[currency] = portfolio
+        return portfolios
+
+    def run_analysis_full(self) -> Dict[str, vbt.Portfolio]:
+        symbols = list(self.reporting.trades.symbol.unique())
+        return self.run_analysis(symbols)
