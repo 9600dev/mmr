@@ -42,6 +42,12 @@ class Universe():
                 return definition
         return None
 
+    def find_symbol(self, symbol: str) -> Optional[SecurityDefinition]:
+        for definition in self.security_definitions:
+            if definition.symbol == symbol:
+                return definition
+        return None
+
 
 class UniverseAccessor():
     def __init__(self, arctic_server_address: str, arctic_universe_library: str):
@@ -88,7 +94,7 @@ class UniverseAccessor():
         return None
 
     def update(self, universe: Universe) -> None:
-        self.library.write(universe.name, universe, prune_previous_version=False)
+        self.library.write(universe.name, universe, prune_previous_version=True)
 
     def insert(self, universe_name: str, security_definition: SecurityDefinition):
         universe = self.get(universe_name)

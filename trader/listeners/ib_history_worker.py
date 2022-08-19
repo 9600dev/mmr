@@ -171,7 +171,7 @@ class IBHistoryWorker():
             if result:
                 df_result = ib_insync.util.df(result).set_index('date')
                 df_result['bar_size'] = bar_size
-                df_result['what_to_show'] = what_to_show
+                df_result['what_to_show'] = int(what_to_show)
                 df_result.rename({'barCount': 'bar_count'}, inplace=True, axis=1)
 
                 # arctic requires timezone to be set
@@ -211,7 +211,7 @@ class IBHistoryWorker():
                     'average': [np.nan],
                     'bar_count': [np.nan],
                     'bar_size': [bar_size],
-                    'what_to_show': what_to_show,
+                    'what_to_show': int(what_to_show),
                 }
                 temp_row = pd.DataFrame.from_dict(null_row)
                 temp_row = temp_row.set_index('date')

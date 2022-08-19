@@ -40,24 +40,29 @@ def build_and_load_ib(
         'ASX': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=asx&showcategories=ETF',
     }
 
-    u = UniverseAccessor(arctic_server_address, arctic_universe_library)
+    accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
     client = IBAIORx(ib_server_address, ib_server_port)
     client.connect()
     resolver = IBResolver(client)
 
     instruments: List[IBInstrument] = []
-    for key, value in product_pages.items():
-        logging.debug('scrape_products() {}'.format(key))
-        instruments += scrape_products(key, value)
+    for market, value in product_pages.items():
+        logging.debug('scrape_products() {}'.format(market))
+        instruments += scrape_products(market, value)
+
+        universe = accessor.get(market)
 
         for instrument in instruments:
-            if not u.find_contract(instrument.to_contract()) and instrument.secType != 'OPT' and instrument.secType != 'WAR':
+            if not universe.find_contract(instrument.to_contract()) and instrument.secType != 'OPT' and instrument.secType != 'WAR':
                 contract_details = asyncio.run(resolver.resolve_contract(instrument.to_contract()))
                 if contract_details:
-                    u.insert(key, SecurityDefinition.from_contract_details(contract_details))
+                    universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details))
+                    accessor.update(universe)
+            else:
+                logging.debug('instrument {} already found in a universe {}'.format(instrument, market))
 
 
-def build_and_load(
+def build_and_load_deprecated(
     ib_server_address: str,
     ib_server_port: int,
     arctic_server_address: str,
@@ -137,6 +142,17 @@ def get(name: str, arctic_server_address: str, arctic_universe_library: str, **a
         universe = accessor.get(name)
         list_definitions = [asdict(security) for security in universe.security_definitions]
         rich_table(list_definitions, True)
+        return 0
+
+
+@cli.command()
+@click.option('--name', required=True, help='Name of universe')
+@common_options()
+@default_config()
+def destroy(name: str, arctic_server_address: str, arctic_universe_library: str, **args):
+    if get:
+        accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
+        universe = accessor.delete(name)
         return 0
 
 

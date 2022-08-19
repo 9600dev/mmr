@@ -1,6 +1,6 @@
-from enum import Enum
+from enum import IntEnum
 
-class WhatToShow(Enum):
+class WhatToShow(IntEnum):
     def __str__(self):
         if self.value == 1: return 'TRADES'
         if self.value == 2: return 'MIDPOINT'
@@ -12,7 +12,7 @@ class WhatToShow(Enum):
     BID = 3
     ASK = 4
 
-class ReportType(Enum):
+class ReportType(IntEnum):
     def __str__(self):
         return self.name
 

@@ -34,7 +34,7 @@ logging = setup_logging(module_name='ib_history_queuer')
 @click.option('--prev_days', required=True, default=5, help='Enqueue today minus prev_days: default 5 days')
 @common_options()
 @default_config()
-def ib_history(
+def get_universe_history_ib(
     ib_server_address: str,
     ib_server_port: int,
     arctic_server_address: str,
@@ -65,5 +65,45 @@ def ib_history(
     queuer.queue_history(u.security_definitions, bar_size, start_date)
 
 
-if __name__ == '__main__':
-    ib_history()
+@cli_norepl.command()
+@click.option('--symbol', required=True, help='conid of the security to backfill')
+@click.option('--universe', required=True, help='name of universe to the security lives in')
+@click.option('--arctic_universe_library', required=True, help='arctic library that contains universe definitions')
+@click.option('--bar_size', required=True, default='1 min', help='IB bar size: 1 min')
+@click.option('--prev_days', required=True, default=5, help='Enqueue today minus prev_days: default 5 days')
+@common_options()
+@default_config()
+def get_symbol_history_ib(
+    ib_server_address: str,
+    ib_server_port: int,
+    arctic_server_address: str,
+    redis_server_address: str,
+    redis_server_port: int,
+    universe: str,
+    symbol: str,
+    arctic_universe_library: str,
+    bar_size: str,
+    prev_days: int,
+    **args
+):
+    # queue up history
+    queuer = IBHistoryQueuer(
+        ib_server_address,
+        ib_server_port,
+        arctic_server_address,
+        universe,
+        redis_server_address,
+        redis_server_port
+    )
+    start_date = dateify(dt.datetime.now() - dt.timedelta(days=prev_days + 1), timezone='America/New_York')
+    logging.info('enqueing IB history from {} to {} days'.format(start_date, prev_days))
+
+    accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
+    u = accessor.get(universe)
+
+    # get a security definition
+    security_definition = u.find_symbol(symbol)
+    if security_definition:
+        queuer.queue_history([security_definition], bar_size, start_date)
+    else:
+        logging.debug('cannot find symbol {} in universe {}'.format(symbol, universe))

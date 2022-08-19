@@ -74,7 +74,7 @@ class IBHistoryQueuer(Queuer):
                                             exchange_calendar,
                                             date_range=DateRange(start=start_date, end=end_date))
 
-            logging.debug('missing dates for {}: {}'.format(security.symbol, date_ranges))
+            logging.debug('missing date_ranges for {}: {}'.format(security.symbol, date_ranges))
 
             for date_dr in date_ranges:
                 if (
@@ -82,16 +82,21 @@ class IBHistoryQueuer(Queuer):
                 ):
                     logging.info('enqueing {} from {} to {}'.format(Universe.to_contract(security),
                                                                     pdt(date_dr.start), pdt(date_dr.end)))
+
+                    client_id = random.randint(50, 100)
                     history_worker = BatchIBHistoryWorker(
                         ib_server_address=self.ib_server_address,
                         ib_server_port=self.ib_server_port,
-                        ib_client_id=random.randint(10, 100),
+                        ib_client_id=client_id,
                         arctic_server_address=self.arctic_server_address,
                         arctic_library=self.arctic_library,
                         redis_server_address=self.redis_server_address,
                         redis_server_port=self.redis_server_port)
 
-                    self.enqueue(history_worker.do_work, [security, date_dr.start, date_dr.end, bar_size])
+                    job = self.enqueue(history_worker.do_work, [security, dateify(date_dr.start), dateify(date_dr.end), bar_size])
+                    logging.debug('Job history_worker.do_work enqueued, is_queued: {} using cliend_id {}'
+                                  .format(job.is_queued, client_id))
+
 
 class BatchIBHistoryWorker():
     def __init__(self,
@@ -114,8 +119,7 @@ class BatchIBHistoryWorker():
     def do_work(self, security: SecurityDefinition, start_date: dt.datetime, end_date: dt.datetime, bar_size: str) -> bool:
         setup_logging(module_name='batch_ib_history_worker', suppress_external_info=True)
 
-        # hacky way of reusing ib connections
-        ib = cast(IB, Container().resolve_cache(IB))
+        ib = cast(IB, Container().resolve(IB))
 
         if not ib.isConnected():
             ib.connect(host=self.ib_server_address, port=self.ib_server_port, clientId=self.ib_client_id)

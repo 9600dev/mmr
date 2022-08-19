@@ -114,13 +114,60 @@ universes.add_command(universes_cli.list_universe)
 universes.add_command(universes_cli.create)
 universes.add_command(universes_cli.bootstrap)
 universes.add_command(universes_cli.get)
+universes.add_command(universes_cli.destroy)
 
 
 @main.group()
-def batch():
+def history():
     pass
 
-batch.add_command(ib_history_queuer.ib_history)
+history.add_command(ib_history_queuer.get_universe_history_ib)
+history.add_command(ib_history_queuer.get_symbol_history_ib)
+
+@history.command('summary')
+@click.option('--universe', required=True, help='universe to summarize')
+@common_options()
+@default_config()
+def history_summary(
+    universe: str,
+    arctic_server_address: str,
+    arctic_library: str,
+    arctic_universe_library: str,
+    **args,
+):
+    accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
+    u = accessor.get(universe)
+    tick_data = TickData(arctic_server_address, arctic_library)
+    print(u.historical_tick_store)
+    examples: List[str] = tick_data.list_symbols()[0:10]
+
+    result = {
+        'name': universe,
+        'security_definition_count': len(u.security_definitions),
+        'history_db_symbol_count': len(tick_data.list_symbols()),
+        'example_symbols': examples
+    }
+    rich_dict(result)
+
+
+@history.command('security')
+@click.option('--symbol', required=True, help='historical data statistics for symbol')
+@click.option('--primary_exchange', required=False, default='NASDAQ', help='exchange for symbol [default: NASDAQ]')
+@common_options()
+@default_config()
+def history_security(
+    symbol: str,
+    primary_exchange: str,
+    arctic_server_address: str,
+    arctic_library: str,
+    arctic_universe_library: str,
+    **args,
+):
+    accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
+    results: List[Dict[str, Any]] = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
+
+    for dict in results:
+        rich_dict(dict)
 
 
 @main.command()
@@ -559,6 +606,7 @@ def def_exit():
 
 container: Container
 amd = Contract(symbol='AMD', conId=4391, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
+tsla = Contract(symbol='TSLA', conId=76792991, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
 nvda = Contract(symbol='NVDA', conId=4815747, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
 a2m = Contract(symbol='A2M', conId=189114468, exchange='SMART', primaryExchange='ASX', currency='AUD')
 marketdata: MarketData
@@ -583,6 +631,12 @@ def setup_ipython():
     store = Arctic(mongo_host=container.config()['arctic_server_address'])
     bardata = container.resolve(TickData)
     marketdata = container.resolve(MarketData, **{'client': client})
+
+    print('Available instance objects:')
+    print()
+    print(' amd: Contract, nvda: Contract, a2m: Contract')
+    print(' container: Container, accessor: UniverseAccessor, client: IBAIORx')
+    print(' store: Arctic, bardata: TickData, marketdata: MarketData')
 
 
 if get_ipython().__class__.__name__ == 'TerminalInteractiveShell':  # type: ignore

@@ -2,10 +2,13 @@ import sys
 import os
 import datetime as dt
 
+from trader.common.logging_helper import setup_logging
+logging = setup_logging(module_name='queuer')
+
 from redis import Redis
 from rq import Queue
 from rq.job import Job
-from typing import List, Optional, Dict, Callable, Union
+from typing import List, Optional, Dict, Callable, Union, cast
 
 class Queuer():
     def __init__(self,
@@ -59,8 +62,10 @@ class Queuer():
         else:
             return self.job_id(job_or_id) in self.current_queue()
 
-    def enqueue(self, func: Callable, args: List):
+    def enqueue(self, func: Callable, args: List) -> Job:
         job_id = self.args_id(args)
-        job = self.rq.enqueue(func, job_id=job_id, *args)
+        job = cast(Job, self.rq.enqueue(func, job_id=job_id, *args))
+        job.save()
         self.jobs_cache[job_id] = True
-
+        logging.debug('{} {} {} {}'.format(self.redis_queue, self.redis_conn, self.redis_server_address, self.redis_server_port))
+        return job
