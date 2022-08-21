@@ -73,6 +73,13 @@ connect()
     help_options_color='green')
 @click.pass_context
 def main(ctx):
+    # todo: actually fix this pytz stuff throughout the codebase
+    import warnings
+    warnings.filterwarnings(
+        'ignore',
+        message='The zone attribute is specific to pytz\'s interface; please migrate to a new time zone provider. For more details on how to do so, see https://pytz-deprecation-shim.readthedocs.io/en/latest/migration.html'
+    )
+
     if ctx.invoked_subcommand is None:
         ctx.invoke(repl)
 
@@ -164,11 +171,22 @@ def history_security(
     **args,
 ):
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
+    tick_data = TickData(arctic_server_address, arctic_library)
     results: List[Dict[str, Any]] = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
+    output = []
 
     for dict in results:
-        rich_dict(dict)
+        start_date, end_date = tick_data.date_summary(int(dict['conId']))
+        output.append({
+            'universe': dict['universe'],
+            'conId': dict['conId'],
+            'symbol': dict['symbol'],
+            'longName': dict['longName'],
+            'history_start': start_date,
+            'history_end': end_date,
+        })
 
+    rich_table(output)
 
 @main.command()
 def portfolio():

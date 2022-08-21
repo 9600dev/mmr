@@ -45,10 +45,9 @@ def build_and_load_ib(
     client.connect()
     resolver = IBResolver(client)
 
-    instruments: List[IBInstrument] = []
     for market, value in product_pages.items():
         logging.debug('scrape_products() {}'.format(market))
-        instruments += scrape_products(market, value)
+        instruments: List[IBInstrument] = scrape_products(market, value)
 
         universe = accessor.get(market)
 
