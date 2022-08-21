@@ -243,6 +243,13 @@ people who lose the money."
 * [Minksy Moments in Venture Capital](https://pivotal.substack.com/p/minsky-moments-in-venture-capital?s=r)
 * [Retained Earnings Thread](https://twitter.com/10kdiver/status/1485006207832051715)
 * [A Summary of Factor Investing](https://twitter.com/ReformedTrader/status/1195450353472303104)
+* [A History: War, Oil Prices, Inflation and Trade](https://investoramnesia.com/2022/03/13/a-history-war-oil-prices-inflation-trade/)
+* [The relationship between illiquidity and volatility](https://twitter.com/ftx_chris/status/1526896272434929664)
+* [The true reason why central banks do QE](https://themacrocompass.substack.com/p/portfolio-rebalancing-qe#details)
+* [Why does the stock market go up?](https://visioninvesting.substack.com/p/why-does-the-stock-market-go-up)
+* [Reading a profit and loss statement](https://lethain.com/profit-and-loss-statement/)
+* [15 images every investor needs to remember](https://twitter.com/BrianFeroldi/status/1553731179546718208)
+* [Thread on QE and why central banks are still engaged in it](https://mobile.twitter.com/MacroAlf/status/1558892593597104128)
 
 ## Structure
 
@@ -262,12 +269,18 @@ people who lose the money."
 
 * [Fintopea](https://www.fintopea.com/quote/AAPL/income-statement): Visualize 30+ years of company balance sheets and income statements for free.
 * [The book of secret knowledge - a long list of tools](https://github.com/trimstray/the-book-of-secret-knowledge)
+* [Financial Modeling Prep](https://site.financialmodelingprep.com/financial-statements/META): good tool for discounted cash flow modeling, intrinsic value of companies etc.
+* [PortfolioLabs](https://portfolioslab.com/tools) - sharpe, calmar, treynor, sortino, etc.
 * [Random notes about Trader Workstation TWS](https://dimon.ca/dmitrys-tws-api-faq/)
+* [OpenBB - a thread on its features](https://mobile.twitter.com/theBuoyantMan/status/1558792415263088641)
+* [10 free finance tools](https://mobile.twitter.com/gurgavin/status/1560748089635651584)
 
 ## Finance Math
 
 * [Common Statistical Tests are Linear Models](https://lindeloev.github.io/tests-as-linear/#51_independent_t-test_and_mann-whitney_u)
 * [Portfolio correlation](https://alpaca.markets/learn/correlation-portfolio-python/)
+* [Understanding Options Greeks](https://mobile.twitter.com/TradrNate/status/1555938610301440000)
+* [Importance of Investment Runway](https://mobile.twitter.com/10kdiver/status/1561414787145224193)
 
 ## Random Finance Links
 
@@ -305,6 +318,7 @@ people who lose the money."
 * [Financial Mentor](https://financialmentor.com/calculator/best-retirement-calculator)
 * [Machine Learning and Data Landscape](https://mattturck.com/data2021/)
 * [Semi-controversial career advice](https://twitter.com/FabiusMercurius/status/1408883428712321024)
+* [Understanding Jane Street](https://www.thediff.co/p/jane-street?triedSigningIn=true)
 
 
 ## The same old boom notes:
