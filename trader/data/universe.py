@@ -83,8 +83,10 @@ class UniverseAccessor():
     def get(self, name: str) -> Universe:
         try:
             return self.library.read(name).data
-        except NoDataFoundException:
-            return Universe(name)
+        except NoDataFoundException as ex:
+            universe = Universe(name)
+            universe.security_definitions = []
+            return universe
 
     def find_contract(self, contract: Contract) -> Optional[Universe]:
         for universe in self.get_all():

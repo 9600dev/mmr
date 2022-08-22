@@ -21,7 +21,7 @@ from scripts.eoddata_scraper import EodDataScraper
 from scripts.ib_resolve import main as ib_resolve_main
 from scripts.ib_instrument_scraper import scrape_products, IBInstrument
 from prompt_toolkit.history import FileHistory
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 logging = setup_logging(module_name='cli')
 
@@ -34,8 +34,8 @@ def build_and_load_ib(
     logging.debug('build_and_load_ib()')
 
     product_pages = {
-        'NASDAQ': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=nasdaq&showcategories=STK',
-        'NYSE': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=nyse&showcategories=ETF',
+        # 'NASDAQ': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=nasdaq&showcategories=STK',
+        # 'NYSE': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=nyse&showcategories=ETF',
         'LSE': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=lse&showcategories=ETF',
         'ASX': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=asx&showcategories=ETF',
     }
@@ -44,10 +44,12 @@ def build_and_load_ib(
     client = IBAIORx(ib_server_address, ib_server_port)
     client.connect()
     resolver = IBResolver(client)
+    universe: Optional[Universe] = None
 
-    for market, value in product_pages.items():
-        logging.debug('scrape_products() {}'.format(market))
-        instruments: List[IBInstrument] = scrape_products(market, value)
+    for market, url in product_pages.items():
+        instruments: List[IBInstrument] = []
+        logging.debug('scrape_products() {}'.format(url))
+        instruments = scrape_products(market, url)
 
         universe = accessor.get(market)
 
@@ -56,10 +58,14 @@ def build_and_load_ib(
                 contract_details = asyncio.run(resolver.resolve_contract(instrument.to_contract()))
                 if contract_details:
                     universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details))
-                    accessor.update(universe)
             else:
                 logging.debug('instrument {} already found in a universe {}'.format(instrument, market))
 
+        # update the universe
+        accessor.update(universe)
+        # weird bug where universe.security_definitions was keeping the previous list object around
+        # after calling accessor.get(). bizaare
+        universe = None
 
 def build_and_load_deprecated(
     ib_server_address: str,
