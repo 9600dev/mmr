@@ -1,4 +1,5 @@
 import os
+from re import I
 from types import resolve_bases
 import numpy as np
 import pandas as pd
@@ -23,7 +24,6 @@ from exchange_calendars import ExchangeCalendar
 from pandas import DatetimeIndex
 from ib_insync.contract import Contract, ContractDetails
 from trader.common.helpers import dateify, daily_close, daily_open, market_hours, get_contract_from_csv, symbol_to_contract
-from trader.data.contract_metadata import ContractMetadata
 
 # todo make sure all writes are monotonically ordered, as TickStore assumes this
 # right now, I don't think this is the case
@@ -282,6 +282,13 @@ class Data():
         self.library = self.store[self.arctic_library]
         self.zone: tzfile = gettz(timezone)  # type: ignore
 
+        # filtering arctic version mismatches with pymongo etc.
+        import warnings
+        warnings.filterwarnings(
+            'ignore',
+            message='The zone attribute is specific to pytz\'s interface; please migrate to a new time zone provider. For more details on how to do so, see https://pytz-deprecation-shim.readthedocs.io/en/latest/migration.html'
+        )
+
     # arctic stupidly returns the read data in the users local timezone
     # todo:// patch this up properly in the arctic source
     def _fix_df_timezone(self, data_frame: pd.DataFrame):
@@ -323,8 +330,10 @@ class Data():
     def list_symbols(self) -> List[str]:
         return self.library.list_symbols()
 
-    def arctic_list_libraries(self) -> List[str]:
-        return self.store.list_libraries(1)
+    @staticmethod
+    def list_libraries(arctic_server_address: str) -> List[str]:
+        store = Arctic(arctic_server_address)
+        return store.list_libraries(1)
 
 T = TypeVar('T')
 
@@ -362,8 +371,6 @@ class TickData(Data):
         super().__init__(arctic_server_address=arctic_server_address,
                          arctic_library=arctic_library,
                          lib_type=TICK_STORE)
-        self.metadata = DictData[ContractMetadata](arctic_server_address=arctic_server_address,
-                                                   arctic_library=arctic_library + 'Metadata')
         PandasObject.daily_open = daily_open  # type: ignore
         PandasObject.daily_close = daily_close  # type: ignore
         PandasObject.market_hours = market_hours  # type: ignore
@@ -397,17 +404,6 @@ class TickData(Data):
                 dateify(max_date, self.zone),
                 self.read(contract, date_range=min_date_range).iloc[0],
                 self.read(contract, date_range=max_date_range).iloc[-1])
-
-    def read_metadata(self, contract: Union[Contract, SecurityDefinition, int]) -> ContractMetadata:
-        metadata = self.metadata.read(contract)
-        if not metadata:
-            return ContractMetadata(contract=Contract(conId=int(self._to_symbol(contract))),
-                                    history_no_data_dates=[], history_overlapping_data_dates=[])
-        else:
-            return metadata
-
-    def write_metadata(self, contract: Contract, metadata: ContractMetadata):
-        self.metadata.write(contract, metadata)
 
     def write_resolve_overlap(
         self,
@@ -477,7 +473,7 @@ class TickData(Data):
             return pd.DataFrame()
 
         if pd_offset:
-            return df.resample(pd_offset).last()
+            return df.resample(pd_offset).last()  # type: ignore
         else:
             return df
 
@@ -511,9 +507,6 @@ class TickData(Data):
         df = self.get_data(contract, pd_offset, period, date_range)
 
         no_data_dates: List[dt.date] = []
-        contract_metadata = self.metadata.read(contract)
-        if contract_metadata:
-            no_data_dates = [d.date() for d in contract_metadata.history_no_data_dates]
 
         dates: List[dt.date] = []
         sessions = exchange_calendar.all_sessions.date  # type: ignore
@@ -522,7 +515,7 @@ class TickData(Data):
             dates = no_data_dates
         else:
             # make sure we have all the trading days
-            dates = df.resample('D').first().index.date
+            dates = df.resample('D').first().index.date  # type: ignore
             dates = list(dates) + no_data_dates
 
         # filter

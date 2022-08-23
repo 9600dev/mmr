@@ -21,7 +21,6 @@ from trader.data.data_access import SecurityDefinition
 class Universe():
     def __init__(self, name: str, security_definitions: List[SecurityDefinition] = []):
         self.name: str = name
-        self.historical_tick_store: str = name
         self.security_definitions: List[SecurityDefinition] = security_definitions
 
     @staticmethod

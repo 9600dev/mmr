@@ -27,7 +27,6 @@ from arctic.exceptions import OverlappingDataException
 from arctic.date import DateRange
 
 from trader.data.data_access import TickData, DictData, SecurityDefinition
-from trader.data.contract_metadata import ContractMetadata
 from trader.data.universe import Universe
 from trader.common.logging_helper import setup_logging
 from trader.common.helpers import date_range, dateify, day_iter, get_exchange_calendar, pdt
@@ -45,22 +44,23 @@ class IBHistoryQueuer(Queuer):
         ib_server_address: str,
         ib_server_port: int,
         arctic_server_address: str,
-        arctic_library: str,
+        universe: str,
+        bar_size: str,
         redis_server_address: str,
         redis_server_port: int
     ):
         super().__init__(redis_queue='history',
                          redis_server_address=redis_server_address,
                          redis_server_port=redis_server_port)
-        self.data = TickData(arctic_server_address, arctic_library)
+        self.data = TickData(arctic_server_address, IBHistoryWorker.history_to_library_hash(universe, bar_size))
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
         self.arctic_server_address = arctic_server_address
-        self.arctic_library = arctic_library
+        self.bar_size = bar_size
+        self.universe = universe
 
     def queue_history(self,
                       security_definitions: List[SecurityDefinition],
-                      bar_size: str = '1 min',
                       start_date: dt.datetime = dateify(dt.datetime.now() - dt.timedelta(days=5), timezone='America/New_York'),
                       end_date: dt.datetime = dateify(
                           dt.datetime.now() - dt.timedelta(days=1),
@@ -78,7 +78,7 @@ class IBHistoryQueuer(Queuer):
 
             for date_dr in date_ranges:
                 if (
-                    not self.is_job_queued(self.args_id([security, date_dr.start, date_dr.end, bar_size]))
+                    not self.is_job_queued(self.args_id([security, date_dr.start, date_dr.end, self.bar_size]))
                 ):
                     logging.info('enqueing {} from {} to {}'.format(Universe.to_contract(security),
                                                                     pdt(date_dr.start), pdt(date_dr.end)))
@@ -89,11 +89,11 @@ class IBHistoryQueuer(Queuer):
                         ib_server_port=self.ib_server_port,
                         ib_client_id=client_id,
                         arctic_server_address=self.arctic_server_address,
-                        arctic_library=self.arctic_library,
+                        arctic_library=IBHistoryWorker.history_to_library_hash(self.universe, self.bar_size),
                         redis_server_address=self.redis_server_address,
                         redis_server_port=self.redis_server_port)
 
-                    job = self.enqueue(history_worker.do_work, [security, dateify(date_dr.start), dateify(date_dr.end), bar_size])
+                    job = self.enqueue(history_worker.do_work, [security, dateify(date_dr.start), dateify(date_dr.end), self.bar_size])
                     logging.debug('Job history_worker.do_work enqueued, is_queued: {} using cliend_id {}'
                                   .format(job.is_queued, client_id))
 
@@ -137,6 +137,7 @@ class BatchIBHistoryWorker():
             bar_size=bar_size,
             filter_between_dates=True
         ))
+        logging.debug('ib_history.get_contract_history for {} returned {} rows'.format(security, len(result)))
 
         self.data.write(security, result)
         return True

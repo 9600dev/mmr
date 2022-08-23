@@ -27,6 +27,7 @@ from trader.data.universe import UniverseAccessor, Universe
 
 logging = setup_logging(module_name='ib_history_queuer')
 
+
 @cli_norepl.command()
 @click.option('--universe', required=True, help='name of universe to grab history for')
 @click.option('--arctic_universe_library', required=True, help='arctic library that contains universe definitions')
@@ -53,6 +54,7 @@ def get_universe_history_ib(
         ib_server_port,
         arctic_server_address,
         universe,
+        bar_size,
         redis_server_address,
         redis_server_port
     )
@@ -62,7 +64,7 @@ def get_universe_history_ib(
 
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
     u = accessor.get(universe)
-    queuer.queue_history(u.security_definitions, bar_size, start_date)
+    queuer.queue_history(u.security_definitions, start_date)
 
 
 @cli_norepl.command()
@@ -92,6 +94,7 @@ def get_symbol_history_ib(
         ib_server_port,
         arctic_server_address,
         universe,
+        bar_size,
         redis_server_address,
         redis_server_port
     )
@@ -104,6 +107,6 @@ def get_symbol_history_ib(
     # get a security definition
     security_definition = u.find_symbol(symbol)
     if security_definition:
-        queuer.queue_history([security_definition], bar_size, start_date)
+        queuer.queue_history([security_definition], start_date)
     else:
         logging.debug('cannot find symbol {} in universe {}'.format(symbol, universe))

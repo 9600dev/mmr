@@ -18,7 +18,7 @@ from aioreactive.observers import auto_detach_observer
 from typing import Type, TypeVar, Dict, Optional, List, cast, Tuple, Any
 from trader.common.reactive import SuccessFailEnum
 from trader.container import Container
-from trader.data.data_access import SecurityDefinition, TickData, DictData
+from trader.data.data_access import SecurityDefinition, TickData, DictData, Data
 from trader.data.universe import Universe, UniverseAccessor
 from scripts.trader_check import health_check
 from scripts.zmq_pub_listener import ZmqPrettyPrinter
@@ -28,6 +28,7 @@ from ib_insync.contract import Contract, ContractDescription, Stock, Option
 from ib_insync.objects import PortfolioItem
 
 from arctic import Arctic
+from arctic.exceptions import NoDataFoundException
 from trader.common.helpers import rich_table, rich_dict, rich_json, DictHelper, rich_list
 from IPython import get_ipython
 from pyfiglet import Figlet
@@ -37,6 +38,7 @@ from ib_insync.ticker import Ticker
 from expression.collections import Seq, seq
 from expression import Nothing, Some, effect, pipe
 from trader.common.command_line import cli, common_options, default_config
+from trader.listeners.ib_history_worker import IBHistoryWorker
 from trader.listeners.ibaiorx import IBAIORx
 from click_help_colors import HelpColorsGroup
 from trader.common.logging_helper import setup_logging, suppress_external
@@ -44,6 +46,7 @@ from trader.listeners.ibaiorx import WhatToShow
 from trader.data.market_data import MarketData
 from scripts.chain import plot_chain
 from trader.common.helpers import contract_from_dict
+from trader.batch.queuer import Queuer, Queue
 from trader.messaging.clientserver import RemotedClient, TopicPubSub
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.common.exceptions import TraderException, TraderConnectionException
@@ -77,7 +80,8 @@ def main(ctx):
     import warnings
     warnings.filterwarnings(
         'ignore',
-        message='The zone attribute is specific to pytz\'s interface; please migrate to a new time zone provider. For more details on how to do so, see https://pytz-deprecation-shim.readthedocs.io/en/latest/migration.html'
+        message='The zone attribute is specific to pytz\'s interface; please migrate to a new time zone provider.\
+            For more details on how to do so, see https://pytz-deprecation-shim.readthedocs.io/en/latest/migration.html'
     )
 
     if ctx.invoked_subcommand is None:
@@ -144,17 +148,67 @@ def history_summary(
 ):
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
     u = accessor.get(universe)
-    tick_data = TickData(arctic_server_address, arctic_library)
-    print(u.historical_tick_store)
-    examples: List[str] = tick_data.list_symbols()[0:10]
 
-    result = {
-        'name': universe,
-        'security_definition_count': len(u.security_definitions),
-        'history_db_symbol_count': len(tick_data.list_symbols()),
-        'example_symbols': examples
-    }
-    rich_dict(result)
+    history_dbs = [x for x in Data.list_libraries(arctic_server_address) if u.name in x and '_' in x]
+    for history_db in history_dbs:
+        tick_data = TickData(arctic_server_address, history_db)
+        examples: List[str] = tick_data.list_symbols()[0:10]
+
+        result = {
+            'universe': universe,
+            'arctic_library': history_db,
+            'bar_size': ' '.join(history_db.split('_')[-2:]),
+            'security_definition_count': len(u.security_definitions),
+            'history_db_symbol_count': len(tick_data.list_symbols()),
+            'example_symbols': examples
+        }
+        rich_dict(result)
+
+
+@history.command('read')
+@click.option('--symbol', required=True, help='historical data statistics for symbol')
+@click.option('--universe', required=True, default='NASDAQ', help='exchange for symbol [default: NASDAQ]')
+@click.option('--bar_size', required=True, default='1 min', help='bar size to read')
+@common_options()
+@default_config()
+def history_read(
+    symbol: str,
+    universe: str,
+    bar_size: str,
+    arctic_server_address: str,
+    arctic_library: str,
+    arctic_universe_library: str,
+    **args,
+):
+    accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
+    results: List[Dict[str, Any]] = __resolve(symbol, arctic_server_address, arctic_universe_library)
+    results = [x for x in results if x['universe'] == universe]
+    if len(results) >= 1:
+        r = results[0]
+        tick_data = TickData(arctic_server_address, IBHistoryWorker.history_to_library_hash(universe, bar_size))
+        contract = Contract(
+            conId=r['conId'],
+            symbol=r['symbol'],
+            exchange=r['exchange'],
+            primaryExchange=r['primaryExchange'],
+            currency=r['currency']
+        )
+        data = tick_data.read(contract)
+        rich_table(data, csv=True, include_index=True)
+
+
+@history.command('jobs')
+@common_options()
+@default_config()
+def history_jobs(
+    arctic_server_address: str,
+    arctic_library: str,
+    arctic_universe_library: str,
+    **args,
+):
+    container = Container()
+    queuer = container.resolve(Queuer)
+    rich_dict(queuer.current_queue())
 
 
 @history.command('security')
@@ -171,22 +225,51 @@ def history_security(
     **args,
 ):
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
-    tick_data = TickData(arctic_server_address, arctic_library)
-    results: List[Dict[str, Any]] = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
-    output = []
+    universes = accessor.list_universes()
 
-    for dict in results:
-        start_date, end_date = tick_data.date_summary(int(dict['conId']))
-        output.append({
-            'universe': dict['universe'],
-            'conId': dict['conId'],
-            'symbol': dict['symbol'],
-            'longName': dict['longName'],
-            'history_start': start_date,
-            'history_end': end_date,
-        })
+    # todo: hacky as shit
+    def in_universes(library: str):
+        for u in universes:
+            if u in library:
+                return True
+        return False
 
-    rich_table(output)
+    def get_universe(library: str) -> Optional[Universe]:
+        for u in universes:
+            if u in library:
+                return accessor.get(u)
+        return None
+
+    history_dbs = [x for x in Data.list_libraries(arctic_server_address) if in_universes(x) and '_' in x]
+    for history_db in history_dbs:
+        tick_data = TickData(arctic_server_address, history_db)
+        results: List[Dict[str, Any]] = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
+        output = []
+
+        history_universe = get_universe(history_db)
+
+        for dict in results:
+            if history_universe and dict['universe'] == history_universe.name:
+                try:
+                    start_date, end_date = tick_data.date_summary(int(dict['conId']))
+                    output.append({
+                        'universe': dict['universe'],
+                        'conId': dict['conId'],
+                        'symbol': dict['symbol'],
+                        'longName': dict['longName'],
+                        'history_start': start_date,
+                        'history_end': end_date,
+                    })
+                except NoDataFoundException:
+                    pass
+
+        rich_table(output)
+
+
+@history.command('bar-sizes')
+def history_bar_sizes():
+    rich_list(IBHistoryWorker.bar_sizes())
+
 
 @main.command()
 def portfolio():
@@ -379,7 +462,6 @@ def snapshot(
         click.echo('could not resolve symbol from symbol database')
 
 
-
 @main.group()
 def subscribe():
     pass
@@ -439,15 +521,17 @@ def subscribe_list(
 
 
 @subscribe.command('listen')
+@click.option('--topic', required=True, help='zmqtopic to listen to')
 @common_options()
 @default_config()
 def subscribe_listen(
+    topic: str,
     zmq_pubsub_server_address: str,
     zmq_pubsub_server_port: int,
     **args,
 ):
     printer = ZmqPrettyPrinter(zmq_pubsub_server_address, zmq_pubsub_server_port, csv=not (is_repl))
-    printer.console_listener()
+    asyncio.run(printer.listen(topic))
 
 
 @main.group()

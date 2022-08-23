@@ -27,7 +27,6 @@ from pandas import DatetimeIndex
 from ib_insync.contract import Contract, ContractDetails
 from ib_insync.objects import BarData, RealTimeBar
 from trader.common.helpers import dateify, daily_close, daily_open, market_hours, get_contract_from_csv, symbol_to_contract
-from trader.data.contract_metadata import ContractMetadata
 from trader.data.data_access import Data, SecurityDefinition, TickData, DictData
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibaiorx import IBAIORx

@@ -237,14 +237,14 @@ def rich_json(json_str: str):
         rich_dict(json_str)  # type: ignore
 
 
-def rich_table(df, csv: bool = False, financial: bool = False, financial_columns: List[str] = []):
+def rich_table(df, csv: bool = False, financial: bool = False, financial_columns: List[str] = [], include_index = False):
     if type(df) is list:
         df = pd.DataFrame(df)
 
     if csv:
         if which('vd'):
             temp_file = tempfile.NamedTemporaryFile(suffix='.csv')
-            df.to_csv(temp_file.name, index=False, float_format='%.2f')
+            df.to_csv(temp_file.name, index=include_index, float_format='%.2f')
             os.system('vd {}'.format(temp_file.name))
             return None
         else:

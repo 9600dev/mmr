@@ -16,7 +16,6 @@ from functools import reduce
 
 from trader.data.data_access import SecurityDefinition, TickData
 from trader.data.universe import Universe
-from trader.data.contract_metadata import ContractMetadata
 from trader.common.logging_helper import setup_logging
 from trader.common.helpers import dateify, day_iter, pdt, timezoneify
 from trader.common.listener_helpers import Helpers
@@ -57,6 +56,18 @@ class IBHistoryWorker():
                                                                                           errorCode,
                                                                                           errorString,
                                                                                           contract))
+
+    @staticmethod
+    def history_to_library_hash(universe: str, bar_size: str):
+        joined = universe + '_' + bar_size
+        return joined.replace(' ', '_')
+
+    @staticmethod
+    def bar_sizes():
+        bar_sizes = ['1 secs', '5 secs', '10 secs', '15 secs', '30 secs', '1 min', '2 mins', '3 mins', '5 mins',
+                    '10 mins', '15 mins', '20 mins', '30 mins', '1 hour', '2 hours', '3 hours', '4 hours', '8 hours',
+                    '1 day', '1 week', '1 month']
+        return bar_sizes
 
     async def connect(self):
         async with self.lock:
