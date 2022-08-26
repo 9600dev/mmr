@@ -1,4 +1,5 @@
 from distutils.log import error
+from re import I
 import sys
 import os
 import time
@@ -36,13 +37,13 @@ from ib_insync.util import df
 from ib_insync.ticker import Ticker
 from eventkit import Event
 
-# from trader.listeners.ibaiorx import IBAIORx, IBAIORxError
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
-from reactivex.abc import DisposableBase
+from reactivex.abc import DisposableBase, ObserverBase
 from reactivex.observable import Observable
 from reactivex.observer import Observer, AutoDetachObserver
 from reactivex.scheduler import ThreadPoolScheduler, NewThreadScheduler
 from reactivex.disposable import Disposable
+from reactivex.subject import Subject
 
 from trader.common.contract_sink import ContractSink
 from trader.common.listener_helpers import Helpers
@@ -349,6 +350,107 @@ class Trader(metaclass=Singleton):
                 # )
                 self.market_data_subscriptions[security] = security_stream
 
+    async def place_order(
+        self,
+        contract: Contract,
+        order: Order,
+        observer: ObserverBase[Trade],
+    ) -> DisposableBase:
+        disposable: DisposableBase = Disposable()
+        try:
+            disposable = await self.client.subscribe_place_order(contract, order, observer)
+        except Exception as ex:
+            # todo not sure how to deal with this error condition yet
+            raise self.create_trader_exception(TraderException, message='place_order()', inner=ex)
+        return disposable
+
+    async def handle_order(
+        self,
+        contract: Contract,
+        action: Action,
+        equity_amount: float,
+        observer: Observer[Trade],
+        debug: bool = False,
+    ) -> DisposableBase:
+        # todo make sure amount is less than outstanding profit
+
+        # grab the latest price of instrument
+        latest_tick: Ticker = await self.client.get_snapshot(contract, delayed=False)
+
+        # assess if we should trade
+        quantity = equity_amount / latest_tick.bid
+
+        if quantity < 1 and quantity > 0:
+            quantity = 1.0
+
+        # round the quantity
+        quantity_int = round(quantity)
+
+        logging.debug('handle_order assessed quantity: {} on bid: {}'.format(
+            quantity_int, latest_tick.bid
+        ))
+
+        limit_price = latest_tick.bid
+
+        # if debug, move the buy/sell by 10%
+        if debug and action == Action.BUY:
+            limit_price = limit_price * 0.9
+            limit_price = round(limit_price * 0.9, ndigits=2)
+        if debug and action == Action.SELL:
+            limit_price = round(limit_price * 1.1, ndigits=2)
+
+        subject = Subject[Trade]()
+        disposable: DisposableBase = Disposable()
+
+        def on_next(trade: Trade):
+            logging.debug('handle_order.on_next()')
+            subject.on_next(trade)
+
+        def on_completed():
+            logging.debug('handle_order.on_completed()')
+            subject.on_completed()
+            disposable.dispose()
+
+        def on_error(ex):
+            logging.debug('handle_order.on_error()')
+            # todo: retry logic here
+            subject.on_error(ex)
+
+        # put an order in
+        disposable = subject.subscribe(observer)
+        order = LimitOrder(action=str(action), totalQuantity=quantity_int, lmtPrice=limit_price)
+        disposable = await self.place_order(contract=contract, order=order, observer=subject)
+        return disposable
+
+    def cancel_order(self, order_id: int) -> Optional[Trade]:
+        # get the Order
+        order = self.book.get_order(order_id)
+        if order and order.clientId == self.client.client_id_counter:
+            logging.info('cancelling order {}'.format(order))
+            trade = self.client.ib.cancelOrder(order)
+            return trade
+        else:
+            logging.error('either order does not exist, or originating client_id is different: {} {}'
+                          .format(order, self.client.client_id_counter))
+            return None
+
+    def is_ib_connected(self) -> bool:
+        return self.client.ib.isConnected()
+
+    def red_button(self):
+        self.client.ib.reqGlobalCancel()
+
+    def status(self) -> Dict[str, bool]:
+        # todo lots of work here
+        status = {
+            'ib_connected': self.client.ib.isConnected(),
+            'arctic_connected': self.data is not None
+        }
+        return status
+
+    def get_universes(self) -> List[Universe]:
+        return self.universes
+
     def start_load_test(self):
         async def _load_test_helper():
             amd = Contract(symbol='AMD', conId=4391, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
@@ -395,104 +497,6 @@ class Trader(metaclass=Singleton):
         self.load_test = True
         logging.critical('starting start_load_test()')
         task = asyncio.create_task(_load_test_helper())
-
-    # async def temp_place_order(
-    #     self,
-    #     contract: Contract,
-    #     order: Order
-    # ) -> AsyncCachedObserver[Trade]:
-    #     async def handle_exception(ex):
-    #         logging.exception(ex)
-    #         # todo sort out the book here
-
-    #     async def handle_trade(trade: Trade):
-    #         logging.debug('handle_trade {}'.format(trade))
-    #         # todo figure out what we want to do here
-
-    #     observer = AsyncCachedObserver(asend=handle_trade,
-    #                                    athrow=handle_exception,
-    #                                    capture_asend_exception=True)
-
-    #     disposable = await self.client.subscribe_place_order(contract, order, observer)
-    #     return observer
-
-    # async def temp_handle_order(
-    #     self,
-    #     contract: Contract,
-    #     action: Action,
-    #     equity_amount: float,
-    #     delayed: bool = False,
-    #     debug: bool = False,
-    # ) -> AsyncCachedObserver[Trade]:
-    #     # todo make sure amount is less than outstanding profit
-
-    #     # grab the latest price of instrument
-    #     subject = await self.client.subscribe_contract(contract=contract, one_time_snapshot=True)
-
-    #     xs = pipe(
-    #         subject,
-    #         Pipe[Ticker].take(1)
-    #     )
-
-    #     observer = AsyncCachedObserver[Ticker]()
-    #     await xs.subscribe_async(observer)
-    #     latest_tick = await observer.wait_value()
-
-    #     # todo perform tick sanity checks
-
-    #     # assess if we should trade
-    #     quantity = equity_amount / latest_tick.bid
-
-    #     if quantity < 1 and quantity > 0:
-    #         quantity = 1.0
-
-    #     # round the quantity
-    #     quantity_int = round(quantity)
-
-    #     logging.debug('temp_handle_order assessed quantity: {} on bid: {}'.format(
-    #         quantity_int, latest_tick.bid
-    #     ))
-
-    #     limit_price = latest_tick.bid
-    #     # if debug, move the buy/sell by 10%
-    #     if debug and action == Action.BUY:
-    #         limit_price = limit_price * 0.9
-    #         limit_price = round(limit_price * 0.9, ndigits=2)
-    #     if debug and action == Action.SELL:
-    #         limit_price = round(limit_price * 1.1, ndigits=2)
-
-    #     # put an order in
-    #     order = LimitOrder(action=str(action), totalQuantity=quantity_int, lmtPrice=limit_price)
-    #     return await self.temp_place_order(contract=contract, order=order)
-
-    def cancel_order(self, order_id: int) -> Optional[Trade]:
-        # get the Order
-        order = self.book.get_order(order_id)
-        if order and order.clientId == self.client.client_id_counter:
-            logging.info('cancelling order {}'.format(order))
-            trade = self.client.ib.cancelOrder(order)
-            return trade
-        else:
-            logging.error('either order does not exist, or originating client_id is different: {} {}'
-                          .format(order, self.client.client_id_counter))
-            return None
-
-    def is_ib_connected(self) -> bool:
-        return self.client.ib.isConnected()
-
-    def red_button(self):
-        self.client.ib.reqGlobalCancel()
-
-    def status(self) -> Dict[str, bool]:
-        # todo lots of work here
-        status = {
-            'ib_connected': self.client.ib.isConnected(),
-            'arctic_connected': self.data is not None
-        }
-        return status
-
-    def get_universes(self) -> List[Universe]:
-        return self.universes
 
     def run(self, *args):
         self.client.run(*args)

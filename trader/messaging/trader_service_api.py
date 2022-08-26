@@ -59,19 +59,41 @@ class TraderServiceApi(RPCHandler):
     def get_orders(self) -> dict[int, list[Order]]:
         return self.trader.book.get_orders()
 
-    # @RPCHandler.rpcmethod
-    # def temp_place_order(self, contract: Contract, action: str, equity_amount: float) -> Trade:
-    #     from trader.trading.trading_runtime import Action, Trader
-    #     # todo: need to figure out the async stuff here
-    #     act = Action.BUY if 'BUY' in action else Action.SELL
-    #     cached_observer = asyncio.get_event_loop().run_until_complete(self.trader.temp_handle_order(
-    #         contract=contract,
-    #         action=act,
-    #         equity_amount=equity_amount,
-    #         delayed=True,
-    #         debug=True
-    #     ))
-    #     return asyncio.get_event_loop().run_until_complete(cached_observer.wait_value())
+    @RPCHandler.rpcmethod
+    def place_order(self, contract: Contract, action: str, equity_amount: float) -> SuccessFail:
+        # todo: we'll have to make the cli async so we can subscribe to the trade
+        # changes as orders get hit etc
+        logging.warn('place_order() is not complete, your mileage may vary')
+        from trader.trading.trading_runtime import Action, Trader
+        act = Action.BUY if 'BUY' in action else Action.SELL
+
+        task = asyncio.Event()
+        disposable: DisposableBase = Disposable()
+        result: Optional[SuccessFail] = None
+
+        loop = asyncio.get_event_loop()
+
+        def on_next(trade: Trade):
+            nonlocal result
+            result = SuccessFail(success_fail=SuccessFailEnum.SUCCESS, obj=trade)
+            task.set()
+
+        def on_error(ex):
+            nonlocal result
+            result = SuccessFail(success_fail=SuccessFailEnum.FAIL, exception=ex)
+
+        def on_completed():
+            pass
+
+        observer = Observer(on_next=on_next, on_completed=on_completed, on_error=on_error)
+
+        disposable = loop.run_until_complete(
+            self.trader.handle_order(contract=contract, action=act, equity_amount=equity_amount, observer=observer, debug=True)
+        )
+
+        loop.run_until_complete(task.wait())
+        disposable.dispose()
+        return result if result else SuccessFail(SuccessFailEnum.FAIL)
 
     @RPCHandler.rpcmethod
     def cancel_order(self, order_id: int) -> Optional[Trade]:
@@ -82,39 +104,13 @@ class TraderServiceApi(RPCHandler):
         loop = asyncio.get_event_loop()
         return loop.run_until_complete(self.trader.client.get_snapshot(contract=contract, delayed=delayed))
 
-    # @RPCHandler.rpcmethod
-    # def publish_contract(self, contract: Contract, delayed: bool) -> SuccessFail:
-    #     task = asyncio.Event()
-    #     disposable: DisposableBase = Disposable()
-    #     result: Optional[SuccessFail] = None
-
-    #     def asend(val: SuccessFail):
-    #         nonlocal result
-    #         result = val
-    #         task.set()
-
-    #     def wait_for_subscription():
-    #         nonlocal disposable
-    #         success_fail = self.trader.publish_contract(contract, delayed)
-    #         disposable = success_fail.subscribe(Observer(on_next=asend))
-
-    #     loop = asyncio.get_event_loop()
-    #     # loop.run_until_complete(wait_for_subscription())
-    #     # loop.run_until_complete(task.wait())
-    #     # loop.run_until_complete(disposable.dispose_async())
-    #     wait_for_subscription()
-    #     loop.run_until_complete(task.wait())
-    #     disposable.dispose()
-
-    #     return result if result else SuccessFail(SuccessFailEnum.FAIL)
-
     @RPCHandler.rpcmethod
     def publish_contract(self, contract: Contract, delayed: bool) -> bool:
         self.trader.publish_contract(contract, delayed)
         return True
 
     @RPCHandler.rpcmethod
-    def get_published_contracts(self) -> list[Contract]:
+    def get_published_contracts(self) -> list[int]:
         return list(self.trader.zmq_pubsub_contracts.keys())
 
     @RPCHandler.rpcmethod

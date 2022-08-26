@@ -3,14 +3,22 @@ from random import randint
 import sys
 import asyncio
 from ib_insync.order import LimitOrder
-from prompt_toolkit.shortcuts import prompt
-import requests
+
 import click
+import requests
 import pandas as pd
 import scripts.universes_cli as universes_cli
 import trader.batch.ib_history_queuer as ib_history_queuer
 import click_repl
 import aioreactive as rx
+
+from prompt_toolkit.shortcuts import prompt
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.styles import Style
+from prompt_toolkit.history import FileHistory, InMemoryHistory
+from prompt_toolkit.cursor_shapes import CursorShape
+from prompt_toolkit import PromptSession
+from prompt_toolkit.patch_stdout import patch_stdout
 
 from aioreactive import AsyncAnonymousObservable, AsyncAwaitableObserver, AsyncAnonymousObserver
 from aioreactive.types import AsyncObservable, AsyncObserver
@@ -29,20 +37,18 @@ from ib_insync.objects import PortfolioItem
 
 from arctic import Arctic
 from arctic.exceptions import NoDataFoundException
+
 from trader.common.helpers import rich_table, rich_dict, rich_json, DictHelper, rich_list
 from IPython import get_ipython
 from pyfiglet import Figlet
-from prompt_toolkit.history import FileHistory, InMemoryHistory
 from ib_insync.objects import Position
 from ib_insync.ticker import Ticker
 from expression.collections import Seq, seq
 from expression import Nothing, Some, effect, pipe
 from trader.common.command_line import cli, common_options, default_config
 from trader.listeners.ib_history_worker import IBHistoryWorker
-from trader.listeners.ibaiorx import IBAIORx
 from click_help_colors import HelpColorsGroup
 from trader.common.logging_helper import setup_logging, suppress_external
-from trader.listeners.ibaiorx import WhatToShow
 from trader.data.market_data import MarketData
 from scripts.chain import plot_chain
 from trader.common.helpers import contract_from_dict
@@ -50,10 +56,12 @@ from trader.batch.queuer import Queuer, Queue
 from trader.messaging.clientserver import RemotedClient, TopicPubSub
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.common.exceptions import TraderException, TraderConnectionException
+from trader.objects import WhatToShow
+from trader.listeners.ibreactive import IBAIORx, IBAIORxError
 from trader.common.helpers import *
 
 
-logging = setup_logging(module_name='cli')
+logging = setup_logging(module_name='cli')  # type: ignore
 is_repl = False
 
 
@@ -61,6 +69,7 @@ error_table = {
     'trader.common.exceptions.TraderException': TraderException,
     'trader.common.exceptions.TraderConnectionException': TraderConnectionException
 }
+
 
 def connect():
     if not remoted_client.connected:
@@ -80,8 +89,7 @@ def main(ctx):
     import warnings
     warnings.filterwarnings(
         'ignore',
-        message='The zone attribute is specific to pytz\'s interface; please migrate to a new time zone provider.\
-            For more details on how to do so, see https://pytz-deprecation-shim.readthedocs.io/en/latest/migration.html'
+        message='The zone attribute is specific to pytz\'s interface; please migrate to a new time zone provider. For more details on how to do so, see https://pytz-deprecation-shim.readthedocs.io/en/latest/migration.html'
     )
 
     if ctx.invoked_subcommand is None:
@@ -103,11 +111,17 @@ def help(ctx, subcommand):
 def repl():
     global is_repl
 
+    def bottom_toolbar():
+        return HTML('MMR statusbar <b><style bg="ansired">[feature not complete]</style></b>.')
+
     prompt_kwargs = {
         'history': FileHistory(os.path.expanduser('/tmp/.trader.history')),
         'vi_mode': True,
-        'message': 'mmr> '
+        'message': 'mmr> ',
+        'bottom_toolbar': bottom_toolbar,
+        'cursor': CursorShape.BLINKING_BLOCK,
     }
+
     is_repl = True
     f = Figlet(font='starwars')
     click.echo(f.renderText('MMR'))

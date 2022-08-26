@@ -10,7 +10,7 @@ from reactivex.subject import Subject
 from reactivex.observable import Observable
 from reactivex.observer import Observer, AutoDetachObserver
 from reactivex.disposable import Disposable
-from reactivex.abc import DisposableBase
+from reactivex.abc import DisposableBase, ObserverBase
 
 import pandas as pd
 import backoff
@@ -221,7 +221,7 @@ class IBAIORx():
         self,
         contract: Contract,
         order: Order,
-        observer: Observer[Trade]
+        observer: ObserverBase[Trade]
     ) -> DisposableBase:
         # the order object gets filled with the order details (clientId, orderId etc)
         # the trade object returned from 'placeOrder' gets filled later, but we don't return it
@@ -429,17 +429,17 @@ class IBAIORx():
         populated_ticker: Optional[Ticker] = None
         thrown_exception: Optional[Exception] = None
 
-        def update_ticker(ticker: Ticker):
+        def on_next(ticker: Ticker):
             nonlocal populated_ticker
             populated_ticker = ticker
             _task.set()
 
-        def athrow(ex: Exception):
+        def on_error(ex: Exception):
             nonlocal thrown_exception
             thrown_exception = ex
             _task.set()
 
-        def aclose():
+        def on_completed():
             logging.debug('get_snapshot() aclose')
 
         # we've got to subscribe, then wait for the first Ticker to arrive in the events
@@ -454,7 +454,7 @@ class IBAIORx():
             ops.take(1)
         )
 
-        observer = AutoDetachObserver[Ticker](on_next=update_ticker, on_error=athrow, on_completed=aclose)
+        observer = AutoDetachObserver[Ticker](on_next=on_next, on_error=on_error, on_completed=on_completed)
         subscription = xs.subscribe(observer)
 
         await _task.wait()
