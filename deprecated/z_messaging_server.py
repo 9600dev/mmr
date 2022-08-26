@@ -12,7 +12,7 @@ import coloredlogs
 import asyncio
 
 from asyncio import AbstractEventLoop
-from rx.subject import Subject
+from reactivex.subject import Subject
 from trader.messaging.messaging_client import MessagingSubscriber, MessagingPublisher
 from typing import Dict
 

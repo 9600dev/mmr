@@ -1,7 +1,5 @@
 root_directory: /home/trader/mmr
 config_file: /home/trader/mmr/configs/trader.yaml
-lightbus_config_file: /home/trader/mmr/configs/lightbus.yaml
-lightbus_module: trader.messaging.bus
 pycron_config_file: /home/trader/mmr/configs/pycron.yaml
 logfile: logs/trader.log
 ib_server_address: 127.0.0.1

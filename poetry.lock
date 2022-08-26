@@ -981,19 +981,6 @@ optional = false
 python-versions = "*"
 
 [[package]]
-name = "lightbus"
-version = "1.1.2"
-description = "RPC & event framework for Python 3"
-category = "main"
-optional = false
-python-versions = ">=3.7"
-
-[package.dependencies]
-aioredis = ">=1.2.0"
-jsonschema = ">=3.2"
-pyyaml = ">=3.12"
-
-[[package]]
 name = "llvmlite"
 version = "0.38.1"
 description = "lightweight wrapper around basic LLVM functionality"
@@ -2312,7 +2299,7 @@ heapdict = "*"
 [metadata]
 lock-version = "1.1"
 python-versions = "3.9.5"
-content-hash = "bc2079465b67e7a32afa4f6f5d3eef06c1dd518488fffd441b2528f0efe32cf4"
+content-hash = "b0e6ba019e6109db48d1fc01011c98e5413deae19f7526685f6210786f665a13"
 
 [metadata.files]
 aiohttp = [
@@ -2895,10 +2882,6 @@ kiwisolver = [
 korean-lunar-calendar = [
     {file = "korean_lunar_calendar-0.2.1-py3-none-any.whl", hash = "sha256:a619ea88610129019267467b85cc9faf0fab6e1694b2e782d1aeb610cdd382d5"},
     {file = "korean_lunar_calendar-0.2.1.tar.gz", hash = "sha256:12ce54b1392ed45a82dc6cea85ee5f7e33630556e82488f57e37a22482c8275d"},
-]
-lightbus = [
-    {file = "lightbus-1.1.2-py3-none-any.whl", hash = "sha256:248579a69b8f16666784369eed09857a22ecb90a8ecfb5eb650214da7c9f6189"},
-    {file = "lightbus-1.1.2.tar.gz", hash = "sha256:e0d347a183346e50eab45762d16dea77c671e6bc75328890461931f3ca44530c"},
 ]
 llvmlite = [
     {file = "llvmlite-0.38.1-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:a7dd2bd1d6406e7789273e3f8a304ed5d9adcfaa5768052fca7dc233a857be98"},
