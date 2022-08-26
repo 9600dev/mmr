@@ -5,7 +5,7 @@ Python based algorithmic trading platform similar to QuantRocket (www.quantrocke
 
 Features include:
 
-* [aioreactive](https://github.com/dbrattli/aioreactive) for asyncio pipelining and programming abstraction, and [vectorbt](https://github.com/polakowo/vectorbt) for algorithm programmability and backtesting.
+* [RxPy 4.0](https://github.com/ReactiveX/RxPY) for asyncio pipelining and programming abstraction, and [vectorbt](https://github.com/polakowo/vectorbt) for algorithm programmability and backtesting.
 * Batch download of instrument data from [Interactive Brokers](https://www.interactivebrokers.com/en/home.php) and [Polygon.io](https://www.polygon.io)
 * [Arctic Timeseries and Tick Store](https://github.com/man-group/arctic) for tick data storage
 * and more...
@@ -177,8 +177,6 @@ Pycron deals with scheduling, starting, stopping and restarting processes, servi
 * Move timezoneify logic to the SecurityDefinition class, so that timezone updates to dt.datetime's are local to the security/market
 * ```listener_helpers.py``` and ```helpers.py``` need to be consolidated.
 * The batch queuing stuff is a bit wonky (there's a subclass there ```queuer.py``` but it's doesn't have the right abstraction). Given batch data downloads is going to be important, should probably clean all this up.
-* aioreactive performance needs to be analyzed. If we're going to have a full replay system (i.e. running historical data through an Interactive Brokers simulator) then RxPy needs to be super fast to do back-testing efficiently.
-* aioreactive and vectorbt interplay needs to be looked at also. RxPy has great window/batching API's (it's join calculus could be used for incoming streams of data), but pandas also has a pandas-streaming library that we should look at also.
 * ```ib_listener.py``` is incomplete, and definitely lacks testing. Should be super rigorous on this, as it's the foundation for all trade and price routing.
 * There's no testing framework setup, and no test coverage. Setup test framework. Add tests.
 * For all the command line tools, we have switches that are 'defaulted' to 127.0.0.1 etc, but we also have ```configs/trader.yaml``` configuration file. Reconcile these two. We probably need some sort of dependency injection/configuration injection style thing, I dunno.

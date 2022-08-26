@@ -1,27 +1,27 @@
-import sys
-import os
-import click
-import tempfile
-import click_repl
+
 import asyncio
-from dataclasses import asdict
+import click
+import os
+import sys
+import tempfile
+
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
 PACKAGE_PARENT = '../'
 SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
-from trader.data.universe import Universe, UniverseAccessor, SecurityDefinition
-from trader.common.logging_helper import setup_logging, suppress_external
-from trader.listeners.ibaiorx import IBAIORx
-from trader.common.helpers import rich_table
-from trader.common.command_line import common_options, default_config, cli
-from scripts.ib_resolve import IBResolver
+from dataclasses import asdict
 from scripts.eoddata_scraper import EodDataScraper
-from scripts.ib_resolve import main as ib_resolve_main
-from scripts.ib_instrument_scraper import scrape_products, IBInstrument
-from prompt_toolkit.history import FileHistory
-from typing import List, Dict, Optional
+from scripts.ib_instrument_scraper import IBInstrument, scrape_products
+from scripts.ib_resolve import IBResolver
+from trader.common.command_line import cli, common_options, default_config
+from trader.common.helpers import rich_table
+from trader.common.logging_helper import setup_logging
+from trader.data.universe import SecurityDefinition, Universe, UniverseAccessor
+from trader.listeners.ibreactive import IBAIORx
+from typing import List, Optional
+
 
 logging = setup_logging(module_name='cli')
 

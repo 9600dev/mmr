@@ -1,13 +1,13 @@
-import time
-import datetime as dt
-import pandas as pd
-import numpy as np
-import logging
-import coloredlogs
-import pytz
-from typing import List, Dict, Tuple, Any
 from polygon import RESTClient
 from trader.common.helpers import dateify
+
+import coloredlogs
+import datetime as dt
+import logging
+import numpy as np
+import pandas as pd
+import pytz
+import time
 
 
 class PolygonFinancials():

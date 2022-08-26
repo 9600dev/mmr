@@ -1,35 +1,31 @@
-import tempfile
-import pandas as pd
-import numpy as np
-import scipy.stats as st
-import logging
-import functools
-import asyncio
+from bs4 import BeautifulSoup
+from collections import deque
+from dateutil.tz import gettz, tzlocal
+from dateutil.tz.tz import tzfile
+from exchange_calendars import ExchangeCalendar
+from ib_insync.contract import Contract
+from pandas import Timestamp
+from pypager.pager import Pager
+from pypager.source import GeneratorSource
+from rich.console import Console
+from rich.table import Table
+from typing import Any, Callable, cast, Dict, Generic, List, Optional, Tuple, TypeVar, Union
+
+import collections
 import datetime as dt
 import exchange_calendars as ec
-import plotille as plt
-import socket
-import warnings
 import io
 import json
 import locale
+import logging
+import numpy as np
 import os
-import click
-import collections
-import aioreactive as aiorx
-from bs4 import BeautifulSoup
-from dateutil.tz import gettz, tzlocal
-from dateutil.tz.tz import tzfile
-from typing import Tuple, Optional, Union, cast, List, Dict, TypeVar, Generic, Callable, Any, Tuple
-from collections import deque
-from aioreactive.types import Projection
-from pandas import Timestamp
-from ib_insync.contract import Contract
-from exchange_calendars import ExchangeCalendar
-from pypager.source import GeneratorSource
-from pypager.pager import Pager
-from rich.console import Console
-from rich.table import Table
+import pandas as pd
+import plotille as plt
+import scipy.stats as st
+import socket
+import tempfile
+import warnings
 
 
 def flatten_dict(d, parent_key='', sep='_'):
@@ -62,13 +58,6 @@ def flatten_json(y):
     return out
 
 
-TPipe = TypeVar('TPipe')
-class Pipe(Generic[TPipe]):
-    @classmethod
-    def take(cls, count: int) -> Projection[TPipe, TPipe]:
-        return cast(Projection[TPipe, TPipe], aiorx.take(count))
-
-
 def contract_from_dict(d: Dict[str, Any]) -> Contract:
     contract = Contract(
         conId=d['conId'],
@@ -81,7 +70,7 @@ def contract_from_dict(d: Dict[str, Any]) -> Contract:
 
 
 def symbol_to_contract(symbol: str) -> Contract:
-    if type(symbol) is int or type(symbol) is np.int or type(symbol) is np.int64:
+    if type(symbol) is int or type(symbol) is np.int_ or type(symbol) is np.int64:
         return Contract(conId=int(symbol))
     if type(symbol) is str and symbol.isnumeric():
         return Contract(conId=int(symbol))
@@ -176,8 +165,8 @@ def parse_fundamentals(xml: str) -> Dict:
 
     def value(key: str):
         elem = soup.find(key)
-        result[key] = elem.text
-        for k, value in elem.attrs.items():
+        result[key] = elem.text  # type: ignore
+        for k, value in elem.attrs.items():  # type: ignore
             result[key + '_' + k] = value
 
     soup = BeautifulSoup(xml, features='lxml')
@@ -237,7 +226,7 @@ def rich_json(json_str: str):
         rich_dict(json_str)  # type: ignore
 
 
-def rich_table(df, csv: bool = False, financial: bool = False, financial_columns: List[str] = [], include_index = False):
+def rich_table(df, csv: bool = False, financial: bool = False, financial_columns: List[str] = [], include_index=False):
     if type(df) is list:
         df = pd.DataFrame(df)
 
@@ -561,7 +550,7 @@ def best_fit_distribution(data, bins=200, ax=None):
     DISTRIBUTIONS = [
         st.alpha, st.anglit, st.arcsine, st.beta, st.betaprime, st.bradford, st.burr, st.cauchy, st.chi, st.chi2, st.cosine,
         st.dgamma, st.dweibull, st.erlang, st.expon, st.exponnorm, st.exponweib, st.exponpow, st.f, st.fatiguelife, st.fisk,
-        st.foldcauchy, st.foldnorm, st.frechet_r, st.frechet_l, st.genlogistic, st.genpareto, st.gennorm, st.genexpon,
+        st.foldcauchy, st.foldnorm, st.genlogistic, st.genpareto, st.gennorm, st.genexpon,
         st.genextreme, st.gausshyper, st.gamma, st.gengamma, st.genhalflogistic, st.gilbrat, st.gompertz, st.gumbel_r,
         st.gumbel_l, st.halfcauchy, st.halflogistic, st.halfnorm, st.halfgennorm, st.hypsecant, st.invgamma, st.invgauss,
         st.invweibull, st.johnsonsb, st.johnsonsu, st.ksone, st.kstwobign, st.laplace, st.levy, st.levy_l,
@@ -600,8 +589,7 @@ def best_fit_distribution(data, bins=200, ax=None):
                 # if axis pass in add to plot
                 try:
                     if ax:
-                        pd.Series(pdf, x).plot(ax=ax)
-                    end
+                        pd.Series(pdf, x).plot(ax=ax)  # type: ignore
                 except Exception:
                     pass
 

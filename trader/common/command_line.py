@@ -1,13 +1,13 @@
-import click
-import os
-import json
-import yaml
-import configobj
-import functools
-import click_repl
-from click.decorators import help_option
 from click_help_colors import HelpColorsGroup
 from prompt_toolkit.history import FileHistory
+
+import click
+import click_repl
+import configobj
+import functools
+import os
+import yaml
+
 
 __all__ = ('configobj_provider', 'configuration_option')
 

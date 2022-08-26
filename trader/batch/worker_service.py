@@ -1,33 +1,23 @@
-import sys
 import os
+import sys
+
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
 PACKAGE_PARENT = '../..'
 SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
-import datetime as dt
-import ib_insync as ibapi
-import click
-import pandas as pd
-
 from redis import Redis
-from rq import Queue
-from rq.job import Job
-from rq import Connection, Worker
-from dateutil.tz import tzlocal
-from typing import Tuple, List, Optional, Dict
-
-from trader.listeners.ib_history_worker import IBHistoryWorker
-from trader.listeners.ibaiorx import IBAIORx
-from trader.common.command_line import common_options, default_config, cli_norepl
-from trader.data.data_access import TickData
-from trader.common.logging_helper import setup_logging
-from trader.common.helpers import date_range, dateify, symbol_to_contract, rich_dict, rich_list
-from trader.common.listener_helpers import Helpers
-from trader.data.universe import UniverseAccessor, Universe
+from rq import Connection, Queue
 from trader.batch.non_fork_worker import NonForkWorker
+from trader.common.command_line import cli_norepl, common_options, default_config
+from trader.common.helpers import rich_dict
+from trader.common.logging_helper import setup_logging
+from typing import Dict, Optional
+
+import click
 import nest_asyncio
+
 
 nest_asyncio.apply()
 logging = setup_logging(module_name='worker_service')

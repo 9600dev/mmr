@@ -1,44 +1,29 @@
-import asyncio
-from re import I
-from struct import unpack
-import aiozmq.rpc
-import inspect
-import pandas as pd
-import numpy as np
-import datetime
-import pyarrow as pa
-import aioreactive as rx
-import random
-import types
-import json
-import nest_asyncio
-import dataclasses
-import dill
-import typing
-import time as time_
-import collections
-import threading
-import functools
-import queue
-from collections import deque
-from inspect import Parameter
-from datetime import timedelta, time, date, tzinfo
-from functools import partial
-from pickle import dumps, loads, HIGHEST_PROTOCOL
-from itertools import count
-from functools import wraps
-from typing import TypeVar, Generic, Tuple, Callable, Dict, Optional, List, Any, Type, cast
-from aioreactive.types import AsyncObservable, AsyncObserver
-from aioreactive.subject import AsyncMultiSubject
-from expression.system import AsyncDisposable, ObjectDisposedException
-from aiozmq.rpc.pubsub import PubSubClient, PubSubService
-from aiozmq.rpc.base import Service, ParametersError, NotFoundError
-from aiozmq.rpc.rpc import RPCClient, _BaseServerProtocol, _ServerProtocol
+from aiozmq.rpc.base import ParametersError, Service
 from aiozmq.rpc.packer import _Packer
-from dataclasses_serialization.json import JSONSerializer
+from aiozmq.rpc.pubsub import PubSubClient, PubSubService
+from aiozmq.rpc.rpc import _BaseServerProtocol, _ServerProtocol
+from datetime import date, time, timedelta, tzinfo
+from functools import partial
 from msgpack import unpackb
+from pickle import dumps, HIGHEST_PROTOCOL, loads
+from reactivex.subject import Subject
+from trader.common.logging_helper import setup_logging
+from typing import Any, Callable, Dict, Generic, Optional, Tuple, Type, TypeVar
 
-from trader.common.logging_helper import setup_logging, get_callstack
+import aiozmq.rpc
+import asyncio
+import dill
+import inspect
+import nest_asyncio
+import pandas as pd
+import pyarrow as pa
+import reactivex as rx
+import threading
+import time as time_
+import types
+import typing
+
+
 logging = setup_logging(module_name='trader.messaging.clientserver')
 
 
@@ -190,32 +175,32 @@ class RPCHandler(aiozmq.rpc.AttrHandler):
         return aiozmq.rpc.method(func)
 
 
-class PubSubAsyncSubject(AsyncMultiSubject[T]):
-    async def athrow(self, error: Exception) -> None:
+class PubSubSubject(Subject[T]):
+    def on_error(self, error: Exception) -> None:
         self.check_disposed()
 
-        if self._is_stopped:
+        if self.is_stopped:
             return
 
-        for obv in list(self._observers):
-            await obv.athrow(error)
+        for obv in list(self.observers):
+            obv.on_error(error)
 
 
 class _Handler(RPCHandler, Generic[T]):
     def __init__(self):
-        self.subject = PubSubAsyncSubject[T]()
+        self.subject = PubSubSubject[T]()
 
     @RPCHandler.rpcmethod
-    async def on_message(self, obj):
-        await self.subject.asend(obj)
+    def on_message(self, obj):
+        self.subject.on_next(obj)
 
     @RPCHandler.rpcmethod
-    async def on_throw(self, ex):
-        await self.subject.athrow(ex)
+    def on_throw(self, ex):
+        self.subject.on_error(ex)
 
     @RPCHandler.rpcmethod
-    async def on_close(self):
-        await self.subject.aclose()
+    def on_close(self):
+        self.subject.on_completed()
 
     def get_subject(self):
         return self.subject
@@ -239,7 +224,7 @@ class TopicPubSub(Generic[T]):
     async def subscriber(
         self,
         topic: str = 'default',
-    ) -> rx.AsyncObservable[T]:
+    ) -> rx.Observable[T]:
         if not self.handler:
             self.handler = _Handler[T]()
             self.zmq_subscriber = await aiozmq.rpc.serve_pubsub(
@@ -257,7 +242,7 @@ class TopicPubSub(Generic[T]):
 
         return self.handler.get_subject()
 
-    async def subscriber_close(self):
+    def subscriber_close(self):
         if self.zmq_subscriber:
             logging.debug('subscriber_close()')
             self.zmq_subscriber.close()

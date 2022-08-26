@@ -1,26 +1,19 @@
-from re import I
+from dateutil.tz import gettz
+from ib_insync.contract import Contract
+from ib_insync.ib import IB
+from trader.common.helpers import dateify, timezoneify
+from trader.common.logging_helper import setup_logging
+from trader.data.data_access import SecurityDefinition
+from trader.data.universe import Universe
+from trader.objects import WhatToShow
+from typing import List, Optional, Union
+
+import asyncio
 import datetime as dt
 import ib_insync
-import pandas as pd
 import numpy as np
-import backoff
-import asyncio
+import pandas as pd
 
-from redis import Redis
-from rq import Queue
-from arctic.exceptions import OverlappingDataException
-from ib_insync.contract import Contract
-from dateutil.tz import tzlocal, gettz
-from typing import Tuple, List, Optional, cast, Union
-from functools import reduce
-
-from trader.data.data_access import SecurityDefinition, TickData
-from trader.data.universe import Universe
-from trader.common.logging_helper import setup_logging
-from trader.common.helpers import dateify, day_iter, pdt, timezoneify
-from trader.common.listener_helpers import Helpers
-from trader.objects import WhatToShow
-from ib_insync.ib import IB
 
 logging = setup_logging(module_name='ibhistoryworker')
 

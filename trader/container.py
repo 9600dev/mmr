@@ -1,12 +1,10 @@
+from trader.common.singleton import Singleton
+from typing import Dict, Type
+
 import inspect
 import os
 import yaml
-import json
-import logging
-import coloredlogs
-import pathlib
-from typing import Type, TypeVar, Dict, Optional
-from trader.common.singleton import Singleton
+
 
 class Container(metaclass=Singleton):
     def __init__(self, config_file: str = '/home/trader/mmr/configs/trader.yaml'):

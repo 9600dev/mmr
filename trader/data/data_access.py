@@ -1,29 +1,22 @@
-import os
-from re import I
-from types import resolve_bases
-import numpy as np
-import pandas as pd
-import datetime as dt
-from dataclasses import dataclass, fields
-from dateutil.tz import tzlocal, gettz
-from dateutil.tz.tz import tzfile
-
-from trader.common.logging_helper import setup_logging
-
-logging = setup_logging(module_name='data')
-
-from pandas.core.base import PandasObject
 from arctic import Arctic, TICK_STORE, VERSION_STORE
-from arctic.date import DateRange, string_to_daterange
-from arctic.tickstore.tickstore import TickStore
-from arctic.store.version_store import VersionStore
+from arctic.date import DateRange
 from arctic.exceptions import NoDataFoundException, OverlappingDataException
-from typing import Tuple, List, Optional, Dict, TypeVar, Generic, Type, Union, cast, Set, NamedTuple
+from dataclasses import dataclass
+from dateutil.tz import gettz
+from dateutil.tz.tz import tzfile
 from durations import Duration
 from exchange_calendars import ExchangeCalendar
-from pandas import DatetimeIndex
 from ib_insync.contract import Contract, ContractDetails
-from trader.common.helpers import dateify, daily_close, daily_open, market_hours, get_contract_from_csv, symbol_to_contract
+from pandas.core.base import PandasObject
+from trader.common.helpers import daily_close, daily_open, dateify, market_hours, symbol_to_contract
+from trader.common.logging_helper import setup_logging
+from typing import cast, Generic, List, NamedTuple, Optional, Set, Tuple, TypeVar, Union
+
+import datetime as dt
+import pandas as pd
+
+
+logging = setup_logging(module_name='data')
 
 # todo make sure all writes are monotonically ordered, as TickStore assumes this
 # right now, I don't think this is the case

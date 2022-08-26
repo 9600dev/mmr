@@ -1,30 +1,16 @@
-from abc import abstractmethod
-import datetime as dt
-import pandas as pd
-import reactivex as rx
+from enum import Enum
+from eventkit import Event
+from functools import wraps
+from reactivex.disposable import Disposable
+from reactivex.observable import Observable
+from reactivex.observer import Observer
+from reactivex.subject import Subject
+from typing import Awaitable, Callable, cast, List, Optional, TypeVar, Union
 
-from reactivex.disposable import (
-    BooleanDisposable,
-    CompositeDisposable,
-    Disposable,
-    RefCountDisposable,
-    SerialDisposable,
-    SingleAssignmentDisposable,
-)
 import reactivex.abc as abc
 
-from reactivex.observable import Observable
-from reactivex.observer import Observer, AutoDetachObserver
-from reactivex.subject import Subject
-from reactivex.abc import DisposableBase
 
-from enum import Enum
-from asyncio import iscoroutinefunction
-from typing import TypeVar, Optional, Callable, Awaitable, Tuple, Generic, Dict, cast, List, Union
-from functools import wraps
-from eventkit import Event, event
-
-# With aioreactive you subscribe observers to observables
+# With reactivex you subscribe observers to observables
 TSource = TypeVar('TSource')
 TResult = TypeVar('TResult')
 TKey = TypeVar('TKey')

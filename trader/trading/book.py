@@ -1,20 +1,15 @@
-import expression
-import pandas as pd
-from expression import pipe
-from expression.collections import seq, Seq
-from ib_insync.objects import Position, PortfolioItem
 from ib_insync.contract import Contract
-from ib_insync.order import Trade, Order, OrderStatus
+from ib_insync.order import Order, Trade
 from trader.common.logging_helper import setup_logging
-from trader.common.helpers import ListHelper
-from trader.common.reactive import AsyncCachedSubject, AsyncEventSubject
-from eventkit import Event
+from trader.common.reactivex import EventSubject
+
 
 logging = setup_logging(module_name='book')
 
-from typing import List, Dict, Tuple, Union, cast, Optional
+from typing import cast, Dict, List, Optional, Tuple, Union
 
-class BookSubject(AsyncEventSubject[Union[Trade, Order]]):
+
+class BookSubject(EventSubject[Union[Trade, Order]]):
     def __init__(self):
         self.orders: Dict[int, List[Order]] = {}
         self.trades: Dict[int, List[Trade]] = {}
@@ -23,7 +18,7 @@ class BookSubject(AsyncEventSubject[Union[Trade, Order]]):
     # we go with order or trade here, because reconnecting with
     # the server means we're doing a reqAllOrder call, which returns
     # orders only
-    async def add_update_trade(self, order: Union[Trade, Order]):
+    def add_update_trade(self, order: Union[Trade, Order]):
         logging.debug('updating trade book with {}'.format(order))
 
         if type(order) is Trade:
@@ -57,9 +52,9 @@ class BookSubject(AsyncEventSubject[Union[Trade, Order]]):
     def get_book(self) -> Tuple[Dict[int, List[Trade]], Dict[int, List[Order]]]:
         return (self.trades, self.orders)
 
-    async def asend(self, value: Union[Trade, Order]) -> None:
-        await self.add_update_trade(value)
-        await super().asend(value)
+    def on_next(self, value: Union[Trade, Order]) -> None:
+        self.add_update_trade(value)
+        super().on_next(value)
 
-    async def filter_book_by_contract(self, contract: Contract, value: Trade):
+    def filter_book_by_contract(self, contract: Contract, value: Trade):
         return contract.conId == value.contract.conId

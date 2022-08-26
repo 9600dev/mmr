@@ -1,14 +1,13 @@
-import time
-import sys
-import random
+from rq.defaults import DEFAULT_LOGGING_DATE_FORMAT, DEFAULT_LOGGING_FORMAT
+
 import datetime
-
+import random
 import rq
-import rq.job
 import rq.compat
+import rq.job
 import rq.worker
-
-from rq.defaults import (DEFAULT_LOGGING_FORMAT, DEFAULT_LOGGING_DATE_FORMAT)
+import sys
+import time
 
 
 class NonForkWorker(rq.Worker):
@@ -74,7 +73,7 @@ class NonForkWorker(rq.Worker):
 
                 pipeline.execute()
 
-        except:
+        except Exception as ex:
             # Use the public setter here, to immediately update Redis
             job.status = rq.job.JobStatus.FAILED
             self.handle_exception(job, *sys.exc_info())

@@ -1,62 +1,31 @@
 # the fundamentals of asyncio: https://www.integralist.co.uk/posts/python-asyncio/
 
-import os
-import asyncio
-import datetime
-import datetime as dt
-import reactivex as rx
-from reactivex import operators as ops
-from reactivex.subject import Subject
-from reactivex.observable import Observable
-from reactivex.observer import Observer, AutoDetachObserver
-from reactivex.disposable import Disposable
-from reactivex.abc import DisposableBase, ObserverBase
-
-import pandas as pd
-import backoff
-import random
-
-from functools import partial
-from ib_insync.ib import IB
-from ib_insync.util import schedule
 from ib_insync.client import Client
-from ib_insync.contract import ContractDescription, ContractDetails, Stock, Contract, Forex, Future, Option
-from ib_insync.objects import PortfolioItem, Position, RealTimeBarList, BarData, BarDataList, RealTimeBar, Fill
-from ib_insync.order import Order, BracketOrder, LimitOrder, StopOrder, OrderStatus, MarketOrder, ExecutionCondition, Trade
-from ib_insync.order import StopLimitOrder
-from ib_insync.util import df
+from ib_insync.contract import Contract, ContractDescription, ContractDetails
+from ib_insync.ib import IB
+from ib_insync.objects import Fill, PortfolioItem, Position, RealTimeBarList
+from ib_insync.order import Order, Trade
 from ib_insync.ticker import Ticker
-from eventkit.event import Event
-
-from asyncio import BaseEventLoop
-from asyncio.events import AbstractEventLoop
-from enum import Enum
-
-from typing import (
-    List,
-    Dict,
-    Tuple,
-    Callable,
-    Coroutine,
-    Awaitable,
-    Optional,
-    Set,
-    Generic,
-    TypeVar,
-    Union,
-    AsyncGenerator,
-    cast,
-    Iterable,
-)
-
+from reactivex import operators as ops
+from reactivex.abc import DisposableBase, ObserverBase
+from reactivex.observable import Observable
+from reactivex.observer import AutoDetachObserver, Observer
+from reactivex.subject import Subject
 from trader.common.listener_helpers import Helpers
-from trader.common.helpers import Pipe
 from trader.common.logging_helper import setup_logging
-from trader.common.reactive import AsyncCachedSubject, AsyncCachedPandasSubject, AsyncCachedObserver
-from trader.common.reactive import AsyncCachedObservable, awaitify, AsyncEventSubject
 from trader.common.reactivex import EventSubject
 from trader.listeners.ib_history_worker import IBHistoryWorker
-from trader.objects import WhatToShow, ReportType
+from trader.objects import WhatToShow
+from typing import cast, Dict, List, Optional, Set, TypeVar, Union
+
+import asyncio
+import backoff
+import datetime
+import datetime as dt
+import pandas as pd
+import random
+import reactivex as rx
+
 
 logging = setup_logging(module_name="ibreactivex")
 
@@ -66,7 +35,6 @@ TValue = TypeVar('TValue')
 Any = TypeVar('Any')
 
 
-# With aioreactive you subscribe observers to observables,
 class IBAIORxError():
     def __init__(self, reqId: int, errorCode: int, errorString: str, contract: Contract):
         self.reqId = reqId
@@ -185,7 +153,7 @@ class IBAIORx():
             logging.debug('ibaiorx is already shutdown')
             return
 
-        logging.debug('ibaiorx.shutdown(), disconnecting clients and disposing aioreactive subscriptions')
+        logging.debug('ibaiorx.shutdown(), disconnecting clients and disposing reactivex subscriptions')
 
         if self.history_worker:
             await self.history_worker.disconnect()
@@ -238,22 +206,6 @@ class IBAIORx():
         # todo, figure out what to do here with the disposable
         # should it cancel the order, or just stop listening?
         return disposable
-
-    # async def subscribe_cancel_order(
-    #     self,
-    #     contract: Contract,
-    #     order: Order,
-    #     observer: rx.AsyncObserver[Trade]
-    # ) -> AsyncDisposable:
-    #     xs = pipe(
-    #         self.trades_subject,
-    #         rx.filter(lambda trade: self._filter_contract(contract, trade)),  # type: ignore
-    #     )
-
-    #     disposable = await xs.subscribe_async(observer)
-    #     await self.trades_subject.call_event_subscriber_sync(lambda: self.ib.cancelOrder(order))
-
-    #     return disposable
 
     def subscribe_contract_direct(
         self,
@@ -472,13 +424,6 @@ class IBAIORx():
             return []
         else:
             return cast(List[ContractDetails], result)
-
-    # async def get_fundamental_data_sync(
-    #     self,
-    #     contract: Contract,
-    #     report_type: ReportType = ReportType.ReportSnapshot
-    # ) -> rx.AsyncObservable[str]:
-    #     return rx.from_async(self.ib.reqFundamentalDataAsync(contract, reportType=str(report_type)))
 
     async def get_matching_symbols(self, symbol: str) -> List[ContractDescription]:
         result = await self.ib.reqMatchingSymbolsAsync(symbol)

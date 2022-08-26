@@ -1,21 +1,12 @@
-from dataclasses import dataclass, fields
-import os
-import csv
-from types import resolve_bases
-import numpy as np
-import pandas as pd
-import datetime as dt
-from dateutil.tz import tzlocal, gettz
-from dateutil.tz.tz import tzfile
-
-from pandas.core.base import PandasObject
-from arctic import Arctic, TICK_STORE, VERSION_STORE
-from arctic.tickstore.tickstore import VERSION, TickStore
-from arctic.store.version_store import VersionStore
+from arctic import Arctic, VERSION_STORE
 from arctic.exceptions import NoDataFoundException
-from typing import Tuple, List, Optional, Dict, TypeVar, Generic, Type, Union, cast, Set
+from arctic.store.version_store import VersionStore
+from dataclasses import fields
 from ib_insync.contract import Contract
 from trader.data.data_access import SecurityDefinition
+from typing import Dict, List, Optional, Union
+
+import csv
 
 
 class Universe():

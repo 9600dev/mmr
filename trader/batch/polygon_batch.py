@@ -1,31 +1,31 @@
-import sys
-import os
-
 import exchange_calendars
+import os
+import sys
+
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
 PACKAGE_PARENT = '../..'
 SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
+from trader.common.logging_helper import setup_logging
+
 import datetime as dt
-import ib_insync as ibapi
 import pandas as pd
 
-from trader.common.logging_helper import setup_logging
-logging = setup_logging(module_name='history_job')
 
-from ib_insync import IB, Contract
-from dateutil.tz import gettz
-from typing import Tuple, List, Optional, Dict
+logging = setup_logging(module_name='polygonqueuer')
+
 from arctic.date import DateRange
 from arctic.exceptions import NoDataFoundException
-
-from trader.data.data_access import TickData, DictData
-from trader.common.helpers import date_range, dateify, day_iter, get_exchange_calendar, pdt
-from trader.listeners.polygon_listener import PolygonListener
-from trader.common.listener_helpers import Helpers
+from ib_insync import Contract
 from trader.batch.queuer import Queuer
+from trader.common.helpers import dateify, day_iter, pdt
+from trader.common.listener_helpers import Helpers
+from trader.data.data_access import DictData, TickData
+from trader.listeners.polygon_listener import PolygonListener
+from typing import List
+
 
 class PolygonQueuer(Queuer):
     def __init__(self,

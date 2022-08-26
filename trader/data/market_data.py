@@ -1,40 +1,22 @@
-import os
-import numpy as np
-import pandas as pd
+from arctic.date import DateRange
+from reactivex import Observer
+from reactivex.disposable import Disposable
+from reactivex.subject import Subject
+from trader.common.logging_helper import setup_logging
+from trader.data.data_access import SecurityDefinition, TickData
+from trader.data.universe import Universe, UniverseAccessor
+from trader.listeners.ib_history_worker import IBHistoryWorker, WhatToShow
+from trader.listeners.ibreactive import IBAIORx
+from typing import Optional
+
 import datetime as dt
 import exchange_calendars
-from dataclasses import dataclass, fields
-from dateutil.tz import tzlocal, gettz
-from dateutil.tz.tz import tzfile
+import pandas as pd
 
-from trader.common.logging_helper import setup_logging
 
 logging = setup_logging(module_name='data')
 
-from pandas.core.base import PandasObject
-from arctic import Arctic, TICK_STORE, VERSION_STORE
-from arctic.date import DateRange, string_to_daterange
-from arctic.tickstore.tickstore import TickStore
-from arctic.store.version_store import VersionStore
-from arctic.exceptions import NoDataFoundException
-from aioreactive.subject import AsyncMultiSubject
-from aioreactive import AsyncObserver
-from expression.system.disposable import Disposable, AsyncDisposable
-from typing import Tuple, List, Optional, Dict, TypeVar, Generic, Type, Union, cast, Set
-from durations import Duration
-from exchange_calendars import ExchangeCalendar
-from pandas import DatetimeIndex
-from ib_insync.contract import Contract, ContractDetails
-from ib_insync.objects import BarData, RealTimeBar
-from trader.common.helpers import dateify, daily_close, daily_open, market_hours, get_contract_from_csv, symbol_to_contract
-from trader.data.data_access import Data, SecurityDefinition, TickData, DictData
-from trader.data.universe import Universe, UniverseAccessor
-from trader.listeners.ibaiorx import IBAIORx
-from trader.listeners.ib_history_worker import IBHistoryWorker, WhatToShow
-from ib_insync.ib import IB
-
-
-class SecurityDataStream(AsyncMultiSubject[pd.DataFrame]):
+class SecurityDataStream(Subject[pd.DataFrame]):
     def __init__(
             self,
             security: SecurityDefinition,
@@ -51,31 +33,31 @@ class SecurityDataStream(AsyncMultiSubject[pd.DataFrame]):
             self.df = existing_data
         self.bar_size = bar_size
 
-    async def asend(self, value: pd.DataFrame) -> None:
+    def on_next(self, value: pd.DataFrame) -> None:
         self.check_disposed()
 
-        if self._is_stopped:
+        if self.is_stopped:
             return
 
         # todo: gotta be a faster way here
         self.df = self.df.append(value)
 
-        for obv in list(self._observers):
-            await obv.asend(self.df)
+        for obv in list(self.observers):
+            obv.on_next(self.df)
 
-    async def subscribe_async(self, observer: AsyncObserver[pd.DataFrame]) -> AsyncDisposable:
+    async def subscribe_async(self, observer: Observer[pd.DataFrame]) -> Disposable:
         self.check_disposed()
 
-        self._observers.append(observer)
+        self.observers.append(observer)
 
-        async def dispose() -> None:
-            if observer in self._observers:
-                self._observers.remove(observer)
+        def dispose() -> None:
+            if observer in self.observers:
+                self.observers.remove(observer)
 
-        result = AsyncDisposable.create(dispose)
+        result = Disposable(dispose)
 
         # send the last cached result
-        await observer.asend(self.df)
+        observer.on_next(self.df)
         return result
 
     def data(self) -> pd.DataFrame:

@@ -1,69 +1,49 @@
-from distutils.log import error
-from re import I
-import sys
-import os
-import time
 
-from trader.objects import WhatToShow
+import os
+import sys
+
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
 PACKAGE_PARENT = '../..'
 SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
-import pandas as pd
-import datetime as dt
-import backoff
-import reactivex as rx
-import reactivex.operators as ops
-import threading
-
-import trader.messaging.trader_service_api as bus
-import asyncio
-from asyncio.events import AbstractEventLoop
+from arctic.date import DateRange
 from enum import Enum
+from ib_insync.contract import Contract
+from ib_insync.objects import PortfolioItem, Position
+from ib_insync.order import LimitOrder, Order, Trade
+from ib_insync.ticker import Ticker
+from reactivex.abc import DisposableBase, ObserverBase
+from reactivex.disposable import Disposable
+from reactivex.observable import Observable
+from reactivex.observer import AutoDetachObserver, Observer
+from reactivex.subject import Subject
+from trader.common.contract_sink import ContractSink
+from trader.common.exceptions import TraderConnectionException, TraderException
+from trader.common.helpers import dateify, ListHelper, timezoneify
+from trader.common.logging_helper import get_callstack, setup_logging
+from trader.common.singleton import Singleton
+from trader.data.data_access import SecurityDefinition, TickData
+from trader.data.market_data import SecurityDataStream
+from trader.data.universe import Universe, UniverseAccessor
+from trader.listeners.ibreactive import IBAIORx, IBAIORxError
+from trader.messaging.clientserver import MultithreadedTopicPubSub, RPCServer
+from trader.trading.book import BookSubject
+from trader.trading.executioner import Executioner
+from trader.trading.portfolio import Portfolio
+from trader.trading.strategy import Strategy
+from typing import cast, Dict, List, Optional
 
-from trader.common.logging_helper import setup_logging, get_callstack
+import asyncio
+import backoff
+import datetime as dt
+import threading
+import trader.messaging.trader_service_api as bus
+
+
 logging = setup_logging(module_name='trading_runtime')
 
-from arctic import Arctic, TICK_STORE
-from arctic.date import DateRange
-from arctic.tickstore.tickstore import TickStore
-from ib_insync.ib import IB
-from ib_insync.contract import Contract, Forex, Future, Stock
-from ib_insync.objects import PortfolioItem, Position, BarData
-from ib_insync.order import LimitOrder, Order, Trade
-from ib_insync.util import df
-from ib_insync.ticker import Ticker
-from eventkit import Event
-
-from trader.listeners.ibreactive import IBAIORx, IBAIORxError
-from reactivex.abc import DisposableBase, ObserverBase
-from reactivex.observable import Observable
-from reactivex.observer import Observer, AutoDetachObserver
-from reactivex.scheduler import ThreadPoolScheduler, NewThreadScheduler
-from reactivex.disposable import Disposable
-from reactivex.subject import Subject
-
-from trader.common.contract_sink import ContractSink
-from trader.common.listener_helpers import Helpers
-from trader.common.observers import ConsoleObserver, ArcticObserver, ComplexConsoleObserver, ContractSinkObserver, NullObserver
-from trader.common.exceptions import TraderException, TraderConnectionException
-from trader.data.data_access import SecurityDefinition, TickData
-from trader.data.universe import UniverseAccessor, Universe
-from trader.container import Container
-from trader.trading.book import BookSubject
-from trader.trading.algo import Algo
-from trader.trading.portfolio import Portfolio
-from trader.trading.executioner import Executioner
-from trader.trading.strategy import Strategy
-from trader.common.reactivex import SuccessFailEnum, SuccessFailObservable, SuccessFail
-from trader.common.singleton import Singleton
-from trader.common.helpers import get_network_ip, Pipe, dateify, timezoneify, ListHelper
-from trader.data.market_data import MarketData, SecurityDataStream
-from trader.messaging.clientserver import RPCServer, MultithreadedTopicPubSub
-
-from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar, cast, Union
 
 # notes
 # https://groups.io/g/insync/topic/using_reqallopenorders/27261173?p=,,,20,0,0,0::recentpostdate%2Fsticky,,,20,2,0,27261173
@@ -198,7 +178,7 @@ class Trader(metaclass=Singleton):
         # for security_definition, security_datastream in self.market_data_subscriptions.items():
         #   security_datastream.dispose()
 
-        await self.book.dispose_async()
+        self.book.dispose()
         await self.client.shutdown()
 
     def reconnect(self):
@@ -259,7 +239,7 @@ class Trader(metaclass=Singleton):
 
         orders = await self.client.ib.reqAllOpenOrdersAsync()
         for o in orders:
-            await self.book.asend(o)
+            self.book.on_next(o)
 
     async def connected_event(self):
         logging.debug('connected_event')

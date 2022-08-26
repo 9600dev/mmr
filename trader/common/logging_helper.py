@@ -1,14 +1,15 @@
-import os
-import yaml
-import logging.config
-import logging
-import coloredlogs
-import warnings
-import inspect
-from rich.logging import RichHandler
 from logging import Logger
-from typing import Dict, cast, List
 from types import FrameType
+from typing import cast, Dict, List
+
+import coloredlogs
+import inspect
+import logging
+import logging.config
+import os
+import warnings
+import yaml
+
 
 global_loggers: Dict[str, Logger] = {}
 

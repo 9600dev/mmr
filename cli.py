@@ -1,64 +1,45 @@
-import os
-from random import randint
-import sys
-import asyncio
-from ib_insync.order import LimitOrder
-
-import click
-import requests
-import pandas as pd
-import scripts.universes_cli as universes_cli
-import trader.batch.ib_history_queuer as ib_history_queuer
-import click_repl
-import aioreactive as rx
-
-from prompt_toolkit.shortcuts import prompt
-from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.styles import Style
-from prompt_toolkit.history import FileHistory, InMemoryHistory
-from prompt_toolkit.cursor_shapes import CursorShape
-from prompt_toolkit import PromptSession
-from prompt_toolkit.patch_stdout import patch_stdout
-
-from aioreactive import AsyncAnonymousObservable, AsyncAwaitableObserver, AsyncAnonymousObserver
-from aioreactive.types import AsyncObservable, AsyncObserver
-from aioreactive.observers import auto_detach_observer
-from typing import Type, TypeVar, Dict, Optional, List, cast, Tuple, Any
-from trader.common.reactive import SuccessFailEnum
-from trader.container import Container
-from trader.data.data_access import SecurityDefinition, TickData, DictData, Data
-from trader.data.universe import Universe, UniverseAccessor
-from scripts.trader_check import health_check
-from scripts.zmq_pub_listener import ZmqPrettyPrinter
-from ib_insync.ib import IB
-from ib_insync.order import Trade, Order
-from ib_insync.contract import Contract, ContractDescription, Stock, Option
-from ib_insync.objects import PortfolioItem
-
 from arctic import Arctic
 from arctic.exceptions import NoDataFoundException
-
-from trader.common.helpers import rich_table, rich_dict, rich_json, DictHelper, rich_list
-from IPython import get_ipython
-from pyfiglet import Figlet
-from ib_insync.objects import Position
-from ib_insync.ticker import Ticker
-from expression.collections import Seq, seq
-from expression import Nothing, Some, effect, pipe
-from trader.common.command_line import cli, common_options, default_config
-from trader.listeners.ib_history_worker import IBHistoryWorker
 from click_help_colors import HelpColorsGroup
-from trader.common.logging_helper import setup_logging, suppress_external
-from trader.data.market_data import MarketData
+from expression import pipe
+from expression.collections import seq
+from ib_insync.contract import Contract
+from ib_insync.objects import PortfolioItem, Position
+from ib_insync.order import Order, Trade
+from ib_insync.ticker import Ticker
+from IPython import get_ipython
+from prompt_toolkit.cursor_shapes import CursorShape
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import FileHistory
+from pyfiglet import Figlet
+from random import randint
 from scripts.chain import plot_chain
-from trader.common.helpers import contract_from_dict
-from trader.batch.queuer import Queuer, Queue
-from trader.messaging.clientserver import RemotedClient, TopicPubSub
+from scripts.trader_check import health_check
+from scripts.zmq_pub_listener import ZmqPrettyPrinter
+from trader.batch.queuer import Queuer
+from trader.common.command_line import cli, common_options, default_config
+from trader.common.exceptions import TraderConnectionException, TraderException
+from trader.common.helpers import contract_from_dict, DictHelper, rich_dict, rich_json, rich_list, rich_table
+from trader.common.logging_helper import setup_logging
+from trader.common.reactivex import SuccessFail
+from trader.container import Container
+from trader.data.data_access import Data, DictData, TickData
+from trader.data.market_data import MarketData
+from trader.data.universe import Universe, UniverseAccessor
+from trader.listeners.ib_history_worker import IBHistoryWorker
+from trader.listeners.ibreactive import IBAIORx
+from trader.messaging.clientserver import RemotedClient
 from trader.messaging.trader_service_api import TraderServiceApi
-from trader.common.exceptions import TraderException, TraderConnectionException
-from trader.objects import WhatToShow
-from trader.listeners.ibreactive import IBAIORx, IBAIORxError
-from trader.common.helpers import *
+from typing import Any, Dict, List, Optional
+
+import asyncio
+import click
+import click_repl
+import os
+import pandas as pd
+import requests
+import scripts.universes_cli as universes_cli
+import trader.batch.ib_history_queuer as ib_history_queuer
 
 
 logging = setup_logging(module_name='cli')  # type: ignore
@@ -702,7 +683,7 @@ def trade(
         click.echo('multiple contracts found for symbol {}, aborting'.format(symbol))
 
     action = 'BUY' if buy else 'SELL'
-    trade: Trade = remoted_client.rpc(return_type=Trade).temp_place_order(
+    trade: SuccessFail = remoted_client.rpc(return_type=SuccessFail).place_order(
         contract=contract_from_dict(contracts[0]),
         action=action,
         equity_amount=amount

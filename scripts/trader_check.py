@@ -1,31 +1,27 @@
-import sys
 import os
+import sys
+import warnings
+
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
 PACKAGE_PARENT = '../'
 SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
-import warnings
-warnings.simplefilter(action='ignore', category=FutureWarning)
 
-import pandas as pd
-import datetime as dt
-import click
-import random
-import os
-import asyncio
-import time
-
-from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar, cast, Union
-from ib_insync.ib import IB
-from trader.listeners.ibaiorx import IBAIORx
-from trader.container import Container
-from trader.data.data_access import TickData
 from redis import Redis
 from rq import Queue
-
 from trader.common.logging_helper import setup_logging, suppress_all, verbose
+from trader.container import Container
+from trader.data.data_access import TickData
+from trader.listeners.ibreactive import IBAIORx
+
+import asyncio
+import click
+
+
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
 logging = setup_logging(module_name='trader_check')
 
 

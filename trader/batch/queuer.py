@@ -1,14 +1,11 @@
-import sys
-import os
-import datetime as dt
-
-from trader.common.logging_helper import setup_logging
-logging = setup_logging(module_name='queuer')
-
 from redis import Redis
 from rq import Queue
 from rq.job import Job
-from typing import List, Optional, Dict, Callable, Union, cast
+from trader.common.logging_helper import setup_logging
+from typing import Callable, cast, Dict, List, Optional, Union
+
+
+logging = setup_logging(module_name='queuer')
 
 class Queuer():
     def __init__(self,

@@ -1,40 +1,31 @@
-import sys
 import os
+import sys
+import warnings
+
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
 PACKAGE_PARENT = '../..'
 SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
-import datetime as dt
-import ib_insync as ibapi
-import pandas as pd
-import random
-import warnings
-import asyncio
-
-from redis import Redis
-from rq import Queue
-from rq.job import Job
-from ib_insync.ib import IB
-from dateutil.tz import tzlocal
-from typing import Tuple, List, Optional, cast
-import exchange_calendars
-from exchange_calendars import ExchangeCalendar
-
 warnings.simplefilter(action='ignore', category=FutureWarning)
-from arctic.exceptions import OverlappingDataException
 from arctic.date import DateRange
-
-from trader.data.data_access import TickData, DictData, SecurityDefinition
-from trader.data.universe import Universe
-from trader.common.logging_helper import setup_logging
-from trader.common.helpers import date_range, dateify, day_iter, get_exchange_calendar, pdt
-from trader.common.listener_helpers import Helpers
-from trader.listeners.ib_history_worker import IBHistoryWorker
+from ib_insync.ib import IB
 from trader.batch.queuer import Queuer
+from trader.common.helpers import dateify, pdt
+from trader.common.logging_helper import setup_logging
 from trader.container import Container
+from trader.data.data_access import SecurityDefinition, TickData
+from trader.data.universe import Universe
+from trader.listeners.ib_history_worker import IBHistoryWorker
 from trader.objects import WhatToShow
+from typing import cast, List
+
+import asyncio
+import datetime as dt
+import exchange_calendars
+import random
+
 
 logging = setup_logging(module_name='ib_history_batch')
 
@@ -93,7 +84,10 @@ class IBHistoryQueuer(Queuer):
                         redis_server_address=self.redis_server_address,
                         redis_server_port=self.redis_server_port)
 
-                    job = self.enqueue(history_worker.do_work, [security, dateify(date_dr.start), dateify(date_dr.end), self.bar_size])
+                    job = self.enqueue(
+                        history_worker.do_work,
+                        [security, dateify(date_dr.start), dateify(date_dr.end), self.bar_size]
+                    )
                     logging.debug('Job history_worker.do_work enqueued, is_queued: {} using cliend_id {}'
                                   .format(job.is_queued, client_id))
 

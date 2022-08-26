@@ -1,5 +1,6 @@
 from enum import IntEnum
 
+
 class WhatToShow(IntEnum):
     def __str__(self):
         if self.value == 1: return 'TRADES'

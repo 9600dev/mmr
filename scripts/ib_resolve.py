@@ -1,28 +1,29 @@
-import sys
 import os
+import sys
+
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
 PACKAGE_PARENT = '../'
 SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
-import logging
-import coloredlogs
-import asyncio
-from trader.common.logging_helper import setup_logging, suppress_external
+from ib_insync.contract import Contract, ContractDetails
 from trader.common.helpers import rich_dict
+from trader.common.logging_helper import setup_logging, suppress_external
+from trader.listeners.ibreactive import IBAIORx
+from typing import AsyncIterator, List, Optional
+
+import asyncio
+import click
+import coloredlogs
+import logging
+import os
+import pandas as pd
+
 
 setup_logging()
 suppress_external()
 
-import pandas as pd
-import datetime as dt
-import click
-import os
-
-from typing import AsyncIterator, List, Optional
-from ib_insync.contract import Contract, ContractDetails
-from trader.listeners.ibaiorx import IBAIORx
 
 class IBResolver():
     def __init__(

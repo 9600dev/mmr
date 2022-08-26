@@ -1,48 +1,17 @@
-import os
-import click
-import signal
-import asyncio
-import aioreactive as rx
-import logging as log
-import expression
-import pytest
-from _pytest.monkeypatch import MonkeyPatch
-
-from trader.common.logging_helper import setup_logging, log_callstack_debug, set_all_log_level
-logging = setup_logging(module_name='trading_runtime')
-
-from asyncio import iscoroutinefunction, AbstractEventLoop
-from trader.container import Container
-from expression.system import CancellationToken, CancellationTokenSource
-from trader.trading.trading_runtime import Trader
+from asyncio import AbstractEventLoop
 from trader.common.helpers import get_network_ip
-from expression.core.mailbox import MailboxProcessor
+from trader.common.logging_helper import set_all_log_level, setup_logging
+from trader.container import Container
+from trader.trading.trading_runtime import Trader
 
-# from expression.core import aiotools
-
-from typing import TypeVar, Callable, Awaitable, Optional, Any
-
-_TSource = TypeVar('_TSource')
-
-async def anoop(value: Optional[Any] = None):  # type: ignore
-    pass
+import asyncio
+import click
+import logging as log
+import os
+import signal
 
 
-def monkeypatch_asyncanonymousobserver(
-        self,
-        asend: Callable[[_TSource], Awaitable[None]] = anoop,
-        athrow: Callable[[Exception], Awaitable[None]] = anoop,
-        aclose: Callable[[], Awaitable[None]] = anoop
-) -> None:
-    log_callstack_debug(frames=0, module_filter='')
-    assert iscoroutinefunction(asend)
-    self._asend = asend
-
-    assert iscoroutinefunction(athrow)
-    self._athrow = athrow
-
-    assert iscoroutinefunction(aclose)
-    self._aclose = aclose
+logging = setup_logging(module_name='trading_runtime')
 
 
 @click.command()
@@ -51,9 +20,6 @@ def monkeypatch_asyncanonymousobserver(
               help='trader.yaml config file location')
 def main(simulation: bool,
          config: str):
-
-    # useful to find out where rogue subscriptions that aren't disposed of are
-    # rx.observers.AsyncAnonymousObserver.__init__ = monkeypatch_asyncanonymousobserver  # type: ignore
 
     is_stopping = False
     loop = asyncio.new_event_loop()

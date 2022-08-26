@@ -1,28 +1,15 @@
-import datetime
-import ib_insync as ibapi
-import pandas as pd
-import asyncio
-import logging
-import functools
-import warnings
-import rx
-import datetime as dt
-import numpy as np
-import json
-
 from bson import json_util
-from ib_insync.contract import ContractDescription
-from enum import Enum
-from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar, cast, Union, Awaitable, Any
-from asyncio import BaseEventLoop
-from ib_insync.ib import IB
-from ib_insync.contract import Stock, Contract, Forex
-from ib_insync.contract import ContractDetails
-from ib_insync.util import df
+from ib_insync.contract import Contract, Forex, Stock
 from ib_insync.ticker import Ticker
-from trader.common.contract_sink import ContractSink
-from logging import Logger
-from asyncio import Task
+from ib_insync.util import df
+from typing import Any, Awaitable, Dict, List, Optional, Tuple, TypeVar
+
+import asyncio
+import functools
+import json
+import logging
+import numpy as np
+import pandas as pd
 
 
 class Helpers():
@@ -36,7 +23,7 @@ class Helpers():
 
     @staticmethod
     def to_df(contract: Contract) -> pd.DataFrame:
-        return pd.DataFrame.from_dict([contract.__dict__])
+        return pd.DataFrame.from_dict([contract.__dict__])  # type: ignore
 
     @staticmethod
     def clean_contract_object(contract: Contract) -> Contract:
@@ -144,7 +131,7 @@ class Helpers():
 
     @staticmethod
     def df(t: Ticker) -> pd.DataFrame:
-        return df([t])
+        return df([t])  # type: ignore
 
     @staticmethod
     def rolling_linreg(df, window=90):
@@ -250,4 +237,3 @@ class Helpers():
             )
         )
         return task
-

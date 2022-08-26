@@ -1,6 +1,7 @@
+from typing import List, Optional
+
 import datetime as dt
-from tracemalloc import start
-from typing import Optional, List
+
 
 class TraderException(Exception):
     def __init__(

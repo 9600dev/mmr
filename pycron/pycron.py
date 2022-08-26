@@ -1,27 +1,25 @@
-import os
-import sys
-import logging
-import coloredlogs
+from asyncio import Task
+from asyncio.subprocess import Process
+from crontab import CronTab
+from reactivex.scheduler.eventloop.asynciothreadsafescheduler import AsyncIOThreadSafeScheduler
+from rich.logging import RichHandler
+from tornado.platform.asyncio import AsyncIOMainLoop
+from tornado.web import Application, RequestHandler, url
+from typing import cast, Dict, List, Optional
+
+import asyncio
+import backoff
 import click
 import datetime as dt
-import yaml
-import asyncio
-import psutil
-import backoff
 import json
+import logging
 import nest_asyncio
+import os
+import psutil
 import socket
+import sys
+import yaml
 
-from crontab import CronTab
-from typing import List, Dict, Optional, cast
-from asyncio.subprocess import Process
-from asyncio import Task
-
-from tornado.platform.asyncio import AsyncIOMainLoop
-from tornado.web import RequestHandler, Application, url
-
-from rx.scheduler.eventloop.asynciothreadsafescheduler import AsyncIOThreadSafeScheduler
-from rich.logging import RichHandler
 
 log = logging.getLogger('pycron')
 

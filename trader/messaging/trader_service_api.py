@@ -1,35 +1,19 @@
-import asyncio
-import sys
-import os
-import reactivex as rx
-import reactivex.operators as ops
-
-# in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
-# PACKAGE_PARENT = '../..'
-# SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
-# sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
-
-from reactivex.abc import DisposableBase
-from reactivex.observable import Observable
-from reactivex.observer import Observer
-from reactivex.disposable import Disposable
-
-from dataclasses import dataclass
-from ib_insync.objects import Position, PortfolioItem
 from ib_insync.contract import Contract
+from ib_insync.objects import PortfolioItem, Position
 from ib_insync.order import Order, Trade
 from ib_insync.ticker import Ticker
-from trader.container import Container
-from trader.common.reactivex import SuccessFail, SuccessFailObservable, SuccessFailEnum
-
-import trader.trading.trading_runtime as runtime
-from trader.data.universe import Universe
-from trader.common.helpers import DictHelper
-
-from typing import List, Dict, Tuple, Optional
-from trader.messaging.clientserver import RPCHandler
-
+from reactivex.abc import DisposableBase
+from reactivex.disposable import Disposable
+from reactivex.observer import Observer
 from trader.common.logging_helper import setup_logging
+from trader.common.reactivex import SuccessFail, SuccessFailEnum
+from trader.messaging.clientserver import RPCHandler
+from typing import Optional
+
+import asyncio
+import trader.trading.trading_runtime as runtime
+
+
 logging = setup_logging(module_name='trader_service_api')
 
 
@@ -64,7 +48,7 @@ class TraderServiceApi(RPCHandler):
         # todo: we'll have to make the cli async so we can subscribe to the trade
         # changes as orders get hit etc
         logging.warn('place_order() is not complete, your mileage may vary')
-        from trader.trading.trading_runtime import Action, Trader
+        from trader.trading.trading_runtime import Action
         act = Action.BUY if 'BUY' in action else Action.SELL
 
         task = asyncio.Event()
@@ -124,5 +108,3 @@ class TraderServiceApi(RPCHandler):
         logging.debug('stop_load_test()')
         self.trader.load_test = False
         return 0
-
-

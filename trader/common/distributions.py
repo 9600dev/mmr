@@ -1,9 +1,11 @@
+from abc import abstractmethod
+from trader.common.helpers import best_fit_distribution, fit_distribution
+from typing import Callable, cast, Dict, List, Optional
+
 import numpy as np
-import scipy.stats as st
 import pandas as pd
-from abc import ABC, abstractmethod
-from typing import cast, Dict, List, Tuple, Generator, Optional, Callable, Iterable, Generic
-from trader.common.helpers import window, best_fit_distribution, fit_distribution
+import scipy.stats as st
+
 
 class Distribution():
     def __init__(self, name: str, cache_size: int = 100000):

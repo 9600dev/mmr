@@ -1,46 +1,32 @@
-import sys
 import os
+import sys
+
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
 PACKAGE_PARENT = '../'
 SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
-import pandas as pd
-import datetime as dt
-import aioreactive as rx
-import trader.messaging.trader_service_api as bus
-import asyncio
-import signal
-import click
-import rich
-import time
-import numpy as np
-from rich.console import Console
 from asyncio.events import AbstractEventLoop
-from aioreactive.types import AsyncObservable, Projection, AsyncObserver
-from expression.core import pipe
-from expression.system import AsyncDisposable
-from aioreactive.observers import AsyncAnonymousObserver, auto_detach_observer, safe_observer
-from enum import Enum
-
-from trader.common.logging_helper import setup_logging
-logging = setup_logging(module_name='trading_runtime')
-
+from ib_insync.contract import Contract
+from ib_insync.ticker import Ticker
+from reactivex.abc import DisposableBase, ObserverBase
+from reactivex.observer import AutoDetachObserver
 from rich.live import Live
 from rich.table import Table
-from arctic import Arctic, TICK_STORE
-from arctic.date import DateRange
-from arctic.tickstore.tickstore import TickStore
-from ib_insync.ib import IB
-from ib_insync.contract import Contract, Forex, Future, Stock
-from ib_insync.objects import PortfolioItem, Position, BarData
-from ib_insync.order import LimitOrder, Order, Trade
-from ib_insync.ticker import Ticker
-from trader.messaging.clientserver import PubSubAsyncSubject, PubSubClient, TopicPubSub
-from trader.common.helpers import rich_dict, rich_table
+from trader.common.logging_helper import setup_logging
+from trader.messaging.clientserver import TopicPubSub
+from typing import Dict, Optional
 
-from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar, cast, Union
+import asyncio
+import click
+import numpy as np
+import pandas as pd
+import rich
+import signal
+
+
+logging = setup_logging(module_name='trading_runtime')
 
 class RichLiveDataFrame():
     def __init__(self, console: rich.console.Console):
@@ -84,8 +70,8 @@ class ZmqPrettyPrinter():
         self.contract_ticks: Dict[Contract, Ticker] = {}
         self.console = rich.console.Console()
         self.rich_live = RichLiveDataFrame(self.console)
-        self.subscription: AsyncDisposable
-        self.observer: AsyncObserver
+        self.subscription: DisposableBase
+        self.observer: ObserverBase
         self.csv = csv
         self.counter = 0
         self.zmq_subscriber: TopicPubSub
@@ -126,7 +112,7 @@ class ZmqPrettyPrinter():
             str_values = [str(v) for v in t.values()]
             print(','.join(str_values))
 
-    async def asend(self, ticker: Ticker):
+    def on_next(self, ticker: Ticker):
         if ticker.contract:
             self.contract_ticks[ticker.contract] = ticker
             try:
@@ -136,10 +122,13 @@ class ZmqPrettyPrinter():
                 self.wait_handle.set()
                 raise ex
 
-    async def athrow(self, ex: Exception):
+    def on_error(self, ex: Exception):
         logging.exception(ex)
         self.wait_handle.set()
         raise ex
+
+    def on_completed(self):
+        logging.debug('zmq_pub_listener.on_completed')
 
     async def listen(self, topic: str):
         try:
@@ -155,9 +144,8 @@ class ZmqPrettyPrinter():
             )
 
             observable = await self.zmq_subscriber.subscriber(topic=topic)
-            observer = AsyncAnonymousObserver(asend=self.asend, athrow=self.athrow)
-            self.observer, auto_detach = auto_detach_observer(observer)
-            self.subscription = await pipe(self.observer, observable.subscribe_async, auto_detach)
+            self.observer = AutoDetachObserver(on_next=self.on_next, on_error=self.on_error, on_completed=self.on_completed)
+            self.subscription = observable.subscribe(self.observer)
 
             await self.wait_handle.wait()
         except KeyboardInterrupt:
@@ -172,9 +160,9 @@ class ZmqPrettyPrinter():
         self.wait_handle.set()
         if not self.being_shutdown:
             self.being_shutdown = True
-            await self.zmq_subscriber.subscriber_close()
-            await self.observer.aclose()
-            await self.subscription.dispose_async()
+            self.zmq_subscriber.subscriber_close()
+            self.observer.on_completed()
+            self.subscription.dispose()
 
 
 @click.command()

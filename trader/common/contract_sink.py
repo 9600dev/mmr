@@ -1,31 +1,19 @@
-import datetime
-import ib_insync as ibapi
-import asyncio
-import pandas as pd
-import rx
-import rx.disposable as disposable
-import datetime as dt
-import threading
-import itertools
-import functools
-import os
-
-from arctic import Arctic, TICK_STORE
-from tabulate import tabulate
-from enum import Enum
-from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar, cast, Union
-from asyncio import BaseEventLoop
-from rx import operators as ops
-from rx.subject import Subject
-from rx.scheduler import ThreadPoolScheduler, CatchScheduler, CurrentThreadScheduler
-from rx.scheduler.eventloop import AsyncIOThreadSafeScheduler
-from rx.core.typing import Observable, Observer, Disposable, Scheduler, OnNext, OnError, OnCompleted
-from ib_insync import Stock, IB, Contract, Forex, Future
+from ib_insync import Contract
 from ib_insync.ticker import Ticker
+from reactivex import abc, Observable, Observer
+from reactivex.subject import Subject
+from trader.common.logging_helper import setup_logging
+from typing import Callable, Optional, Union
 
-class ContractSink(rx.Observable, Observer):
+import pandas as pd
+
+
+logging = setup_logging(module_name='contract_sink')
+
+
+class ContractSink(Observable[Ticker], Observer[Ticker]):
     def __init__(self, contract: Contract):
-        super(rx.Observable, self).__init__()
+        super(Observable, self).__init__()
         super(Observer, self).__init__()
         self.contract: Contract = contract
         self.latest_tick: Ticker = Ticker()
@@ -33,20 +21,19 @@ class ContractSink(rx.Observable, Observer):
         self.last_tick: Ticker = Ticker()
         self.last_df: pd.DataFrame = pd.DataFrame()
         self.data_frame: pd.DataFrame = pd.DataFrame()
-        self.subject = Subject()
+        self.subject = Subject[Ticker]()
 
-    def subscribe(self,
-                  observer: Optional[Union[Observer, OnNext]] = None,
-                  on_error: Optional[OnError] = None,
-                  on_completed: Optional[OnCompleted] = None,
-                  on_next: Optional[OnNext] = None,
-                  *,
-                  scheduler: Optional[Scheduler] = None,
-                  ) -> Disposable:
-        return self.subject.subscribe(observer)
-
-    def _subscribe(self, observer):
-        return self.subject
+    def subscribe(
+        self,
+        on_next: Optional[
+            Union[abc.ObserverBase[Ticker], abc.OnNext[Ticker], None]
+        ] = None,
+        on_error: Optional[abc.OnError] = None,
+        on_completed: Optional[abc.OnCompleted] = None,
+        *,
+        scheduler: Optional[abc.SchedulerBase] = None,
+    ) -> abc.DisposableBase:
+        return self.subject.subscribe(on_next=on_next, on_error=on_error, on_completed=on_completed, scheduler=scheduler)
 
     def dispose(self):
         self.subject.dispose()
@@ -54,14 +41,6 @@ class ContractSink(rx.Observable, Observer):
     # todo this is a duplicate from the Helpers class because we can't have circular imports
     def symbol_from_contract(self, contract: Contract) -> int:
         return contract.conId
-        # if type(contract) is Forex:
-        #     return contract.symbol + contract.currency
-        # if type(contract) is Stock:
-        #     return contract.symbol + contract.currency
-        # if type(contract) is Future:
-        #     return contract.symbol
-        # else:
-        #     raise ValueError('not implemented')
 
     def df(self):
         return self.data_frame
@@ -98,7 +77,6 @@ class ContractSink(rx.Observable, Observer):
                                      'prevLastSize', 'volume', 'vwap', 'halted'])
 
     def last(self):
-        # return pd.DataFrame(self.data_frame.iloc[-1])
         return self.data_frame.tail(1)
 
     def on_next(self, tick: Ticker):
@@ -111,13 +89,15 @@ class ContractSink(rx.Observable, Observer):
             self.data_frame = self.latest_df
         else:
             self.data_frame = self.data_frame.append(self.latest_df, ignore_index=True)
-        self.subject.on_next(self)
+        self.subject.on_next(tick)
 
     def on_completed(self):
-        print('completed')
+        logging.debug('on_completed')
+        self.subject.on_completed()
 
     def on_error(self, error):
-        print(error)
+        logging.error(error)
+        self.subject.on_error(error)
 
     def __str__(self):
         return str(self.last())

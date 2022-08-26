@@ -38,7 +38,9 @@
     * ![](2022-06-21-11-03-33.png)
     * ![](2022-06-21-11-06-36.png)
 
-## aioreactive
+## aio-/reactive
+
+deprecated, moved to rxpy 4.0 instead -- it's significantly fasterx
 
 * Must dispose of disposables, otherwise the Mailbox processor used for processing messages passed through to Observables will continue to hold asyncio tasks. This causes the dreaded "Task was destroyed, but still PENDING" exception when closing down the loop.
 * observable = rx.from_async(client.get_contract_history(..))
@@ -47,7 +49,7 @@
     * save_observer sets up a MailboxProcessor and calls start, passing in the worker() message_loop
     * this message_loop waits for inbox.receive() not sure what this does yet
     * MsgKind.ON_NEXT calls msg.accept_observer (which calls 'obv.asend(self.value)')
-    * aioreactive 3x filter: total (ms): 2388.098
+    * aio-reactive 3x filter: total (ms): 2388.098
     * inline if else: total (ms): 850.931
 
 
