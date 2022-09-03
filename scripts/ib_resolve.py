@@ -11,7 +11,7 @@ from ib_insync.contract import Contract, ContractDetails
 from trader.common.helpers import rich_dict
 from trader.common.logging_helper import setup_logging, suppress_external
 from trader.listeners.ibreactive import IBAIORx
-from typing import AsyncIterator, List, Optional
+from typing import Any, AsyncIterator, cast, Dict, List, Optional
 
 import asyncio
 import click
@@ -44,7 +44,7 @@ class IBResolver():
         }
 
     @staticmethod
-    def contractdetails_dict(details: ContractDetails):
+    def contractdetails_dict(details: ContractDetails) -> Dict[str, Any]:
         return {
             'symbol': details.contract.symbol if details.contract else '',
             'conId': int(details.contract.conId) if details.contract else -1,
@@ -92,7 +92,7 @@ class IBResolver():
                             exchange=exchange,
                             primaryExchange=primary_exchange,
                             currency=currency)
-        result = await self.client.get_contract_details(contract)
+        result = self.client.get_contract_details(contract)
         if len(result) > 1:
             logging.info('found multiple results for {}:'.format(symbol))
             for d in result:
@@ -101,10 +101,13 @@ class IBResolver():
         elif len(result) == 0:
             logging.info('no matching results found for {}'.format(symbol))
             return None
-        else:
-            c = result[0]
-            logging.info('{} {} {}'.format(c.contract.conId, c.contract.symbol, c.longName))
+        elif len(result) == 1:
+            c = cast(ContractDetails, result[0])
+            if c.contract:
+                logging.info('{} {} {}'.format(c.contract.conId, c.contract.symbol, c.longName))
             return result[0]
+        else:
+            return None
 
     async def resolve_symbols(
         self,
@@ -120,7 +123,7 @@ class IBResolver():
                 yield result
 
     async def resolve_contract(self, contract: Contract) -> Optional[ContractDetails]:
-        result = await self.client.get_contract_details(contract)
+        result = self.client.get_contract_details(contract)
         if len(result) > 1:
             logging.info('found multiple results for {}:'.format(contract))
             for d in result:
@@ -131,7 +134,8 @@ class IBResolver():
             return None
         else:
             c = result[0]
-            logging.info('{} {} {}'.format(c.contract.conId, c.contract.symbol, c.longName))
+            if c.contract:
+                logging.info('{} {} {}'.format(c.contract.conId, c.contract.symbol, c.longName))
             return result[0]
 
         return result
@@ -167,7 +171,7 @@ class IBResolver():
         # overwrite current csv if no output is specified
         df = pd.read_csv(csv_file)
 
-        list_contracts = []
+        list_contracts: List[Dict[Any, Any]] = []
         for index, row in df.iterrows():
             symbol = str(row['symbol'])
             sec_type = str(row['secType']) if 'secType' in row else sec_type_default
@@ -184,9 +188,9 @@ class IBResolver():
         # drop the columns we're looking for if they already exist, as we'll replace them
         df = df.drop(['conId', 'secType', 'exchange', 'primaryExchange', 'currency'], axis=1)
         # merge the contractdetails with the existing csv data
-        df = pd.merge(df, pd.DataFrame.from_dict(list_contracts), how='left', on='symbol', suffixes=('', '_drop'))
+        df = pd.merge(df, pd.DataFrame.from_dict(list_contracts), how='left', on='symbol', suffixes=('', '_drop'))  # type: ignore
 
-        #Drop the duplicate columns
+        # Drop the duplicate columns
         df.drop([col for col in df.columns if 'drop' in col], axis=1, inplace=True)
 
         df['conId'] = df['conId'].fillna(-1)  # type: ignore

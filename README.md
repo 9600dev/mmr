@@ -272,6 +272,7 @@ people who lose the money."
 * [Random notes about Trader Workstation TWS](https://dimon.ca/dmitrys-tws-api-faq/)
 * [OpenBB - a thread on its features](https://mobile.twitter.com/theBuoyantMan/status/1558792415263088641)
 * [10 free finance tools](https://mobile.twitter.com/gurgavin/status/1560748089635651584)
+* [i8 Terminal](https://github.com/investoreight/i8-terminal)
 
 ## Finance Math
 

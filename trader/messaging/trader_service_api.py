@@ -44,7 +44,14 @@ class TraderServiceApi(RPCHandler):
         return self.trader.book.get_orders()
 
     @RPCHandler.rpcmethod
-    def place_order(self, contract: Contract, action: str, equity_amount: float) -> SuccessFail:
+    def place_order(
+        self, contract: Contract,
+        action: str,
+        equity_amount: float,
+        limit_price: float,
+        market_order: bool = False,
+        stop_loss_percentage: float = 0.0,
+    ) -> SuccessFail:
         # todo: we'll have to make the cli async so we can subscribe to the trade
         # changes as orders get hit etc
         logging.warn('place_order() is not complete, your mileage may vary')
@@ -72,7 +79,16 @@ class TraderServiceApi(RPCHandler):
         observer = Observer(on_next=on_next, on_completed=on_completed, on_error=on_error)
 
         disposable = loop.run_until_complete(
-            self.trader.handle_order(contract=contract, action=act, equity_amount=equity_amount, observer=observer, debug=True)
+            self.trader.handle_order(
+                contract=contract,
+                action=act,
+                equity_amount=equity_amount,
+                limit_price=limit_price,
+                market_order=market_order,
+                stop_loss_percentage=stop_loss_percentage,
+                observer=observer,
+                debug=True
+            )
         )
 
         loop.run_until_complete(task.wait())

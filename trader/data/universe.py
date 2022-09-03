@@ -4,7 +4,7 @@ from arctic.store.version_store import VersionStore
 from dataclasses import fields
 from ib_insync.contract import Contract
 from trader.data.data_access import SecurityDefinition
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import csv
 
@@ -85,6 +85,18 @@ class UniverseAccessor():
                     return universe
         return None
 
+    def resolve_symbol(self, symbol: Union[str, int]) -> List[Tuple[Universe, SecurityDefinition]]:
+        results = []
+        for universe in self.get_all():
+            for definition in universe.security_definitions:
+                if symbol is int:
+                    if symbol == definition.conId:
+                        results.append((universe, definition))
+                if symbol is str:
+                    if symbol == definition.symbol:
+                        results.append((universe, definition))
+        return results
+
     def update(self, universe: Universe) -> None:
         self.library.write(universe.name, universe, prune_previous_version=True)
 
@@ -110,5 +122,9 @@ class UniverseAccessor():
             security_definition = SecurityDefinition(**args)
             defs.append(security_definition)
             counter += 1
-        self.update(Universe(name, defs))
+
+        universe = self.get(name)
+        universe.security_definitions = universe.security_definitions + defs
+        self.update(universe)
+
         return counter

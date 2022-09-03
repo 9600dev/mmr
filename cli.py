@@ -1,6 +1,9 @@
 from arctic import Arctic
 from arctic.exceptions import NoDataFoundException
 from click_help_colors import HelpColorsGroup
+from cloup import option as cloupoption
+from cloup import option_group
+from cloup.constraints import mutually_exclusive
 from expression import pipe
 from expression.collections import seq
 from ib_insync.contract import Contract
@@ -8,6 +11,7 @@ from ib_insync.objects import PortfolioItem, Position
 from ib_insync.order import Order, Trade
 from ib_insync.ticker import Ticker
 from IPython import get_ipython
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.cursor_shapes import CursorShape
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
@@ -70,7 +74,7 @@ def main(ctx):
     import warnings
     warnings.filterwarnings(
         'ignore',
-        message='The zone attribute is specific to pytz\'s interface; please migrate to a new time zone provider. For more details on how to do so, see https://pytz-deprecation-shim.readthedocs.io/en/latest/migration.html'
+        message='The zone attribute is specific to pytz\'s interface; please migrate to a new time zone provider. For more details on how to do so, see https://pytz-deprecation-shim.readthedocs.io/en/latest/migration.html'  # noqa: E501
     )
 
     if ctx.invoked_subcommand is None:
@@ -96,11 +100,12 @@ def repl():
         return HTML('MMR statusbar <b><style bg="ansired">[feature not complete]</style></b>.')
 
     prompt_kwargs = {
-        'history': FileHistory(os.path.expanduser('/tmp/.trader.history')),
+        'history': FileHistory(os.path.expanduser('.trader.history')),
         'vi_mode': True,
         'message': 'mmr> ',
         'bottom_toolbar': bottom_toolbar,
         'cursor': CursorShape.BLINKING_BLOCK,
+        'auto_suggest': AutoSuggestFromHistory(),
     }
 
     is_repl = True
@@ -121,7 +126,7 @@ universes.add_command(universes_cli.create)
 universes.add_command(universes_cli.bootstrap)
 universes.add_command(universes_cli.get)
 universes.add_command(universes_cli.destroy)
-
+universes.add_command(universes_cli.add_to_universe)
 
 @main.group()
 def history():
@@ -654,9 +659,15 @@ def company_info(symbol: str):
 @click.option('--buy/--sell', default=True, help='buy or sell')
 @click.option('--symbol', required=True, type=str, help='IB conId for security')
 @click.option('--primary_exchange', required=False, default='', type=str, help='exchange [not required]')
-@click.option('--market', default=False, help='accept current market price')
-@click.option('--limit', required=True, type=float, help='limit price for security')
+@option_group(
+    "trade options",
+    cloupoption('--market', is_flag=True, help='This text should describe the option --foo.'),
+    cloupoption('--limit', help='This text should describe the option --bar.'),
+    constraint=mutually_exclusive,
+)
 @click.option('--amount', required=True, type=float, help='total amount to buy/sell')
+@click.option('--stop_loss_percentage', required=False, type=float, default=0.0,
+              help='percentage below price to place stop loss order [default=0.0, no stop loss]')
 @common_options()
 @default_config()
 def trade(
@@ -666,6 +677,7 @@ def trade(
     market: bool,
     limit: float,
     amount: float,
+    stop_loss_percentage: float,
     arctic_server_address: str,
     arctic_universe_library: str,
     **args,
@@ -686,7 +698,10 @@ def trade(
     trade: SuccessFail = remoted_client.rpc(return_type=SuccessFail).place_order(
         contract=contract_from_dict(contracts[0]),
         action=action,
-        equity_amount=amount
+        equity_amount=amount,
+        limit_price=limit,
+        market_order=market,
+        stop_loss_percentage=stop_loss_percentage
     )
     click.echo(trade)
 

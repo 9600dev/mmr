@@ -12,7 +12,7 @@ from arctic.date import DateRange
 from enum import Enum
 from ib_insync.contract import Contract
 from ib_insync.objects import PortfolioItem, Position
-from ib_insync.order import LimitOrder, Order, Trade
+from ib_insync.order import LimitOrder, MarketOrder, Order, StopLimitOrder, StopOrder, Trade
 from ib_insync.ticker import Ticker
 from reactivex.abc import DisposableBase, ObserverBase
 from reactivex.disposable import Disposable
@@ -349,6 +349,9 @@ class Trader(metaclass=Singleton):
         contract: Contract,
         action: Action,
         equity_amount: float,
+        limit_price: float,
+        market_order: bool,
+        stop_loss_percentage: float,
         observer: Observer[Trade],
         debug: bool = False,
     ) -> DisposableBase:
@@ -370,14 +373,18 @@ class Trader(metaclass=Singleton):
             quantity_int, latest_tick.bid
         ))
 
-        limit_price = latest_tick.bid
-
         # if debug, move the buy/sell by 10%
         if debug and action == Action.BUY:
             limit_price = limit_price * 0.9
             limit_price = round(limit_price * 0.9, ndigits=2)
         if debug and action == Action.SELL:
             limit_price = round(limit_price * 1.1, ndigits=2)
+
+        stop_loss_price = 0.0
+
+        # calculate stop_loss
+        if stop_loss_percentage > 0.0:
+            stop_loss_price = round(limit_price - limit_price * stop_loss_percentage, ndigits=2)
 
         subject = Subject[Trade]()
         disposable: DisposableBase = Disposable()
@@ -398,7 +405,23 @@ class Trader(metaclass=Singleton):
 
         # put an order in
         disposable = subject.subscribe(observer)
-        order = LimitOrder(action=str(action), totalQuantity=quantity_int, lmtPrice=limit_price)
+        order: Order = Order()
+
+        if market_order and stop_loss_price > 0:
+            order = StopOrder(action=str(action), totalQuantity=quantity_int, stopPrice=stop_loss_price)
+        elif market_order and stop_loss_price == 0.0:
+            order = MarketOrder(action=str(action), totalQuantity=quantity_int)
+
+        if not market_order and stop_loss_price > 0:
+            order = StopLimitOrder(
+                action=str(action),
+                totalQuantity=quantity_int,
+                lmtPrice=limit_price,
+                stopPrice=stop_loss_price
+            )
+        elif not market_order and stop_loss_price == 0.0:
+            order = LimitOrder(action=str(action), totalQuantity=quantity_int, lmtPrice=limit_price)
+
         disposable = await self.place_order(contract=contract, order=order, observer=subject)
         return disposable
 

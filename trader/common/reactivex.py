@@ -38,6 +38,9 @@ class SuccessFail():
     def success():
         return SuccessFail(SuccessFailEnum.SUCCESS)
 
+    def __str__(self):
+        return '{}: obj: {}, error: {}'.format(self.success_fail, self.obj, self.error)
+
 
 _T_out = TypeVar('_T_out')
 
@@ -54,7 +57,6 @@ class SuccessFailObservable(Observable[SuccessFail], Disposable):
             # self.observer.on_completed()
             self.observer.on_next(SuccessFail(SuccessFailEnum.SUCCESS))
             self.observer.on_completed()
-
 
     def failure(self, success_fail: SuccessFail):
         if not self.is_disposed and self.observer:

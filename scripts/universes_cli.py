@@ -1,4 +1,5 @@
 
+
 import asyncio
 import click
 import os
@@ -12,15 +13,16 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
 from dataclasses import asdict
+from ib_insync import Contract, ContractDescription
 from scripts.eoddata_scraper import EodDataScraper
 from scripts.ib_instrument_scraper import IBInstrument, scrape_products
 from scripts.ib_resolve import IBResolver
 from trader.common.command_line import cli, common_options, default_config
-from trader.common.helpers import rich_table
+from trader.common.helpers import rich_list, rich_table
 from trader.common.logging_helper import setup_logging
 from trader.data.universe import SecurityDefinition, Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx
-from typing import List, Optional
+from typing import cast, List, Optional
 
 
 logging = setup_logging(module_name='cli')
@@ -54,7 +56,10 @@ def build_and_load_ib(
         universe = accessor.get(market)
 
         for instrument in instruments:
-            if not universe.find_contract(instrument.to_contract()) and instrument.secType != 'OPT' and instrument.secType != 'WAR':
+            if (
+                not universe.find_contract(instrument.to_contract())
+                and instrument.secType != 'OPT' and instrument.secType != 'WAR'
+            ):
                 contract_details = asyncio.run(resolver.resolve_contract(instrument.to_contract()))
                 if contract_details:
                     universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details))
@@ -163,7 +168,7 @@ def destroy(name: str, arctic_server_address: str, arctic_universe_library: str,
 
 @cli.command()
 @click.option('--name', help='Name of the universe to create')
-@click.option('--csv_file', help='csv file of securities to load into universe')
+@click.option('--csv_file', help='optional csv file of securities to load into universe')
 @common_options()
 @default_config()
 def create(
@@ -172,22 +177,69 @@ def create(
     ib_server_address: str,
     ib_server_port: int,
     arctic_server_address: str,
-    arctic_universe_library: str
+    arctic_universe_library: str,
+    **args,
 ):
     client = IBAIORx(ib_server_address, ib_server_port)
     client.connect()
 
-    resolver = IBResolver(client)
-    temp_file = tempfile.NamedTemporaryFile(suffix='.csv')
-    click.echo('resolving to {}'.format(temp_file.name))
-    asyncio.run(resolver.fill_csv(csv_file, temp_file.name))
-
     u = UniverseAccessor(arctic_server_address, arctic_universe_library)
-    with open(temp_file.name, 'r') as f:
-        csv_string = f.read()
-        click.echo('updating trader host with new universe')
-        counter = u.update_from_csv_str(name, csv_string)
-    click.echo('finished loading {}, with {} securities loaded'.format(create, str(counter)))
+
+    if csv_file:
+        resolver = IBResolver(client)
+        temp_file = tempfile.NamedTemporaryFile(suffix='.csv')
+        click.echo('resolving to {}'.format(temp_file.name))
+        asyncio.run(resolver.fill_csv(csv_file, temp_file.name))
+
+        with open(temp_file.name, 'r') as f:
+            csv_string = f.read()
+            click.echo('updating trader host with new universe')
+            counter = u.update_from_csv_str(name, csv_string)
+        click.echo('finished loading {}, with {} securities loaded'.format(create, str(counter)))
+    else:
+        result = u.get(name)
+        u.update(result)
+
+
+@cli.command('add-to-universe')
+@click.option('--name', help='Name of the universe to add instrument to')
+@click.option('--symbol', help='symbol or conId to add to universe')
+@click.option('--primary_exchange', default='SMART', help='primary exchange the symbol is listed on default [SMART]')
+@click.option('--sec_type', required=True, default='STK', help='security type [default STK]')
+@common_options()
+@default_config()
+def add_to_universe(
+    name: str,
+    symbol: str,
+    primary_exchange: str,
+    sec_type: str,
+    ib_server_address: str,
+    ib_server_port: int,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    **args
+):
+    client = IBAIORx(ib_server_address, ib_server_port)
+    client.connect()
+
+    result = asyncio.run(client.get_contract_description(symbol, secType=sec_type, primaryExchange=primary_exchange))
+    if result is list:
+        click.echo('multiple symbols found:')
+        rich_list(cast(list, result))
+        click.echo('use primary_exchange to be more specific')
+    elif type(result) is ContractDescription and result is not None:
+        description = cast(ContractDescription, result)
+
+        contract_details = client.get_contract_details(cast(Contract, description.contract))
+        logging.debug('found contract details for {}: {}'.format(symbol, contract_details))
+        u = UniverseAccessor(arctic_server_address, arctic_universe_library)
+        universe = u.get(name)
+        # todo using the first element in the list is probably a bug, should fix this
+        universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details[0]))
+        u.update(universe)
+        logging.debug('adding contract to universe: {}'.format(name))
+    else:
+        click.echo('no security definition found for {}'.format(symbol))
 
 
 if __name__ == '__main__':

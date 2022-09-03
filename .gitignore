@@ -11,3 +11,4 @@ anbox-work/*
 scratch/
 .python-version
 .devcontainer/
+.trader.history
