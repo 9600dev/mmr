@@ -39,7 +39,7 @@ jobs:
         - "exec('sys.path.append(\"scripts\")') or exec('from ib_status import ib_status') or ib_status()"
       start: "* * * * *"
       start_on_pycron_start: True
-      restart_if_found: True
+      restart_if_found: False 
       restart_if_finished: True
       depends_on:
         - qtile
@@ -50,7 +50,7 @@ jobs:
       arguments: --config configs/mongodb.conf
       start: "* * * * *"
       start_on_pycron_start: True
-      restart_if_found: True
+      restart_if_found: False
     - name: redis
       description: redis server
       command: /usr/bin/redis-server
@@ -64,7 +64,7 @@ jobs:
       arguments: trader/batch/worker_service.py start --config configs/trader.yaml --queue_name history
       start: "* * * * *"
       start_on_pycron_start: True
-      restart_if_found: True
+      restart_if_found: False 
       restart_if_finished: True
       depends_on:
         - tws

@@ -356,15 +356,19 @@ class IBAIORx():
     #     else:
     #         logging.debug('unsubscribe_barlist failed for {}'.format(contract))
 
-    async def subscribe_positions(self) -> Observable[List[Position]]:
+    async def subscribe_positions(self, observer: Observer[List[Position]]) -> DisposableBase:
+        disposable = self.positions_subject.subscribe(observer)
         await self.positions_subject.call_event_subscriber(self.ib.reqPositionsAsync())
-        return self.positions_subject
+        return disposable
 
-    async def subscribe_portfolio(self) -> Observable[PortfolioItem]:
+    async def subscribe_portfolio(self, observer: Observer[PortfolioItem]) -> DisposableBase:
+        disposable = self.portfolio_subject.subscribe(observer)
+
         portfolio_items = self.ib.portfolio()
         for item in portfolio_items:
             self.portfolio_subject.on_next(item)
-        return self.portfolio_subject
+
+        return disposable
 
     async def get_open_orders(self) -> List[Order]:
         return await self.ib.reqAllOpenOrdersAsync()

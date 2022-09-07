@@ -219,16 +219,31 @@ class JobScheduler():
         def compare_list(a: List[str], b: List[str]):
             return [s.lower() for s in a] == [s.lower() for s in b]
 
+        test_process_name = process.name()
+        test_process_cmdline = process.cmdline()
+
         process_names: List[str] = []
         process_names.append(name.lower())
 
         # strip command from arguments
-        process_arguments = process.as_dict()['cmdline'][1:]
+        test_process_arguments = process.as_dict()['cmdline'][1:]
         args = arguments.split(' ')
 
         if os.path.exists(name):
             process_names.append(os.path.basename(name).lower())
-        return process.name().lower() in process_names and compare_list(args, process_arguments)
+
+        if '/bin/sh' in test_process_cmdline and '-c' in test_process_cmdline:
+            # chew the /bin/sh -c
+            test_process_name = test_process_cmdline[2]
+            if ' ' in test_process_name:
+                test_process_arguments = test_process_name.split(' ')[1:]
+                test_process_name = test_process_name.split(' ')[0]
+
+        for process_name in process_names:
+            if process_name in test_process_name.lower() and compare_list(args, test_process_arguments):
+                return True
+
+        return False
 
     def stop_job(self, job: Job):
         def kill(proc_pid):
@@ -474,7 +489,12 @@ def main(config_file: str, only_list: List[str], except_list: List[str]):
 @click.option('--start', '-s', multiple=True, required=False, help='process name(s) to start [repeat option for more]')
 @click.option('--butnot', '-n', multiple=True, required=False, help='process names(s) not to start [repeat option for more]')
 @click.option('--debug', is_flag=True, required=False, help='show debug output')
-def bootstrap(config: str, start, butnot, debug):
+def bootstrap(
+    config: str,
+    start,
+    butnot,
+    debug
+):
     debug_level = 'DEBUG' if debug else 'INFO'
     logging.basicConfig(
         level=debug_level, format='%(message)s', datefmt='[%X]', handlers=[RichHandler()]

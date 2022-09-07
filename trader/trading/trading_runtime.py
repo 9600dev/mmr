@@ -8,7 +8,6 @@ PACKAGE_PARENT = '../..'
 SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
-from arctic.date import DateRange
 from enum import Enum
 from ib_insync.contract import Contract
 from ib_insync.objects import PortfolioItem, Position
@@ -21,7 +20,7 @@ from reactivex.observer import AutoDetachObserver, Observer
 from reactivex.subject import Subject
 from trader.common.contract_sink import ContractSink
 from trader.common.exceptions import TraderConnectionException, TraderException
-from trader.common.helpers import dateify, ListHelper, timezoneify
+from trader.common.helpers import ListHelper
 from trader.common.logging_helper import get_callstack, setup_logging
 from trader.common.singleton import Singleton
 from trader.data.data_access import SecurityDefinition, TickData
@@ -33,7 +32,7 @@ from trader.trading.book import BookSubject
 from trader.trading.executioner import Executioner
 from trader.trading.portfolio import Portfolio
 from trader.trading.strategy import Strategy
-from typing import cast, Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import asyncio
 import backoff
@@ -117,6 +116,8 @@ class Trader(metaclass=Singleton):
         self.last_connect_time: dt.datetime
         self.load_test: bool = False
 
+        self.disposables: List[DisposableBase] = []
+
     def create_trader_exception(self, exception_type: type, message: str, inner: Optional[Exception]):
         # todo use reflection here to automatically populate trader runtime vars that we care about
         # given a particular exception type
@@ -178,6 +179,9 @@ class Trader(metaclass=Singleton):
         # for security_definition, security_datastream in self.market_data_subscriptions.items():
         #   security_datastream.dispose()
 
+        for disposable in self.disposables:
+            disposable.dispose()
+
         self.book.dispose()
         await self.client.shutdown()
 
@@ -185,10 +189,13 @@ class Trader(metaclass=Singleton):
         # this will force a reconnect through the disconnected event
         self.client.ib.disconnect()
 
-    def __update_positions(self, positions: List[Position]):
+    def __update_positions(self, positions: Union[List[Position], Position]):
         logging.debug('__update_positions')
-        for position in positions:
-            self.portfolio.add_position(position)
+        if type(positions) is Position:
+            self.portfolio.add_position(positions)
+        elif type(positions) is list:
+            for position in positions:
+                self.portfolio.add_position(position)
 
     def __update_portfolio(self, portfolio_item: PortfolioItem):
         logging.debug('__update_portfolio')
@@ -217,22 +224,20 @@ class Trader(metaclass=Singleton):
             ]
         )
 
-        positions = await self.client.subscribe_positions()
-        positions.subscribe(Observer(
+        positions_observer = Observer(
             on_next=self.__update_positions,
             on_error=handle_subscription_exception,
             on_completed=handle_completed
-        ))
-        portfolio = await self.client.subscribe_portfolio()
-        portfolio.subscribe(Observer(
+        )
+
+        positions_disposable = await self.client.subscribe_positions(positions_observer)
+        self.disposables.append(positions_disposable)
+
+        portfolio_disposable = await self.client.subscribe_portfolio(Observer(
             on_next=self.__update_portfolio,
             on_error=handle_subscription_exception,
         ))
-
-        # because the portfolio subscription is synchronous, an observer isn't attached
-        # as the ib.portfolio() method is called, so call it again
-        for p in self.client.ib.portfolio():
-            self.client.portfolio_subject.on_next(p)
+        self.disposables.append(portfolio_disposable)
 
         # make sure we're getting either live, or delayed data
         self.client.ib.reqMarketDataType(self.market_data)
@@ -306,29 +311,29 @@ class Trader(metaclass=Singleton):
             logging.debug('updating portfolio universe with {}'.format(portfolio_item))
             self.universe_accessor.update(universe)
 
-            if not ListHelper.isin(
-                list(self.market_data_subscriptions.keys()),
-                lambda subscription: subscription.conId == portfolio_item.contract.conId
-            ):
-                logging.debug('subscribing to market data stream for portfolio item {}'.format(portfolio_item.contract))
-                security = cast(SecurityDefinition, universe.find_contract(portfolio_item.contract))
-                date_range = DateRange(
-                    start=dateify(dt.datetime.now() - dt.timedelta(days=30)),
-                    end=timezoneify(dt.datetime.now(), timezone='America/New_York')
-                )
-                security_stream = SecurityDataStream(
-                    security=security,
-                    bar_size='1 min',
-                    date_range=date_range,
-                    existing_data=None
-                )
-                # await self.client.subscribe_contract_history(
-                #     contract=portfolio_item.contract,
-                #     start_date=dateify(dt.datetime.now() - dt.timedelta(days=30)),
-                #     what_to_show=WhatToShow.TRADES,
-                #     observer=security_stream
-                # )
-                self.market_data_subscriptions[security] = security_stream
+            # if not ListHelper.isin(
+            #     list(self.market_data_subscriptions.keys()),
+            #     lambda subscription: subscription.conId == portfolio_item.contract.conId
+            # ):
+            #     logging.debug('subscribing to market data stream for portfolio item {}'.format(portfolio_item.contract))
+            #     security = cast(SecurityDefinition, universe.find_contract(portfolio_item.contract))
+            #     date_range = DateRange(
+            #         start=dateify(dt.datetime.now() - dt.timedelta(days=30)),
+            #         end=timezoneify(dt.datetime.now(), timezone='America/New_York')
+            #     )
+            #     security_stream = SecurityDataStream(
+            #         security=security,
+            #         bar_size='1 min',
+            #         date_range=date_range,
+            #         existing_data=None
+            #     )
+            #     await self.client.subscribe_contract_history(
+            #         contract=portfolio_item.contract,
+            #         start_date=dateify(dt.datetime.now() - dt.timedelta(days=30)),
+            #         what_to_show=WhatToShow.TRADES,
+            #         observer=security_stream
+            #     )
+            #     self.market_data_subscriptions[security] = security_stream
 
     async def place_order(
         self,

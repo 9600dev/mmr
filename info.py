@@ -2,6 +2,7 @@ from expression import pipe
 from expression.collections import seq
 from ib_insync.contract import Contract
 from ib_insync.objects import PortfolioItem
+from ib_insync.order import Order
 from ib_insync.ticker import Ticker
 from reactivex.observer import AutoDetachObserver
 from rich.align import Align
@@ -9,7 +10,7 @@ from rich.table import Table
 from textual.app import App
 from textual.widget import Widget
 from trader.common.exceptions import TraderConnectionException, TraderException
-from trader.common.helpers import rich_tablify
+from trader.common.helpers import DictHelper, rich_tablify
 from trader.messaging.clientserver import RemotedClient, TopicPubSub
 from trader.messaging.trader_service_api import TraderServiceApi
 from typing import Dict, List
@@ -86,17 +87,28 @@ class PortfolioTickers(Widget):
 
 
 class Orders(Widget):
-    def __init__(self):
+    def __init__(self, remoted_client: RemotedClient):
         super().__init__('orders')
         self.body = Table()
+        self.remoted_client = remoted_client
 
     async def render_content(self):
-        table = Table(title='Orders', expand=True)
+        orders: dict[int, list[Order]] = self.remoted_client.rpc(return_type=dict[int, list[Order]]).get_orders()
+        columns = [
+            'orderId', 'action',
+            'status', 'orderType', 'lmtPrice', 'totalQuantity'
+        ]
 
-        for i in range(2):
-            table.add_column(f"Col {random.randint(0, 4) + 1}", style="magenta")
-        for i in range(5):
-            table.add_row(*[f"cell asdf {i},{j}" for j in range(2)])
+        data = []
+        for order_id, trade_list in orders.items():
+            data.append(DictHelper[str, str].dict_from_object(trade_list[0], columns))
+
+        table = rich_tablify(pd.DataFrame(data, columns=columns), financial=True, financial_columns=[
+            'lmtPrice'
+        ])
+        table.expand = True
+        table.title = 'Orders'
+
         self.body = table
 
     async def on_mount(self):
@@ -159,7 +171,7 @@ class TraderLog(Widget):
         self.body = Table()
 
     async def render_content(self):
-        table = Table(title='Trader Log', expand=True)
+        table = Table(title='Algo Log', expand=True)
 
         for i in range(2):
             table.add_column(f"Col {random.randint(0, 4) + 1}", style="magenta")
@@ -205,7 +217,7 @@ class MMRViewer(App):
     async def on_mount(self) -> None:
         self.connect()
         self.portfolio = Portfolio(self.remoted_client)
-        self.orders = Orders()
+        self.orders = Orders(self.remoted_client)
         self.trader_log = TraderLog()
 
         grid = await self.view.dock_grid(edge="left", name="left")
