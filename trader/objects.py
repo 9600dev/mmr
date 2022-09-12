@@ -1,4 +1,15 @@
-from enum import IntEnum
+from enum import Enum, IntEnum
+
+
+class Action(Enum):
+    BUY = 1
+    SELL = 2
+    NEUTRAL = 3
+
+    def __str__(self):
+        if self.value == 1: return 'BUY'
+        if self.value == 2: return 'SELL'
+        if self.value == 3: return 'NEUTRAL'
 
 
 class WhatToShow(IntEnum):

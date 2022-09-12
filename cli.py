@@ -613,6 +613,48 @@ def book_order_cancel(order_id: int):
 
 
 @main.group()
+def strategy():
+    pass
+
+
+@strategy.command('list')
+def strategy_list():
+    trades = remoted_client.rpc(return_type=dict[int, list[Trade]]).get_trades()
+    columns = [
+        'symbol', 'primaryExchange', 'currency', 'orderId',
+        'action', 'status', 'orderType', 'lmtPrice', 'totalQuantity'
+    ]
+    table = []
+    for trade_id, trade_list in trades.items():
+        table.append(DictHelper[str, str].dict_from_object(trade_list[0], columns))
+    rich_table(table)
+
+
+@strategy.command('enable')
+def strategy_enable():
+    orders: dict[int, list[Order]] = remoted_client.rpc(return_type=dict[int, list[Order]]).get_orders()
+    columns = [
+        'orderId', 'clientId', 'parentId', 'action',
+        'status', 'orderType', 'allOrNone', 'lmtPrice', 'totalQuantity'
+    ]
+    table = []
+    for order_id, trade_list in orders.items():
+        table.append(DictHelper[str, str].dict_from_object(trade_list[0], columns))
+    rich_table(table)
+
+
+@strategy.command('disable')
+@click.option('--order_id', required=True, type=int, help='order_id to cancel')
+def book_order_cancel(order_id: int):
+    # todo: untested
+    order: Optional[Trade] = remoted_client.rpc(return_type=Optional[Trade]).cancel_order(order_id)
+    if order:
+        click.echo(order)
+    else:
+        click.echo('no Trade object returned')
+
+
+@main.group()
 def pycron():
     pass
 

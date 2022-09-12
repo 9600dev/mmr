@@ -8,7 +8,6 @@ PACKAGE_PARENT = '../..'
 SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
-from enum import Enum
 from ib_insync.contract import Contract
 from ib_insync.objects import PortfolioItem, Position
 from ib_insync.order import LimitOrder, MarketOrder, Order, StopLimitOrder, StopOrder, Trade
@@ -28,8 +27,9 @@ from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
 from trader.messaging.clientserver import MultithreadedTopicPubSub, RPCServer
+from trader.objects import Action
 from trader.trading.book import BookSubject
-from trader.trading.executioner import Executioner
+from trader.trading.executioner import TradeExecutioner
 from trader.trading.portfolio import Portfolio
 from trader.trading.strategy import Strategy
 from typing import Dict, List, Optional, Union
@@ -47,14 +47,6 @@ logging = setup_logging(module_name='trading_runtime')
 # notes
 # https://groups.io/g/insync/topic/using_reqallopenorders/27261173?p=,,,20,0,0,0::recentpostdate%2Fsticky,,,20,2,0,27261173
 # talks about trades/orders being tied to clientId, which means we'll need to always have a consistent clientid
-
-class Action(Enum):
-    BUY = 1
-    SELL = 2
-
-    def __str__(self):
-        if self.value == 1: return 'BUY'
-        if self.value == 2: return 'SELL'
 
 
 class Trader(metaclass=Singleton):
@@ -103,7 +95,7 @@ class Trader(metaclass=Singleton):
         # portfolio (current and past positions)
         self.portfolio: Portfolio = Portfolio()
         # takes care of execution of orders
-        self.executioner: Executioner
+        self.executioner: TradeExecutioner
         # a list of all the universes of stocks we have registered
         self.universes: List[Universe]
         self.market_data = 3
@@ -497,7 +489,13 @@ class Trader(metaclass=Singleton):
                 if delta.seconds >= 10:
                     task_num = len(asyncio.all_tasks())
                     threading_num = threading.active_count()
-                    logging.critical('{} tickers per second, {} tasks, {} threads'.format(float(counter) / 10.0, task_num, threading_num))
+                    logging.critical(
+                        '{} tickers per second, {} tasks, {} threads'.format(
+                            float(counter) / 10.0,
+                            task_num,
+                            threading_num
+                        )
+                    )
                     counter = 0
                     timer = dt.datetime.now()
             logging.debug('load test stopped')

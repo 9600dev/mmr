@@ -248,6 +248,7 @@ people who lose the money."
 * [Reading a profit and loss statement](https://lethain.com/profit-and-loss-statement/)
 * [15 images every investor needs to remember](https://twitter.com/BrianFeroldi/status/1553731179546718208)
 * [Thread on QE and why central banks are still engaged in it](https://mobile.twitter.com/MacroAlf/status/1558892593597104128)
+* [Sharpe Ratio](https://seekingalpha.com/article/4239442-your-sharpe-ratio-is-low-for-reasons-bad-golf)
 
 ## Structure
 
