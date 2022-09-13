@@ -28,6 +28,9 @@ class SMICrossOver(Strategy):
         return True
 
     def signals(self, open_price: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
+        if len(open_price) <= 50:
+            return None
+
         fast_ma = vbt.MA.run(open_price, 10)
         slow_ma = vbt.MA.run(open_price, 50)
         entries = fast_ma.ma_crossed_above(slow_ma)  # type: ignore
@@ -35,8 +38,10 @@ class SMICrossOver(Strategy):
         return (entries, exits)
 
     def on_next(self, prices: pd.DataFrame) -> Optional[Signal]:
-        result = self.signals(prices)
-        if result[0][-1] == 1:
+        result = self.signals(prices.ask)
+        if result and result[0].iloc[-1] == True:
             return Signal(Action.BUY, 0.0)
+        elif result and result[1].iloc[-1] == True:
+            return Signal(Action.SELL, 0.0)
         else:
             return None

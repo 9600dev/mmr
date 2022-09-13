@@ -89,13 +89,25 @@ class UniverseAccessor():
         results = []
         for universe in self.get_all():
             for definition in universe.security_definitions:
-                if symbol is int:
+                if type(symbol) is int:
                     if symbol == definition.conId:
                         results.append((universe, definition))
-                if symbol is str:
+                if type(symbol) is str:
                     if symbol == definition.symbol:
                         results.append((universe, definition))
         return results
+
+    def resolve_first_symbol(self, symbol: Union[str, int]) -> Optional[Tuple[Universe, SecurityDefinition]]:
+        for universe in self.get_all():
+            for definition in universe.security_definitions:
+                if type(symbol) is int:
+                    if symbol == definition.conId:
+                        return (universe, definition)
+                if type(symbol) is str:
+                    if symbol == definition.symbol:
+                        return (universe, definition)
+        return None
+
 
     def update(self, universe: Universe) -> None:
         self.library.write(universe.name, universe, prune_previous_version=True)

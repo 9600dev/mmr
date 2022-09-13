@@ -1,7 +1,7 @@
 from asyncio import AbstractEventLoop
 from trader.common.logging_helper import set_all_log_level, setup_logging
 from trader.container import Container
-from trader.messaging.trader_service_api import TraderServiceApi
+from trader.strategy.strategy_runtime import StrategyRuntime
 
 import asyncio
 import click
@@ -23,9 +23,6 @@ def main(simulation: bool,
     is_stopping = False
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-
-    container = Container(config)
-    bus = container.resolve(TraderServiceApi, simulation=simulation)
 
     def stop_loop(loop: AbstractEventLoop):
         nonlocal is_stopping
@@ -55,6 +52,10 @@ def main(simulation: bool,
         loop.add_signal_handler(signal.SIGINT, stop_loop, loop)
 
         # run stuff here.
+        container = Container(config)
+        strategy_runtime = container.resolve(StrategyRuntime)
+        asyncio.get_event_loop().create_task(strategy_runtime.run())
+        asyncio.get_event_loop().run_forever()
 
     except KeyboardInterrupt:
         logging.info('KeyboardInterrupt')
