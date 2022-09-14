@@ -75,6 +75,7 @@ types-redis = "^4.3.17"
 textual = "^0.1.18"
 isort = "^5.10.1"
 reactivex = "^4.0.4"
+cloup = "^1.0.0"
 
 [tool.poetry.dev-dependencies]
 

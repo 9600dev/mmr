@@ -1,4 +1,4 @@
-FROM ubuntu:21.04
+FROM ubuntu:21.10
 WORKDIR /home/trader/mmr
 ENV container docker
 ENV PATH "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -11,6 +11,9 @@ RUN useradd -m -d /home/trader -s /bin/bash -G sudo trader
 RUN mkdir -p /var/run/sshd
 RUN mkdir -p /run/sshd
 RUN mkdir -p /tmp
+
+RUN cp /etc/apt/sources.list /etc/apt/sources.list.bak && sed -i -re 's/([a-z]{2}\.)?archive.ubuntu.com|security.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list
+
 RUN apt-get update
 RUN apt-get install -y dialog apt-utils
 RUN apt-get install -y python3
