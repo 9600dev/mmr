@@ -48,7 +48,7 @@ class TraderServiceApi(RPCHandler):
         self, contract: Contract,
         action: str,
         equity_amount: float,
-        limit_price: float,
+        limit_price: Optional[float],
         market_order: bool = False,
         stop_loss_percentage: float = 0.0,
     ) -> SuccessFail:

@@ -1,4 +1,5 @@
 
+
 import os
 import sys
 
@@ -346,7 +347,7 @@ class Trader(metaclass=Singleton):
         contract: Contract,
         action: Action,
         equity_amount: float,
-        limit_price: float,
+        limit_price: Optional[float],
         market_order: bool,
         stop_loss_percentage: float,
         observer: Observer[Trade],
@@ -354,8 +355,14 @@ class Trader(metaclass=Singleton):
     ) -> DisposableBase:
         # todo make sure amount is less than outstanding profit
 
+        if limit_price and limit_price <= 0.0:
+            raise ValueError('limit_price specified but invalid: {}'.format(limit_price))
+        if stop_loss_percentage >= 1.0 or stop_loss_percentage < 0.0:
+            raise ValueError('stop_loss_percentage invalid: {}'.format(stop_loss_percentage))
+
         # grab the latest price of instrument
         latest_tick: Ticker = await self.client.get_snapshot(contract, delayed=False)
+        order_price = 0.0
 
         # assess if we should trade
         quantity = equity_amount / latest_tick.bid
@@ -370,18 +377,23 @@ class Trader(metaclass=Singleton):
             quantity_int, latest_tick.bid
         ))
 
+        if limit_price:
+            order_price = float(limit_price)
+        elif market_order:
+            order_price = latest_tick.ask
+
         # if debug, move the buy/sell by 10%
         if debug and action == Action.BUY:
-            limit_price = limit_price * 0.9
-            limit_price = round(limit_price * 0.9, ndigits=2)
+            order_price = order_price * 0.9
+            order_price = round(order_price * 0.9, ndigits=2)
         if debug and action == Action.SELL:
-            limit_price = round(limit_price * 1.1, ndigits=2)
+            order_price = round(order_price * 1.1, ndigits=2)
 
         stop_loss_price = 0.0
 
         # calculate stop_loss
         if stop_loss_percentage > 0.0:
-            stop_loss_price = round(limit_price - limit_price * stop_loss_percentage, ndigits=2)
+            stop_loss_price = round(order_price - order_price * stop_loss_percentage, ndigits=2)
 
         subject = Subject[Trade]()
         disposable: DisposableBase = Disposable()
@@ -413,11 +425,11 @@ class Trader(metaclass=Singleton):
             order = StopLimitOrder(
                 action=str(action),
                 totalQuantity=quantity_int,
-                lmtPrice=limit_price,
+                lmtPrice=order_price,
                 stopPrice=stop_loss_price
             )
         elif not market_order and stop_loss_price == 0.0:
-            order = LimitOrder(action=str(action), totalQuantity=quantity_int, lmtPrice=limit_price)
+            order = LimitOrder(action=str(action), totalQuantity=quantity_int, lmtPrice=order_price)
 
         disposable = await self.place_order(contract=contract, order=order, observer=subject)
         return disposable

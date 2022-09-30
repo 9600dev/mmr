@@ -83,6 +83,36 @@ You can also VNC into the Docker container also, which will allow you to interac
 
 ![](docs/2022-06-03-08-58-08.png)
 
+
+### Running Things Manually
+
+There are two ways to perform trades and inspect the mmr runtime manually: from the command line, or through the CLI helper.
+
+To fire up the CLI helper, type:
+
+* ```python3 cli.py```
+
+![](docs/2022-09-30-11-07-06.png)
+
+This gives you a range of options to interact with the mmr runtime: inspect orders, logs, trades etc, and manually submit trades from the CLI itself:
+
+* ```mmr> trade --symbol AMD --buy --limit 60.00 --amount 100.0```
+
+While most command inputs take the string symbol (in this case "AMD") its best to use the unique contract identifier that Interactive Brokers supplies, and you can do this via the ```mmr> resolve``` command:
+
+![](docs/2022-09-30-11-08-58.png)
+
+Trading from your command line interface of choice is also supported:
+
+* ```/home/trader/mmr $] python3 cli.py trade --symbol AMD --buy --market --amount 100.0```
+
+There's also a terminal based dashboard to quickly inspect the runtime, orders, algos and prices [TODO: this is under active development]:
+
+* ```python3 info.py```
+
+![](docs/2022-09-30-10-48-12.png)
+
+
 ### Manual Installation
 
 If you want to YOLO the install, and you're on Ubuntu or a derivative, run the ```native_install.sh``` script, otherwise:

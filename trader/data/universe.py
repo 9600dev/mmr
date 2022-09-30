@@ -89,9 +89,10 @@ class UniverseAccessor():
         results = []
         for universe in self.get_all():
             for definition in universe.security_definitions:
-                if type(symbol) is int:
-                    if symbol == definition.conId:
-                        results.append((universe, definition))
+                if type(symbol) is int and int(symbol) == definition.conId:
+                    results.append((universe, definition))
+                if type(symbol) is str and symbol.isnumeric() and int(symbol) == definition.conId:
+                    results.append((universe, definition))
                 if type(symbol) is str:
                     if symbol == definition.symbol:
                         results.append((universe, definition))

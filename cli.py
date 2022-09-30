@@ -34,7 +34,7 @@ from trader.listeners.ib_history_worker import IBHistoryWorker
 from trader.listeners.ibreactive import IBAIORx
 from trader.messaging.clientserver import RemotedClient
 from trader.messaging.trader_service_api import TraderServiceApi
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import asyncio
 import click
@@ -347,30 +347,31 @@ def clear():
 
 
 def __resolve(
-    symbol: str,
+    symbol: Union[str, int],
     arctic_server_address: str,
     arctic_universe_library: str,
     primary_exchange: Optional[str] = ''
 ) -> List[Dict[str, Any]]:
     if not primary_exchange: primary_exchange = ''
-    symbol = symbol.lower()
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
-    results = []
-    for universe in accessor.get_all():
-        for definition in universe.security_definitions:
-            if definition.symbol.lower().startswith(symbol):
-                results.append({
-                    'universe': universe.name,
-                    'conId': definition.conId,
-                    'symbol': definition.symbol,
-                    'exchange': definition.exchange,
-                    'primaryExchange': definition.primaryExchange,
-                    'currency': definition.currency,
-                    'longName': definition.longName,
-                    'category': definition.category,
-                    'subcategory': definition.subcategory,
-                    'minTick': definition.minTick,
-                })
+    universe_definitions = accessor.resolve_symbol(symbol)
+
+    results: List[Dict] = []
+    for universe, definition in universe_definitions:
+        # check to see if there is an existing definition with the same conId
+        if not any([x['conId'] == definition.conId for x in results]):
+            results.append({
+                'universe': universe.name,
+                'conId': definition.conId,
+                'symbol': definition.symbol,
+                'exchange': definition.exchange,
+                'primaryExchange': definition.primaryExchange,
+                'currency': definition.currency,
+                'longName': definition.longName,
+                'category': definition.category,
+                'subcategory': definition.subcategory,
+                'minTick': definition.minTick,
+            })
     return [r for r in results if primary_exchange in r['primaryExchange']]
 
 
@@ -703,8 +704,8 @@ def company_info(symbol: str):
 @click.option('--primary_exchange', required=False, default='', type=str, help='exchange [not required]')
 @option_group(
     "trade options",
-    cloupoption('--market', is_flag=True, help='This text should describe the option --foo.'),
-    cloupoption('--limit', help='This text should describe the option --bar.'),
+    cloupoption('--market', is_flag=True, help='market order'),
+    cloupoption('--limit', type=float, help='limit price, requires a decimal price'),
     constraint=mutually_exclusive,
 )
 @click.option('--amount', required=True, type=float, help='total amount to buy/sell')
@@ -717,13 +718,16 @@ def trade(
     symbol: str,
     primary_exchange: str,
     market: bool,
-    limit: float,
+    limit: Optional[float],
     amount: float,
     stop_loss_percentage: float,
     arctic_server_address: str,
     arctic_universe_library: str,
     **args,
 ):
+    if limit and limit <= 0.0:
+        raise ValueError('limit price is specified incorrectly: {}'.format(limit))
+
     contracts = __resolve(
         symbol=symbol,
         arctic_server_address=arctic_server_address,
@@ -735,6 +739,7 @@ def trade(
         click.echo('no contract found for symbol {}'.format(symbol))
     elif len(contracts) > 1:
         click.echo('multiple contracts found for symbol {}, aborting'.format(symbol))
+        return
 
     action = 'BUY' if buy else 'SELL'
     trade: SuccessFail = remoted_client.rpc(return_type=SuccessFail).place_order(

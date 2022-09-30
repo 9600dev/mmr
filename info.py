@@ -19,7 +19,6 @@ import asyncio
 import click
 import numpy as np
 import pandas as pd
-import random
 
 
 class PortfolioTickers(Widget):
@@ -173,10 +172,11 @@ class TraderLog(Widget):
     async def render_content(self):
         table = Table(title='Algo Log', expand=True)
 
-        for i in range(2):
-            table.add_column(f"Col {random.randint(0, 4) + 1}", style="magenta")
+        table.add_column('id')
+        table.add_column('details', style="magenta")
+
         for i in range(5):
-            table.add_row(*[f"cell asdf {i},{j}" for j in range(2)])
+            table.add_row(*[f"example log entry {i},{j}" for j in range(2)])
         self.body = table
 
     async def on_mount(self):
