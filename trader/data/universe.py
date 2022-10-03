@@ -109,7 +109,6 @@ class UniverseAccessor():
                         return (universe, definition)
         return None
 
-
     def update(self, universe: Universe) -> None:
         self.library.write(universe.name, universe, prune_previous_version=True)
 

@@ -1,11 +1,8 @@
-import requests
-import pandas as pd
-import coloredlogs
-import click
-from ib_insync import Contract
-
 from bs4 import BeautifulSoup
-from typing import List, Dict, Tuple, Callable
+from ib_insync import Contract
+from typing import Callable, List, Tuple
+
+import requests
 
 
 class IBInstrument():
@@ -45,14 +42,19 @@ class IBInstrument():
         return self.__str__()
 
     def to_contract(self) -> Contract:
-        return Contract(
-            secType=self.secType,
-            conId=self.conId,
-            symbol=self.ib_symbol,
-            primaryExchange=self.exchange,
-            currency=self.currency,
-            exchange='SMART'
-        )
+        if self.conId > 0:
+            return Contract(
+                secType=self.secType,
+                conId=self.conId,
+            )
+        else:
+            return Contract(
+                symbol=self.ib_symbol,
+                secType=self.secType,
+                primaryExchange=self.exchange,
+                currency=self.currency,
+                exchange=self.exchange,
+            )
 
 
 def __readtoken(s: str, character_check: Callable[[str], bool], token: str = '') -> str:
@@ -91,7 +93,11 @@ def scrape_product_page(exchange: str, url: str) -> Tuple[List[IBInstrument], st
     instruments: List[IBInstrument] = []
 
     exchange_full_name = soup.h2.text.strip()
-    instrument_type = soup.find('div', {'class': 'btn-selectors'}).find('a', {'class': 'active'}).text.strip()
+    instrument_type = ''
+    instrument_type_node = soup.find('div', {'class': 'btn-selectors'})
+    if instrument_type_node:
+        instrument_type = instrument_type_node.find('a', {'class': 'active'}).text.strip()
+
     sec_type = __readstr(url, 'showcategories=')
 
     if 'ETF' in sec_type:
@@ -99,6 +105,9 @@ def scrape_product_page(exchange: str, url: str) -> Tuple[List[IBInstrument], st
 
     if 'OPTGRP' in sec_type:
         sec_type = 'OPT'
+
+    if 'FUTGRP' in sec_type:
+        sec_type = 'FUT'
 
     # we seem to get pacing violations pretty easily for warrants -- potentially
     # ignore them?
@@ -120,7 +129,7 @@ def scrape_product_page(exchange: str, url: str) -> Tuple[List[IBInstrument], st
                 exchange=exchange,
                 exchange_full_name=exchange_full_name,
                 secType=sec_type,
-                instrument_type=instrument_type
+                instrument_type=instrument_type,
             ))
 
     # check to see if there is a next page, otherwise, return
@@ -128,8 +137,14 @@ def scrape_product_page(exchange: str, url: str) -> Tuple[List[IBInstrument], st
     if next_page:
         next_page = next_page.find('li', {'class': 'active'}).next_sibling.next_sibling
         if next_page.has_attr('class') and len(next_page['class']) >= 1 and next_page['class'][0] == 'disabled':
-        # now we have to see if there are extra classes of instrument to search before returning empty string
-            instrument_class = soup.find('div', {'class': 'btn-selectors'}).find('a', {'class': 'active'})
+            # now we have to see if there are extra classes of instrument to search before returning empty string
+            instrument_class_node = soup.find('div', {'class': 'btn-selectors'})
+
+            if instrument_class_node:
+                instrument_class = instrument_class_node.find('a', {'class': 'active'})
+            else:
+                return instruments, ''
+
             if instrument_class.parent.next_sibling.next_sibling:
                 return instruments, instrument_class.parent.next_sibling.next_sibling.a['href']
             else:

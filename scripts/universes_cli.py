@@ -14,7 +14,6 @@ sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
 from dataclasses import asdict
 from ib_insync import Contract, ContractDescription
-from scripts.eoddata_scraper import EodDataScraper
 from scripts.ib_instrument_scraper import IBInstrument, scrape_products
 from scripts.ib_resolve import IBResolver
 from trader.common.command_line import cli, common_options, default_config
@@ -22,7 +21,7 @@ from trader.common.helpers import rich_list, rich_table
 from trader.common.logging_helper import setup_logging
 from trader.data.universe import SecurityDefinition, Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx
-from typing import cast, List, Optional
+from typing import cast, List, Optional, Union
 
 
 logging = setup_logging(module_name='cli')
@@ -36,10 +35,19 @@ def build_and_load_ib(
     logging.debug('build_and_load_ib()')
 
     product_pages = {
-        # 'NASDAQ': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=nasdaq&showcategories=STK',
-        # 'NYSE': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=nyse&showcategories=ETF',
+        # Stocks
+        'NASDAQ': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=nasdaq&showcategories=STK',
+        'NYSE': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=nyse&showcategories=ETF',
         'LSE': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=lse&showcategories=ETF',
         'ASX': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=asx&showcategories=ETF',
+
+        # Options, Futures, Agri
+        'CFE': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=cfe&showcategories=FUTGRP',
+        'GLOBEX': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=globex&showcategories=OPTGRP',
+        'NYMEX': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=nymex&showcategories=OPTGRP',
+        'NYBOT': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=nybot&showcategories=OPTGRP',
+        'ICEUS': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=iceus&showcategories=FUTGRP',
+        'CBOE': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=cboe&showcategories=ETF',
     }
 
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
@@ -58,7 +66,8 @@ def build_and_load_ib(
         for instrument in instruments:
             if (
                 not universe.find_contract(instrument.to_contract())
-                and instrument.secType != 'OPT' and instrument.secType != 'WAR'
+                # we don't do warrants yet
+                and instrument.secType != 'WAR'
             ):
                 contract_details = asyncio.run(resolver.resolve_contract(instrument.to_contract()))
                 if contract_details:
@@ -71,35 +80,6 @@ def build_and_load_ib(
         # weird bug where universe.security_definitions was keeping the previous list object around
         # after calling accessor.get(). bizaare
         universe = None
-
-def build_and_load_deprecated(
-    ib_server_address: str,
-    ib_server_port: int,
-    arctic_server_address: str,
-    arctic_universe_library: str,
-    sectype: str,
-    exchange: str,
-    primary_exchange: str,
-    currency: str,
-    csv_output_file: str
-):
-    click.echo('starting {} universe bootstrap temp file'.format(primary_exchange))
-    n = EodDataScraper()
-    result = n.scrape(primary_exchange)
-    securities = len(result)
-    result.to_csv(csv_output_file, header=True, index=False)
-
-    client = IBAIORx(ib_server_address, ib_server_port)
-    client.connect()
-    resolver = IBResolver(client)
-    asyncio.run(resolver.fill_csv(csv_output_file, csv_output_file, sectype, exchange, primary_exchange, currency))
-
-    u = UniverseAccessor(arctic_server_address, arctic_universe_library)
-    with open(csv_output_file, 'r') as f:
-        csv_string = f.read()
-        click.echo('updating trader host with new universe')
-        u.update_from_csv_str(primary_exchange, csv_string)
-    click.echo('finished {} bootstrap, with {} securities loaded'.format(primary_exchange, str(securities)))
 
 
 @cli.command()
@@ -127,9 +107,36 @@ def bootstrap(
     ib_server_address: str,
     ib_server_port: int,
     arctic_server_address: str,
-    arctic_universe_library: str, **args
+    arctic_universe_library: str,
+    **args,
 ):
     build_and_load_ib(ib_server_address, ib_server_port, arctic_server_address, arctic_universe_library)
+
+    macro_defaults = [
+        294530233,  # BZ, Brent Crude
+        256019308,  # CL, Light Sweet Crude Oil
+        457630923,  # GC, Gold
+        484743936,  # SI, Silver
+        484743956,  # HG, Copper Index
+        344273380,  # HH, Natural Gas
+        385575948,  # UX, Uranium
+        578106878,  # LBR, Lumber Futures
+        568549458,  # MNQ, Micro E-Mini Nasdaq 100
+        495512551,
+    ]
+
+    # add the macro universe
+    for conId in macro_defaults:
+        add_to_universe_helper(
+            name='macro',
+            symbol=conId,
+            primary_exchange='',
+            sec_type='',
+            ib_server_address=ib_server_address,
+            ib_server_port=ib_server_port,
+            arctic_server_address=arctic_server_address,
+            arctic_universe_library=arctic_universe_library
+        )
 
 
 @cli.command('list')
@@ -201,6 +208,55 @@ def create(
         u.update(result)
 
 
+def add_to_universe_helper(
+    name: str,
+    symbol: Union[str, int],
+    primary_exchange: str,
+    sec_type: str,
+    ib_server_address: str,
+    ib_server_port: int,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    **args
+):
+    client = IBAIORx(ib_server_address, ib_server_port)
+    client.connect()
+
+    # conId
+    if type(symbol) is int:
+        contract_details = client.get_contract_details(Contract(conId=symbol))
+        if len(contract_details) > 0:
+            logging.debug('found contract details for {}: {}'.format(symbol, contract_details))
+            u = UniverseAccessor(arctic_server_address, arctic_universe_library)
+            universe = u.get(name)
+            # todo using the first element in the list is probably a bug, should fix this
+            universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details[0]))
+            u.update(universe)
+            logging.debug('adding contract {} to universe: {}'.format(symbol, name))
+    # string symbol
+    else:
+        result = asyncio.run(
+            client.get_contract_description(cast(str, symbol), secType=sec_type, primaryExchange=primary_exchange)
+        )
+        if result is list:
+            click.echo('multiple symbols found:')
+            rich_list(cast(list, result))
+            click.echo('use primary_exchange to be more specific')
+        elif type(result) is ContractDescription and result is not None:
+            description = cast(ContractDescription, result)
+
+            contract_details = client.get_contract_details(cast(Contract, description.contract))
+            logging.debug('found contract details for {}: {}'.format(symbol, contract_details))
+            u = UniverseAccessor(arctic_server_address, arctic_universe_library)
+            universe = u.get(name)
+            # todo using the first element in the list is probably a bug, should fix this
+            universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details[0]))
+            u.update(universe)
+            logging.debug('adding contract {} to universe: {}'.format(symbol, name))
+        else:
+            click.echo('no security definition found for {}'.format(symbol))
+
+
 @cli.command('add-to-universe')
 @click.option('--name', help='Name of the universe to add instrument to')
 @click.option('--symbol', help='symbol or conId to add to universe')
@@ -219,27 +275,16 @@ def add_to_universe(
     arctic_universe_library: str,
     **args
 ):
-    client = IBAIORx(ib_server_address, ib_server_port)
-    client.connect()
-
-    result = asyncio.run(client.get_contract_description(symbol, secType=sec_type, primaryExchange=primary_exchange))
-    if result is list:
-        click.echo('multiple symbols found:')
-        rich_list(cast(list, result))
-        click.echo('use primary_exchange to be more specific')
-    elif type(result) is ContractDescription and result is not None:
-        description = cast(ContractDescription, result)
-
-        contract_details = client.get_contract_details(cast(Contract, description.contract))
-        logging.debug('found contract details for {}: {}'.format(symbol, contract_details))
-        u = UniverseAccessor(arctic_server_address, arctic_universe_library)
-        universe = u.get(name)
-        # todo using the first element in the list is probably a bug, should fix this
-        universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details[0]))
-        u.update(universe)
-        logging.debug('adding contract to universe: {}'.format(name))
-    else:
-        click.echo('no security definition found for {}'.format(symbol))
+    add_to_universe_helper(
+        name,
+        symbol,
+        primary_exchange,
+        sec_type,
+        ib_server_address,
+        ib_server_port,
+        arctic_server_address,
+        arctic_universe_library,
+    )
 
 
 if __name__ == '__main__':

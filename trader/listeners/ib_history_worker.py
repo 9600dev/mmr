@@ -170,7 +170,7 @@ class IBHistoryWorker():
 
             # skip if 'no data' returned
             if self.error_code > 0 and self.error_code != 162:
-                raise Exception('error_code: {}'.format(self.error_code))
+                raise Exception('error_code: {}, error_string: {}'.format(self.error_code, self.error_string))
 
             if result:
                 df_result = ib_insync.util.df(result).set_index('date')

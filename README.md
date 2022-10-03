@@ -374,6 +374,7 @@ people who lose the money."
 * (https://github.com/hudson-and-thames/mlfinlab)
 * (https://github.com/pyro-ppl/numpyro)
 * [A better pickle](https://github.com/uqfoundation/dill)
+* [Public API's - a list](https://github.com/public-apis/public-apis)
 
 ## Trading Systems
 

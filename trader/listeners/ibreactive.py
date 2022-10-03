@@ -435,7 +435,11 @@ class IBAIORx():
         else: return result
 
     async def __get_contract_description_helper(
-        self, symbol: str, secType: str, primaryExchange: str, currency: str
+        self,
+        symbol: Union[str, int],
+        secType: str,
+        primaryExchange: str,
+        currency: str,
     ) -> Optional[ContractDescription]:
         contract_desc: List[ContractDescription] = await self.get_matching_symbols(symbol)
         f: List[ContractDescription] = []

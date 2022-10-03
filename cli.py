@@ -410,7 +410,10 @@ def resolve(
             rich_dict(contract.__dict__)
     else:
         results = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
-        rich_table(results, False)
+        if len(results) > 0:
+            rich_table(results, False)
+        else:
+            click.echo('unable to resolve {}, maybe try the --ib flag to force resolution from IB?'.format(symbol))
 
 
 @main.command()
@@ -511,6 +514,26 @@ def subscribe_portfolio(
 
         click.echo('subscribing to {}'.format(portfolio_item.contract.symbol))
         remoted_client.rpc().publish_contract(portfolio_item.contract, delayed=False)
+
+
+@subscribe.command('universe')
+@click.option('--name', required=True, help='universe name to tick subscribe')
+@click.option('--delayed', required=True, is_flag=True, default=False, help='subscribe to delayed data')
+@common_options()
+@default_config()
+def subscribe_universe(
+    name: str,
+    delayed: bool,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    **args,
+):
+    accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
+    u = accessor.get(name)
+    for security_definition in u.security_definitions:
+        click.echo('subscribing to {}'.format(security_definition.symbol))
+        remoted_client.rpc().publish_contract(u.to_contract(security_definition), delayed=delayed)
+
 
 @subscribe.command('list')
 @common_options()
@@ -644,17 +667,6 @@ def strategy_enable():
     rich_table(table)
 
 
-@strategy.command('disable')
-@click.option('--order_id', required=True, type=int, help='order_id to cancel')
-def book_order_cancel(order_id: int):
-    # todo: untested
-    order: Optional[Trade] = remoted_client.rpc(return_type=Optional[Trade]).cancel_order(order_id)
-    if order:
-        click.echo(order)
-    else:
-        click.echo('no Trade object returned')
-
-
 @main.group()
 def pycron():
     pass
@@ -768,6 +780,8 @@ amd = Contract(symbol='AMD', conId=4391, exchange='SMART', primaryExchange='NASD
 tsla = Contract(symbol='TSLA', conId=76792991, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
 nvda = Contract(symbol='NVDA', conId=4815747, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
 a2m = Contract(symbol='A2M', conId=189114468, exchange='SMART', primaryExchange='ASX', currency='AUD')
+cl = Contract(conId=457630923, symbol='CL', secType='FUT', exchange='NYMEX', lastTradeDateOrContractMonth='20221122')
+
 marketdata: MarketData
 accessor: UniverseAccessor
 client: IBAIORx
@@ -793,7 +807,7 @@ def setup_ipython():
 
     print('Available instance objects:')
     print()
-    print(' amd: Contract, nvda: Contract, a2m: Contract')
+    print(' amd: Contract, nvda: Contract, a2m: Contract, cl: Contract')
     print(' container: Container, accessor: UniverseAccessor, client: IBAIORx')
     print(' store: Arctic, bardata: TickData, marketdata: MarketData')
 

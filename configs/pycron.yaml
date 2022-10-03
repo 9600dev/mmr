@@ -79,4 +79,4 @@ jobs:
       restart_if_finished: True
       depends_on:
         - tws
-      delay: 5
+      delay: 20

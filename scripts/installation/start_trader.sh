@@ -85,4 +85,10 @@ fi
 
 echo "Starting or attaching to tmux session to host pycron and start the command line interface."
 cd /home/trader/mmr
-/usr/bin/tmux attach || /usr/bin/tmux new-session -d python3 pycron/pycron.py --config ./configs/pycron.yaml \; split-window python3 cli.py \; attach
+
+if [ -z "${TMUX}" ]
+then
+        echo "starting new tmux session for mmr trader"
+        cd /home/trader/mmr
+        tmux new-session -d -n pycron 'echo; echo "Ctrl-b + n [next window], Ctrl-b + p [previous window]"; echo; python3 pycron/pycron.py --config ./configs/pycron.yaml' \; new-window -d -n cli python3 cli.py \; new-window -d -n dashboard python3 info.py \; attach
+fi
