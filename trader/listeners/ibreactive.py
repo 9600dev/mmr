@@ -499,6 +499,7 @@ class IBAIORx():
         else:
             return await self.__get_contract_description_helper(str(symbols), secType, primaryExchange, currency)
 
+    # todo this sucks
     async def get_conid(
         self,
         symbols: Union[str, List[str]],

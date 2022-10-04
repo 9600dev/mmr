@@ -10,11 +10,13 @@ from trader.data.universe import UniverseAccessor
 from trader.messaging.clientserver import RemotedClient, TopicPubSub
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.objects import Action
-from trader.strategy.strategies.smi_crossover import SMICrossOver
 from trader.trading.strategy import Strategy
-from typing import Dict, List
+from typing import cast, Dict, List
 
 import asyncio
+import importlib
+import inspect
+import os
 import pandas as pd
 
 
@@ -36,6 +38,7 @@ class StrategyRuntime(metaclass=Singleton):
                  zmq_pubsub_server_port: int,
                  zmq_rpc_server_address: str,
                  zmq_rpc_server_port: int,
+                 strategies_directory: str,
                  paper_trading: bool = False,
                  simulation: bool = False):
         self.arctic_server_address = arctic_server_address
@@ -47,15 +50,36 @@ class StrategyRuntime(metaclass=Singleton):
         self.zmq_pubsub_server_port = zmq_pubsub_server_port
         self.zmq_rpc_server_address = zmq_rpc_server_address
         self.zmq_rpc_server_port = zmq_rpc_server_port
+        self.strategies_directory = strategies_directory
 
-        self.data: TickData
+        # todo: this is wrong as we'll have a whole bunch of different tickdata libraries for
+        # different bartypes etc.
+        self.data: TickData = TickData(self.arctic_server_address, self.arctic_library)
 
         self.accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
         self.remoted_client = RemotedClient[TraderServiceApi](error_table=error_table)
         self.strategies: Dict[int, List[Strategy]] = {}
-        self.strategies[0] = []
-
+        self.strategy_implementations: List[Strategy] = []
         self.streams: Dict[int, pd.DataFrame] = {}
+
+    def load_strategies(self):
+        for root, dirs, files in os.walk(self.strategies_directory):
+            for file_name in files:
+                file = os.path.join(root, file_name)
+                try:
+                    relative_import = os.path.relpath(file).replace('.py', '').replace('.pyc', '').replace('/', '.')
+                    module = importlib.import_module(relative_import)
+                    for x in dir(module):
+                        obj = getattr(module, x)
+
+                        if inspect.isclass(obj) and issubclass(obj, Strategy) and obj is not Strategy:
+                            logging.debug('found implementation of Strategy {}'.format(obj))
+                            instance = obj(self.data, self.accessor, logging)
+                            self.strategy_implementations.append(cast(Strategy, instance))
+                            if instance.install(self):
+                                instance.enable()
+                except Exception as ex:
+                    logging.debug(ex)
 
     def on_next(self, ticker: Ticker):
         logging.debug('StrategyRuntime.on_next()')
@@ -81,7 +105,7 @@ class StrategyRuntime(metaclass=Singleton):
                 return []
 
         # execute the strategies attached to the conId's
-        for strategy in (__get_strategies(conId) + self.strategies[0]):
+        for strategy in __get_strategies(conId):
             signal = strategy.on_next(self.streams[conId])
             if signal and signal.action == Action.BUY:
                 logging.info('BUY action')
@@ -94,28 +118,28 @@ class StrategyRuntime(metaclass=Singleton):
     def on_completed(self):
         logging.debug('StrategyRuntime.on_completed')
 
+    def subscribe(self, strategy: Strategy, contract: Contract) -> None:
+        logging.debug('strategy_runtime.subscribe() contract: {} strategy: {}'.format(contract, strategy))
+        if contract.conId not in self.strategies:
+            self.strategies[contract.conId] = []
+            self.strategies[contract.conId].append(strategy)
+            self.remoted_client.rpc().publish_contract(contract=contract, delayed=False)
+        elif contract.conId in self.strategies and strategy not in self.strategies[contract.conId]:
+            self.strategies[contract.conId].append(strategy)
+
     async def run(self):
         logging.debug('StrategyRuntime.run()')
 
-        self.strategies[0].append(SMICrossOver())
-
         asyncio.get_event_loop().run_until_complete(self.remoted_client.connect())
-        # definition = self.accessor.resolve_first_symbol('NCM')
-        # if not definition:
-        #     return
-
-        # contract = Universe.to_contract(definition[1])
-
-        # start publishing ticks
-        contract = Contract(symbol='NCM', primaryExchange='ASX', exchange='SMART', currency='AUD')
-        self.remoted_client.rpc().publish_contract(contract=contract, delayed=False)
 
         self.zmq_subscriber = TopicPubSub[Ticker](
             self.zmq_pubsub_server_address,
             self.zmq_pubsub_server_port,
         )
 
-        logging.debug('subscribing to ticks')
+        logging.debug('subscribing to tick stream')
         observable = await self.zmq_subscriber.subscriber('ticker')
         self.observer = AutoDetachObserver(on_next=self.on_next, on_error=self.on_error, on_completed=self.on_completed)
         self.subscription = observable.subscribe(self.observer)
+
+        self.load_strategies()

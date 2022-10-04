@@ -32,7 +32,7 @@ from trader.objects import Action
 from trader.trading.book import BookSubject
 from trader.trading.executioner import TradeExecutioner
 from trader.trading.portfolio import Portfolio
-from trader.trading.strategy import Strategy
+# from trader.trading.strategy import Strategy
 from typing import Dict, List, Optional, Union
 
 import asyncio
@@ -90,7 +90,7 @@ class Trader(metaclass=Singleton):
         # the minute-by-minute MarketData stream's we're subscribed to
         self.market_data_subscriptions: Dict[SecurityDefinition, SecurityDataStream] = {}
         # the strategies we're using
-        self.strategies: List[Strategy] = []
+        # self.strategies: List[Strategy] = []
         # current order book (outstanding orders, trades etc)
         self.book: BookSubject = BookSubject()
         # portfolio (current and past positions)

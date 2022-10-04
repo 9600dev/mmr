@@ -396,6 +396,7 @@ def resolve(
     if ib:
         container = Container()
         client = container.resolve(IBAIORx)
+        # todo fix this
         IBAIORx.client_id_counter = randint(20, 99)
         client.connect()
         contract = asyncio.get_event_loop().run_until_complete(client.get_conid(
