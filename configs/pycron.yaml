@@ -79,7 +79,7 @@ jobs:
       restart_if_finished: True
       depends_on:
         - tws
-      delay: 20
+      delay: 30
     - name: strategy_service
       description: service that loads, hosts and executes trading strategies and algorithms
       command: python3
@@ -91,4 +91,4 @@ jobs:
       depends_on:
         - tws
         - trader_service
-      delay: 5
+      delay: 15

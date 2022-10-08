@@ -44,6 +44,7 @@ RUN apt-get install -y iproute2
 RUN apt-get install -y net-tools
 RUN apt-get install -y rsync
 RUN apt-get install -y iputils-ping
+RUN apt-get install -y lnav
 # required for pyenv to build 3.9.5 properly
 RUN apt-get install -y libbz2-dev
 RUN apt-get install -y libsqlite3-dev
@@ -80,9 +81,9 @@ RUN mkdir /home/trader/mmr/data/mongodb
 RUN mkdir /home/trader/mmr/logs
 
 # install IBC
-RUN wget https://github.com/IbcAlpha/IBC/releases/download/3.13.0/IBCLinux-3.13.0.zip -P /home/trader
-RUN unzip /home/trader/IBCLinux-3.13.0.zip -d /home/trader/ibc
-RUN rm /home/trader/IBCLinux-3.13.0.zip
+RUN wget https://github.com/IbcAlpha/IBC/releases/download/3.14.0/IBCLinux-3.14.0.zip -P /home/trader
+RUN unzip /home/trader/IBCLinux-3.14.0.zip -d /home/trader/ibc
+RUN rm /home/trader/IBCLinux-3.14.0.zip
 RUN chmod +x /home/trader/ibc/*.sh
 
 # download TWS offline installer

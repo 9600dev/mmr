@@ -724,7 +724,7 @@ def company_info(symbol: str):
 @option_group(
     'amount options',
     cloupoption('--equity_amount', type=float, help='total $$ equity amount to buy/sell, eg 1000.0'),
-    cloupoption('--quantity', type=float, optionalhelp='quantity of the underlying, eg 100.0'),
+    cloupoption('--quantity', type=float, help='quantity of the underlying, eg 100.0'),
     constraint=mutually_exclusive,
 )
 @click.option('--stop_loss_percentage', required=False, type=float, default=0.0,

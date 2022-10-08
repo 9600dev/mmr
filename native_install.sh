@@ -35,16 +35,31 @@ sudo apt-get install -y python3
 sudo apt-get install -y python3-pip
 sudo apt-get install -y git
 sudo apt-get install -y wget
+
 sudo wget -qO - https://www.mongodb.org/static/pgp/server-5.0.asc | sudo apt-key add -
 sudo echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/5.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-5.0.list
 sudo apt-get update -y
 sudo apt-get install -y mongodb-org
+sudo apt-get install -y linux-headers-generic
 sudo apt-get install -y lzip curl
 sudo apt-get install -y redis-server
 sudo apt-get install -y unzip
 sudo apt-get install -y expect
 sudo apt-get install -y iputils-ping
 sudo apt-get install -y language-pack-en-base
+sudo apt-get install -y tmux
+sudo apt-get install -y expect
+sudo apt-get install -y iproute2
+sudo apt-get install -y net-tools
+sudo apt-get install -y rsync
+sudo apt-get install -y iputils-ping
+sudo apt-get install -y lnav
+# required for pyenv to build 3.9.5 properly
+sudo apt-get install -y libbz2-dev
+sudo apt-get install -y libsqlite3-dev
+sudo apt-get install -y libreadline-dev
+sudo apt-get install -y python3-venv
+
 
 # install poetry
 echo "installing poetry"
@@ -60,9 +75,9 @@ mkdir /home/trader/mmr/logs
 
 echo "installing IBC (Trader Workstation login automation)"
 # install IBC
-wget https://github.com/IbcAlpha/IBC/releases/download/3.13.0/IBCLinux-3.13.0.zip -P /home/trader
-unzip /home/trader/IBCLinux-3.13.0.zip -d /home/trader/ibc
-rm /home/trader/IBCLinux-3.8.7.zip
+wget https://github.com/IbcAlpha/IBC/releases/download/3.14.0/IBCLinux-3.14.0.zip -P /home/trader
+unzip /home/trader/IBCLinux-3.14.0.zip -d /home/trader/ibc
+rm /home/trader/IBCLinux-3.14.0.zip
 chmod +x /home/trader/ibc/*.sh
 
 # download latest TWS offline installer
