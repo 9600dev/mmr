@@ -16,7 +16,25 @@ handlers:
 
     rich_console:
         class: rich.logging.RichHandler
-        level: DEBUG 
+        level: DEBUG
+
+    trader_service_handler:
+        class: logging.handlers.RotatingFileHandler
+        level: DEBUG
+        formatter: standard
+        filename: /home/trader/mmr/logs/trader_service.log
+        maxBytes: 10485760 # 10MB
+        backupCount: 20
+        encoding: utf8
+
+    strategy_service_handler:
+        class: logging.handlers.RotatingFileHandler
+        level: DEBUG
+        formatter: standard
+        filename: /home/trader/mmr/logs/strategy_service.log
+        maxBytes: 10485760 # 10MB
+        backupCount: 20
+        encoding: utf8
 
     file_handler:
         class: logging.handlers.RotatingFileHandler
@@ -45,31 +63,29 @@ handlers:
         backupCount: 20
         encoding: utf8
 
-    critical_file_handler:
-        class: logging.handlers.RotatingFileHandler
-        level: CRITICAL
-        formatter: standard
-        filename: /tmp/critical.log
-        maxBytes: 10485760 # 10MB
-        backupCount: 20
-        encoding: utf8
-
-    warn_file_handler:
-        class: logging.handlers.RotatingFileHandler
-        level: WARN
-        formatter: standard
-        filename: /tmp/warn.log
-        maxBytes: 10485760 # 10MB
-        backupCount: 20
-        encoding: utf8
-
 root:
     level: NOTSET
-    handlers: [rich_console, file_handler, error_file_handler, critical_file_handler, debug_file_handler, warn_file_handler]
+    handlers: [rich_console, file_handler, error_file_handler, debug_file_handler]
     propogate: no
 
 loggers:
     ibhist:
         level: NOTSET
-        handlers: [file_handler, error_file_handler, critical_file_handler, debug_file_handler, warn_file_handler]
+        handlers: [file_handler, error_file_handler, debug_file_handler]
         propogate: yes
+    trader_service:
+        level: DEBUG
+        handlers: [trader_service_handler, error_file_handler, rich_console]
+        propogate: no
+    trading_runtime:
+        level: DEBUG
+        handlers: [trader_service_handler, error_file_handler, rich_console]
+        propogate: no
+    strategy_service:
+        level: DEBUG
+        handlers: [strategy_service_handler, error_file_handler, rich_console]
+        propogate: no
+    strategy_runtime:
+        level: DEBUG
+        handlers: [strategy_service_handler, error_file_handler, rich_console]
+        propogate: no

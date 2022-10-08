@@ -716,14 +716,20 @@ def company_info(symbol: str):
 @click.option('--symbol', required=True, type=str, help='IB conId for security')
 @click.option('--primary_exchange', required=False, default='', type=str, help='exchange [not required]')
 @option_group(
-    "trade options",
+    'trade options',
     cloupoption('--market', is_flag=True, help='market order'),
-    cloupoption('--limit', type=float, help='limit price, requires a decimal price'),
+    cloupoption('--limit', type=float, help='limit price [requires a decimal price]'),
     constraint=mutually_exclusive,
 )
-@click.option('--amount', required=True, type=float, help='total amount to buy/sell')
+@option_group(
+    'amount options',
+    cloupoption('--equity_amount', type=float, help='total $$ equity amount to buy/sell, eg 1000.0'),
+    cloupoption('--quantity', type=float, optionalhelp='quantity of the underlying, eg 100.0'),
+    constraint=mutually_exclusive,
+)
 @click.option('--stop_loss_percentage', required=False, type=float, default=0.0,
               help='percentage below price to place stop loss order [default=0.0, no stop loss]')
+@click.option('--debug', is_flag=True, default=False, help='changes the trade to be + or - 10 percent of submitted limit price.')
 @common_options()
 @default_config()
 def trade(
@@ -732,14 +738,16 @@ def trade(
     primary_exchange: str,
     market: bool,
     limit: Optional[float],
-    amount: float,
+    equity_amount: Optional[float],
+    quantity: Optional[float],
     stop_loss_percentage: float,
+    debug: bool,
     arctic_server_address: str,
     arctic_universe_library: str,
     **args,
 ):
     if limit and limit <= 0.0:
-        raise ValueError('limit price is specified incorrectly: {}'.format(limit))
+        raise ValueError('limit price can be less than or equal to 0.0: {}'.format(limit))
 
     contracts = __resolve(
         symbol=symbol,
@@ -758,10 +766,12 @@ def trade(
     trade: SuccessFail = remoted_client.rpc(return_type=SuccessFail).place_order(
         contract=contract_from_dict(contracts[0]),
         action=action,
-        equity_amount=amount,
+        equity_amount=equity_amount,
+        quantity=quantity,
         limit_price=limit,
         market_order=market,
-        stop_loss_percentage=stop_loss_percentage
+        stop_loss_percentage=stop_loss_percentage,
+        debug=debug,
     )
     click.echo(trade)
 

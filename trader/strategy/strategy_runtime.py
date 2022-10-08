@@ -128,6 +128,7 @@ class StrategyRuntime(metaclass=Singleton):
             self.strategies[contract.conId].append(strategy)
 
     async def run(self):
+        logging.info('starting strategy_runtime')
         logging.debug('StrategyRuntime.run()')
 
         asyncio.get_event_loop().run_until_complete(self.remoted_client.connect())

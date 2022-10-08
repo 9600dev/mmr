@@ -47,10 +47,12 @@ class TraderServiceApi(RPCHandler):
     def place_order(
         self, contract: Contract,
         action: str,
-        equity_amount: float,
+        equity_amount: Optional[float],
+        quantity: Optional[float],
         limit_price: Optional[float],
         market_order: bool = False,
         stop_loss_percentage: float = 0.0,
+        debug: bool = False,
     ) -> SuccessFail:
         # todo: we'll have to make the cli async so we can subscribe to the trade
         # changes as orders get hit etc
@@ -83,11 +85,12 @@ class TraderServiceApi(RPCHandler):
                 contract=contract,
                 action=act,
                 equity_amount=equity_amount,
+                quantity=quantity,
                 limit_price=limit_price,
                 market_order=market_order,
                 stop_loss_percentage=stop_loss_percentage,
                 observer=observer,
-                debug=True
+                debug=debug,
             )
         )
 

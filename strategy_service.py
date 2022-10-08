@@ -39,6 +39,8 @@ def main(simulation: bool,
                 logging.debug('waiting five seconds for {} pending tasks'.format(len(pending_tasks)))
                 loop.run_until_complete(asyncio.wait(pending_tasks, timeout=5))
             loop.stop()
+            # SystemExit's out of the current asyncio loop
+            exit(0)
 
     if simulation:
         raise ValueError('simulation not implemented yet')
@@ -56,11 +58,13 @@ def main(simulation: bool,
         strategy_runtime = container.resolve(StrategyRuntime)
         asyncio.get_event_loop().create_task(strategy_runtime.run())
         asyncio.get_event_loop().run_forever()
-
     except KeyboardInterrupt:
-        logging.info('KeyboardInterrupt')
+        logging.debug('KeyboardInterrupt')
         stop_loop(loop)
         exit()
+    except SystemExit:
+        logging.debug('SystemExit')
+        os._exit(0)
 
 
 if __name__ == '__main__':

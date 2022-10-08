@@ -33,7 +33,7 @@ from trader.trading.book import BookSubject
 from trader.trading.executioner import TradeExecutioner
 from trader.trading.portfolio import Portfolio
 # from trader.trading.strategy import Strategy
-from typing import Dict, List, Optional, Union
+from typing import cast, Dict, List, Optional, Union
 
 import asyncio
 import backoff
@@ -346,7 +346,8 @@ class Trader(metaclass=Singleton):
         self,
         contract: Contract,
         action: Action,
-        equity_amount: float,
+        equity_amount: Optional[float],
+        quantity: Optional[float],
         limit_price: Optional[float],
         market_order: bool,
         stop_loss_percentage: float,
@@ -359,22 +360,25 @@ class Trader(metaclass=Singleton):
             raise ValueError('limit_price specified but invalid: {}'.format(limit_price))
         if stop_loss_percentage >= 1.0 or stop_loss_percentage < 0.0:
             raise ValueError('stop_loss_percentage invalid: {}'.format(stop_loss_percentage))
+        if not equity_amount and not quantity:
+            raise ValueError('equity_amount or quantity need to be specified')
 
         # grab the latest price of instrument
         latest_tick: Ticker = await self.client.get_snapshot(contract, delayed=False)
         order_price = 0.0
 
-        # assess if we should trade
-        quantity = equity_amount / latest_tick.bid
+        if not quantity and equity_amount:
+            # assess if we should trade
+            quantity = equity_amount / latest_tick.bid
 
-        if quantity < 1 and quantity > 0:
-            quantity = 1.0
+            if quantity < 1 and quantity > 0:
+                quantity = 1.0
 
-        # round the quantity
-        quantity_int = round(quantity)
+            # toddo round the quantity, but probably shouldn't do this given IB supports fractional shares.
+            quantity = round(quantity)
 
         logging.debug('handle_order assessed quantity: {} on bid: {}'.format(
-            quantity_int, latest_tick.bid
+            quantity, latest_tick.bid
         ))
 
         if limit_price:
@@ -417,19 +421,19 @@ class Trader(metaclass=Singleton):
         order: Order = Order()
 
         if market_order and stop_loss_price > 0:
-            order = StopOrder(action=str(action), totalQuantity=quantity_int, stopPrice=stop_loss_price)
+            order = StopOrder(action=str(action), totalQuantity=cast(float, quantity), stopPrice=stop_loss_price)
         elif market_order and stop_loss_price == 0.0:
-            order = MarketOrder(action=str(action), totalQuantity=quantity_int)
+            order = MarketOrder(action=str(action), totalQuantity=cast(float, quantity))
 
         if not market_order and stop_loss_price > 0:
             order = StopLimitOrder(
                 action=str(action),
-                totalQuantity=quantity_int,
+                totalQuantity=cast(float, quantity),
                 lmtPrice=order_price,
                 stopPrice=stop_loss_price
             )
         elif not market_order and stop_loss_price == 0.0:
-            order = LimitOrder(action=str(action), totalQuantity=quantity_int, lmtPrice=order_price)
+            order = LimitOrder(action=str(action), totalQuantity=cast(float, quantity), lmtPrice=order_price)
 
         disposable = await self.place_order(contract=contract, order=order, observer=subject)
         return disposable

@@ -70,7 +70,7 @@ jobs:
         - tws
       delay: 5
     - name: trader_service
-      description: the host service for all algo trading
+      description: service that abstracts over and interfaces with Interactive Brokers
       command: python3
       arguments: trader_service.py
       start: "* * * * *"
@@ -80,3 +80,15 @@ jobs:
       depends_on:
         - tws
       delay: 20
+    - name: strategy_service
+      description: service that loads, hosts and executes trading strategies and algorithms
+      command: python3
+      arguments: strategy_service.py
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_found: True
+      restart_if_finished: True
+      depends_on:
+        - tws
+        - trader_service
+      delay: 5
