@@ -17,7 +17,7 @@ Features include:
 - [x] Interactive brokers historical data collection
 - [x] Login; logoff; get positions; get portfolio;
 - [x] Subscribe to bars, subscribe to ticks
-- [ ] Place, cancel, update orders (partially working)
+- [ ] Place, cancel, update orders (mostly working)
 - [ ] Backtesting
 - [ ] Risk analysis
 - [ ] Add/remove strategies
@@ -37,54 +37,69 @@ $ ./docker.sh --build  # builds the mmr image (default name mmr-image)
 $ ./docker.sh --run    # runs the mmr image in a container (default name mmr-container); automatically ssh'es into the container to continue TWS configuration
 ```
 
-![Docker build](docs/docker_build.png)
+![Docker build](docs/2022-10-08-09-30-05.png)
 
 The script will build the docker image and run a container instance for you.
 
 Once it's built and running, ssh into the container to continue the installation and configuration of Trader Workstation:
 
 ```
->> build complete
+>> 0a97a73dcbccdeadd6b7f9abee1a945dfb1d909b78255a72f97e156063ac4bf1
+>>
+>> ip address: 172.17.0.2
 >> ssh into container via trader@localhost -p 2222, password 'trader'
 
 $ ssh trader@localhost -p 2222
 ```
 
-![ssh](docs/ssh.png)
+![](docs/2022-10-08-09-34-11.png)
+
 
 Enter your Trader Workstation username and password. The script will proceed to automatically install the latest Trader Workstation version.
 
-After this has completed, it will start a tmux session with two commands:
+After this has completed, it will start a [tmux](https://github.com/tmux/tmux/wiki) session with two commands:
 
-* `pycron` (MMR's process spawner and scheduler) which handles the process scheduling, maintenance and uptime of ArcticDB, Redis, X Windows, and Trader Workstation, ready for automatic trading.
+* `pycron` (MMR's process spawner and scheduler) which handles the process scheduling, maintenance and uptime of the mmr trading runtime, ArcticDB, Redis, X Windows, and Trader Workstation, ready for automatic trading. You can manually call this by: ```python3 pycron/pycron.py --config ./configs/pycron.yaml```
 * `cli` which is command line interface to interact with the trading system (check portfolio, check systems, manually create orders etc). You can manually call this using ```python3 cli.py```.
+* `info` a simple realtime dashboard that observes the mmr runtime. Displays positions, portfolio, and strategy logs.
+* `trader_service_log` displays the trader service log real time (see below for information on this service).
+* `strategy_service_log` displays the trader service log real time.
 
-![mmr cli](docs/tmux.png)
+![](docs/2022-10-08-09-43-06.png)
 
-First thing you should do is populate the symbols universe. By default, it grabs the symbols and Interactive Brokers contract id's [conId] for NASDAQ and ASX exchanges):
+When starting mmr for the first time, there are a couple of things you should do:
+
+#### Checking mmr status:
+
+* ```status```
+
+![](docs/2022-10-08-09-52-53.png)
+
+#### Bootstrapping the symbol universes
+
+After ensuring everything is connected and functioning, you should bootstrap the population of the "symbol universe". This is mmr's cache of most of Interactive Brokers tradeable instruments, mapping symbol to IB contract ID (i.e. AMD -> 4931).
 
 * ```universes bootstrap```
 
 ![universes cli](docs/universes.png)
 
-A Universe is a collection of symbols/conIds to which you can apply your trading algo's to. You can resolve a symbol to universe via:
+This command will grab the symbols for NYSE, NASDAQ, ASX, LSE, CFE, GLOBEX, NYMEX, CBOE, NYBOT, and ICEUS and stash them in their respective "universes". The command typically takes a good couple of hours to complete.
+
+A Universe (like "NASDAQ") is a collection of symbols and their respective Interactive Brokers contract id's to which you can apply your trading algo's to. You can resolve a symbol to universe and contract id via:
 
 * ```resolve --symbol AMD```
 
 ![mmr resolve](docs/resolve.png)
 
-Bootstrapping the universe full of symbols and the respective Interactive Broker conId's for those symbols is straightforward. It takes an hour or two, and will populate the NASDAQ, NYSE, LSE and ASX universes with stocks, indicies and etf's:
+From here you're good to go: either using the `cli` to push manual trades to IB, or by implementing an algo, through extending the `Strategy` abstract class. An example of a strategy implementation can be found [here](https://github.com/9600dev/mmr/blob/master/strategies/smi_crossover.py). There's still a lot to do here, and the implementation of the strategy runtime changes often.
 
-* ```universes bootstrap```
+## Debugging Things
 
-![](docs/2022-07-14-08-26-54.png)
-
-You can also VNC into the Docker container also, which will allow you to interact with the running instance of TWS workstation. Screenshot below shows [TigerVNC](https://tigervnc.org/) viewing a stalled TWS instance waiting for authentication.
+You can VNC into the Docker container which will allow you to interact with the running instance of TWS workstation. Screenshot below shows [TigerVNC](https://tigervnc.org/) viewing a stalled TWS instance waiting for authentication:
 
 ![](docs/2022-06-03-08-58-08.png)
 
-
-### Running Things Manually
+### Trading Manually from the Command Line
 
 There are two ways to perform trades and inspect the mmr runtime manually: from the command line, or through the CLI helper.
 

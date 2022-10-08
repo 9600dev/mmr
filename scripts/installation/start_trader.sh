@@ -90,5 +90,7 @@ if [ -z "${TMUX}" ]
 then
         echo "starting new tmux session for mmr trader"
         cd /home/trader/mmr
+        touch logs/trader_service.log
+        touch logs/strategy_service.log
         tmux new-session -d -n pycron 'echo; echo "Ctrl-b + n [next window], Ctrl-b + p [previous window]"; echo; python3 pycron/pycron.py --config ./configs/pycron.yaml' \; new-window -d -n cli python3 cli.py \; new-window -d -n dashboard python3 info.py \; new-window -d -n trader_service_log lnav logs/trader_service.log \; new-window -d -n strategy_service_log lnav logs/strategy_service.log \; attach
 fi

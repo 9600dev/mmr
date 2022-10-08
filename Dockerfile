@@ -122,6 +122,10 @@ COPY ./scripts/installation/config.py /home/trader/.configs/qtile
 RUN --mount=type=cache,target=/root/.cache \
    pip3 install qtile
 
+RUN touch /home/trader/.hushlogin
+RUN touch /home/trader/mmr/logs/trader_service.log
+RUN touch /home/trader/mmr/logs/strategy_service.log
+
 # data needs to be copied manually?
 # COPY ./data/ib_symbols_nyse_nasdaq.csv /home/trader/mmr/data/ib_symbols_nyse_nasdaq.csv
 # COPY ./data/symbols_historical.csv /home/trader/mmr/data/symbols_historical.csv
