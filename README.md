@@ -93,11 +93,24 @@ A Universe (like "NASDAQ") is a collection of symbols and their respective Inter
 
 From here you're good to go: either using the `cli` to push manual trades to IB, or by implementing an algo, through extending the `Strategy` abstract class. An example of a strategy implementation can be found [here](https://github.com/9600dev/mmr/blob/master/strategies/smi_crossover.py). There's still a lot to do here, and the implementation of the strategy runtime changes often.
 
-## Debugging Things
+### Manual Installation
 
-You can VNC into the Docker container which will allow you to interact with the running instance of TWS workstation. Screenshot below shows [TigerVNC](https://tigervnc.org/) viewing a stalled TWS instance waiting for authentication:
+If you want to YOLO the install, and you're on Ubuntu or a derivative, you can try running the ```native_install.sh``` script. Otherwise, this might get you close enough:
 
-![](docs/2022-06-03-08-58-08.png)
+* Clone this repository into /home/trader/mmr directory
+* Create a user 'trader' (or chown a new /home/trader directory)
+* Install [Trader Workstation](https://download2.interactivebrokers.com/installers/tws/latest-standalone/tws-latest-standalone-linux-x64.sh)
+* Install IBC: https://github.com/IbcAlpha/IBC into /home/trader/ibc
+* Copy ``scripts/installation/config.ini`` and ``scripts/installation/twstart.sh`` into /home/trader/ibc directory. Adjust both of those files to reflect the TWS version you installed.
+* Make sure ~/ibc/logs and ~/mmr/logs directories are created
+* Install MongoDB: https://docs.mongodb.com/manual/installation/
+* Install Arctic Database (Mongo wrapper basically): https://github.com/man-group/arctic
+* Install Python >= 3.9.5
+* Install Pip and then ```pip3 install -r requirements.txt```
+* Install Redis via ```sudo apt install redis-server```
+* Start pycron:
+ 	* ```cd /home/trader/mmr/pycron```
+ 	* ```python3 pycron.py ../configs/pycron.yaml```
 
 ### Trading Manually from the Command Line
 
@@ -128,33 +141,48 @@ There's also a terminal based dashboard to quickly inspect the runtime, orders, 
 ![](docs/2022-09-30-10-48-12.png)
 
 
-### Manual Installation
+### cli.py commands
 
-If you want to YOLO the install, and you're on Ubuntu or a derivative, run the ```native_install.sh``` script, otherwise:
+You can choose to use the REPL (read eval print loop) via ```python3 cli.py``` or by invoking the command directly from the command line, i.e. ```/home/trader/mmr $] python3 cli.py trade --symbol AMD --buy --market --amount 100.0```
 
-* Clone this repository into /home/trader/mmr directory
-* Create a user 'trader' (or chown a new /home/trader directory)
-* Install [Trader Workstation](https://download2.interactivebrokers.com/installers/tws/latest-standalone/tws-latest-standalone-linux-x64.sh)
-* Install IBC: https://github.com/IbcAlpha/IBC into /home/trader/ibc
-* Copy ``scripts/installation/config.ini`` and ``scripts/installation/twstart.sh`` into /home/trader/ibc directory. Adjust both of those files to reflect the TWS version you installed.
-* Make sure ~/ibc/logs and ~/mmr/logs directories are created
-* Install MongoDB: https://docs.mongodb.com/manual/installation/
-* Install Arctic Database (Mongo wrapper basically): https://github.com/man-group/arctic
-* Install Python 3.9.5
-* Install Pip and then ```pip3 install -r requirements.txt```
-* Install Redis via ```sudo apt install redis-server```
-* Start pycron:
- 	* ```cd /home/trader/mmr/pycron```
- 	* ```python3 pycron.py ../configs/pycron.yaml```
+| Command       | Sub Commands | Help |
+| :-------------| ----:|:------|
+| book          | cancel orders trades | shows the current order book |
+| clear         | | clears the screen |
+| company-info  | | shows company financials when connected to polygon.io [in progress] |
+| exit          || exits the cli |
+| history       | bar-sizes get-symbol-history-ib get-universe-history-ib jobs read security summary | retrieves historical price data from IB or Polygon.io (in progress) for a given security or universe. Use "history bar-sizes" for a list of bar sizes supported |
+| option        | plot | gets option data for a given date and plots a histogram of future price |
+| portfolio     | | shows the current portfolio |
+| positions     | | shows current positions |
+| pycron        | | shows pycron status |
+| reconnect     | | reconnects to Interactive Brokers TWS |
+| resolve       | | resolves a symbol (i.e. AMD) to a universe and IB connection ID |
+| snapshot      | | gets a price snapshot (delayed or realtime) for a given symbol |
+| status        | | checks the status of all services and systems |
+| strategy      | enable list | lists, enables and disables loaded strategies |
+| subscribe     | list listen portfolio start universe | subscribes to tick data for a given symbol or universe, optionally displays tick changes to console |
+| trade         | | creates buy and sell orders (market, limit) with or without stop loss |
+| universes     | add-to-universe bootstrap create destroy get list | creates and deletes universes; adds securities to a given universe; bootstraps universes from IB |
 
+## Implementing an Automated Algorithm/Strategy
 
-## Implementing an Algo
+TODO:// explain how to do this once it's fully coded.
 
-TODO:// explain how to do this once it's coded.
+## Debugging
 
-## Other Stuff
+You can VNC into the Docker container which will allow you to interact with the running instance of TWS workstation. Screenshot below shows [TigerVNC](https://tigervnc.org/) viewing a stalled TWS instance waiting for authentication:
 
-TODO:// explain how all this stuff works.
+![](docs/2022-06-03-08-58-08.png)
+
+Otherwise, tail the following:
+
+* logs/trader.log for most module level debug output
+* logs/error.log for critical/error logs
+* logs/trader_service.log
+* logs/strategy_service.log
+
+## Random
 
 * ```trader/batch``` directory has the batch services, which allow you to queue up and download historical data from IB or Polygon.io.
   * ```python3 history_queuer.py --contracts ../../data/ib_symbols_nyse_nasdaq.csv --prev_days 30``` download 30 days worth of 1 minute data for all stocks listed in ib_symbols_nyse_nasdaq.csv.
@@ -163,14 +191,8 @@ TODO:// explain how all this stuff works.
   * The ```*_batch.py``` files contain the classes that are invoked from ```rq```
 * ```trader/scripts``` directory contains a bunch of helpers to grab the complete lists of symbols from various exchanges around the world; contains symbol -> interactive broker 'conId' resolution (```ib_resolve.py```) and more.
 * ```trader/scripts/trader_check.py``` will do a bunch of system checks to make sure all services are up, and interactive brokers is responding
-* ```trader/listeners/ib_listener.py``` and ```trader/listeners/ibrx.py``` is the RxPy concurrency wrapper around the Interactive Brokers API. It is what you program against.
+* ```trader/listeners/ibreactivex.py``` is the RxPY concurrency wrapper around the Interactive Brokers API. If you're not familiar with reactive programming, start with the RxPY website.
 * ```pycron/pycron.py```is the workhorse for process scheduling. It makes sure all services and processes are continuously running (restarting if they're not) and checks for dependencies. It will also start, stop and restart services on a crontab like schedule.
-* Want a complete list of symbols from NASDAQ and NYSE?
-  * ```python3 scripts/eoddata_scraper.py --exchange NASDAQ --csv_output_file NASDAQ.csv```
-  * ```python3 scripts/eoddata_scraper.py --exchange NYSE --csv_output_file NYSE.csv```
-  * ```cat NASDAQ.CSV NYSE.csv > complete.csv```
-  * Add the Interactive Brokers 'conId' column:
-  * ```python3 ib_resolve.py --csv_file complete.csv --csv_output_file ib_symbols_nyse_nasdaq.csv```
 * Docker build failing, not being able to resolve DNS? Try:
   * sudo pkill docker
   * sudo iptables -t nat -F
@@ -213,18 +235,17 @@ Pycron deals with scheduling, starting, stopping and restarting processes, servi
 * Runs periodic health checks
 * Has a small tornado based webservice that allows for remote control of processes
 
+[todo explain the other services]
 
 # Backlog
 
-* right now, we use EOD data to gather instrument names, we should instead scrape: https://www.interactivebrokers.com/en/index.php?f=products
 * timezonify should move everything that's deailing with internal timezones to timezone.utc
 * there's a timezoneTWS property on IB that gives you the TWS instance timeframe, use that.
 * Move timezoneify logic to the SecurityDefinition class, so that timezone updates to dt.datetime's are local to the security/market
 * ```listener_helpers.py``` and ```helpers.py``` need to be consolidated.
 * The batch queuing stuff is a bit wonky (there's a subclass there ```queuer.py``` but it's doesn't have the right abstraction). Given batch data downloads is going to be important, should probably clean all this up.
-* ```ib_listener.py``` is incomplete, and definitely lacks testing. Should be super rigorous on this, as it's the foundation for all trade and price routing.
 * There's no testing framework setup, and no test coverage. Setup test framework. Add tests.
-* For all the command line tools, we have switches that are 'defaulted' to 127.0.0.1 etc, but we also have ```configs/trader.yaml``` configuration file. Reconcile these two. We probably need some sort of dependency injection/configuration injection style thing, I dunno.
+* For all the command line tools, we have switches that are 'defaulted' to 127.0.0.1 etc, but we also have ```configs/trader.yaml``` configuration file. Reconcile these two. We probably need some sort of dependency injection/configuration injection style thing.
 
 # License
 
