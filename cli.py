@@ -27,13 +27,13 @@ from trader.common.helpers import contract_from_dict, DictHelper, rich_dict, ric
 from trader.common.logging_helper import setup_logging
 from trader.common.reactivex import SuccessFail
 from trader.container import Container
-from trader.data.data_access import Data, DictData, TickData
+from trader.data.data_access import DictData, TickData, TickStorage
 from trader.data.market_data import MarketData
 from trader.data.universe import Universe, UniverseAccessor
-from trader.listeners.ib_history_worker import IBHistoryWorker
 from trader.listeners.ibreactive import IBAIORx
 from trader.messaging.clientserver import RemotedClient
 from trader.messaging.trader_service_api import TraderServiceApi
+from trader.objects import BarSize
 from typing import Any, Dict, List, Optional, Union
 
 import asyncio
@@ -142,14 +142,14 @@ history.add_command(ib_history_queuer.get_symbol_history_ib)
 def history_summary(
     universe: str,
     arctic_server_address: str,
-    arctic_library: str,
     arctic_universe_library: str,
     **args,
 ):
+    raise ValueError('needs to be refactored, changed how we index on tickdata')
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
     u = accessor.get(universe)
 
-    history_dbs = [x for x in Data.list_libraries(arctic_server_address) if u.name in x and '_' in x]
+    history_dbs = [x for x in TickStorage(arctic_server_address).list_libraries() if u.name in x and '_' in x]
     for history_db in history_dbs:
         tick_data = TickData(arctic_server_address, history_db)
         examples: List[str] = tick_data.list_symbols()[0:10]
@@ -176,24 +176,14 @@ def history_read(
     universe: str,
     bar_size: str,
     arctic_server_address: str,
-    arctic_library: str,
     arctic_universe_library: str,
     **args,
 ):
-    accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
-    results: List[Dict[str, Any]] = __resolve(symbol, arctic_server_address, arctic_universe_library)
-    results = [x for x in results if x['universe'] == universe]
+    results: List[Contract] = __resolve_contract(symbol, arctic_server_address, arctic_universe_library)
+    bar_size_enum = BarSize.parse_str(bar_size)
+
     if len(results) >= 1:
-        r = results[0]
-        tick_data = TickData(arctic_server_address, IBHistoryWorker.history_to_library_hash(universe, bar_size))
-        contract = Contract(
-            conId=r['conId'],
-            symbol=r['symbol'],
-            exchange=r['exchange'],
-            primaryExchange=r['primaryExchange'],
-            currency=r['currency']
-        )
-        data = tick_data.read(contract)
+        data = TickStorage(arctic_server_address).get_tickdata(bar_size_enum).read(results[0])
         rich_table(data, csv=True, include_index=True)
 
 
@@ -201,9 +191,6 @@ def history_read(
 @common_options()
 @default_config()
 def history_jobs(
-    arctic_server_address: str,
-    arctic_library: str,
-    arctic_universe_library: str,
     **args,
 ):
     container = Container()
@@ -220,7 +207,6 @@ def history_security(
     symbol: str,
     primary_exchange: str,
     arctic_server_address: str,
-    arctic_library: str,
     arctic_universe_library: str,
     **args,
 ):
@@ -240,16 +226,15 @@ def history_security(
                 return accessor.get(u)
         return None
 
-    history_dbs = [x for x in Data.list_libraries(arctic_server_address) if in_universes(x) and '_' in x]
-    for history_db in history_dbs:
-        tick_data = TickData(arctic_server_address, history_db)
-        results: List[Dict[str, Any]] = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
-        output = []
+    results: List[Dict[str, Any]] = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
+    history_bar_sizes = TickStorage(arctic_server_address).list_libraries_barsize()
+    output = []
 
-        history_universe = get_universe(history_db)
+    for result in results:
+        for history_bar_size in history_bar_sizes:
+            tick_data = TickStorage(arctic_server_address).get_tickdata(history_bar_size)
 
-        for dict in results:
-            if history_universe and dict['universe'] == history_universe.name:
+            for dict in results:
                 try:
                     start_date, end_date = tick_data.date_summary(int(dict['conId']))
                     output.append({
@@ -262,13 +247,12 @@ def history_security(
                     })
                 except NoDataFoundException:
                     pass
-
-        rich_table(output)
+    rich_table(output)
 
 
 @history.command('bar-sizes')
 def history_bar_sizes():
-    rich_list(IBHistoryWorker.bar_sizes())
+    rich_list(BarSize.bar_sizes())
 
 
 @main.command()
@@ -373,6 +357,24 @@ def __resolve(
                 'minTick': definition.minTick,
             })
     return [r for r in results if primary_exchange in r['primaryExchange']]
+
+
+def __resolve_contract(
+    symbol: Union[str, int],
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    primary_exchange: Optional[str] = ''
+) -> List[Contract]:
+    results = []
+    descriptions = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
+    for result in descriptions:
+        results.append(Contract(
+            conId=result['conId'],
+            symbol=result['symbol'],
+            exchange=result['exchange'],
+            currency=result['currency'],
+        ))
+    return results
 
 
 @main.command()

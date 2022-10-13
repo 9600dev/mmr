@@ -10,6 +10,7 @@ from ib_insync.contract import Contract, ContractDetails
 from pandas.core.base import PandasObject
 from trader.common.helpers import daily_close, daily_open, dateify, market_hours, symbol_to_contract
 from trader.common.logging_helper import setup_logging
+from trader.objects import BarSize
 from typing import cast, Generic, List, NamedTuple, Optional, Set, Tuple, TypeVar, Union
 
 import datetime as dt
@@ -91,6 +92,26 @@ class SecurityDefinition:
             industry=d.industry,
         )
 
+
+@dataclass(eq=True, frozen=True)
+class MMRBarData():
+    date: dt.datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    average: float
+    bar_count: int
+    bar_size: int
+    what_to_show: int
+
+    @staticmethod
+    def has_schema(data_frame: pd.DataFrame) -> bool:
+        for column in MMRBarData.__annotations__.keys():
+            if column not in data_frame.columns:
+                return False
+        return True
 
 class IBTradeConfirm(NamedTuple):
     accountId: str
@@ -261,6 +282,9 @@ class IBSLBFee(NamedTuple):
     toAcct: str
 
 
+T = TypeVar('T')
+
+
 class Data():
     def __init__(self,
                  arctic_server_address: str,
@@ -323,12 +347,6 @@ class Data():
     def list_symbols(self) -> List[str]:
         return self.library.list_symbols()
 
-    @staticmethod
-    def list_libraries(arctic_server_address: str) -> List[str]:
-        store = Arctic(arctic_server_address)
-        return store.list_libraries(1)
-
-T = TypeVar('T')
 
 class DictData(Data, Generic[T]):
     def __init__(self,
@@ -541,3 +559,43 @@ class TickData(Data):
             data_frame = self.history(symbol_to_contract(symbol))
             data_frame.index.name = 'date'
             data_frame.to_csv(csv_file_location + '/' + symbol + '.csv', header=True)
+
+
+class TickStorage():
+    def __init__(
+        self,
+        arctic_server_address: str
+    ):
+        self.arctic_server_address = arctic_server_address
+        self.store = Arctic(self.arctic_server_address)
+
+    def list_libraries(self) -> List[str]:
+        libraries = self.store.list_libraries(1)
+        return [x for x in libraries if x in BarSize.bar_sizes()]
+
+    def list_libraries_barsize(self) -> List[BarSize]:
+        libraries = self.store.list_libraries(1)
+        return [BarSize.parse_str(x) for x in self.list_libraries()]
+
+    def get_tickdata(self, bar_size: BarSize):
+        # todo: sharding this by bar_size doesn't seem right, but
+        # neither does universe_name + bar_size
+        library_name = TickStorage.history_to_library_hash(bar_size)
+        library = TickData(self.arctic_server_address, library_name)
+        return library
+
+    def read(
+        self,
+        contract: Union[Contract, SecurityDefinition, int],
+        date_range: DateRange = DateRange(dt.datetime(1970, 1, 1), dt.datetime.now())
+    ) -> pd.DataFrame:
+        results = pd.DataFrame()
+
+        for bar_size in self.list_libraries_barsize():
+            result = self.get_tickdata(bar_size).read(contract=contract, date_range=date_range)
+            results = pd.concat([results, result])
+        return results
+
+    @staticmethod
+    def history_to_library_hash(bar_size: BarSize):
+        return str(bar_size)

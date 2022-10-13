@@ -1,9 +1,10 @@
+from datetime import timedelta
 from ib_insync import Contract
 from logging import Logger
 from trader.data.data_access import TickData
 from trader.data.universe import UniverseAccessor
-from trader.objects import Action
-from trader.trading.strategy import Signal, Strategy, StrategyState
+from trader.objects import Action, BarSize
+from trader.trading.strategy import Signal, Strategy, StrategyConfig, StrategyState
 from typing import Optional, Tuple
 
 import pandas as pd
@@ -11,6 +12,11 @@ import trader.strategy.strategy_runtime as runtime
 import vectorbt as vbt
 
 
+@StrategyConfig(
+    universe_symbol_pairs=[('NASDAQ', '4391'), ('ASX', '34805876')],
+    bar_size=BarSize.Mins1,
+    historical_data_timedelta=timedelta(days=180),
+)
 class SMICrossOver(Strategy):
     def __init__(
         self,

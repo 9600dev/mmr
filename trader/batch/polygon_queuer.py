@@ -1,33 +1,29 @@
-from re import I
-import sys
+
 import os
+import sys
+
+
+# todo this needs a lot of work
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
 PACKAGE_PARENT = '../..'
 SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
-import datetime as dt
-import ib_insync as ibapi
-import click
-import pandas as pd
-import backoff
-
 from trader.common.logging_helper import setup_logging
+
+import click
+import datetime as dt
+import pandas as pd
+
+
 logging = setup_logging(module_name='history_job')
 
-from redis import Redis
-from rq import Queue
-from rq.job import Job
-from ib_insync import Stock, IB, Index, Contract, Ticker, BarDataList
-from dateutil.tz import tzlocal
-from typing import Tuple, List, Optional
-
-from trader.data.data_access import TickData
-from trader.common.helpers import date_range, dateify, day_iter, get_exchange_calendar, pdt
-from trader.listeners.polygon_listener import PolygonListener
+from trader.batch.polygon_batch import PolygonQueuer
+from trader.common.helpers import dateify
 from trader.common.listener_helpers import Helpers
-from trader.batch.polygon_batch import PolygonWorker, PolygonQueuer
+from trader.data.data_access import TickData
+
 
 @click.command()
 @click.option('--contracts', required=False, help='filename or comma seperated list of IB conIds')

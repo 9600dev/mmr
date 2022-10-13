@@ -23,7 +23,7 @@ from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.helpers import ListHelper
 from trader.common.logging_helper import get_callstack, setup_logging
 from trader.common.singleton import Singleton
-from trader.data.data_access import SecurityDefinition, TickData
+from trader.data.data_access import SecurityDefinition, TickStorage
 from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
@@ -55,7 +55,6 @@ class Trader(metaclass=Singleton):
                  ib_server_address: str,
                  ib_server_port: int,
                  arctic_server_address: str,
-                 arctic_library: str,
                  arctic_universe_library: str,
                  redis_server_address: str,
                  redis_server_port: str,
@@ -68,7 +67,6 @@ class Trader(metaclass=Singleton):
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
         self.arctic_server_address = arctic_server_address
-        self.arctic_library = arctic_library
         self.arctic_universe_library = arctic_universe_library
         self.simulation: bool = simulation
         self.paper_trading = paper_trading
@@ -82,7 +80,7 @@ class Trader(metaclass=Singleton):
         # todo I think you can have up to 24 connections to TWS (and have multiple TWS instances running)
         # so we need to take this from single client, to multiple client
         self.client: IBAIORx
-        self.data: TickData
+        self.data: TickStorage
         self.universe_accessor: UniverseAccessor
 
         # the live ticker data streams we have
@@ -134,7 +132,7 @@ class Trader(metaclass=Singleton):
     def connect(self):
         try:
             self.client = IBAIORx(self.ib_server_address, self.ib_server_port)
-            self.data = TickData(self.arctic_server_address, self.arctic_library)
+            self.data = TickStorage(self.arctic_server_address)
             self.universe_accessor = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
             self.universes = self.universe_accessor.get_all()
             self.clear_portfolio_universe()

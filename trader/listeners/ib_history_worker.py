@@ -5,7 +5,7 @@ from trader.common.helpers import dateify, timezoneify
 from trader.common.logging_helper import setup_logging
 from trader.data.data_access import SecurityDefinition
 from trader.data.universe import Universe
-from trader.objects import WhatToShow
+from trader.objects import BarSize, WhatToShow
 from typing import List, Optional, Union
 
 import asyncio
@@ -50,18 +50,6 @@ class IBHistoryWorker():
                                                                                           errorString,
                                                                                           contract))
 
-    @staticmethod
-    def history_to_library_hash(universe: str, bar_size: str):
-        joined = universe + '_' + bar_size
-        return joined.replace(' ', '_')
-
-    @staticmethod
-    def bar_sizes():
-        bar_sizes = ['1 secs', '5 secs', '10 secs', '15 secs', '30 secs', '1 min', '2 mins', '3 mins', '5 mins',
-                    '10 mins', '15 mins', '20 mins', '30 mins', '1 hour', '2 hours', '3 hours', '4 hours', '8 hours',
-                    '1 day', '1 week', '1 month']
-        return bar_sizes
-
     async def connect(self):
         async with self.lock:
             if self.connected:
@@ -102,7 +90,7 @@ class IBHistoryWorker():
         self,
         security: Union[Contract, SecurityDefinition],
         what_to_show: WhatToShow,
-        bar_size: str,
+        bar_size: BarSize,
         start_date: dt.datetime,
         end_date: dt.datetime,
         filter_between_dates: bool = True,
@@ -131,11 +119,11 @@ class IBHistoryWorker():
         # 24 hours
         duration_step_size = '86400 S'
 
-        if bar_size == '1 day':
+        if str(bar_size) == '1 day':
             duration_step_size = '10 Y'
-        if bar_size == '1 hour':
+        if str(bar_size) == '1 hour':
             duration_step_size = '4 Y'
-        if bar_size == '2 hours':
+        if str(bar_size) == '2 hours':
             duration_step_size = '1 Y'
 
         # we say that the 'end date' is the start of the day after
@@ -161,7 +149,7 @@ class IBHistoryWorker():
                 contract,
                 endDateTime=current_date,
                 durationStr=duration_step_size,
-                barSizeSetting=bar_size,
+                barSizeSetting=str(bar_size),
                 whatToShow=str(what_to_show),
                 useRTH=False,
                 formatDate=1,
@@ -174,7 +162,7 @@ class IBHistoryWorker():
 
             if result:
                 df_result = ib_insync.util.df(result).set_index('date')
-                df_result['bar_size'] = bar_size
+                df_result['bar_size'] = str(bar_size)
                 df_result['what_to_show'] = int(what_to_show)
                 df_result.rename({'barCount': 'bar_count'}, inplace=True, axis=1)
 
@@ -214,7 +202,7 @@ class IBHistoryWorker():
                     'volume': [np.nan],
                     'average': [np.nan],
                     'bar_count': [np.nan],
-                    'bar_size': [bar_size],
+                    'bar_size': [str(bar_size)],
                     'what_to_show': int(what_to_show),
                 }
                 temp_row = pd.DataFrame.from_dict(null_row)

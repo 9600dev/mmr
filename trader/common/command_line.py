@@ -226,10 +226,6 @@ def common_options():
             help='arctic library that describes securities universes, eg: Universes'
         )(function)
         function = click.option(
-            '--arctic_library',
-            help='arctic library for historical data'
-        )(function)
-        function = click.option(
             '--arctic_server_address',
             help='arctic server address, eg: 127.0.0.1'
         )(function)

@@ -42,10 +42,10 @@ class Universe():
 class UniverseAccessor():
     def __init__(self, arctic_server_address: str, arctic_universe_library: str):
         self.arctic_server_address = arctic_server_address
-        self.arctic_library = arctic_universe_library
+        self.arctic_universe_library = arctic_universe_library
         self.store = Arctic(self.arctic_server_address)
-        self.store.initialize_library(self.arctic_library, lib_type=VERSION_STORE)
-        self.library: VersionStore = self.store[self.arctic_library]
+        self.store.initialize_library(self.arctic_universe_library, lib_type=VERSION_STORE)
+        self.library: VersionStore = self.store[self.arctic_universe_library]
 
     def list_universes(self) -> List[str]:
         result = self.library.list_symbols()

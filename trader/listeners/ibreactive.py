@@ -15,7 +15,7 @@ from trader.common.listener_helpers import Helpers
 from trader.common.logging_helper import setup_logging
 from trader.common.reactivex import EventSubject
 from trader.listeners.ib_history_worker import IBHistoryWorker
-from trader.objects import WhatToShow
+from trader.objects import BarSize, WhatToShow
 from typing import cast, Dict, List, Optional, Set, TypeVar, Union
 
 import asyncio
@@ -436,7 +436,7 @@ class IBAIORx():
 
     async def __get_contract_description_helper(
         self,
-        symbol: Union[str, int],
+        symbol: str,
         secType: str,
         primaryExchange: str,
         currency: str,
@@ -541,7 +541,7 @@ class IBAIORx():
         contract: Contract,
         start_date: dt.datetime,
         end_date: dt.datetime = dt.datetime.now(),
-        bar_size: str = '1 min',
+        bar_size: BarSize = BarSize.Mins1,
         what_to_show: WhatToShow = WhatToShow.MIDPOINT,
     ) -> pd.DataFrame:
         if self.history_worker and not self.history_worker.connected:

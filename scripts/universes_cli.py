@@ -71,6 +71,7 @@ def build_and_load_ib(
             ):
                 contract_details = asyncio.run(resolver.resolve_contract(instrument.to_contract()))
                 if contract_details:
+                    click.echo('adding instrument {} to universe {}'.format(instrument, market))
                     universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details))
             else:
                 logging.debug('instrument {} already found in a universe {}'.format(instrument, market))

@@ -5,6 +5,7 @@
 * Exporting requirements.txt from poetry for a Docker default pip install
 * We set AcceptIncomingConnectionAction=accept in IBC's config.ini, which should automatically accept incoming API connections to TWS. This is insecure, so either set it to "manual", or configure it yourself when you fire up TWS for the first time.
 * Arctic: don't ever call store.list_libraries() without specifying a cache reset parameter: store.list_libraries(1), otherwise you may get an old cache without the latest libraries you've built.
+* Remove the backoff stuff, implement this properly.
 
 ## What to do when things don't work
 

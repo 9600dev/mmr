@@ -1,13 +1,16 @@
 from abc import ABC, abstractmethod
+from datetime import timedelta
 from enum import IntEnum
 from logging import Logger
 from trader.data.data_access import TickData
 from trader.data.universe import UniverseAccessor
-from trader.objects import Action
-from typing import Optional
+from trader.objects import Action, BarSize
+from typing import List, Optional, Tuple
 
 import datetime as dt
 import pandas as pd
+
+
 # to avoid circular import
 
 
@@ -29,9 +32,30 @@ class Signal():
 
 class StrategyState(IntEnum):
     NOT_INSTALLED = 0,
-    RUNNING = 1,
-    DISABLED = 2,
-    ERROR = 3,
+    GETTING_HISTORICAL_DATA = 1,
+    RUNNING = 2,
+    DISABLED = 3,
+    ERROR = 4,
+
+
+def StrategyConfig(
+    universe_symbol_pairs: List[Tuple[str, str]] = [],
+    bar_size: BarSize = BarSize.Mins1,
+    historical_data_timedelta: Optional[timedelta] = None,
+    runs_when_crontab: Optional[str] = None,
+):
+    class StrategyWrapper:
+        def __init__(self, cls):
+            self.strategy_class = cls
+
+        def __call__(self, *cls_args):
+            strategy = self.strategy_class(*cls_args)
+            strategy.universe_symbol_pairs = universe_symbol_pairs
+            strategy.historical_data_timedelta = historical_data_timedelta
+            strategy.bar_size = bar_size
+            strategy.crontab = runs_when_crontab
+            return strategy
+    return StrategyWrapper
 
 
 class Strategy(ABC):
@@ -46,6 +70,12 @@ class Strategy(ABC):
         self.strategy_runtime = None
         self.logging = logging
         self.state = StrategyState.NOT_INSTALLED
+
+        # set by the StrategyConfig decorator
+        self.universe_symbol_pairs: List[Tuple[str, str]] = []
+        self.bar_size: BarSize = BarSize.Mins1
+        self.historical_data_timedelta: Optional[timedelta] = None
+        self.runs_when_crontab: Optional[str] = None
 
     @abstractmethod
     def install(self, strategy_runtime) -> bool:

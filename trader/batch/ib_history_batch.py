@@ -15,10 +15,10 @@ from trader.batch.queuer import Queuer
 from trader.common.helpers import dateify, pdt
 from trader.common.logging_helper import setup_logging
 from trader.container import Container
-from trader.data.data_access import SecurityDefinition, TickData
+from trader.data.data_access import SecurityDefinition, TickData, TickStorage
 from trader.data.universe import Universe
 from trader.listeners.ib_history_worker import IBHistoryWorker
-from trader.objects import WhatToShow
+from trader.objects import BarSize, WhatToShow
 from typing import cast, List
 
 import asyncio
@@ -35,20 +35,18 @@ class IBHistoryQueuer(Queuer):
         ib_server_address: str,
         ib_server_port: int,
         arctic_server_address: str,
-        universe: str,
-        bar_size: str,
+        bar_size: BarSize,
         redis_server_address: str,
         redis_server_port: int
     ):
         super().__init__(redis_queue='history',
                          redis_server_address=redis_server_address,
                          redis_server_port=redis_server_port)
-        self.data = TickData(arctic_server_address, IBHistoryWorker.history_to_library_hash(universe, bar_size))
+        self.data = TickStorage(arctic_server_address).get_tickdata(bar_size=bar_size)
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
         self.arctic_server_address = arctic_server_address
         self.bar_size = bar_size
-        self.universe = universe
 
     def queue_history(self,
                       security_definitions: List[SecurityDefinition],
@@ -80,9 +78,9 @@ class IBHistoryQueuer(Queuer):
                         ib_server_port=self.ib_server_port,
                         ib_client_id=client_id,
                         arctic_server_address=self.arctic_server_address,
-                        arctic_library=IBHistoryWorker.history_to_library_hash(self.universe, self.bar_size),
                         redis_server_address=self.redis_server_address,
-                        redis_server_port=self.redis_server_port)
+                        redis_server_port=self.redis_server_port
+                    )
 
                     job = self.enqueue(
                         history_worker.do_work,
@@ -98,19 +96,18 @@ class BatchIBHistoryWorker():
                  ib_server_port: int,
                  ib_client_id: int,
                  arctic_server_address: str,
-                 arctic_library: str,
                  redis_server_address: str,
                  redis_server_port: int):
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
         self.ib_client_id = ib_client_id
         self.arctic_server_address = arctic_server_address
-        self.arctic_library = arctic_library
         self.redis_server_address = redis_server_address
         self.redis_server_port = redis_server_port
+        self.storage: TickStorage
         self.data: TickData
 
-    def do_work(self, security: SecurityDefinition, start_date: dt.datetime, end_date: dt.datetime, bar_size: str) -> bool:
+    def do_work(self, security: SecurityDefinition, start_date: dt.datetime, end_date: dt.datetime, bar_size: BarSize) -> bool:
         setup_logging(module_name='batch_ib_history_worker', suppress_external_info=True)
 
         ib = cast(IB, Container().resolve(IB))
@@ -119,7 +116,7 @@ class BatchIBHistoryWorker():
             ib.connect(host=self.ib_server_address, port=self.ib_server_port, clientId=self.ib_client_id)
 
         self.ib_history = IBHistoryWorker(ib)
-        self.data = TickData(self.arctic_server_address, self.arctic_library)
+        self.data = TickStorage(self.arctic_server_address).get_tickdata(bar_size)
 
         logging.info('do_work: {} {} {} {}'.format(security.symbol, pdt(start_date), pdt(end_date), bar_size))
         # result = self.ib_history.get_and_populate_stock_history(cast(Stock, contract), bar_size, start_date, end_date)

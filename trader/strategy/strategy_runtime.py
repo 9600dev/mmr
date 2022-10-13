@@ -5,11 +5,11 @@ from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.listener_helpers import Helpers
 from trader.common.logging_helper import setup_logging
 from trader.common.singleton import Singleton
-from trader.data.data_access import TickData
+from trader.data.data_access import TickStorage
 from trader.data.universe import UniverseAccessor
 from trader.messaging.clientserver import RemotedClient, TopicPubSub
 from trader.messaging.trader_service_api import TraderServiceApi
-from trader.objects import Action
+from trader.objects import Action, BarSize
 from trader.trading.strategy import Strategy
 from typing import cast, Dict, List
 
@@ -32,7 +32,6 @@ error_table = {
 class StrategyRuntime(metaclass=Singleton):
     def __init__(self,
                  arctic_server_address: str,
-                 arctic_library: str,
                  arctic_universe_library: str,
                  zmq_pubsub_server_address: str,
                  zmq_pubsub_server_port: int,
@@ -42,7 +41,6 @@ class StrategyRuntime(metaclass=Singleton):
                  paper_trading: bool = False,
                  simulation: bool = False):
         self.arctic_server_address = arctic_server_address
-        self.arctic_library = arctic_library
         self.arctic_universe_library = arctic_universe_library
         self.simulation: bool = simulation
         self.paper_trading = paper_trading
@@ -54,13 +52,14 @@ class StrategyRuntime(metaclass=Singleton):
 
         # todo: this is wrong as we'll have a whole bunch of different tickdata libraries for
         # different bartypes etc.
-        self.data: TickData = TickData(self.arctic_server_address, self.arctic_library)
+        self.storage: TickStorage = TickStorage(self.arctic_server_address)
 
         self.accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
         self.remoted_client = RemotedClient[TraderServiceApi](error_table=error_table)
         self.strategies: Dict[int, List[Strategy]] = {}
         self.strategy_implementations: List[Strategy] = []
         self.streams: Dict[int, pd.DataFrame] = {}
+
 
     def load_strategies(self):
         for root, dirs, files in os.walk(self.strategies_directory):
@@ -74,10 +73,15 @@ class StrategyRuntime(metaclass=Singleton):
 
                         if inspect.isclass(obj) and issubclass(obj, Strategy) and obj is not Strategy:
                             logging.debug('found implementation of Strategy {}'.format(obj))
-                            instance = obj(self.data, self.accessor, logging)
+                            # todo: fix this
+                            # here's where we need bar_size to strategy
+                            instance = obj(self.storage.get_tickdata(BarSize.Mins1), self.accessor, logging)
                             self.strategy_implementations.append(cast(Strategy, instance))
+
+                            # logic to install and download data for the strategy
                             if instance.install(self):
                                 instance.enable()
+
                 except Exception as ex:
                     logging.debug(ex)
 

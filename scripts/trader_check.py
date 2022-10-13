@@ -13,7 +13,7 @@ from redis import Redis
 from rq import Queue
 from trader.common.logging_helper import setup_logging, suppress_all, verbose
 from trader.container import Container
-from trader.data.data_access import TickData
+from trader.data.data_access import TickStorage
 from trader.listeners.ibreactive import IBAIORx
 
 import asyncio
@@ -28,7 +28,6 @@ logging = setup_logging(module_name='trader_check')
 def test_platform(ib_server_address: str,
                   ib_server_port: int,
                   arctic_server_address: str,
-                  arctic_library: str,
                   redis_server_address: str,
                   redis_server_port: int) -> bool:
     succeeded = True
@@ -43,7 +42,7 @@ def test_platform(ib_server_address: str,
         logging.error('interactive brokers connection could not be made: {}'.format(ex))
         succeeded = False
     try:
-        data = TickData(arctic_server_address, arctic_library)
+        storage = TickStorage(arctic_server_address)
     except Exception as ex:
         logging.error('arctic database broken: {}'.format(ex))
         succeeded = False
@@ -63,12 +62,11 @@ def test_platform_config(config_file) -> bool:
     ib_server_address = container.config()['ib_server_address']
     ib_server_port = container.config()['ib_server_port']
     arctic_server_address = container.config()['arctic_server_address']
-    arctic_library = container.config()['arctic_library']
     redis_server_address = container.config()['redis_server_address']
     redis_server_port = container.config()['redis_server_port']
 
     result = test_platform(ib_server_address, ib_server_port, arctic_server_address,
-                           arctic_library, redis_server_address, redis_server_port)
+                           redis_server_address, redis_server_port)
     return result
 
 
@@ -92,14 +90,12 @@ def health_check(config_file) -> bool:
 @click.option('--ib_server_address', required=False, default='127.0.0.1', help='tws trader api address')
 @click.option('--ib_server_port', required=False, default=7496, help='port for tws server api')
 @click.option('--arctic_server_address', required=False, default='127.0.0.1', help='arctic server ip address: 127.0.0.1')
-@click.option('--arctic_library', required=False, default='Historical', help='tick store library name: Historical')
 @click.option('--redis_server_address', required=False, default='127.0.0.1', help='redis server ip address: 127.0.0.1')
 @click.option('--redis_server_port', required=False, default=6379, help='redis server port: 6379')
 def main(config: str,
          ib_server_address: str,
          ib_server_port: int,
          arctic_server_address: str,
-         arctic_library: str,
          redis_server_address: str,
          redis_server_port: int):
 
@@ -108,7 +104,7 @@ def main(config: str,
         result = test_platform_config(config)
     else:
         result = test_platform(ib_server_address, ib_server_port, arctic_server_address,
-                               arctic_library, redis_server_address, redis_server_port)
+                               redis_server_address, redis_server_port)
     print(result)
 
 

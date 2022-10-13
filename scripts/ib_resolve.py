@@ -16,12 +16,11 @@ from typing import Any, AsyncIterator, cast, Dict, List, Optional
 import asyncio
 import click
 import coloredlogs
-import logging
 import os
 import pandas as pd
 
 
-setup_logging()
+logging = setup_logging()
 suppress_external()
 
 
@@ -219,9 +218,6 @@ def main(ib_server_address: str,
          csv_file: str,
          csv_output_file: str,
          just_conid: bool):
-
-    logging.getLogger('ib_insync.wrapper').setLevel(logging.CRITICAL)
-    logging.getLogger('ibrx').setLevel(logging.ERROR)
 
     client = IBAIORx(ib_server_address, ib_server_port)
     client.connect()
