@@ -1,40 +1,37 @@
-from datetime import timedelta
+from arctic.date import DateRange
 from ib_insync import Contract
 from logging import Logger
-from trader.data.data_access import TickData
+from trader.data.data_access import TickStorage
 from trader.data.universe import UniverseAccessor
 from trader.objects import Action, BarSize
 from trader.trading.strategy import Signal, Strategy, StrategyConfig, StrategyState
 from typing import Optional, Tuple
 
+import datetime as dt
+import exchange_calendars
 import pandas as pd
 import trader.strategy.strategy_runtime as runtime
 import vectorbt as vbt
 
 
 @StrategyConfig(
-    universe_symbol_pairs=[('NASDAQ', '4391'), ('ASX', '34805876')],
+    name='SMICrossOver',
+    conids=[4391, 34805876],
     bar_size=BarSize.Mins1,
-    historical_data_timedelta=timedelta(days=180),
+    historical_days_prior=180
 )
 class SMICrossOver(Strategy):
     def __init__(
         self,
-        data: TickData,
+        storage: TickStorage,
         accessor: UniverseAccessor,
         logging: Logger,
-
     ):
         super().__init__(
-            data,
+            storage,
             accessor,
             logging
         )
-
-        self.contracts = [
-            Contract(conId=76792991),  # TSLA
-            Contract(conId=34805876),  # FMG.ASX
-        ]
 
     def install(self, strategy_runtime: runtime.StrategyRuntime) -> bool:
         self.strategy_runtime = strategy_runtime
@@ -47,9 +44,27 @@ class SMICrossOver(Strategy):
         if not self.strategy_runtime:
             raise ValueError('install() has not been called')
 
+        date_range: Optional[DateRange] = None
+        if self.historical_days_prior:
+            date_range = DateRange(start=dt.datetime.now() - dt.timedelta(days=self.historical_days_prior), end=dt.datetime.now())
+
+        # check to see if we have all the available data we need
+        # todo fix this
+        for conid in self.conids:
+            missing_data = self.storage.get_tickdata(self.bar_size).missing(
+                conid,
+                exchange_calendar=exchange_calendars.get_calendar('NASDAQ'),
+                pd_offset=None,
+                date_range=date_range
+            )
+
+            if missing_data:
+                self.state = StrategyState.WAITING_HISTORICAL_DATA
+                return self.state
+
         # start subscriptions
-        for contract in self.contracts:
-            self.strategy_runtime.subscribe(self, contract)
+        for conid in self.conids:
+            self.strategy_runtime.subscribe(self, Contract(conId=conid))
 
         self.state = StrategyState.RUNNING
         return self.state

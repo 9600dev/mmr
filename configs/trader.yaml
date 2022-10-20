@@ -1,6 +1,7 @@
 root_directory: /home/trader/mmr
 config_file: /home/trader/mmr/configs/trader.yaml
 pycron_config_file: /home/trader/mmr/configs/pycron.yaml
+strategy_config_file: /home/trader/mmr/configs/strategy_runtime.yaml
 logfile: logs/trader.log
 strategies_directory: /home/trader/mmr/strategies
 ib_server_address: 127.0.0.1

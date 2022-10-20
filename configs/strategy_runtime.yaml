@@ -1,0 +1,18 @@
+env: TRADER_CHECK=False
+ib_client_id: 10
+strategies:
+  - name: global
+    description: strategy wide configuration
+    universe: portfolio
+    bar_size: '1 min'
+    historical_days_prior: 180
+    module: strategies/global.py
+  - name: smi_crossover
+    description: moving average example
+    bar_size: '1 min'
+    historical_days_prior: 180
+    module: strategies/smi_crossover.py
+    conids:
+      - 4931
+      - 34805876
+

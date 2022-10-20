@@ -1,17 +1,13 @@
 from abc import ABC, abstractmethod
-from datetime import timedelta
 from enum import IntEnum
 from logging import Logger
-from trader.data.data_access import TickData
+from trader.data.data_access import TickStorage
 from trader.data.universe import UniverseAccessor
 from trader.objects import Action, BarSize
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import datetime as dt
 import pandas as pd
-
-
-# to avoid circular import
 
 
 class Signal():
@@ -32,17 +28,20 @@ class Signal():
 
 class StrategyState(IntEnum):
     NOT_INSTALLED = 0,
-    GETTING_HISTORICAL_DATA = 1,
+    WAITING_HISTORICAL_DATA = 1,
     RUNNING = 2,
     DISABLED = 3,
     ERROR = 4,
 
 
 def StrategyConfig(
-    universe_symbol_pairs: List[Tuple[str, str]] = [],
+    name: str,
     bar_size: BarSize = BarSize.Mins1,
-    historical_data_timedelta: Optional[timedelta] = None,
+    conids: Optional[List[int]] = None,
+    universe: Optional[str] = None,
+    historical_days_prior: Optional[int] = None,
     runs_when_crontab: Optional[str] = None,
+    description: Optional[str] = None,
 ):
     class StrategyWrapper:
         def __init__(self, cls):
@@ -50,10 +49,13 @@ def StrategyConfig(
 
         def __call__(self, *cls_args):
             strategy = self.strategy_class(*cls_args)
-            strategy.universe_symbol_pairs = universe_symbol_pairs
-            strategy.historical_data_timedelta = historical_data_timedelta
+            strategy.name = name
             strategy.bar_size = bar_size
-            strategy.crontab = runs_when_crontab
+            strategy.conids = conids
+            strategy.universe = universe
+            strategy.historical_days_prior = historical_days_prior
+            strategy.runs_when_crontab = runs_when_crontab
+            strategy.description = description
             return strategy
     return StrategyWrapper
 
@@ -61,21 +63,24 @@ def StrategyConfig(
 class Strategy(ABC):
     def __init__(
         self,
-        data: TickData,
+        storage: TickStorage,
         accessor: UniverseAccessor,
         logging: Logger,
     ):
-        self.data = data
+        self.storage = storage
         self.accessor = accessor
         self.strategy_runtime = None
         self.logging = logging
         self.state = StrategyState.NOT_INSTALLED
 
-        # set by the StrategyConfig decorator
-        self.universe_symbol_pairs: List[Tuple[str, str]] = []
+        # set by the StrategyConfig decorator, or by the strategy_runtime.yaml file
+        self.name: str = ''
         self.bar_size: BarSize = BarSize.Mins1
-        self.historical_data_timedelta: Optional[timedelta] = None
+        self.conids: Optional[List[int]] = None
+        self.universe: Optional[str] = None
+        self.historical_days_prior: Optional[int] = None
         self.runs_when_crontab: Optional[str] = None
+        self.description: Optional[str] = None
 
     @abstractmethod
     def install(self, strategy_runtime) -> bool:
