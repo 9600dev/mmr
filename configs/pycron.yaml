@@ -14,7 +14,7 @@ jobs:
     - name: x0vncserver
       description: starts x0vncserver
       command: /usr/bin/x0vncserver
-      arguments: -display :1 -fg -SecurityTypes VncAuth -PasswordFile /home/trader/.vnc/passwd -localhost no -verbose
+      arguments: -display :1 -SecurityTypes VncAuth -PasswordFile /home/trader/.vnc/passwd
       start: "* * * * *"
       start_on_pycron_start: True
       restart_if_found: False
@@ -23,7 +23,7 @@ jobs:
       delay: 5
     - name: qtile
       description: qtile window manager
-      command: DISPLAY=:1 /usr/local/bin/qtile
+      command: DISPLAY=:1 /home/trader/.pyenv/versions/3.9.5/bin/qtile
       arguments: start
       start: "* * * * *"
       start_on_pycron_start: True

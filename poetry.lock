@@ -56,59 +56,6 @@ pyzmq = ">=13.1,<17.1.2 || >17.1.2"
 rpc = ["msgpack (>=0.5.0)"]
 
 [[package]]
-name = "alpaca-trade-api"
-version = "2.1.0"
-description = "Alpaca API python client"
-category = "main"
-optional = false
-python-versions = "*"
-
-[package.dependencies]
-aiohttp = "3.8.1"
-deprecation = "2.1.0"
-msgpack = "1.0.3"
-numpy = ">=1.11.1"
-pandas = ">=0.18.1"
-PyYAML = "6.0"
-requests = ">2,<3"
-urllib3 = ">1.24,<2"
-websocket-client = ">=0.56.0,<2"
-websockets = ">=9.0,<11"
-
-[[package]]
-name = "alpha-vantage"
-version = "2.3.1"
-description = "Python module to get stock data from the Alpha Vantage Api"
-category = "main"
-optional = false
-python-versions = "*"
-
-[package.dependencies]
-aiohttp = "*"
-requests = "*"
-
-[[package]]
-name = "alphalens"
-version = "0.4.0"
-description = "Performance analysis of predictive (alpha) stock factors"
-category = "main"
-optional = false
-python-versions = "*"
-
-[package.dependencies]
-empyrical = ">=0.5.0"
-IPython = ">=3.2.3"
-matplotlib = ">=1.4.0"
-numpy = ">=1.9.1"
-pandas = ">=0.18.0"
-scipy = ">=0.14.0"
-seaborn = ">=0.6.0"
-statsmodels = ">=0.6.1"
-
-[package.extras]
-test = ["nose (>=1.3.7)", "parameterized (>=0.5.0)", "tox (>=2.3.1)", "flake8 (>=3.7.9)"]
-
-[[package]]
 name = "appnope"
 version = "0.1.3"
 description = "Disable App Nap on macOS >= 10.9"
@@ -489,17 +436,6 @@ wrapt = ">=1.10,<2"
 dev = ["tox", "bump2version (<1)", "sphinx (<2)", "importlib-metadata (<3)", "importlib-resources (<4)", "configparser (<5)", "sphinxcontrib-websupport (<2)", "zipp (<2)", "PyTest (<5)", "PyTest-Cov (<2.6)", "pytest", "pytest-cov"]
 
 [[package]]
-name = "deprecation"
-version = "2.1.0"
-description = "A library to handle automated deprecations"
-category = "main"
-optional = false
-python-versions = "*"
-
-[package.dependencies]
-packaging = "*"
-
-[[package]]
 name = "dill"
 version = "0.3.5.1"
 description = "serialize all of python"
@@ -517,23 +453,6 @@ description = "UNKNOWN"
 category = "main"
 optional = false
 python-versions = "*"
-
-[[package]]
-name = "empyrical"
-version = "0.5.5"
-description = "empyrical is a Python library with performance and risk statistics commonly used in quantitative finance"
-category = "main"
-optional = false
-python-versions = "*"
-
-[package.dependencies]
-numpy = ">=1.9.2"
-pandas = ">=0.16.1"
-pandas-datareader = ">=0.2"
-scipy = ">=0.15.1"
-
-[package.extras]
-dev = ["nose (==1.3.7)", "parameterized (==0.6.1)", "flake8 (==2.5.1)"]
 
 [[package]]
 name = "entrypoints"
@@ -1108,8 +1027,8 @@ mock = ">=0.8.0"
 
 [[package]]
 name = "msgpack"
-version = "1.0.3"
-description = "MessagePack (de)serializer."
+version = "1.0.4"
+description = "MessagePack serializer"
 category = "main"
 optional = false
 python-versions = "*"
@@ -1800,20 +1719,6 @@ python-versions = ">=3.8,<3.11"
 numpy = ">=1.17.3,<1.25.0"
 
 [[package]]
-name = "seaborn"
-version = "0.11.2"
-description = "seaborn: statistical data visualization"
-category = "main"
-optional = false
-python-versions = ">=3.6"
-
-[package.dependencies]
-matplotlib = ">=2.2"
-numpy = ">=1.15"
-pandas = ">=0.23"
-scipy = ">=1.0"
-
-[[package]]
 name = "send2trash"
 version = "1.8.0"
 description = "Send file to trash natively under Mac OS X, Windows and Linux."
@@ -2222,19 +2127,6 @@ optional = false
 python-versions = "*"
 
 [[package]]
-name = "websocket-client"
-version = "1.3.2"
-description = "WebSocket client for Python with low level API options"
-category = "main"
-optional = false
-python-versions = ">=3.7"
-
-[package.extras]
-docs = ["Sphinx (>=3.4)", "sphinx-rtd-theme (>=0.5)"]
-optional = ["python-socks", "wsaccel"]
-test = ["websockets"]
-
-[[package]]
 name = "websockets"
 version = "10.3"
 description = "An implementation of the WebSocket Protocol (RFC 6455 & 7692)"
@@ -2302,7 +2194,7 @@ heapdict = "*"
 [metadata]
 lock-version = "1.1"
 python-versions = "3.9.5"
-content-hash = "fd21cc9c04bec6fe94f38c6a4e2062c5ccf5fd46c4d2170562d67352e680185d"
+content-hash = "1e5b88450020d50ad358573b2c81fe6cab5057473d1dfbea927e6bee1b91c917"
 
 [metadata.files]
 aiohttp = [
@@ -2390,17 +2282,6 @@ aiosignal = [
 aiozmq = [
     {file = "aiozmq-0.9.0-py3-none-any.whl", hash = "sha256:85b677fe118f9470e85eb66e8209d1a71ab289538a57b5595d365d2e0b236a34"},
     {file = "aiozmq-0.9.0.tar.gz", hash = "sha256:9d7315bb77e2655fc3a5051ea22e79527d62c42e51b2420c4f6f3dcebae65230"},
-]
-alpaca-trade-api = [
-    {file = "alpaca-trade-api-2.1.0.tar.gz", hash = "sha256:906a573508f105dc1ee974ea7795b4bc13d4aa8b8c4a65bbd77a8bed1a1cb10c"},
-    {file = "alpaca_trade_api-2.1.0-py3-none-any.whl", hash = "sha256:436edc5d351c0b1278622a1618328e8bd568ed7c4be7c0dea83e6adf54350bb5"},
-]
-alpha-vantage = [
-    {file = "alpha_vantage-2.3.1-py3-none-any.whl", hash = "sha256:5d05355febe6f0fafc4bd11dc6ce3504a02d9d3c105d60202539855c0f608661"},
-    {file = "alpha_vantage-2.3.1.tar.gz", hash = "sha256:0ce76908c3e2a22f9bbdacead90195ec3a4fa41ef8ae7c69a4a2fc99459bfbec"},
-]
-alphalens = [
-    {file = "alphalens-0.4.0.tar.gz", hash = "sha256:a58a53d165b8f99bbf6c4a92b5f34f2f21fde9c8ec45c491e5161a99201f45b4"},
 ]
 appnope = [
     {file = "appnope-0.1.3-py2.py3-none-any.whl", hash = "sha256:265a455292d0bd8a72453494fa24df5a11eb18373a60c7c0430889f22548605e"},
@@ -2604,19 +2485,12 @@ deprecated = [
     {file = "Deprecated-1.2.13-py2.py3-none-any.whl", hash = "sha256:64756e3e14c8c5eea9795d93c524551432a0be75629f8f29e67ab8caf076c76d"},
     {file = "Deprecated-1.2.13.tar.gz", hash = "sha256:43ac5335da90c31c24ba028af536a91d41d53f9e6901ddb021bcc572ce44e38d"},
 ]
-deprecation = [
-    {file = "deprecation-2.1.0-py2.py3-none-any.whl", hash = "sha256:a10811591210e1fb0e768a8c25517cabeabcba6f0bf96564f8ff45189f90b14a"},
-    {file = "deprecation-2.1.0.tar.gz", hash = "sha256:72b3bde64e5d778694b0cf68178aed03d15e15477116add3fb773e581f9518ff"},
-]
 dill = [
     {file = "dill-0.3.5.1-py2.py3-none-any.whl", hash = "sha256:33501d03270bbe410c72639b350e941882a8b0fd55357580fbc873fba0c59302"},
     {file = "dill-0.3.5.1.tar.gz", hash = "sha256:d75e41f3eff1eee599d738e76ba8f4ad98ea229db8b085318aa2b3333a208c86"},
 ]
 durations = [
     {file = "durations-0.3.3.tar.gz", hash = "sha256:820ffe09c390469dc621b6a0aa46d3a624b6dadf09b439e175696b6f6b77ef2f"},
-]
-empyrical = [
-    {file = "empyrical-0.5.5.tar.gz", hash = "sha256:84320f36931496774e948d7ca9f03494ae2dd94451b320eeda378639e5eba950"},
 ]
 entrypoints = [
     {file = "entrypoints-0.4-py3-none-any.whl", hash = "sha256:f174b5ff827504fd3cd97cc3f8649f3693f51538c7e4bdf3ef002c8429d42f9f"},
@@ -3104,42 +2978,7 @@ mockextras = [
     {file = "mockextras-1.0.2.win-amd64.exe", hash = "sha256:fff715578d61486032890b09dff3bc04057ee665b60cd4fd95843b18482ee3b1"},
     {file = "mockextras-1.0.2.zip", hash = "sha256:0a9038d8c1d9a08a69c2f6b8440fc6d7749e10dd79af9df57ba8962c0264ae8e"},
 ]
-msgpack = [
-    {file = "msgpack-1.0.3-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:96acc674bb9c9be63fa8b6dabc3248fdc575c4adc005c440ad02f87ca7edd079"},
-    {file = "msgpack-1.0.3-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:2c3ca57c96c8e69c1a0d2926a6acf2d9a522b41dc4253a8945c4c6cd4981a4e3"},
-    {file = "msgpack-1.0.3-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:b0a792c091bac433dfe0a70ac17fc2087d4595ab835b47b89defc8bbabcf5c73"},
-    {file = "msgpack-1.0.3-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1c58cdec1cb5fcea8c2f1771d7b5fec79307d056874f746690bd2bdd609ab147"},
-    {file = "msgpack-1.0.3-cp310-cp310-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:2f97c0f35b3b096a330bb4a1a9247d0bd7e1f3a2eba7ab69795501504b1c2c39"},
-    {file = "msgpack-1.0.3-cp310-cp310-win32.whl", hash = "sha256:36a64a10b16c2ab31dcd5f32d9787ed41fe68ab23dd66957ca2826c7f10d0b85"},
-    {file = "msgpack-1.0.3-cp310-cp310-win_amd64.whl", hash = "sha256:c1ba333b4024c17c7591f0f372e2daa3c31db495a9b2af3cf664aef3c14354f7"},
-    {file = "msgpack-1.0.3-cp36-cp36m-macosx_10_9_x86_64.whl", hash = "sha256:c2140cf7a3ec475ef0938edb6eb363fa704159e0bf71dde15d953bacc1cf9d7d"},
-    {file = "msgpack-1.0.3-cp36-cp36m-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:6f4c22717c74d44bcd7af353024ce71c6b55346dad5e2cc1ddc17ce8c4507c6b"},
-    {file = "msgpack-1.0.3-cp36-cp36m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:47d733a15ade190540c703de209ffbc42a3367600421b62ac0c09fde594da6ec"},
-    {file = "msgpack-1.0.3-cp36-cp36m-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:c7e03b06f2982aa98d4ddd082a210c3db200471da523f9ac197f2828e80e7770"},
-    {file = "msgpack-1.0.3-cp36-cp36m-win32.whl", hash = "sha256:3d875631ecab42f65f9dce6f55ce6d736696ced240f2634633188de2f5f21af9"},
-    {file = "msgpack-1.0.3-cp36-cp36m-win_amd64.whl", hash = "sha256:40fb89b4625d12d6027a19f4df18a4de5c64f6f3314325049f219683e07e678a"},
-    {file = "msgpack-1.0.3-cp37-cp37m-macosx_10_9_x86_64.whl", hash = "sha256:6eef0cf8db3857b2b556213d97dd82de76e28a6524853a9beb3264983391dc1a"},
-    {file = "msgpack-1.0.3-cp37-cp37m-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:0d8c332f53ffff01953ad25131272506500b14750c1d0ce8614b17d098252fbc"},
-    {file = "msgpack-1.0.3-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:9c0903bd93cbd34653dd63bbfcb99d7539c372795201f39d16fdfde4418de43a"},
-    {file = "msgpack-1.0.3-cp37-cp37m-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:bf1e6bfed4860d72106f4e0a1ab519546982b45689937b40257cfd820650b920"},
-    {file = "msgpack-1.0.3-cp37-cp37m-win32.whl", hash = "sha256:d02cea2252abc3756b2ac31f781f7a98e89ff9759b2e7450a1c7a0d13302ff50"},
-    {file = "msgpack-1.0.3-cp37-cp37m-win_amd64.whl", hash = "sha256:2f30dd0dc4dfe6231ad253b6f9f7128ac3202ae49edd3f10d311adc358772dba"},
-    {file = "msgpack-1.0.3-cp38-cp38-macosx_10_9_universal2.whl", hash = "sha256:f201d34dc89342fabb2a10ed7c9a9aaaed9b7af0f16a5923f1ae562b31258dea"},
-    {file = "msgpack-1.0.3-cp38-cp38-macosx_10_9_x86_64.whl", hash = "sha256:bb87f23ae7d14b7b3c21009c4b1705ec107cb21ee71975992f6aca571fb4a42a"},
-    {file = "msgpack-1.0.3-cp38-cp38-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:8a3a5c4b16e9d0edb823fe54b59b5660cc8d4782d7bf2c214cb4b91a1940a8ef"},
-    {file = "msgpack-1.0.3-cp38-cp38-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f74da1e5fcf20ade12c6bf1baa17a2dc3604958922de8dc83cbe3eff22e8b611"},
-    {file = "msgpack-1.0.3-cp38-cp38-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:73a80bd6eb6bcb338c1ec0da273f87420829c266379c8c82fa14c23fb586cfa1"},
-    {file = "msgpack-1.0.3-cp38-cp38-win32.whl", hash = "sha256:9fce00156e79af37bb6db4e7587b30d11e7ac6a02cb5bac387f023808cd7d7f4"},
-    {file = "msgpack-1.0.3-cp38-cp38-win_amd64.whl", hash = "sha256:9b6f2d714c506e79cbead331de9aae6837c8dd36190d02da74cb409b36162e8a"},
-    {file = "msgpack-1.0.3-cp39-cp39-macosx_10_9_universal2.whl", hash = "sha256:89908aea5f46ee1474cc37fbc146677f8529ac99201bc2faf4ef8edc023c2bf3"},
-    {file = "msgpack-1.0.3-cp39-cp39-macosx_10_9_x86_64.whl", hash = "sha256:973ad69fd7e31159eae8f580f3f707b718b61141838321c6fa4d891c4a2cca52"},
-    {file = "msgpack-1.0.3-cp39-cp39-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:da24375ab4c50e5b7486c115a3198d207954fe10aaa5708f7b65105df09109b2"},
-    {file = "msgpack-1.0.3-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:a598d0685e4ae07a0672b59792d2cc767d09d7a7f39fd9bd37ff84e060b1a996"},
-    {file = "msgpack-1.0.3-cp39-cp39-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:e4c309a68cb5d6bbd0c50d5c71a25ae81f268c2dc675c6f4ea8ab2feec2ac4e2"},
-    {file = "msgpack-1.0.3-cp39-cp39-win32.whl", hash = "sha256:494471d65b25a8751d19c83f1a482fd411d7ca7a3b9e17d25980a74075ba0e88"},
-    {file = "msgpack-1.0.3-cp39-cp39-win_amd64.whl", hash = "sha256:f01b26c2290cbd74316990ba84a14ac3d599af9cebefc543d241a66e785cf17d"},
-    {file = "msgpack-1.0.3.tar.gz", hash = "sha256:51fdc7fb93615286428ee7758cecc2f374d5ff363bdd884c7ea622a7a327a81e"},
-]
+msgpack = []
 multidict = [
     {file = "multidict-6.0.2-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:0b9e95a740109c6047602f4db4da9949e6c5945cefbad34a1299775ddc9a62e2"},
     {file = "multidict-6.0.2-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:ac0e27844758d7177989ce406acc6a83c16ed4524ebc363c1f748cba184d89d3"},
@@ -3892,10 +3731,6 @@ scipy = [
     {file = "scipy-1.8.1-cp39-cp39-win_amd64.whl", hash = "sha256:9dd4012ac599a1e7eb63c114d1eee1bcfc6dc75a29b589ff0ad0bb3d9412034f"},
     {file = "scipy-1.8.1.tar.gz", hash = "sha256:9e3fb1b0e896f14a85aa9a28d5f755daaeeb54c897b746df7a55ccb02b340f33"},
 ]
-seaborn = [
-    {file = "seaborn-0.11.2-py3-none-any.whl", hash = "sha256:85a6baa9b55f81a0623abddc4a26b334653ff4c6b18c418361de19dbba0ef283"},
-    {file = "seaborn-0.11.2.tar.gz", hash = "sha256:cf45e9286d40826864be0e3c066f98536982baf701a7caa386511792d61ff4f6"},
-]
 send2trash = [
     {file = "Send2Trash-1.8.0-py3-none-any.whl", hash = "sha256:f20eaadfdb517eaca5ce077640cb261c7d2698385a6a0f072a4a5447fd49fa08"},
     {file = "Send2Trash-1.8.0.tar.gz", hash = "sha256:d2c24762fd3759860a0aff155e45871447ea58d2be6bdd39b5c8f966a0c99c2d"},
@@ -4152,10 +3987,6 @@ wcwidth = [
 webencodings = [
     {file = "webencodings-0.5.1-py2.py3-none-any.whl", hash = "sha256:a0af1213f3c2226497a97e2b3aa01a7e4bee4f403f95be16fc9acd2947514a78"},
     {file = "webencodings-0.5.1.tar.gz", hash = "sha256:b36a1c245f2d304965eb4e0a82848379241dc04b865afcc4aab16748587e1923"},
-]
-websocket-client = [
-    {file = "websocket-client-1.3.2.tar.gz", hash = "sha256:50b21db0058f7a953d67cc0445be4b948d7fc196ecbeb8083d68d94628e4abf6"},
-    {file = "websocket_client-1.3.2-py3-none-any.whl", hash = "sha256:722b171be00f2b90e1d4fb2f2b53146a536ca38db1da8ff49c972a4e1365d0ef"},
 ]
 websockets = [
     {file = "websockets-10.3-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:661f641b44ed315556a2fa630239adfd77bd1b11cb0b9d96ed8ad90b0b1e4978"},

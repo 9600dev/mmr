@@ -57,6 +57,7 @@ if [ ! -d /home/trader/Jts ]; then
     /bin/sed -i "s/{password}/$PASSWORD/g" /home/trader/ibc/config.ini
 
     echo ""
+    echo ""
     echo "Automating the installation of Trader Workstation to /home/trader/Jts..."
     echo ""
     /usr/bin/expect /home/trader/mmr/scripts/installation/tws-install.exp

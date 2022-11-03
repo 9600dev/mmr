@@ -1,4 +1,4 @@
-FROM ubuntu:21.10
+FROM ubuntu:20.04
 WORKDIR /home/trader/mmr
 ENV container docker
 ENV PATH "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -6,13 +6,13 @@ ENV LANG C.UTF-8
 ENV LC_ALL C.UTF-8
 ENV DEBIAN_FRONTEND=noninteractive
 
-# RUN useradd -rm -d /home/trader -s /bin/bash -g root -G sudo -u 1000 trader
 RUN useradd -m -d /home/trader -s /bin/bash -G sudo trader
 RUN mkdir -p /var/run/sshd
 RUN mkdir -p /run/sshd
 RUN mkdir -p /tmp
 
-RUN cp /etc/apt/sources.list /etc/apt/sources.list.bak && sed -i -re 's/([a-z]{2}\.)?archive.ubuntu.com|security.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list
+# if you update the FROM ubuntu:20.04 to some later ubuntu distribution, you may need the following line:
+# RUN cp /etc/apt/sources.list /etc/apt/sources.list.bak && sed -i -re 's/([a-z]{2}\.)?archive.ubuntu.com|security.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list
 
 RUN apt-get update
 RUN apt-get install -y dialog apt-utils
@@ -28,11 +28,16 @@ ENV TZ=America/New_York
 RUN apt-get install -y tzdata
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
+RUN echo "deb http://security.ubuntu.com/ubuntu focal-security main" | tee /etc/apt/sources.list.d/focal-security.list
+
 # mongo
 RUN wget -qO - https://www.mongodb.org/static/pgp/server-5.0.asc | apt-key add -
 RUN echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/5.0 multiverse" | tee /etc/apt/sources.list.d/mongodb-org-5.0.list
 RUN apt-get update -y
 RUN apt-get install -y mongodb-org
+
+RUN rm /etc/apt/sources.list.d/focal-security.list
+
 RUN apt-get install -y linux-headers-generic
 RUN apt-get install -y lzip curl
 RUN apt-get install -y redis-server
@@ -45,11 +50,18 @@ RUN apt-get install -y net-tools
 RUN apt-get install -y rsync
 RUN apt-get install -y iputils-ping
 RUN apt-get install -y lnav
+
 # required for pyenv to build 3.9.5 properly
 RUN apt-get install -y libbz2-dev
 RUN apt-get install -y libsqlite3-dev
 RUN apt-get install -y libreadline-dev
+
+# python version upgrade
 RUN apt-get install -y python3-venv
+RUN apt-get install -y libedit-dev
+RUN apt-get install -y libncurses5-dev
+RUN apt-get install -y libssl-dev
+RUN apt-get install -y libffi-dev
 
 RUN echo 'trader:trader' | chpasswd
 RUN service ssh start
@@ -94,14 +106,9 @@ RUN chmod +x /home/trader/mmr/scripts/installation/install_tws.sh
 # TWS needs JavaFX to be able to fully start
 RUN apt-get install -y openjfx
 
-# pip install packages
-RUN --mount=type=cache,target=/root/.cache \
-   pip3 install -r /home/trader/mmr/requirements.txt
-
 # install window managers, Xvfb and vnc
 RUN apt-get install -y tigervnc-scraping-server
-# RUN apt-get install -y awesome
-RUN apt-get install -y python3-cairocffi
+# RUN apt-get install -y python3-cairocffi
 RUN apt-get install -y xvfb
 RUN apt-get install -y xterm
 RUN apt-get install -y language-pack-en-base
@@ -110,8 +117,9 @@ RUN mkdir /home/trader/.vnc
 RUN echo 'trader' | vncpasswd -f > /home/trader/.vnc/passwd
 
 RUN mkdir /home/trader/.config
-# RUN mkdir /home/trader/.config/awesome
 RUN mkdir /home/trader/.config/qtile
+RUN mkdir /home/trader/.tmp
+RUN mkdir /home/trader/.cache
 
 COPY ./scripts/installation/.bash_profile /home/trader
 COPY ./scripts/installation/start_trader.sh /home/trader
@@ -119,20 +127,41 @@ COPY ./scripts/installation/twsstart.sh /home/trader/ibc/twsstart.sh
 COPY ./scripts/installation/config.ini /home/trader/ibc/config.ini
 COPY ./scripts/installation/config.py /home/trader/.configs/qtile
 
-RUN --mount=type=cache,target=/root/.cache \
-   pip3 install qtile
-
 RUN touch /home/trader/.hushlogin
 RUN touch /home/trader/mmr/logs/trader_service.log
 RUN touch /home/trader/mmr/logs/strategy_service.log
 
-# data needs to be copied manually?
-# COPY ./data/ib_symbols_nyse_nasdaq.csv /home/trader/mmr/data/ib_symbols_nyse_nasdaq.csv
-# COPY ./data/symbols_historical.csv /home/trader/mmr/data/symbols_historical.csv
-
 RUN chown -R trader:trader /home/trader
-WORKDIR /home/trader
 
-#ENTRYPOINT /home/trader/mmr/scripts/docker_startup.sh
-#CMD tail -f /dev/null
+# install all the python 3.9.5 runtimes and packages
+USER trader
+
+ENV HOME /home/trader
+ENV PYENV_ROOT $HOME/.pyenv
+ENV PATH $PYENV_ROOT/shims:$PYENV_ROOT/bin:$HOME/.local/bin:$PATH
+ENV TMPDIR $HOME/.tmp
+
+RUN curl https://pyenv.run | bash
+
+WORKDIR /home/trader/mmr
+
+RUN pyenv install 3.9.5
+RUN pyenv local 3.9.5
+RUN pyenv rehash
+
+# window manager for vnc
+RUN pip3 install xcffib
+RUN pip3 install --no-cache-dir cairocffi
+
+RUN --mount=type=cache,target=/root/.cache \
+   pip3 install qtile
+
+# pip install packages
+RUN --mount=type=cache,target=/root/.cache \
+   pip3 install -r /home/trader/mmr/requirements.txt
+
+# spin back to root, to start sshd
+USER root
+
+WORKDIR /home/trader
 ENTRYPOINT service ssh restart && tail -f /dev/null

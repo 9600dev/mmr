@@ -20,9 +20,6 @@ vectorbt = ">=0.23.3"
 durations = ">=0.3.3"
 bs4 = ">=0.0.1"
 beautifulsoup4 = ">=4.10.0"
-alpaca-trade-api = ">=2.1.0"
-alpha-vantage = ">=2.3.1"
-alphalens = ">=0.4.0"
 polygon-api-client = ">=1.0.2"
 plotille = ">=3.7.2"
 aiohttp = ">=3.8.1"
@@ -75,6 +72,7 @@ textual = "^0.1.18"
 isort = "^5.10.1"
 reactivex = "^4.0.4"
 cloup = "^1.0.0"
+msgpack = "^1.0.4"
 
 [tool.poetry.dev-dependencies]
 

@@ -2,6 +2,7 @@
 .git
 .cache
 .vscode
+.python_version
 temp
 scratch
 data

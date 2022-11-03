@@ -49,7 +49,7 @@ container_clean() {
 
 run_docker() {
     echo "running container $CONTNAME with this command:"
-    echo " -- docker run --name $CONTNAME -ti -e TRADER_CONFIG='/home/trader/mmr/configs/trader.yaml -p 2222:22 -p starting -p 7496:7496 -p 6379:6379 -p 27017:27017 -p 5900:5900 -p 5901:5901 -p 8081:8081 --tmpfs /run --tmpfs /run/lock --tmpfs /tmp -v /lib/modules:/lib/modules:ro -d $IMGNAME"
+    echo " -- docker run --name $CONTNAME -ti -p 2222:22 -p 7496:7496 -p 6379:6379 -p 27017:27017 -p 5900:5900 -p 5901:5901 -p 8081:8081 --tmpfs /run --tmpfs /run/lock --tmpfs /tmp -v /lib/modules:/lib/modules:ro -d $IMGNAME"
     echo ""
 
     docker run \
@@ -101,7 +101,7 @@ done
 container_clean
 
 # build
-DOCKER_BUILDKIT=1 docker build -t $IMGNAME --force-rm=true --rm=true $BUILDDIR $1 || clean_up
+DOCKER_BUILDKIT=1 docker buildx build --platform linux/amd64 -t $IMGNAME --force-rm=true --rm=true $BUILDDIR $1 || clean_up
 
 print_info
 

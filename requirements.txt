@@ -2,14 +2,11 @@ aiohttp==3.8.1; python_version >= "3.6"
 aioredis==1.3.1
 aiosignal==1.2.0; python_version >= "3.6"
 aiozmq==0.9.0
-alpaca-trade-api==2.1.0
-alpha-vantage==2.3.1
-alphalens==0.4.0
 appnope==0.1.3; sys_platform == "darwin" and python_version >= "3.8" and python_version < "3.10" and platform_system == "Darwin"
 arctic @ git+https://github.com/9600dev/arctic.git@master
 argon2-cffi-bindings==21.2.0; python_version >= "3.7" and python_version < "3.10"
 argon2-cffi==21.3.0; python_version >= "3.7" and python_version < "3.10"
-asttokens==2.0.5; python_version >= "3.8" and python_version < "3.10"
+asttokens==2.0.5; python_version >= "3.8"
 async-timeout==4.0.2; python_version >= "3.6"
 attrs==21.4.0; python_version >= "3.7" and python_full_version < "3.0.0" and python_version < "3.10" or python_full_version >= "3.5.0" and python_version >= "3.7" and python_version < "3.10"
 backcall==0.2.0; python_version >= "3.8" and python_version < "3.10"
@@ -37,16 +34,14 @@ debugpy==1.6.0; python_version >= "3.7" and python_version < "3.10"
 decorator==5.1.1; python_version >= "3.8" and python_version < "3.10"
 defusedxml==0.7.1; python_version >= "3.7" and python_full_version < "3.0.0" and python_version < "3.10" or python_version >= "3.7" and python_version < "3.10" and python_full_version >= "3.5.0"
 deprecated==1.2.13; python_version >= "3.6" and python_full_version < "3.0.0" or python_full_version >= "3.4.0" and python_version >= "3.6"
-deprecation==2.1.0
 dill==0.3.5.1; (python_version >= "2.7" and python_full_version < "3.0.0") or (python_full_version >= "3.7.0")
 durations==0.3.3
-empyrical==0.5.5
 entrypoints==0.4; python_version >= "3.7" and python_version < "3.10"
 enum-compat==0.0.3
 eventkit==0.8.9; python_version >= "3.6"
 ewmh==0.1.6
 exchange-calendars==3.6.3; python_version >= "3.7"
-executing==0.8.3; python_version >= "3.8" and python_version < "3.10"
+executing==0.8.3; python_version >= "3.8"
 expression==2.2.0; python_version >= "3.9" and python_version < "3.11"
 fastjsonschema==2.15.3; python_version >= "3.7" and python_version < "3.10"
 finviz==1.4.4
@@ -85,7 +80,7 @@ mccabe==0.6.1; python_version >= "3.6"
 mistune==0.8.4; python_version >= "3.7" and python_version < "3.10"
 mock==4.0.3; python_version >= "3.6"
 mockextras==1.0.2
-msgpack==1.0.3
+msgpack==1.0.4
 multidict==6.0.2; python_version >= "3.7"
 multitasking==0.0.10
 mypy-extensions==0.4.3; python_version >= "3.6" and python_version < "3.10"
@@ -101,7 +96,7 @@ packaging==21.3; python_version >= "3.7" and python_version < "3.10"
 pandas-datareader==0.10.0; python_version >= "3.6"
 pandas==1.4.3; python_version >= "3.8"
 pandocfilters==1.5.0; python_version >= "3.7" and python_full_version < "3.0.0" and python_version < "3.10" or python_version >= "3.7" and python_version < "3.10" and python_full_version >= "3.4.0"
-parso==0.8.3; python_version >= "3.8" and python_version < "3.10"
+parso==0.8.3; python_version >= "3.8"
 patsy==0.5.2; python_version >= "3.7"
 pexpect==4.8.0; sys_platform != "win32" and python_version >= "3.8" and python_version < "3.10"
 pickleshare==0.7.5; python_version >= "3.8" and python_version < "3.10"
@@ -113,7 +108,7 @@ prometheus-client==0.14.1; python_version >= "3.7" and python_version < "3.10"
 prompt-toolkit==3.0.29; python_full_version >= "3.6.2"
 psutil==5.9.1; (python_version >= "2.7" and python_full_version < "3.0.0") or (python_full_version >= "3.4.0")
 ptyprocess==0.7.0; sys_platform != "win32" and python_version >= "3.8" and python_version < "3.10" and os_name != "nt"
-pure-eval==0.2.2; python_version >= "3.8" and python_version < "3.10"
+pure-eval==0.2.2; python_version >= "3.8"
 py==1.11.0; python_version >= "3.6" and python_full_version < "3.0.0" and implementation_name == "pypy" or implementation_name == "pypy" and python_version >= "3.6" and python_full_version >= "3.5.0"
 pyarrow==8.0.0; python_version >= "3.7"
 pycodestyle==2.8.0; python_version >= "3.6" and python_full_version < "3.0.0" or python_full_version >= "3.5.0" and python_version >= "3.6"
@@ -144,7 +139,6 @@ rq==1.10.1; python_version >= "3.5"
 schedule==1.1.0; python_version >= "3.6" and python_version < "3.10"
 scikit-learn==1.1.1; python_version >= "3.8"
 scipy==1.8.1; python_version >= "3.8" and python_version < "3.11"
-seaborn==0.11.2; python_version >= "3.6"
 send2trash==1.8.0; python_version >= "3.7" and python_version < "3.10"
 setproctitle==1.2.3; python_version >= "3.6"
 setuptools-scm==6.4.2; python_version >= "3.7" and python_version < "3.10"
@@ -178,9 +172,8 @@ user-agent==0.1.10
 vectorbt==0.23.3; python_version >= "3.6" and python_version < "3.10"
 vine==5.0.0; python_version >= "3.6"
 visidata==2.8; python_version >= "3.6"
-wcwidth==0.2.5; python_full_version >= "3.6.2" and python_version >= "3.8" and python_version < "3.10"
+wcwidth==0.2.5; python_full_version >= "3.6.2" and python_version >= "3.8"
 webencodings==0.5.1; python_version >= "3.7" and python_version < "3.10"
-websocket-client==1.3.2; python_version >= "3.7"
 websockets==10.3; python_version >= "3.8" and python_version < "4.0"
 widgetsnbextension==3.6.0; python_version >= "3.6" and python_version < "3.10"
 wrapt==1.14.1; python_version >= "3.6" and python_full_version < "3.0.0" or python_full_version >= "3.5.0" and python_version >= "3.6"
