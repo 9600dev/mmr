@@ -1,7 +1,7 @@
 from dateutil.tz import gettz
 from ib_insync.contract import Contract
 from ib_insync.ib import IB
-from trader.common.helpers import dateify, timezoneify
+from trader.common.helpers import dateify, timezoneify, utcify_str
 from trader.common.logging_helper import setup_logging
 from trader.data.data_access import SecurityDefinition
 from trader.data.universe import Universe
@@ -13,6 +13,7 @@ import datetime as dt
 import ib_insync
 import numpy as np
 import pandas as pd
+import pytz
 
 
 logging = setup_logging(module_name='ibhistoryworker')
@@ -94,8 +95,13 @@ class IBHistoryWorker():
         start_date: dt.datetime,
         end_date: dt.datetime,
         filter_between_dates: bool = True,
-        tz_info: str = 'America/New_York'
+        tz_info: str = 'US/Eastern'
     ) -> pd.DataFrame:
+
+        if not start_date.tzinfo:
+            logging.debug('get_contract_history() start_date had no timezone, applying tz_info')
+            start_date.astimezone(pytz.timezone(tz_info))
+
         # todo doing this with 'asx' based stocks gives us a dataframe with the incorrect timezone
         # figure this out
         self.__clear_error()
@@ -116,6 +122,7 @@ class IBHistoryWorker():
 
         # 16 hours, 4am to 8pm
         # duration_step_size = '57600 S'
+
         # 24 hours
         duration_step_size = '86400 S'
 
@@ -131,6 +138,7 @@ class IBHistoryWorker():
         # end_date_offset = dateify(end_date, timezone=tz_info) + dt.timedelta(days=1)
         start_date = timezoneify(start_date, timezone=tz_info)
         end_date_offset = timezoneify(end_date, timezone=tz_info)
+
         current_date = end_date_offset
         local_tz = dt.datetime.now(dt.timezone.utc).astimezone().tzinfo
 
@@ -144,15 +152,21 @@ class IBHistoryWorker():
         bars: List[pd.DataFrame] = []
 
         while current_date >= start_date:
-            logging.debug('self.ib_client.reqHistoricalDataAsync {} {}'.format(security, current_date))
+            logging.debug('self.ib_client.reqHistoricalDataAsync {} {} {} {} {}'.format(
+                security,
+                utcify_str(current_date),
+                duration_step_size,
+                str(bar_size),
+                what_to_show,
+            ))
             result = await self.ib_client.reqHistoricalDataAsync(
                 contract,
-                endDateTime=current_date,
+                endDateTime=utcify_str(current_date),
                 durationStr=duration_step_size,
                 barSizeSetting=str(bar_size),
                 whatToShow=str(what_to_show),
                 useRTH=False,
-                formatDate=1,
+                formatDate=2,
                 keepUpToDate=False,
             )
 
@@ -168,7 +182,8 @@ class IBHistoryWorker():
 
                 # arctic requires timezone to be set
                 df_result.index = pd.to_datetime(df_result.index)  # type: ignore
-                df_result.index = df_result.index.tz_localize(local_tz)  # type: ignore
+                # next line no leonger required as we pass in =2 to formatDate
+                # df_result.index = df_result.index.tz_localize(local_tz)  # type: ignore
                 df_result.index = df_result.index.tz_convert(tz_info)
                 df_result.sort_index(ascending=True, inplace=True)
 
@@ -214,6 +229,7 @@ class IBHistoryWorker():
             # add to the bars list
             bars.append(df_result)
             pd_date = pd.to_datetime(df_result.index[0])
+
             current_date = dt.datetime(
                 pd_date.year,
                 pd_date.month,
@@ -227,6 +243,6 @@ class IBHistoryWorker():
         all_data: pd.DataFrame = pd.concat(bars)
 
         if filter_between_dates:
-            all_data = all_data[(all_data.index >= start_date.replace(tzinfo=gettz(tz_info)))  # type: ignore
-                                & (all_data.index <= end_date_offset.replace(tzinfo=gettz(tz_info)))]  # type: ignore
+            all_data = all_data[(all_data.index >= start_date)  #.replace(tzinfo=gettz(tz_info)))  # type: ignore
+                                & (all_data.index <= end_date_offset)]  #.replace(tzinfo=gettz(tz_info)))]  # type: ignore
         return all_data.sort_index(ascending=True)

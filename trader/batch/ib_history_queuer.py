@@ -51,7 +51,7 @@ def get_universe_history_ib(
         redis_server_port,
     )
 
-    start_date = dateify(dt.datetime.now() - dt.timedelta(days=prev_days + 1), timezone='America/New_York')
+    start_date = dateify(dt.datetime.now() - dt.timedelta(days=prev_days + 1), timezone='America/New_York', make_sod=True)
     logging.info('enqueing IB history from {} to {} days'.format(start_date, prev_days))
 
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
@@ -61,7 +61,7 @@ def get_universe_history_ib(
 
 @cli_norepl.command()
 @click.option('--symbol', required=True, help='conid of the security to backfill')
-@click.option('--universe', required=True, help='name of universe to the security lives in')
+@click.option('--universe', required=True, help='name of universe that the security definition lives in')
 @click.option('--arctic_universe_library', required=True, help='arctic library that contains universe definitions')
 @click.option('--bar_size', required=True, default='1 min', help='IB bar size: 1 min')
 @click.option('--prev_days', required=True, default=5, help='Enqueue today minus prev_days: default 5 days')
@@ -92,15 +92,20 @@ def get_symbol_history_ib(
         redis_server_address,
         redis_server_port
     )
-    start_date = dateify(dt.datetime.now() - dt.timedelta(days=prev_days + 1), timezone='America/New_York')
-    logging.info('enqueing IB history from {} to {} days'.format(start_date, prev_days))
-
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
+
     u = accessor.get(universe)
 
     # get a security definition
     security_definition = u.find_symbol(symbol)
     if security_definition:
+        start_date = dateify(dt.datetime.now() - dt.timedelta(days=prev_days + 1), timezone=security_definition.timeZoneId)
+        logging.info('enqueing IB history from {} to {} days using local securitys timezone {}'.format(
+            start_date,
+            prev_days,
+            security_definition.timeZoneId
+        ))
+
         queuer.queue_history([security_definition], start_date)
     else:
         logging.debug('cannot find symbol {} in universe {}'.format(symbol, universe))

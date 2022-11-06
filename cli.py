@@ -799,7 +799,7 @@ marketdata: MarketData
 accessor: UniverseAccessor
 client: IBAIORx
 store: Arctic
-bardata: TickData
+tickstorage: TickStorage
 
 
 def setup_ipython():
@@ -809,13 +809,14 @@ def setup_ipython():
     global store
     global bardata
     global marketdata
+    global tickstorage
 
     container = Container()
     accessor = container.resolve(UniverseAccessor)
     client = container.resolve(IBAIORx)
     client.connect()
     store = Arctic(mongo_host=container.config()['arctic_server_address'])
-    bardata = container.resolve(TickData)
+    tickstorage = container.resolve(TickStorage)
     marketdata = container.resolve(MarketData, **{'client': client})
 
     print('Available instance objects:')

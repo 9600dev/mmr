@@ -48,14 +48,16 @@ class IBHistoryQueuer(Queuer):
         self.arctic_server_address = arctic_server_address
         self.bar_size = bar_size
 
-    def queue_history(self,
-                      security_definitions: List[SecurityDefinition],
-                      start_date: dt.datetime = dateify(dt.datetime.now() - dt.timedelta(days=5), timezone='America/New_York'),
-                      end_date: dt.datetime = dateify(
-                          dt.datetime.now() - dt.timedelta(days=1),
-                          timezone='America/New_York',
-                          make_eod=True
-                      )):
+    def queue_history(
+        self,
+        security_definitions: List[SecurityDefinition],
+        start_date: dt.datetime = dateify(dt.datetime.now() - dt.timedelta(days=5), timezone='US/Eastern', make_sod=True),
+        end_date: dt.datetime = dateify(
+            dt.datetime.now() - dt.timedelta(days=1),
+            timezone='US/Eastern',
+            make_eod=True
+        )
+    ):
         for security in security_definitions:
             # find the missing dates between start_date and end_date, and queue them up
             exchange_calendar = exchange_calendars.get_calendar(security.primaryExchange)
@@ -84,7 +86,12 @@ class IBHistoryQueuer(Queuer):
 
                     job = self.enqueue(
                         history_worker.do_work,
-                        [security, dateify(date_dr.start), dateify(date_dr.end), self.bar_size]
+                        [
+                            security,
+                            dateify(date_dr.start, timezone=security.timeZoneId, make_sod=True),
+                            dateify(date_dr.end, timezone=security.timeZoneId, make_eod=True),
+                            self.bar_size
+                        ]
                     )
                     logging.debug('Job history_worker.do_work enqueued, is_queued: {} using cliend_id {}'
                                   .format(job.is_queued, client_id))
@@ -128,7 +135,13 @@ class BatchIBHistoryWorker():
             bar_size=bar_size,
             filter_between_dates=True
         ))
-        logging.debug('ib_history.get_contract_history for {} returned {} rows'.format(security, len(result)))
+        logging.debug('ib_history.get_contract_history for {} returned {} rows, writing to library "{}"'.format(
+            security.symbol,
+            len(result),
+            str(bar_size)
+        ))
 
-        self.data.write(security, result)
+        if len(result) > 0:
+            self.data.write(security, result)
+
         return True

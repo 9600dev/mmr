@@ -22,6 +22,7 @@ import numpy as np
 import os
 import pandas as pd
 import plotille as plt
+import pytz
 import scipy.stats as st
 import socket
 import tempfile
@@ -303,11 +304,14 @@ def paginate(content: str):
     p.run()
 
 
-def timezoneify(date_time: Union[dt.datetime, Timestamp], timezone: Union[str, tzfile]) -> dt.datetime:
+def timezoneify(date_time: Union[dt.datetime, Timestamp, str], timezone: Union[str, tzfile]) -> dt.datetime:
     zone = None
 
     if isinstance(date_time, Timestamp):
         date_time = cast(Timestamp, date_time).to_pydatetime()
+
+    if isinstance(date_time, str):
+        date_time = dt.datetime.strptime(date_time, '%Y%m%d-%H:%M:%S')
 
     if isinstance(timezone, str):
         zone = gettz(timezone)  # type: ignore
@@ -319,9 +323,22 @@ def timezoneify(date_time: Union[dt.datetime, Timestamp], timezone: Union[str, t
     date_time = cast(dt.datetime, date_time.astimezone(zone))  # not sure if I should be casting here
     return date_time
 
+def utcify(date_time: dt.datetime) -> dt.datetime:
+    if not date_time.tzinfo:
+        raise ValueError('tzinfo on datetime required')
 
-def dateify(date_time: Optional[Union[dt.datetime, dt.date, Timestamp]] = None,
-            timezone: Optional[Union[str, tzfile]] = None, make_eod: bool = False) -> dt.datetime:
+    return date_time.astimezone(pytz.UTC)
+
+def utcify_str(date_time: dt.datetime) -> str:
+    return utcify(date_time).strftime('%Y%m%d-%H:%M:%S')
+
+def dateify(
+    date_time: Optional[Union[dt.datetime, dt.date, Timestamp]] = None,
+    timezone: Optional[Union[str, tzfile]] = None,
+    make_eod: bool = False,
+    make_sod: bool = False,
+) -> dt.datetime:
+
     zone = None
 
     if not timezone:
@@ -336,6 +353,8 @@ def dateify(date_time: Optional[Union[dt.datetime, dt.date, Timestamp]] = None,
         result = dt.datetime(year=date_time.year, month=date_time.month, day=date_time.day, tzinfo=zone)
         if make_eod:
             result = result.replace(hour=23, minute=59, second=59)
+        if make_sod:
+            result = result.replace(hour=0, minute=0, second=0)
         return result
 
     if date_time:
@@ -348,6 +367,9 @@ def dateify(date_time: Optional[Union[dt.datetime, dt.date, Timestamp]] = None,
         if date_time.tzinfo and not timezone:
             if make_eod:
                 date_time = date_time.replace(hour=23, minute=59, second=59)
+            if make_sod:
+                date_time = date_time.replace(hour=0, minute=0, second=0)
+
             return date_time.replace(hour=0, minute=0, second=0, microsecond=0)
         else:
             # if we have an already existing timezone in the datetime
@@ -356,6 +378,8 @@ def dateify(date_time: Optional[Union[dt.datetime, dt.date, Timestamp]] = None,
             date_time = date_time.replace(hour=0, minute=0, second=0, microsecond=0)
             if make_eod:
                 date_time = date_time.replace(hour=23, minute=59, second=59)
+            if make_sod:
+                date_time = date_time.replace(hour=0, minute=0, second=0)
             return date_time
     else:
         return dt.datetime.now(zone).replace(hour=0, minute=0, second=0, microsecond=0)

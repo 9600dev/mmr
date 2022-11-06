@@ -4,7 +4,7 @@ from arctic.store.version_store import VersionStore
 from dataclasses import fields
 from ib_insync.contract import Contract
 from trader.data.data_access import SecurityDefinition
-from typing import Dict, List, Optional, Tuple, Union
+from typing import cast, Dict, List, Optional, Tuple, Union
 
 import csv
 
@@ -32,10 +32,17 @@ class Universe():
                 return definition
         return None
 
-    def find_symbol(self, symbol: str) -> Optional[SecurityDefinition]:
+    def find_symbol(self, symbol: Union[int, str]) -> Optional[SecurityDefinition]:
         for definition in self.security_definitions:
-            if definition.symbol == symbol:
-                return definition
+            if type(symbol) is str:
+                if definition.symbol == symbol:
+                    return definition
+            elif type(symbol) is str and cast(str, symbol).isnumeric():
+                if definition.conId == int(symbol):
+                    return definition
+            else:
+                if definition.conId == symbol:
+                    return definition
         return None
 
 
