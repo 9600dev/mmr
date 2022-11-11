@@ -23,7 +23,6 @@ import backoff
 import datetime
 import datetime as dt
 import pandas as pd
-import random
 import reactivex as rx
 
 
@@ -52,18 +51,16 @@ class IBAIORxError():
 
 
 class IBAIORx():
-    # master client id should be set to 5 (incremented on the call to connect())
-    # todo moving this to random for now, will find a global sync solution later
-    client_id_counter = random.randint(4, 98)
-
     def __init__(
         self,
         ib_server_address: str,
         ib_server_port: int,
+        ib_client_id: int,
         read_only: bool = False
     ):
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
+        self.ib_client_id = ib_client_id
         self.read_only = read_only
 
         self.ib = IB()
@@ -118,15 +115,12 @@ class IBAIORx():
     @backoff.on_exception(backoff.expo, Exception, max_tries=3, max_time=30)
     def connect(self):
         def __handle_client_id_error(msg):
-            logging.error('clientId already in use, randomizing and trying again')
-            IBAIORx.client_id_counter = random.randint(10, 99)
+            logging.error('clientId already in use: {}'.format(msg))
             raise ValueError('clientId')
 
         if self.ib.isConnected():
             return self
 
-        # todo set in the readme that the master client ID has to be set to 5
-        IBAIORx.client_id_counter += 1
         self._shutdown = False
 
         if self.__handle_error not in self.ib.errorEvent:
@@ -136,15 +130,19 @@ class IBAIORx():
         net_client.conn.disconnected += __handle_client_id_error
 
         self.ib.connect(
-            self.ib_server_address,
-            self.ib_server_port,
-            clientId=IBAIORx.client_id_counter,
+            host=self.ib_server_address,
+            port=self.ib_server_port,
+            clientId=self.ib_client_id,
             timeout=10,
             readonly=self.read_only
         )
 
         net_client.conn.disconnected -= __handle_client_id_error
-        self.history_worker = IBHistoryWorker(self.ib)
+        self.history_worker = IBHistoryWorker(
+            self.ib_server_address,
+            self.ib_server_port,
+            self.ib_client_id + 1,
+        )
 
         return self
 

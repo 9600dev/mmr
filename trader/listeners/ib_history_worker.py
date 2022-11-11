@@ -1,6 +1,6 @@
 from dateutil.tz import gettz
+from ib_insync import IB
 from ib_insync.contract import Contract
-from ib_insync.ib import IB
 from trader.common.helpers import dateify, timezoneify, utcify_str
 from trader.common.logging_helper import setup_logging
 from trader.data.data_access import SecurityDefinition
@@ -19,10 +19,18 @@ import pytz
 logging = setup_logging(module_name='ibhistoryworker')
 
 class IBHistoryWorker():
-    def __init__(self, ib_client: IB):
+    def __init__(
+        self,
+        ib_server_address: str,
+        ib_server_port: int,
+        ib_client_id: int,
+    ):
         # self.ib_client = ib_client
-        self.ib_client = IB()
-        self.ib_client_parent = ib_client
+        self.ib_server_address = ib_server_address
+        self.ib_server_port = ib_server_port
+        self.ib_client_id = ib_client_id
+        self.ib_client: IB = IB()
+
         self.error_code: int = 0
         self.error_string: str = ''
         self.error_contract: Optional[Contract] = None
@@ -65,9 +73,9 @@ class IBHistoryWorker():
                 self.ib_client.errorEvent += self.__handle_error
 
             self.ib_client.connect(
-                self.ib_client_parent.client.host,
-                self.ib_client_parent.client.port,
-                clientId=self.ib_client_parent.client.clientId + 5,
+                host=self.ib_server_address,
+                port=self.ib_server_port,
+                clientId=self.ib_client_id,
                 timeout=15,
                 readonly=True
             )
@@ -243,6 +251,6 @@ class IBHistoryWorker():
         all_data: pd.DataFrame = pd.concat(bars)
 
         if filter_between_dates:
-            all_data = all_data[(all_data.index >= start_date)  #.replace(tzinfo=gettz(tz_info)))  # type: ignore
-                                & (all_data.index <= end_date_offset)]  #.replace(tzinfo=gettz(tz_info)))]  # type: ignore
+            all_data = all_data[(all_data.index >= start_date)  # .replace(tzinfo=gettz(tz_info)))  # type: ignore
+                                & (all_data.index <= end_date_offset)]  # .replace(tzinfo=gettz(tz_info)))]  # type: ignore
         return all_data.sort_index(ascending=True)

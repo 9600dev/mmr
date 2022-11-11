@@ -16,7 +16,6 @@ from prompt_toolkit.cursor_shapes import CursorShape
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from pyfiglet import Figlet
-from random import randint
 from scripts.chain import plot_chain
 from scripts.trader_check import health_check
 from scripts.zmq_pub_listener import ZmqPrettyPrinter
@@ -62,6 +61,8 @@ def connect():
 
 remoted_client = RemotedClient[TraderServiceApi](error_table=error_table)
 connect()
+
+cli_client_id = remoted_client.rpc(return_type=int).get_unique_client_id()
 
 @click.group(
     invoke_without_command=True,
@@ -397,9 +398,8 @@ def resolve(
 ):
     if ib:
         container = Container()
-        client = container.resolve(IBAIORx)
-        # todo fix this
-        IBAIORx.client_id_counter = randint(20, 99)
+        client = container.resolve(IBAIORx, extra_args={'ib_client_id': cli_client_id})
+
         client.connect()
         contract = asyncio.get_event_loop().run_until_complete(client.get_conid(
             symbols=symbol,
@@ -813,7 +813,7 @@ def setup_ipython():
 
     container = Container()
     accessor = container.resolve(UniverseAccessor)
-    client = container.resolve(IBAIORx)
+    client = container.resolve(IBAIORx, extra_args={'ib_client_id': cli_client_id})
     client.connect()
     store = Arctic(mongo_host=container.config()['arctic_server_address'])
     tickstorage = container.resolve(TickStorage)

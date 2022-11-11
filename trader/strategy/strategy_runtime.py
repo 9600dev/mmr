@@ -38,6 +38,7 @@ class StrategyRuntime(metaclass=Singleton):
         self,
         ib_server_address: str,
         ib_server_port: int,
+        strategy_runtime_ib_client_id: int,
         arctic_server_address: str,
         arctic_universe_library: str,
         zmq_pubsub_server_address: str,
@@ -51,6 +52,7 @@ class StrategyRuntime(metaclass=Singleton):
     ):
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
+        self.strategy_runtime_ib_client_id: int = strategy_runtime_ib_client_id
         self.arctic_server_address = arctic_server_address
         self.arctic_universe_library = arctic_universe_library
         self.simulation: bool = simulation
@@ -72,7 +74,6 @@ class StrategyRuntime(metaclass=Singleton):
         self.strategy_implementations: List[Strategy] = []
         self.streams: Dict[int, pd.DataFrame] = {}
 
-        self.ib_client_id: int = 0
         self.historical_data_client: IBHistoryWorker
 
     def load_strategies(self):
@@ -199,9 +200,6 @@ class StrategyRuntime(metaclass=Singleton):
         conf_file = open(config_file, 'r')
         config = yaml.load(conf_file, Loader=yaml.FullLoader)
 
-        self.ib_client_id = config['ib_client_id']
-        # todo figure out if changes to this require logout/login
-
         for strategy_config in config['strategies']:
             self.load_strategy(
                 name=strategy_config['name'],
@@ -269,7 +267,11 @@ class StrategyRuntime(metaclass=Singleton):
 
         logging.debug('starting connection to IB for historical data')
         client = IB()
-        self.historical_data_client = IBHistoryWorker(client)
+        self.historical_data_client = IBHistoryWorker(
+            self.ib_server_address,
+            self.ib_server_port,
+            self.strategy_runtime_ib_client_id + 1,
+        )
         await self.historical_data_client.connect()
         await self.get_historical_data()
 

@@ -10,21 +10,18 @@ sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 from arctic.date import DateRange
-from ib_insync.ib import IB
 from trader.batch.queuer import Queuer
-from trader.common.helpers import dateify, pdt
+from trader.common.helpers import dateify, pdt, timezoneify
 from trader.common.logging_helper import setup_logging
-from trader.container import Container
 from trader.data.data_access import SecurityDefinition, TickData, TickStorage
 from trader.data.universe import Universe
 from trader.listeners.ib_history_worker import IBHistoryWorker
 from trader.objects import BarSize, WhatToShow
-from typing import cast, List
+from typing import List, Optional
 
 import asyncio
 import datetime as dt
 import exchange_calendars
-import random
 
 
 logging = setup_logging(module_name='ib_history_batch')
@@ -34,6 +31,7 @@ class IBHistoryQueuer(Queuer):
         self,
         ib_server_address: str,
         ib_server_port: int,
+        ib_client_id: int,
         arctic_server_address: str,
         bar_size: BarSize,
         redis_server_address: str,
@@ -45,22 +43,42 @@ class IBHistoryQueuer(Queuer):
         self.data = TickStorage(arctic_server_address).get_tickdata(bar_size=bar_size)
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
+        self.ib_client_id = ib_client_id
         self.arctic_server_address = arctic_server_address
         self.bar_size = bar_size
+
+    def __try_get_exchange_calendar(self, security: SecurityDefinition):
+        exchange_calendar = None
+        try:
+            exchange_calendar = exchange_calendars.get_calendar(security.primaryExchange)
+        except exchange_calendars.exchange_calendar.errors.InvalidCalendarName:
+            try:
+                exchange_calendar = exchange_calendars.get_calendar(security.exchange)
+            except Exception as ex:
+                return None
+        return exchange_calendar
 
     def queue_history(
         self,
         security_definitions: List[SecurityDefinition],
-        start_date: dt.datetime = dateify(dt.datetime.now() - dt.timedelta(days=5), timezone='US/Eastern', make_sod=True),
+        start_date: dt.datetime = dateify(dt.datetime.now() - dt.timedelta(days=5), make_sod=True),
         end_date: dt.datetime = dateify(
             dt.datetime.now() - dt.timedelta(days=1),
-            timezone='US/Eastern',
             make_eod=True
-        )
+        ),
+        exchange_calendar: Optional[exchange_calendars.ExchangeCalendar] = None,
     ):
         for security in security_definitions:
+            # timezonify the start date based on the securities trading timezone
+            start_date = timezoneify(start_date, timezone=security.timeZoneId)
+            end_date = timezoneify(end_date, timezone=security.timeZoneId)
+
             # find the missing dates between start_date and end_date, and queue them up
-            exchange_calendar = exchange_calendars.get_calendar(security.primaryExchange)
+            exchange_calendar = self.__try_get_exchange_calendar(security)
+            if not exchange_calendar:
+                logging.error('could not find correct exchange calendar for security {}, try passing one'.format(security))
+                continue
+
             date_ranges = self.data.missing(security,
                                             exchange_calendar,
                                             date_range=DateRange(start=start_date, end=end_date))
@@ -74,11 +92,10 @@ class IBHistoryQueuer(Queuer):
                     logging.info('enqueing {} from {} to {}'.format(Universe.to_contract(security),
                                                                     pdt(date_dr.start), pdt(date_dr.end)))
 
-                    client_id = random.randint(50, 100)
                     history_worker = BatchIBHistoryWorker(
                         ib_server_address=self.ib_server_address,
                         ib_server_port=self.ib_server_port,
-                        ib_client_id=client_id,
+                        ib_client_id=self.ib_client_id,
                         arctic_server_address=self.arctic_server_address,
                         redis_server_address=self.redis_server_address,
                         redis_server_port=self.redis_server_port
@@ -94,7 +111,7 @@ class IBHistoryQueuer(Queuer):
                         ]
                     )
                     logging.debug('Job history_worker.do_work enqueued, is_queued: {} using cliend_id {}'
-                                  .format(job.is_queued, client_id))
+                                  .format(job.is_queued, self.ib_client_id))
 
 
 class BatchIBHistoryWorker():
@@ -113,21 +130,23 @@ class BatchIBHistoryWorker():
         self.redis_server_port = redis_server_port
         self.storage: TickStorage
         self.data: TickData
+        self.ib_history_worker: IBHistoryWorker
 
     def do_work(self, security: SecurityDefinition, start_date: dt.datetime, end_date: dt.datetime, bar_size: BarSize) -> bool:
         setup_logging(module_name='batch_ib_history_worker', suppress_external_info=True)
 
-        ib = cast(IB, Container().resolve(IB))
+        self.ib_history_worker = IBHistoryWorker(
+            self.ib_server_address,
+            self.ib_server_port,
+            self.ib_client_id
+        )
 
-        if not ib.isConnected():
-            ib.connect(host=self.ib_server_address, port=self.ib_server_port, clientId=self.ib_client_id)
-
-        self.ib_history = IBHistoryWorker(ib)
         self.data = TickStorage(self.arctic_server_address).get_tickdata(bar_size)
+        asyncio.run(self.ib_history_worker.connect())
 
         logging.info('do_work: {} {} {} {}'.format(security.symbol, pdt(start_date), pdt(end_date), bar_size))
         # result = self.ib_history.get_and_populate_stock_history(cast(Stock, contract), bar_size, start_date, end_date)
-        result = asyncio.run(self.ib_history.get_contract_history(
+        result = asyncio.run(self.ib_history_worker.get_contract_history(
             security=Universe.to_contract(security),
             what_to_show=WhatToShow.TRADES,
             start_date=start_date,
@@ -140,6 +159,8 @@ class BatchIBHistoryWorker():
             len(result),
             str(bar_size)
         ))
+
+        asyncio.run(self.ib_history_worker.disconnect())
 
         if len(result) > 0:
             self.data.write(security, result)

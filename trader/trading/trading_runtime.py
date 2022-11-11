@@ -54,6 +54,7 @@ class Trader(metaclass=Singleton):
     def __init__(self,
                  ib_server_address: str,
                  ib_server_port: int,
+                 trading_runtime_ib_client_id: int,
                  arctic_server_address: str,
                  arctic_universe_library: str,
                  redis_server_address: str,
@@ -66,6 +67,7 @@ class Trader(metaclass=Singleton):
                  simulation: bool = False):
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
+        self.trading_runtime_ib_client_id = trading_runtime_ib_client_id
         self.arctic_server_address = arctic_server_address
         self.arctic_universe_library = arctic_universe_library
         self.simulation: bool = simulation
@@ -106,6 +108,7 @@ class Trader(metaclass=Singleton):
         self.startup_time: dt.datetime = dt.datetime.now()
         self.last_connect_time: dt.datetime
         self.load_test: bool = False
+        self.tws_client_ids: List[int] = [self.trading_runtime_ib_client_id, self.trading_runtime_ib_client_id + 1]
 
         self.disposables: List[DisposableBase] = []
 
@@ -131,7 +134,7 @@ class Trader(metaclass=Singleton):
     @backoff.on_exception(backoff.expo, ConnectionRefusedError, max_tries=10, max_time=120)
     def connect(self):
         try:
-            self.client = IBAIORx(self.ib_server_address, self.ib_server_port)
+            self.client = IBAIORx(self.ib_server_address, self.ib_server_port, self.trading_runtime_ib_client_id)
             self.data = TickStorage(self.arctic_server_address)
             self.universe_accessor = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
             self.universes = self.universe_accessor.get_all()
@@ -439,13 +442,13 @@ class Trader(metaclass=Singleton):
     def cancel_order(self, order_id: int) -> Optional[Trade]:
         # get the Order
         order = self.book.get_order(order_id)
-        if order and order.clientId == self.client.client_id_counter:
+        if order and order.clientId == self.trading_runtime_ib_client_id:
             logging.info('cancelling order {}'.format(order))
             trade = self.client.ib.cancelOrder(order)
             return trade
         else:
             logging.error('either order does not exist, or originating client_id is different: {} {}'
-                          .format(order, self.client.client_id_counter))
+                          .format(order, self.trading_runtime_ib_client_id))
             return None
 
     def is_ib_connected(self) -> bool:
@@ -464,6 +467,16 @@ class Trader(metaclass=Singleton):
 
     def get_universes(self) -> List[Universe]:
         return self.universes
+
+    def get_unique_client_id(self) -> int:
+        new_client_id = max(self.tws_client_ids) + 1
+        self.tws_client_ids.append(new_client_id)
+        self.tws_client_ids.append(new_client_id + 1)
+        return new_client_id
+
+    def release_client_id(self, client_id: int):
+        if client_id in self.tws_client_ids:
+            self.tws_client_ids.remove(client_id)
 
     def start_load_test(self):
         async def _load_test_helper():

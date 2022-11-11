@@ -117,6 +117,15 @@ class TraderServiceApi(RPCHandler):
         return list(self.trader.zmq_pubsub_contracts.keys())
 
     @RPCHandler.rpcmethod
+    def get_unique_client_id(self) -> int:
+        return self.trader.get_unique_client_id()
+
+    @RPCHandler.rpcmethod
+    def release_client_id(self, client_id: int) -> bool:
+        self.trader.release_client_id(client_id)
+        return True
+
+    @RPCHandler.rpcmethod
     def start_load_test(self) -> int:
         logging.debug('start_load_test()')
         self.trader.start_load_test()

@@ -25,11 +25,13 @@ logging = setup_logging(module_name='ib_history_queuer')
 @click.option('--universe', required=True, help='name of universe to grab history for')
 @click.option('--bar_size', required=True, default='1 min', help='IB bar size: 1 min')
 @click.option('--prev_days', required=True, default=5, help='Enqueue today minus prev_days: default 5 days')
+@click.option('--ib_client_id', required=True, default=10, help='unique client id for TWS: default 10')
 @common_options()
 @default_config()
 def get_universe_history_ib(
     ib_server_address: str,
     ib_server_port: int,
+    ib_client_id: int,
     arctic_server_address: str,
     redis_server_address: str,
     redis_server_port: int,
@@ -45,14 +47,15 @@ def get_universe_history_ib(
     queuer = IBHistoryQueuer(
         ib_server_address,
         ib_server_port,
+        ib_client_id,
         arctic_server_address,
         bar_size_enum,
         redis_server_address,
         redis_server_port,
     )
 
-    start_date = dateify(dt.datetime.now() - dt.timedelta(days=prev_days + 1), timezone='America/New_York', make_sod=True)
-    logging.info('enqueing IB history from {} to {} days'.format(start_date, prev_days))
+    start_date = dateify(dt.datetime.now() - dt.timedelta(days=prev_days + 1), make_sod=True)
+    logging.info('enqueing IB history from {} to the previous {} days'.format(start_date, prev_days))
 
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
     u = accessor.get(universe)
@@ -65,11 +68,13 @@ def get_universe_history_ib(
 @click.option('--arctic_universe_library', required=True, help='arctic library that contains universe definitions')
 @click.option('--bar_size', required=True, default='1 min', help='IB bar size: 1 min')
 @click.option('--prev_days', required=True, default=5, help='Enqueue today minus prev_days: default 5 days')
+@click.option('--ib_client_id', required=True, default=10, help='unique client id for TWS: default 10')
 @common_options()
 @default_config()
 def get_symbol_history_ib(
     ib_server_address: str,
     ib_server_port: int,
+    ib_client_id: int,
     arctic_server_address: str,
     redis_server_address: str,
     redis_server_port: int,
@@ -87,6 +92,7 @@ def get_symbol_history_ib(
     queuer = IBHistoryQueuer(
         ib_server_address,
         ib_server_port,
+        ib_client_id,
         arctic_server_address,
         bar_size_enum,
         redis_server_address,

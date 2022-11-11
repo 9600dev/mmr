@@ -1,5 +1,4 @@
 env: TRADER_CHECK=False
-ib_client_id: 10
 strategies:
   - name: global
     description: strategy wide configuration
