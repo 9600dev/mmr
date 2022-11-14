@@ -4,7 +4,7 @@ set -o errexit -o pipefail -o noclobber -o nounset
 
 CONTNAME=mmr-container
 IMGNAME=mmr-image
-RELEASE=21.04
+RELEASE=20.04
 
 # usually /home/trader/mmr
 BUILDDIR=$(cd $(dirname "$0"); pwd)
@@ -18,12 +18,13 @@ echo_usage() {
     echo "  -s (sync code to running container)"
     echo "  -a (sync all files in mmr to running container)"
     echo "  -r (run container and ssh into it)"
+    echo "  -g (go: clean, build, run and ssh into container)"
     echo "  -n|--container_name <name> (default: mmr-container)"
     echo "  -i|--image_name <name> (default: mmr-trader)"
     echo ""
 }
 
-b=n c=n r=n s=n a=n
+b=n c=n r=n s=n a=n g=n
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -37,6 +38,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -r|--run)
       r=y
+      shift # past argument
+      ;;
+    -g|--go)
+      g=y
       shift # past argument
       ;;
     -s|--sync)
@@ -96,7 +101,7 @@ clean() {
 run() {
     echo "running container $CONTNAME with this command:"
     echo ""
-    echo " $ docker run --name $CONTNAME -ti -e TRADER_CONFIG='/home/trader/mmr/configs/trader.yaml -p 2222:22 -p starting -p 7496:7496 -p 6379:6379 -p 27017:27017 -p 5900:5900 -p 5901:5901 -p 8081:8081 --tmpfs /run --tmpfs /run/lock --tmpfs /tmp -v /lib/modules:/lib/modules:ro -d $IMGNAME"
+    echo " $ docker run --name $CONTNAME -ti -p 2222:22 -p starting -p 7496:7496 -p 6379:6379 -p 27017:27017 -p 5900:5900 -p 5901:5901 -p 8081:8081 --tmpfs /run --tmpfs /run/lock --tmpfs /tmp -v /lib/modules:/lib/modules:ro -d $IMGNAME"
     echo ""
 
     if [ ! "$(docker image ls -a | grep $IMGNAME)" ]; then
@@ -132,9 +137,9 @@ run() {
 build() {
     echo "building mmr into image $IMGNAME and container $CONTNAME"
     echo ""
-    echo " $ DOCKER_BUILDKIT=1 docker build -t $IMGNAME --force-rm=true --rm=true $BUILDDIR"
+    echo "DOCKER_BUILDKIT=1 docker buildx build --platform linux/amd64 -t $IMGNAME --force-rm=true --rm=true $BUILDDIR"
     echo ""
-    DOCKER_BUILDKIT=1 docker build -t $IMGNAME --force-rm=true --rm=true $BUILDDIR
+    DOCKER_BUILDKIT=1 docker buildx build --platform linux/amd64 -t $IMGNAME --force-rm=true --rm=true $BUILDDIR
 }
 
 sync() {
@@ -165,7 +170,7 @@ sync_all() {
     rsync -e 'docker exec -i' -av --delete $BUILDDIR/ $CONTID:/home/trader/mmr/ --exclude='.git'
 }
 
-echo "build: $b, clean: $c, run: $r, sync: $s, sync_all: $a, image_name: $IMGNAME, container_name: $CONTNAME"
+echo "build: $b, clean: $c, run: $r, sync: $s, sync_all: $a, go: $g, image_name: $IMGNAME, container_name: $CONTNAME"
 
 if [[ $b == "y" ]]; then
     build
@@ -181,4 +186,7 @@ if [[ $s == "y" ]]; then
 fi
 if [[ $a == "y" ]]; then
     sync_all
+fi
+if [[ $g == "y" ]]; then
+    clean; build; run
 fi

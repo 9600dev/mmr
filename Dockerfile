@@ -104,6 +104,11 @@ RUN chmod +x /home/trader/tws-latest-standalone-linux-x64.sh
 RUN chmod +x /home/trader/mmr/scripts/installation/install_tws.sh
 
 # TWS needs JavaFX to be able to fully start
+
+RUN apt-get update
+# for whatever reason, some recent security update was causing openjfx to fail to install
+# missing libtiff5
+RUN apt-get install -y libtiff5-dev libtiff5 libjbig-dev
 RUN apt-get install -y openjfx
 
 # install window managers, Xvfb and vnc

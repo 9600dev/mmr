@@ -33,20 +33,30 @@ It relies on:
 - [ ] Algorithmic Strategy API and extensibility hooks (started)
 - [ ] Strategy and portfolio risk analysis (started)
 - [ ] Add/remove strategies
+- [ ] Hyperparameter search on strategies
 
 There is still about 2-3 months of work left before MMR is 'shippable'. If you want to help speed that up, send me a message.
 
 ## Installation
 
-### Docker Installation (easiest)
+### Docker Installation
 
-The simplest way to install and run MMR trader is via Docker. It will use an Ubuntu 21.04 image, install Python 3.9, install all requirements, and automatically install the latest version of Interactive Brokers Trader Workstation.
+The simplest way to install and run MMR trader is via Docker. It will use an Ubuntu 21.04 image, install Python 3.9.5, install all requirements, and automatically install the latest version of Interactive Brokers Trader Workstation.
 
 ```
 $ git clone https://github.com/9600dev/mmr.git
 $ cd mmr/
-$ ./docker.sh --build  # builds the mmr image (default name mmr-image)
-$ ./docker.sh --run    # runs the mmr image in a container (default name mmr-container); automatically ssh'es into the container to continue TWS configuration
+$ ./docker.sh --go     # builds, deploys, and runs the docker container
+```
+
+or:
+
+```
+$ ./docker.sh --clean  # cleans images and containers
+$ ./docker.sh --build  # builds image
+$ ./docker.sh --run    # builds and deploys container
+$ ./docker.sh --sync   # syncs local code changes to running container
+
 ```
 
 ![Docker build](docs/2022-10-08-09-30-05.png)
@@ -196,7 +206,7 @@ Therefore, needs to support a wide range of strategy requirements:
 * [semi-high frequency] Momentum trades spanning minutes, quick exits from risky positions, market making (selling buying calls and puts) etc.
 * **Non-goal is sub-second high frequency trading**.
 
-## Block architecture
+# Block architecture
 
 ![Block diagram](docs/block_arch_2.png)
 
