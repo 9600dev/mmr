@@ -146,12 +146,11 @@ def history_summary(
     arctic_universe_library: str,
     **args,
 ):
-    raise ValueError('needs to be refactored, changed how we index on tickdata')
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
     u = accessor.get(universe)
 
-    history_dbs = [x for x in TickStorage(arctic_server_address).list_libraries() if u.name in x and '_' in x]
-    for history_db in history_dbs:
+    for history_db in TickStorage(arctic_server_address).list_libraries():
+        tick_data = TickStorage(arctic_server_address).get_tickdata(history_db)
         tick_data = TickData(arctic_server_address, history_db)
         examples: List[str] = tick_data.list_symbols()[0:10]
 

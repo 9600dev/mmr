@@ -1,6 +1,16 @@
+# Backlog
+
+* timezonify should move everything that's deailing with internal timezones to timezone.utc
+* there's a timezoneTWS property on IB that gives you the TWS instance timeframe, use that.
+* Move timezoneify logic to the SecurityDefinition class, so that timezone updates to dt.datetime's are local to the security/market
+* ```listener_helpers.py``` and ```helpers.py``` need to be consolidated.
+* The batch queuing stuff is a bit wonky (there's a subclass there ```queuer.py``` but it's doesn't have the right abstraction). Given batch data downloads is going to be important, should probably clean all this up.
+* There's no testing framework setup, and no test coverage. Setup test framework. Add tests.
+* For all the command line tools, we have switches that are 'defaulted' to 127.0.0.1 etc, but we also have ```configs/trader.yaml``` configuration file. Reconcile these two. We probably need some sort of dependency injection/configuration injection style thing.
+
 # Development Notes
 
-* Largely following ![this guys approach](https://mitelman.engineering/blog/python-best-practice/automating-python-best-practices-for-a-new-project/#how-to-manage-python-versions-with-pyenv) to build/test/package management etc.
+* Largely following [this guys approach](https://mitelman.engineering/blog/python-best-practice/automating-python-best-practices-for-a-new-project/#how-to-manage-python-versions-with-pyenv) to build/test/package management etc.
 * Using poetry + pyenv for local dev, pinning to Python 3.5.9 (default Ubuntu 21.04 installation)
 * Exporting requirements.txt from poetry for a Docker default pip install
 * We set AcceptIncomingConnectionAction=accept in IBC's config.ini, which should automatically accept incoming API connections to TWS. This is insecure, so either set it to "manual", or configure it yourself when you fire up TWS for the first time.
@@ -14,12 +24,24 @@
 
 ## Backlog
 
-* getting portfolio stock history looks like it's blocking out RPC calls from lightbus.
 * ib_status() needs to deal with the ambiguity of outages vs. outages of specific exchanges we don't actually care about:
 * ![](2022-05-29-11-37-19.png)
 * traitlets is broken on 5.2.1 and 5.2.2, version assertion error. Forced install of 5.2.0
-* aioredis 1.2.0 is required for lightbus.
 * ExitAfterSecondFactorAuthenticationTimeout=yes doesn't work (crash on startup). Setting to 'no' works fine.
+
+## Random code in random places worth knowing about:
+
+  * ```python3 polygon_queuer.py --contracts ../../data/ib_symbols_nyse_nasdaq.csv``` does the same price history download, but using polygon.io.
+* ```trader/scripts``` directory contains a bunch of helpers to grab the complete lists of symbols from various exchanges around the world; contains symbol -> interactive broker 'conId' resolution (```ib_resolve.py```) and more.
+* ```trader/scripts/trader_check.py``` will do a bunch of system checks to make sure all services are up, and interactive brokers is responding
+* ```trader/listeners/ibreactivex.py``` is the RxPY concurrency wrapper around the Interactive Brokers API. If you're not familiar with reactive programming, start with the RxPY website.
+* ```pycron/pycron.py```is the workhorse for process scheduling. It makes sure all services and processes are continuously running (restarting if they're not) and checks for dependencies. It will also start, stop and restart services on a crontab like schedule.
+* Docker build failing, not being able to resolve DNS? Try:
+  * sudo pkill docker
+  * sudo iptables -t nat -F
+  * sudo ifconfig docker0 down
+  * sudo brctl delbr docker0
+  * sudo service docker restart
 
 ## Asyncio Lifecycle
 
@@ -99,7 +121,6 @@ Observable xs = pipe(
     * CancellationTokenSource -> cancel() self.dispose()
     * dispose() for all listeners?? call the continuation
     * which in this case is cb() task.cancel()
-
 
 ![](2022-07-02-10-35-01.png)
 ![](2022-07-03-07-44-07.png)

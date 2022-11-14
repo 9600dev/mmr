@@ -1,13 +1,23 @@
 # Make Me Rich!
 ![money!](docs/moneyroll.jpg)
 
-Python based algorithmic trading platform similar to QuantRocket (www.quantrocket.com) and others. It uses the Interactive Brokers brokerage API's to route and execute its trades.
+Python based algorithmic trading platform similar to [QuantRocket](www.quantrocket.com) and others. It uses the Interactive Brokers brokerage API's to download historical data, and route/execute its trades.
 
-Features include:
+You can use MMR in three ways:
+
+1. Complete automated and algorithmic trading: MMR will subscribe to instrument ticks, pipe them to your algo, and you provide the signal for automatic trading.
+2. Fully interactive terminal prompt: get quotes, create, cancel, change orders etc from a live terminal prompt.
+2. Command line trading: get quotes, create, cancel and change orders etc, all from the Windows, MacOS or Linux command line.
+
+MMR hosts the Interactive Brokers Trader Workstation instance, maintains connection, ensures consistency and reliabilty between your Interactive Brokers account and your local trading book. It's opinionated about the programming abstractions you should use to program your algos, but will meet you at the level of abstraction you want.
+
+It relies on:
 
 * [RxPy 4.0](https://github.com/ReactiveX/RxPY) for asyncio pipelining and programming abstraction, and [vectorbt](https://github.com/polakowo/vectorbt) for algorithm programmability and backtesting.
-* Batch download of instrument data from [Interactive Brokers](https://www.interactivebrokers.com/en/home.php) and [Polygon.io](https://www.polygon.io)
-* [Arctic Timeseries and Tick Store](https://github.com/man-group/arctic) for tick data storage
+* Batch download of historical instrument data from [Interactive Brokers](https://www.interactivebrokers.com/en/home.php) and [Polygon.io](https://www.polygon.io).
+* [Arctic Timeseries and Tick Store](https://github.com/man-group/arctic) for tick data storage and super-fast retrieval.
+* No fancy Web x.x technologies, just simple and easily extended Python services.
+* Docker build and deploy on Ubuntu 20.04 LTS + Python 3.9.5.
 * and more...
 
 ### Status
@@ -17,12 +27,14 @@ Features include:
 - [x] Interactive brokers historical data collection
 - [x] Login; logoff; get positions; get portfolio;
 - [x] Subscribe to bars, subscribe to ticks
-- [ ] Place, cancel, update orders (mostly working)
+- [x] Place, cancel, update orders for all Interactive Brokers instruments
+- [x] Stop loss, trailing stop loss
 - [ ] Backtesting
-- [ ] Risk analysis
+- [ ] Algorithmic Strategy API and extensibility hooks (started)
+- [ ] Strategy and portfolio risk analysis (started)
 - [ ] Add/remove strategies
-- [ ] Find strategies
-- [ ] ... and everything else.
+
+There is still about 2-3 months of work left before MMR is 'shippable'. If you want to help speed that up, send me a message.
 
 ## Installation
 
@@ -59,17 +71,17 @@ Enter your Trader Workstation username and password. The script will proceed to 
 
 After this has completed, it will start a [tmux](https://github.com/tmux/tmux/wiki) session with two commands:
 
-* `pycron` (MMR's process spawner and scheduler) which handles the process scheduling, maintenance and uptime of the mmr trading runtime, ArcticDB, Redis, X Windows, and Trader Workstation, ready for automatic trading. You can manually call this by: ```python3 pycron/pycron.py --config ./configs/pycron.yaml```
+* `pycron` (MMR's process spawner and scheduler) which handles the process scheduling, maintenance and uptime of the MMR trading runtime, ArcticDB, Redis, X Windows, and Trader Workstation, ready for automatic trading. You can manually call this by: ```python3 pycron/pycron.py --config ./configs/pycron.yaml```
 * `cli` which is command line interface to interact with the trading system (check portfolio, check systems, manually create orders etc). You can manually call this using ```python3 cli.py```.
-* `info` a simple realtime dashboard that observes the mmr runtime. Displays positions, portfolio, and strategy logs.
+* `info` a simple realtime dashboard that observes the MMR runtime. Displays positions, portfolio, and strategy logs.
 * `trader_service_log` displays the trader service log real time (see below for information on this service).
 * `strategy_service_log` displays the trader service log real time.
 
 ![](docs/2022-10-08-09-43-06.png)
 
-When starting mmr for the first time, there are a couple of things you should do:
+When starting MMR for the first time, there are a couple of things you should do:
 
-#### Checking mmr status:
+#### Checking MMR status:
 
 * ```status```
 
@@ -77,7 +89,7 @@ When starting mmr for the first time, there are a couple of things you should do
 
 #### Bootstrapping the symbol universes
 
-After ensuring everything is connected and functioning, you should bootstrap the population of the "symbol universe". This is mmr's cache of most of Interactive Brokers tradeable instruments, mapping symbol to IB contract ID (i.e. AMD -> 4931).
+After ensuring everything is connected and functioning, you should bootstrap the population of the "symbol universe". This is MMR's cache of most of Interactive Brokers tradeable instruments, mapping symbol to IB contract ID (i.e. AMD -> 4931).
 
 * ```universes bootstrap```
 
@@ -95,26 +107,11 @@ From here you're good to go: either using the `cli` to push manual trades to IB,
 
 ### Manual Installation
 
-If you want to YOLO the install, and you're on Ubuntu or a derivative, you can try running the ```native_install.sh``` script. Otherwise, this might get you close enough:
-
-* Clone this repository into /home/trader/mmr directory
-* Create a user 'trader' (or chown a new /home/trader directory)
-* Install [Trader Workstation](https://download2.interactivebrokers.com/installers/tws/latest-standalone/tws-latest-standalone-linux-x64.sh)
-* Install IBC: https://github.com/IbcAlpha/IBC into /home/trader/ibc
-* Copy ``scripts/installation/config.ini`` and ``scripts/installation/twstart.sh`` into /home/trader/ibc directory. Adjust both of those files to reflect the TWS version you installed.
-* Make sure ~/ibc/logs and ~/mmr/logs directories are created
-* Install MongoDB: https://docs.mongodb.com/manual/installation/
-* Install Arctic Database (Mongo wrapper basically): https://github.com/man-group/arctic
-* Install Python >= 3.9.5
-* Install Pip and then ```pip3 install -r requirements.txt```
-* Install Redis via ```sudo apt install redis-server```
-* Start pycron:
- 	* ```cd /home/trader/mmr/pycron```
- 	* ```python3 pycron.py ../configs/pycron.yaml```
+See [docs/MANUAL_INSTALL.md](docs/MANUAL_INSTALL.md)
 
 ### Trading Manually from the Command Line
 
-There are two ways to perform trades and inspect the mmr runtime manually: from the command line, or through the CLI helper.
+There are two ways to perform trades and inspect the MMR runtime manually: from the command line, or through the CLI helper.
 
 To fire up the CLI helper, type:
 
@@ -122,7 +119,7 @@ To fire up the CLI helper, type:
 
 ![](docs/2022-09-30-11-07-06.png)
 
-This gives you a range of options to interact with the mmr runtime: inspect orders, logs, trades etc, and manually submit trades from the CLI itself:
+This gives you a range of options to interact with the MMR runtime: inspect orders, logs, trades etc, and manually submit trades from the CLI itself:
 
 * ```mmr> trade --symbol AMD --buy --limit 60.00 --amount 100.0```
 
@@ -175,34 +172,20 @@ You can VNC into the Docker container which will allow you to interact with the 
 
 ![](docs/2022-06-03-08-58-08.png)
 
-Otherwise, tail the following:
+All services log debug, info, critical and warn to the following log files:
 
-* logs/trader.log for most module level debug output
-* logs/error.log for critical/error logs
-* logs/trader_service.log
-* logs/strategy_service.log
+* ```logs/trader.log``` for most module level debug output
+* ```logs/error.log``` for critical/error logs
+* ```logs/trader_service.log``` for trader_service
+* ```logs/strategy_service.log``` for strategy_service
 
-## Random
+## Development Notes
 
-* ```trader/batch``` directory has the batch services, which allow you to queue up and download historical data from IB or Polygon.io.
-  * ```python3 history_queuer.py --contracts ../../data/ib_symbols_nyse_nasdaq.csv --prev_days 30``` download 30 days worth of 1 minute data for all stocks listed in ib_symbols_nyse_nasdaq.csv.
-  * This should automatically queue Price History requests for stocks listed in csv using [RQ Python](https://python-rq.org/). There is an ``rq`` worker that will run automatically, as it's already running and listening from PyCron.
-  * ```python3 polygon_queuer.py --contracts ../../data/ib_symbols_nyse_nasdaq.csv``` does the same price history download, but using polygon.io.
-  * The ```*_batch.py``` files contain the classes that are invoked from ```rq```
-* ```trader/scripts``` directory contains a bunch of helpers to grab the complete lists of symbols from various exchanges around the world; contains symbol -> interactive broker 'conId' resolution (```ib_resolve.py```) and more.
-* ```trader/scripts/trader_check.py``` will do a bunch of system checks to make sure all services are up, and interactive brokers is responding
-* ```trader/listeners/ibreactivex.py``` is the RxPY concurrency wrapper around the Interactive Brokers API. If you're not familiar with reactive programming, start with the RxPY website.
-* ```pycron/pycron.py```is the workhorse for process scheduling. It makes sure all services and processes are continuously running (restarting if they're not) and checks for dependencies. It will also start, stop and restart services on a crontab like schedule.
-* Docker build failing, not being able to resolve DNS? Try:
-  * sudo pkill docker
-  * sudo iptables -t nat -F
-  * sudo ifconfig docker0 down
-  * sudo brctl delbr docker0
-  * sudo service docker restart
+Something weird happening? Want to know more about a particular abstraction? Check out the [docs/DEV_NOTES.md](docs/DEV_NOTES.md) doc.
 
 # Direction
 
-MMR trading platform should be able to scale from a couple of trades per month, to many trades per minute:
+MMR's scalability target is many trades per minute to a couple of trades per month:
 
 ![Contrast diagram](docs/contrast_diagram.png)
 
@@ -211,19 +194,20 @@ Therefore, needs to support a wide range of strategy requirements:
 * [low frequency] Risk analysis of portfolio compared to market conditions: re-balancing. Tax implications etc.
 * [medium frequency] Trade strategies that span multiple days/weeks: mean reversion over time.
 * [semi-high frequency] Momentum trades spanning minutes, quick exits from risky positions, market making (selling buying calls and puts) etc.
-* Non-goal is sub-second high frequency trading.
+* **Non-goal is sub-second high frequency trading**.
 
 ## Block architecture
 
-![Block diagram](docs/block_diagram.png)
+![Block diagram](docs/block_arch_2.png)
 
-Some of this stuff is built, a lot of it isn't. Some general product requirements:
+#### High level product requirements/architecture choices:
 
-* Live market feeds for prices etc are saved and "re-playable" via simulation.
-* Historical data can be use to "replay" previous days/months/years of trading (i.e. use bid, ask, price, last_price, volume, etc to simulate the IB market feed)
+* Live market feeds for prices etc are saved and "re-playable" via simulation. (not done)
+* Historical data can be use to "replay" previous days/months/years of trading (i.e. use bid, ask, price, last_price, volume, etc to simulate the IB market feed) (not done)
 * Two dominant data-structures the platform is based on:
-  * DataFrames that represent prices, which can be 'windowed' over time.
-  * Reactive Extensions (or equivalent) that allows
+  * DataFrames that represent prices, which can be 'windowed' over time. (done)
+  * Reactive Extensions for real time/reactive algorithmic programming. (done)
+* *_service.py are independent processes, and multiple instances of them can be spun up for horizontal scalability. Each process communicates via ZeroMQ messages with msgpack as the compressed message container. See more [here](https://zeromq.org/messages/). Ticks arrive as pandas dataframes. (done)
 
 ### Pycron ```pycron/pycron.py```
 
@@ -236,16 +220,6 @@ Pycron deals with scheduling, starting, stopping and restarting processes, servi
 * Has a small tornado based webservice that allows for remote control of processes
 
 [todo explain the other services]
-
-# Backlog
-
-* timezonify should move everything that's deailing with internal timezones to timezone.utc
-* there's a timezoneTWS property on IB that gives you the TWS instance timeframe, use that.
-* Move timezoneify logic to the SecurityDefinition class, so that timezone updates to dt.datetime's are local to the security/market
-* ```listener_helpers.py``` and ```helpers.py``` need to be consolidated.
-* The batch queuing stuff is a bit wonky (there's a subclass there ```queuer.py``` but it's doesn't have the right abstraction). Given batch data downloads is going to be important, should probably clean all this up.
-* There's no testing framework setup, and no test coverage. Setup test framework. Add tests.
-* For all the command line tools, we have switches that are 'defaulted' to 127.0.0.1 etc, but we also have ```configs/trader.yaml``` configuration file. Reconcile these two. We probably need some sort of dependency injection/configuration injection style thing.
 
 # License
 

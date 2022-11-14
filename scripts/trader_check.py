@@ -27,12 +27,13 @@ logging = setup_logging(module_name='trader_check')
 
 def test_platform(ib_server_address: str,
                   ib_server_port: int,
+                  ib_client_id: int,
                   arctic_server_address: str,
                   redis_server_address: str,
                   redis_server_port: int) -> bool:
     succeeded = True
     try:
-        ibrx = IBAIORx(ib_server_address, ib_server_port)
+        ibrx = IBAIORx(ib_server_address, ib_server_port, ib_client_id)
         ibrx.connect()
         result = asyncio.run(ibrx.get_conid(['AMD']))
         if not result:
@@ -61,12 +62,19 @@ def test_platform_config(config_file) -> bool:
     container = Container(config_file)
     ib_server_address = container.config()['ib_server_address']
     ib_server_port = container.config()['ib_server_port']
+    ib_client_id = 100
     arctic_server_address = container.config()['arctic_server_address']
     redis_server_address = container.config()['redis_server_address']
     redis_server_port = container.config()['redis_server_port']
 
-    result = test_platform(ib_server_address, ib_server_port, arctic_server_address,
-                           redis_server_address, redis_server_port)
+    result = test_platform(
+        ib_server_address,
+        ib_server_port,
+        ib_client_id,
+        arctic_server_address,
+        redis_server_address,
+        redis_server_port
+    )
     return result
 
 
@@ -89,12 +97,14 @@ def health_check(config_file) -> bool:
 @click.option('--config', required=False, default='/home/trader/mmr/configs/trader.yaml')
 @click.option('--ib_server_address', required=False, default='127.0.0.1', help='tws trader api address')
 @click.option('--ib_server_port', required=False, default=7496, help='port for tws server api')
+@click.option('--ib_client_id', required=False, default=100, help='TWS client id [default: 100]')
 @click.option('--arctic_server_address', required=False, default='127.0.0.1', help='arctic server ip address: 127.0.0.1')
 @click.option('--redis_server_address', required=False, default='127.0.0.1', help='redis server ip address: 127.0.0.1')
 @click.option('--redis_server_port', required=False, default=6379, help='redis server port: 6379')
 def main(config: str,
          ib_server_address: str,
          ib_server_port: int,
+         ib_client_id: int,
          arctic_server_address: str,
          redis_server_address: str,
          redis_server_port: int):
@@ -103,8 +113,14 @@ def main(config: str,
     if config:
         result = test_platform_config(config)
     else:
-        result = test_platform(ib_server_address, ib_server_port, arctic_server_address,
-                               redis_server_address, redis_server_port)
+        result = test_platform(
+            ib_server_address,
+            ib_server_port,
+            ib_client_id,
+            arctic_server_address,
+            redis_server_address,
+            redis_server_port
+        )
     print(result)
 
 
