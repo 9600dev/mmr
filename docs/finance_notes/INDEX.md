@@ -8,4 +8,5 @@
 * [Analysis](ANALYSIS.md)
     * Sharpe; Quantitative Easing; Central Banks; etc.
 * [Finance Math](FINANCE_MATH.md])
-* [Unsorted Finance, Tools, Software Links](UNSORTED.md)
+* [Tools, Software, Platforms](TRADING_SYSTEMS.md)
+* [Unsorted Links](UNSORTED.md)
