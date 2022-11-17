@@ -16,6 +16,7 @@ It relies on:
 * [RxPy 4.0](https://github.com/ReactiveX/RxPY) for asyncio pipelining and programming abstraction, and [vectorbt](https://github.com/polakowo/vectorbt) for algorithm programmability and backtesting.
 * Batch download of historical instrument data from [Interactive Brokers](https://www.interactivebrokers.com/en/home.php) and [Polygon.io](https://www.polygon.io).
 * [Arctic Timeseries and Tick Store](https://github.com/man-group/arctic) for tick data storage and super-fast retrieval.
+* [erdewit's ib_insync API](https://github.com/erdewit/ib_insync). A sane sync/asyncio wrapper around the TWS API.
 * No fancy Web x.x technologies, just simple and easily extended Python services.
 * Docker build and deploy on Ubuntu 20.04 LTS + Python 3.9.5.
 * and more...
@@ -36,6 +37,15 @@ It relies on:
 - [ ] Hyperparameter search on strategies
 
 There is still about 2-3 months of work left before MMR is 'shippable'. If you want to help speed that up, send me a message.
+
+## Want to Learn About Finance?
+
+[Follow along here](docs/finance_notes/INDEX.md) as I take notes from books and web resources. Macro, micro, market structure, accounting, pricing, market making and trading systems.
+
+I lean heavily on the following books for the design of this trading system, and my own algorithmic trading:
+
+[<img src="docs/2022-11-16-15-30-42.png" height=300>](https://www.amazon.com/Systematic-Trading-designing-trading-investing/dp/0857194453)
+[<img src="docs/2022-11-16-15-32-22.png" height=300>](https://www.amazon.com/Advances-Financial-Machine-Learning-Marcos/dp/1119482089)
 
 ## Installation
 
