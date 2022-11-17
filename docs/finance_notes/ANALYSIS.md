@@ -11,4 +11,17 @@
 * [Thread on QE and why central banks are still engaged in it](https://mobile.twitter.com/MacroAlf/status/1558892593597104128)
 * [Sharpe Ratio](https://seekingalpha.com/article/4239442-your-sharpe-ratio-is-low-for-reasons-bad-golf)
 
+## Structure
+
+* [Options Market Structure - 101](https://frontmonth.substack.com/p/options-market-structure-101-b18?s=r)
+* [Carbon footprint of crypto](https://blog.dshr.org/2022/02/ee380-talk.html)
+* [Hidden Intel Trapped in Options Chain Data](https://threadreaderapp.com/thread/1474855205728501760.html)
+* [Turning Networks into Economies](https://twitter.com/cdixon/status/1429585831899983876)
+* [Generating Functions, a thread](https://twitter.com/10kdiver/status/1426597150993965057)
+* [Thread on how clearing houses work, and what happened in the RH GME debarcle](https://twitter.com/compound248/status/1355274739351248898)
+
+## Trading Ideas
+
+* [10 Under-the-cover Trading Hacks](https://twitter.com/FabiusMercurius/status/1492569620569489409)
+* [Systematic Trading blog](https://qoppac.blogspot.com/p/systematic-trading-start-here.html)
 

@@ -35,4 +35,4 @@
 * [Machine Learning and Data Landscape](https://mattturck.com/data2021/)
 * [Semi-controversial career advice](https://twitter.com/FabiusMercurius/status/1408883428712321024)
 * [Understanding Jane Street](https://www.thediff.co/p/jane-street?triedSigningIn=true)
-
+* [Same old boom link](https://investoramnesia.com/2020/09/13/the-same-old-boom/)
