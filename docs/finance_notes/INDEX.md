@@ -7,3 +7,5 @@
     * How to read a balance sheet; How to read an income statement; Valuations and pricing instruments; Factor based investing
 * [Analysis](ANALYSIS.md)
     * Sharpe; Quantitative Easing; Central Banks; etc.
+* [Finance Math](FINANCE_MATH.md])
+* [Unsorted Finance, Tools, Software Links](UNSORTED.md)
