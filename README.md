@@ -187,7 +187,14 @@ You can choose to use the REPL (read eval print loop) via ```python3 cli.py``` o
 
 ## Implementing an Automated Algorithm/Strategy
 
-TODO:// explain how to do this once it's fully coded.
+TODO:// there are many different levels of abstraction that MMR can work at, explain all of them.
+
+This is all still in flux, but you can take a look at the source code to get a sense of the different algo implementation abstractions:
+
+* Most flexible, most difficult: Using [trader/listeners/ibreactive.py](https://github.com/9600dev/mmr/blob/master/trader/listeners/ibreactive.py) instead of ib_insync. This is essentially a RxPY wrapper around the ib_insync library to move ib_insync from event driven to reactive/stream driven, which makes real-time algo coding easier.
+* Less flexible: Adding/extending [trader_runtime.py](https://github.com/9600dev/mmr/blob/master/trader/trading/trading_runtime.py). The trader_service.py service hosts trading_runtime, which spins up a ibreactive.py connection to TWS, maintains trade and book state, and enables real-time streaming tick data subscription handling. It also a clean simple library to interact with the Tick Data database, risk analysis, financial math apis and more.
+* Less flexible, but preferred method: extending [trader/trading/strategy.py](https://github.com/9600dev/mmr/blob/master/trader/trading/strategy.py). Build your own strategy by exending this base class. It will be hosted by the [strategy_service.py](https://github.com/9600dev/mmr/blob/master/strategy_service.py) service, a separate process that enables tick subscriptons and routes trades through the trader_service.py service. strategy_service.py will also handle backfilling historical data, ensuring reliability of order routing, and running risk safety checks.
+
 
 ## Debugging
 
