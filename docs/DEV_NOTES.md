@@ -7,6 +7,8 @@
 * The batch queuing stuff is a bit wonky (there's a subclass there ```queuer.py``` but it's doesn't have the right abstraction). Given batch data downloads is going to be important, should probably clean all this up.
 * There's no testing framework setup, and no test coverage. Setup test framework. Add tests.
 * For all the command line tools, we have switches that are 'defaulted' to 127.0.0.1 etc, but we also have ```configs/trader.yaml``` configuration file. Reconcile these two. We probably need some sort of dependency injection/configuration injection style thing.
+* IB order "conditions" aren't exposed yet: https://interactivebrokers.github.io/tws-api/order_conditions.html. Enable these.
+  * ![](2022-11-18-09-31-11.png)
 
 # Development Notes
 

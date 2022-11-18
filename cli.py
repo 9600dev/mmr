@@ -8,7 +8,7 @@ from expression import pipe
 from expression.collections import seq
 from ib_insync.contract import Contract
 from ib_insync.objects import PortfolioItem, Position
-from ib_insync.order import Order, Trade
+from ib_insync.order import Order, OrderStatus, Trade
 from ib_insync.ticker import Ticker
 from IPython import get_ipython
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
@@ -596,7 +596,7 @@ def load_test_stop():
     remoted_client.rpc().stop_load_test()
 
 
-## CLI_BOOK
+# CLI_BOOK
 @main.group()
 def book():
     pass
@@ -906,9 +906,46 @@ def trade_update(
     quantity: Optional[float],
     stop_loss_percentage: float,
     debug: bool,
+    arctic_server_address: str,
+    arctic_universe_library: str,
     **args,
 ):
-    click.echo('not implemented')
+    # todo: I don't like this api
+    def error_out():
+        click.echo('order_id {} already filled or cancelled. Aborting'.format(order_id))
+    # ib_insync groups talk about modifying the order in place, and resubmitting via place_order
+    # but it feels cleaner to cancel the existing order and resubmit in case the user wants to move
+    # from limit to market, or whatever.
+
+    # ensure the order id is in the book via trades (Trade is a wrapper around the order, telling you
+    # if the trade is submitted, executed, etc)
+    trades: dict[int, list[Trade]] = remoted_client.rpc(return_type=dict[int, list[Trade]]).get_trades()
+    if order_id in trades and len(trades[order_id]) > 0:
+        trade = trades[order_id][0]
+
+        if trade.orderStatus.status in list(OrderStatus.DoneStates):
+            error_out()
+            return
+
+        cancelled_trade: Optional[Trade] = remoted_client.rpc(return_type=Optional[Trade]).cancel_order(order_id=order_id)
+        if not cancelled_trade:
+            error_out()
+            return
+
+        __trade_helper(
+            buy=trade.order.action == 'BUY',
+            symbol=str(trade.contract.conId),
+            primary_exchange='',
+            market=market,
+            limit=limit,
+            equity_amount=equity_amount,
+            quantity=quantity,
+            stop_loss_percentage=stop_loss_percentage,
+            debug=debug,
+            arctic_server_address=arctic_server_address,
+            arctic_universe_library=arctic_universe_library,
+            args=args,
+        )
 
 
 @main.command()
