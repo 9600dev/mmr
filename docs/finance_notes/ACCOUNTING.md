@@ -1,6 +1,5 @@
 # Accounting
 
-* [Ten threads that teach you accounting](https://twitter.com/thealexbanks/status/1500876409731903489)
 * [Mental Models: Financial Assets as Levers (thread)](https://twitter.com/UrbanKaoboy/status/1467174640162279425): “stocks as bonds,” why “duration of CFs” matter, and why many tech stocks resemble “30-year zero-coupon bonds” – how even a small shift in rate expectations can move valuations A LOT.
 
 ### Assets = Liabilities + Equity (Owners/Shareholders)

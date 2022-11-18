@@ -242,14 +242,14 @@ def rich_tablify(df, financial: bool = False, financial_columns: List[str] = [],
         r = []
         for i in range(1, len(row)):
             if type(row[i]) is float and not financial:
-                r.append('%.2f' % row[i])
+                r.append('%.3f' % row[i])
             elif type(row[i]) is float and financial:
                 if len(financial_columns) > 0 and cols[i - 1] in financial_columns:
                     r.append(locale.currency(row[i], grouping=True))
                 elif len(financial_columns) == 0 and financial:
                     r.append(locale.currency(row[i], grouping=True))
                 else:
-                    r.append('%.2f' % row[i])
+                    r.append('%.3f' % row[i])
 
             else:
                 r.append(str(row[i]))

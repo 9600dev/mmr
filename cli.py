@@ -596,6 +596,7 @@ def load_test_stop():
     remoted_client.rpc().stop_load_test()
 
 
+## CLI_BOOK
 @main.group()
 def book():
     pass
@@ -712,28 +713,14 @@ def company_info(symbol: str):
                     rich_table(financials.read(definition).financials, True)  # type: ignore
                     return
 
-@main.command()
-@click.option('--buy/--sell', default=True, help='buy or sell')
-@click.option('--symbol', required=True, type=str, help='IB conId for security')
-@click.option('--primary_exchange', required=False, default='', type=str, help='exchange [not required]')
-@option_group(
-    'trade options',
-    cloupoption('--market', is_flag=True, help='market order'),
-    cloupoption('--limit', type=float, help='limit price [requires a decimal price]'),
-    constraint=mutually_exclusive,
-)
-@option_group(
-    'amount options',
-    cloupoption('--equity_amount', type=float, help='total $$ equity amount to buy/sell, eg 1000.0'),
-    cloupoption('--quantity', type=float, help='quantity of the underlying, eg 100.0'),
-    constraint=mutually_exclusive,
-)
-@click.option('--stop_loss_percentage', required=False, type=float, default=0.0,
-              help='percentage below price to place stop loss order [default=0.0, no stop loss]')
-@click.option('--debug', is_flag=True, default=False, help='changes the trade to be + or - 10 percent of submitted limit price.')
-@common_options()
-@default_config()
-def trade(
+
+# CLI_TRADE
+@main.group()
+def trade():
+    pass
+
+
+def __trade_helper(
     buy: bool,
     symbol: str,
     primary_exchange: str,
@@ -762,6 +749,8 @@ def trade(
     elif len(contracts) > 1:
         click.echo('multiple contracts found for symbol {}, aborting'.format(symbol))
         return
+    elif not symbol.isnumeric():
+        click.echo('warning: not using IB conId as symbol identifier could lead to unexpected trade behavior.')
 
     action = 'BUY' if buy else 'SELL'
     trade: SuccessFail = remoted_client.rpc(return_type=SuccessFail).place_order(
@@ -775,6 +764,151 @@ def trade(
         debug=debug,
     )
     click.echo(trade)
+
+
+@trade.command('buy')
+@click.option('--symbol', required=True, type=str, help='IB conId for security')
+@click.option('--primary_exchange', required=False, default='', type=str, help='exchange [not required]')
+@option_group(
+    'trade options',
+    cloupoption('--market', is_flag=True, help='market order'),
+    cloupoption('--limit', type=float, help='limit price [requires a decimal price]'),
+    constraint=mutually_exclusive,
+)
+@option_group(
+    'amount options',
+    cloupoption('--equity_amount', type=float, help='total $$ equity amount to buy/sell, eg 1000.0'),
+    cloupoption('--quantity', type=float, help='quantity of the underlying, eg 100.0'),
+    constraint=mutually_exclusive,
+)
+@click.option('--stop_loss_percentage', required=False, type=float, default=0.0,
+              help='percentage below price to place stop loss order [default=0.0, no stop loss]')
+@click.option('--debug', is_flag=True, default=False, help='changes the trade to be + or - 10 percent of submitted limit price.')
+@common_options()
+@default_config()
+def trade_buy(
+    symbol: str,
+    primary_exchange: str,
+    market: bool,
+    limit: Optional[float],
+    equity_amount: Optional[float],
+    quantity: Optional[float],
+    stop_loss_percentage: float,
+    debug: bool,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    **args,
+):
+    __trade_helper(
+        buy=True,
+        symbol=symbol,
+        primary_exchange=primary_exchange,
+        market=market,
+        limit=limit,
+        equity_amount=equity_amount,
+        quantity=quantity,
+        stop_loss_percentage=stop_loss_percentage,
+        debug=debug,
+        arctic_server_address=arctic_server_address,
+        arctic_universe_library=arctic_universe_library,
+        args=args,
+    )
+
+
+@trade.command('sell')
+@click.option('--symbol', required=True, type=str, help='IB conId for security')
+@click.option('--primary_exchange', required=False, default='', type=str, help='exchange [not required]')
+@option_group(
+    'trade options',
+    cloupoption('--market', is_flag=True, help='market order'),
+    cloupoption('--limit', type=float, help='limit price [requires a decimal price]'),
+    constraint=mutually_exclusive,
+)
+@option_group(
+    'amount options',
+    cloupoption('--equity_amount', type=float, help='total $$ equity amount to buy/sell, eg 1000.0'),
+    cloupoption('--quantity', type=float, help='quantity of the underlying, eg 100.0'),
+    constraint=mutually_exclusive,
+)
+@click.option('--stop_loss_percentage', required=False, type=float, default=0.0,
+              help='percentage below price to place stop loss order [default=0.0, no stop loss]')
+@click.option('--debug', is_flag=True, default=False, help='changes the trade to be + or - 10 percent of submitted limit price.')
+@common_options()
+@default_config()
+def trade_sell(
+    symbol: str,
+    primary_exchange: str,
+    market: bool,
+    limit: Optional[float],
+    equity_amount: Optional[float],
+    quantity: Optional[float],
+    stop_loss_percentage: float,
+    debug: bool,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    **args,
+):
+    __trade_helper(
+        buy=False,
+        symbol=symbol,
+        primary_exchange=primary_exchange,
+        market=market,
+        limit=limit,
+        equity_amount=equity_amount,
+        quantity=quantity,
+        stop_loss_percentage=stop_loss_percentage,
+        debug=debug,
+        arctic_server_address=arctic_server_address,
+        arctic_universe_library=arctic_universe_library,
+        args=args,
+    )
+
+
+@trade.command('cancel')
+@click.option('--order_id', required=True, type=int, help='order_id for submitted order')
+@common_options()
+@default_config()
+def trade_cancel(
+    order_id: int,
+    **args,
+):
+    trade: Optional[Trade] = remoted_client.rpc(return_type=SuccessFail).cancel_order(order_id)
+    if trade:
+        click.echo(trade)
+    else:
+        click.echo('cancellation unsuccessful; either order_id did not exist or order was already completed')
+
+
+@trade.command('update')
+@click.option('--order_id', required=True, type=int, help='order_id for submitted order')
+@option_group(
+    'trade options',
+    cloupoption('--market', is_flag=True, help='market order'),
+    cloupoption('--limit', type=float, help='limit price [requires a decimal price]'),
+    constraint=mutually_exclusive,
+)
+@option_group(
+    'amount options',
+    cloupoption('--equity_amount', type=float, help='total $$ equity amount to buy/sell, eg 1000.0'),
+    cloupoption('--quantity', type=float, help='quantity of the underlying, eg 100.0'),
+    constraint=mutually_exclusive,
+)
+@click.option('--stop_loss_percentage', required=False, type=float, default=0.0,
+              help='percentage below price to place stop loss order [default=0.0, no stop loss]')
+@click.option('--debug', is_flag=True, default=False, help='changes the trade to be + or - 10 percent of submitted limit price.')
+@common_options()
+@default_config()
+def trade_update(
+    order_id: int,
+    market: bool,
+    limit: Optional[float],
+    equity_amount: Optional[float],
+    quantity: Optional[float],
+    stop_loss_percentage: float,
+    debug: bool,
+    **args,
+):
+    click.echo('not implemented')
 
 
 @main.command()
