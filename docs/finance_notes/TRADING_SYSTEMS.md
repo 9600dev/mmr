@@ -28,11 +28,19 @@
 
 ## Tools
 
+* [Trading View](https://www.tradingview.com/symbols/TVC-NDQ/): Pretty good vizualization tool. Integration with Interactive Brokers.
+* [Finviz](https://finviz.com/): The 'poor mans Bloomberg'.
+    ![](../2022-11-17-10-47-41.png)
 * [Fintopea](https://www.fintopea.com/quote/AAPL/income-statement): Visualize 30+ years of company balance sheets and income statements for free.
-* [The book of secret knowledge - a long list of tools](https://github.com/trimstray/the-book-of-secret-knowledge)
+    ![](../2022-11-17-10-50-29.png)
+* [Trading Economics](https://tradingeconomics.com/): Flat, simple site. Contains commodity prices, currencies, stocks, bonds and crypto prices.
+  ![](../2022-11-17-11-00-09.png)
 * [Financial Modeling Prep](https://site.financialmodelingprep.com/financial-statements/META): good tool for discounted cash flow modeling, intrinsic value of companies etc.
 * [PortfolioLabs](https://portfolioslab.com/tools) - sharpe, calmar, treynor, sortino, etc.
 * [Random notes about Trader Workstation TWS](https://dimon.ca/dmitrys-tws-api-faq/)
 * [OpenBB - a thread on its features](https://mobile.twitter.com/theBuoyantMan/status/1558792415263088641)
 * [10 free finance tools](https://mobile.twitter.com/gurgavin/status/1560748089635651584)
 * [i8 Terminal](https://github.com/investoreight/i8-terminal)
+* [Dataroma](https://www.dataroma.com/m/home.php): Portfolio updates of hedge funds and super investors.
+* [Earnings Whispers](https://earningswhispers.com/): Dates/times of upcoming earnings reports, plus predictions.
+* [The book of secret knowledge - a long list of tools](https://github.com/trimstray/the-book-of-secret-knowledge)

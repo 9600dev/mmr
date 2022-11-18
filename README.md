@@ -1,7 +1,7 @@
 # Make Me Rich!
-![money!](docs/moneyroll.jpg)
+![MMR logo from stable diffusion](docs/2022-11-17-14-43-24.png)
 
-Python based algorithmic trading platform similar to [QuantRocket](www.quantrocket.com) and others. It uses the Interactive Brokers brokerage API's to download historical data, and route/execute its trades.
+Python based algorithmic trading platform for [Interactive Brokers](https://interactivebrokers.com), similar to [QuantRocket](www.quantrocket.com) and others. It uses the Interactive Brokers brokerage API's to download historical data, and route/execute its trades.
 
 You can use MMR in three ways:
 
@@ -64,8 +64,11 @@ or:
 ```
 $ ./docker.sh --clean  # cleans images and containers
 $ ./docker.sh --build  # builds image
-$ ./docker.sh --run    # builds and deploys container
-$ ./docker.sh --sync   # syncs local code changes to running container
+$ ./docker.sh --run    # deploys container in docker, runs MMR
+
+and then:
+
+$ ./docker.sh --sync   # to sync local code changes to running container
 
 ```
 
@@ -201,7 +204,9 @@ All services log debug, info, critical and warn to the following log files:
 
 ## Development Notes
 
-Something weird happening? Want to know more about a particular abstraction? Check out the [docs/DEV_NOTES.md](docs/DEV_NOTES.md) doc.
+* Something weird happening? Want to know more about a particular abstraction? Check out the [docs/DEV_NOTES.md](docs/DEV_NOTES.md) doc.
+* Something weird in TWS happening? This link here: [Random notes about Trader Workstation TWS](https://dimon.ca/dmitrys-tws-api-faq/) might have you covered.
+* Want a list of all the Interactive Brokers instruments in their trading universe: click [here](https://www.interactivebrokers.com/en/index.php?f=1563&p=fut)
 
 # Direction
 

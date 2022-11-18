@@ -107,4 +107,4 @@
 * [A Summary of Factor Investing](https://twitter.com/ReformedTrader/status/1195450353472303104)
 * [Retained Earnings, a Twitter thread](https://twitter.com/10kdiver/status/1485006207832051715)
 * [Reading a profit and loss statement](https://lethain.com/profit-and-loss-statement/)
-
+* [Wasteland Capital Twitter](https://twitter.com/ecommerceshares): These guys breakdown earnings statements.

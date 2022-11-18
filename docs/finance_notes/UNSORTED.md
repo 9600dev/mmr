@@ -1,10 +1,8 @@
 # Random Finance Links
 
 * [Bloomberg terminal overview](https://www.optionsbro.com/bloomberg-terminal-review/)
-* [Percentage Changes, logarithmic returns discussion](https://www.reddit.com/r/algotrading/comments/uduv5s/a_mathematical_consideration_that_is_stumping_me/)
 * [Superinvestors - list of hedge fund portfolio changes](https://www.dataroma.com/m/home.php)
 * [Worldwide bond yield curves](http://www.worldgovernmentbonds.com/inverted-yield-curves/)
-* [IB Product Listings](https://www.interactivebrokers.com/en/index.php?f=1563&p=fut)
 * [Interactive Brokers Format Guide](https://www.sierrachart.com/index.php?page=doc/IBSymbols.html)
 * [IB Symbol Guide](https://www.linnsoft.com/support/symbol-guide-ib)
 * [Ming Zhao - Hidden Intel trapped in Options Chain Data (amazing thread)](https://twitter.com/FabiusMercurius/status/1474855205728501760)
