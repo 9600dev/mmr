@@ -1,7 +1,7 @@
 # Make Me Rich!
 ![MMR logo from stable diffusion](docs/2022-11-17-14-43-24.png)
 
-Python based algorithmic trading platform for [Interactive Brokers](https://interactivebrokers.com), similar to [QuantRocket](www.quantrocket.com) and others. It uses the Interactive Brokers brokerage API's to download historical data, and route/execute its trades.
+Python based algorithmic trading platform for [Interactive Brokers](https://interactivebrokers.com), similar to [QuantRocket](https://www.quantrocket.com) and others. It uses the Interactive Brokers brokerage API's to download historical data, and route/execute its trades.
 
 You can use MMR in three ways:
 
