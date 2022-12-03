@@ -18,7 +18,7 @@ It relies on:
 * [Arctic Timeseries and Tick Store](https://github.com/man-group/arctic) for tick data storage and super-fast retrieval.
 * [erdewit's ib_insync API](https://github.com/erdewit/ib_insync). A sane sync/asyncio wrapper around the TWS API.
 * No fancy Web x.x technologies, just simple and easily extended Python services.
-* Docker build and deploy on Ubuntu 20.04 LTS + Python 3.9.5.
+* Docker build and deploy on Debian 11.5 + Python 3.9.5.
 * and more...
 
 ### Status
@@ -51,7 +51,7 @@ I lean heavily on the following books for the design of this trading system, and
 
 ### Docker Installation
 
-The simplest way to install and run MMR trader is via Docker. It will use an Ubuntu 21.04 image, install Python 3.9.5, install all requirements, and automatically install the latest version of Interactive Brokers Trader Workstation.
+The simplest way to install and run MMR trader is via Docker. It will use a Debian 11.5 image, install Python 3.9.5, install all requirements, and automatically install the latest version of Interactive Brokers Trader Workstation.
 
 ```
 $ git clone https://github.com/9600dev/mmr.git
