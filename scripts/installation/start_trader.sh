@@ -47,20 +47,20 @@ if [ ! -d /home/trader/Jts ]; then
     fi
 
     # we already do this in Dockerfile and native_installation.sh but we should redo it anyway
-    /bin/cp /home/trader/mmr/scripts/installation/config.ini /home/trader/ibc/config.ini
-    /bin/cp /home/trader/mmr/scripts/installation/twsstart.sh /home/trader/ibc/twsstart.sh
+    cp /home/trader/mmr/scripts/installation/config.ini /home/trader/ibc/config.ini
+    cp /home/trader/mmr/scripts/installation/twsstart.sh /home/trader/ibc/twsstart.sh
 
-    /bin/sed -i "s/{username}/$USERNAME/g" /home/trader/ibc/twsstart.sh
-    /bin/sed -i "s/{username}/$USERNAME/g" /home/trader/ibc/config.ini
+    sed -i "s/{username}/$USERNAME/g" /home/trader/ibc/twsstart.sh
+    sed -i "s/{username}/$USERNAME/g" /home/trader/ibc/config.ini
 
-    /bin/sed -i "s/{password}/$PASSWORD/g" /home/trader/ibc/twsstart.sh
-    /bin/sed -i "s/{password}/$PASSWORD/g" /home/trader/ibc/config.ini
+    sed -i "s/{password}/$PASSWORD/g" /home/trader/ibc/twsstart.sh
+    sed -i "s/{password}/$PASSWORD/g" /home/trader/ibc/config.ini
 
     echo ""
     echo ""
     echo "Automating the installation of Trader Workstation to /home/trader/Jts..."
     echo ""
-    /usr/bin/expect /home/trader/mmr/scripts/installation/tws-install.exp
+    expect /home/trader/mmr/scripts/installation/tws-install.exp
     echo ""
     echo "Installed. Hit enter to start the pycron tmux session, which starts all"
     echo "trader services (Arctic DB, Redis, pycron, X windows, VNC Server, etc."
@@ -74,8 +74,8 @@ if [ ! -d /home/trader/Jts ]; then
         mv ~/Jts /home/trader
     fi
 
-    TWS_VERSION=$(/bin/ls -m /home/trader/Jts | /bin/head -n 1 | /bin/sed 's/,.*$//')
-    /bin/sed -i "s/{tws_version}/$TWS_VERSION/g" /home/trader/ibc/twsstart.sh
+    TWS_VERSION=$(ls -m /home/trader/Jts | head -n 1 | sed 's/,.*$//')
+    sed -i "s/{tws_version}/$TWS_VERSION/g" /home/trader/ibc/twsstart.sh
 
     # move the default jts.ini settings over
     # this prevents the 'do you want to use SSL dialog' from popping

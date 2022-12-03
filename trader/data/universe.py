@@ -105,7 +105,7 @@ class UniverseAccessor():
                         results.append((universe, definition))
         return results
 
-    def resolve_first_symbol(self, symbol: Union[str, int]) -> Optional[Tuple[Universe, SecurityDefinition]]:
+    def resolve_first_symbol(self, symbol: Union[str, int]) -> Tuple[Universe, SecurityDefinition]:
         for universe in self.get_all():
             for definition in universe.security_definitions:
                 if type(symbol) is int:
@@ -114,7 +114,7 @@ class UniverseAccessor():
                 if type(symbol) is str:
                     if symbol == definition.symbol:
                         return (universe, definition)
-        return None
+        raise ValueError('symbol not found {}'.format(symbol))
 
     def update(self, universe: Universe) -> None:
         self.library.write(universe.name, universe, prune_previous_version=True)

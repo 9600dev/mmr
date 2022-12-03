@@ -1,4 +1,4 @@
-FROM ubuntu:20.04
+FROM debian:11.5
 WORKDIR /home/trader/mmr
 ENV container docker
 ENV PATH "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -28,18 +28,16 @@ ENV TZ=America/New_York
 RUN apt-get install -y tzdata
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-RUN echo "deb http://security.ubuntu.com/ubuntu focal-security main" | tee /etc/apt/sources.list.d/focal-security.list
 
 # mongo
 RUN wget -qO - https://www.mongodb.org/static/pgp/server-5.0.asc | apt-key add -
-RUN echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/5.0 multiverse" | tee /etc/apt/sources.list.d/mongodb-org-5.0.list
+RUN echo "deb http://repo.mongodb.org/apt/debian bullseye/mongodb-org/5.0 main" | tee /etc/apt/sources.list.d/mongodb-org-5.0.list
 RUN apt-get update -y
 RUN apt-get install -y mongodb-org
 
-RUN rm /etc/apt/sources.list.d/focal-security.list
-
 RUN apt-get install -y linux-headers-generic
 RUN apt-get install -y lzip curl
+RUN apt-get install -y locales-all
 RUN apt-get install -y redis-server
 RUN apt-get install -y openssh-server sudo
 RUN apt-get install -y unzip
@@ -116,7 +114,6 @@ RUN apt-get install -y tigervnc-scraping-server
 # RUN apt-get install -y python3-cairocffi
 RUN apt-get install -y xvfb
 RUN apt-get install -y xterm
-RUN apt-get install -y language-pack-en-base
 
 RUN mkdir /home/trader/.vnc
 RUN echo 'trader' | vncpasswd -f > /home/trader/.vnc/passwd
