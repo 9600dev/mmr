@@ -22,6 +22,7 @@ RUN apt-get install -y git
 RUN apt-get install -y wget
 RUN apt-get install -y vim
 RUN apt-get install -y dpkg
+RUN apt-get install -y build-essential
 
 # set to New York timezone, can override with docker run -e TZ=Europe/London etc.
 ENV TZ=America/New_York
@@ -60,6 +61,7 @@ RUN apt-get install -y libedit-dev
 RUN apt-get install -y libncurses5-dev
 RUN apt-get install -y libssl-dev
 RUN apt-get install -y libffi-dev
+RUN apt-get install -y liblzma-dev
 
 RUN echo 'trader:trader' | chpasswd
 RUN service ssh start
