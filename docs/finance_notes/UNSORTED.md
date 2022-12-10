@@ -1,5 +1,6 @@
 # Random Finance Links
 
+* [Interactive Brokers - List of all order types (100+)](https://www.interactivebrokers.com/en/index.php?f=4985)
 * [Bloomberg terminal overview](https://www.optionsbro.com/bloomberg-terminal-review/)
 * [Superinvestors - list of hedge fund portfolio changes](https://www.dataroma.com/m/home.php)
 * [Worldwide bond yield curves](http://www.worldgovernmentbonds.com/inverted-yield-curves/)
