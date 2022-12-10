@@ -29,7 +29,6 @@ ENV TZ=America/New_York
 RUN apt-get install -y tzdata
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-
 # mongo
 RUN wget -qO - https://www.mongodb.org/static/pgp/server-5.0.asc | apt-key add -
 RUN echo "deb http://repo.mongodb.org/apt/debian bullseye/mongodb-org/5.0 main" | tee /etc/apt/sources.list.d/mongodb-org-5.0.list
@@ -40,7 +39,8 @@ RUN apt-get install -y linux-headers-generic
 RUN apt-get install -y lzip curl
 RUN apt-get install -y locales-all
 RUN apt-get install -y redis-server
-RUN apt-get install -y openssh-server sudo
+RUN apt-get install -y openssh-server
+RUN apt-get install -y sudo
 RUN apt-get install -y unzip
 RUN apt-get install -y tmux
 RUN apt-get install -y expect
@@ -99,17 +99,20 @@ RUN rm /home/trader/IBCLinux-3.14.0.zip
 RUN chmod +x /home/trader/ibc/*.sh
 
 # download TWS offline installer
-RUN wget https://download2.interactivebrokers.com/installers/tws/latest-standalone/tws-latest-standalone-linux-x64.sh -P /home/trader
-RUN chmod +x /home/trader/tws-latest-standalone-linux-x64.sh
+RUN wget https://download2.interactivebrokers.com/installers/tws/latest-standalone/tws-latest-standalone-linux-x64.sh -P /home/trader/mmr
+RUN chmod +x /home/trader/mmr/tws-latest-standalone-linux-x64.sh
 RUN chmod +x /home/trader/mmr/scripts/installation/install_tws.sh
 
-# TWS needs JavaFX to be able to fully start
+RUN apt-get update -y
 
-RUN apt-get update
-# for whatever reason, some recent security update was causing openjfx to fail to install
-# missing libtiff5
-RUN apt-get install -y libtiff5-dev libtiff5 libjbig-dev
-RUN apt-get install -y openjfx
+# libs needed for the TWS JDK to function correctly
+RUN apt-get install -y libtiff5-dev
+RUN apt-get install -y libtiff5
+RUN apt-get install -y libjbig-dev
+RUN apt-get install -y libpango-1.0-0
+RUN apt-get install -y libpangocairo-1.0-0
+RUN apt-get install -y libcairo2-dev
+RUN apt-get install -y libgdk-pixbuf2.0-0
 
 # install window managers, Xvfb and vnc
 RUN apt-get install -y tigervnc-scraping-server
@@ -126,7 +129,6 @@ RUN mkdir /home/trader/.tmp
 RUN mkdir /home/trader/.cache
 
 COPY ./scripts/installation/.bash_profile /home/trader
-COPY ./scripts/installation/start_trader.sh /home/trader
 COPY ./scripts/installation/twsstart.sh /home/trader/ibc/twsstart.sh
 COPY ./scripts/installation/config.ini /home/trader/ibc/config.ini
 COPY ./scripts/installation/config.py /home/trader/.configs/qtile

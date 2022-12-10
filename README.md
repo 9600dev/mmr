@@ -92,7 +92,7 @@ $ ssh trader@localhost -p 2222
 
 Enter your Trader Workstation username and password. The script will proceed to automatically install the latest Trader Workstation version.
 
-After this has completed, it will start a [tmux](https://github.com/tmux/tmux/wiki) session with two commands:
+After this has completed, it will call a script `start_trader.sh` in the MMR root directory, which starts a [tmux](https://github.com/tmux/tmux/wiki) session with five commands:
 
 * `pycron` (MMR's process spawner and scheduler) which handles the process scheduling, maintenance and uptime of the MMR trading runtime, ArcticDB, Redis, X Windows, and Trader Workstation, ready for automatic trading. You can manually call this by: ```python3 pycron/pycron.py --config ./configs/pycron.yaml```
 * `cli` which is command line interface to interact with the trading system (check portfolio, check systems, manually create orders etc). You can manually call this using ```python3 cli.py```.

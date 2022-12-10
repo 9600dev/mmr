@@ -5,4 +5,5 @@ command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"
 eval "$(pyenv init -)"
 
 export TRADER_CONFIG="/home/trader/mmr/configs/trader.yaml"
-/home/trader/start_trader.sh
+cd /home/trader/mmr
+/home/trader/mmr/start_trader.sh
