@@ -113,6 +113,7 @@ RUN apt-get install -y libpango-1.0-0
 RUN apt-get install -y libpangocairo-1.0-0
 RUN apt-get install -y libcairo2-dev
 RUN apt-get install -y libgdk-pixbuf2.0-0
+RUN apt-get install -y jq
 
 # install window managers, Xvfb and vnc
 RUN apt-get install -y tigervnc-scraping-server

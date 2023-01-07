@@ -33,7 +33,7 @@ fi
 if [ ! -d $IBC_DIR ]; then
     echo "Can't find IBC in $IBC_DIR. Either a non-docker install, or it's misconfigured?"
     echo "Let's try and download and install it anyway..."
-    LATEST_IBC=$(curl -sL https://api.github.com/repos/vmware/govmomi/releases/latest | jq -r ".tag_name")
+    LATEST_IBC=$(curl -sL https://api.github.com/repos/IbcAlpha/IBC/releases/latest | jq -r ".tag_name")
     mkdir $IBC_DIR
     wget https://github.com/IbcAlpha/IBC/releases/download/$LATEST_IBC/IBCLinux-$LATEST_IBC.zip -P $IBC_DIR
     cd $IBC_DIR
