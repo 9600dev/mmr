@@ -46,7 +46,38 @@ fi
 # check to see if we've installed tws
 if [ ! -d $JTS_DIR ]; then
     # likely first time start
-    echo "Can't find TWS, first time running? let's configure Interactive Brokers!"
+    echo "Can't find TWS, first time running? Let's download, install and configure Interactive Brokers!"
+
+    if [ ! -d $MMR_DIR/latest-standalone/tws-latest-standalone-linux-x64.sh ]; then
+        echo "latest TWS linux installer not found, downloading"
+        wget https://download2.interactivebrokers.com/installers/tws/latest-standalone/tws-latest-standalone-linux-x64.sh -P $MMR_DIR
+        chmod +x $MMR_DIR/tws-latest-standalone-linux-x64.sh
+        chmod +x $MMR_DIR/scripts/installation/install_tws.sh
+    fi
+
+    echo ""
+    echo ""
+    echo "Automating the installation of Trader Workstation to $JTS_DIR..."
+    echo ""
+    expect $MMR_DIR/scripts/installation/tws-install.exp
+
+    if [ -d ~/Jts ] && [ ! -d $JTS_DIR ]
+    then
+        # default install went to running users directory
+        mv ~/Jts $JTS_DIR
+    fi
+
+    TWS_VERSION=$(ls -m $JTS_DIR | head -n 1 | sed 's/,.*$//')
+    sed -i "s/{tws_version}/$TWS_VERSION/g" $IBC_DIR/twsstart.sh
+
+    # move the default jts.ini settings over
+    # this prevents the 'do you want to use SSL dialog' from popping
+    cp $MMR_DIR/scripts/installation/jts.ini $JTS_DIR
+
+    if [ -d $MMR_DIR/latest-standalone/tws-latest-standalone-linux-x64.sh ]; then
+        rm $MMR_DIR/latest-standalone/tws-latest-standalone-linux-x64.sh
+    fi
+
     echo -n "Please enter Interactive Brokers username: "
     read USERNAME;
 
@@ -75,42 +106,12 @@ if [ ! -d $JTS_DIR ]; then
     sed -i "s/{password}/$PASSWORD/g" $IBC_DIR/twsstart.sh
     sed -i "s/{password}/$PASSWORD/g" $IBC_DIR/config.ini
 
-    if [ ! -d $MMR_DIR/latest-standalone/tws-latest-standalone-linux-x64.sh ]; then
-        echo "latest TWS linux installer not found, downloading"
-        wget https://download2.interactivebrokers.com/installers/tws/latest-standalone/tws-latest-standalone-linux-x64.sh -P $MMR_DIR
-        chmod +x $MMR_DIR/tws-latest-standalone-linux-x64.sh
-        chmod +x $MMR_DIR/scripts/installation/install_tws.sh
-    fi
-
-    echo ""
-    echo ""
-    echo "Automating the installation of Trader Workstation to /home/trader/Jts..."
-    echo ""
-    expect $MMR_DIR/scripts/installation/tws-install.exp
     echo ""
     echo "Installed. Hit enter to start the pycron tmux session, which starts all"
     echo "trader services (Arctic DB, Redis, pycron, X windows, VNC Server, etc."
     echo ""
     chmod +x $IBC_DIR/scripts/displaybannerandlaunch.sh
     chmod +x $IBC_DIR/scripts/ibcstart.sh
-
-    if [ -d ~/Jts ] && [ ! -d $JTS_DIR ]
-    then
-        # default install went to running users directory
-        mv ~/Jts $JTS_DIR
-    fi
-
-    TWS_VERSION=$(ls -m $JTS_DIR | head -n 1 | sed 's/,.*$//')
-    sed -i "s/{tws_version}/$TWS_VERSION/g" $IBC_DIR/twsstart.sh
-
-    # move the default jts.ini settings over
-    # this prevents the 'do you want to use SSL dialog' from popping
-    cp $MMR_DIR/scripts/installation/jts.ini $JTS_DIR
-
-
-    if [ -d $MMR_DIR/latest-standalone/tws-latest-standalone-linux-x64.sh ]; then
-        rm $MMR_DIR/latest-standalone/tws-latest-standalone-linux-x64.sh
-    fi
 
     read NULL;
 fi
