@@ -9,6 +9,7 @@ from pypager.pager import Pager
 from pypager.source import GeneratorSource
 from rich.console import Console
 from rich.table import Table
+from scipy.stats import truncnorm
 from typing import Any, Callable, cast, Dict, Generic, List, Optional, Tuple, TypeVar, Union
 
 import collections
@@ -636,4 +637,9 @@ def best_fit_distribution(data, bins=200, ax=None):
             pass
 
     return (best_distribution, best_params)
+
+
+def get_truncated_normal(mean=0.0, sd=1.0, low=0.0, upp=10.0):
+    return truncnorm(
+        (low - mean) / sd, (upp - mean) / sd, loc=mean, scale=sd)
 

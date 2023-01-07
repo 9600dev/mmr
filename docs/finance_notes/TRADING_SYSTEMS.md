@@ -44,3 +44,4 @@
 * [Dataroma](https://www.dataroma.com/m/home.php): Portfolio updates of hedge funds and super investors.
 * [Earnings Whispers](https://earningswhispers.com/): Dates/times of upcoming earnings reports, plus predictions.
 * [The book of secret knowledge - a long list of tools](https://github.com/trimstray/the-book-of-secret-knowledge)
+* [GetGuestimate -- probability spreadsheet](https://www.getguesstimate.com/)

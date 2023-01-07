@@ -29,6 +29,20 @@ else
     exit 1
 fi
 
+# check to see if we've installed IBC
+if [ ! -d $IBC_DIR ]; then
+    echo "Can't find IBC in $IBC_DIR. Either a non-docker install, or it's misconfigured?"
+    echo "Let's try and download and install it anyway..."
+    LATEST_IBC=$(curl -sL https://api.github.com/repos/vmware/govmomi/releases/latest | jq -r ".tag_name")
+    mkdir $IBC_DIR
+    wget https://github.com/IbcAlpha/IBC/releases/download/$LATEST_IBC/IBCLinux-$LATEST_IBC.zip -P $IBC_DIR
+    cd $IBC_DIR
+    unzip IBCLinux-$LATEST_IBC.zip
+    chmod +x $IBC_DIR/*.sh
+    rm $IBC_DIR/IBCLinux-$LATEST_IBC.zip
+    echo "Finished unzipping IBC"
+fi
+
 # check to see if we've installed tws
 if [ ! -d $JTS_DIR ]; then
     # likely first time start
