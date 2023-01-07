@@ -31,8 +31,10 @@ fi
 
 # check to see if we've installed IBC
 if [ ! -d $IBC_DIR ]; then
+    echo ""
     echo "Can't find IBC in $IBC_DIR. Either a non-docker install, or it's misconfigured?"
     echo "Let's try and download and install it anyway..."
+    echo ""
     LATEST_IBC=$(curl -sL https://api.github.com/repos/IbcAlpha/IBC/releases/latest | jq -r ".tag_name")
     mkdir $IBC_DIR
     wget https://github.com/IbcAlpha/IBC/releases/download/$LATEST_IBC/IBCLinux-$LATEST_IBC.zip -P $IBC_DIR
@@ -40,7 +42,9 @@ if [ ! -d $IBC_DIR ]; then
     unzip IBCLinux-$LATEST_IBC.zip
     chmod +x $IBC_DIR/*.sh
     rm $IBC_DIR/IBCLinux-$LATEST_IBC.zip
+    echo ""
     echo "Finished unzipping IBC"
+    echo ""
 fi
 
 # check to see if we've installed tws
@@ -48,7 +52,7 @@ if [ ! -d $JTS_DIR ]; then
     # likely first time start
     echo "Can't find TWS, first time running? Let's download, install and configure Interactive Brokers!"
 
-    if [ ! -d $MMR_DIR/latest-standalone/tws-latest-standalone-linux-x64.sh ]; then
+    if [ ! -d $MMR_DIR/tws-latest-standalone-linux-x64.sh ]; then
         echo "latest TWS linux installer not found, downloading"
         wget https://download2.interactivebrokers.com/installers/tws/latest-standalone/tws-latest-standalone-linux-x64.sh -P $MMR_DIR
         chmod +x $MMR_DIR/tws-latest-standalone-linux-x64.sh
@@ -59,7 +63,7 @@ if [ ! -d $JTS_DIR ]; then
     echo ""
     echo "Automating the installation of Trader Workstation to $JTS_DIR..."
     echo ""
-    expect $MMR_DIR/scripts/installation/tws-install.exp
+    expect $MMR_DIR/scripts/installation/tws-install.exp $MMR_DIR
 
     if [ -d ~/Jts ] && [ ! -d $JTS_DIR ]
     then
@@ -74,13 +78,16 @@ if [ ! -d $JTS_DIR ]; then
     # this prevents the 'do you want to use SSL dialog' from popping
     cp $MMR_DIR/scripts/installation/jts.ini $JTS_DIR
 
-    if [ -d $MMR_DIR/latest-standalone/tws-latest-standalone-linux-x64.sh ]; then
-        rm $MMR_DIR/latest-standalone/tws-latest-standalone-linux-x64.sh
+    if [ -d $MMR_DIR/tws-latest-standalone-linux-x64.sh ]; then
+        rm $MMR_DIR/tws-latest-standalone-linux-x64.sh
     fi
 
+    echo ""
+    echo ""
     echo -n "Please enter Interactive Brokers username: "
     read USERNAME;
 
+    echo ""
     echo -n "Please enter Interactive Brokers password: "
     read -s PASSWORD;
 
@@ -107,8 +114,10 @@ if [ ! -d $JTS_DIR ]; then
     sed -i "s/{password}/$PASSWORD/g" $IBC_DIR/config.ini
 
     echo ""
+    echo ""
     echo "Installed. Hit enter to start the pycron tmux session, which starts all"
     echo "trader services (Arctic DB, Redis, pycron, X windows, VNC Server, etc."
+    echo ""
     echo ""
     chmod +x $IBC_DIR/scripts/displaybannerandlaunch.sh
     chmod +x $IBC_DIR/scripts/ibcstart.sh

@@ -1,9 +1,10 @@
 #!/usr/bin/expect
 
 set timeout 120
+set MMR_DIR [lindex $argv 0];
 
 spawn sh -c {
-    DISPLAY= /home/trader/tws-latest-standalone-linux-x64.sh
+    DISPLAY= $MMR_DIR/tws-latest-standalone-linux-x64.sh
 }
 
 expect "Where should"
