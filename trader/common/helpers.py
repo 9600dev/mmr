@@ -18,7 +18,6 @@ import exchange_calendars as ec
 import io
 import json
 import locale
-import logging
 import numpy as np
 import os
 import pandas as pd
@@ -557,6 +556,13 @@ def pct_change_adjust(df: pd.DataFrame, column: str) -> pd.Series:
     return df[column]
 
 
+def params_to_dict(params):
+    return {
+        'loc': params[-2],
+        'scale': params[-1],
+        'args': params[:-2],
+    }
+
 def fit_distribution(data, distribution_function, bins=200):
     # try and fit
     y, x = np.histogram(data, bins=bins, density=True)
@@ -601,7 +607,7 @@ def best_fit_distribution(data, bins=200, ax=None):
 
     # Estimate distribution parameters from data
     for distribution in DISTRIBUTIONS:
-        logging.info('fitting {}'.format(distribution))
+        # logging.info('fitting {}'.format(distribution))
         # Try to fit the distribution
         try:
             # Ignore warnings from data that can't be fit

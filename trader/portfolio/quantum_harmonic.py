@@ -1,21 +1,20 @@
-import numpy as np
-import matplotlib.pyplot as plt
-import numpy.polynomial.hermite as herm
-import math
-# import sdeint as sde
-from typing import List, Callable, Optional
-from scipy.constants import pi
 from trader.common.distributions import Distribution
+# import sdeint as sde
+from typing import Callable, List, Optional, Union
+
+import math
+import numpy as np
+import numpy.polynomial.hermite as herm
 import pandas as pd
+
 
 class QuantumHarmonic(Distribution):
     def __init__(self,
-                 name: str,
                  csv_file: str,
                  parameters: List[float],
                  data_column_apply: Optional[Callable[[pd.DataFrame, str], pd.Series]] = None,
                  cache_size: int = 365 * 20):
-        super().__init__(name=name, cache_size=cache_size)
+        super().__init__('QuantumHarmonic', cache_size=cache_size)
         self.csv_file = csv_file
         self.parameters = parameters
         self.data: List[float] = []
@@ -39,6 +38,12 @@ class QuantumHarmonic(Distribution):
             self.populate_cache()
 
         return self.cache[self.cache_index] / 100.0
+
+    def rvs(self, n: int = 1) -> Union[float, list[float]]:
+        if n == 1:
+            return self.sample()
+        else:
+            return [self.sample() for x in range(0, n)]
 
     def qho_fp(self, x_range, t, C, mw, h_bar=1, n=5):
         # This is taken from original paper, "Modeling stock return distributions with a quantum harmonic oscillator"

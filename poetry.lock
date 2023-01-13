@@ -562,6 +562,23 @@ urllib3 = "*"
 user_agent = "*"
 
 [[package]]
+name = "fitter"
+version = "1.5.2"
+description = "A tool to fit data to many distributions and best one(s)"
+category = "main"
+optional = false
+python-versions = "*"
+
+[package.dependencies]
+click = "*"
+joblib = "*"
+matplotlib = "*"
+numpy = "*"
+pandas = "*"
+scipy = ">=0.18"
+tqdm = "*"
+
+[[package]]
 name = "flake8"
 version = "4.0.1"
 description = "the modular source code checker: pep8 pyflakes and co"
@@ -2194,7 +2211,7 @@ heapdict = "*"
 [metadata]
 lock-version = "1.1"
 python-versions = "3.9.5"
-content-hash = "1e5b88450020d50ad358573b2c81fe6cab5057473d1dfbea927e6bee1b91c917"
+content-hash = "09a2cae3f259f023cbff67f6a50ab87b99fde478a441e4b7d1763c1f0c340b36"
 
 [metadata.files]
 aiohttp = [
@@ -2525,6 +2542,7 @@ fastjsonschema = [
 finviz = [
     {file = "finviz-1.4.4.tar.gz", hash = "sha256:9772060a070d59e8d1045ffbe826553d15f189fab43074b50bf7a510b5360172"},
 ]
+fitter = []
 flake8 = [
     {file = "flake8-4.0.1-py2.py3-none-any.whl", hash = "sha256:479b1304f72536a55948cb40a32dce8bb0ffe3501e26eaf292c7e60eb5e0428d"},
     {file = "flake8-4.0.1.tar.gz", hash = "sha256:806e034dda44114815e23c16ef92f95c91e4c71100ff52813adf7132a6ad870d"},

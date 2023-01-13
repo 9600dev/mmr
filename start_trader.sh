@@ -71,9 +71,6 @@ if [ ! -d $JTS_DIR ]; then
         mv ~/Jts $JTS_DIR
     fi
 
-    TWS_VERSION=$(ls -m $JTS_DIR | head -n 1 | sed 's/,.*$//')
-    sed -i "s/{tws_version}/$TWS_VERSION/g" $IBC_DIR/twsstart.sh
-
     # move the default jts.ini settings over
     # this prevents the 'do you want to use SSL dialog' from popping
     cp $MMR_DIR/scripts/installation/jts.ini $JTS_DIR
@@ -113,6 +110,9 @@ if [ ! -d $JTS_DIR ]; then
     sed -i "s/{password}/$PASSWORD/g" $IBC_DIR/twsstart.sh
     sed -i "s/{password}/$PASSWORD/g" $IBC_DIR/config.ini
 
+    TWS_VERSION=$(ls -m $JTS_DIR | head -n 1 | sed 's/,.*$//')
+    sed -i "s/{tws_version}/$TWS_VERSION/g" $IBC_DIR/twsstart.sh
+
     echo ""
     echo ""
     echo "Installed. Hit enter to start the pycron tmux session, which starts all"
@@ -136,7 +136,9 @@ then
     touch logs/strategy_service.log
     tmux new-session -d -n pycron 'echo; echo "Ctrl-b + n [next window], Ctrl-b + p [previous window]"; echo; python3 pycron/pycron.py --config ./configs/pycron.yaml' \; new-window -d -n cli python3 cli.py \; new-window -d -n dashboard python3 info.py \; new-window -d -n trader_service_log lnav logs/trader_service.log \; new-window -d -n strategy_service_log lnav logs/strategy_service.log \; attach
 else
+    echo ""
     echo "already in tmux session, starting pycron directly"
-    echo "python3 pycron/pycron.py --config ./configs/pycron.yaml"
+    echo "> python3 pycron/pycron.py --config ./configs/pycron.yaml"
+    echo ""
     python3 pycron/pycron.py --config ./configs/pycron.yaml
 fi

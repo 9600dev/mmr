@@ -3,45 +3,38 @@
 import os
 import sys
 
+
 PACKAGE_PARENT = '../..'
 SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
-import pandas as pd
-import numpy as np
-import datetime as dt
-import logging
-import coloredlogs
-import bisect
-import scipy.stats as st
-import os
-import matplotlib.pyplot as plt
-import matplotlib.ticker as plttick
-import seaborn as sns
-import gc
-import plotly.graph_objects as go
-import plotly.express as px
-
-from abc import ABC, abstractmethod
-from typing import List, Tuple, Generator, Optional, Callable, Iterable, Generic, Dict
-from trader.common.helpers import window, reformat_large_tick_values, pct_change_adjust, best_fit_distribution, fit_distribution
-from trader.common.distributions import Distribution, CsvContinuousDistribution, TestDistribution
-from collections import deque
-from enum import Enum
+from abc import abstractmethod
 from dateutil.relativedelta import relativedelta
+from enum import Enum
+from trader.common.distributions import CsvContinuousDistribution, Distribution
 from trader.portfolio.quantum_harmonic import QuantumHarmonic
+from typing import Callable, Dict, Generator, List, Optional, Tuple
+
+import bisect
+import coloredlogs
+import datetime as dt
+import gc
+import logging
+import numpy as np
+import os
+import pandas as pd
+
 
 logger = logging.getLogger(name=__name__)
 logger.setLevel(logging.WARN)
 coloredlogs.install(level='DEBUG')
 gc.disable()
 
-ROOT = '../../'
-SANDP_DISTRIBUTION = ROOT + 'data/sandp2000-2019.csv' if 'finance' in os.getcwd() else 'finance/data/sandp2000-2019.csv'
-LIFE_EXPECTANCY = ROOT + 'data/life_expectancy.csv' if 'finance' in os.getcwd() else 'finance/data/life_expectancy.csv'
-AUSTRALIA_INFLATION = ROOT + 'data/rba_inflation_data.csv' if 'finance' in os.getcwd() else 'finance/data/rba_inflation_data.csv'
-TEST_DISTRIBUTION = ROOT + 'data/model.csv' if 'finance' in os.getcwd() else 'finance/data/model.csv'
-QUANTUM_HARMONIC = ROOT + 'data/quantumharmonic.csv' if 'finance' in os.getcwd() else 'finance/data/quantumharmonic.csv'
+SANDP_DISTRIBUTION = 'data/sandp2000-2019.csv'
+LIFE_EXPECTANCY = 'data/life_expectancy.csv'
+AUSTRALIA_INFLATION = 'data/rba_inflation_data.csv'
+TEST_DISTRIBUTION = 'data/model.csv'
+QUANTUM_HARMONIC = 'data/quantumharmonic.csv'
 
 class AssetType(Enum):
     CASH = 1
@@ -346,7 +339,7 @@ class AssetStock(Asset):
         #                                               data_column_apply=pct_change_adjust,
         #                                               distribution=st.loglaplace)
         parameters = [0.2, 0.2, 0.086, 0.182, 0.133, 0.928]
-        self.distribution = QuantumHarmonic(name=name, csv_file=QUANTUM_HARMONIC, parameters=parameters)
+        self.distribution = QuantumHarmonic(csv_file=QUANTUM_HARMONIC, parameters=parameters)
 
     def sample_yield(self, last_tick: AssetTick) -> float:
         return self.distribution.sample()
@@ -621,7 +614,7 @@ class LifeSimulator():
 
         return book
 
-def init() -> Book:
+def init() -> tuple[Book, LifeSimulator]:
     logging.info('Starting init()')
     simulator = LifeSimulator(dt.datetime(1981, 4, 13), 1000000.0)
     start_date = dt.datetime(2020, 1, 1)
@@ -651,6 +644,6 @@ def init() -> Book:
                              simulation_start_date=start_date,
                              simulation_end_date=end_date)
     logging.info('finished init()')
-    return book
+    return (book, simulator)
 
-book = init()
+book, simulator = init()

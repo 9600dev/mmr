@@ -2,4 +2,5 @@
 *
 # Except this file
 !.gitignore
+!modeling_cash_flows.ipynb
 
