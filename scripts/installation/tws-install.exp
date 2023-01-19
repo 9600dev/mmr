@@ -1,14 +1,26 @@
 #!/usr/bin/expect
 
-set timeout 120
+set timeout 240
 set MMR_DIR [lindex $argv 0];
+set JTS_DIR [lindex $argv 1];
 
-spawn sh -c {
-    DISPLAY= $MMR_DIR/tws-latest-standalone-linux-x64.sh
+spawn bash
+send "DISPLAY= $MMR_DIR/third_party/tws-latest-standalone-linux-x64.sh\n"
+
+expect {
+    "Where should" {
+        exp_continue
+    }
+    -re {\d+(?=])} {
+        set VERSION $expect_out(0,string)
+        send "$JTS_DIR/$VERSION\r"
+        exp_continue
+    }
+    "already exists" {
+        send "y\r"
+        exp_continue
+    }
+    "Run Trader" {
+        send "n\r"
+    }
 }
-
-expect "Where should"
-send "\r"
-
-expect "Run Trader"
-send "n\r"
