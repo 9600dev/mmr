@@ -11,9 +11,6 @@ RUN mkdir -p /var/run/sshd
 RUN mkdir -p /run/sshd
 RUN mkdir -p /tmp
 
-# if you update the FROM ubuntu:20.04 to some later ubuntu distribution, you may need the following line:
-# RUN cp /etc/apt/sources.list /etc/apt/sources.list.bak && sed -i -re 's/([a-z]{2}\.)?archive.ubuntu.com|security.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list
-
 RUN apt-get update
 RUN apt-get install -y dialog apt-utils
 RUN apt-get install -y python3
@@ -94,8 +91,8 @@ RUN mkdir /home/trader/mmr/logs
 
 # install IBC
 RUN wget https://github.com/IbcAlpha/IBC/releases/download/3.15.2/IBCLinux-3.15.2.zip -P /home/trader/mmr/third_party
-RUN unzip /home/trader/mmr/third_party/IBCLinux-3.15.2.zip -d /home/trader/mmr/third_party/ibc
-RUN rm /home/trader/mmr/third_party/IBCLinux-3.15.2.zip
+RUN unzip -o /home/trader/mmr/third_party/IBCLinux-3.15.2.zip -d /home/trader/mmr/third_party/ibc
+RUN rm -f /home/trader/mmr/third_party/IBCLinux-3.15.2.zip
 RUN chmod +x /home/trader/mmr/third_party/ibc/*.sh
 
 # download TWS offline installer
@@ -117,7 +114,6 @@ RUN apt-get install -y jq
 
 # install window managers, Xvfb and vnc
 RUN apt-get install -y tigervnc-scraping-server
-# RUN apt-get install -y python3-cairocffi
 RUN apt-get install -y xvfb
 RUN apt-get install -y xterm
 
@@ -130,8 +126,6 @@ RUN mkdir /home/trader/.tmp
 RUN mkdir /home/trader/.cache
 
 COPY ./scripts/installation/.bash_profile /home/trader
-COPY ./scripts/installation/twsstart.sh /home/trader/mmr/third_party/ibc/twsstart.sh
-COPY ./scripts/installation/config.ini /home/trader/mmr/third_party/ibc/config.ini
 COPY ./scripts/installation/config.py /home/trader/.configs/qtile
 
 RUN touch /home/trader/.hushlogin
