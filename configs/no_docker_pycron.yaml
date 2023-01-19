@@ -7,7 +7,7 @@ health_check_eval:
 jobs:
     - name: tws
       description: make sure tws is continuously running, and force restart/reauth on Sunday
-      command: ../ibc/twsstart.sh
+      command: third_party/ibc/twsstart.sh
       arguments: -inline
       eval:
         - "exec('sys.path.append(\"scripts\")') or exec('from ib_status import ib_status') or ib_status()"

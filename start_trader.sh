@@ -1,7 +1,7 @@
 #!/bin/bash
 
-export JTS_DIR="/home/trader/Jts"
-export IBC_DIR="/home/trader/ibc"
+export JTS_DIR="/home/trader/mmr/third_party/Jts"
+export IBC_DIR="/home/trader/mmr/third_party/ibc"
 export MMR_DIR="/home/trader/mmr"
 export TRADER_CONFIG="$MMR_DIR/configs/trader.yaml"
 
@@ -41,19 +41,20 @@ if [ ! -d $IBC_DIR ]; then
     cd $IBC_DIR
     unzip IBCLinux-$LATEST_IBC.zip
     chmod +x $IBC_DIR/*.sh
-    rm $IBC_DIR/IBCLinux-$LATEST_IBC.zip
+    rm -f $IBC_DIR/IBCLinux-$LATEST_IBC.zip
     echo ""
     echo "Finished unzipping IBC"
     echo ""
 fi
 
 # check to see if we've installed tws
-if [ ! -d $JTS_DIR ]; then
+if [ ! -d $JTS_DIR ] || [ ! "$(ls $JTS_DIR)" ]; then
     # likely first time start
     echo "Can't find TWS, first time running? Let's download, install and configure Interactive Brokers!"
 
     if [ ! -d $MMR_DIR/tws-latest-standalone-linux-x64.sh ]; then
         echo "latest TWS linux installer not found, downloading"
+        rm -f $MMR_DIR/tws-latest-standalone-linux-x64.sh
         wget https://download2.interactivebrokers.com/installers/tws/latest-standalone/tws-latest-standalone-linux-x64.sh -P $MMR_DIR
         chmod +x $MMR_DIR/tws-latest-standalone-linux-x64.sh
         chmod +x $MMR_DIR/scripts/installation/install_tws.sh
@@ -76,7 +77,7 @@ if [ ! -d $JTS_DIR ]; then
     cp $MMR_DIR/scripts/installation/jts.ini $JTS_DIR
 
     if [ -d $MMR_DIR/tws-latest-standalone-linux-x64.sh ]; then
-        rm $MMR_DIR/tws-latest-standalone-linux-x64.sh
+        rm -f $MMR_DIR/tws-latest-standalone-linux-x64.sh
     fi
 
     echo ""
@@ -112,6 +113,12 @@ if [ ! -d $JTS_DIR ]; then
 
     TWS_VERSION=$(ls -m $JTS_DIR | head -n 1 | sed 's/,.*$//')
     sed -i "s/{tws_version}/$TWS_VERSION/g" $IBC_DIR/twsstart.sh
+
+    IBC_DIR_ESCAPED=${IBC_DIR//\//\\/}
+    JTS_DIR_ESCAPED=${JTS_DIR//\//\\/}
+
+    sed -i "s/{ibc_dir}/$IBC_DIR_ESCAPED/g" $IBC_DIR/twsstart.sh
+    sed -i "s/{tws_dir}/$JTS_DIR_ESCAPED/g" $IBC_DIR/twsstart.sh
 
     echo ""
     echo ""

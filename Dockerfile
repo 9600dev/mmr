@@ -93,14 +93,14 @@ RUN mkdir /home/trader/mmr/data/mongodb
 RUN mkdir /home/trader/mmr/logs
 
 # install IBC
-RUN wget https://github.com/IbcAlpha/IBC/releases/download/3.15.2/IBCLinux-3.15.2.zip -P /home/trader
-RUN unzip /home/trader/IBCLinux-3.15.2.zip -d /home/trader/ibc
-RUN rm /home/trader/IBCLinux-3.15.2.zip
-RUN chmod +x /home/trader/ibc/*.sh
+RUN wget https://github.com/IbcAlpha/IBC/releases/download/3.15.2/IBCLinux-3.15.2.zip -P /home/trader/mmr/third_party
+RUN unzip /home/trader/mmr/third_party/IBCLinux-3.15.2.zip -d /home/trader/mmr/third_party/ibc
+RUN rm /home/trader/mmr/third_party/IBCLinux-3.15.2.zip
+RUN chmod +x /home/trader/mmr/third_party/ibc/*.sh
 
 # download TWS offline installer
-RUN wget https://download2.interactivebrokers.com/installers/tws/latest-standalone/tws-latest-standalone-linux-x64.sh -P /home/trader/mmr
-RUN chmod +x /home/trader/mmr/tws-latest-standalone-linux-x64.sh
+RUN wget https://download2.interactivebrokers.com/installers/tws/latest-standalone/tws-latest-standalone-linux-x64.sh -P /home/trader/mmr/third_party
+RUN chmod +x /home/trader/mmr/third_party/tws-latest-standalone-linux-x64.sh
 RUN chmod +x /home/trader/mmr/scripts/installation/install_tws.sh
 
 RUN apt-get update -y
@@ -130,8 +130,8 @@ RUN mkdir /home/trader/.tmp
 RUN mkdir /home/trader/.cache
 
 COPY ./scripts/installation/.bash_profile /home/trader
-COPY ./scripts/installation/twsstart.sh /home/trader/ibc/twsstart.sh
-COPY ./scripts/installation/config.ini /home/trader/ibc/config.ini
+COPY ./scripts/installation/twsstart.sh /home/trader/mmr/third_party/ibc/twsstart.sh
+COPY ./scripts/installation/config.ini /home/trader/mmr/third_party/ibc/config.ini
 COPY ./scripts/installation/config.py /home/trader/.configs/qtile
 
 RUN touch /home/trader/.hushlogin

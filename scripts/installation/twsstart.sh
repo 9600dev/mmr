@@ -19,13 +19,13 @@
 
 
 TWS_MAJOR_VRSN={tws_version}
-IBC_INI=/home/trader/ibc/config.ini
+IBC_INI={ibc_dir}/config.ini
 TRADING_MODE=
 TWOFA_TIMEOUT_ACTION=exit
-IBC_PATH=/home/trader/ibc
-TWS_PATH=/home/trader/Jts
+IBC_PATH={ibc_dir}
+TWS_PATH={tws_dir}
 TWS_SETTINGS_PATH=
-LOG_PATH=/home/trader/ibc/logs
+LOG_PATH={ibc_dir}/logs
 TWSUSERID={username}
 TWSPASSWORD={password}
 JAVA_PATH=

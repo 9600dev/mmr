@@ -33,7 +33,7 @@ jobs:
       delay: 10
     - name: tws
       description: make sure tws is continuously running, and force restart/reauth on Sunday
-      command: DISPLAY=:1 ../ibc/twsstart.sh
+      command: DISPLAY=:1 third_party/ibc/twsstart.sh
       arguments: -inline
       eval:
         - "exec('sys.path.append(\"scripts\")') or exec('from ib_status import ib_status') or ib_status()"
