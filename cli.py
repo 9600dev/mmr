@@ -124,10 +124,54 @@ def universes():
 
 universes.add_command(universes_cli.list_universe)
 universes.add_command(universes_cli.create)
-universes.add_command(universes_cli.bootstrap)
 universes.add_command(universes_cli.get)
 universes.add_command(universes_cli.destroy)
 universes.add_command(universes_cli.add_to_universe)
+
+@universes.command()
+@common_options()
+@default_config()
+def bootstrap(
+    ib_server_address: str,
+    ib_server_port: int,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    ib_client_id: Optional[int] = None,
+    **args,
+):
+    universes_cli.build_and_load_ib(
+        ib_server_address,
+        ib_server_port,
+        ib_client_id if ib_client_id else cli_client_id,
+        arctic_server_address,
+        arctic_universe_library
+    )
+
+    macro_defaults = [
+        294530233,  # BZ, Brent Crude
+        256019308,  # CL, Light Sweet Crude Oil
+        457630923,  # GC, Gold
+        484743936,  # SI, Silver
+        484743956,  # HG, Copper Index
+        344273380,  # HH, Natural Gas
+        385575948,  # UX, Uranium
+        578106878,  # LBR, Lumber Futures
+        568549458,  # MNQ, Micro E-Mini Nasdaq 100
+        495512551,
+    ]
+
+    # add the macro universe
+    for conId in macro_defaults:
+        universes_cli.add_to_universe_helper(
+            name='macro',
+            symbol=conId,
+            primary_exchange='',
+            sec_type='',
+            ib_server_address=ib_server_address,
+            ib_server_port=ib_server_port,
+            arctic_server_address=arctic_server_address,
+            arctic_universe_library=arctic_universe_library
+        )
 
 @main.group()
 def history():

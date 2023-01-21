@@ -29,6 +29,7 @@ logging = setup_logging(module_name='cli')
 def build_and_load_ib(
     ib_server_address: str,
     ib_server_port: int,
+    ib_client_id: int,
     arctic_server_address: str,
     arctic_universe_library: str,
 ):
@@ -51,7 +52,7 @@ def build_and_load_ib(
     }
 
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
-    client = IBAIORx(ib_server_address, ib_server_port)
+    client = IBAIORx(ib_server_address, ib_server_port, ib_client_id)
     client.connect()
     resolver = IBResolver(client)
     universe: Optional[Universe] = None
@@ -99,45 +100,6 @@ def delete(
     else:
         click.echo('deleting {}'.format(name))
         u.delete(name)
-
-
-@cli.command()
-@common_options()
-@default_config()
-def bootstrap(
-    ib_server_address: str,
-    ib_server_port: int,
-    arctic_server_address: str,
-    arctic_universe_library: str,
-    **args,
-):
-    build_and_load_ib(ib_server_address, ib_server_port, arctic_server_address, arctic_universe_library)
-
-    macro_defaults = [
-        294530233,  # BZ, Brent Crude
-        256019308,  # CL, Light Sweet Crude Oil
-        457630923,  # GC, Gold
-        484743936,  # SI, Silver
-        484743956,  # HG, Copper Index
-        344273380,  # HH, Natural Gas
-        385575948,  # UX, Uranium
-        578106878,  # LBR, Lumber Futures
-        568549458,  # MNQ, Micro E-Mini Nasdaq 100
-        495512551,
-    ]
-
-    # add the macro universe
-    for conId in macro_defaults:
-        add_to_universe_helper(
-            name='macro',
-            symbol=conId,
-            primary_exchange='',
-            sec_type='',
-            ib_server_address=ib_server_address,
-            ib_server_port=ib_server_port,
-            arctic_server_address=arctic_server_address,
-            arctic_universe_library=arctic_universe_library
-        )
 
 
 @cli.command('list')
