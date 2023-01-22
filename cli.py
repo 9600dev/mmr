@@ -23,7 +23,7 @@ from trader.batch.queuer import Queuer
 from trader.common.command_line import cli, common_options, default_config
 from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.helpers import contract_from_dict, DictHelper, rich_dict, rich_json, rich_list, rich_table
-from trader.common.logging_helper import setup_logging
+from trader.common.logging_helper import set_log_level, setup_logging
 from trader.common.reactivex import SuccessFail
 from trader.container import Container
 from trader.data.data_access import DictData, TickData, TickStorage
@@ -332,6 +332,7 @@ def portfolio():
     rich_table(df.sort_values(by='unrealizedPNL', ascending=False), csv=is_repl, financial=True, financial_columns=[
         'marketPrice', 'marketValue', 'averageCost', 'unrealizedPNL', 'realizedPNL'
     ])
+    set_log_level('cli', 10)
 
 
 @main.command()
@@ -362,6 +363,7 @@ def positions():
     rich_table(df.sort_values(by='currency'), financial=True, financial_columns=['total', 'avgCost'], csv=is_repl)
     if is_repl:
         rich_table(df.groupby(by=['currency'])['total'].sum().reset_index(), financial=True)
+    set_log_level('cli', 10)
 
 
 @main.command()

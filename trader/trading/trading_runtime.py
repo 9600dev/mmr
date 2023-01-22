@@ -157,7 +157,7 @@ class Trader(metaclass=Singleton):
 
             self.run(self.zmq_rpc_server.serve())
         except Exception as ex:
-            raise self.create_trader_exception(type(TraderConnectionException), message='connect() exception', inner=ex)
+            raise self.create_trader_exception(TraderConnectionException, message='connect() exception', inner=ex)
 
     async def shutdown(self):
         logging.debug('trading_runtime.shutdown()')

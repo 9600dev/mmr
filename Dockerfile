@@ -47,6 +47,13 @@ RUN apt-get install -y rsync
 RUN apt-get install -y iputils-ping
 RUN apt-get install -y lnav
 
+# required for TWS
+RUN apt-get install -y libgtk-3-0
+RUN apt-get install -y libasound2
+RUN apt-get install -y libnss3
+RUN apt-get install -y libgbm1
+RUN apt-get install -y libnspr4
+
 # required for pyenv to build 3.9.5 properly
 RUN apt-get install -y libbz2-dev
 RUN apt-get install -y libsqlite3-dev
