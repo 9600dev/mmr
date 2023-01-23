@@ -44,7 +44,6 @@ def build_and_load_ib(
 
         # Options, Futures, Agri
         'CFE': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=cfe&showcategories=FUTGRP',
-        'GLOBEX': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=globex&showcategories=OPTGRP',
         'NYMEX': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=nymex&showcategories=OPTGRP',
         'NYBOT': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=nybot&showcategories=OPTGRP',
         'ICEUS': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=iceus&showcategories=FUTGRP',
