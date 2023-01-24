@@ -33,12 +33,10 @@ def test_platform(ib_server_address: str,
                   redis_server_port: int) -> bool:
     succeeded = True
     try:
-        ibrx = IBAIORx(ib_server_address, ib_server_port, ib_client_id)
-        ibrx.connect()
-        result = asyncio.run(ibrx.get_conid(['AMD']))
-        if not result:
-            raise Exception('cannot get AMD Contract details')
-        asyncio.run(ibrx.shutdown())
+        with (IBAIORx(ib_server_address, ib_server_port, ib_client_id)) as ibrx:
+            result = asyncio.run(ibrx.get_conid(['AMD']))
+            if not result:
+                raise Exception('cannot get AMD Contract details')
     except Exception as ex:
         logging.error('interactive brokers connection could not be made: {}'.format(ex))
         succeeded = False

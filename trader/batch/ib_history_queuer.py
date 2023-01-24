@@ -59,7 +59,8 @@ def get_universe_history_ib(
 
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
     u = accessor.get(universe)
-    queuer.queue_history(u.security_definitions, start_date)
+    job_count = queuer.queue_history(u.security_definitions, start_date)
+    logging.info('enqueued {} jobs'.format(job_count))
 
 
 @cli_norepl.command()

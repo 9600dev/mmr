@@ -1,5 +1,6 @@
 # Trading Systems, Software and Libraries
 
+* [Qlib - Quant lib by Microsoft, looks good](https://github.com/microsoft/qlib)
 * [How to setup IBC + TWS on headless Ubuntu to run two accounts, paper + real](https://dimon.ca/how-to-setup-ibc-and-tws-on-headless-ubuntu-in-10-minutes/)
 * [How to Build an Exchange](https://www.janestreet.com/tech-talks/building-an-exchange/)
 * [How NVidia's CUDA Monopoly in Machine Learning is Breaking](https://www.semianalysis.com/p/nvidiaopenaitritonpytorch)

@@ -160,7 +160,7 @@ class IBAIORx():
         logging.debug('ibaiorx.shutdown(), disconnecting clients and disposing reactivex subscriptions')
 
         if self.history_worker:
-            await self.history_worker.disconnect()
+            self.history_worker.shutdown()
 
         self.market_data_subject.dispose()
         self.historical_data_subject.dispose()

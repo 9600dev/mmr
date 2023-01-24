@@ -67,7 +67,8 @@ class IBHistoryQueuer(Queuer):
             make_eod=True
         ),
         exchange_calendar: Optional[exchange_calendars.ExchangeCalendar] = None,
-    ):
+    ) -> int:
+        jobs = 0
         for security in security_definitions:
             # timezonify the start date based on the securities trading timezone
             start_date = timezoneify(start_date, timezone=security.timeZoneId)
@@ -83,7 +84,8 @@ class IBHistoryQueuer(Queuer):
                                             exchange_calendar,
                                             date_range=DateRange(start=start_date, end=end_date))
 
-            logging.debug('missing date_ranges for {}: {}'.format(security.symbol, date_ranges))
+            if date_ranges:
+                logging.debug('missing historical data for {} in date_ranges {}:'.format(security.symbol, date_ranges))
 
             for date_dr in date_ranges:
                 if (
@@ -110,8 +112,10 @@ class IBHistoryQueuer(Queuer):
                             self.bar_size
                         ]
                     )
+                    jobs += 1
                     logging.debug('Job history_worker.do_work enqueued, is_queued: {} using cliend_id {}'
                                   .format(job.is_queued, self.ib_client_id))
+        return jobs
 
 
 class BatchIBHistoryWorker():
@@ -130,39 +134,34 @@ class BatchIBHistoryWorker():
         self.redis_server_port = redis_server_port
         self.storage: TickStorage
         self.data: TickData
-        self.ib_history_worker: IBHistoryWorker
 
     def do_work(self, security: SecurityDefinition, start_date: dt.datetime, end_date: dt.datetime, bar_size: BarSize) -> bool:
-        setup_logging(module_name='batch_ib_history_worker', suppress_external_info=True)
+        setup_logging(module_name='ib_history', suppress_external_info=True)
 
-        self.ib_history_worker = IBHistoryWorker(
+        with (IBHistoryWorker(
             self.ib_server_address,
             self.ib_server_port,
             self.ib_client_id
-        )
+        )) as ib_history_worker:
+            self.data = TickStorage(self.arctic_server_address).get_tickdata(bar_size)
 
-        self.data = TickStorage(self.arctic_server_address).get_tickdata(bar_size)
-        asyncio.run(self.ib_history_worker.connect())
+            logging.info('do_work: {} {} {} {}'.format(security.symbol, pdt(start_date), pdt(end_date), bar_size))
+            # result = self.ib_history.get_and_populate_stock_history(cast(Stock, contract), bar_size, start_date, end_date)
+            result = asyncio.run(ib_history_worker.get_contract_history(
+                security=Universe.to_contract(security),
+                what_to_show=WhatToShow.TRADES,
+                start_date=start_date,
+                end_date=end_date,
+                bar_size=bar_size,
+                filter_between_dates=True
+            ))
+            logging.debug('ib_history.get_contract_history for {} returned {} rows, writing to library "{}"'.format(
+                security.symbol,
+                len(result),
+                str(bar_size)
+            ))
 
-        logging.info('do_work: {} {} {} {}'.format(security.symbol, pdt(start_date), pdt(end_date), bar_size))
-        # result = self.ib_history.get_and_populate_stock_history(cast(Stock, contract), bar_size, start_date, end_date)
-        result = asyncio.run(self.ib_history_worker.get_contract_history(
-            security=Universe.to_contract(security),
-            what_to_show=WhatToShow.TRADES,
-            start_date=start_date,
-            end_date=end_date,
-            bar_size=bar_size,
-            filter_between_dates=True
-        ))
-        logging.debug('ib_history.get_contract_history for {} returned {} rows, writing to library "{}"'.format(
-            security.symbol,
-            len(result),
-            str(bar_size)
-        ))
+            if len(result) > 0:
+                self.data.write(security, result)
 
-        asyncio.run(self.ib_history_worker.disconnect())
-
-        if len(result) > 0:
-            self.data.write(security, result)
-
-        return True
+            return True

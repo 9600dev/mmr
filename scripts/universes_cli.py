@@ -186,5 +186,62 @@ def add_to_universe_helper(
                 click.echo('no security definition found for {}'.format(symbol))
 
 
+def remove_from_universe_helper(
+    name: str,
+    symbol: Union[str, int],
+    primary_exchange: str,
+    sec_type: str,
+    ib_server_address: str,
+    ib_server_port: int,
+    ib_client_id: int,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    **args
+):
+    with (IBAIORx(ib_server_address, ib_server_port, ib_client_id)) as client:
+        # conId
+        if type(symbol) is int:
+            contract_details = client.get_contract_details(Contract(conId=symbol))
+            if contract_details:
+                logging.debug('found contract details for {}: {}'.format(symbol, contract_details))
+                u = UniverseAccessor(arctic_server_address, arctic_universe_library)
+                universe = u.get(name)
+                if not universe.find_contract(cast(Contract, contract_details[0].contract)):
+                    click.echo('cant find contract {} to remove from universe {}'.format(symbol, name))
+                else:
+                    # find security definition
+                    sd = next(x for x in universe.security_definitions if x.conId == contract_details[0].contract.conId)
+                    universe.security_definitions.remove(sd)
+                    u.update(universe)
+                    click.echo('removing contract {} from universe: {}'.format(symbol, name))
+        # string symbol
+        else:
+            result = asyncio.run(
+                client.get_contract_description(cast(str, symbol), secType=sec_type, primaryExchange=primary_exchange)
+            )
+            if result is list:
+                click.echo('multiple symbols found:')
+                rich_list(cast(list, result))
+                click.echo('use primary_exchange to be more specific')
+            elif type(result) is ContractDescription and result is not None:
+                description = cast(ContractDescription, result)
+
+                contract_details = client.get_contract_details(cast(Contract, description.contract))
+                logging.debug('found contract details for {}: {}'.format(symbol, contract_details))
+                u = UniverseAccessor(arctic_server_address, arctic_universe_library)
+                universe = u.get(name)
+                # todo using the first element in the list is probably a bug, should fix this
+                if not universe.find_contract(cast(Contract, contract_details[0].contract)):
+                    click.echo('contract {} not found in universe: {}'.format(symbol, name))
+                else:
+                    # find security definition
+                    sd = next(x for x in universe.security_definitions if x.conId == contract_details[0].contract.conId)
+                    universe.security_definitions.remove(sd)
+                    u.update(universe)
+                    click.echo('removing contract {} from universe: {}'.format(symbol, name))
+            else:
+                click.echo('no security definition found for {}'.format(symbol))
+
+
 if __name__ == '__main__':
     cli(obj={})

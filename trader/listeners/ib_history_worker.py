@@ -9,6 +9,7 @@ from trader.objects import BarSize, WhatToShow
 from typing import List, Optional, Union
 
 import asyncio
+import backoff
 import datetime as dt
 import ib_insync
 import numpy as np
@@ -35,7 +36,12 @@ class IBHistoryWorker():
         self.error_string: str = ''
         self.error_contract: Optional[Contract] = None
         self.connected: bool = False
-        self.lock: asyncio.Lock = asyncio.Lock()
+
+    def __enter__(self):
+        return self.connect()
+
+    def __exit__(self, *args):
+        self.shutdown()
 
     def __clear_error(self):
         self.error_code = 0
@@ -59,35 +65,36 @@ class IBHistoryWorker():
                                                                                           errorString,
                                                                                           contract))
 
-    async def connect(self):
-        async with self.lock:
-            if self.connected:
-                return self
-
-            def __handle_client_id_error(msg):
-                logging.error('clientId already in use, randomizing and trying again')
-                raise ValueError('clientId')
-
-            # todo set in the readme that the master client ID has to be set to 5
-            if self.__handle_error not in self.ib_client.errorEvent:
-                self.ib_client.errorEvent += self.__handle_error
-
-            self.ib_client.connect(
-                host=self.ib_server_address,
-                port=self.ib_server_port,
-                clientId=self.ib_client_id,
-                timeout=15,
-                readonly=True
-            )
-
-            self.error_code = 0
-            self.error_string = ''
-            self.error_contract = None
-            self.ib_client.client.conn.disconnected -= __handle_client_id_error
-            self.connected = True
+    @backoff.on_exception(backoff.expo, exception=ValueError, max_tries=3)
+    def connect(self):
+        if self.connected:
             return self
 
-    async def disconnect(self):
+        def __handle_client_id_error(msg):
+            logging.error('ib_client_id already in use, randomizing and trying again')
+            self.ib_client_id = np.random.randint(self.ib_client_id, self.ib_client_id + 20)
+            raise ValueError('ib_client_id in use')
+
+        # todo set in the readme that the master client ID has to be set to 5
+        if self.__handle_error not in self.ib_client.errorEvent:
+            self.ib_client.errorEvent += self.__handle_error
+
+        self.ib_client.connect(
+            host=self.ib_server_address,
+            port=self.ib_server_port,
+            clientId=self.ib_client_id,
+            timeout=15,
+            readonly=True
+        )
+
+        self.error_code = 0
+        self.error_string = ''
+        self.error_contract = None
+        self.ib_client.client.conn.disconnected -= __handle_client_id_error
+        self.connected = True
+        return self
+
+    def shutdown(self):
         self.ib_client.disconnect()
         self.error_code = 0
         self.error_string = ''
@@ -116,7 +123,7 @@ class IBHistoryWorker():
         contract = Universe.to_contract(security)
 
         if not self.connected:
-            await asyncio.wait_for(self.connect(), timeout=20.0)
+            self.connect()
 
         # solves for errorCode 321 "please enter exchange"
         if not contract.exchange:

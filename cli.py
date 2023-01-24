@@ -250,6 +250,38 @@ def add_to_universe(
     )
 
 
+@universes.command('remove-from-universe')
+@click.option('--name', help='Name of the universe to remove instrument from')
+@click.option('--symbol', help='symbol or conId to add to universe')
+@click.option('--primary_exchange', default='SMART', help='primary exchange the symbol is listed on default [SMART]')
+@click.option('--sec_type', required=True, default='STK', help='security type [default STK]')
+@common_options()
+@default_config()
+def remove_from_universe(
+    name: str,
+    symbol: str,
+    primary_exchange: str,
+    sec_type: str,
+    ib_server_address: str,
+    ib_server_port: int,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    ib_client_id: Optional[int] = None,
+    **args
+):
+    universes_cli.remove_from_universe_helper(
+        name,
+        symbol,
+        primary_exchange,
+        sec_type,
+        ib_server_address,
+        ib_server_port,
+        ib_client_id if ib_client_id else cli_client_id,
+        arctic_server_address,
+        arctic_universe_library,
+    )
+
+
 @main.group()
 def history():
     pass
