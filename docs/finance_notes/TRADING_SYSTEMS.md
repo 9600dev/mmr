@@ -1,5 +1,11 @@
 # Trading Systems, Software and Libraries
 
+* [How to setup IBC + TWS on headless Ubuntu to run two accounts, paper + real](https://dimon.ca/how-to-setup-ibc-and-tws-on-headless-ubuntu-in-10-minutes/)
+* [How to Build an Exchange](https://www.janestreet.com/tech-talks/building-an-exchange/)
+* [How NVidia's CUDA Monopoly in Machine Learning is Breaking](https://www.semianalysis.com/p/nvidiaopenaitritonpytorch)
+* [ML Papers Explained](https://github.com/dair-ai/ML-Papers-Explained)
+* [Which GPU's to get for Deep Learning](https://timdettmers.com/2023/01/16/which-gpu-for-deep-learning/)
+* [einops - readable tensor operations](https://einops.rocks/)
 * https://app.breakingequity.com/#/tradings/live
 * https://github.com/robcarver17/pysystemtrade/blob/master/docs/introduction.md
 * http://pmorissette.github.io/bt/index.html#what-is-bt

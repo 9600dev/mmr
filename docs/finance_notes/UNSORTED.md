@@ -1,5 +1,11 @@
 # Random Finance Links
 
+* [The buy and hold mindset](https://avc.com/2022/11/the-buy-and-hold-mindset/)
+* [The Casino-Chip Society](https://brettscott.substack.com/p/casino-chip-cashless-society)
+* [Cramming: Training a Language Model on a Single GPU in One Day](https://arxiv.org/abs/2212.14034)
+* [Risk over Time - an analysis of the belief that volatility risk of holding stocks decreases over time](https://danluu.com/norstad/risk-time/)
+* [Stocks for the Long Run? Sometimes Yes. Sometimes No.](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3805927)
+* [An analysis of META](https://mobile.twitter.com/borrowed_ideas/status/1617207537438265344)
 * [Interactive Brokers - List of all order types (100+)](https://www.interactivebrokers.com/en/index.php?f=4985)
 * [Bloomberg terminal overview](https://www.optionsbro.com/bloomberg-terminal-review/)
 * [Superinvestors - list of hedge fund portfolio changes](https://www.dataroma.com/m/home.php)

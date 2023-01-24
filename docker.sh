@@ -40,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     -f|--force)
       f=y
       shift # past argument
+      ;;
     -r|--run)
       r=y
       shift # past argument
@@ -103,7 +104,6 @@ clean() {
 }
 
 force_clean() {
-    clean()
     echo "Cleaning all build cache"
     docker builder prune --force
 }
@@ -147,9 +147,9 @@ run() {
 build() {
     echo "building mmr into image $IMGNAME and container $CONTNAME"
     echo ""
-    echo "DOCKER_BUILDKIT=1 docker buildx build --platform linux/amd64 -t $IMGNAME --force-rm=true --rm=true $BUILDDIR"
+    echo "DOCKER_BUILDKIT=1 docker buildx build -f $BUILDDIR/Dockerfile --platform linux/amd64 -t $IMGNAME --force-rm=true --rm=true $BUILDDIR"
     echo ""
-    DOCKER_BUILDKIT=1 docker buildx build --platform linux/amd64 -t $IMGNAME --force-rm=true --rm=true $BUILDDIR
+    DOCKER_BUILDKIT=1 docker buildx build -f $BUILDDIR/Dockerfile --platform linux/amd64 -t $IMGNAME --force-rm=true --rm=true $BUILDDIR
 }
 
 sync() {
@@ -180,13 +180,16 @@ sync_all() {
     rsync -e 'docker exec -i' -av --delete $BUILDDIR/ $CONTID:/home/trader/mmr/ --exclude='.git'
 }
 
-echo "build: $b, clean: $c, run: $r, sync: $s, sync_all: $a, go: $g, image_name: $IMGNAME, container_name: $CONTNAME"
+echo "build: $b, clean: $c, run: $r, force: $f, sync: $s, sync_all: $a, go: $g, image_name: $IMGNAME, container_name: $CONTNAME"
 
 if [[ $b == "y" ]]; then
     build
 fi
 if [[ $c == "y" ]]; then
     clean
+fi
+if [[ $f == "y" ]]; then
+    clean; force_clean
 fi
 if [[ $r == "y" ]]; then
     run

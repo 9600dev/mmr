@@ -1,5 +1,11 @@
 # Analysis
 
+* [NVIDIA earnings analysis](https://www.cheddarflow.com/blog/nvidia-earnings-analysis/)
+* [How many stocks should you own?](https://ndvr.com/journal/how-many-stocks-should-you-own)
+* [Number of years until inflation reverts below 3%](https://mobile.twitter.com/RA_Insights/status/1599802065936863234)
+* [U.S Stock Market Returns - a history from the 1870's to 2022](https://themeasureofaplan.com/us-stock-market-returns-1870s-to-present/)
+* [Statistical Analysis of a stock price](https://towardsdatascience.com/statistical-analysis-of-a-stock-price-e6d6f84ac2cd)
+* [How much does not having survivorship free data change test results?](https://alvarezquanttrading.com/blog/how-much-does-hot-having-survivorship-free-data-changes-test-results/)
 * [Learning to trade options, a thread](https://twitter.com/FabiusMercurius/status/1502680794204016642)
 * [Ten investing books that changed my life and P&L](https://twitter.com/FabiusMercurius/status/1500190848943681539)
 * [Minksy Moments in Venture Capital](https://pivotal.substack.com/p/minsky-moments-in-venture-capital?s=r)
@@ -25,3 +31,7 @@
 * [10 Under-the-cover Trading Hacks](https://twitter.com/FabiusMercurius/status/1492569620569489409)
 * [Systematic Trading blog](https://qoppac.blogspot.com/p/systematic-trading-start-here.html)
 
+
+* From the link "How many stocks should you own?"
+![](https://ndvr.com/journalPhotos/HowManyStocks-Figure3.webp)
+![](https://ndvr.com/journalPhotos/HowManyStocks-Figure4.webp)

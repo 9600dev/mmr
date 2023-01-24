@@ -103,9 +103,9 @@ RUN rm -f /home/trader/mmr/third_party/IBCLinux-3.15.2.zip
 RUN chmod +x /home/trader/mmr/third_party/ibc/*.sh
 
 # download TWS offline installer
-RUN wget https://download2.interactivebrokers.com/installers/tws/latest-standalone/tws-latest-standalone-linux-x64.sh -P /home/trader/mmr/third_party
-RUN chmod +x /home/trader/mmr/third_party/tws-latest-standalone-linux-x64.sh
-RUN chmod +x /home/trader/mmr/scripts/installation/install_tws.sh
+# RUN wget https://download2.interactivebrokers.com/installers/tws/latest-standalone/tws-latest-standalone-linux-x64.sh -P /home/trader/mmr/third_party
+# RUN chmod +x /home/trader/mmr/third_party/tws-latest-standalone-linux-x64.sh
+# RUN chmod +x /home/trader/mmr/scripts/installation/install_tws.sh
 
 RUN apt-get update -y
 

@@ -6,6 +6,7 @@
 temp
 scratch
 data
+third_party
 .gitignore
 .mypy_cache
 .pytest_cache
