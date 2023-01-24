@@ -18,6 +18,7 @@ import exchange_calendars as ec
 import io
 import json
 import locale
+import logging
 import numpy as np
 import os
 import pandas as pd
@@ -257,7 +258,13 @@ def rich_tablify(df, financial: bool = False, financial_columns: List[str] = [],
     return table
 
 
-def rich_table(df, csv: bool = False, financial: bool = False, financial_columns: List[str] = [], include_index=False):
+def rich_table(
+    df,
+    csv: bool = False,
+    financial: bool = False,
+    financial_columns: List[str] = [],
+    include_index=False,
+):
     if type(df) is list:
         df = pd.DataFrame(df)
 

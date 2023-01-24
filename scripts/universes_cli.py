@@ -1,10 +1,7 @@
-
-
 import asyncio
 import click
 import os
 import sys
-import tempfile
 
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
@@ -51,36 +48,35 @@ def build_and_load_ib(
     }
 
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
-    client = IBAIORx(ib_server_address, ib_server_port, ib_client_id)
-    client.connect()
-    resolver = IBResolver(client)
-    universe: Optional[Universe] = None
+    with (IBAIORx(ib_server_address, ib_server_port, ib_client_id)) as client:
+        resolver = IBResolver(client)
+        universe: Optional[Universe] = None
 
-    for market, url in product_pages.items():
-        instruments: List[IBInstrument] = []
-        logging.debug('scrape_products() {}'.format(url))
-        instruments = scrape_products(market, url)
+        for market, url in product_pages.items():
+            instruments: List[IBInstrument] = []
+            logging.debug('scrape_products() {}'.format(url))
+            instruments = scrape_products(market, url)
 
-        universe = accessor.get(market)
+            universe = accessor.get(market)
 
-        for instrument in instruments:
-            if (
-                not universe.find_contract(instrument.to_contract())
-                # we don't do warrants yet
-                and instrument.secType != 'WAR'
-            ):
-                contract_details = asyncio.run(resolver.resolve_contract(instrument.to_contract()))
-                if contract_details:
-                    click.echo('adding instrument {} to universe {}'.format(instrument, market))
-                    universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details))
-            else:
-                logging.debug('instrument {} already found in a universe {}'.format(instrument, market))
+            for instrument in instruments:
+                if (
+                    not universe.find_contract(instrument.to_contract())
+                    # we don't do warrants yet
+                    and instrument.secType != 'WAR'
+                ):
+                    contract_details = asyncio.run(resolver.resolve_contract(instrument.to_contract()))
+                    if contract_details:
+                        click.echo('adding instrument {} to universe {}'.format(instrument, market))
+                        universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details))
+                else:
+                    logging.debug('instrument {} already found in a universe {}'.format(instrument, market))
 
-        # update the universe
-        accessor.update(universe)
-        # weird bug where universe.security_definitions was keeping the previous list object around
-        # after calling accessor.get(). bizaare
-        universe = None
+            # update the universe
+            accessor.update(universe)
+            # weird bug where universe.security_definitions was keeping the previous list object around
+            # after calling accessor.get(). bizaare
+            universe = None
 
 
 @cli.command()
@@ -135,41 +131,6 @@ def destroy(name: str, arctic_server_address: str, arctic_universe_library: str,
         return 0
 
 
-@cli.command()
-@click.option('--name', help='Name of the universe to create')
-@click.option('--csv_file', help='optional csv file of securities to load into universe')
-@common_options()
-@default_config()
-def create(
-    name: str,
-    csv_file: str,
-    ib_server_address: str,
-    ib_server_port: int,
-    arctic_server_address: str,
-    arctic_universe_library: str,
-    **args,
-):
-    client = IBAIORx(ib_server_address, ib_server_port)
-    client.connect()
-
-    u = UniverseAccessor(arctic_server_address, arctic_universe_library)
-
-    if csv_file:
-        resolver = IBResolver(client)
-        temp_file = tempfile.NamedTemporaryFile(suffix='.csv')
-        click.echo('resolving to {}'.format(temp_file.name))
-        asyncio.run(resolver.fill_csv(csv_file, temp_file.name))
-
-        with open(temp_file.name, 'r') as f:
-            csv_string = f.read()
-            click.echo('updating trader host with new universe')
-            counter = u.update_from_csv_str(name, csv_string)
-        click.echo('finished loading {}, with {} securities loaded'.format(create, str(counter)))
-    else:
-        result = u.get(name)
-        u.update(result)
-
-
 def add_to_universe_helper(
     name: str,
     symbol: Union[str, int],
@@ -177,76 +138,52 @@ def add_to_universe_helper(
     sec_type: str,
     ib_server_address: str,
     ib_server_port: int,
+    ib_client_id: int,
     arctic_server_address: str,
     arctic_universe_library: str,
     **args
 ):
-    client = IBAIORx(ib_server_address, ib_server_port)
-    client.connect()
+    with (IBAIORx(ib_server_address, ib_server_port, ib_client_id)) as client:
 
-    # conId
-    if type(symbol) is int:
-        contract_details = client.get_contract_details(Contract(conId=symbol))
-        if len(contract_details) > 0:
-            logging.debug('found contract details for {}: {}'.format(symbol, contract_details))
-            u = UniverseAccessor(arctic_server_address, arctic_universe_library)
-            universe = u.get(name)
-            # todo using the first element in the list is probably a bug, should fix this
-            universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details[0]))
-            u.update(universe)
-            logging.debug('adding contract {} to universe: {}'.format(symbol, name))
-    # string symbol
-    else:
-        result = asyncio.run(
-            client.get_contract_description(cast(str, symbol), secType=sec_type, primaryExchange=primary_exchange)
-        )
-        if result is list:
-            click.echo('multiple symbols found:')
-            rich_list(cast(list, result))
-            click.echo('use primary_exchange to be more specific')
-        elif type(result) is ContractDescription and result is not None:
-            description = cast(ContractDescription, result)
-
-            contract_details = client.get_contract_details(cast(Contract, description.contract))
-            logging.debug('found contract details for {}: {}'.format(symbol, contract_details))
-            u = UniverseAccessor(arctic_server_address, arctic_universe_library)
-            universe = u.get(name)
-            # todo using the first element in the list is probably a bug, should fix this
-            universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details[0]))
-            u.update(universe)
-            logging.debug('adding contract {} to universe: {}'.format(symbol, name))
+        # conId
+        if type(symbol) is int:
+            contract_details = client.get_contract_details(Contract(conId=symbol))
+            if contract_details:
+                logging.debug('found contract details for {}: {}'.format(symbol, contract_details))
+                u = UniverseAccessor(arctic_server_address, arctic_universe_library)
+                universe = u.get(name)
+                # todo using the first element in the list is probably a bug, should fix this
+                if universe.find_contract(cast(Contract, contract_details[0].contract)):
+                    click.echo('contract {} already found in universe: {}'.format(symbol, name))
+                else:
+                    universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details[0]))
+                    u.update(universe)
+                    click.echo('adding contract {} to universe: {}'.format(symbol, name))
+        # string symbol
         else:
-            click.echo('no security definition found for {}'.format(symbol))
+            result = asyncio.run(
+                client.get_contract_description(cast(str, symbol), secType=sec_type, primaryExchange=primary_exchange)
+            )
+            if result is list:
+                click.echo('multiple symbols found:')
+                rich_list(cast(list, result))
+                click.echo('use primary_exchange to be more specific')
+            elif type(result) is ContractDescription and result is not None:
+                description = cast(ContractDescription, result)
 
-
-@cli.command('add-to-universe')
-@click.option('--name', help='Name of the universe to add instrument to')
-@click.option('--symbol', help='symbol or conId to add to universe')
-@click.option('--primary_exchange', default='SMART', help='primary exchange the symbol is listed on default [SMART]')
-@click.option('--sec_type', required=True, default='STK', help='security type [default STK]')
-@common_options()
-@default_config()
-def add_to_universe(
-    name: str,
-    symbol: str,
-    primary_exchange: str,
-    sec_type: str,
-    ib_server_address: str,
-    ib_server_port: int,
-    arctic_server_address: str,
-    arctic_universe_library: str,
-    **args
-):
-    add_to_universe_helper(
-        name,
-        symbol,
-        primary_exchange,
-        sec_type,
-        ib_server_address,
-        ib_server_port,
-        arctic_server_address,
-        arctic_universe_library,
-    )
+                contract_details = client.get_contract_details(cast(Contract, description.contract))
+                logging.debug('found contract details for {}: {}'.format(symbol, contract_details))
+                u = UniverseAccessor(arctic_server_address, arctic_universe_library)
+                universe = u.get(name)
+                # todo using the first element in the list is probably a bug, should fix this
+                if universe.find_contract(cast(Contract, contract_details[0].contract)):
+                    click.echo('contract {} already found in universe: {}'.format(symbol, name))
+                else:
+                    universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details[0]))
+                    u.update(universe)
+                    click.echo('adding contract {} to universe: {}'.format(symbol, name))
+            else:
+                click.echo('no security definition found for {}'.format(symbol))
 
 
 if __name__ == '__main__':

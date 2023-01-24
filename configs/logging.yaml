@@ -36,6 +36,15 @@ handlers:
         backupCount: 20
         encoding: utf8
 
+    worker_service_handler:
+        class: logging.handlers.RotatingFileHandler
+        level: DEBUG
+        formatter: standard
+        filename: /home/trader/mmr/logs/worker_service.log
+        maxBytes: 10485760 # 10MB
+        backupCount: 20
+        encoding: utf8
+
     file_handler:
         class: logging.handlers.RotatingFileHandler
         level: INFO
@@ -69,10 +78,14 @@ root:
     propogate: no
 
 loggers:
-    ibhist:
-        level: NOTSET
-        handlers: [file_handler, error_file_handler, debug_file_handler]
-        propogate: yes
+    worker_service:
+        level: DEBUG
+        handlers: [worker_service_handler, error_file_handler, rich_console]
+        propogate: no
+    ib_history:
+        level: DEBUG
+        handlers: [worker_service_handler, error_file_handler, rich_console]
+        propogate: no
     trader_service:
         level: DEBUG
         handlers: [trader_service_handler, error_file_handler, rich_console]

@@ -23,7 +23,7 @@ from trader.batch.queuer import Queuer
 from trader.common.command_line import cli, common_options, default_config
 from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.helpers import contract_from_dict, DictHelper, rich_dict, rich_json, rich_list, rich_table
-from trader.common.logging_helper import set_log_level, setup_logging
+from trader.common.logging_helper import LogLevels, set_log_level, setup_logging
 from trader.common.reactivex import SuccessFail
 from trader.container import Container
 from trader.data.data_access import DictData, TickData, TickStorage
@@ -80,6 +80,7 @@ def main(ctx):
 
     if ctx.invoked_subcommand is None:
         ctx.invoke(repl)
+        set_log_level(LogLevels.DEBUG)
 
 
 @main.command()
@@ -123,10 +124,8 @@ def universes():
     pass
 
 universes.add_command(universes_cli.list_universe)
-universes.add_command(universes_cli.create)
 universes.add_command(universes_cli.get)
 universes.add_command(universes_cli.destroy)
-universes.add_command(universes_cli.add_to_universe)
 
 @universes.command()
 @common_options()
@@ -169,9 +168,87 @@ def bootstrap(
             sec_type='',
             ib_server_address=ib_server_address,
             ib_server_port=ib_server_port,
+            ib_client_id=ib_client_id if ib_client_id else cli_client_id,
             arctic_server_address=arctic_server_address,
             arctic_universe_library=arctic_universe_library
         )
+
+
+@universes.command()
+@click.option('--name', help='Name of the universe to create')
+@click.option('--csv_file', help='optional csv file of securities to load into universe')
+@common_options()
+@default_config()
+def create(
+    name: str,
+    csv_file: str,
+    ib_server_address: str,
+    ib_server_port: int,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    ib_client_id: Optional[int] = None,
+    **args,
+):
+    with (IBAIORx(
+        ib_server_address,
+        ib_server_port,
+        ib_client_id if ib_client_id else cli_client_id
+    )) as client:
+
+        u = UniverseAccessor(arctic_server_address, arctic_universe_library)
+
+        if csv_file:
+            from scripts.ib_resolve import IBResolver
+
+            import tempfile
+
+            resolver = IBResolver(client)
+            temp_file = tempfile.NamedTemporaryFile(suffix='.csv')
+            click.echo('resolving to {}'.format(temp_file.name))
+            asyncio.run(resolver.fill_csv(csv_file, temp_file.name))
+
+            with open(temp_file.name, 'r') as f:
+                csv_string = f.read()
+                click.echo('updating trader host with new universe')
+                counter = u.update_from_csv_str(name, csv_string)
+            click.echo('finished loading {}, with {} securities loaded'.format(create, str(counter)))
+        else:
+            result = u.get(name)
+            u.update(result)
+            logging.debug('created universe {}'.format(name))
+
+
+@universes.command('add-to-universe')
+@click.option('--name', help='Name of the universe to add instrument to')
+@click.option('--symbol', help='symbol or conId to add to universe')
+@click.option('--primary_exchange', default='SMART', help='primary exchange the symbol is listed on default [SMART]')
+@click.option('--sec_type', required=True, default='STK', help='security type [default STK]')
+@common_options()
+@default_config()
+def add_to_universe(
+    name: str,
+    symbol: str,
+    primary_exchange: str,
+    sec_type: str,
+    ib_server_address: str,
+    ib_server_port: int,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    ib_client_id: Optional[int] = None,
+    **args
+):
+    universes_cli.add_to_universe_helper(
+        name,
+        symbol,
+        primary_exchange,
+        sec_type,
+        ib_server_address,
+        ib_server_port,
+        ib_client_id if ib_client_id else cli_client_id,
+        arctic_server_address,
+        arctic_universe_library,
+    )
+
 
 @main.group()
 def history():
@@ -193,15 +270,15 @@ def history_summary(
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
     u = accessor.get(universe)
 
-    for history_db in TickStorage(arctic_server_address).list_libraries():
-        tick_data = TickStorage(arctic_server_address).get_tickdata(history_db)
-        tick_data = TickData(arctic_server_address, history_db)
+    for barsize_db in TickStorage(arctic_server_address).list_libraries():
+        tick_data = TickStorage(arctic_server_address).get_tickdata(BarSize.parse_str(barsize_db))
+        tick_data = TickData(arctic_server_address, barsize_db)
         examples: List[str] = tick_data.list_symbols()[0:10]
 
         result = {
             'universe': universe,
-            'arctic_library': history_db,
-            'bar_size': ' '.join(history_db.split('_')[-2:]),
+            'arctic_library': barsize_db,
+            'bar_size': ' '.join(barsize_db.split('_')[-2:]),
             'security_definition_count': len(u.security_definitions),
             'history_db_symbol_count': len(tick_data.list_symbols()),
             'example_symbols': examples
@@ -211,13 +288,11 @@ def history_summary(
 
 @history.command('read')
 @click.option('--symbol', required=True, help='historical data statistics for symbol')
-@click.option('--universe', required=True, default='NASDAQ', help='exchange for symbol [default: NASDAQ]')
 @click.option('--bar_size', required=True, default='1 min', help='bar size to read')
 @common_options()
 @default_config()
 def history_read(
     symbol: str,
-    universe: str,
     bar_size: str,
     arctic_server_address: str,
     arctic_universe_library: str,
@@ -332,7 +407,6 @@ def portfolio():
     rich_table(df.sort_values(by='unrealizedPNL', ascending=False), csv=is_repl, financial=True, financial_columns=[
         'marketPrice', 'marketValue', 'averageCost', 'unrealizedPNL', 'realizedPNL'
     ])
-    set_log_level('cli', 10)
 
 
 @main.command()
@@ -360,10 +434,17 @@ def positions():
     df = pd.DataFrame(data=list(xs), columns=[
         'account', 'conId', 'localSymbol', 'exchange', 'position', 'avgCost', 'currency', 'total'
     ])
-    rich_table(df.sort_values(by='currency'), financial=True, financial_columns=['total', 'avgCost'], csv=is_repl)
+    rich_table(
+        df.sort_values(by='currency'),
+        financial=True,
+        financial_columns=['total', 'avgCost'],
+        csv=is_repl,
+    )
     if is_repl:
-        rich_table(df.groupby(by=['currency'])['total'].sum().reset_index(), financial=True)
-    set_log_level('cli', 10)
+        rich_table(
+            df.groupby(by=['currency'])['total'].sum().reset_index(),
+            financial=True,
+        )
 
 
 @main.command()
@@ -388,20 +469,17 @@ def __resolve(
 
     results: List[Dict] = []
     for universe, definition in universe_definitions:
-        # check to see if there is an existing definition with the same conId
-        if not any([x['conId'] == definition.conId for x in results]):
-            results.append({
-                'universe': universe.name,
-                'conId': definition.conId,
-                'symbol': definition.symbol,
-                'exchange': definition.exchange,
-                'primaryExchange': definition.primaryExchange,
-                'currency': definition.currency,
-                'longName': definition.longName,
-                'category': definition.category,
-                'subcategory': definition.subcategory,
-                'minTick': definition.minTick,
-            })
+        results.append({
+            'universe': universe.name,
+            'conId': definition.conId,
+            'symbol': definition.symbol,
+            'exchange': definition.exchange,
+            'primaryExchange': definition.primaryExchange,
+            'currency': definition.currency,
+            'longName': definition.longName,
+            'category': definition.category,
+            'minTick': definition.minTick,
+        })
     return [r for r in results if primary_exchange in r['primaryExchange']]
 
 
@@ -443,23 +521,21 @@ def resolve(
 ):
     if ib:
         container = Container()
-        client = container.resolve(IBAIORx, extra_args={'ib_client_id': cli_client_id})
-
-        client.connect()
-        contract = asyncio.get_event_loop().run_until_complete(client.get_conid(
-            symbols=symbol,
-            secType=sec_type,
-            primaryExchange=primary_exchange,
-            currency=currency
-        ))
-        if contract and type(contract) is list:
-            rich_list(contract)
-        elif contract and type(contract) is Contract:
-            rich_dict(contract.__dict__)
+        with (container.resolve(IBAIORx, ib_client_id=cli_client_id)) as client:
+            contract = asyncio.get_event_loop().run_until_complete(client.get_conid(
+                symbols=symbol,
+                secType=sec_type,
+                primaryExchange=primary_exchange,
+                currency=currency
+            ))
+            if contract and type(contract) is list:
+                rich_list(contract)
+            elif contract and type(contract) is Contract:
+                rich_dict(contract.__dict__)
     else:
         results = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
         if len(results) > 0:
-            rich_table(results, False)
+            rich_table(results, False )
         else:
             click.echo('unable to resolve {}, maybe try the --ib flag to force resolution from IB?'.format(symbol))
 
@@ -627,19 +703,19 @@ def options(
     plot_chain(symbol, list_dates, date, True, risk_free_rate)
 
 
-@main.group()
-def loadtest():
-    pass
+# @main.group()
+# def loadtest():
+#     pass
 
 
-@loadtest.command('start')
-def load_test_start():
-    remoted_client.rpc().start_load_test()
+# @loadtest.command('start')
+# def load_test_start():
+#     remoted_client.rpc().start_load_test()
 
 
-@loadtest.command('stop')
-def load_test_stop():
-    remoted_client.rpc().stop_load_test()
+# @loadtest.command('stop')
+# def load_test_stop():
+#     remoted_client.rpc().stop_load_test()
 
 
 # CLI_BOOK
@@ -1029,7 +1105,7 @@ def setup_ipython():
 
     container = Container()
     accessor = container.resolve(UniverseAccessor)
-    client = container.resolve(IBAIORx, extra_args={'ib_client_id': cli_client_id})
+    client = container.resolve(IBAIORx, ib_client_id=cli_client_id)
     client.connect()
     store = Arctic(mongo_host=container.config()['arctic_server_address'])
     tickstorage = container.resolve(TickStorage)

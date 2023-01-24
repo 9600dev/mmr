@@ -34,11 +34,11 @@ class Universe():
 
     def find_symbol(self, symbol: Union[int, str]) -> Optional[SecurityDefinition]:
         for definition in self.security_definitions:
-            if type(symbol) is str:
-                if definition.symbol == symbol:
-                    return definition
-            elif type(symbol) is str and cast(str, symbol).isnumeric():
+            if type(symbol) is str and cast(str, symbol).isnumeric():
                 if definition.conId == int(symbol):
+                    return definition
+            elif type(symbol) is str:
+                if definition.symbol == symbol:
                     return definition
             else:
                 if definition.conId == symbol:

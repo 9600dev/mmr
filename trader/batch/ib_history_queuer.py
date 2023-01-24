@@ -18,7 +18,7 @@ import click
 import datetime as dt
 
 
-logging = setup_logging(module_name='ib_history_queuer')
+logging = setup_logging(module_name='ib_history')
 
 
 @cli_norepl.command()

@@ -99,6 +99,12 @@ class IBAIORx():
         # try binding helper methods to things we care about
         Contract.to_df = Helpers.to_df  # type: ignore
 
+    def __enter__(self):
+        return self.connect()
+
+    def __exit__(self, *args):
+        asyncio.run(self.shutdown())
+
     async def __handle_error(self, reqId, errorCode, errorString, contract):
         global error_code
 
@@ -113,7 +119,7 @@ class IBAIORx():
         self.error_subject.on_next(IBAIORxError(reqId, errorCode, errorString, contract))
 
     @backoff.on_exception(backoff.expo, Exception, max_tries=3, max_time=30)
-    def connect(self):
+    def connect(self) -> 'IBAIORx':
         def __handle_client_id_error(msg):
             logging.error('clientId already in use: {}'.format(msg))
             raise ValueError('clientId')

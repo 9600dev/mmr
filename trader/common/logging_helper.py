@@ -1,3 +1,4 @@
+from enum import IntEnum
 from logging import Logger
 from types import FrameType
 from typing import cast, Dict, List
@@ -9,6 +10,17 @@ import logging.config
 import os
 import warnings
 import yaml
+
+
+class LogLevels(IntEnum):
+    CRITICAL = 50
+    FATAL = CRITICAL
+    ERROR = 40
+    WARNING = 30
+    WARN = WARNING
+    INFO = 20
+    DEBUG = 10
+    NOTSET = 0
 
 
 global_loggers: Dict[str, Logger] = {}
@@ -59,7 +71,7 @@ def set_log_level(module_name: str, level):
         global_loggers[module_name].setLevel(level)
 
 
-def set_external_log_level(level):
+def set_external_log_level(level: LogLevels):
     logging.getLogger('ib_insync.wrapper').setLevel(level)
     logging.getLogger('ib_insync.client').setLevel(level)
     logging.getLogger('ib_insync.ib').setLevel(level)
@@ -67,19 +79,19 @@ def set_external_log_level(level):
     logging.getLogger('arctic.arctic').setLevel(level)
     logging.getLogger('arctic.store.version_store').setLevel(level)
 
-def set_all_log_level(level):
+def set_all_log_level(level: LogLevels):
     set_external_log_level(level)
     logging.getLogger().setLevel(level)
 
 def suppress_external():
-    set_external_log_level(logging.ERROR)
+    set_external_log_level(LogLevels.ERROR)
 
 def suppress_all():
     suppress_external()
     logging.getLogger().setLevel(logging.ERROR)
 
 def verbose():
-    set_all_log_level(logging.DEBUG)
+    set_all_log_level(LogLevels.DEBUG)
 
 def get_callstack(frames: int = 0) -> List[str]:
     def walk_stack(frame: FrameType, counter: int = 1) -> List[str]:

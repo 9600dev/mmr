@@ -24,7 +24,7 @@ import datetime as dt
 import exchange_calendars
 
 
-logging = setup_logging(module_name='ib_history_batch')
+logging = setup_logging(module_name='ib_history')
 
 class IBHistoryQueuer(Queuer):
     def __init__(

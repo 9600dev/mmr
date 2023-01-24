@@ -38,6 +38,7 @@ class WorkerService():
         self.redis_conn = Redis(host=self.redis_server_address, port=self.redis_server_port)
 
     def start(self):
+        logging.debug('starting worker_service')
         if not self.redis_conn: self._connect()
         queue = Queue(connection=self.redis_conn, name=self.work_queue)
 
@@ -46,12 +47,13 @@ class WorkerService():
             w.work()
 
     def list_queues(self) -> Dict[str, int]:
+        logging.debug('list_queues')
         if not self.redis_conn: self._connect()
         return {q.name: q.count for q in Queue.all(connection=self.redis_conn)}
 
 
 @cli_norepl.command()
-@click.option('--queue_name', required=True, help='name of RQ job queue to use, eg: ib_history_queue')
+@click.option('--queue_name', required=True, help='name of RQ job queue to use, eg: history')
 @common_options()
 @default_config()
 def start(

@@ -16,7 +16,7 @@ import pandas as pd
 import pytz
 
 
-logging = setup_logging(module_name='ibhistoryworker')
+logging = setup_logging(module_name='ib_history')
 
 class IBHistoryWorker():
     def __init__(
@@ -179,7 +179,8 @@ class IBHistoryWorker():
             )
 
             # skip if 'no data' returned
-            if self.error_code > 0 and self.error_code != 162:
+            # 162 is 'Historical Market data error' so we gotta parse the message
+            if self.error_code > 0:
                 raise Exception('error_code: {}, error_string: {}'.format(self.error_code, self.error_string))
 
             if result:
