@@ -65,11 +65,10 @@ def setup_logging(default_path='/home/trader/mmr/configs/logging.yaml',
     global_loggers[module_name] = logging.getLogger(module_name)
     return global_loggers[module_name]
 
-def set_log_level(module_name: str, level):
+def set_log_level(module_name: str, level: LogLevels):
     global global_loggers
     if module_name in global_loggers:
         global_loggers[module_name].setLevel(level)
-
 
 def set_external_log_level(level: LogLevels):
     logging.getLogger('ib_insync.wrapper').setLevel(level)

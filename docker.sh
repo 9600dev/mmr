@@ -14,6 +14,7 @@ echo_usage() {
     echo
     echo "  -b (build image from Dockerfile)"
     echo "  -c (clean docker [remove all images named mmr-image and containers named mmr-container])"
+    echo "  -f (force clean docker [remove all images and containers, and build cache])"
     echo "  -r (run container)"
     echo "  -s (sync code to running container)"
     echo "  -a (sync all files in mmr to running container)"
@@ -24,7 +25,7 @@ echo_usage() {
     echo ""
 }
 
-b=n c=n r=n s=n a=n g=n
+b=n c=n f=n r=n s=n a=n g=n
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -36,6 +37,9 @@ while [[ $# -gt 0 ]]; do
       c=y
       shift # past argument
       ;;
+    -f|--force)
+      f=y
+      shift # past argument
     -r|--run)
       r=y
       shift # past argument
@@ -96,6 +100,12 @@ clean() {
         docker image prune -f
         docker image rm -f $IMGNAME
     fi
+}
+
+force_clean() {
+    clean()
+    echo "Cleaning all build cache"
+    docker builder prune --force
 }
 
 run() {
