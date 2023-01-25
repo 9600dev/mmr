@@ -20,6 +20,7 @@ from typing import Dict, Optional
 
 import asyncio
 import click
+import functools
 import numpy as np
 import pandas as pd
 import rich
@@ -56,6 +57,21 @@ class RichLiveDataFrame():
         if title:
             self.console.print(title)
         self.console.print(self.table)
+
+
+# https://stackoverflow.com/questions/35223896/listen-to-keypress-with-asyncio
+class Prompt():
+    def __init__(self, loop=None):
+        self.loop = loop or asyncio.get_event_loop()
+        self.q = asyncio.Queue()
+        self.loop.add_reader(sys.stdin, self.got_input)
+
+    def got_input(self):
+        asyncio.ensure_future(self.q.put(sys.stdin.readline()), loop=self.loop)
+
+    async def __call__(self, msg, end='\n', flush=False):
+        print(msg, end=end, flush=flush)
+        return (await self.q.get()).rstrip('\n')
 
 
 class ZmqPrettyPrinter():
@@ -103,7 +119,7 @@ class ZmqPrettyPrinter():
             self.counter += 1
             data = [get_snap(ticker) for contract, ticker in self.contract_ticks.items()]
             data_frame = pd.DataFrame(data)
-            self.rich_live.print_console(data_frame, 'Ctrl-c to stop...')
+            self.rich_live.print_console(data_frame, 'Hit Enter to stop...')
             if self.counter % 1000 == 0:
                 self.console.clear()
                 self.contract_ticks.clear()
@@ -147,7 +163,10 @@ class ZmqPrettyPrinter():
             self.observer = AutoDetachObserver(on_next=self.on_next, on_error=self.on_error, on_completed=self.on_completed)
             self.subscription = observable.subscribe(self.observer)
 
-            await self.wait_handle.wait()
+            prompt = Prompt()
+            raw_input = functools.partial(prompt, end='', flush=True)
+
+            await prompt("Press enter to continue")
         except KeyboardInterrupt:
             logging.debug('KeyboardInterrupt')
             self.wait_handle.set()

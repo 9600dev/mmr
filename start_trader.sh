@@ -4,6 +4,7 @@ export JTS_DIR="/home/trader/mmr/third_party/Jts"
 export IBC_DIR="/home/trader/mmr/third_party/ibc"
 export MMR_DIR="/home/trader/mmr"
 export TRADER_CONFIG="$MMR_DIR/configs/trader.yaml"
+export TMUX_START=true
 
 RED=`tput setaf 1`
 GREEN=`tput setaf 2`
@@ -12,6 +13,23 @@ WHITE=`tput setaf 7`
 BLACK=`tput setaf 0`
 CYAN=`tput setaf 6`
 RESET=`tput sgr0`
+
+# parse arguments
+VALID_ARGS=$(getopt -o t --long no-tmux -- "$@")
+eval set -- "$VALID_ARGS"
+while [ : ]; do
+  case "$1" in
+    -t | --no-tmux)
+        echo "will not start with tmux session"
+        TMUX_START=false
+        shift
+        ;;
+    --) shift;
+        break
+        ;;
+  esac
+done
+
 
 echo ""
 echo " $(tput setab 2)${BLACK}----------------------------------------${RESET}"
@@ -131,15 +149,13 @@ fi
 echo "Starting or attaching to tmux session to host pycron and start the command line interface."
 cd $MMR_DIR
 
-if [ ! "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ] && [ -z "${TMUX}" ]; then
+if [ ! "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ] && [ -z "${TMUX}" ] && [ TMUX_START = true ]; then
     echo "starting new tmux session for mmr trader"
     cd $MMR_DIR
-    touch logs/trader_service.log
-    touch logs/strategy_service.log
     tmux new-session -d -n pycron 'echo; echo "Ctrl-b + n [next window], Ctrl-b + p [previous window]"; echo; python3 pycron/pycron.py --config ./configs/pycron.yaml' \; new-window -d -n cli python3 cli.py \; new-window -d -n dashboard python3 info.py \; new-window -d -n trader_service_log lnav logs/trader_service.log \; new-window -d -n strategy_service_log lnav logs/strategy_service.log \; attach
 elif [ ! "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ]; then
     echo ""
-    echo "already in tmux session, starting pycron directly"
+    echo "starting pycron directly"
     echo "> python3 pycron/pycron.py --config ./configs/pycron.yaml"
     echo ""
     python3 pycron/pycron.py --config ./configs/pycron.yaml

@@ -701,7 +701,7 @@ def subscribe_list(
 
 
 @subscribe.command('listen')
-@click.option('--topic', required=True, help='zmqtopic to listen to')
+@click.option('--topic', required=True, default='ticker', help='zmqtopic to listen to')
 @common_options()
 @default_config()
 def subscribe_listen(
@@ -711,8 +711,7 @@ def subscribe_listen(
     **args,
 ):
     printer = ZmqPrettyPrinter(zmq_pubsub_server_address, zmq_pubsub_server_port, csv=not (is_repl))
-    asyncio.run(printer.listen(topic))
-
+    asyncio.get_event_loop().run_until_complete(printer.listen(topic))
 
 @main.group()
 def option():

@@ -373,7 +373,7 @@ class RemotedClient(Generic[T]):
 
     async def connect(self):
         if not self.client:
-            logging.debug('connect()')
+            logging.debug('RemotedClient.connect()')
             bind = '{}:{}'.format(self.zmq_server_address, self.zmq_server_port)
             self.client = await aiozmq.rpc.connect_rpc(
                 connect=bind,
