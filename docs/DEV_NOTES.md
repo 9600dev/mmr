@@ -1,5 +1,6 @@
 # Backlog
 
+* Sometimes reqHistoricalData returns and error that suggests it can't parse the query. Restarting MMR seems to fix this. Scary.
 * timezonify should move everything that's deailing with internal timezones to timezone.utc
 * there's a timezoneTWS property on IB that gives you the TWS instance timeframe, use that.
 * Move timezoneify logic to the SecurityDefinition class, so that timezone updates to dt.datetime's are local to the security/market

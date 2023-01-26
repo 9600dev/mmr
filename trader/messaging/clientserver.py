@@ -373,7 +373,7 @@ class RemotedClient(Generic[T]):
 
     async def connect(self):
         if not self.client:
-            logging.debug('RemotedClient.connect()')
+            logging.debug('trying RemotedClient.connect()')
             bind = '{}:{}'.format(self.zmq_server_address, self.zmq_server_port)
             self.client = await aiozmq.rpc.connect_rpc(
                 connect=bind,
@@ -382,6 +382,7 @@ class RemotedClient(Generic[T]):
                 error_table=self.error_table
             )  # type: ignore
             self.connected = True
+            logging.debug('RemotedClient.connect() success')
 
     async def awaitable_rpc(self) -> T:
         return self.client.call  # type: ignore

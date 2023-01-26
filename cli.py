@@ -1146,7 +1146,7 @@ def setup_ipython():
     print()
     print(' amd: Contract, nvda: Contract, a2m: Contract, cl: Contract')
     print(' container: Container, accessor: UniverseAccessor, client: IBAIORx')
-    print(' store: Arctic, bardata: TickData, marketdata: MarketData')
+    print(' store: Arctic, tickstorage: TickStorage, marketdata: MarketData')
 
 
 if get_ipython().__class__.__name__ == 'TerminalInteractiveShell':  # type: ignore
