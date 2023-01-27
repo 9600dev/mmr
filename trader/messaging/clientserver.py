@@ -382,7 +382,6 @@ class RemotedClient(Generic[T]):
                 error_table=self.error_table
             )  # type: ignore
             self.connected = True
-            logging.debug('RemotedClient.connect() success')
 
     async def awaitable_rpc(self) -> T:
         return self.client.call  # type: ignore

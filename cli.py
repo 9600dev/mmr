@@ -40,6 +40,7 @@ import click
 import click_repl
 import os
 import pandas as pd
+import random
 import requests
 import scripts.universes_cli as universes_cli
 import trader.batch.ib_history_queuer as ib_history_queuer
@@ -54,15 +55,31 @@ error_table = {
     'trader.common.exceptions.TraderConnectionException': TraderConnectionException
 }
 
+container = Container()
 
 def connect():
     if not remoted_client.connected:
         asyncio.get_event_loop().run_until_complete(remoted_client.connect())
 
-remoted_client = RemotedClient[TraderServiceApi](error_table=error_table)
+remoted_client = RemotedClient[TraderServiceApi](
+    zmq_server_address=container.config()['zmq_rpc_server_address'],
+    zmq_server_port=container.config()['zmq_rpc_server_port'],
+    error_table=error_table,
+    timeout=5,
+)
 connect()
 
-cli_client_id = remoted_client.rpc(return_type=int).get_unique_client_id()
+cli_client_id = -1
+try:
+    remoted_client.rpc(return_type=int).get_unique_client_id()
+except asyncio.exceptions.TimeoutError:
+    click.echo('Could not connect to trader service at {}:{}. Is it running?'.format(
+        container.config()['zmq_rpc_server_address'],
+        container.config()['zmq_rpc_server_port']
+    ))
+    cli_client_id = random.randint(50, 100)
+    click.echo('using client id {}'.format(cli_client_id))
+
 
 @click.group(
     invoke_without_command=True,
@@ -80,7 +97,7 @@ def main(ctx):
 
     if ctx.invoked_subcommand is None:
         ctx.invoke(repl)
-        set_log_level(LogLevels.DEBUG)
+        set_log_level('cli', level=LogLevels.DEBUG)
 
 
 @main.command()
@@ -1111,7 +1128,6 @@ def def_exit():
     os._exit(os.EX_OK)
 
 
-container: Container
 amd = Contract(symbol='AMD', conId=4391, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
 tsla = Contract(symbol='TSLA', conId=76792991, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
 nvda = Contract(symbol='NVDA', conId=4815747, exchange='SMART', primaryExchange='NASDAQ', currency='USD')

@@ -8,7 +8,7 @@ import yaml
 
 class Container(metaclass=Singleton):
     def __init__(self, config_file: str = '/home/trader/mmr/configs/trader.yaml'):
-        if os.getenv('TRADER_CONFIG'):
+        if config_file == '/home/trader/mmr/configs/trader.yaml' and os.getenv('TRADER_CONFIG'):
             self.config_file = str(os.getenv('TRADER_CONFIG'))  # type: ignore
         else:
             self.config_file = config_file
