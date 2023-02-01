@@ -121,8 +121,8 @@ class IBAIORx():
     @backoff.on_exception(backoff.expo, Exception, max_tries=3, max_time=30)
     def connect(self) -> 'IBAIORx':
         def __handle_client_id_error(msg):
-            logging.error('clientId already in use: {}'.format(msg))
-            raise ValueError('clientId')
+            logging.error('clientId already in use, msg: {}, object ib_client_id: {}'.format(msg, self.ib_client_id))
+            raise ValueError('ib_client_id')
 
         if self.ib.isConnected():
             return self
@@ -135,6 +135,10 @@ class IBAIORx():
         net_client = cast(Client, self.ib.client)
         net_client.conn.disconnected += __handle_client_id_error
 
+        logging.debug('ibreactive.connect ib_server_address: {}, ib_server_port: {}, ib_client_id: {}'.format(
+            self.ib_server_address, self.ib_server_port, self.ib_client_id
+        ))
+
         self.ib.connect(
             host=self.ib_server_address,
             port=self.ib_server_port,
@@ -144,6 +148,7 @@ class IBAIORx():
         )
 
         net_client.conn.disconnected -= __handle_client_id_error
+
         self.history_worker = IBHistoryWorker(
             self.ib_server_address,
             self.ib_server_port,
@@ -549,7 +554,7 @@ class IBAIORx():
         what_to_show: WhatToShow = WhatToShow.MIDPOINT,
     ) -> pd.DataFrame:
         if self.history_worker and not self.history_worker.connected:
-            await asyncio.wait_for(self.history_worker.connect(), timeout=20.0)
+            self.history_worker.connect()
 
         return await self.history_worker.get_contract_history(  # type: ignore
             security=contract,

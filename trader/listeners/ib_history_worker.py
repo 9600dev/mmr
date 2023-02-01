@@ -1,3 +1,4 @@
+from datetime import date
 from dateutil.tz import gettz
 from ib_insync import IB
 from ib_insync.contract import Contract
@@ -10,6 +11,7 @@ from typing import List, Optional, Union
 
 import asyncio
 import backoff
+import calendar
 import datetime as dt
 import ib_insync
 import numpy as np
@@ -196,8 +198,13 @@ class IBHistoryWorker():
                 df_result['what_to_show'] = int(what_to_show)
                 df_result.rename({'barCount': 'bar_count'}, inplace=True, axis=1)
 
+                utc = False
+                if type(df_result.index[0]) is date:
+                    utc = True
+
                 # arctic requires timezone to be set
-                df_result.index = pd.to_datetime(df_result.index)  # type: ignore
+                df_result.index = pd.to_datetime(df_result.index, utc=utc)  # type: ignore
+
                 # next line no leonger required as we pass in =2 to formatDate
                 # df_result.index = df_result.index.tz_localize(local_tz)  # type: ignore
                 df_result.index = df_result.index.tz_convert(tz_info)

@@ -1,5 +1,8 @@
 # Random Finance Links
 
+* [Market Chameleon - has some good fundamentals calculators](https://marketchameleon.com/Overview/AMD/Payback-Period/)
+* [Fintel - excellent insider analysis](https://fintel.io/so/au)
+* [newsfilter.io](https://newsfilter.io/search?query=AMD)
 * [The buy and hold mindset](https://avc.com/2022/11/the-buy-and-hold-mindset/)
 * [The Casino-Chip Society](https://brettscott.substack.com/p/casino-chip-cashless-society)
 * [Cramming: Training a Language Model on a Single GPU in One Day](https://arxiv.org/abs/2212.14034)

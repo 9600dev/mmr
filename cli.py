@@ -1,6 +1,7 @@
 from arctic import Arctic
 from arctic.exceptions import NoDataFoundException
 from click_help_colors import HelpColorsGroup
+from click_option_group import optgroup, RequiredMutuallyExclusiveOptionGroup
 from cloup import option as cloupoption
 from cloup import option_group
 from cloup.constraints import mutually_exclusive
@@ -29,7 +30,7 @@ from trader.container import Container
 from trader.data.data_access import DictData, TickData, TickStorage
 from trader.data.market_data import MarketData
 from trader.data.universe import Universe, UniverseAccessor
-from trader.listeners.ibreactive import IBAIORx
+from trader.listeners.ibreactive import IBAIORx, WhatToShow
 from trader.messaging.clientserver import RemotedClient
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.objects import BarSize
@@ -38,8 +39,11 @@ from typing import Any, Dict, List, Optional, Union
 import asyncio
 import click
 import click_repl
+import cloup
+import datetime as dt
 import os
 import pandas as pd
+import plotext as plt
 import random
 import requests
 import scripts.universes_cli as universes_cli
@@ -71,7 +75,7 @@ connect()
 
 cli_client_id = -1
 try:
-    remoted_client.rpc(return_type=int).get_unique_client_id()
+    cli_client_id = remoted_client.rpc(return_type=int).get_unique_client_id()
 except asyncio.exceptions.TimeoutError:
     click.echo('Could not connect to trader service at {}:{}. Is it running?'.format(
         container.config()['zmq_rpc_server_address'],
@@ -456,6 +460,94 @@ def portfolio():
     rich_table(df.sort_values(by='unrealizedPNL', ascending=False), csv=is_repl, financial=True, financial_columns=[
         'marketPrice', 'marketValue', 'averageCost', 'unrealizedPNL', 'realizedPNL'
     ])
+
+
+def pretty_group(
+    name: Optional[str] = None,
+    help: Optional[str] = None,
+    cls = None,
+    **attrs,
+):
+    return optgroup.group(f'\n{name}', help=f'\b--- {help}\n\n', cls=cls, **attrs)
+
+
+@main.command('plot')
+@click.option('--symbol', required=True, help='historical data statistics for symbol')
+@pretty_group('Standard plot', help='Plots data over given range and bar_size')
+@optgroup.option('--exchange', required=False, default='', help='primary exchange')
+@optgroup.option('--bar_size', required=True, default='1 min', help='bar size to read')
+@optgroup.option('--prev_days', required=True, type=int, default=1, help='previous days to plot')
+@pretty_group('Live plot', help='Subscribes to tick data and plots')
+@optgroup.option('--live', is_flag=True, help='start live console plot of symbol')
+@optgroup.option('--delayed', is_flag=True, help='use delayed data')
+@optgroup.option('--topic', default='ticker', help='\b\nzmq topic, default="ticker"\n\n\n  ')
+@common_options()
+@default_config()
+def plot(
+    symbol: str,
+    exchange: str,
+    bar_size: str,
+    prev_days: int,
+    live: bool,
+    delayed: bool,
+    ib_server_address: str,
+    ib_server_port: int,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    zmq_pubsub_server_address: str,
+    zmq_pubsub_server_port: int,
+    topic: str,
+    ib_client_id: Optional[int] = None,
+    **args,
+):
+    results: List[Contract] = __resolve_contract(
+        symbol,
+        arctic_server_address,
+        arctic_universe_library,
+        primary_exchange=exchange
+    )
+    # todo fix all this resolution stuff up
+    contract = results[0]
+
+    if live:
+        click.echo('subscribing to {}'.format(contract.symbol))
+        remoted_client.rpc().publish_contract(contract, delayed)
+
+        printer = ZmqPrettyPrinter(zmq_pubsub_server_address, zmq_pubsub_server_port, csv=False, live_graph=True)
+        asyncio.get_event_loop().run_until_complete(printer.listen(topic))
+    else:
+        bar_size_enum = BarSize.parse_str(bar_size)
+        start_date = dt.datetime.now() - dt.timedelta(days=prev_days)
+
+        with (IBAIORx(
+            ib_server_address,
+            ib_server_port,
+            ib_client_id if ib_client_id else cli_client_id
+        )) as client:
+            click.echo(ib_client_id)
+            history = asyncio.run(client.get_contract_history(
+                contract=results[0],
+                start_date=start_date,
+                bar_size=bar_size_enum,
+                what_to_show=WhatToShow.TRADES,
+            ))
+
+            plt.clear_data()
+            plt.clear_figure()
+            plt.theme('dark')
+            plt.title(f'{symbol} {bar_size} {prev_days} days')
+
+            if bar_size_enum >= BarSize.Days1:
+                plt.date_form('d/m/Y')
+            else:
+                plt.date_form('d H:M')
+
+            plt.plot(
+                plt.datetimes_to_string(history.index),
+                history['close'],
+                marker='hd')
+            plt.show()
+            click.getchar()
 
 
 @main.command()

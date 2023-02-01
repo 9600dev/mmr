@@ -23,6 +23,7 @@ import click
 import functools
 import numpy as np
 import pandas as pd
+import plotext as plt
 import rich
 import signal
 
@@ -58,6 +59,30 @@ class RichLiveDataFrame():
             self.console.print(title)
         self.console.print(self.table)
 
+class LiveGraph():
+    def __init__(self, console: rich.console.Console, column_name: str):
+        self.console = console
+        self.first: bool = True
+        self.column_name = column_name
+        self.y_values: List[float] = []
+
+    def print_console(self, df: pd.DataFrame):
+        if self.first:
+            self.console.clear()
+            self.first = False
+
+        self.y_values.append(float(df[self.column_name].values[-1]))
+
+        plt.clear_data()
+        plt.theme('dark')
+        plt.grid(1, 1)
+        plt.xaxes(False, False)
+        plt.plot(
+            list(range(0, len(self.y_values))),
+            self.y_values,
+            marker='hd')
+        plt.show()
+
 
 # https://stackoverflow.com/questions/35223896/listen-to-keypress-with-asyncio
 class Prompt():
@@ -80,12 +105,17 @@ class ZmqPrettyPrinter():
         zmq_pubsub_server_address: str,
         zmq_pubsub_server_port: int,
         csv: bool = False,
+        live_graph: bool = False,
+        filter_symbol: str = '',
     ):
         self.zmq_pubsub_server_address = zmq_pubsub_server_address
         self.zmq_pubsub_server_port = zmq_pubsub_server_port
         self.contract_ticks: Dict[Contract, Ticker] = {}
         self.console = rich.console.Console()
         self.rich_live = RichLiveDataFrame(self.console)
+        self.live_graph = live_graph
+        self.filter_symbol = filter_symbol
+        self.graph = LiveGraph(self.console, 'last')
         self.subscription: DisposableBase
         self.observer: ObserverBase
         self.csv = csv
@@ -113,20 +143,26 @@ class ZmqPrettyPrinter():
                 'halted': int(ticker.halted) if not np.isnan(ticker.halted) else -1
             }
 
-        # self.console.clear(True)
-        # rich_table(data_frame, False, True, ['currency', 'bid', 'ask', 'last', 'open', 'high', 'low', 'close'])
-        if not self.csv:
-            self.counter += 1
-            data = [get_snap(ticker) for contract, ticker in self.contract_ticks.items()]
-            data_frame = pd.DataFrame(data)
-            self.rich_live.print_console(data_frame, 'Hit Enter to stop...')
-            if self.counter % 1000 == 0:
-                self.console.clear()
-                self.contract_ticks.clear()
-        else:
-            t = get_snap(ticker)  # type: ignore
-            str_values = [str(v) for v in t.values()]
-            print(','.join(str_values))
+        if (ticker and ticker.contract and self.filter_symbol in ticker.contract.symbol) or \
+           (ticker and ticker.contract and self.filter_symbol.isnumeric() and int(self.filter_symbol) == ticker.contract.conId):
+
+            if not self.csv and not self.live_graph:
+                self.counter += 1
+                data = [get_snap(ticker) for contract, ticker in self.contract_ticks.items()]
+                data_frame = pd.DataFrame(data)
+                self.rich_live.print_console(data_frame, 'Hit Enter to stop...')
+                if self.counter % 1000 == 0:
+                    self.console.clear()
+                    self.contract_ticks.clear()
+            elif self.live_graph:
+                self.counter += 1
+                data = [get_snap(ticker) for contract, ticker in self.contract_ticks.items()]
+                data_frame = pd.DataFrame(data)
+                self.graph.print_console(data_frame)
+            else:
+                t = get_snap(ticker)  # type: ignore
+                str_values = [str(v) for v in t.values()]
+                print(','.join(str_values))
 
     def on_next(self, ticker: Ticker):
         if ticker.contract:
@@ -166,7 +202,7 @@ class ZmqPrettyPrinter():
             prompt = Prompt()
             raw_input = functools.partial(prompt, end='', flush=True)
 
-            await prompt("Press enter to continue")
+            await prompt("Press enter to exit...")
         except KeyboardInterrupt:
             logging.debug('KeyboardInterrupt')
             self.wait_handle.set()
@@ -186,16 +222,26 @@ class ZmqPrettyPrinter():
 
 @click.command()
 @click.option('--csv', required=True, is_flag=True, default=False)
+@click.option('--live_graph', required=False, is_flag=True, default=False)
 @click.option('--topic', required=True, default='ticker')
+@click.option('--filter_symbol', required=False, default='')
 @click.option('--zmq_pubsub_server_address', required=True, default='tcp://127.0.0.1')
 @click.option('--zmq_pubsub_server_port', required=True, default=42002)
 def main(
     csv: bool,
+    live_graph: bool,
     topic: str,
+    filter_symbol: str,
     zmq_pubsub_server_address: str,
     zmq_pubsub_server_port: int
 ):
-    printer = ZmqPrettyPrinter(zmq_pubsub_server_address, zmq_pubsub_server_port, csv=csv)
+    printer = ZmqPrettyPrinter(
+        zmq_pubsub_server_address,
+        zmq_pubsub_server_port,
+        csv=csv,
+        live_graph=live_graph,
+        filter_symbol=filter_symbol,
+    )
 
     def stop_loop(loop: AbstractEventLoop):
         loop.run_until_complete(printer.shutdown())

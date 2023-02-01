@@ -53,6 +53,8 @@ class UniverseAccessor():
         self.store = Arctic(self.arctic_server_address)
         self.store.initialize_library(self.arctic_universe_library, lib_type=VERSION_STORE)
         self.library: VersionStore = self.store[self.arctic_universe_library]
+        # reverse order
+        self.sorted_names = ['LSE', 'ASX', 'NYSE', 'NASDAQ']
 
     def list_universes(self) -> List[str]:
         result = self.library.list_symbols()
@@ -60,6 +62,11 @@ class UniverseAccessor():
         if 'portfolio' in result:
             result.remove('portfolio')
             result.insert(0, 'portfolio')
+
+        for name in self.sorted_names:
+            if name in result:
+                result.remove(name)
+                result.insert(0, name)
         return result
 
     def list_universes_count(self) -> Dict[str, int]:
