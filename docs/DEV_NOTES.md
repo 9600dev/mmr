@@ -1,5 +1,6 @@
 # Backlog
 
+* trading_mode in trader.yaml and TradingMode in config.ini needs to be tested on startup to ensure they're the same.
 * Sometimes reqHistoricalData returns and error that suggests it can't parse the query. Restarting MMR seems to fix this. Scary.
 * timezonify should move everything that's deailing with internal timezones to timezone.utc
 * there's a timezoneTWS property on IB that gives you the TWS instance timeframe, use that.

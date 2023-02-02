@@ -115,6 +115,17 @@ def help(ctx, subcommand):
         click.echo(subcommand_obj.get_help(ctx))
 
 
+@main.command()
+@click.argument('subcommand', required=False)
+@click.pass_context
+def ls(ctx, subcommand):
+    subcommand_obj = main.get_command(ctx, subcommand)
+    if subcommand_obj is None:
+        click.echo(click.get_current_context().find_root().get_help())
+    else:
+        click.echo(subcommand_obj.get_help(ctx))
+
+
 @cli.command()
 def repl():
     global is_repl
@@ -480,6 +491,7 @@ def pretty_group(
 @pretty_group('Live plot', help='Subscribes to tick data and plots')
 @optgroup.option('--live', is_flag=True, help='start live console plot of symbol')
 @optgroup.option('--delayed', is_flag=True, help='use delayed data')
+@optgroup.option('--height', default=0, help='height of plot [default: 0 for fullscreen]')
 @optgroup.option('--topic', default='ticker', help='\b\nzmq topic, default="ticker"\n\n\n  ')
 @common_options()
 @default_config()
@@ -490,6 +502,7 @@ def plot(
     prev_days: int,
     live: bool,
     delayed: bool,
+    height: int,
     ib_server_address: str,
     ib_server_port: int,
     arctic_server_address: str,
@@ -513,7 +526,14 @@ def plot(
         click.echo('subscribing to {}'.format(contract.symbol))
         remoted_client.rpc().publish_contract(contract, delayed)
 
-        printer = ZmqPrettyPrinter(zmq_pubsub_server_address, zmq_pubsub_server_port, csv=False, live_graph=True)
+        printer = ZmqPrettyPrinter(
+            zmq_pubsub_server_address,
+            zmq_pubsub_server_port,
+            csv=False,
+            live_graph=True,
+            filter_symbol=symbol,
+            height=height,
+        )
         asyncio.get_event_loop().run_until_complete(printer.listen(topic))
     else:
         bar_size_enum = BarSize.parse_str(bar_size)

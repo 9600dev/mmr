@@ -3,7 +3,11 @@
 export JTS_DIR="/home/trader/mmr/third_party/Jts"
 export IBC_DIR="/home/trader/mmr/third_party/ibc"
 export MMR_DIR="/home/trader/mmr"
-export TRADER_CONFIG="$MMR_DIR/configs/trader.yaml"
+if [[ -z "{TRADER_CONFIG}" ]]; then
+    export TRADER_CONFIG="${TRADER_CONFIG}"
+else
+    export TRADER_CONFIG="$MMR_DIR/configs/trader.yaml"
+fi
 export TMUX_START=true
 
 RED=`tput setaf 1`
@@ -15,13 +19,26 @@ CYAN=`tput setaf 6`
 RESET=`tput sgr0`
 
 # parse arguments
-VALID_ARGS=$(getopt -o t --long no-tmux -- "$@")
+VALID_ARGS=$(getopt -o tlp --long no-tmux,live,paper -- "$@")
 eval set -- "$VALID_ARGS"
 while [ : ]; do
   case "$1" in
     -t | --no-tmux)
+        echo ""
         echo "will not start with tmux session"
         TMUX_START=false
+        shift
+        ;;
+    -p | --paper)
+        echo ""
+        echo "updating configurations in $TRADER_CONFIG and IBC config.ini to trade paper account"
+        PAPER=true
+        shift
+        ;;
+    -l | --live)
+        echo ""
+        echo "updating configurations in $TRADER_CONFIG and IBC config.ini to trade live account"
+        LIVE=true
         shift
         ;;
     --) shift;
@@ -30,6 +47,22 @@ while [ : ]; do
   esac
 done
 
+function parse_yaml {
+   local prefix=$2
+   local s='[[:space:]]*' w='[a-zA-Z0-9_]*' fs=$(echo @|tr @ '\034')
+   sed -ne "s|^\($s\):|\1|" \
+        -e "s|^\($s\)\($w\)$s:$s[\"']\(.*\)[\"']$s\$|\1$fs\2$fs\3|p" \
+        -e "s|^\($s\)\($w\)$s:$s\(.*\)$s\$|\1$fs\2$fs\3|p"  $1 |
+   awk -F$fs '{
+      indent = length($1)/2;
+      vname[indent] = $2;
+      for (i in vname) {if (i > indent) {delete vname[i]}}
+      if (length($3) > 0) {
+         vn=""; for (i=0; i<indent; i++) {vn=(vn)(vname[i])("_")}
+         printf("%s%s%s=\"%s\"\n", "'$prefix'",vn, $2, $3);
+      }
+   }'
+}
 
 echo ""
 echo " $(tput setab 2)${BLACK}----------------------------------------${RESET}"
@@ -45,6 +78,19 @@ if [ -t 0 ] ; then
 else
     echo "You must start the container with 'interactive mode' enabled (docker run -it ...) or ssh into container"
     exit 1
+fi
+
+# deal with --live and --paper arguments
+if [ -n "$LIVE" ]; then
+    CONF_trading_mode="live"
+    sed -i "s/^TradingMode=.*/TradingMode=$CONF_trading_mode/" $IBC_DIR/config.ini
+    sed -i "s/^trading_mode:.*/trading_mode: $CONF_trading_mode/" $TRADER_CONFIG
+fi
+
+if [ -n "$PAPER" ]; then
+    CONF_trading_mode="paper"
+    sed -i "s/^TradingMode=.*/TradingMode=$CONF_trading_mode/" $IBC_DIR/config.ini
+    sed -i "s/^trading_mode:.*/trading_mode: $CONF_trading_mode/" $TRADER_CONFIG
 fi
 
 # check to see if we've installed IBC
@@ -117,11 +163,29 @@ if [ "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ]; then
         exit 1
     fi
 
+    # deal with trading mode option
+    eval $(parse_yaml $TRADER_CONFIG "CONF_")
+
+    echo "TWS trading mode configured in $TRADER_CONFIG is: $CONF_trading_mode"
+    echo "Hit enter to keep, or type 'paper' or 'live' to change: "
+    read -s TRADING_MODE;
+
+    if [ -z "$TRADING_MODE" ]
+    then
+        echo "Using trading mode from $TRADER_CONFIG"
+    else
+        echo "Using trading mode from user input: $TRADING_MODE"
+        CONF_trading_mode=$TRADING_MODE
+    fi
+
     sed -i "s/^TWSUSERID=.*/TWSUSERID=$USERNAME/" $IBC_DIR/twsstart.sh
     sed -i "s/^TWSPASSWORD=.*/TWSPASSWORD=$PASSWORD/" $IBC_DIR/twsstart.sh
 
     sed -i "s/^IbLoginId=.*/IbLoginId=$USERNAME/" $IBC_DIR/config.ini
     sed -i "s/^IbPassword=.*/IbPassword=$PASSWORD/" $IBC_DIR/config.ini
+
+    sed -i "s/^TradingMode=.*/TradingMode=$CONF_trading_mode/" $IBC_DIR/config.ini
+    sed -i "s/^trading_mode:.*/trading_mode: $CONF_trading_mode/" $TRADER_CONFIG
 
     TWS_VERSION=$(ls -m $JTS_DIR | head -n 1 | sed 's/,.*$//')
     sed -i "s/^TWS_MAJOR_VRSN.*/TWS_MAJOR_VRSN=$TWS_VERSION/" $IBC_DIR/twsstart.sh
@@ -146,6 +210,10 @@ if [ "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ]; then
     read NULL;
 fi
 
+
+
+
+
 echo "Starting or attaching to tmux session to host pycron and start the command line interface."
 cd $MMR_DIR
 
@@ -156,9 +224,9 @@ if [ ! "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ] && [ -z "${TMUX}" ] && [ 
 elif [ ! "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ]; then
     echo ""
     echo "starting pycron directly"
-    echo "> python3 pycron/pycron.py --config ./configs/pycron.yaml"
+    echo "> python3 pycron/pycron.py --config $IBC_DIR/configs/pycron.yaml"
     echo ""
-    python3 pycron/pycron.py --config ./configs/pycron.yaml
+    python3 pycron/pycron.py --config $IBC_DIR/configs/pycron.yaml
 else
     echo "There doesn't seem to be a password set in $IBC_DIR/twsstart.sh, which may mean the installation script failed. Aborting."
 fi

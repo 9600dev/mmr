@@ -16,7 +16,7 @@ from rich.live import Live
 from rich.table import Table
 from trader.common.logging_helper import setup_logging
 from trader.messaging.clientserver import TopicPubSub
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import asyncio
 import click
@@ -60,18 +60,22 @@ class RichLiveDataFrame():
         self.console.print(self.table)
 
 class LiveGraph():
-    def __init__(self, console: rich.console.Console, column_name: str):
+    def __init__(self, console: rich.console.Console, height: int = 0):
         self.console = console
         self.first: bool = True
-        self.column_name = column_name
         self.y_values: List[float] = []
+        self.height = height
 
-    def print_console(self, df: pd.DataFrame):
+    def print_console(self, df: pd.DataFrame, column_name: str):
         if self.first:
             self.console.clear()
             self.first = False
 
-        self.y_values.append(float(df[self.column_name].values[-1]))
+        self.y_values.append(float(df[column_name].values[-1]))
+
+        if self.height > 0:
+            plt.plot_size(width=plt.tw(), height=self.height)
+            plt.clear_terminal()
 
         plt.clear_data()
         plt.theme('dark')
@@ -107,6 +111,7 @@ class ZmqPrettyPrinter():
         csv: bool = False,
         live_graph: bool = False,
         filter_symbol: str = '',
+        height: int = 0,
     ):
         self.zmq_pubsub_server_address = zmq_pubsub_server_address
         self.zmq_pubsub_server_port = zmq_pubsub_server_port
@@ -115,7 +120,7 @@ class ZmqPrettyPrinter():
         self.rich_live = RichLiveDataFrame(self.console)
         self.live_graph = live_graph
         self.filter_symbol = filter_symbol
-        self.graph = LiveGraph(self.console, 'last')
+        self.graph = LiveGraph(self.console, height=height)
         self.subscription: DisposableBase
         self.observer: ObserverBase
         self.csv = csv
@@ -156,9 +161,9 @@ class ZmqPrettyPrinter():
                     self.contract_ticks.clear()
             elif self.live_graph:
                 self.counter += 1
-                data = [get_snap(ticker) for contract, ticker in self.contract_ticks.items()]
-                data_frame = pd.DataFrame(data)
-                self.graph.print_console(data_frame)
+                # data = [get_snap(ticker) for contract, ticker in self.contract_ticks.items()]
+                data_frame = pd.DataFrame([get_snap(ticker)])
+                self.graph.print_console(data_frame, 'ask')
             else:
                 t = get_snap(ticker)  # type: ignore
                 str_values = [str(v) for v in t.values()]
