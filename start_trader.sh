@@ -224,9 +224,9 @@ if [ ! "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ] && [ -z "${TMUX}" ] && [ 
 elif [ ! "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ]; then
     echo ""
     echo "starting pycron directly"
-    echo "> python3 pycron/pycron.py --config $IBC_DIR/configs/pycron.yaml"
+    echo "> python3 pycron/pycron.py --config $MMR_DIR/configs/pycron.yaml"
     echo ""
-    python3 pycron/pycron.py --config $IBC_DIR/configs/pycron.yaml
+    python3 pycron/pycron.py --config $MMR_DIR/configs/pycron.yaml
 else
     echo "There doesn't seem to be a password set in $IBC_DIR/twsstart.sh, which may mean the installation script failed. Aborting."
 fi
