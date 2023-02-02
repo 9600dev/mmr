@@ -501,7 +501,7 @@ def bootstrap(
     )
 
     if not os.path.exists(config):
-        log.error('config_file does not exist')
+        log.error('config_file at {} does not exist'.format(config))
         sys.exit(1)
 
     main(config, start, butnot)
