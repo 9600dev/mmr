@@ -82,7 +82,8 @@ fi
 
 # check for --live and --paper arguments, and update config files if everything is already installed
 # todo: refactor this all out into a singular function to deal with username/passwords and configuration
-if [ -f "$IBC_DIR/config.ini" ] && [ -f "$TRADER_CONFIG" ]; then
+
+if [ ! "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ] && [ -f "$IBC_DIR/config.ini" ] && [ -f "$TRADER_CONFIG" ]; then
     eval $(parse_yaml $TRADER_CONFIG "CONF_")
     IBC_TRADING_MODE="$(grep -oP '(?<=TradingMode=).*$' $IBC_DIR/config.ini)"
 
