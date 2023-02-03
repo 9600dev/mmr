@@ -133,7 +133,6 @@ RUN mkdir /home/trader/.tmp
 RUN mkdir /home/trader/.cache
 
 COPY ./scripts/installation/.bash_profile /home/trader
-COPY ./scripts/installation/config.py /home/trader/.configs/qtile
 
 RUN touch /home/trader/.hushlogin
 RUN touch /home/trader/mmr/logs/trader_service.log

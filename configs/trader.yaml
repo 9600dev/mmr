@@ -4,9 +4,9 @@ pycron_config_file: /home/trader/mmr/configs/pycron.yaml
 strategy_config_file: /home/trader/mmr/configs/strategy_runtime.yaml
 logfile: logs/trader.log
 strategies_directory: /home/trader/mmr/strategies
-trading_mode: paper
+trading_mode: live
 ib_server_address: 127.0.0.1
-ib_server_port: 7497
+ib_server_port: 7496
 trading_runtime_ib_client_id: 5
 strategy_runtime_ib_client_id: 7
 arctic_server_address: 127.0.0.1

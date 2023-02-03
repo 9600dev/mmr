@@ -182,11 +182,12 @@ fi
 if [ "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ]; then
     echo ""
     echo ""
-    echo "[Can't find a username set in $IBC_DIR/twsstart.sh, asking for credentials]:"
+    echo "[Can't find a username set in $IBC_DIR/twsstart.sh, prompting for credentials]:"
 
     # deal with trading mode option
     eval $(parse_yaml $TRADER_CONFIG "CONF_")
 
+    echo ""
     echo "TWS trading mode configured in $TRADER_CONFIG is: $CONF_trading_mode"
     echo "Hit enter to keep, or type 'paper' or 'live' to change: "
     read -s TRADING_MODE;
