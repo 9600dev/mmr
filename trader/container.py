@@ -16,9 +16,9 @@ class Container(metaclass=Singleton):
         if not os.path.exists(self.config_file):  # type: ignore
             raise ValueError('configuration_file is not found {} or TRADER_CONFIG set incorrectly'.format(config_file))
 
-        conf_file = open(self.config_file, 'r')
-        self.configuration: Dict = yaml.load(conf_file, Loader=yaml.FullLoader)
-        self.type_instance_cache: Dict[Type, object] = {}
+        with open(self.config_file, 'r') as conf_file:
+            self.configuration: Dict = yaml.load(conf_file, Loader=yaml.FullLoader)
+            self.type_instance_cache: Dict[Type, object] = {}
 
     def resolve(self, t: Type, **extra_args):
         args = {}

@@ -11,7 +11,7 @@ from ib_insync.contract import Contract
 from ib_insync.objects import PortfolioItem, Position
 from ib_insync.order import Order, OrderStatus, Trade
 from ib_insync.ticker import Ticker
-from IPython import get_ipython
+from IPython.core.getipython import get_ipython
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.cursor_shapes import CursorShape
 from prompt_toolkit.formatted_text import HTML
