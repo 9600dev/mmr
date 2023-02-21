@@ -74,6 +74,7 @@ reactivex = "^4.0.4"
 cloup = "^1.0.0"
 msgpack = "^1.0.4"
 fitter = "^1.5.2"
+plotext = "^5.2.8"
 
 [tool.poetry.dev-dependencies]
 

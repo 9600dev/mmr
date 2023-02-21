@@ -8,7 +8,8 @@ if [[ -z "{TRADER_CONFIG}" ]]; then
 else
     export TRADER_CONFIG="$MMR_DIR/configs/trader.yaml"
 fi
-export TMUX_START=true
+
+TMUX_START=true
 
 RED=`tput setaf 1`
 GREEN=`tput setaf 2`
@@ -190,7 +191,7 @@ if [ "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ]; then
     echo ""
     echo "TWS trading mode configured in $TRADER_CONFIG is: $CONF_trading_mode"
     echo "Hit enter to keep, or type 'paper' or 'live' to change: "
-    read -s TRADING_MODE;
+    read TRADING_MODE;
 
     if [ -z "$TRADING_MODE" ]
     then
@@ -200,11 +201,11 @@ if [ "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ]; then
         CONF_trading_mode=$TRADING_MODE
     fi
 
-    echo -n "Please enter Interactive Brokers username for trading account $CONF_trading_mode: "
+    echo -n "Please enter Interactive Brokers username for trading account '$CONF_trading_mode': "
     read USERNAME;
 
     echo ""
-    echo -n "Please enter Interactive Brokers password for trading account $CONF_trading_mode: "
+    echo -n "Please enter Interactive Brokers password for trading account '$CONF_trading_mode': "
     read -s PASSWORD;
 
     if [ -z "$USERNAME" ]
@@ -254,8 +255,8 @@ if [ "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ]; then
 
     echo ""
     echo ""
-    echo "Installed. Hit enter to start the pycron tmux session, which starts all"
-    echo "trader services (Arctic DB, Redis, pycron, X windows, VNC Server, etc."
+    echo "Installed. Hit __enter__ to start the pycron tmux session, which starts all"
+    echo "trader services (Arctic DB, Redis, pycron, X windows, VNC Server, etc.)"
     echo ""
     echo ""
     chmod +x $IBC_DIR/scripts/displaybannerandlaunch.sh
@@ -271,10 +272,10 @@ fi
 echo "Starting or attaching to tmux session to host pycron and start the command line interface."
 cd $MMR_DIR
 
-if [ ! "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ] && [ -z "${TMUX}" ] && [ TMUX_START = true ]; then
+if [ ! "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ] && [ -z "$TMUX" ] && [ "$TMUX_START" = true ]; then
     echo "starting new tmux session for mmr trader"
     cd $MMR_DIR
-    tmux new-session -d -n pycron 'echo; echo "Ctrl-b + n [next window], Ctrl-b + p [previous window]"; echo; python3 pycron/pycron.py --config ./configs/pycron.yaml' \; new-window -d -n cli python3 cli.py \; new-window -d -n dashboard python3 info.py \; new-window -d -n trader_service_log lnav logs/trader_service.log \; new-window -d -n strategy_service_log lnav logs/strategy_service.log \; attach
+    tmux new-session -d -n pycron 'echo; echo "Ctrl-b + n [next window], Ctrl-b + p [previous window]"; echo; python3 pycron/pycron.py --config ./configs/pycron.yaml' \; new-window -d -n cli python3 cli.py \; new-window -d -n trader_service_log lnav logs/trader_service.log \; new-window -d -n strategy_service_log lnav logs/strategy_service.log \; attach
 elif [ ! "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ]; then
     echo ""
     echo "starting pycron directly"

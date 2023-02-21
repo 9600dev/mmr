@@ -156,6 +156,9 @@ RUN pyenv install 3.9.5
 RUN pyenv local 3.9.5
 RUN pyenv rehash
 
+# install poetry
+RUN curl -sSL https://install.python-poetry.org | python3 -
+
 # window manager for vnc
 RUN pip3 install xcffib
 RUN pip3 install --no-cache-dir cairocffi

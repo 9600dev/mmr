@@ -261,19 +261,7 @@ def common_options():
     help_options_color='green')
 @click.pass_context
 def cli(ctx):
-    if ctx.invoked_subcommand is None:
-        ctx.invoke(repl)
-
-
-@cli.command()
-def repl():
-    prompt_kwargs = {
-        'history': FileHistory(os.path.expanduser('/tmp/.trader.history')),
-        'vi_mode': True,
-        'message': 'mmr> '
-    }
-    click.echo('Ctrl-D to exit')
-    click_repl.repl(click.get_current_context(), prompt_kwargs=prompt_kwargs)
+    pass
 
 
 @click.group(

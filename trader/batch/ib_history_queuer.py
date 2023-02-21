@@ -8,7 +8,7 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
 from trader.batch.ib_history_batch import IBHistoryQueuer
-from trader.common.command_line import cli_norepl, common_options, default_config
+from trader.cli.command_line import cli_norepl, common_options, default_config
 from trader.common.helpers import dateify
 from trader.common.logging_helper import setup_logging
 from trader.data.universe import UniverseAccessor

@@ -10,7 +10,7 @@ sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 from redis import Redis
 from rq import Connection, Queue
 from trader.batch.non_fork_worker import NonForkWorker
-from trader.common.command_line import cli_norepl, common_options, default_config
+from trader.cli.command_line import cli_norepl, common_options, default_config
 from trader.common.helpers import rich_dict
 from trader.common.logging_helper import setup_logging
 from typing import Dict, Optional

@@ -13,7 +13,7 @@ from dataclasses import asdict
 from ib_insync import Contract, ContractDescription
 from scripts.ib_instrument_scraper import IBInstrument, scrape_products
 from scripts.ib_resolve import IBResolver
-from trader.common.command_line import cli, common_options, default_config
+from trader.cli.command_line import cli, common_options, default_config
 from trader.common.helpers import rich_list, rich_table
 from trader.common.logging_helper import setup_logging
 from trader.data.universe import SecurityDefinition, Universe, UniverseAccessor

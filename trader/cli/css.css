@@ -1,8 +1,8 @@
 #app-grid {
     layout: grid;
-    grid-size: 2;  /* two columns */
+    grid-size: 2 4;  /* two columns, three rows */
     grid-columns: 1fr;
-    grid-rows: 1fr;
+    grid-rows: 16% 37% 37% 10%;
 }
 
 #top {
@@ -12,14 +12,14 @@
     column-span: 2;
 }
 
-#top > Static {    
+#top > Static {
     background: $boost;
     color: auto;
     /*  margin-bottom: 1;
     padding: 1; */
 }
 
-#top-left > Static {    
+#top-left > Static {
     background: $boost;
     color: auto;
     /*  margin-bottom: 1;
@@ -83,6 +83,48 @@
 #bottom-left > Static {
     height: 100%;
     background: $boost;
+}
+
+#repl {
+    width: 100%;
+    height: 100%;
+    background: $panel;
+    content-align: left bottom;
+    column-span: 2;
+}
+
+#repl > Static {
+    background: $boost;
+    color: auto;
+    /*  margin-bottom: 1;
+    padding: 1; */
+}
+
+#repl-result {
+    background: $boost;
+    color: auto;
+    border: yellow;
+    /*  margin-bottom: 1;
+    padding: 1; */
+}
+
+#repl-result2 {
+    background: $boost;
+    color: auto;
+    border: yellow;
+    column-span: 2;
+    /*  margin-bottom: 1;
+    padding: 1; */
+}
+
+#repl-input {
+    height: 100%;
+    background: $boost;
+    color: auto;
+    border: red;
+    content-align: left bottom;
+    /*  margin-bottom: 1;
+    padding: 1; */
 }
 
 
@@ -151,3 +193,71 @@ Dialog Container {
 Dialog Button {
     margin: 0 4;
 }
+
+
+Screen {
+    layers: base dialog;
+}
+
+MyDialog {
+    margin-left: 20;
+    margin-top: 20;
+    layer: dialog;
+    width: 51;
+    height: 11;
+}
+
+MyDialog Input {
+    padding: 0 0;
+    border: none;
+}
+
+.hidden {
+    display: none;
+}
+
+#mydialog {
+    content-align: center middle;
+    border: solid brown;
+    background: ansi_white;
+}
+
+#mydialog Label {
+    text-align: center;
+    width: 1fr;
+    margin-top: 1;
+    color: ansi_red;
+}
+
+#text-box {
+    height: 100%;
+    background: $panel;
+    border: greenyellow;
+}
+
+AsyncDialog {
+    layer: dialog;
+}
+
+AsyncDialog Input {
+    padding: 0 0;
+    border: none;
+}
+
+.hidden {
+    display: none;
+}
+
+#asyncdialog{
+    content-align: center middle;
+    border: solid brown;
+    background: ansi_white;
+}
+
+#asyncdialog Label {
+    text-align: center;
+    width: 1fr;
+    margin-top: 1;
+    color: ansi_red;
+}
+
