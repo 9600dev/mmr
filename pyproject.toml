@@ -55,7 +55,6 @@ click-repl = ">=0.2.0"
 click-help-colors = ">=0.9.1"
 click-option-group = ">=0.5.3"
 configobj = ">=5.0.6"
-arctic = {git = "https://github.com/9600dev/arctic.git"}
 yfinance = ">=0.1.69"
 uniplot = ">=0.5.0"
 ipython = "^8.4.0"
@@ -68,13 +67,14 @@ dill = "^0.3.5"
 pyarrow = "^8.0.0"
 types-python-dateutil = "^2.8.19"
 types-redis = "^4.3.17"
-textual = "^0.1.18"
 isort = "^5.10.1"
 reactivex = "^4.0.4"
 cloup = "^1.0.0"
 msgpack = "^1.0.4"
 fitter = "^1.5.2"
 plotext = "^5.2.8"
+arctic = {git = "https://github.com/9600dev/arctic.git", rev = "master"}
+textual = {extras = ["dev"], version = "^0.11.1"}
 
 [tool.poetry.dev-dependencies]
 

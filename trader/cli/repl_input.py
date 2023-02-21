@@ -174,7 +174,7 @@ class ReplInput(Widget, can_focus=True):
     async def watch_value(self, value: str) -> None:
         if self.styles.auto_dimensions:
             self.refresh(layout=True)
-        await self.emit(self.Changed(self, value))
+        await self.post_message(self.Changed(self, value))
 
     @property
     def cursor_width(self) -> int:
@@ -324,7 +324,7 @@ class ReplInput(Widget, can_focus=True):
             self.cursor_position = delete_position
 
     async def action_submit(self) -> None:
-        await self.emit(self.Submitted(self, self.value))
+        await self.post_message(self.Submitted(self, self.value))
 
     class Changed(Message, bubble=True):
         """Value was changed.

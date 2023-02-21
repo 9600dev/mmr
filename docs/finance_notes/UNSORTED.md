@@ -1,5 +1,8 @@
 # Random Finance Links
 
+* [N-HiTS: Neural Heirarchical Interpolation for Time Series Forecasting](https://arxiv.org/abs/2201.12886)
+* [Temporal Fusion Transformers for Interpretable Multi-horizon Time Series Forecasting](https://arxiv.org/abs/1912.09363)
+* [Are Transformers Effective for Time Series Forecasting](https://arxiv.org/abs/2205.13504)
 * [Market Chameleon - has some good fundamentals calculators](https://marketchameleon.com/Overview/AMD/Payback-Period/)
 * [Fintel - excellent insider analysis](https://fintel.io/so/au)
 * [newsfilter.io](https://newsfilter.io/search?query=AMD)
