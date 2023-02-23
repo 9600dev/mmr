@@ -33,7 +33,7 @@ jobs:
     - name: worker_service
       description: worker service for batch job
       command: python
-      arguments: trader/batch/worker_service.py start --config configs/trader.yaml --queue_name history
+      arguments: worker_service.py start --config configs/trader.yaml --queue_name history
       start: "* * * * *"
       start_on_pycron_start: True
       restart_if_found: False
