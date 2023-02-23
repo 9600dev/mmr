@@ -1,5 +1,6 @@
 # Finance Math
 
+* [How to finally start believing your backtests](https://towardsdatascience.com/ai-in-finance-how-to-finally-start-to-believe-your-backtests-2-3-adfd13da20ec)
 * [Common Statistical Tests are Linear Models](https://lindeloev.github.io/tests-as-linear/#51_independent_t-test_and_mann-whitney_u)
 * [Portfolio correlation](https://alpaca.markets/learn/correlation-portfolio-python/)
 * [Understanding Options Greeks](https://mobile.twitter.com/TradrNate/status/1555938610301440000)

@@ -1,5 +1,6 @@
 # Trading Systems, Software and Libraries
 
+* [Microstructure Plotter](https://github.com/will-thompson-k/microstructure-plotter)
 * [Qlib - Quant lib by Microsoft, looks good](https://github.com/microsoft/qlib)
 * [How to setup IBC + TWS on headless Ubuntu to run two accounts, paper + real](https://dimon.ca/how-to-setup-ibc-and-tws-on-headless-ubuntu-in-10-minutes/)
 * [How to Build an Exchange](https://www.janestreet.com/tech-talks/building-an-exchange/)
@@ -35,6 +36,11 @@
 
 ## Tools
 
+* [Whale Wisdom - Funds holding a given stock](https://whalewisdom.com/stock/fb)
+* [NASDAQ - Insider Activity](https://www.nasdaq.com/market-activity/stocks/meta/insider-activity)
+* [YCharts](https://ycharts.com/indicators)
+* [YCharts - list of ETF daily returns](https://ycharts.com/etfs)
+  ![](../2023-02-21-16-21-58.png)
 * [Trading View](https://www.tradingview.com/symbols/TVC-NDQ/): Pretty good vizualization tool. Integration with Interactive Brokers.
 * [Finviz](https://finviz.com/): The 'poor mans Bloomberg'.
     ![](../2022-11-17-10-47-41.png)

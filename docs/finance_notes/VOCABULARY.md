@@ -40,3 +40,5 @@
   * Eg.
     ![](../2022-11-15-12-49-00.png)
 
+* Random
+  * **Closed-end Fund**: A closed-end fund holds an IPO at launch and the money raised from that IPO is used by portfolio managers to buy securities.
