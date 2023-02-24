@@ -14,9 +14,10 @@ from scripts.chain import plot_chain
 from scripts.trader_check import health_check
 from scripts.zmq_pub_listener import ZmqPrettyPrinter
 from trader.batch.queuer import Queuer
+from trader.cli.cli_renderer import CliRenderer
 from trader.cli.command_line import common_options, default_config
 from trader.common.exceptions import TraderConnectionException, TraderException
-from trader.common.helpers import contract_from_dict, DictHelper, rich_dict, rich_json, rich_list, rich_table
+from trader.common.helpers import contract_from_dict, DictHelper
 from trader.common.logging_helper import LogLevels, set_log_level, setup_logging
 from trader.common.reactivex import SuccessFail
 from trader.container import Container as TraderContainer
@@ -42,6 +43,9 @@ import trader.batch.ib_history_queuer as ib_history_queuer
 import trader.cli.universes_cli as universes_cli
 
 
+global cli_client_id
+cli_client_id = -1
+
 logging = setup_logging(module_name='cli')  # type: ignore
 is_repl = False
 
@@ -52,7 +56,6 @@ error_table = {
 
 invoke_context = None
 container = TraderContainer()
-cli_client_id = -1
 
 remoted_client = RemotedClient[TraderServiceApi](
     zmq_server_address=container.config()['zmq_rpc_server_address'],
@@ -60,6 +63,8 @@ remoted_client = RemotedClient[TraderServiceApi](
     error_table=error_table,
     timeout=5,
 )
+
+renderer = CliRenderer()
 
 from click.core import MultiCommand
 from io import StringIO
@@ -85,12 +90,16 @@ def connect():
         asyncio.get_event_loop().run_until_complete(remoted_client.connect())
 
 
-def setup_connection():
+def setup_cli(cli_renderer: CliRenderer):
     global cli_client_id
+    global renderer
+
+    renderer = cli_renderer
+
     connect()
 
-    cli_client_id = -1
     try:
+        logging.debug('getting client id from trader service')
         cli_client_id = remoted_client.rpc(return_type=int).get_unique_client_id()
     except asyncio.exceptions.TimeoutError:
         click.echo('Could not connect to trader service at {}:{}. Is it running?'.format(
@@ -99,6 +108,8 @@ def setup_connection():
         ))
         cli_client_id = random.randint(50, 100)
         click.echo('using client id {}'.format(cli_client_id))
+
+    return cli_client_id
 
 
 def __resolve(
@@ -143,7 +154,6 @@ def __resolve_contract(
             currency=result['currency'],
         ))
     return results
-
 
 
 def invoke_context_wrapper(ctx):
@@ -197,7 +207,7 @@ def ls(ctx, subcommand):
 @cli.command()
 def status():
     result = health_check(TraderContainer().config_file)
-    rich_dict({'status': result})
+    renderer.rich_dict({'status': result})
 
 
 @cli.command('exit')
@@ -401,7 +411,7 @@ def history_summary(
             'history_db_symbol_count': len(tick_data.list_symbols()),
             'example_symbols': examples
         }
-        rich_dict(result)
+        renderer.rich_dict(result)
 
 
 @history.command('read', no_args_is_help=True)
@@ -421,7 +431,7 @@ def history_read(
 
     if len(results) >= 1:
         data = TickStorage(arctic_server_address).get_tickdata(bar_size_enum).read(results[0])
-        rich_table(data, csv=True, include_index=True)
+        renderer.rich_table(data, csv=True, include_index=True)
 
 
 @history.command('jobs')
@@ -432,7 +442,7 @@ def history_jobs(
 ):
     container = TraderContainer()
     queuer = container.resolve(Queuer)
-    rich_dict(queuer.current_queue())
+    renderer.rich_dict(queuer.current_queue())
 
 
 @history.command('security', no_args_is_help=True)
@@ -484,12 +494,12 @@ def history_security(
                     })
                 except NoDataFoundException:
                     pass
-    rich_table(output)
+    renderer.rich_table(output)
 
 
 @history.command('bar-sizes', no_args_is_help=True)
 def history_bar_sizes():
-    rich_list(BarSize.bar_sizes())
+    renderer.rich_list(BarSize.bar_sizes())
 
 
 @cli.command()
@@ -522,7 +532,7 @@ def portfolio():
         'position', 'marketPrice', 'marketValue', 'averageCost', 'unrealizedPNL', 'realizedPNL'
     ])
 
-    rich_table(df.sort_values(by='unrealizedPNL', ascending=False), csv=is_repl, financial=True, financial_columns=[
+    renderer.rich_table(df.sort_values(by='unrealizedPNL', ascending=False), csv=is_repl, financial=True, financial_columns=[
         'marketPrice', 'marketValue', 'averageCost', 'unrealizedPNL', 'realizedPNL'
     ])
 
@@ -530,7 +540,7 @@ def portfolio():
 def pretty_group(
     name: Optional[str] = None,
     help: Optional[str] = None,
-    cls = None,
+    cls=None,
     **attrs,
 ):
     return optgroup.group(f'\n{name}', help=f'\b--- {help}\n\n', cls=cls, **attrs)
@@ -652,14 +662,14 @@ def positions():
     df = pd.DataFrame(data=list(xs), columns=[
         'account', 'conId', 'localSymbol', 'exchange', 'position', 'avgCost', 'currency', 'total'
     ])
-    rich_table(
+    renderer.rich_table(
         df.sort_values(by='currency'),
         financial=True,
         financial_columns=['total', 'avgCost'],
         csv=is_repl,
     )
     if is_repl:
-        rich_table(
+        renderer.rich_table(
             df.groupby(by=['currency'])['total'].sum().reset_index(),
             financial=True,
         )
@@ -703,13 +713,13 @@ def resolve(
                 currency=currency
             ))
             if contract and type(contract) is list:
-                rich_list(contract)
+                renderer.rich_list(contract)
             elif contract and type(contract) is Contract:
-                rich_dict(contract.__dict__)
+                renderer.rich_dict(contract.__dict__)
     else:
         results = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
         if len(results) > 0:
-            rich_table(results, False )
+            renderer.rich_table(results, False)
         else:
             click.echo('unable to resolve {}, maybe try the --ib flag to force resolution from IB?'.format(symbol))
 
@@ -759,7 +769,7 @@ def snapshot(
             'close': ticker.close,
             'halted': ticker.halted
         }
-        rich_dict(snap)
+        renderer.rich_dict(snap)
     else:
         click.echo('could not resolve symbol from symbol database')
 
@@ -839,7 +849,7 @@ def subscribe_universe(
 def subscribe_list(
     **args,
 ):
-    rich_list(remoted_client.rpc(return_type=list[Contract]).get_published_contracts())
+    renderer.rich_list(remoted_client.rpc(return_type=list[Contract]).get_published_contracts())
 
 
 @subscribe.command('listen', no_args_is_help=True)
@@ -907,7 +917,7 @@ def book_trades():
     table = []
     for trade_id, trade_list in trades.items():
         table.append(DictHelper[str, str].dict_from_object(trade_list[0], columns))
-    rich_table(table)
+    renderer.rich_table(table)
 
 
 @book.command('orders', no_args_is_help=True)
@@ -920,7 +930,7 @@ def book_orders():
     table = []
     for order_id, trade_list in orders.items():
         table.append(DictHelper[str, str].dict_from_object(trade_list[0], columns))
-    rich_table(table)
+    renderer.rich_table(table)
 
 
 @book.command('cancel', no_args_is_help=True)
@@ -949,7 +959,7 @@ def strategy_list():
     table = []
     for trade_id, trade_list in trades.items():
         table.append(DictHelper[str, str].dict_from_object(trade_list[0], columns))
-    rich_table(table)
+    renderer.rich_table(table)
 
 
 @strategy.command('enable')
@@ -962,7 +972,7 @@ def strategy_enable():
     table = []
     for order_id, trade_list in orders.items():
         table.append(DictHelper[str, str].dict_from_object(trade_list[0], columns))
-    rich_table(table)
+    renderer.rich_table(table)
 
 
 @cli.group()
@@ -976,7 +986,7 @@ def pycron_info():
     pycron_server_address = TraderContainer().config()['pycron_server_address']
     pycron_server_port = TraderContainer().config()['pycron_server_port']
     response = requests.get('http://{}:{}'.format(pycron_server_address, pycron_server_port))
-    rich_json(response.json())
+    renderer.rich_json(response.json())
 
 
 @pycron.command('restart')
@@ -988,7 +998,7 @@ def pycron_restart(
     pycron_server_port = TraderContainer().config()['pycron_server_port']
     response = requests.get('http://{}:{}/?restart={}'.format(pycron_server_address, pycron_server_port, service))
     click.echo(response.json())
-    rich_json(response.json())
+    renderer.rich_json(response.json())
 
 
 @cli.command(no_args_is_help=True)
@@ -1005,7 +1015,7 @@ def company_info(symbol: str):
             if symbol in definition.symbol.lower():
                 info = financials.read(definition)
                 if info:
-                    rich_table(financials.read(definition).financials, True)  # type: ignore
+                    renderer.rich_table(financials.read(definition).financials, True)  # type: ignore
                     return
 
 

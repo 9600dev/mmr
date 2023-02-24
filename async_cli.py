@@ -43,16 +43,23 @@ from textual.css.query import NoMatches
 from textual.reactive import Reactive, var
 from textual.scroll_view import ScrollView
 from textual.widget import Widget
-from textual.widgets import Button, DirectoryTree, Footer, Header, Input, Label, Pretty, Static, TextLog
+from textual.widgets import (
+    Button,
+    DataTable,
+    DirectoryTree,
+    Footer,
+    Header,
+    Input,
+    Label,
+    Pretty,
+    Static,
+    TextLog
+)
 from trader.batch.queuer import Queuer
+from trader.cli.cli_renderer import TuiRenderer
 from trader.cli.command_line import cli, common_options, default_config
 from trader.cli.commands import *  # NOQA
-from trader.cli.commands import (
-    cli_client_id,
-    invoke_context_wrapper,
-    monkeypatch_click_echo,
-    setup_connection
-)
+from trader.cli.commands import cli_client_id, invoke_context_wrapper, monkeypatch_click_echo, setup_cli
 from trader.cli.dialog import Dialog
 from trader.cli.repl_input import ReplInput
 from trader.common.exceptions import TraderConnectionException, TraderException
@@ -311,6 +318,8 @@ class AsyncCli(App):
     ):
         super().__init__()
         self.group_ctx = group_ctx
+        self.renderer = TuiRenderer(DataTable())
+        self.hidden_container = Container(id='hidden-container')
 
     """A Textual app to manage stopwatches."""
     CSS_PATH = 'trader/cli/css.css'
@@ -326,10 +335,12 @@ class AsyncCli(App):
         pass
 
     def compose(self) -> ComposeResult:
+        self.data_table: DataTable = DataTable()
+
         self.text_log = TextLog(id='repl-result2', highlight=False, wrap=True)
+
         self.top: Container = Container(
-            Static('', id='plot', markup=False, expand=True),
-            Static('', id='table', markup=False, expand=True),
+            Container(self.data_table, classes='hidden'),
             id='top',
         )
         self.left_box = TextLog(id='text-box', highlight=False, wrap=True)
@@ -341,6 +352,7 @@ class AsyncCli(App):
             Static("grid layout!", id="bottom-right-final"),
             id="bottom-right",
         )
+
         self.repl = ReplWidget(self.left_box, self.group_ctx, self.text_log)
 
         yield Container(
@@ -360,9 +372,21 @@ class AsyncCli(App):
         self.dialog = AsyncDialog(id='mydialog')
         self.repl.focus()
 
+        self.renderer.set_table(self.data_table)
         self.setup_tasks()
 
         yield self.dialog
+
+    def replace_top_panel(self, top_widget: Widget):
+        top = self.query_one('#top', Container)
+
+        for widget in top.children:
+            if not widget.has_class('hidden'):
+                widget.toggle_class('hidden')
+
+        self.query_one('#top', Container).mount(top_widget, before=0)
+        if top_widget.has_class('hidden'):
+            top_widget.toggle_class('hidden')
 
     def action_confirm_y_n(
         self, message: str, confirm_action: str, noconfirm_action: str, title: str = ""
@@ -390,8 +414,7 @@ class AsyncCli(App):
         self.plot.height = self.top.container_size.height
         text = f'width: {self.top.container_size.width}, height: {self.top.container_size.height}'
 
-        self.query('#top > *').remove()
-        self.query_one('#top', Container).mount(Static(self.plot, markup=False, expand=True))
+        self.replace_top_panel(Container(Static(self.plot, markup=False, expand=True)))
 
     def action_table(self) -> None:
         container = Container(
@@ -401,8 +424,11 @@ class AsyncCli(App):
             Static('using'),
         )
 
-        self.query('#top > *').remove()
-        self.query_one('#top', Container).mount(container)
+        self.replace_top_panel(container)
+
+    def on_tui_message(self, event: TuiRenderer.TuiMessage) -> None:
+        container = Container(self.data_table)
+        self.replace_top_panel(container)
 
     async def on_key(self, event: events.Key) -> None:
         self.text_log.write(f'key: {event.key}, character: {event.character}')
@@ -410,7 +436,7 @@ class AsyncCli(App):
 
     def setup_tasks(self):
         self.text_log.write('setup_tasks')
-        setup_connection()
+        setup_cli(self.renderer)
 
 app: AsyncCli
 
@@ -509,4 +535,3 @@ def repl():
 if __name__ == '__main__':
     invoke_context_wrapper(repl)
     cli(prog_name='cli')
-

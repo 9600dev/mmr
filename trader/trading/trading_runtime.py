@@ -10,7 +10,7 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
 from ib_insync.contract import Contract
-from ib_insync.objects import PortfolioItem, Position
+from ib_insync.objects import PnLSingle, PortfolioItem, Position
 from ib_insync.order import LimitOrder, MarketOrder, Order, StopLimitOrder, StopOrder, Trade
 from ib_insync.ticker import Ticker
 from reactivex.abc import DisposableBase, ObserverBase
@@ -19,6 +19,7 @@ from reactivex.observable import Observable
 from reactivex.observer import AutoDetachObserver, Observer
 from reactivex.subject import Subject
 from trader.common.contract_sink import ContractSink
+from trader.common.dataclass_cache import DataClassCache
 from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.helpers import ListHelper
 from trader.common.logging_helper import get_callstack, setup_logging
@@ -33,7 +34,7 @@ from trader.trading.book import BookSubject
 from trader.trading.executioner import TradeExecutioner
 from trader.trading.portfolio import Portfolio
 # from trader.trading.strategy import Strategy
-from typing import cast, Dict, List, Optional, Union
+from typing import cast, Dict, List, Optional, Tuple, Union
 
 import asyncio
 import backoff
@@ -95,6 +96,9 @@ class Trader(metaclass=Singleton):
         self.book: BookSubject = BookSubject()
         # portfolio (current and past positions)
         self.portfolio: Portfolio = Portfolio()
+        # pnl for current portfolio
+        self.pnl: DataClassCache = DataClassCache[PnLSingle](lambda pnl: str((pnl.account, pnl.conId)))
+        self.pnl_subscriptions: Dict[Tuple[str, int], bool] = {}
         # takes care of execution of orders
         self.executioner: TradeExecutioner
         # a list of all the universes of stocks we have registered
@@ -232,6 +236,28 @@ class Trader(metaclass=Singleton):
             on_error=handle_subscription_exception,
         ))
         self.disposables.append(portfolio_disposable)
+
+        # subscribe to all portfolio changes, then make sure we're subscribing to the pnl for each
+        def __subscribe_pnl(portfolio_item: PortfolioItem):
+            # todo this is a hack, we need to figure out how to make this work with async
+            async def __async_subscribe_pnl(portfolio_item: PortfolioItem):
+                if portfolio_item.contract and (portfolio_item.account, portfolio_item.contract.conId) not in self.pnl_subscriptions:  # noqa: E501
+                    disposable = await self.client.subscribe_single_pnl(
+                        portfolio_item.account,
+                        portfolio_item.contract,
+                        self.pnl.create_observer(error_func=handle_subscription_exception)
+                    )
+                    self.disposables.append(disposable)
+                    self.pnl_subscriptions.update({(portfolio_item.account, portfolio_item.contract.conId): True})
+
+            self.run(__async_subscribe_pnl(portfolio_item))
+
+        await self.client.subscribe_portfolio(
+            Observer(
+                on_next=__subscribe_pnl,
+                on_error=handle_subscription_exception,
+            )
+        )
 
         # make sure we're getting either live, or delayed data
         self.client.ib.reqMarketDataType(self.market_data)

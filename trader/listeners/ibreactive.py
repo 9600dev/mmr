@@ -3,7 +3,7 @@
 from ib_insync.client import Client
 from ib_insync.contract import Contract, ContractDescription, ContractDetails
 from ib_insync.ib import IB
-from ib_insync.objects import Fill, PortfolioItem, Position, RealTimeBarList
+from ib_insync.objects import Fill, PnLSingle, PortfolioItem, Position, RealTimeBarList
 from ib_insync.order import Order, Trade
 from ib_insync.ticker import Ticker
 from reactivex import operators as ops
@@ -81,6 +81,7 @@ class IBAIORx():
         self.bars_data_subject = EventSubject[RealTimeBarList](eventkit_event=self.ib.barUpdateEvent)
         self.positions_subject = EventSubject[List[Position]](eventkit_event=self.ib.positionEvent)
         self.portfolio_subject = EventSubject[PortfolioItem](eventkit_event=self.ib.updatePortfolioEvent)
+        self.pnl_subject = EventSubject[PnLSingle](eventkit_event=self.ib.pnlSingleEvent)
         self.trades_subject = EventSubject[Trade](eventkit_event=self.ib.orderStatusEvent)
         self._contracts_source = EventSubject[Set[Ticker]](eventkit_event=self.ib.pendingTickersEvent)
         self.error_subject = Subject[IBAIORxError]()
@@ -94,6 +95,7 @@ class IBAIORx():
         self.bars_cache: Dict[Contract, Observable[RealTimeBarList]] = {}
         self.historical_subscribers: Dict[Contract, int] = {}
         self.history_worker: Optional[IBHistoryWorker] = None
+        self.pnl_cache: Dict[int, bool] = {}
         self._shutdown: bool = True
 
         # try binding helper methods to things we care about
@@ -378,6 +380,33 @@ class IBAIORx():
             self.portfolio_subject.on_next(item)
 
         return disposable
+
+    async def subscribe_single_pnl(self, account: str, contract: Contract, observer: Observer[PnLSingle]) -> DisposableBase:
+        logging.debug('subscribe_single_pnl({})'.format(contract))
+
+        # if not already subscribed
+        if contract.conId not in self.pnl_cache:
+            self.pnl_subject.call_event_subscriber_sync(
+                lambda: self.ib.reqPnLSingle(
+                    account=account,
+                    modelCode='',
+                    conId=contract.conId
+                ),
+                asend_result=True
+            )
+
+        filter: Observable[PnLSingle] = self.pnl_subject.pipe(
+            ops.filter(lambda pnl: pnl.conId == contract.conId)  # type: ignore
+        )
+
+        disposable = filter.subscribe(observer)
+        return disposable
+
+    async def cancel_single_pnl(self, account: str, contract: Contract):
+        logging.debug('cancel_single_pnl({})'.format(contract))
+        if contract.conId in self.pnl_cache:
+            self.ib.cancelPnLSingle(account=account, modelCode='', conId=contract.conId)
+            del self.pnl_cache[contract.conId]
 
     async def get_open_orders(self) -> List[Order]:
         return await self.ib.reqAllOpenOrdersAsync()

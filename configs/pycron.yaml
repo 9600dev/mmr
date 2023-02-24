@@ -7,7 +7,7 @@ jobs:
     - name: xvfb
       description: starts a virtual display
       command: /usr/bin/Xvfb
-      arguments: :1 -ac -screen 0 2560x1600x24
+      arguments: :1 -ac -screen 0 3840x2160x24
       start: "* * * * *"
       start_on_pycron_start: True
       restart_if_found: False
