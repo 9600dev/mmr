@@ -1,9 +1,10 @@
 from enum import IntEnum
 from logging import Logger
+from rich.logging import RichHandler
+from rich.traceback import install
 from types import FrameType
 from typing import cast, Dict, List
 
-import coloredlogs
 import inspect
 import logging
 import logging.config
@@ -25,12 +26,16 @@ class LogLevels(IntEnum):
 
 global_loggers: Dict[str, Logger] = {}
 
+
 def setup_logging(default_path='/home/trader/mmr/configs/logging.yaml',
                   module_name='root',
                   default_level=logging.DEBUG,
                   env_key='LOG_CFG',
                   suppress_external_info=False) -> Logger:
     global global_loggers
+
+    # rich tracebacks
+    install(show_locals=True)
 
     # ipython repl has a nasty habit of being polluted with debug crap from parso
     logging.getLogger('parso.python.diff').setLevel(logging.WARNING)
@@ -56,10 +61,8 @@ def setup_logging(default_path='/home/trader/mmr/configs/logging.yaml',
                 print(e)
                 print('Error in Logging Configuration. Using default configs')
                 logging.basicConfig(level=default_level)
-                coloredlogs.install(level=default_level)
     else:
         logging.basicConfig(level=default_level)
-        coloredlogs.install(level=default_level)
         print('Failed to load configuration file. Using default configs')
 
     global_loggers[module_name] = logging.getLogger(module_name)

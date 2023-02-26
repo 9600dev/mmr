@@ -4060,6 +4060,18 @@ files = [
 ]
 
 [[package]]
+name = "types-pyyaml"
+version = "6.0.12.8"
+description = "Typing stubs for PyYAML"
+category = "main"
+optional = false
+python-versions = "*"
+files = [
+    {file = "types-PyYAML-6.0.12.8.tar.gz", hash = "sha256:19304869a89d49af00be681e7b267414df213f4eb89634c4495fa62e8f942b9f"},
+    {file = "types_PyYAML-6.0.12.8-py3-none-any.whl", hash = "sha256:5314a4b2580999b2ea06b2e5f9a7763d860d6e09cdf21c0e9561daa9cbd60178"},
+]
+
+[[package]]
 name = "types-redis"
 version = "4.3.17"
 description = "Typing stubs for redis"
@@ -4617,4 +4629,4 @@ testing = ["flake8 (<5)", "func-timeout", "jaraco.functools", "jaraco.itertools"
 [metadata]
 lock-version = "2.0"
 python-versions = "3.9.5"
-content-hash = "e5f5cab6ed943c2d3c20be52f4cc3d047f5fb627b8cbb9bed18e19f15d5f1840"
+content-hash = "615a51565e7b55fe44df3183350aa7bda32143f000fc586ef5e127a383c7c304"

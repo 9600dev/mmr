@@ -55,6 +55,10 @@ class DataClassCache(Generic[_T], SubjectBase[DataClassEvent[_T]]):
     def get_all(self) -> List[_T]:
         return list(self.cache.values())
 
+    def post_all(self) -> None:
+        for item in self.cache.values():
+            self.on_next(UpdateEvent(item))
+
     def create_observer(self, error_func) -> Observer[_T]:
         return Observer(
             on_next=self.update,

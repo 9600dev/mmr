@@ -23,6 +23,7 @@ from prompt_toolkit.input import create_input
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.shortcuts import PromptSession
 from pyfiglet import Figlet
+from reactivex.observer import AutoDetachObserver
 from rich.ansi import AnsiDecoder
 from rich.console import Console, Group, RenderableType
 from rich.jupyter import JupyterMixin
@@ -62,6 +63,7 @@ from trader.cli.commands import *  # NOQA
 from trader.cli.commands import cli_client_id, invoke_context_wrapper, monkeypatch_click_echo, setup_cli
 from trader.cli.dialog import Dialog
 from trader.cli.repl_input import ReplInput
+from trader.common.dataclass_cache import DataClassEvent, UpdateEvent
 from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.helpers import contract_from_dict, DictHelper, rich_dict, rich_json, rich_list, rich_table
 from trader.common.logging_helper import LogLevels, set_log_level, setup_logging
@@ -71,10 +73,10 @@ from trader.data.data_access import DictData, TickData, TickStorage
 from trader.data.market_data import MarketData
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, WhatToShow
-from trader.messaging.clientserver import RemotedClient
+from trader.messaging.clientserver import RemotedClient, TopicPubSub
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.objects import BarSize
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, cast, Dict, List, Optional, Union
 
 import asyncio
 import click
@@ -314,12 +316,18 @@ class AsyncDialog(Widget):
 class AsyncCli(App):
     def __init__(
         self,
+        zmq_pubsub_server_address: str,
+        zmq_pubsub_server_port: int,
         group_ctx: Optional[click.core.Context] = None,
     ):
         super().__init__()
         self.group_ctx = group_ctx
         self.renderer = TuiRenderer(DataTable())
         self.hidden_container = Container(id='hidden-container')
+        self.zmq_subscriber = TopicPubSub[DataClassEvent](
+            zmq_pubsub_server_address,
+            zmq_pubsub_server_port + 1,
+        )
 
     """A Textual app to manage stopwatches."""
     CSS_PATH = 'trader/cli/css.css'
@@ -373,7 +381,8 @@ class AsyncCli(App):
         self.repl.focus()
 
         self.renderer.set_table(self.data_table)
-        self.setup_tasks()
+        # todo
+        asyncio.run(self.setup_tasks())
 
         yield self.dialog
 
@@ -434,15 +443,32 @@ class AsyncCli(App):
         self.text_log.write(f'key: {event.key}, character: {event.character}')
         self.repl.focus()
 
-    def setup_tasks(self):
+    async def setup_tasks(self):
+        def on_next(dataclass: DataClassEvent):
+            if type(dataclass) is UpdateEvent:
+                self.text_log.write(f'next: {cast(UpdateEvent, dataclass).item}')
+
+        def on_error(error):
+            self.text_log.write(f'error: {error}')
+
+        def on_completed():
+            pass
+
         self.text_log.write('setup_tasks')
+
         setup_cli(self.renderer)
+        observable = await self.zmq_subscriber.subscriber(topic='dataclass')
+        self.observer = AutoDetachObserver(on_next=on_next, on_error=on_error, on_completed=on_completed)
+        self.subscription = observable.subscribe(self.observer)
+
 
 app: AsyncCli
 
 async def app_main(click_context):
     global app
-    app = AsyncCli()
+
+    trader_container = TraderContainer()
+    app = trader_container.resolve(AsyncCli)
     await app.run_async()
 
 

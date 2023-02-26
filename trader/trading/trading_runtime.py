@@ -19,7 +19,7 @@ from reactivex.observable import Observable
 from reactivex.observer import AutoDetachObserver, Observer
 from reactivex.subject import Subject
 from trader.common.contract_sink import ContractSink
-from trader.common.dataclass_cache import DataClassCache
+from trader.common.dataclass_cache import DataClassCache, DataClassEvent, UpdateEvent
 from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.helpers import ListHelper
 from trader.common.logging_helper import get_callstack, setup_logging
@@ -106,6 +106,7 @@ class Trader(metaclass=Singleton):
         self.market_data = 3
         self.zmq_rpc_server: RPCServer[bus.TraderServiceApi]
         self.zmq_pubsub_server: MultithreadedTopicPubSub[Ticker]
+        self.zmq_dataclass_server: MultithreadedTopicPubSub[DataClassEvent]
         self.zmq_pubsub_contracts: Dict[int, Observable[IBAIORxError]] = {}
         self.zmq_pubsub_contract_filters: Dict[int, bool] = {}
         self.zmq_pubsub_contract_subscription: DisposableBase = Disposable()
@@ -155,6 +156,13 @@ class Trader(metaclass=Singleton):
                 zmq_pubsub_server_port=self.zmq_pubsub_server_port
             )
             self.zmq_pubsub_server.start()
+
+            self.zmq_dataclass_server = MultithreadedTopicPubSub[DataClassEvent](
+                zmq_pubsub_server_address=self.zmq_pubsub_server_address,
+                zmq_pubsub_server_port=self.zmq_pubsub_server_port + 1
+            )
+            self.zmq_dataclass_server.start()
+
             self.zmq_pubsub_contracts = {}
             self.zmq_pubsub_contract_filters = {}
             self.zmq_pubsub_contract_subscription = Disposable()
@@ -199,6 +207,10 @@ class Trader(metaclass=Singleton):
         logging.debug('__update_portfolio')
         self.portfolio.add_portfolio_item(portfolio_item=portfolio_item)
         self.update_portfolio_universe(portfolio_item)
+
+    def __dataclass_server_put(self, message: DataClassEvent):
+        logging.debug('__dataclass_server_put')
+        self.zmq_dataclass_server.put(('dataclass', message))
 
     async def setup_subscriptions(self):
         if not self.is_ib_connected():
@@ -259,12 +271,26 @@ class Trader(metaclass=Singleton):
             )
         )
 
+        pnl_router_disposable = self.pnl.subscribe(on_next=self.__dataclass_server_put, on_error=handle_subscription_exception)
+        self.disposables.append(pnl_router_disposable)
+
         # make sure we're getting either live, or delayed data
         self.client.ib.reqMarketDataType(self.market_data)
 
         orders = await self.client.ib.reqAllOpenOrdersAsync()
         for o in orders:
             self.book.on_next(o)
+
+        # todo temporary
+        async def push_pnl():
+            async def periodic():
+                while True:
+                    await asyncio.sleep(5)
+                    self.pnl.post_all()
+
+            loop = asyncio.get_event_loop()
+            loop.create_task(periodic())
+        await push_pnl()
 
     async def connected_event(self):
         logging.debug('connected_event')
