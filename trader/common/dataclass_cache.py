@@ -52,6 +52,9 @@ class DataClassCache(Generic[_T], SubjectBase[DataClassEvent[_T]]):
     def exists(self, key: _T) -> bool:
         return self.key_lookup(key) in self.cache
 
+    def get_key_lookup(self) -> Callable[[_T], str]:
+        return self.key_lookup
+
     def get_all(self) -> List[_T]:
         return list(self.cache.values())
 

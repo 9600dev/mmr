@@ -21,7 +21,7 @@ from trader.common.helpers import contract_from_dict, DictHelper
 from trader.common.logging_helper import LogLevels, set_log_level, setup_logging
 from trader.common.reactivex import SuccessFail
 from trader.container import Container as TraderContainer
-from trader.data.data_access import DictData, TickData, TickStorage
+from trader.data.data_access import DictData, PortfolioSummary, TickData, TickStorage
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, WhatToShow
 from trader.messaging.clientserver import RemotedClient
@@ -44,6 +44,8 @@ import trader.cli.universes_cli as universes_cli
 
 
 global cli_client_id
+global remoted_client
+
 cli_client_id = -1
 
 logging = setup_logging(module_name='cli')  # type: ignore
@@ -93,6 +95,7 @@ def connect():
 def setup_cli(cli_renderer: CliRenderer):
     global cli_client_id
     global renderer
+    global remoted_client
 
     renderer = cli_renderer
 
@@ -109,7 +112,7 @@ def setup_cli(cli_renderer: CliRenderer):
         cli_client_id = random.randint(50, 100)
         click.echo('using client id {}'.format(cli_client_id))
 
-    return cli_client_id
+    return remoted_client, cli_client_id
 
 
 def __resolve(
@@ -213,6 +216,12 @@ def status():
 @cli.command('exit')
 def def_exit():
     os._exit(os.EX_OK)
+
+
+@cli.command()
+def pnl():
+    result = remoted_client.rpc().get_pnl()
+    renderer.rich_table(result)
 
 
 @cli.group()
@@ -502,12 +511,11 @@ def history_bar_sizes():
     renderer.rich_list(BarSize.bar_sizes())
 
 
-@cli.command()
-def portfolio():
+def portfolio_helper() -> pd.DataFrame:
     connect()
-    portfolio: list[PortfolioItem] = remoted_client.rpc(return_type=list[PortfolioItem]).get_portfolio()
+    portfolio: list[PortfolioSummary] = remoted_client.rpc(return_type=list[PortfolioSummary]).get_portfolio_summary()
 
-    def mapper(portfolio: PortfolioItem) -> List:
+    def mapper(portfolio: PortfolioSummary) -> List:
         # portfolio = PortfolioItem(*portfolio)
         return [
             portfolio.account,
@@ -518,6 +526,7 @@ def portfolio():
             portfolio.marketPrice,
             portfolio.marketValue,
             portfolio.averageCost,
+            portfolio.dailyPNL,
             portfolio.unrealizedPNL,
             portfolio.realizedPNL,
         ]
@@ -527,13 +536,19 @@ def portfolio():
         seq.map(mapper)
     )
 
-    df = pd.DataFrame(data=list(xs), columns=[
+    df = pd.DataFrame(data=xs, columns=[
         'account', 'conId', 'localSymbol', 'currency',
-        'position', 'marketPrice', 'marketValue', 'averageCost', 'unrealizedPNL', 'realizedPNL'
+        'position', 'marketPrice', 'marketValue', 'averageCost', 'dailyPNL', 'unrealizedPNL', 'realizedPNL'
     ])
 
-    renderer.rich_table(df.sort_values(by='unrealizedPNL', ascending=False), csv=is_repl, financial=True, financial_columns=[
-        'marketPrice', 'marketValue', 'averageCost', 'unrealizedPNL', 'realizedPNL'
+    return df.sort_values(by='dailyPNL', ascending=False)
+
+
+@cli.command()
+def portfolio():
+    df = portfolio_helper()
+    renderer.rich_table(df, csv=is_repl, financial=True, financial_columns=[
+        'marketPrice', 'marketValue', 'averageCost', 'dailyPNL', 'unrealizedPNL', 'realizedPNL', 'dailyPNL'
     ])
 
 
@@ -637,8 +652,7 @@ def plot(
             click.getchar()
 
 
-@cli.command()
-def positions():
+def positions_helper() -> pd.DataFrame:
     connect()
     positions: list[Position] = remoted_client.rpc(return_type=list[Position]).get_positions()
 
@@ -662,8 +676,14 @@ def positions():
     df = pd.DataFrame(data=list(xs), columns=[
         'account', 'conId', 'localSymbol', 'exchange', 'position', 'avgCost', 'currency', 'total'
     ])
+    return df.sort_values(by='currency')
+
+
+@cli.command()
+def positions():
+    df = positions_helper()
     renderer.rich_table(
-        df.sort_values(by='currency'),
+        df,
         financial=True,
         financial_columns=['total', 'avgCost'],
         csv=is_repl,

@@ -24,7 +24,7 @@ from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.helpers import ListHelper
 from trader.common.logging_helper import get_callstack, setup_logging
 from trader.common.singleton import Singleton
-from trader.data.data_access import SecurityDefinition, TickStorage
+from trader.data.data_access import PortfolioSummary, SecurityDefinition, TickStorage
 from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
@@ -34,7 +34,7 @@ from trader.trading.book import BookSubject
 from trader.trading.executioner import TradeExecutioner
 from trader.trading.portfolio import Portfolio
 # from trader.trading.strategy import Strategy
-from typing import cast, Dict, List, Optional, Tuple, Union
+from typing import cast, Dict, List, NamedTuple, Optional, Tuple, Union
 
 import asyncio
 import backoff
@@ -44,6 +44,7 @@ import trader.messaging.trader_service_api as bus
 
 
 logging = setup_logging(module_name='trading_runtime')
+
 
 
 # notes
@@ -525,6 +526,32 @@ class Trader(metaclass=Singleton):
         self.tws_client_ids.append(new_client_id)
         self.tws_client_ids.append(new_client_id + 1)
         return new_client_id
+
+    def get_pnl(self) -> List[PnLSingle]:
+        return self.pnl.get_all()
+
+    def get_portfolio_summary(self) -> List[PortfolioSummary]:
+        def find_pnl_or_nan(account: str, contract: Contract) -> float:
+            if str((account, contract.conId)) in self.pnl.cache:
+                return self.pnl.cache[str((account, contract.conId))].dailyPnL
+            else:
+                return float('nan')
+
+        summary: List[PortfolioSummary] = []
+
+        for portfolio_item in self.portfolio.get_portfolio_items():
+            summary.append(PortfolioSummary(
+                contract=portfolio_item.contract,
+                position=portfolio_item.position,
+                marketValue=portfolio_item.marketValue,
+                averageCost=portfolio_item.averageCost,
+                unrealizedPNL=portfolio_item.unrealizedPNL,
+                realizedPNL=portfolio_item.realizedPNL,
+                account=portfolio_item.account,
+                marketPrice=portfolio_item.marketPrice,
+                dailyPNL=find_pnl_or_nan(portfolio_item.account, portfolio_item.contract)
+            ))
+        return summary
 
     def release_client_id(self, client_id: int):
         if client_id in self.tws_client_ids:

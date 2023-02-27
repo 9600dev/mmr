@@ -134,12 +134,8 @@ def setup_ipython():
     input()
 
 
-
 if get_ipython().__class__.__name__ == 'TerminalInteractiveShell':  # type: ignore
     setup_ipython()
-
-
-setup_ipython()
 
 
 if __name__ == '__main__':

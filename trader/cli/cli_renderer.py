@@ -18,6 +18,7 @@ from typing import Any, Callable, cast, Dict, Generic, List, Optional, Tuple, Ty
 
 import asyncio
 import collections
+import dataclasses
 import datetime as dt
 import exchange_calendars as ec
 import io
@@ -27,6 +28,7 @@ import logging
 import numpy as np
 import os
 import pandas as pd
+import sys
 import tempfile
 
 
@@ -69,30 +71,37 @@ class CliRenderer():
     def rich_list(self, list_source: List):
         pass
 
-
-class ConsoleRenderer(CliRenderer):
-    def rich_json(self, json_str: str):
-        try:
-            df = pd.read_json(json.dumps(json_str))
-            self.rich_table(df)
-        except ValueError as ex:
-            self.rich_dict(json_str)  # type: ignore
-
-    def rich_tablify(self, df, financial: bool = False, financial_columns: List[str] = [], include_index=False):
-        if type(df) is list:
+    def rich_tablify(
+        self,
+        df: Union[List, pd.DataFrame],
+        table,
+        financial: bool = False,
+        financial_columns: List[str] = [],
+        include_index=False,
+    ):
+        if type(df) is list and len(df) > 0 and dataclasses.is_dataclass(df[0]):
+            df = pd.DataFrame([o.__dict__ for o in df])
+        elif type(df) is list:
             df = pd.DataFrame(df)
+
+        df = cast(pd.DataFrame, df)
+        df.replace('', np.nan, inplace=True)
+        df.dropna(axis=1, inplace=True)
 
         if financial:
             locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
         cols: List[str] = list(df.columns)  # type: ignore
-        table = Table()
+
         for column in df.columns:
             table.add_column(str(column))
         for row in df.itertuples():
             r = []
             for i in range(1, len(row)):
-                if type(row[i]) is float and not financial:
+                # float max
+                if type(row[i]) is float and row[i] >= sys.float_info.max:
+                    r.append('inf')
+                elif type(row[i]) is float and not financial:
                     r.append('%.3f' % row[i])
                 elif type(row[i]) is float and financial:
                     if len(financial_columns) > 0 and cols[i - 1] in financial_columns:
@@ -106,6 +115,15 @@ class ConsoleRenderer(CliRenderer):
             table.add_row(*r)
         return table
 
+
+class ConsoleRenderer(CliRenderer):
+    def rich_json(self, json_str: str):
+        try:
+            df = pd.read_json(json.dumps(json_str))
+            self.rich_table(df)
+        except ValueError as ex:
+            self.rich_dict(json_str)  # type: ignore
+
     def rich_table(
         self,
         df,
@@ -114,7 +132,9 @@ class ConsoleRenderer(CliRenderer):
         financial_columns: List[str] = [],
         include_index=False,
     ):
-        if type(df) is list:
+        if type(df) is list and len(df) > 0 and dataclasses.is_dataclass(df[0]):
+            df = pd.DataFrame([o.__dict__ for o in df])
+        else:
             df = pd.DataFrame(df)
 
         if csv:
@@ -127,7 +147,8 @@ class ConsoleRenderer(CliRenderer):
                 print(df.to_csv(index=False))
             return
 
-        table = self.rich_tablify(df, financial, financial_columns, include_index)
+        table = Table()
+        table = self.rich_tablify(df, table, financial, financial_columns, include_index)
 
         console = Console()
         console.print(table)
@@ -177,37 +198,6 @@ class TuiRenderer(CliRenderer):
         except ValueError as ex:
             self.rich_dict(json_str)  # type: ignore
 
-    def rich_tablify(self, df, financial: bool = False, financial_columns: List[str] = [], include_index=False):
-        self.clear()
-
-        import random
-        if type(df) is list:
-            df = pd.DataFrame(df)
-
-        if financial:
-            locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
-
-        cols: List[str] = list(df.columns)  # type: ignore
-        for column in df.columns:
-            self.table.add_column(str(column))
-        for row in df.itertuples():
-            key = random.randint(0, 10000000)
-            r = []
-            for i in range(1, len(row)):
-                if type(row[i]) is float and not financial:
-                    r.append('%.3f' % row[i])
-                elif type(row[i]) is float and financial:
-                    if len(financial_columns) > 0 and cols[i - 1] in financial_columns:
-                        r.append(locale.currency(row[i], grouping=True))
-                    elif len(financial_columns) == 0 and financial:
-                        r.append(locale.currency(row[i], grouping=True))
-                    else:
-                        r.append('%.3f' % row[i])
-                else:
-                    r.append(str(row[i]))
-            self.table.add_row(*r, key=str(key))
-        self.focus()
-
     def rich_table(
         self,
         df,
@@ -216,11 +206,14 @@ class TuiRenderer(CliRenderer):
         financial_columns: List[str] = [],
         include_index=False,
     ):
-        if type(df) is list:
+        if type(df) is list and len(df) > 0 and dataclasses.is_dataclass(df[0]):
+            df = pd.DataFrame([o.__dict__ for o in df])
+        else:
             df = pd.DataFrame(df)
 
         self.clear()
-        self.rich_tablify(df, financial, financial_columns, include_index)
+        self.rich_tablify(df, self.table, financial, financial_columns, include_index)
+        self.focus()
 
     def rich_dict(self, d: Dict):
         self.clear()
@@ -229,7 +222,6 @@ class TuiRenderer(CliRenderer):
         self.table.add_column('value')
         for key, value in d.items():
             self.table.add_row(str(key), str(value), key=str(key))
-
         self.focus()
 
     def rich_list(self, list_source: List):

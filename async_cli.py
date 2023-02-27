@@ -60,7 +60,13 @@ from trader.batch.queuer import Queuer
 from trader.cli.cli_renderer import TuiRenderer
 from trader.cli.command_line import cli, common_options, default_config
 from trader.cli.commands import *  # NOQA
-from trader.cli.commands import cli_client_id, invoke_context_wrapper, monkeypatch_click_echo, setup_cli
+from trader.cli.commands import (
+    cli_client_id,
+    invoke_context_wrapper,
+    monkeypatch_click_echo,
+    portfolio_helper,
+    setup_cli
+)
 from trader.cli.dialog import Dialog
 from trader.cli.repl_input import ReplInput
 from trader.common.dataclass_cache import DataClassEvent, UpdateEvent
@@ -328,6 +334,7 @@ class AsyncCli(App):
             zmq_pubsub_server_address,
             zmq_pubsub_server_port + 1,
         )
+        self.remoted_client: RemotedClient
 
     """A Textual app to manage stopwatches."""
     CSS_PATH = 'trader/cli/css.css'
@@ -344,6 +351,7 @@ class AsyncCli(App):
 
     def compose(self) -> ComposeResult:
         self.data_table: DataTable = DataTable()
+        self.positions_table: DataTable = DataTable()
 
         self.text_log = TextLog(id='repl-result2', highlight=False, wrap=True)
 
@@ -353,11 +361,7 @@ class AsyncCli(App):
         )
         self.left_box = TextLog(id='text-box', highlight=False, wrap=True)
         self.right_box = Container(
-            Static("This"),
-            Static("panel"),
-            Static("is"),
-            Static("using"),
-            Static("grid layout!", id="bottom-right-final"),
+            Container(self.positions_table),
             id="bottom-right",
         )
 
@@ -435,6 +439,11 @@ class AsyncCli(App):
 
         self.replace_top_panel(container)
 
+    def render_portfolio(self) -> None:
+        df = portfolio_helper()
+        df.drop(columns=['account', 'currency', 'realizedPNL', 'averageCost'], inplace=True)
+        TuiRenderer(self.positions_table).rich_table(df, financial=True)
+
     def on_tui_message(self, event: TuiRenderer.TuiMessage) -> None:
         container = Container(self.data_table)
         self.replace_top_panel(container)
@@ -445,8 +454,9 @@ class AsyncCli(App):
 
     async def setup_tasks(self):
         def on_next(dataclass: DataClassEvent):
-            if type(dataclass) is UpdateEvent:
-                self.text_log.write(f'next: {cast(UpdateEvent, dataclass).item}')
+            # if type(dataclass) is UpdateEvent:
+            # self.text_log.write(f'next: {cast(UpdateEvent, dataclass).item}')
+            pass
 
         def on_error(error):
             self.text_log.write(f'error: {error}')
@@ -456,10 +466,17 @@ class AsyncCli(App):
 
         self.text_log.write('setup_tasks')
 
-        setup_cli(self.renderer)
+        self.remoted_client, _ = setup_cli(self.renderer)
         observable = await self.zmq_subscriber.subscriber(topic='dataclass')
         self.observer = AutoDetachObserver(on_next=on_next, on_error=on_error, on_completed=on_completed)
         self.subscription = observable.subscribe(self.observer)
+
+        # refresh positions (todo, should be a zmq thing)
+        async def refresh_positions():
+            while True:
+                await asyncio.sleep(2)
+                self.render_portfolio()
+        asyncio.create_task(refresh_positions())
 
 
 app: AsyncCli
