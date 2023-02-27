@@ -13,7 +13,7 @@ from rich.text import Text
 from scipy.stats import truncnorm
 from textual.message import Message
 from textual.widgets import DataTable
-from textual.widgets.data_table import ColumnKey
+from textual.widgets.data_table import ColumnKey, RowDoesNotExist
 from typing import Any, Callable, cast, Dict, Generic, List, Optional, Tuple, TypeVar, Union
 
 import asyncio
@@ -185,8 +185,7 @@ class TuiRenderer(CliRenderer):
         self.table = table
 
     def clear(self):
-        self.table.columns.clear()
-        self.table.clear()
+        self.table.clear(columns=True)
 
     def focus(self):
         self.table.post_message_no_wait(TuiRenderer.TuiMessage(sender=self.table))
@@ -198,21 +197,85 @@ class TuiRenderer(CliRenderer):
         except ValueError as ex:
             self.rich_dict(json_str)  # type: ignore
 
+    def rich_tablify(
+        self,
+        df: Union[List, pd.DataFrame],
+        table: DataTable,
+        financial: bool = False,
+        financial_columns: List[str] = [],
+        include_index=False,
+        column_key: Optional[str] = None,
+    ):
+        if type(df) is list and len(df) > 0 and dataclasses.is_dataclass(df[0]):
+            df = pd.DataFrame([o.__dict__ for o in df])
+        elif type(df) is list:
+            df = pd.DataFrame(df)
+
+        if not column_key:
+            self.clear()
+
+        df = cast(pd.DataFrame, df)
+        df.replace('', np.nan, inplace=True)
+        df.dropna(axis=1, inplace=True)
+
+        if financial:
+            locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+
+        cols: List[str] = list(df.columns)  # type: ignore
+
+        for column in df.columns:
+            if column not in table.columns:
+                if column_key:
+                    table.add_column(str(column), key=column)
+                else:
+                    table.add_column(str(column))
+
+        for row in df.itertuples():
+            r = []
+            for i in range(1, len(row)):
+                # float max
+                if type(row[i]) is float and row[i] >= sys.float_info.max:
+                    r.append('inf')
+                elif type(row[i]) is float and not financial:
+                    r.append('%.3f' % row[i])
+                elif type(row[i]) is float and financial:
+                    if len(financial_columns) > 0 and cols[i - 1] in financial_columns:
+                        r.append(locale.currency(row[i], grouping=True))
+                    elif len(financial_columns) == 0 and financial:
+                        r.append(locale.currency(row[i], grouping=True))
+                    else:
+                        r.append('%.3f' % row[i])
+                else:
+                    r.append(str(row[i]))
+
+            if not column_key:
+                table.add_row(*r)
+                continue
+
+            try:
+                loc = df.columns.get_loc(column_key)
+                table.get_row(r[loc])
+                for i in range(0, len(r)):
+                    table.update_cell(r[df.columns.get_loc(column_key)], str(df.columns[i]), r[i])
+            except (RowDoesNotExist, KeyError):
+                table.add_row(*r, key=r[df.columns.get_loc(column_key)])
+        return table
+
     def rich_table(
         self,
-        df,
+        df: Union[List, pd.DataFrame],
         csv: bool = False,
         financial: bool = False,
         financial_columns: List[str] = [],
         include_index=False,
+        column_key: Optional[str] = None,
     ):
         if type(df) is list and len(df) > 0 and dataclasses.is_dataclass(df[0]):
             df = pd.DataFrame([o.__dict__ for o in df])
         else:
             df = pd.DataFrame(df)
 
-        self.clear()
-        self.rich_tablify(df, self.table, financial, financial_columns, include_index)
+        self.rich_tablify(df, self.table, financial, financial_columns, include_index, column_key=column_key)
         self.focus()
 
     def rich_dict(self, d: Dict):

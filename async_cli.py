@@ -442,11 +442,12 @@ class AsyncCli(App):
     def render_portfolio(self) -> None:
         df = portfolio_helper()
         df.drop(columns=['account', 'currency', 'realizedPNL', 'averageCost'], inplace=True)
-        TuiRenderer(self.positions_table).rich_table(df, financial=True)
+        TuiRenderer(self.positions_table).rich_table(df, financial=True, column_key='conId')
 
     def on_tui_message(self, event: TuiRenderer.TuiMessage) -> None:
-        container = Container(self.data_table)
-        self.replace_top_panel(container)
+        if event.sender == self.data_table:
+            container = Container(self.data_table)
+            self.replace_top_panel(container)
 
     async def on_key(self, event: events.Key) -> None:
         self.text_log.write(f'key: {event.key}, character: {event.character}')

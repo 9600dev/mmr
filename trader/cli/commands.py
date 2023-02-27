@@ -521,13 +521,13 @@ def portfolio_helper() -> pd.DataFrame:
             portfolio.account,
             portfolio.contract.conId,
             portfolio.contract.localSymbol,
-            portfolio.contract.currency,
-            portfolio.position,
-            portfolio.marketPrice,
-            portfolio.marketValue,
-            portfolio.averageCost,
             portfolio.dailyPNL,
             portfolio.unrealizedPNL,
+            portfolio.marketPrice,
+            portfolio.contract.currency,
+            portfolio.position,
+            portfolio.marketValue,
+            portfolio.averageCost,
             portfolio.realizedPNL,
         ]
 
@@ -537,8 +537,8 @@ def portfolio_helper() -> pd.DataFrame:
     )
 
     df = pd.DataFrame(data=xs, columns=[
-        'account', 'conId', 'localSymbol', 'currency',
-        'position', 'marketPrice', 'marketValue', 'averageCost', 'dailyPNL', 'unrealizedPNL', 'realizedPNL'
+        'account', 'conId', 'localSymbol', 'dailyPNL', 'unrealizedPNL', 'marketPrice', 'currency',
+        'position', 'marketValue', 'averageCost', 'realizedPNL'
     ])
 
     return df.sort_values(by='dailyPNL', ascending=False)

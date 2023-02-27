@@ -17,6 +17,7 @@ from reactivex.abc import DisposableBase, ObserverBase
 from reactivex.disposable import Disposable
 from reactivex.observable import Observable
 from reactivex.observer import AutoDetachObserver, Observer
+from reactivex.scheduler.eventloop.asynciothreadsafescheduler import AsyncIOThreadSafeScheduler
 from reactivex.subject import Subject
 from trader.common.contract_sink import ContractSink
 from trader.common.dataclass_cache import DataClassCache, DataClassEvent, UpdateEvent
@@ -115,6 +116,7 @@ class Trader(metaclass=Singleton):
         self.last_connect_time: dt.datetime
         self.load_test: bool = False
         self.tws_client_ids: List[int] = [self.trading_runtime_ib_client_id, self.trading_runtime_ib_client_id + 1]
+        self.scheduler = AsyncIOThreadSafeScheduler(asyncio.get_event_loop())
 
         self.disposables: List[DisposableBase] = []
 
@@ -282,16 +284,9 @@ class Trader(metaclass=Singleton):
         for o in orders:
             self.book.on_next(o)
 
-        # todo temporary
-        async def push_pnl():
-            async def periodic():
-                while True:
-                    await asyncio.sleep(5)
-                    self.pnl.post_all()
-
-            loop = asyncio.get_event_loop()
-            loop.create_task(periodic())
-        await push_pnl()
+        # ensure that pnl is getting pumped out of zmq
+        scheduled_disposable = self.scheduler.schedule_periodic(10, lambda x: self.pnl.post_all())
+        self.disposables.append(scheduled_disposable)
 
     async def connected_event(self):
         logging.debug('connected_event')
