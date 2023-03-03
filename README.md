@@ -96,7 +96,7 @@ After this has completed, it will call a script `start_trader.sh` in the MMR roo
 
 * `pycron` (MMR's process spawner and scheduler) which handles the process scheduling, maintenance and uptime of the MMR trading runtime, ArcticDB, Redis, X Windows, and Trader Workstation, ready for automatic trading. You can manually call this by: ```python3 pycron/pycron.py --config ./configs/pycron.yaml```
 * `cli` which is command line interface to interact with the trading system (check portfolio, check systems, manually create orders etc). You can manually call this using ```python3 cli.py```.
-* `info` a simple realtime dashboard that observes the MMR runtime. Displays positions, portfolio, and strategy logs.
+* `async_cli` TUI (terminal UI) based way to interact with the trading system. (this will replace the `cli` module in the future).
 * `trader_service_log` displays the trader service log real time (see below for information on this service).
 * `strategy_service_log` displays the trader service log real time.
 
@@ -154,12 +154,13 @@ Trading from your command line interface of choice is also supported:
 
 * ```/home/trader/mmr $] python3 cli.py trade --symbol AMD --buy --market --amount 100.0```
 
-There's also a terminal based dashboard to quickly inspect the runtime, orders, algos and prices [TODO: this is under active development]:
+There's also a terminal based TUI to quickly inspect the runtime, orders, algos and prices [TODO: this is under significant active development].
 
-* ```python3 info.py```
+* ```python3 async_cli.py```
 
-![](docs/2022-09-30-10-48-12.png)
+![](docs/2023-03-03-09-50-58.png)
 
+I expect this will be the default command line interaction mechanism in a month or so.
 
 ### cli.py commands
 
