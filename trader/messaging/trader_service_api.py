@@ -1,5 +1,5 @@
 from ib_insync.contract import Contract
-from ib_insync.objects import PortfolioItem, Position
+from ib_insync.objects import PnLSingle, PortfolioItem, Position
 from ib_insync.order import Order, Trade
 from ib_insync.ticker import Ticker
 from reactivex.abc import DisposableBase
@@ -7,6 +7,7 @@ from reactivex.disposable import Disposable
 from reactivex.observer import Observer
 from trader.common.logging_helper import setup_logging
 from trader.common.reactivex import SuccessFail, SuccessFailEnum
+from trader.data.data_access import PortfolioSummary
 from trader.messaging.clientserver import RPCHandler
 from typing import Optional
 
@@ -32,6 +33,10 @@ class TraderServiceApi(RPCHandler):
         return self.trader.client.ib.portfolio()
 
     @RPCHandler.rpcmethod
+    def get_portfolio_summary(self) -> list[PortfolioSummary]:
+        return self.trader.get_portfolio_summary()
+
+    @RPCHandler.rpcmethod
     def get_universes(self) -> dict[str, int]:
         return self.trader.universe_accessor.list_universes_count()
 
@@ -42,6 +47,10 @@ class TraderServiceApi(RPCHandler):
     @RPCHandler.rpcmethod
     def get_orders(self) -> dict[int, list[Order]]:
         return self.trader.book.get_orders()
+
+    @RPCHandler.rpcmethod
+    def get_pnl(self) -> list[PnLSingle]:
+        return self.trader.get_pnl()
 
     @RPCHandler.rpcmethod
     def place_order(

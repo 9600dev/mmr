@@ -1,5 +1,7 @@
 # Analysis
 
+* [Compounding Quality](https://qualitycompounding.substack.com/p/everything-you-need-to-know-about)
+* [My Quality Investment Philosophy](https://qualitycompounding.substack.com/p/my-quality-investment-philosophy)
 * [NVIDIA earnings analysis](https://www.cheddarflow.com/blog/nvidia-earnings-analysis/)
 * [How many stocks should you own?](https://ndvr.com/journal/how-many-stocks-should-you-own)
 * [Number of years until inflation reverts below 3%](https://mobile.twitter.com/RA_Insights/status/1599802065936863234)

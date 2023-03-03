@@ -10,20 +10,22 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
 from ib_insync.contract import Contract
-from ib_insync.objects import PortfolioItem, Position
+from ib_insync.objects import PnLSingle, PortfolioItem, Position
 from ib_insync.order import LimitOrder, MarketOrder, Order, StopLimitOrder, StopOrder, Trade
 from ib_insync.ticker import Ticker
 from reactivex.abc import DisposableBase, ObserverBase
 from reactivex.disposable import Disposable
 from reactivex.observable import Observable
 from reactivex.observer import AutoDetachObserver, Observer
+from reactivex.scheduler.eventloop.asynciothreadsafescheduler import AsyncIOThreadSafeScheduler
 from reactivex.subject import Subject
 from trader.common.contract_sink import ContractSink
+from trader.common.dataclass_cache import DataClassCache, DataClassEvent, UpdateEvent
 from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.helpers import ListHelper
 from trader.common.logging_helper import get_callstack, setup_logging
 from trader.common.singleton import Singleton
-from trader.data.data_access import SecurityDefinition, TickStorage
+from trader.data.data_access import PortfolioSummary, SecurityDefinition, TickStorage
 from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
@@ -33,7 +35,7 @@ from trader.trading.book import BookSubject
 from trader.trading.executioner import TradeExecutioner
 from trader.trading.portfolio import Portfolio
 # from trader.trading.strategy import Strategy
-from typing import cast, Dict, List, Optional, Union
+from typing import cast, Dict, List, NamedTuple, Optional, Tuple, Union
 
 import asyncio
 import backoff
@@ -43,6 +45,7 @@ import trader.messaging.trader_service_api as bus
 
 
 logging = setup_logging(module_name='trading_runtime')
+
 
 
 # notes
@@ -95,6 +98,9 @@ class Trader(metaclass=Singleton):
         self.book: BookSubject = BookSubject()
         # portfolio (current and past positions)
         self.portfolio: Portfolio = Portfolio()
+        # pnl for current portfolio
+        self.pnl: DataClassCache = DataClassCache[PnLSingle](lambda pnl: str((pnl.account, pnl.conId)))
+        self.pnl_subscriptions: Dict[Tuple[str, int], bool] = {}
         # takes care of execution of orders
         self.executioner: TradeExecutioner
         # a list of all the universes of stocks we have registered
@@ -102,6 +108,7 @@ class Trader(metaclass=Singleton):
         self.market_data = 3
         self.zmq_rpc_server: RPCServer[bus.TraderServiceApi]
         self.zmq_pubsub_server: MultithreadedTopicPubSub[Ticker]
+        self.zmq_dataclass_server: MultithreadedTopicPubSub[DataClassEvent]
         self.zmq_pubsub_contracts: Dict[int, Observable[IBAIORxError]] = {}
         self.zmq_pubsub_contract_filters: Dict[int, bool] = {}
         self.zmq_pubsub_contract_subscription: DisposableBase = Disposable()
@@ -109,6 +116,7 @@ class Trader(metaclass=Singleton):
         self.last_connect_time: dt.datetime
         self.load_test: bool = False
         self.tws_client_ids: List[int] = [self.trading_runtime_ib_client_id, self.trading_runtime_ib_client_id + 1]
+        self.scheduler = AsyncIOThreadSafeScheduler(asyncio.get_event_loop())
 
         self.disposables: List[DisposableBase] = []
 
@@ -151,6 +159,13 @@ class Trader(metaclass=Singleton):
                 zmq_pubsub_server_port=self.zmq_pubsub_server_port
             )
             self.zmq_pubsub_server.start()
+
+            self.zmq_dataclass_server = MultithreadedTopicPubSub[DataClassEvent](
+                zmq_pubsub_server_address=self.zmq_pubsub_server_address,
+                zmq_pubsub_server_port=self.zmq_pubsub_server_port + 1
+            )
+            self.zmq_dataclass_server.start()
+
             self.zmq_pubsub_contracts = {}
             self.zmq_pubsub_contract_filters = {}
             self.zmq_pubsub_contract_subscription = Disposable()
@@ -196,6 +211,10 @@ class Trader(metaclass=Singleton):
         self.portfolio.add_portfolio_item(portfolio_item=portfolio_item)
         self.update_portfolio_universe(portfolio_item)
 
+    def __dataclass_server_put(self, message: DataClassEvent):
+        logging.debug('__dataclass_server_put')
+        self.zmq_dataclass_server.put(('dataclass', message))
+
     async def setup_subscriptions(self):
         if not self.is_ib_connected():
             raise ConnectionError('not connected to interactive brokers')
@@ -233,12 +252,41 @@ class Trader(metaclass=Singleton):
         ))
         self.disposables.append(portfolio_disposable)
 
+        # subscribe to all portfolio changes, then make sure we're subscribing to the pnl for each
+        def __subscribe_pnl(portfolio_item: PortfolioItem):
+            # todo this is a hack, we need to figure out how to make this work with async
+            async def __async_subscribe_pnl(portfolio_item: PortfolioItem):
+                if portfolio_item.contract and (portfolio_item.account, portfolio_item.contract.conId) not in self.pnl_subscriptions:  # noqa: E501
+                    disposable = await self.client.subscribe_single_pnl(
+                        portfolio_item.account,
+                        portfolio_item.contract,
+                        self.pnl.create_observer(error_func=handle_subscription_exception)
+                    )
+                    self.disposables.append(disposable)
+                    self.pnl_subscriptions.update({(portfolio_item.account, portfolio_item.contract.conId): True})
+
+            self.run(__async_subscribe_pnl(portfolio_item))
+
+        await self.client.subscribe_portfolio(
+            Observer(
+                on_next=__subscribe_pnl,
+                on_error=handle_subscription_exception,
+            )
+        )
+
+        pnl_router_disposable = self.pnl.subscribe(on_next=self.__dataclass_server_put, on_error=handle_subscription_exception)
+        self.disposables.append(pnl_router_disposable)
+
         # make sure we're getting either live, or delayed data
         self.client.ib.reqMarketDataType(self.market_data)
 
         orders = await self.client.ib.reqAllOpenOrdersAsync()
         for o in orders:
             self.book.on_next(o)
+
+        # ensure that pnl is getting pumped out of zmq
+        scheduled_disposable = self.scheduler.schedule_periodic(10, lambda x: self.pnl.post_all())
+        self.disposables.append(scheduled_disposable)
 
     async def connected_event(self):
         logging.debug('connected_event')
@@ -473,6 +521,32 @@ class Trader(metaclass=Singleton):
         self.tws_client_ids.append(new_client_id)
         self.tws_client_ids.append(new_client_id + 1)
         return new_client_id
+
+    def get_pnl(self) -> List[PnLSingle]:
+        return self.pnl.get_all()
+
+    def get_portfolio_summary(self) -> List[PortfolioSummary]:
+        def find_pnl_or_nan(account: str, contract: Contract) -> float:
+            if str((account, contract.conId)) in self.pnl.cache:
+                return self.pnl.cache[str((account, contract.conId))].dailyPnL
+            else:
+                return float('nan')
+
+        summary: List[PortfolioSummary] = []
+
+        for portfolio_item in self.portfolio.get_portfolio_items():
+            summary.append(PortfolioSummary(
+                contract=portfolio_item.contract,
+                position=portfolio_item.position,
+                marketValue=portfolio_item.marketValue,
+                averageCost=portfolio_item.averageCost,
+                unrealizedPNL=portfolio_item.unrealizedPNL,
+                realizedPNL=portfolio_item.realizedPNL,
+                account=portfolio_item.account,
+                marketPrice=portfolio_item.marketPrice,
+                dailyPNL=find_pnl_or_nan(portfolio_item.account, portfolio_item.contract)
+            ))
+        return summary
 
     def release_client_id(self, client_id: int):
         if client_id in self.tws_client_ids:

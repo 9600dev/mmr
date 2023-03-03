@@ -16,6 +16,7 @@ handlers:
 
     rich_console:
         class: rich.logging.RichHandler
+        rich_tracebacks: True
         level: DEBUG
 
     trader_service_handler:
@@ -75,30 +76,29 @@ handlers:
 root:
     level: NOTSET
     handlers: [rich_console, file_handler, error_file_handler, debug_file_handler]
-    propogate: no
 
 loggers:
     worker_service:
         level: DEBUG
-        handlers: [worker_service_handler, error_file_handler, rich_console]
+        handlers: [worker_service_handler, error_file_handler]
         propogate: no
     ib_history:
         level: DEBUG
-        handlers: [worker_service_handler, error_file_handler, rich_console]
+        handlers: [worker_service_handler, error_file_handler]
         propogate: no
     trader_service:
         level: DEBUG
-        handlers: [trader_service_handler, error_file_handler, rich_console]
+        handlers: [trader_service_handler, error_file_handler]
         propogate: no
     trading_runtime:
         level: DEBUG
-        handlers: [trader_service_handler, error_file_handler, rich_console]
+        handlers: [trader_service_handler, error_file_handler]
         propogate: no
     strategy_service:
         level: DEBUG
-        handlers: [strategy_service_handler, error_file_handler, rich_console]
+        handlers: [strategy_service_handler, error_file_handler]
         propogate: no
     strategy_runtime:
         level: DEBUG
-        handlers: [strategy_service_handler, error_file_handler, rich_console]
+        handlers: [strategy_service_handler, error_file_handler]
         propogate: no

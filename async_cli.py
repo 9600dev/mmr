@@ -23,6 +23,7 @@ from prompt_toolkit.input import create_input
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.shortcuts import PromptSession
 from pyfiglet import Figlet
+from reactivex.observer import AutoDetachObserver
 from rich.ansi import AnsiDecoder
 from rich.console import Console, Group, RenderableType
 from rich.jupyter import JupyterMixin
@@ -43,18 +44,32 @@ from textual.css.query import NoMatches
 from textual.reactive import Reactive, var
 from textual.scroll_view import ScrollView
 from textual.widget import Widget
-from textual.widgets import Button, DirectoryTree, Footer, Header, Input, Label, Pretty, Static, TextLog
+from textual.widgets import (
+    Button,
+    DataTable,
+    DirectoryTree,
+    Footer,
+    Header,
+    Input,
+    Label,
+    Pretty,
+    Static,
+    TextLog
+)
 from trader.batch.queuer import Queuer
+from trader.cli.cli_renderer import TuiRenderer
 from trader.cli.command_line import cli, common_options, default_config
 from trader.cli.commands import *  # NOQA
 from trader.cli.commands import (
     cli_client_id,
     invoke_context_wrapper,
     monkeypatch_click_echo,
-    setup_connection
+    portfolio_helper,
+    setup_cli
 )
 from trader.cli.dialog import Dialog
 from trader.cli.repl_input import ReplInput
+from trader.common.dataclass_cache import DataClassEvent, UpdateEvent
 from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.helpers import contract_from_dict, DictHelper, rich_dict, rich_json, rich_list, rich_table
 from trader.common.logging_helper import LogLevels, set_log_level, setup_logging
@@ -64,10 +79,10 @@ from trader.data.data_access import DictData, TickData, TickStorage
 from trader.data.market_data import MarketData
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, WhatToShow
-from trader.messaging.clientserver import RemotedClient
+from trader.messaging.clientserver import RemotedClient, TopicPubSub
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.objects import BarSize
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, cast, Dict, List, Optional, Union
 
 import asyncio
 import click
@@ -307,10 +322,19 @@ class AsyncDialog(Widget):
 class AsyncCli(App):
     def __init__(
         self,
+        zmq_pubsub_server_address: str,
+        zmq_pubsub_server_port: int,
         group_ctx: Optional[click.core.Context] = None,
     ):
         super().__init__()
         self.group_ctx = group_ctx
+        self.renderer = TuiRenderer(DataTable())
+        self.hidden_container = Container(id='hidden-container')
+        self.zmq_subscriber = TopicPubSub[DataClassEvent](
+            zmq_pubsub_server_address,
+            zmq_pubsub_server_port + 1,
+        )
+        self.remoted_client: RemotedClient
 
     """A Textual app to manage stopwatches."""
     CSS_PATH = 'trader/cli/css.css'
@@ -326,21 +350,21 @@ class AsyncCli(App):
         pass
 
     def compose(self) -> ComposeResult:
+        self.data_table: DataTable = DataTable()
+        self.positions_table: DataTable = DataTable()
+
         self.text_log = TextLog(id='repl-result2', highlight=False, wrap=True)
+
         self.top: Container = Container(
-            Static('', id='plot', markup=False, expand=True),
-            Static('', id='table', markup=False, expand=True),
+            Container(self.data_table, classes='hidden'),
             id='top',
         )
         self.left_box = TextLog(id='text-box', highlight=False, wrap=True)
         self.right_box = Container(
-            Static("This"),
-            Static("panel"),
-            Static("is"),
-            Static("using"),
-            Static("grid layout!", id="bottom-right-final"),
+            Container(self.positions_table),
             id="bottom-right",
         )
+
         self.repl = ReplWidget(self.left_box, self.group_ctx, self.text_log)
 
         yield Container(
@@ -360,9 +384,22 @@ class AsyncCli(App):
         self.dialog = AsyncDialog(id='mydialog')
         self.repl.focus()
 
-        self.setup_tasks()
+        self.renderer.set_table(self.data_table)
+        # todo
+        asyncio.run(self.setup_tasks())
 
         yield self.dialog
+
+    def replace_top_panel(self, top_widget: Widget):
+        top = self.query_one('#top', Container)
+
+        for widget in top.children:
+            if not widget.has_class('hidden'):
+                widget.toggle_class('hidden')
+
+        self.query_one('#top', Container).mount(top_widget, before=0)
+        if top_widget.has_class('hidden'):
+            top_widget.toggle_class('hidden')
 
     def action_confirm_y_n(
         self, message: str, confirm_action: str, noconfirm_action: str, title: str = ""
@@ -390,8 +427,7 @@ class AsyncCli(App):
         self.plot.height = self.top.container_size.height
         text = f'width: {self.top.container_size.width}, height: {self.top.container_size.height}'
 
-        self.query('#top > *').remove()
-        self.query_one('#top', Container).mount(Static(self.plot, markup=False, expand=True))
+        self.replace_top_panel(Container(Static(self.plot, markup=False, expand=True)))
 
     def action_table(self) -> None:
         container = Container(
@@ -401,22 +437,56 @@ class AsyncCli(App):
             Static('using'),
         )
 
-        self.query('#top > *').remove()
-        self.query_one('#top', Container).mount(container)
+        self.replace_top_panel(container)
+
+    def render_portfolio(self) -> None:
+        df = portfolio_helper()
+        df.drop(columns=['account', 'currency', 'realizedPNL', 'averageCost'], inplace=True)
+        TuiRenderer(self.positions_table).rich_table(df, financial=True, column_key='conId')
+
+    def on_tui_message(self, event: TuiRenderer.TuiMessage) -> None:
+        if event.sender == self.data_table:
+            container = Container(self.data_table)
+            self.replace_top_panel(container)
 
     async def on_key(self, event: events.Key) -> None:
         self.text_log.write(f'key: {event.key}, character: {event.character}')
         self.repl.focus()
 
-    def setup_tasks(self):
+    async def setup_tasks(self):
+        def on_next(dataclass: DataClassEvent):
+            # if type(dataclass) is UpdateEvent:
+            # self.text_log.write(f'next: {cast(UpdateEvent, dataclass).item}')
+            pass
+
+        def on_error(error):
+            self.text_log.write(f'error: {error}')
+
+        def on_completed():
+            pass
+
         self.text_log.write('setup_tasks')
-        setup_connection()
+
+        self.remoted_client, _ = setup_cli(self.renderer)
+        observable = await self.zmq_subscriber.subscriber(topic='dataclass')
+        self.observer = AutoDetachObserver(on_next=on_next, on_error=on_error, on_completed=on_completed)
+        self.subscription = observable.subscribe(self.observer)
+
+        # refresh positions (todo, should be a zmq thing)
+        async def refresh_positions():
+            while True:
+                await asyncio.sleep(2)
+                self.render_portfolio()
+        asyncio.create_task(refresh_positions())
+
 
 app: AsyncCli
 
 async def app_main(click_context):
     global app
-    app = AsyncCli()
+
+    trader_container = TraderContainer()
+    app = trader_container.resolve(AsyncCli)
     await app.run_async()
 
 
@@ -509,4 +579,3 @@ def repl():
 if __name__ == '__main__':
     invoke_context_wrapper(repl)
     cli(prog_name='cli')
-

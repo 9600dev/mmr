@@ -1,6 +1,6 @@
 from asyncio import AbstractEventLoop
 from trader.common.helpers import get_network_ip
-from trader.common.logging_helper import set_all_log_level, setup_logging
+from trader.common.logging_helper import LogLevels, set_all_log_level, setup_logging
 from trader.container import Container
 from trader.trading.trading_runtime import Trader
 
@@ -53,7 +53,7 @@ def main(simulation: bool,
 
     try:
         if os.environ.get('TRADER_NODEBUG'):
-            set_all_log_level(log.CRITICAL)
+            set_all_log_level(LogLevels.CRITICAL)
         else:
             loop.set_debug(enabled=True)
 

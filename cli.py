@@ -21,9 +21,10 @@ from scripts.chain import plot_chain
 from scripts.trader_check import health_check
 from scripts.zmq_pub_listener import ZmqPrettyPrinter
 from trader.batch.queuer import Queuer
+from trader.cli.cli_renderer import ConsoleRenderer
 from trader.cli.command_line import cli, common_options, default_config
 from trader.cli.commands import *  # NOQA
-from trader.cli.commands import cli_client_id, invoke_context_wrapper, setup_connection
+from trader.cli.commands import cli_client_id, invoke_context_wrapper, setup_cli
 from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.helpers import contract_from_dict, DictHelper, rich_dict, rich_json, rich_list, rich_table
 from trader.common.logging_helper import LogLevels, set_log_level, setup_logging
@@ -63,7 +64,9 @@ def repl():
         'auto_suggest': AutoSuggestFromHistory(),
     }
 
-    setup_connection()
+    renderer = ConsoleRenderer()
+
+    setup_cli(renderer)
 
     is_repl = True
     f = Figlet(font='starwars')
@@ -95,6 +98,22 @@ def setup_ipython():
     global bardata
     global marketdata
     global tickstorage
+    global cli_client_id
+
+    from reactivex import Observer
+
+    class MyObserver(Observer):
+        def on_next(self, value):
+            print(value)
+
+        def on_error(self, error: Exception):
+            print("Got error: %s" % error)
+
+        def on_completed(self):
+            print("Sequence completed")
+
+    renderer = ConsoleRenderer()
+    cli_client_id = setup_cli(renderer)
 
     container = Container()
     accessor = container.resolve(UniverseAccessor)
@@ -104,17 +123,20 @@ def setup_ipython():
     tickstorage = container.resolve(TickStorage)
     marketdata = container.resolve(MarketData, **{'client': client})
 
+    asyncio.run(client.subscribe_single_pnl('U2556618', tsla, MyObserver()))
+
     print('Available instance objects:')
     print()
     print(' amd: Contract, nvda: Contract, a2m: Contract, cl: Contract')
     print(' container: Container, accessor: UniverseAccessor, client: IBAIORx')
     print(' store: Arctic, tickstorage: TickStorage, marketdata: MarketData')
 
-    setup_connection()
+    input()
 
 
 if get_ipython().__class__.__name__ == 'TerminalInteractiveShell':  # type: ignore
     setup_ipython()
+
 
 if __name__ == '__main__':
     invoke_context_wrapper(repl)
