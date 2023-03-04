@@ -22,7 +22,7 @@ from trader.common.logging_helper import LogLevels, set_log_level, setup_logging
 from trader.common.reactivex import SuccessFail
 from trader.container import Container as TraderContainer
 from trader.data.data_access import DictData, PortfolioSummary, TickData, TickStorage
-from trader.data.universe import Universe, UniverseAccessor
+from trader.data.universe import SecurityDefinition, Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, WhatToShow
 from trader.messaging.clientserver import RemotedClient
 from trader.messaging.trader_service_api import TraderServiceApi
@@ -114,6 +114,14 @@ def setup_cli(cli_renderer: CliRenderer):
 
     return remoted_client, cli_client_id
 
+def resolve_conId(
+    conId: int,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    primary_exchange: Optional[str] = ''
+) -> SecurityDefinition:
+    accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
+    return accessor.resolve_conid(conId)
 
 def __resolve(
     symbol: Union[str, int],

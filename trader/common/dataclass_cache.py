@@ -21,10 +21,16 @@ class UpdateEvent(DataClassEvent[_T]):
     def __init__(self, item: _T):
         self.item = item
 
+    def __str__(self):
+        return 'UpdateEvent: {}'.format(self.item)
+
 
 class RemoveEvent(DataClassEvent[_T]):
     def __init__(self, key: str):
         self.key = key
+
+    def __str__(self):
+        return 'RemoveEvent: {}'.format(self.key)
 
 
 class DataClassCache(Generic[_T], SubjectBase[DataClassEvent[_T]]):

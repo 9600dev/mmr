@@ -6,6 +6,7 @@ from click_option_group import optgroup, RequiredMutuallyExclusiveOptionGroup
 from cloup import option as cloupoption
 from cloup import option_group
 from cloup.constraints import mutually_exclusive
+from dataclasses import asdict, dataclass
 from expression import pipe
 from expression.collections import seq
 from ib_insync.contract import Contract
@@ -24,6 +25,9 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.shortcuts import PromptSession
 from pyfiglet import Figlet
 from reactivex.observer import AutoDetachObserver
+from reactivex.operators import debounce, filter, sample
+from reactivex.scheduler.eventloop.asyncioscheduler import AsyncIOScheduler
+from reactivex.scheduler.eventloop.asynciothreadsafescheduler import AsyncIOThreadSafeScheduler
 from rich.ansi import AnsiDecoder
 from rich.console import Console, Group, RenderableType
 from rich.jupyter import JupyterMixin
@@ -41,7 +45,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, Bindings
 from textual.containers import Container, Content, Grid, Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.reactive import Reactive, var
+from textual.reactive import reactive, Reactive, var
 from textual.scroll_view import ScrollView
 from textual.widget import Widget
 from textual.widgets import (
@@ -65,6 +69,7 @@ from trader.cli.commands import (
     invoke_context_wrapper,
     monkeypatch_click_echo,
     portfolio_helper,
+    resolve_conId,
     setup_cli
 )
 from trader.cli.dialog import Dialog
@@ -90,36 +95,52 @@ import datetime as dt
 import os
 import pandas as pd
 import plotext as plt
-import rich as r
 import shlex
 import sys
 import trader.batch.ib_history_queuer as ib_history_queuer
 import trader.cli.universes_cli as universes_cli
 
 
-def make_plot(width, height, phase):
-    plt.clf()
-    l, frames = 1000, 30
-    x = range(1, l + 1)
-    # y = plt.sin()
-    y = plt.sin(1, length=l, phase=2 * phase / frames)
-    plt.scatter(x, y, marker="fhd")
-    plt.plotsize(width, height)
-    return plt.build()
+class PlotextMixin(JupyterMixin, Widget):
+    update = reactive('update')
 
-
-class PlotextMixin(JupyterMixin):
-    def __init__(self, width, height, phase=0):
+    def __init__(self, width, height):
+        super().__init__()
         self.decoder = AnsiDecoder()
+        self.rich_canvas = Group()
         self.width = width
         self.height = height
-        self.phase = 0
+        self.y_values = []
+        self.filter = 0
+        self.update = reactive('update')
+        self.dt = dt.datetime.now()
+
+    def filter_plot(self, conId: int):
+        self.y_values = []
+        self.rich_canvas = Group(*self.decoder.decode('waiting for data...'))
+        self.filter = conId
+        self.dt = dt.datetime.now()
+
+    def make_plot(self, x, y, width, height):
+        plt.clf()
+        plt.grid(1, 1)
+        plt.title(self.filter)
+        plt.xticks([0.0, len(self.y_values) - 1], [self.dt.strftime('%H:%M:%S'), dt.datetime.now().strftime('%H:%M:%S')])
+        plt.plot(
+            list(range(0, len(self.y_values))),
+            self.y_values,
+            marker='hd')
+
+        plt.plotsize(width, height)
+        return plt.build()
+
+    def ticker(self, ticker: Ticker):
+        if ticker.contract and ticker.contract.conId == self.filter:
+            self.y_values.append(ticker.last)
+            canvas = self.make_plot(range(0, len(self.y_values)), self.y_values, self.width, self.height)
+            self.rich_canvas = Group(*self.decoder.decode(canvas))
 
     def __rich_console__(self, console, options):
-        # self.width = options.max_width or console.width
-        # self.height = options.height or console.height
-        canvas = make_plot(self.width, self.height, self.phase)
-        self.rich_canvas = Group(*self.decoder.decode(canvas))
         yield self.rich_canvas
 
 
@@ -322,6 +343,8 @@ class AsyncDialog(Widget):
 class AsyncCli(App):
     def __init__(
         self,
+        arctic_server_address: str,
+        arctic_universe_library: str,
         zmq_pubsub_server_address: str,
         zmq_pubsub_server_port: int,
         group_ctx: Optional[click.core.Context] = None,
@@ -330,11 +353,18 @@ class AsyncCli(App):
         self.group_ctx = group_ctx
         self.renderer = TuiRenderer(DataTable())
         self.hidden_container = Container(id='hidden-container')
+        self.zmq_ticker = TopicPubSub[Ticker](
+            zmq_pubsub_server_address,
+            zmq_pubsub_server_port,
+        )
         self.zmq_subscriber = TopicPubSub[DataClassEvent](
             zmq_pubsub_server_address,
             zmq_pubsub_server_port + 1,
         )
-        self.remoted_client: RemotedClient
+        self.remoted_client: RemotedClient[TraderServiceApi]
+        self.scheduler = AsyncIOScheduler(asyncio.get_running_loop())
+        self.arctic_server_address = arctic_server_address
+        self.arctic_universe_library = arctic_universe_library
 
     """A Textual app to manage stopwatches."""
     CSS_PATH = 'trader/cli/css.css'
@@ -352,25 +382,27 @@ class AsyncCli(App):
     def compose(self) -> ComposeResult:
         self.data_table: DataTable = DataTable()
         self.positions_table: DataTable = DataTable()
+        self.book_table: DataTable = DataTable()
 
+        self.repl_log = TextLog(id='text-box', highlight=False, wrap=True)
         self.text_log = TextLog(id='repl-result2', highlight=False, wrap=True)
 
         self.top: Container = Container(
             Container(self.data_table, classes='hidden'),
             id='top',
         )
-        self.left_box = TextLog(id='text-box', highlight=False, wrap=True)
+
         self.right_box = Container(
             Container(self.positions_table),
             id="bottom-right",
         )
 
-        self.repl = ReplWidget(self.left_box, self.group_ctx, self.text_log)
+        self.repl = ReplWidget(self.repl_log, self.group_ctx, self.text_log)
 
         yield Container(
             self.text_log,
             self.top,
-            self.left_box,
+            self.repl_log,
             self.right_box,
             Container(
                 self.repl,
@@ -381,6 +413,7 @@ class AsyncCli(App):
         yield Footer()
 
         self.plot = PlotextMixin(self.top.container_size.width, self.top.container_size.height)
+        self.plot_static = Static(self.plot, expand=True, markup=False)
         self.dialog = AsyncDialog(id='mydialog')
         self.repl.focus()
 
@@ -397,7 +430,15 @@ class AsyncCli(App):
             if not widget.has_class('hidden'):
                 widget.toggle_class('hidden')
 
-        self.query_one('#top', Container).mount(top_widget, before=0)
+        # check to see if needed to mount
+        mount = True
+        for widget in top.children:
+            if widget == top_widget:
+                mount = False
+
+        if mount:
+            self.query_one('#top', Container).mount(top_widget, before=0)
+
         if top_widget.has_class('hidden'):
             top_widget.toggle_class('hidden')
 
@@ -422,12 +463,11 @@ class AsyncCli(App):
             self.dialog.show()
 
     def action_plot(self) -> None:
-        self.plot.phase += 1
         self.plot.width = self.top.container_size.width
         self.plot.height = self.top.container_size.height
         text = f'width: {self.top.container_size.width}, height: {self.top.container_size.height}'
-
-        self.replace_top_panel(Container(Static(self.plot, markup=False, expand=True)))
+        self.text_log.write(text)
+        self.replace_top_panel(Container(self.plot_static))   # Static(self.plot, markup=False, expand=True)))
 
     def action_table(self) -> None:
         container = Container(
@@ -449,15 +489,58 @@ class AsyncCli(App):
             container = Container(self.data_table)
             self.replace_top_panel(container)
 
+    def on_data_table_cell_selected(self, event: DataTable.CellSelected):
+        if event.sender == self.positions_table:
+            if event.cell_key.column_key == 'conId':
+                contract = Universe.to_contract(
+                    resolve_conId(
+                        int(str(event.value)),
+                        self.arctic_server_address,
+                        self.arctic_universe_library
+                    )
+                )
+                self.plot.filter_plot(int(str(event.value)))
+                self.action_plot()
+                self.remoted_client.rpc().publish_contract(contract=contract, delayed=False)
+
     async def on_key(self, event: events.Key) -> None:
         self.text_log.write(f'key: {event.key}, character: {event.character}')
         self.repl.focus()
 
+    async def ticker_listen(self):
+        def on_next(ticker: Ticker):
+            symbol = ticker.contract.symbol if ticker.contract else ''
+            self.text_log.write('{} {} {}'.format(dt.datetime.now().strftime('%H:%M:%S'), symbol, ticker.last))
+            self.plot.ticker(ticker)
+            self.plot_static.refresh(repaint=True, layout=True)
+
+        def on_error(error):
+            self.text_log.write(f'ticker error: {error}')
+            self.plot.filter_plot(0)
+
+        observable = await self.zmq_ticker.subscriber(topic='ticker')
+        self.observer = AutoDetachObserver(on_next=on_next, on_error=on_error)
+        xs = observable.pipe(
+            filter(lambda ticker: ticker.contract is not None and ticker.contract.conId == self.plot.filter),
+            sample(sampler=1.0, scheduler=self.scheduler)
+        )
+        self.subscription = xs.subscribe(self.observer)
+
     async def setup_tasks(self):
-        def on_next(dataclass: DataClassEvent):
-            # if type(dataclass) is UpdateEvent:
-            # self.text_log.write(f'next: {cast(UpdateEvent, dataclass).item}')
-            pass
+        self.text_log.write('setup_tasks')
+
+        def on_next(data_class: DataClassEvent):
+            self.text_log.write(f'next: {data_class}')
+            if data_class is type(UpdateEvent) and cast(UpdateEvent, dataclass).item is type(Trade):
+                trade = cast(Trade, cast(UpdateEvent, dataclass).item)
+                order_status = asdict(trade.orderStatus)
+                TuiRenderer(self.book_table).rich_dict(order_status)
+                # bind the trade to the datatable
+            elif dataclass is type(UpdateEvent) and cast(UpdateEvent, dataclass).item is type(Order):
+                order = cast(Order, cast(UpdateEvent, dataclass).item)
+                order_dict = asdict(order)
+                TuiRenderer(self.book_table).rich_dict(order_dict)
+                pass
 
         def on_error(error):
             self.text_log.write(f'error: {error}')
@@ -465,19 +548,15 @@ class AsyncCli(App):
         def on_completed():
             pass
 
-        self.text_log.write('setup_tasks')
-
         self.remoted_client, _ = setup_cli(self.renderer)
         observable = await self.zmq_subscriber.subscriber(topic='dataclass')
         self.observer = AutoDetachObserver(on_next=on_next, on_error=on_error, on_completed=on_completed)
         self.subscription = observable.subscribe(self.observer)
 
-        # refresh positions (todo, should be a zmq thing)
-        async def refresh_positions():
-            while True:
-                await asyncio.sleep(2)
-                self.render_portfolio()
-        asyncio.create_task(refresh_positions())
+        await self.ticker_listen()
+
+        self.render_portfolio()
+        self.scheduler.schedule_periodic(100.0, lambda x: self.render_portfolio())
 
 
 app: AsyncCli

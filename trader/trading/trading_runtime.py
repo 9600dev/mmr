@@ -46,8 +46,6 @@ import trader.messaging.trader_service_api as bus
 
 logging = setup_logging(module_name='trading_runtime')
 
-
-
 # notes
 # https://groups.io/g/insync/topic/using_reqallopenorders/27261173?p=,,,20,0,0,0::recentpostdate%2Fsticky,,,20,2,0,27261173
 # talks about trades/orders being tied to clientId, which means we'll need to always have a consistent clientid
@@ -212,7 +210,7 @@ class Trader(metaclass=Singleton):
         self.update_portfolio_universe(portfolio_item)
 
     def __dataclass_server_put(self, message: DataClassEvent):
-        logging.debug('__dataclass_server_put')
+        logging.debug('__dataclass_server_put: {}'.format(message))
         self.zmq_dataclass_server.put(('dataclass', message))
 
     async def setup_subscriptions(self):
@@ -276,6 +274,19 @@ class Trader(metaclass=Singleton):
 
         pnl_router_disposable = self.pnl.subscribe(on_next=self.__dataclass_server_put, on_error=handle_subscription_exception)
         self.disposables.append(pnl_router_disposable)
+
+        # push book updates
+        def __update_book(trade_order: Union[Trade, Order]):
+            event = UpdateEvent(trade_order)
+            self.__dataclass_server_put(event)
+
+        book_update_disposable = self.book.subscribe(
+            Observer(
+                on_next=__update_book,
+                on_error=handle_subscription_exception,
+            )
+        )
+        self.disposables.append(book_update_disposable)
 
         # make sure we're getting either live, or delayed data
         self.client.ib.reqMarketDataType(self.market_data)
