@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from expression import pipe
 from expression.collections import seq
 from ib_insync.contract import Contract
-from ib_insync.objects import PortfolioItem, Position
+from ib_insync.objects import PnLSingle, PortfolioItem, Position
 from ib_insync.order import Order, OrderStatus, Trade
 from ib_insync.ticker import Ticker
 from io import StringIO
@@ -44,6 +44,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding, Bindings
 from textual.containers import Container, Content, Grid, Horizontal, Vertical
+from textual.coordinate import Coordinate
 from textual.css.query import NoMatches
 from textual.reactive import reactive, Reactive, var
 from textual.scroll_view import ScrollView
@@ -72,6 +73,7 @@ from trader.cli.commands import (
     resolve_conId,
     setup_cli
 )
+from trader.cli.custom_footer import CustomFooter
 from trader.cli.dialog import Dialog
 from trader.cli.repl_input import ReplInput
 from trader.common.dataclass_cache import DataClassEvent, UpdateEvent
@@ -381,7 +383,7 @@ class AsyncCli(App):
 
     def compose(self) -> ComposeResult:
         self.data_table: DataTable = DataTable()
-        self.positions_table: DataTable = DataTable()
+        self.portfolio_table: DataTable = DataTable()
         self.book_table: DataTable = DataTable()
 
         self.repl_log = TextLog(id='text-box', highlight=False, wrap=True)
@@ -392,8 +394,11 @@ class AsyncCli(App):
             id='top',
         )
 
+        self.plot = PlotextMixin(self.top.container_size.width, self.top.container_size.height)
+        self.plot_static = Static(self.plot, expand=True, markup=False)
+
         self.right_box = Container(
-            Container(self.positions_table),
+            Container(self.portfolio_table),
             id="bottom-right",
         )
 
@@ -410,16 +415,17 @@ class AsyncCli(App):
             ),
             id="app-grid",
         )
-        yield Footer()
 
-        self.plot = PlotextMixin(self.top.container_size.width, self.top.container_size.height)
-        self.plot_static = Static(self.plot, expand=True, markup=False)
+        self.custom_footer = CustomFooter()
+        yield self.custom_footer
+
         self.dialog = AsyncDialog(id='mydialog')
         self.repl.focus()
 
         self.renderer.set_table(self.data_table)
+
         # todo
-        asyncio.run(self.setup_tasks())
+        asyncio.create_task(self.setup_tasks())
 
         yield self.dialog
 
@@ -482,7 +488,32 @@ class AsyncCli(App):
     def render_portfolio(self) -> None:
         df = portfolio_helper()
         df.drop(columns=['account', 'currency', 'realizedPNL', 'averageCost'], inplace=True)
-        TuiRenderer(self.positions_table).rich_table(df, financial=True, column_key='conId')
+        TuiRenderer(self.portfolio_table).rich_table(df, financial=True, column_key='conId')
+
+        # post the pnl to the footer
+        daily_pnl_sum = df['dailyPNL'].sum()
+        unrealized_pnl = df['unrealizedPNL'].sum()
+        asyncio.run(
+            self.custom_footer.post_message(
+                CustomFooter.FooterMessage(self, daily_pnl_sum, unrealized_pnl)
+            )
+        )
+
+    def start_plot(self, conId: Union[int, str]) -> None:
+        if type(conId) == str:
+            conId = int(conId)
+
+        contract = Universe.to_contract(
+            resolve_conId(
+                int(conId),
+                self.arctic_server_address,
+                self.arctic_universe_library
+            )
+        )
+
+        self.plot.filter_plot(int(conId))
+        self.action_plot()
+        self.remoted_client.rpc().publish_contract(contract=contract, delayed=False)
 
     def on_tui_message(self, event: TuiRenderer.TuiMessage) -> None:
         if event.sender == self.data_table:
@@ -490,18 +521,9 @@ class AsyncCli(App):
             self.replace_top_panel(container)
 
     def on_data_table_cell_selected(self, event: DataTable.CellSelected):
-        if event.sender == self.positions_table:
+        if event.sender == self.portfolio_table:
             if event.cell_key.column_key == 'conId':
-                contract = Universe.to_contract(
-                    resolve_conId(
-                        int(str(event.value)),
-                        self.arctic_server_address,
-                        self.arctic_universe_library
-                    )
-                )
-                self.plot.filter_plot(int(str(event.value)))
-                self.action_plot()
-                self.remoted_client.rpc().publish_contract(contract=contract, delayed=False)
+                self.start_plot(str(event.value))
 
     async def on_key(self, event: events.Key) -> None:
         self.text_log.write(f'key: {event.key}, character: {event.character}')
@@ -522,24 +544,28 @@ class AsyncCli(App):
         self.observer = AutoDetachObserver(on_next=on_next, on_error=on_error)
         xs = observable.pipe(
             filter(lambda ticker: ticker.contract is not None and ticker.contract.conId == self.plot.filter),
-            sample(sampler=1.0, scheduler=self.scheduler)
+            sample(sampler=2.0, scheduler=self.scheduler)
         )
         self.subscription = xs.subscribe(self.observer)
 
     async def setup_tasks(self):
         self.text_log.write('setup_tasks')
 
-        def on_next(data_class: DataClassEvent):
-            self.text_log.write(f'next: {data_class}')
-            if data_class is type(UpdateEvent) and cast(UpdateEvent, dataclass).item is type(Trade):
-                trade = cast(Trade, cast(UpdateEvent, dataclass).item)
+        def on_next(data: DataClassEvent):
+            self.text_log.write(f'next: {data}')
+            if data is type(UpdateEvent) and cast(UpdateEvent, data).item is Trade:
+                trade = cast(Trade, cast(UpdateEvent, data).item)
                 order_status = asdict(trade.orderStatus)
                 TuiRenderer(self.book_table).rich_dict(order_status)
                 # bind the trade to the datatable
-            elif dataclass is type(UpdateEvent) and cast(UpdateEvent, dataclass).item is type(Order):
-                order = cast(Order, cast(UpdateEvent, dataclass).item)
+            elif type(data) is UpdateEvent and cast(UpdateEvent, data).item is Order:
+                order = cast(Order, cast(UpdateEvent, data).item)
                 order_dict = asdict(order)
                 TuiRenderer(self.book_table).rich_dict(order_dict)
+                pass
+            elif type(data) is UpdateEvent and type(cast(UpdateEvent, data).item) is PnLSingle:
+                pnl_single = cast(PnLSingle, cast(UpdateEvent, data).item)
+                # we're not setup to update the portfolio datatable just yet
                 pass
 
         def on_error(error):
@@ -556,8 +582,11 @@ class AsyncCli(App):
         await self.ticker_listen()
 
         self.render_portfolio()
-        self.scheduler.schedule_periodic(100.0, lambda x: self.render_portfolio())
+        self.scheduler.schedule_periodic(5.0, lambda x: self.render_portfolio())
 
+        # setup the plot to start drawing on startup
+        cell = self.portfolio_table.get_cell_at(Coordinate(0, 0))
+        self.start_plot(str(cell))
 
 app: AsyncCli
 
