@@ -7,9 +7,10 @@ from reactivex.disposable import Disposable
 from reactivex.observer import Observer
 from trader.common.logging_helper import setup_logging
 from trader.common.reactivex import SuccessFail, SuccessFailEnum
-from trader.data.data_access import PortfolioSummary
+from trader.data.data_access import PortfolioSummary, SecurityDefinition
+from trader.data.universe import Universe
 from trader.messaging.clientserver import RPCHandler
-from typing import Optional
+from typing import List, Optional, Tuple, Union
 
 import asyncio
 import trader.trading.trading_runtime as runtime
@@ -128,6 +129,10 @@ class TraderServiceApi(RPCHandler):
     @RPCHandler.rpcmethod
     def get_unique_client_id(self) -> int:
         return self.trader.get_unique_client_id()
+
+    @RPCHandler.rpcmethod
+    def resolve_symbol_to_security_definitions(self, symbol: Union[str, int]) -> list[Tuple[Universe, SecurityDefinition]]:
+        return self.trader.resolve_symbol_to_security_definitions(symbol)
 
     @RPCHandler.rpcmethod
     def release_client_id(self, client_id: int) -> bool:

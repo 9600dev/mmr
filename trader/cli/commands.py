@@ -114,14 +114,28 @@ def setup_cli(cli_renderer: CliRenderer):
 
     return remoted_client, cli_client_id
 
-def resolve_conId(
-    conId: int,
+def resolve_conid_to_security_definition_db(
+    conid: int,
     arctic_server_address: str,
     arctic_universe_library: str,
-    primary_exchange: Optional[str] = ''
-) -> SecurityDefinition:
+) -> Optional[SecurityDefinition]:
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
-    return accessor.resolve_conid(conId)
+    universe_security_definition = accessor.resolve_conid(conid)
+    if universe_security_definition:
+        return universe_security_definition[1]
+    else:
+        return None
+
+def resolve_conid_to_security_definition(
+    conid: int,
+) -> Optional[SecurityDefinition]:
+    result = remoted_client.rpc(
+        return_type=list[tuple[Universe, SecurityDefinition]]
+    ).resolve_symbol_to_security_definitions(conid)
+    if result:
+        return result[0][1]
+    else:
+        return None
 
 def __resolve(
     symbol: Union[str, int],

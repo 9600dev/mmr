@@ -155,6 +155,9 @@ class _AwaitedMethodCall():
                 return list_result
             elif self._return_type == type(list):
                 return list(obj)
+            elif isinstance(obj, tuple) and hasattr(return_type, '__origin__') and return_type.__origin__ is tuple:
+                return return_type(obj)
+            # for whatever reason, things like PortfolioSummary are returned as tuples, so we have to new them up with *args
             elif isinstance(obj, tuple):
                 return return_type(*obj)
             else:

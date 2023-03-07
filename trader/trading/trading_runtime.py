@@ -313,6 +313,27 @@ class Trader(metaclass=Singleton):
         universe.security_definitions.clear()
         self.universe_accessor.update(universe)
 
+    def resolve_symbol_to_security_definitions(self, symbol: Union[str, int]) -> list[Tuple[Universe, SecurityDefinition]]:
+        int_symbol = 0
+
+        if type(symbol) is str and symbol.isnumeric():
+            int_symbol = int(symbol)
+        if type(symbol) is int:
+            int_symbol = symbol
+
+        # see if conid is in the cache
+        if int_symbol > 0:
+            # not in the cache
+            result = self.universe_accessor.resolve_conid(int_symbol)
+            if result: return [result]
+            return []
+        else:
+            # not in the cache
+            universe_definition = self.universe_accessor.resolve_first_symbol(symbol)
+            if universe_definition:
+                return [universe_definition]
+            return []
+
     def publish_contract(self, contract: Contract, delayed: bool) -> Observable[IBAIORxError]:
         if contract.conId in self.zmq_pubsub_contract_filters:
             return self.zmq_pubsub_contracts[contract.conId]

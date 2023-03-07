@@ -113,7 +113,7 @@ def setup_ipython():
             print("Sequence completed")
 
     renderer = ConsoleRenderer()
-    cli_client_id = setup_cli(renderer)
+    remoted_client, cli_client_id = setup_cli(renderer)
 
     container = Container()
     accessor = container.resolve(UniverseAccessor)
@@ -129,9 +129,7 @@ def setup_ipython():
     print()
     print(' amd: Contract, nvda: Contract, a2m: Contract, cl: Contract')
     print(' container: Container, accessor: UniverseAccessor, client: IBAIORx')
-    print(' store: Arctic, tickstorage: TickStorage, marketdata: MarketData')
-
-    input()
+    print(' store: Arctic, tickstorage: TickStorage, marketdata: MarketData, remoted_client: RemotedClient')
 
 
 if get_ipython().__class__.__name__ == 'TerminalInteractiveShell':  # type: ignore

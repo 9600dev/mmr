@@ -70,7 +70,7 @@ from trader.cli.commands import (
     invoke_context_wrapper,
     monkeypatch_click_echo,
     portfolio_helper,
-    resolve_conId,
+    resolve_conid_to_security_definition,
     setup_cli
 )
 from trader.cli.custom_footer import CustomFooter
@@ -499,21 +499,19 @@ class AsyncCli(App):
             )
         )
 
-    def start_plot(self, conId: Union[int, str]) -> None:
-        if type(conId) == str:
-            conId = int(conId)
+    def start_plot(self, conid: Union[int, str]) -> None:
+        if type(conid) == str and str(conid).isnumeric():
+            conid = int(conid)
 
-        contract = Universe.to_contract(
-            resolve_conId(
-                int(conId),
-                self.arctic_server_address,
-                self.arctic_universe_library
-            )
-        )
+        definition = resolve_conid_to_security_definition(int(conid))
+        if definition:
+            contract = Universe.to_contract(definition)
 
-        self.plot.filter_plot(int(conId))
-        self.action_plot()
-        self.remoted_client.rpc().publish_contract(contract=contract, delayed=False)
+            self.plot.filter_plot(int(conid))
+            self.action_plot()
+            self.remoted_client.rpc().publish_contract(contract=contract, delayed=False)
+        else:
+            self.text_log.write(f'Could not resolve conid: {conid}')
 
     def on_tui_message(self, event: TuiRenderer.TuiMessage) -> None:
         if event.sender == self.data_table:
@@ -582,7 +580,7 @@ class AsyncCli(App):
         await self.ticker_listen()
 
         self.render_portfolio()
-        self.scheduler.schedule_periodic(5.0, lambda x: self.render_portfolio())
+        # self.scheduler.schedule_periodic(5.0, lambda x: self.render_portfolio())
 
         # setup the plot to start drawing on startup
         cell = self.portfolio_table.get_cell_at(Coordinate(0, 0))

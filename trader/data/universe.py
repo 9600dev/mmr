@@ -57,7 +57,7 @@ class UniverseAccessor():
         self.sorted_names = ['LSE', 'ASX', 'NYSE', 'NASDAQ']
 
         # todo: fix this at the source: Universe shouldn't have a list of SecurityDefinitions
-        self._resolver_cache: Dict[int, SecurityDefinition] = {}
+        self._resolver_cache: Dict[int, Tuple[Universe, SecurityDefinition]] = {}
 
     def list_universes(self) -> List[str]:
         result = self.library.list_symbols()
@@ -102,18 +102,18 @@ class UniverseAccessor():
                     return universe
         return None
 
-    def resolve_conid(self, conId: int) -> SecurityDefinition:
-        if conId in self._resolver_cache:
-            return self._resolver_cache[conId]
+    def resolve_conid(self, conid: int) -> Optional[Tuple[Universe, SecurityDefinition]]:
+        if conid in self._resolver_cache:
+            return self._resolver_cache[conid]
 
         for universe in self.get_all():
             for definition in universe.security_definitions:
-                if conId == definition.conId:
-                    self._resolver_cache.update({definition.conId: definition})
-                    return definition
+                if conid == definition.conId:
+                    self._resolver_cache.update({definition.conId: (universe, definition)})
+                    return (universe, definition)
                 else:
-                    self._resolver_cache.update({definition.conId: definition})
-        raise ValueError('conId not found {}'.format(conId))
+                    self._resolver_cache.update({definition.conId: (universe, definition)})
+        return None
 
     def resolve_symbol(self, symbol: Union[str, int]) -> List[Tuple[Universe, SecurityDefinition]]:
         results = []
@@ -121,28 +121,28 @@ class UniverseAccessor():
             for definition in universe.security_definitions:
                 if type(symbol) is int and int(symbol) == definition.conId:
                     results.append((universe, definition))
-                    self._resolver_cache.update({definition.conId: definition})
+                    self._resolver_cache.update({definition.conId: (universe, definition)})
                 if type(symbol) is str and symbol.isnumeric() and int(symbol) == definition.conId:
                     results.append((universe, definition))
-                    self._resolver_cache.update({definition.conId: definition})
+                    self._resolver_cache.update({definition.conId: (universe, definition)})
                 if type(symbol) is str:
                     if symbol == definition.symbol:
                         results.append((universe, definition))
-                        self._resolver_cache.update({definition.conId: definition})
+                        self._resolver_cache.update({definition.conId: (universe, definition)})
         return results
 
-    def resolve_first_symbol(self, symbol: Union[str, int]) -> Tuple[Universe, SecurityDefinition]:
+    def resolve_first_symbol(self, symbol: Union[str, int]) -> Optional[Tuple[Universe, SecurityDefinition]]:
         for universe in self.get_all():
             for definition in universe.security_definitions:
                 if type(symbol) is int:
                     if symbol == definition.conId:
-                        self._resolver_cache.update({definition.conId: definition})
+                        self._resolver_cache.update({definition.conId: (universe, definition)})
                         return (universe, definition)
                 if type(symbol) is str:
                     if symbol == definition.symbol:
-                        self._resolver_cache.update({definition.conId: definition})
+                        self._resolver_cache.update({definition.conId: (universe, definition)})
                         return (universe, definition)
-        raise ValueError('symbol not found {}'.format(symbol))
+        return None
 
     def update(self, universe: Universe) -> None:
         self.library.write(universe.name, universe, prune_previous_version=True)
