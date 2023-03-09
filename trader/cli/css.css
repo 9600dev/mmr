@@ -63,8 +63,6 @@
     border: greenyellow;
 }
 
-
-
 #bottom-right-final {
     column-span: 2;
 }
@@ -74,7 +72,26 @@
     background: $boost;
 }
 
-#bottom-left {
+#bottom-left{
+    height: 100%;
+    width: 100%;
+    background: $panel;
+    border: greenyellow;
+}
+
+#bottom-left-final {
+    column-span: 2;
+}
+
+#bottom-left > Static {
+    height: 100%;
+    background: $boost;
+}
+
+
+
+
+/* #bottom-left {
     height: 100%;
     layout: grid;
     grid-size: 3;
@@ -84,7 +101,7 @@
     background: $panel;
     border: greenyellow;
 }
-
+ */
 #bottom-left-final {
     column-span: 2;
 }
@@ -242,8 +259,8 @@ MyDialog Input {
 
 #text-box {
     height: 100%;
-    background: $panel;
-    border: greenyellow;
+    /* background: $panel; */
+    /* border: greenyellow; */
 }
 
 AsyncDialog {

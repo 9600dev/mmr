@@ -71,6 +71,12 @@ class CliRenderer():
     def rich_list(self, list_source: List):
         pass
 
+    def rich_empty_table(self, message: Optional[str] = None):
+        if message:
+            self.rich_dict({'message': 'No results found for {}'.format(message)})
+        else:
+            self.rich_dict({'message': 'No results found'})
+
     def rich_tablify(
         self,
         df: Union[List, pd.DataFrame],
@@ -100,7 +106,9 @@ class CliRenderer():
             for i in range(1, len(row)):
                 # float max
                 if type(row[i]) is float and row[i] >= sys.float_info.max:
-                    r.append('inf')
+                    r.append('nan')
+                elif type(row[i]) is int and row[i] >= 2147483647:
+                    r.append('nan')
                 elif type(row[i]) is float and not financial:
                     r.append('%.3f' % row[i])
                 elif type(row[i]) is float and financial:
@@ -158,7 +166,12 @@ class ConsoleRenderer(CliRenderer):
         table.add_column('key')
         table.add_column('value')
         for key, value in d.items():
-            table.add_row(str(key), str(value))
+            if type(value) is float and value >= sys.float_info.max:
+                table.add_row(str(key), 'nan')
+            elif type(value) is int and value >= 2147483647:
+                table.add_row(str(key), '')
+            else:
+                table.add_row(str(key), str(value))
         console = Console()
         console.print(table)
 
@@ -235,7 +248,9 @@ class TuiRenderer(CliRenderer):
             for i in range(1, len(row)):
                 # float max
                 if type(row[i]) is float and row[i] >= sys.float_info.max:
-                    r.append('inf')
+                    r.append('nan')
+                elif type(row[i]) is int and row[i] >= 2147483647:
+                    r.append('nan')
                 elif type(row[i]) is float and not financial:
                     r.append('%.3f' % row[i])
                 elif type(row[i]) is float and financial:
@@ -284,7 +299,12 @@ class TuiRenderer(CliRenderer):
         self.table.add_column('key')
         self.table.add_column('value')
         for key, value in d.items():
-            self.table.add_row(str(key), str(value), key=str(key))
+            if type(value) is float and value >= sys.float_info.max:
+                self.table.add_row(str(key), 'nan', key=str(key))
+            elif type(value) is int and value >= 2147483647:
+                self.table.add_row(str(key), 'nan', key=str(key))
+            else:
+                self.table.add_row(str(key), str(value), key=str(key))
         self.focus()
 
     def rich_list(self, list_source: List):

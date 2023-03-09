@@ -27,7 +27,7 @@ from trader.listeners.ibreactive import IBAIORx, WhatToShow
 from trader.messaging.clientserver import RemotedClient
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.objects import BarSize
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import asyncio
 import click
@@ -63,7 +63,7 @@ remoted_client = RemotedClient[TraderServiceApi](
     zmq_server_address=container.config()['zmq_rpc_server_address'],
     zmq_server_port=container.config()['zmq_rpc_server_port'],
     error_table=error_table,
-    timeout=5,
+    timeout=10,
 )
 
 renderer = CliRenderer()
@@ -136,6 +136,13 @@ def resolve_conid_to_security_definition(
         return result[0][1]
     else:
         return None
+
+def resolve_symbol_to_security_definitions(
+    symbol: Union[str, int],
+) -> List[Tuple[Universe, SecurityDefinition]]:
+    return remoted_client.rpc(
+        return_type=list[tuple[Universe, SecurityDefinition]]
+    ).resolve_symbol_to_security_definitions(symbol)
 
 def __resolve(
     symbol: Union[str, int],
@@ -533,6 +540,37 @@ def history_bar_sizes():
     renderer.rich_list(BarSize.bar_sizes())
 
 
+def book_helper() -> pd.DataFrame:
+    connect()
+
+    trades_result: dict[int, list[Trade]] = remoted_client.rpc(return_type=dict[int, list[Trade]]).get_trades()
+    trades = [sublist[0] for sublist in trades_result.values()]
+
+    def mapper(trade: Trade) -> List:
+        return [
+            trade.contract.conId,
+            trade.contract.symbol,
+            trade.order.orderId,
+            trade.order.action,
+            trade.orderStatus.status,
+            trade.orderStatus.filled,
+            trade.order.orderType,
+            trade.order.lmtPrice,
+            trade.order.totalQuantity,
+        ]
+
+    xs = pipe(
+        trades,
+        seq.map(mapper)
+    )
+
+    df = pd.DataFrame(data=xs, columns=[
+        'conId', 'symbol', 'orderId', 'action', 'status', 'filled', 'orderType', 'lmtPrice', 'totalQuantity'
+    ])
+
+    return df.sort_values(by='orderId', ascending=True)
+
+
 def portfolio_helper() -> pd.DataFrame:
     connect()
     portfolio: list[PortfolioSummary] = remoted_client.rpc(return_type=list[PortfolioSummary]).get_portfolio_summary()
@@ -545,12 +583,12 @@ def portfolio_helper() -> pd.DataFrame:
             portfolio.contract.localSymbol,
             portfolio.dailyPNL,
             portfolio.unrealizedPNL,
+            portfolio.realizedPNL,
             portfolio.marketPrice,
             portfolio.contract.currency,
             portfolio.position,
             portfolio.marketValue,
             portfolio.averageCost,
-            portfolio.realizedPNL,
         ]
 
     xs = pipe(
@@ -559,8 +597,8 @@ def portfolio_helper() -> pd.DataFrame:
     )
 
     df = pd.DataFrame(data=xs, columns=[
-        'account', 'conId', 'localSymbol', 'dailyPNL', 'unrealizedPNL', 'marketPrice', 'currency',
-        'position', 'marketValue', 'averageCost', 'realizedPNL'
+        'account', 'conId', 'localSymbol', 'dailyPNL', 'unrealizedPNL', 'realizedPNL', 'marketPrice', 'currency',
+        'position', 'marketValue', 'averageCost',
     ])
 
     return df.sort_values(by='dailyPNL', ascending=False)
@@ -949,7 +987,7 @@ def book():
     pass
 
 
-@book.command('trades', no_args_is_help=True)
+@book.command('trades')
 def book_trades():
     trades = remoted_client.rpc(return_type=dict[int, list[Trade]]).get_trades()
     columns = [
@@ -959,10 +997,13 @@ def book_trades():
     table = []
     for trade_id, trade_list in trades.items():
         table.append(DictHelper[str, str].dict_from_object(trade_list[0], columns))
-    renderer.rich_table(table)
+    if table:
+        renderer.rich_table(table)
+    else:
+        renderer.rich_empty_table(message='no trades found')
 
 
-@book.command('orders', no_args_is_help=True)
+@book.command('orders')
 def book_orders():
     orders: dict[int, list[Order]] = remoted_client.rpc(return_type=dict[int, list[Order]]).get_orders()
     columns = [
@@ -972,7 +1013,10 @@ def book_orders():
     table = []
     for order_id, trade_list in orders.items():
         table.append(DictHelper[str, str].dict_from_object(trade_list[0], columns))
-    renderer.rich_table(table)
+    if table:
+        renderer.rich_table(table)
+    else:
+        renderer.rich_empty_table(message='no orders found')
 
 
 @book.command('cancel', no_args_is_help=True)
@@ -981,7 +1025,7 @@ def book_order_cancel(order_id: int):
     # todo: untested
     order: Optional[Trade] = remoted_client.rpc(return_type=Optional[Trade]).cancel_order(order_id)
     if order:
-        click.echo(order)
+        renderer.rich_dict(DictHelper.dict_from_object(order))
     else:
         click.echo('no Trade object returned')
 
@@ -1001,20 +1045,15 @@ def strategy_list():
     table = []
     for trade_id, trade_list in trades.items():
         table.append(DictHelper[str, str].dict_from_object(trade_list[0], columns))
-    renderer.rich_table(table)
+    if table:
+        renderer.rich_table(table)
+    else:
+        renderer.rich_empty_table(message='no strategies found')
 
 
 @strategy.command('enable')
 def strategy_enable():
-    orders: dict[int, list[Order]] = remoted_client.rpc(return_type=dict[int, list[Order]]).get_orders()
-    columns = [
-        'orderId', 'clientId', 'parentId', 'action',
-        'status', 'orderType', 'allOrNone', 'lmtPrice', 'totalQuantity'
-    ]
-    table = []
-    for order_id, trade_list in orders.items():
-        table.append(DictHelper[str, str].dict_from_object(trade_list[0], columns))
-    renderer.rich_table(table)
+    renderer.rich_empty_table(message='not implemented')
 
 
 @cli.group()
@@ -1059,6 +1098,7 @@ def company_info(symbol: str):
                 if info:
                     renderer.rich_table(financials.read(definition).financials, True)  # type: ignore
                     return
+    renderer.rich_empty_table('no company info found')
 
 
 # CLI_TRADE
@@ -1084,24 +1124,24 @@ def __trade_helper(
     if limit and limit <= 0.0:
         raise ValueError('limit price can be less than or equal to 0.0: {}'.format(limit))
 
-    contracts = __resolve(
-        symbol=symbol,
-        arctic_server_address=arctic_server_address,
-        arctic_universe_library=arctic_universe_library,
-        primary_exchange=primary_exchange
-    )
+    universe_definitions = resolve_symbol_to_security_definitions(symbol)
+    definitions = list({t[1] for t in universe_definitions})
 
-    if len(contracts) == 0:
+    if len(definitions) == 0:
         click.echo('no contract found for symbol {}'.format(symbol))
-    elif len(contracts) > 1:
-        click.echo('multiple contracts found for symbol {}, aborting'.format(symbol))
         return
-    elif not symbol.isnumeric():
-        click.echo('warning: not using IB conId as symbol identifier could lead to unexpected trade behavior.')
+    elif len(definitions) > 1:
+        click.echo('multiple security definitions found for symbol {}'.format(symbol))
+        for definition in definitions:
+            click.echo(definition)
+        return
+
+    security = definitions[0]
+    contract = Universe.to_contract(security)
 
     action = 'BUY' if buy else 'SELL'
     trade: SuccessFail = remoted_client.rpc(return_type=SuccessFail).place_order(
-        contract=contract_from_dict(contracts[0]),
+        contract=contract,
         action=action,
         equity_amount=equity_amount,
         quantity=quantity,
@@ -1110,7 +1150,17 @@ def __trade_helper(
         stop_loss_percentage=stop_loss_percentage,
         debug=debug,
     )
-    click.echo(trade)
+
+    output_dict = {
+        'result': trade.success_fail,
+        'error': trade.error,
+        'exception': trade.exception,
+    }
+
+    if trade.obj:
+        output_dict.update(DictHelper.dict_from_object(trade.obj))
+
+    renderer.rich_dict(output_dict)
 
 
 @trade.command('buy', no_args_is_help=True)
@@ -1221,7 +1271,7 @@ def trade_cancel(
 ):
     trade: Optional[Trade] = remoted_client.rpc(return_type=SuccessFail).cancel_order(order_id)
     if trade:
-        click.echo(trade)
+        renderer.rich_dict(DictHelper.dict_from_object(trade))
     else:
         click.echo('cancellation unsuccessful; either order_id did not exist or order was already completed')
 

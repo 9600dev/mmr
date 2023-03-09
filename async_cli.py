@@ -66,6 +66,7 @@ from trader.cli.cli_renderer import TuiRenderer
 from trader.cli.command_line import cli, common_options, default_config
 from trader.cli.commands import *  # NOQA
 from trader.cli.commands import (
+    book_helper,
     cli_client_id,
     invoke_context_wrapper,
     monkeypatch_click_echo,
@@ -374,7 +375,7 @@ class AsyncCli(App):
         Binding('ctrl+d', 'toggle_dark', 'Toggle dark mode'),
         Binding('ctrl+u', 'dialog', 'Dialog'),
         Binding('ctrl+p', 'plot', 'Plot'),
-        Binding('ctrl+t', 'table', 'Table'),
+        Binding('ctrl+b', 'book', 'Book'),
         Binding('ctrl+q', 'quit', 'Quit'),
     ]
 
@@ -399,7 +400,13 @@ class AsyncCli(App):
 
         self.right_box = Container(
             Container(self.portfolio_table),
-            id="bottom-right",
+            id='bottom-right',
+        )
+
+        self.left_box = Container(
+            Container(self.repl_log, id='repl-log'),
+            Container(self.book_table, id='book-table', classes='hidden'),
+            id='bottom-left'
         )
 
         self.repl = ReplWidget(self.repl_log, self.group_ctx, self.text_log)
@@ -407,7 +414,8 @@ class AsyncCli(App):
         yield Container(
             self.text_log,
             self.top,
-            self.repl_log,
+            self.left_box,
+            # self.repl_log,
             self.right_box,
             Container(
                 self.repl,
@@ -428,6 +436,15 @@ class AsyncCli(App):
         asyncio.create_task(self.setup_tasks())
 
         yield self.dialog
+
+    def switch_widget(self, container_id: str, widget_id: str):
+        panel = self.query_one(container_id, Container)
+
+        for child_widget in panel.children:
+            if not child_widget.has_class('hidden') and child_widget.id != widget_id:
+                child_widget.toggle_class('hidden')
+            if child_widget.id == widget_id and child_widget.has_class('hidden'):
+                child_widget.toggle_class('hidden')
 
     def replace_top_panel(self, top_widget: Widget):
         top = self.query_one('#top', Container)
@@ -475,29 +492,28 @@ class AsyncCli(App):
         self.text_log.write(text)
         self.replace_top_panel(Container(self.plot_static))   # Static(self.plot, markup=False, expand=True)))
 
-    def action_table(self) -> None:
-        container = Container(
-            Static('This'),
-            Static('panel'),
-            Static('is'),
-            Static('using'),
-        )
-
-        self.replace_top_panel(container)
+    def action_book(self) -> None:
+        self.render_book()
+        self.switch_widget('#bottom-left', 'book-table')
 
     def render_portfolio(self) -> None:
         df = portfolio_helper()
-        df.drop(columns=['account', 'currency', 'realizedPNL', 'averageCost'], inplace=True)
+        df.drop(columns=['account', 'currency', 'averageCost'], inplace=True)
         TuiRenderer(self.portfolio_table).rich_table(df, financial=True, column_key='conId')
 
         # post the pnl to the footer
         daily_pnl_sum = df['dailyPNL'].sum()
         unrealized_pnl = df['unrealizedPNL'].sum()
+        realized_pnl = df['realizedPNL'].sum()
         asyncio.run(
             self.custom_footer.post_message(
-                CustomFooter.FooterMessage(self, daily_pnl_sum, unrealized_pnl)
+                CustomFooter.FooterMessage(self, daily_pnl_sum, unrealized_pnl, realized_pnl)
             )
         )
+
+    def render_book(self) -> None:
+        df = book_helper()
+        TuiRenderer(self.book_table).rich_table(df, financial=True, column_key='orderId')
 
     def start_plot(self, conid: Union[int, str]) -> None:
         if type(conid) == str and str(conid).isnumeric():
@@ -527,6 +543,9 @@ class AsyncCli(App):
         self.text_log.write(f'key: {event.key}, character: {event.character}')
         self.repl.focus()
 
+    def on_repl_input_submitted(self, event: ReplInput.Submitted):
+        self.switch_widget('#bottom-left', 'repl-log')
+
     async def ticker_listen(self):
         def on_next(ticker: Ticker):
             symbol = ticker.contract.symbol if ticker.contract else ''
@@ -552,14 +571,15 @@ class AsyncCli(App):
         def on_next(data: DataClassEvent):
             self.text_log.write(f'next: {data}')
             if data is type(UpdateEvent) and cast(UpdateEvent, data).item is Trade:
-                trade = cast(Trade, cast(UpdateEvent, data).item)
-                order_status = asdict(trade.orderStatus)
-                TuiRenderer(self.book_table).rich_dict(order_status)
+                # trade = cast(Trade, cast(UpdateEvent, data).item)
+                # order_status = asdict(trade.orderStatus)
+                # TuiRenderer(self.book_table).rich_dict(order_status)
                 # bind the trade to the datatable
+                pass
             elif type(data) is UpdateEvent and cast(UpdateEvent, data).item is Order:
-                order = cast(Order, cast(UpdateEvent, data).item)
-                order_dict = asdict(order)
-                TuiRenderer(self.book_table).rich_dict(order_dict)
+                # order = cast(Order, cast(UpdateEvent, data).item)
+                # order_dict = asdict(order)
+                # TuiRenderer(self.book_table).rich_dict(order_dict)
                 pass
             elif type(data) is UpdateEvent and type(cast(UpdateEvent, data).item) is PnLSingle:
                 pnl_single = cast(PnLSingle, cast(UpdateEvent, data).item)
@@ -580,7 +600,8 @@ class AsyncCli(App):
         await self.ticker_listen()
 
         self.render_portfolio()
-        # self.scheduler.schedule_periodic(5.0, lambda x: self.render_portfolio())
+        self.scheduler.schedule_periodic(3.0, lambda x: self.render_portfolio())
+        self.scheduler.schedule_periodic(3.0, lambda x: self.render_book())
 
         # setup the plot to start drawing on startup
         cell = self.portfolio_table.get_cell_at(Coordinate(0, 0))

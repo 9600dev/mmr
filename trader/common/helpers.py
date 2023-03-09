@@ -115,7 +115,7 @@ class DictHelper(Generic[K, V]):
         return result
 
     @classmethod
-    def dict_from_object(cls, obj, columns: Optional[List[str]]):
+    def dict_from_object(cls, obj, columns: Optional[List[str]] = None):
         if type(obj) is not dict and not hasattr(obj, '__dict__'):
             return {str(obj): str(obj)}
 

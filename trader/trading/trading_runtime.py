@@ -210,7 +210,7 @@ class Trader(metaclass=Singleton):
         self.update_portfolio_universe(portfolio_item)
 
     def __dataclass_server_put(self, message: DataClassEvent):
-        logging.debug('__dataclass_server_put: {}'.format(message))
+        # logging.debug('__dataclass_server_put: {}'.format(message))
         self.zmq_dataclass_server.put(('dataclass', message))
 
     async def setup_subscriptions(self):

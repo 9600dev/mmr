@@ -56,17 +56,20 @@ class CustomFooter(Widget):
     highlight_key: Reactive[str | None] = Reactive(None)
     daily_pnl: Reactive[float | None] = Reactive(None)
     unrealized_pnl: Reactive[float | None] = Reactive(None)
+    realized_pnl: Reactive[float | None] = Reactive(None)
 
     class FooterMessage(Message, bubble=True):
         def __init__(
             self,
             sender,
             daily_pnl: Optional[float],
-            unrealized_pnl: Optional[float]
+            unrealized_pnl: Optional[float],
+            realized_pnl: Optional[float],
         ) -> None:
             super().__init__(sender)
             self.daily_pnl = daily_pnl
             self.unrealized_pnl = unrealized_pnl
+            self.realized_pnl = realized_pnl
 
     def __init__(self) -> None:
         super().__init__()
@@ -86,11 +89,18 @@ class CustomFooter(Widget):
         self._key_text = None
         self.refresh()
 
+    async def watch_realized_pnl(self, value) -> None:
+        self._key_text = None
+        self.refresh()
+
     def update_daily_pnl(self, value: float) -> None:
         self.daily_pnl = value  # Text(value, style="bold")
 
     def update_unrealized_pnl(self, value: float) -> None:
         self.unrealized_pnl = value  # Text(value, style="bold")
+
+    def update_realized_pnl(self, value: float) -> None:
+        self.realized_pnl = value
 
     def on_mount(self) -> None:
         self.watch(self.screen, "focused", self._focus_changed)
@@ -104,6 +114,8 @@ class CustomFooter(Widget):
             self.update_daily_pnl(event.daily_pnl)
         if event.unrealized_pnl is not None:
             self.update_unrealized_pnl(event.unrealized_pnl)
+        if event.realized_pnl is not None:
+            self.update_realized_pnl(event.realized_pnl)
 
     async def on_mouse_move(self, event: events.MouseMove) -> None:
         """Store any key we are moving over."""
@@ -131,9 +143,15 @@ class CustomFooter(Widget):
             text.append_text(Text('  Daily: $0.00', style=base_style))
 
         if self.unrealized_pnl is not None:
-            text.append_text(Text(f' Unrealized: ${self.unrealized_pnl:,.2f}  '))
+            text.append_text(Text(f' Unrlzd: ${self.unrealized_pnl:,.2f}'))
         else:
-            text.append_text(Text('  Unrealized: $0.00  ', style=base_style))
+            text.append_text(Text(' Unrlzd: $0.00', style=base_style))
+
+        if self.realized_pnl is not None:
+            text.append_text(Text(f' Realized: ${self.realized_pnl:,.2f} '))
+        else:
+            text.append_text(Text(' Realized: $0.00 ', style=base_style))
+
 
         return text
 
