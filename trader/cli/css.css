@@ -296,3 +296,8 @@ AsyncDialog Input {
 #hidden-container {
     display: none;
 }
+
+
+Tabs {
+    dock: top;
+}

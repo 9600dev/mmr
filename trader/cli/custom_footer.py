@@ -61,12 +61,11 @@ class CustomFooter(Widget):
     class FooterMessage(Message, bubble=True):
         def __init__(
             self,
-            sender,
             daily_pnl: Optional[float],
             unrealized_pnl: Optional[float],
             realized_pnl: Optional[float],
         ) -> None:
-            super().__init__(sender)
+            super().__init__()
             self.daily_pnl = daily_pnl
             self.unrealized_pnl = unrealized_pnl
             self.realized_pnl = realized_pnl

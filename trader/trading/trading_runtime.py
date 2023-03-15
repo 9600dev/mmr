@@ -1,5 +1,3 @@
-
-
 import os
 import sys
 
@@ -34,7 +32,7 @@ from trader.objects import Action
 from trader.trading.book import BookSubject
 from trader.trading.executioner import TradeExecutioner
 from trader.trading.portfolio import Portfolio
-# from trader.trading.strategy import Strategy
+from trader.trading.strategy import Strategy
 from typing import cast, Dict, List, NamedTuple, Optional, Tuple, Union
 
 import asyncio
@@ -64,6 +62,8 @@ class Trader(metaclass=Singleton):
                  zmq_pubsub_server_port: int,
                  zmq_rpc_server_address: str,
                  zmq_rpc_server_port: int,
+                 zmq_strategy_rpc_server_address: str,
+                 zmq_strategy_rpc_server_port: int,
                  paper_trading: bool = False,
                  simulation: bool = False):
         self.ib_server_address = ib_server_address
@@ -79,6 +79,8 @@ class Trader(metaclass=Singleton):
         self.zmq_pubsub_server_port = zmq_pubsub_server_port
         self.zmq_rpc_server_address = zmq_rpc_server_address
         self.zmq_rpc_server_port = zmq_rpc_server_port
+        self.zmq_strategy_rpc_server_address = zmq_strategy_rpc_server_address
+        self.zmq_strategy_rpc_server_port = zmq_strategy_rpc_server_port
 
         # todo I think you can have up to 24 connections to TWS (and have multiple TWS instances running)
         # so we need to take this from single client, to multiple client
@@ -90,8 +92,7 @@ class Trader(metaclass=Singleton):
         self.contract_subscriptions: Dict[Contract, ContractSink] = {}
         # the minute-by-minute MarketData stream's we're subscribed to
         self.market_data_subscriptions: Dict[SecurityDefinition, SecurityDataStream] = {}
-        # the strategies we're using
-        # self.strategies: List[Strategy] = []
+
         # current order book (outstanding orders, trades etc)
         self.book: BookSubject = BookSubject()
         # portfolio (current and past positions)
@@ -110,6 +111,7 @@ class Trader(metaclass=Singleton):
         self.zmq_pubsub_contracts: Dict[int, Observable[IBAIORxError]] = {}
         self.zmq_pubsub_contract_filters: Dict[int, bool] = {}
         self.zmq_pubsub_contract_subscription: DisposableBase = Disposable()
+
         self.startup_time: dt.datetime = dt.datetime.now()
         self.last_connect_time: dt.datetime
         self.load_test: bool = False
@@ -170,7 +172,7 @@ class Trader(metaclass=Singleton):
 
             self.run(self.zmq_rpc_server.serve())
         except Exception as ex:
-            raise self.create_trader_exception(TraderConnectionException, message='connect() exception', inner=ex)
+            raise self.create_trader_exception(TraderConnectionException, message='trading_runtime connect() exception', inner=ex)
 
     async def shutdown(self):
         logging.debug('trading_runtime.shutdown()')

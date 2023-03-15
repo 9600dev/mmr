@@ -4,23 +4,25 @@ from ib_insync.ticker import Ticker
 from reactivex.observer import AutoDetachObserver
 from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.listener_helpers import Helpers
-from trader.common.logging_helper import setup_logging
+from trader.common.logging_helper import get_callstack, setup_logging
 from trader.common.singleton import Singleton
 from trader.data.data_access import TickStorage
 from trader.data.universe import UniverseAccessor
 from trader.listeners.ib_history_worker import IBHistoryWorker
-from trader.messaging.clientserver import RemotedClient, TopicPubSub
+from trader.messaging.clientserver import MultithreadedTopicPubSub, RemotedClient, RPCServer, TopicPubSub
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.objects import Action, BarSize, WhatToShow
-from trader.trading.strategy import Strategy
+from trader.trading.strategy import Strategy, StrategyState
 from typing import cast, Dict, List, Optional
 
 import asyncio
+import backoff
 import datetime as dt
 import importlib
 import inspect
 import os
 import pandas as pd
+import trader.messaging.strategy_service_api as bus
 import yaml
 
 
@@ -45,6 +47,8 @@ class StrategyRuntime(metaclass=Singleton):
         zmq_pubsub_server_port: int,
         zmq_rpc_server_address: str,
         zmq_rpc_server_port: int,
+        zmq_strategy_rpc_server_address: str,
+        zmq_strategy_rpc_server_port: int,
         strategies_directory: str,
         strategy_config_file: str,
         paper_trading: bool = False,
@@ -61,20 +65,86 @@ class StrategyRuntime(metaclass=Singleton):
         self.zmq_pubsub_server_port = zmq_pubsub_server_port
         self.zmq_rpc_server_address = zmq_rpc_server_address
         self.zmq_rpc_server_port = zmq_rpc_server_port
+        self.zmq_strategy_rpc_server_address = zmq_strategy_rpc_server_address
+        self.zmq_strategy_rpc_server_port = zmq_strategy_rpc_server_port
         self.strategies_directory = strategies_directory
         self.strategy_config_file = strategy_config_file
+        self.startup_time: dt.datetime = dt.datetime.now()
+        self.last_connect_time: dt.datetime
 
+        self.zmq_strategy_rpc_server: RPCServer[bus.StrategyServiceApi]
         # todo: this is wrong as we'll have a whole bunch of different tickdata libraries for
         # different bartypes etc.
-        self.storage: TickStorage = TickStorage(self.arctic_server_address)
+        self.storage: TickStorage
 
-        self.accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
-        self.remoted_client = RemotedClient[TraderServiceApi](error_table=error_table)
+        self.accessor: UniverseAccessor
+        self.remoted_client: RemotedClient[TraderServiceApi]
+
         self.strategies: Dict[int, List[Strategy]] = {}
         self.strategy_implementations: List[Strategy] = []
         self.streams: Dict[int, pd.DataFrame] = {}
 
         self.historical_data_client: IBHistoryWorker
+
+    def create_strategy_exception(self, exception_type: type, message: str, inner: Optional[Exception]):
+        # todo use reflection here to automatically populate trader runtime vars that we care about
+        # given a particular exception type
+        data = self.storage if hasattr(self, 'data') else None
+        last_connect_time = self.last_connect_time if hasattr(self, 'last_connect_time') else dt.datetime.min
+
+        exception = exception_type(
+            message,
+            data is not None,
+            False,
+            self.startup_time,
+            last_connect_time,
+            inner,
+            get_callstack(10)
+        )
+        logging.exception(exception)
+        return exception
+
+    @backoff.on_exception(backoff.expo, ConnectionRefusedError, max_tries=10, max_time=120)
+    def connect(self):
+        try:
+            self.storage = TickStorage(self.arctic_server_address)
+            self.universe_accessor = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
+            self.remoted_client = RemotedClient[TraderServiceApi](error_table=error_table)
+            self.last_connect_time = dt.datetime.now()
+
+            self.zmq_strategy_rpc_server = RPCServer[bus.StrategyServiceApi](
+                instance=bus.StrategyServiceApi(self),
+                zmq_rpc_server_address=self.zmq_strategy_rpc_server_address,
+                zmq_rpc_server_port=self.zmq_strategy_rpc_server_port,
+            )
+
+            asyncio.run(self.zmq_strategy_rpc_server.serve())
+        except Exception as ex:
+            raise self.create_strategy_exception(TraderConnectionException, message='strategy_runtime.connect() exception', inner=ex)
+
+    def enable_strategy(self, name: str) -> StrategyState:
+        for strategy in self.strategy_implementations:
+            if strategy.name == name:
+                return strategy.enable()
+        return StrategyState.ERROR
+
+    def disable_strategy(self, name: str) -> StrategyState:
+        for strategy in self.strategy_implementations:
+            if strategy.name == name:
+                return strategy.disable()
+        return StrategyState.ERROR
+
+    def get_strategy(self, name: str) -> Optional[Strategy]:
+        for strategy in self.strategy_implementations:
+            if strategy.name == name:
+                return strategy
+        return None
+
+    def get_enabled_strategies(self, conid: int) -> List[Strategy]:
+        if conid in self.strategies:
+            return [strategy for strategy in self.strategies[conid]
+                    if strategy.state == StrategyState.RUNNING or strategy.state == StrategyState.WAITING_HISTORICAL_DATA]
+        return []
 
     def load_strategies(self):
         for root, dirs, files in os.walk(self.strategies_directory):
@@ -94,14 +164,19 @@ class StrategyRuntime(metaclass=Singleton):
                             self.strategy_implementations.append(cast(Strategy, instance))
 
                             # logic to install and download data for the strategy
-                            if instance.install(self):
-                                instance.enable()
+                            # todo: once bugs are out, automatically enable strategies
+                            instance.install(self)
+                            # instance.enable()
 
                 except Exception as ex:
                     logging.debug(ex)
 
-    def on_next(self, ticker: Ticker):
-        logging.debug('StrategyRuntime.on_next()')
+    def on_ticker_next(self, ticker: Ticker):
+        if ticker.contract:
+            logging.debug('StrategyRuntime.on_ticker_next({} {})'.format(ticker.contract.symbol, ticker.contract.conId))
+        else:
+            logging.debug('StrategyRuntime.on_ticker_next()')
+
         conId = 0
 
         if not ticker.contract:
@@ -117,24 +192,18 @@ class StrategyRuntime(metaclass=Singleton):
             result = pd.concat([self.streams[conId], Helpers.df(ticker)], axis=0, copy=False)
             self.streams[conId] = result
 
-        def __get_strategies(conId: int) -> List[Strategy]:
-            if conId in self.strategies:
-                return self.strategies[conId]
-            else:
-                return []
-
         # execute the strategies attached to the conId's
-        for strategy in __get_strategies(conId):
+        for strategy in self.get_enabled_strategies(conId):
             signal = strategy.on_next(self.streams[conId])
             if signal and signal.action == Action.BUY:
                 logging.info('BUY action')
             elif signal and signal.action == Action.SELL:
                 logging.info('SELL action')
 
-    def on_error(self, ex: Exception):
+    def on_ticker_error(self, ex: Exception):
         logging.debug('StrategyRuntime.on_error')
 
-    def on_completed(self):
+    def on_ticker_completed(self):
         logging.debug('StrategyRuntime.on_completed')
 
     def subscribe(self, strategy: Strategy, contract: Contract) -> None:
@@ -250,7 +319,11 @@ class StrategyRuntime(metaclass=Singleton):
 
         logging.debug('subscribing to tick stream')
         observable = await self.zmq_subscriber.subscriber('ticker')
-        self.observer = AutoDetachObserver(on_next=self.on_next, on_error=self.on_error, on_completed=self.on_completed)
+        self.observer = AutoDetachObserver(
+            on_next=self.on_ticker_next,
+            on_error=self.on_ticker_error,
+            on_completed=self.on_ticker_completed
+        )
         self.subscription = observable.subscribe(self.observer)
 
         logging.debug('loading {} config file'.format(self.strategy_config_file))
@@ -266,12 +339,12 @@ class StrategyRuntime(metaclass=Singleton):
                 self.subscribe_universe(strategy, strategy.universe)
 
         logging.debug('starting connection to IB for historical data')
-        client = IB()
+
         self.historical_data_client = IBHistoryWorker(
             self.ib_server_address,
             self.ib_server_port,
             self.strategy_runtime_ib_client_id + 1,
         )
-        await self.historical_data_client.connect()
+        self.historical_data_client.connect()
         await self.get_historical_data()
 

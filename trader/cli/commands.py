@@ -1037,18 +1037,7 @@ def strategy():
 
 @strategy.command('list')
 def strategy_list():
-    trades = remoted_client.rpc(return_type=dict[int, list[Trade]]).get_trades()
-    columns = [
-        'symbol', 'primaryExchange', 'currency', 'orderId',
-        'action', 'status', 'orderType', 'lmtPrice', 'totalQuantity'
-    ]
-    table = []
-    for trade_id, trade_list in trades.items():
-        table.append(DictHelper[str, str].dict_from_object(trade_list[0], columns))
-    if table:
-        renderer.rich_table(table)
-    else:
-        renderer.rich_empty_table(message='no strategies found')
+    renderer.rich_empty_table(message='not implemented')
 
 
 @strategy.command('enable')

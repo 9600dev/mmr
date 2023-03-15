@@ -505,10 +505,8 @@ class AsyncCli(App):
         daily_pnl_sum = df['dailyPNL'].sum()
         unrealized_pnl = df['unrealizedPNL'].sum()
         realized_pnl = df['realizedPNL'].sum()
-        asyncio.run(
-            self.custom_footer.post_message(
-                CustomFooter.FooterMessage(self, daily_pnl_sum, unrealized_pnl, realized_pnl)
-            )
+        self.custom_footer.post_message(
+            CustomFooter.FooterMessage(daily_pnl_sum, unrealized_pnl, realized_pnl)
         )
 
     def render_book(self) -> None:
@@ -530,7 +528,7 @@ class AsyncCli(App):
             self.text_log.write(f'Could not resolve conid: {conid}')
 
     def on_tui_message(self, event: TuiRenderer.TuiMessage) -> None:
-        if event.sender == self.data_table:
+        if event.table == self.data_table:
             container = Container(self.data_table)
             self.replace_top_panel(container)
 

@@ -3882,25 +3882,22 @@ test = ["pre-commit", "pytest (>=6.0)", "pytest-timeout"]
 
 [[package]]
 name = "textual"
-version = "0.11.1"
+version = "0.15.1"
 description = "Modern Text User Interface framework"
 category = "main"
 optional = false
 python-versions = ">=3.7,<4.0"
 files = [
-    {file = "textual-0.11.1-py3-none-any.whl", hash = "sha256:77afbb64caa136fdc568ee43601fd5a1a94f13bb7e057c95dc8ee5dfa3f3083b"},
-    {file = "textual-0.11.1.tar.gz", hash = "sha256:9b027853b686ac9561a3dc6f2b637a25089f2ee67a9e37bbf39d0da7567694b0"},
+    {file = "textual-0.15.1-py3-none-any.whl", hash = "sha256:be79dd8d7f3f5b5c40893da4d5d8228e54c5c9f7b844abfb0e8a13ce2b3a7930"},
+    {file = "textual-0.15.1.tar.gz", hash = "sha256:b86d4668a072fc85092f081e157e1e7575b353b2f6b728755752bbbe23123063"},
 ]
 
 [package.dependencies]
-aiohttp = {version = ">=3.8.1", optional = true, markers = "extra == \"dev\""}
-click = {version = ">=8.1.2", optional = true, markers = "extra == \"dev\""}
 importlib-metadata = ">=4.11.3,<5.0.0"
 markdown-it-py = {version = ">=2.1.0,<3.0.0", extras = ["linkify", "plugins"]}
 mkdocs-exclude = ">=1.0.2,<2.0.0"
-msgpack = {version = ">=1.0.3", optional = true, markers = "extra == \"dev\""}
 rich = ">12.6.0"
-typing-extensions = ">=4.0.0,<5.0.0"
+typing-extensions = ">=4.4.0,<5.0.0"
 
 [package.extras]
 dev = ["aiohttp (>=3.8.1)", "click (>=8.1.2)", "msgpack (>=1.0.3)"]
@@ -4112,14 +4109,14 @@ files = [
 
 [[package]]
 name = "typing-extensions"
-version = "4.2.0"
+version = "4.5.0"
 description = "Backported and Experimental Type Hints for Python 3.7+"
 category = "main"
 optional = false
 python-versions = ">=3.7"
 files = [
-    {file = "typing_extensions-4.2.0-py3-none-any.whl", hash = "sha256:6657594ee297170d19f67d55c05852a874e7eb634f4f753dbd667855e07c1708"},
-    {file = "typing_extensions-4.2.0.tar.gz", hash = "sha256:f1c24655a0da0d1b67f07e17a5e6b2a105894e6824b92096378bb3668ef02376"},
+    {file = "typing_extensions-4.5.0-py3-none-any.whl", hash = "sha256:fb33085c39dd998ac16d1431ebc293a8b3eedd00fd4a32de0ff79002c19511b4"},
+    {file = "typing_extensions-4.5.0.tar.gz", hash = "sha256:5cb5f4a79139d699607b3ef622a1dedafa84e115ab0024e0d9c044a9479ca7cb"},
 ]
 
 [[package]]
@@ -4629,4 +4626,4 @@ testing = ["flake8 (<5)", "func-timeout", "jaraco.functools", "jaraco.itertools"
 [metadata]
 lock-version = "2.0"
 python-versions = "3.9.5"
-content-hash = "615a51565e7b55fe44df3183350aa7bda32143f000fc586ef5e127a383c7c304"
+content-hash = "180a5cbbeddb0deb7a12cf057e551ce9bfa2ee991fa981e32cb1597fec9ce77c"

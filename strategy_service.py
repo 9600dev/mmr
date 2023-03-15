@@ -55,6 +55,11 @@ def main(simulation: bool,
         # run stuff here.
         container = Container(config)
         strategy_runtime = container.resolve(StrategyRuntime)
+
+        # connect the runtime to all the services
+        strategy_runtime.connect()
+
+        # enter run loop
         asyncio.get_event_loop().create_task(strategy_runtime.run())
         asyncio.get_event_loop().run_forever()
     except KeyboardInterrupt:

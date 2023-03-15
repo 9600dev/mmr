@@ -174,7 +174,7 @@ class ReplInput(Widget, can_focus=True):
     async def watch_value(self, value: str) -> None:
         if self.styles.auto_dimensions:
             self.refresh(layout=True)
-        await self.post_message(self.Changed(self, value))
+        self.post_message(self.Changed(self, value))
 
     @property
     def cursor_width(self) -> int:
@@ -323,8 +323,8 @@ class ReplInput(Widget, can_focus=True):
             self.value = f"{before}{after}"
             self.cursor_position = delete_position
 
-    async def action_submit(self) -> None:
-        await self.post_message(self.Submitted(self, self.value))
+    def action_submit(self) -> None:
+        self.post_message(self.Submitted(self, self.value))
 
     class Changed(Message, bubble=True):
         """Value was changed.
@@ -335,7 +335,7 @@ class ReplInput(Widget, can_focus=True):
         """
 
         def __init__(self, sender: ReplInput, value: str) -> None:
-            super().__init__(sender)
+            super().__init__()
             self.value: str = value
             self.input: ReplInput = sender
 
@@ -348,6 +348,6 @@ class ReplInput(Widget, can_focus=True):
         """
 
         def __init__(self, sender: ReplInput, value: str) -> None:
-            super().__init__(sender)
+            super().__init__()
             self.value: str = value
             self.input: ReplInput = sender

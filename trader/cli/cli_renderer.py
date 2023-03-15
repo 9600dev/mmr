@@ -191,8 +191,11 @@ class TuiRenderer(CliRenderer):
         self.table = table
 
     class TuiMessage(Message, bubble=True):
-        def __init__(self, sender) -> None:
-            super().__init__(sender)
+        def __init__(self, table, message) -> None:
+            super().__init__()
+            # todo clearly wrong
+            self.message = message
+            self.table = table
 
     def set_table(self, table: DataTable):
         self.table = table
@@ -201,7 +204,7 @@ class TuiRenderer(CliRenderer):
         self.table.clear(columns=True)
 
     def focus(self):
-        self.table.post_message_no_wait(TuiRenderer.TuiMessage(sender=self.table))
+        self.table.post_message(TuiRenderer.TuiMessage(message='focus', table=self.table))
 
     def rich_json(self, json_str: str):
         try:
@@ -228,8 +231,8 @@ class TuiRenderer(CliRenderer):
             self.clear()
 
         df = cast(pd.DataFrame, df)
-        df.replace('', np.nan, inplace=True)
-        df.dropna(axis=1, inplace=True)
+        df.dropna(axis=1, inplace=True, how='all')
+        df.fillna(0.0, inplace=True)
 
         if financial:
             locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
