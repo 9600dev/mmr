@@ -139,7 +139,8 @@ class PlotextMixin(JupyterMixin, Widget):
 
     def ticker(self, ticker: Ticker):
         if ticker.contract and ticker.contract.conId == self.filter:
-            self.y_values.append(ticker.last)
+            last = ticker.last if ticker.last >= 0.0 else ticker.close
+            self.y_values.append(last)
             canvas = self.make_plot(range(0, len(self.y_values)), self.y_values, self.width, self.height)
             self.rich_canvas = Group(*self.decoder.decode(canvas))
 
@@ -547,7 +548,9 @@ class AsyncCli(App):
     async def ticker_listen(self):
         def on_next(ticker: Ticker):
             symbol = ticker.contract.symbol if ticker.contract else ''
-            self.text_log.write('{} {} {}'.format(dt.datetime.now().strftime('%H:%M:%S'), symbol, ticker.last))
+            last = ticker.last if ticker.last >= 0.0 else ticker.close
+
+            self.text_log.write('{} {} {}'.format(dt.datetime.now().strftime('%H:%M:%S'), symbol, last))
             self.plot.ticker(ticker)
             self.plot_static.refresh(repaint=True, layout=True)
 

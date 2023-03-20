@@ -109,6 +109,9 @@ def scrape_product_page(exchange: str, url: str) -> Tuple[List[IBInstrument], st
     if 'FUTGRP' in sec_type:
         sec_type = 'FUT'
 
+    if exchange == 'IDEALPRO' or 'FX' in sec_type:
+        sec_type = 'CASH'
+
     # we seem to get pacing violations pretty easily for warrants -- potentially
     # ignore them?
 

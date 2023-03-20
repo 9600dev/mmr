@@ -23,6 +23,47 @@ from typing import cast, List, Optional, Union
 
 logging = setup_logging(module_name='cli')
 
+
+def build_and_load_ib_single(
+    market: str,
+    url: str,
+    ib_server_address: str,
+    ib_server_port: int,
+    ib_client_id: int,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+):
+    accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
+    with (IBAIORx(ib_server_address, ib_server_port, ib_client_id)) as client:
+        resolver = IBResolver(client)
+        universe: Optional[Universe] = None
+
+        instruments: List[IBInstrument] = []
+        logging.debug('build_and_load_ib_single() {}'.format(url))
+        instruments = scrape_products(market, url)
+
+        universe = accessor.get(market)
+
+        for instrument in instruments:
+            if (
+                not universe.find_contract(instrument.to_contract())
+                # we don't do warrants yet
+                and instrument.secType != 'WAR'
+            ):
+                contract_details = asyncio.run(resolver.resolve_contract(instrument.to_contract()))
+                if contract_details:
+                    click.echo('adding instrument {} to universe {}'.format(instrument, market))
+                    universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details))
+            else:
+                logging.debug('instrument {} already found in a universe {}'.format(instrument, market))
+
+        # update the universe
+        accessor.update(universe)
+        # weird bug where universe.security_definitions was keeping the previous list object around
+        # after calling accessor.get(). bizaare
+        universe = None
+
+
 def build_and_load_ib(
     ib_server_address: str,
     ib_server_port: int,
@@ -45,38 +86,14 @@ def build_and_load_ib(
         'NYBOT': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=nybot&showcategories=OPTGRP',
         'ICEUS': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=iceus&showcategories=FUTGRP',
         'CBOE': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=cboe&showcategories=ETF',
+
+        # currencies
+        'IDEALPRO': 'https://www.interactivebrokers.com/en/index.php?f=2222&exch=ibfxpro&showcategories=FX',
     }
 
-    accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
-    with (IBAIORx(ib_server_address, ib_server_port, ib_client_id)) as client:
-        resolver = IBResolver(client)
-        universe: Optional[Universe] = None
+    for market, url in product_pages.items():
+        build_and_load_ib_single(market, url, ib_server_address, ib_server_port, ib_client_id, arctic_server_address, arctic_universe_library)
 
-        for market, url in product_pages.items():
-            instruments: List[IBInstrument] = []
-            logging.debug('scrape_products() {}'.format(url))
-            instruments = scrape_products(market, url)
-
-            universe = accessor.get(market)
-
-            for instrument in instruments:
-                if (
-                    not universe.find_contract(instrument.to_contract())
-                    # we don't do warrants yet
-                    and instrument.secType != 'WAR'
-                ):
-                    contract_details = asyncio.run(resolver.resolve_contract(instrument.to_contract()))
-                    if contract_details:
-                        click.echo('adding instrument {} to universe {}'.format(instrument, market))
-                        universe.security_definitions.append(SecurityDefinition.from_contract_details(contract_details))
-                else:
-                    logging.debug('instrument {} already found in a universe {}'.format(instrument, market))
-
-            # update the universe
-            accessor.update(universe)
-            # weird bug where universe.security_definitions was keeping the previous list object around
-            # after calling accessor.get(). bizaare
-            universe = None
 
 
 @cli.command()
