@@ -35,7 +35,7 @@ def setup_logging(default_path='/home/trader/mmr/configs/logging.yaml',
     global global_loggers
 
     # rich tracebacks
-    install(show_locals=True)
+    # install(show_locals=False)
 
     # ipython repl has a nasty habit of being polluted with debug crap from parso
     logging.getLogger('parso.python.diff').setLevel(logging.WARNING)

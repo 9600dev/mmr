@@ -43,6 +43,11 @@ class SecurityDefinition:
     secType: str
     primaryExchange: str
     currency: str
+    tradingClass: str
+    includeExpired: bool
+    secIdType: str
+    secId: str
+    description: str
     minTick: float
     orderTypes: str
     validExchanges: str
@@ -54,11 +59,14 @@ class SecurityDefinition:
     timeZoneId: str
     liquidHours: str
     stockType: str
+    minSize: float
+    sizeIncrement: float
+    suggestedSizeIncrement: float
     bondType: str
     couponType: str
     callable: bool
     putable: bool
-    coupon: int
+    coupon: float
     convertable: bool
     maturity: str
     issueDate: str
@@ -75,9 +83,14 @@ class SecurityDefinition:
             symbol=d.contract.symbol if d.contract else '',
             exchange=d.contract.exchange if d.contract else '',
             conId=d.contract.conId if d.contract else -1,
-            secType=d.contract.secIdType if d.contract else '',
+            secType=d.contract.secType if d.contract else '',
             primaryExchange=d.contract.primaryExchange if d.contract else '',
             currency=d.contract.currency if d.contract else '',
+            tradingClass=d.contract.tradingClass if d.contract else '',
+            includeExpired=d.contract.includeExpired if d.contract else False,
+            secIdType=d.contract.secIdType if d.contract else '',
+            secId=d.contract.secId if d.contract else '',
+            description=d.contract.description if d.contract else '',
             minTick=d.minTick,
             orderTypes=d.orderTypes,
             validExchanges=d.validExchanges,
@@ -89,6 +102,9 @@ class SecurityDefinition:
             timeZoneId=d.timeZoneId,
             liquidHours=d.liquidHours,
             stockType=d.stockType,
+            minSize=d.minSize,
+            sizeIncrement=d.sizeIncrement,
+            suggestedSizeIncrement=d.suggestedSizeIncrement,
             bondType=d.bondType,
             couponType=d.couponType,
             callable=d.callable,
