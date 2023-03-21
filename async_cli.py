@@ -374,9 +374,10 @@ class AsyncCli(App):
     CSS_PATH = 'trader/cli/css.css'
     BINDINGS = [
         Binding('ctrl+d', 'toggle_dark', 'Toggle dark mode'),
-        Binding('ctrl+u', 'dialog', 'Dialog'),
+        # Binding('ctrl+u', 'dialog', 'Dialog'),
         Binding('ctrl+p', 'plot', 'Plot'),
         Binding('ctrl+b', 'book', 'Book'),
+        Binding('ctrl+s', 'strategy', 'Strategies'),
         Binding('ctrl+q', 'quit', 'Quit'),
     ]
 
@@ -387,6 +388,7 @@ class AsyncCli(App):
         self.data_table: DataTable = DataTable()
         self.portfolio_table: DataTable = DataTable()
         self.book_table: DataTable = DataTable()
+        self.strategy_table: DataTable = DataTable()
 
         self.repl_log = TextLog(id='text-box', highlight=False, wrap=True)
         self.text_log = TextLog(id='repl-result2', highlight=False, wrap=True)
@@ -407,6 +409,7 @@ class AsyncCli(App):
         self.left_box = Container(
             Container(self.repl_log, id='repl-log'),
             Container(self.book_table, id='book-table', classes='hidden'),
+            Container(self.strategy_table, id='strategy-table', classes='hidden'),
             id='bottom-left'
         )
 
@@ -513,6 +516,11 @@ class AsyncCli(App):
     def render_book(self) -> None:
         df = book_helper()
         TuiRenderer(self.book_table).rich_table(df, financial=True, column_key='orderId')
+
+    def render_strategies(self) -> None:
+        # df = book_helper()
+        # TuiRenderer(self.book_table).rich_table(df, financial=True, column_key='orderId')
+        pass
 
     def start_plot(self, conid: Union[int, str]) -> None:
         if type(conid) == str and str(conid).isnumeric():

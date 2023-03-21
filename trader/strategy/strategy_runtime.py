@@ -4,15 +4,14 @@ from ib_insync.ticker import Ticker
 from reactivex.observer import AutoDetachObserver
 from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.listener_helpers import Helpers
-from trader.common.logging_helper import get_callstack, setup_logging
+from trader.common.logging_helper import get_callstack, log_method, setup_logging
 from trader.common.singleton import Singleton
-from trader.data.data_access import TickStorage
+from trader.data.data_access import SecurityDefinition, TickStorage
 from trader.data.universe import UniverseAccessor
 from trader.listeners.ib_history_worker import IBHistoryWorker
 from trader.messaging.clientserver import MultithreadedTopicPubSub, RemotedClient, RPCServer, TopicPubSub
-from trader.messaging.trader_service_api import TraderServiceApi
 from trader.objects import Action, BarSize, WhatToShow
-from trader.trading.strategy import Strategy, StrategyState
+from trader.trading.strategy import Strategy, StrategyMetadata, StrategyState
 from typing import cast, Dict, List, Optional
 
 import asyncio
@@ -77,8 +76,7 @@ class StrategyRuntime(metaclass=Singleton):
         # different bartypes etc.
         self.storage: TickStorage
 
-        self.accessor: UniverseAccessor
-        self.remoted_client: RemotedClient[TraderServiceApi]
+        self.universe_accessor: UniverseAccessor
 
         self.strategies: Dict[int, List[Strategy]] = {}
         self.strategy_implementations: List[Strategy] = []
@@ -106,6 +104,8 @@ class StrategyRuntime(metaclass=Singleton):
 
     @backoff.on_exception(backoff.expo, ConnectionRefusedError, max_tries=10, max_time=120)
     def connect(self):
+        # avoids circular import
+        from trader.messaging.trader_service_api import TraderServiceApi
         try:
             self.storage = TickStorage(self.arctic_server_address)
             self.universe_accessor = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
@@ -122,30 +122,38 @@ class StrategyRuntime(metaclass=Singleton):
         except Exception as ex:
             raise self.create_strategy_exception(TraderConnectionException, message='strategy_runtime.connect() exception', inner=ex)
 
-    def enable_strategy(self, name: str) -> StrategyState:
+    @log_method
+    def enable_strategy(self, strategy: Strategy) -> StrategyState:
         for strategy in self.strategy_implementations:
-            if strategy.name == name:
+            if strategy.name == strategy.name:
                 return strategy.enable()
         return StrategyState.ERROR
 
-    def disable_strategy(self, name: str) -> StrategyState:
+    @log_method
+    def disable_strategy(self, strategy: Strategy) -> StrategyState:
         for strategy in self.strategy_implementations:
-            if strategy.name == name:
+            if strategy.name == strategy.name:
                 return strategy.disable()
         return StrategyState.ERROR
 
+    @log_method
     def get_strategy(self, name: str) -> Optional[Strategy]:
         for strategy in self.strategy_implementations:
             if strategy.name == name:
                 return strategy
         return None
 
-    def get_enabled_strategies(self, conid: int) -> List[Strategy]:
+    def __get_enabled_strategies(self, conid: int) -> List[Strategy]:
         if conid in self.strategies:
             return [strategy for strategy in self.strategies[conid]
                     if strategy.state == StrategyState.RUNNING or strategy.state == StrategyState.WAITING_HISTORICAL_DATA]
         return []
 
+    @log_method
+    def get_strategies(self) -> List[Strategy]:
+        return self.strategy_implementations
+
+    @log_method
     def load_strategies(self):
         for root, dirs, files in os.walk(self.strategies_directory):
             for file_name in files:
@@ -160,7 +168,7 @@ class StrategyRuntime(metaclass=Singleton):
                             logging.debug('found implementation of Strategy {}'.format(obj))
                             # todo: fix this
                             # here's where we need bar_size to strategy
-                            instance = obj(self.storage, self.accessor, logging)
+                            instance = obj(self.storage, self.universe_accessor, logging)
                             self.strategy_implementations.append(cast(Strategy, instance))
 
                             # logic to install and download data for the strategy
@@ -193,7 +201,7 @@ class StrategyRuntime(metaclass=Singleton):
             self.streams[conId] = result
 
         # execute the strategies attached to the conId's
-        for strategy in self.get_enabled_strategies(conId):
+        for strategy in self.__get_enabled_strategies(conId):
             signal = strategy.on_next(self.streams[conId])
             if signal and signal.action == Action.BUY:
                 logging.info('BUY action')
@@ -217,10 +225,10 @@ class StrategyRuntime(metaclass=Singleton):
 
     def subscribe_universe(self, strategy: Strategy, universe_name: str) -> None:
         logging.debug('strategy_runtime.subscribe_universe() universe: {} strategy: {}'.format(universe_name, strategy))
-        universe = self.accessor.get(universe_name)
+        universe = self.universe_accessor.get(universe_name)
 
         for security in universe.security_definitions:
-            self.subscribe(strategy, Contract(conId=security.conId))
+            self.subscribe(strategy, SecurityDefinition.to_contract(security))
 
     def load_strategy(
         self,
@@ -246,7 +254,7 @@ class StrategyRuntime(metaclass=Singleton):
 
                     # todo: fix this
                     # here's where we need bar_size to strategy
-                    instance = obj(self.storage, self.accessor, logging)
+                    instance = obj(self.storage, self.universe_accessor, logging)
                     instance.name = name
                     instance.bar_size = BarSize.parse_str(bar_size_str)
                     instance.description = description
@@ -295,7 +303,7 @@ class StrategyRuntime(metaclass=Singleton):
                     )
 
             if strategy.universe:
-                conids = [x.conId for x in self.accessor.get(strategy.universe).security_definitions]
+                conids = [x.conId for x in self.universe_accessor.get(strategy.universe).security_definitions]
                 for conId in conids:
                     await self.historical_data_client.get_contract_history(
                         security=Contract(conId=conId),

@@ -10,10 +10,9 @@ from trader.common.reactivex import SuccessFail, SuccessFailEnum
 from trader.data.data_access import PortfolioSummary, SecurityDefinition
 from trader.data.universe import Universe
 from trader.messaging.clientserver import RPCHandler
-from trader.trading.strategy import Strategy, StrategyState
+from trader.trading.strategy import Strategy, StrategyMetadata, StrategyState
 from typing import Dict, List, Optional, Tuple, Union
 
-import asyncio
 import trader.strategy.strategy_runtime as runtime
 
 
@@ -24,23 +23,32 @@ class StrategyServiceApi(RPCHandler):
     def __init__(self, strategy_runtime):
         self.strategy: runtime.StrategyRuntime = strategy_runtime
 
-    # json can't encode Dict's with keys that aren't primitive and hashable
-    # so we often have to convert to weird containers like List[Tuple]
     @RPCHandler.rpcmethod
-    def enable_strategy(self, name: str) -> StrategyState:
-        return self.strategy.enable_strategy(name)
+    def enable_strategy(self, strategy_meta: StrategyMetadata) -> SuccessFail[StrategyState]:
+        try:
+            # find the strategy
+            strategy = self.strategy.get_strategy(strategy_meta.name)
+            if strategy:
+                state = self.strategy.enable_strategy(strategy)
+                return SuccessFail.success(state)
+            else:
+                return SuccessFail.fail(error='Strategy not found or error')
+        except Exception as ex:
+            return SuccessFail.fail(exception=ex)
 
     @RPCHandler.rpcmethod
-    def disable_strategy(self, name: str) -> StrategyState:
-        return self.strategy.disable_strategy(name)
+    def disable_strategy(self, strategy_meta: StrategyMetadata) -> SuccessFail[StrategyState]:
+        try:
+            # find the strategy
+            strategy = self.strategy.get_strategy(strategy_meta.name)
+            if strategy:
+                state = self.strategy.enable_strategy(strategy)
+                return SuccessFail.success(obj=state)
+            else:
+                return SuccessFail.fail(error='Strategy not found or error')
+        except Exception as ex:
+            return SuccessFail.fail(exception=ex)
 
     @RPCHandler.rpcmethod
-    def list_strategies(self) -> Dict[str, List[int]]:
-        result: Dict[str, List[int]] = {}
-        for conid, strategy_list in self.strategy.strategies.items():
-            for strategy in strategy_list:
-                if strategy.name in result:
-                    result[strategy.name].append(conid)
-                else:
-                    result[strategy.name] = [conid]
-        return result
+    def get_strategies(self) -> List[StrategyMetadata]:
+        return [StrategyMetadata.from_strategy(strategy) for strategy in self.strategy.get_strategies()]

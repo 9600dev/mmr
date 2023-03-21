@@ -121,6 +121,19 @@ class SecurityDefinition:
             industry=d.industry,
         )
 
+    @staticmethod
+    def to_contract(definition: Union['SecurityDefinition', Contract]) -> Contract:
+        if isinstance(definition, SecurityDefinition):
+            contract = Contract(secType=definition.secType, conId=definition.conId, symbol=definition.symbol,
+                                currency=definition.currency, exchange=definition.exchange,
+                                primaryExchange=definition.primaryExchange)
+            return contract
+        elif isinstance(definition, Contract):
+            return definition
+        else:
+            raise ValueError('unable to cast type to Contract')
+
+
 
 @dataclass(eq=True, frozen=True)
 class MMRBarData():

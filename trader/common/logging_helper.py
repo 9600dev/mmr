@@ -1,4 +1,5 @@
 from enum import IntEnum
+from functools import wraps
 from logging import Logger
 from rich.logging import RichHandler
 from rich.traceback import install
@@ -120,3 +121,15 @@ def log_callstack_debug(frames: int = 0, module_filter: str = ''):
             callstack = [a for a in callstack if module_filter in a]
         result = ' <- '.join(callstack)
         logging.debug(result)
+
+def log_method(func):
+    global logging
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        func_args = inspect.signature(func).bind(*args, **kwargs).arguments
+        func_args_str = ", ".join(map("{0[0]} = {0[1]!r}".format, func_args.items()))
+        logging.debug(f"{func.__module__}.{func.__qualname__} ( {func_args_str} )")
+        return func(*args, **kwargs)
+
+    return wrapper

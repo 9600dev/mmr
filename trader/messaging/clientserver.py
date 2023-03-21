@@ -212,8 +212,8 @@ class _Handler(RPCHandler, Generic[T]):
 class TopicPubSub(Generic[T]):
     def __init__(
         self,
-        zmq_pubsub_server_address: str = 'tcp://127.0.0.1',
-        zmq_pubsub_server_port: int = 42002,
+        zmq_pubsub_server_address: str,
+        zmq_pubsub_server_port: int,
         translation_table: Dict[int, Tuple[Any, partial[Any], Callable]] = translation_table,  # type: ignore
     ):
         nest_asyncio.apply()
@@ -256,14 +256,18 @@ class TopicPubSub(Generic[T]):
         obj: T,
         topic: str = 'default'
     ):
-        if not self.zmq_publisher:
-            self.zmq_publisher = await aiozmq.rpc.connect_pubsub(
-                # connect='{}:{}'.format(self.zmq_server_address, self.zmq_server_port),
-                bind='{}:{}'.format(self.zmq_server_address, self.zmq_server_port),
-                translation_table=self.translation_table
-            )  # type: ignore
-
-        await self.zmq_publisher.publish(topic).on_message(obj)
+        try:
+            if not self.zmq_publisher:
+                logging.debug(f'clientserver.publisher() self.zmq_server_address: {self.zmq_server_address}, self.zmq_server_port: {self.zmq_server_port}')
+                self.zmq_publisher = await aiozmq.rpc.connect_pubsub(
+                    # connect='{}:{}'.format(self.zmq_server_address, self.zmq_server_port),
+                    bind='{}:{}'.format(self.zmq_server_address, self.zmq_server_port),
+                    translation_table=self.translation_table
+                )  # type: ignore
+            await self.zmq_publisher.publish(topic).on_message(obj)
+        except Exception as e:
+            logging.exception(e)
+            logging.debug(f'self.zmq_server_address: {self.zmq_server_address}, self.zmq_server_port: {self.zmq_server_port}')
 
     async def publisher_close(self):
         if self.zmq_publisher:
@@ -275,8 +279,8 @@ class TopicPubSub(Generic[T]):
 class MultithreadedTopicPubSub(Generic[T], TopicPubSub[T]):
     def __init__(
         self,
-        zmq_pubsub_server_address: str = 'tcp://127.0.0.1',
-        zmq_pubsub_server_port: int = 42002,
+        zmq_pubsub_server_address: str,
+        zmq_pubsub_server_port: int,
         translation_table: Dict[int, Tuple[Any, partial[Any], Callable]] = translation_table,  # type: ignore
     ):
         super().__init__(
@@ -317,6 +321,15 @@ class MultithreadedTopicPubSub(Generic[T], TopicPubSub[T]):
         logging.debug('starting _publisher_loop')
         self.wait_handle = threading.Event()
 
+        # race condition above, make sure we start the publisher here
+        if not self.zmq_publisher:
+            logging.debug(f'clientserver.publisher() self.zmq_server_address: {self.zmq_server_address}, self.zmq_server_port: {self.zmq_server_port}')
+            self.zmq_publisher = asyncio.get_event_loop().run_until_complete(aiozmq.rpc.connect_pubsub(
+                # connect='{}:{}'.format(self.zmq_server_address, self.zmq_server_port),
+                bind='{}:{}'.format(self.zmq_server_address, self.zmq_server_port),
+                translation_table=self.translation_table
+            ))  # type: ignore
+
         th = threading.Thread(target=self._publisher_loop, args=(self.wait_handle,))
         th.start()
         self.wait_handle.wait()
@@ -330,8 +343,8 @@ class RPCServer(Generic[T]):
     def __init__(
         self,
         instance: T,
-        zmq_rpc_server_address: str = 'tcp://127.0.0.1',
-        zmq_rpc_server_port: int = 42001,
+        zmq_rpc_server_address: str,
+        zmq_rpc_server_port: int,
         translation_table: Dict[int, Tuple[Any, partial[Any], Callable]] = translation_table  # type: ignore
     ):
 
@@ -358,8 +371,8 @@ class RPCServer(Generic[T]):
 class RemotedClient(Generic[T]):
     def __init__(
         self,
-        zmq_server_address: str = 'tcp://127.0.0.1',
-        zmq_server_port: int = 42001,
+        zmq_server_address: str,
+        zmq_server_port: int,
         translation_table: Dict[int, Tuple[Any, partial[Any], Callable]] = translation_table,  # type: ignore
         timeout: Optional[int] = None,
         error_table: Optional[Dict[str, Exception]] = None,

@@ -10,6 +10,7 @@ from trader.common.reactivex import SuccessFail, SuccessFailEnum
 from trader.data.data_access import PortfolioSummary, SecurityDefinition
 from trader.data.universe import Universe
 from trader.messaging.clientserver import RPCHandler
+from trader.trading.strategy import StrategyMetadata, StrategyState
 from typing import List, Optional, Tuple, Union
 
 import asyncio
@@ -63,7 +64,7 @@ class TraderServiceApi(RPCHandler):
         market_order: bool = False,
         stop_loss_percentage: float = 0.0,
         debug: bool = False,
-    ) -> SuccessFail:
+    ) -> SuccessFail[Trade]:
         # todo: we'll have to make the cli async so we can subscribe to the trade
         # changes as orders get hit etc
         logging.warn('place_order() is not complete, your mileage may vary')
@@ -78,12 +79,12 @@ class TraderServiceApi(RPCHandler):
 
         def on_next(trade: Trade):
             nonlocal result
-            result = SuccessFail(success_fail=SuccessFailEnum.SUCCESS, obj=trade)
+            result = SuccessFail.success(obj=trade)
             task.set()
 
         def on_error(ex):
             nonlocal result
-            result = SuccessFail(success_fail=SuccessFailEnum.FAIL, exception=ex)
+            result = SuccessFail.fail(exception=ex)
 
         def on_completed():
             pass
@@ -106,11 +107,15 @@ class TraderServiceApi(RPCHandler):
 
         loop.run_until_complete(task.wait())
         disposable.dispose()
-        return result if result else SuccessFail(SuccessFailEnum.FAIL)
+        return result if result else SuccessFail.fail()
 
     @RPCHandler.rpcmethod
-    def cancel_order(self, order_id: int) -> Optional[Trade]:
-        return self.trader.cancel_order(order_id)
+    def cancel_order(self, order_id: int) -> SuccessFail[Trade]:
+        order = self.trader.cancel_order(order_id)
+        if order:
+            return SuccessFail.success(order)
+        else:
+            return SuccessFail.fail()
 
     @RPCHandler.rpcmethod
     def get_snapshot(self, contract: Contract, delayed: bool) -> Ticker:
@@ -138,6 +143,18 @@ class TraderServiceApi(RPCHandler):
     def release_client_id(self, client_id: int) -> bool:
         self.trader.release_client_id(client_id)
         return True
+
+    @RPCHandler.rpcmethod
+    def get_strategies(self) -> SuccessFail[List[StrategyMetadata]]:
+        return self.trader.get_strategies()
+
+    @RPCHandler.rpcmethod
+    def enable_strategy(self, strategy_meta: StrategyMetadata) -> SuccessFail[StrategyState]:
+        return self.trader.enable_strategy(strategy_meta)
+
+    @RPCHandler.rpcmethod
+    def disable_strategy(self, strategy_meta: StrategyMetadata) -> SuccessFail[StrategyState]:
+        return self.trader.disable_strategy(strategy_meta)
 
     @RPCHandler.rpcmethod
     def start_load_test(self) -> int:

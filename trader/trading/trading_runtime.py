@@ -22,23 +22,25 @@ from trader.common.dataclass_cache import DataClassCache, DataClassEvent, Update
 from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.helpers import ListHelper
 from trader.common.logging_helper import get_callstack, setup_logging
+from trader.common.reactivex import SuccessFail
 from trader.common.singleton import Singleton
 from trader.data.data_access import PortfolioSummary, SecurityDefinition, TickStorage
 from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
-from trader.messaging.clientserver import MultithreadedTopicPubSub, RPCServer
+from trader.messaging.clientserver import MultithreadedTopicPubSub, RemotedClient, RPCServer
 from trader.objects import Action
 from trader.trading.book import BookSubject
 from trader.trading.executioner import TradeExecutioner
 from trader.trading.portfolio import Portfolio
-from trader.trading.strategy import Strategy
+from trader.trading.strategy import Strategy, StrategyMetadata, StrategyState
 from typing import cast, Dict, List, NamedTuple, Optional, Tuple, Union
 
 import asyncio
 import backoff
 import datetime as dt
 import threading
+import trader.messaging.strategy_service_api as strategy_bus
 import trader.messaging.trader_service_api as bus
 
 
@@ -112,6 +114,8 @@ class Trader(metaclass=Singleton):
         self.zmq_pubsub_contract_filters: Dict[int, bool] = {}
         self.zmq_pubsub_contract_subscription: DisposableBase = Disposable()
 
+        self.zmq_strategy_client: RemotedClient[strategy_bus.StrategyServiceApi]
+
         self.startup_time: dt.datetime = dt.datetime.now()
         self.last_connect_time: dt.datetime
         self.load_test: bool = False
@@ -153,7 +157,11 @@ class Trader(metaclass=Singleton):
             self.client.ib.disconnectedEvent += self.disconnected_event
             self.client.connect()
             self.last_connect_time = dt.datetime.now()
-            self.zmq_rpc_server = RPCServer[bus.TraderServiceApi](bus.TraderServiceApi(self))
+            self.zmq_rpc_server = RPCServer[bus.TraderServiceApi](
+                instance=bus.TraderServiceApi(self),
+                zmq_rpc_server_address=self.zmq_rpc_server_address,
+                zmq_rpc_server_port=self.zmq_rpc_server_port
+            )
             self.zmq_pubsub_server = MultithreadedTopicPubSub[Ticker](
                 zmq_pubsub_server_address=self.zmq_pubsub_server_address,
                 zmq_pubsub_server_port=self.zmq_pubsub_server_port
@@ -170,7 +178,16 @@ class Trader(metaclass=Singleton):
             self.zmq_pubsub_contract_filters = {}
             self.zmq_pubsub_contract_subscription = Disposable()
 
+            # connect to the strategy server
+            self.zmq_strategy_client = RemotedClient[strategy_bus.StrategyServiceApi](
+                self.zmq_strategy_rpc_server_address,
+                self.zmq_strategy_rpc_server_port,
+                timeout=5,
+            )
+
+            self.run(self.zmq_strategy_client.connect())
             self.run(self.zmq_rpc_server.serve())
+
         except Exception as ex:
             raise self.create_trader_exception(TraderConnectionException, message='trading_runtime connect() exception', inner=ex)
 
@@ -308,6 +325,29 @@ class Trader(metaclass=Singleton):
     async def disconnected_event(self):
         logging.debug('disconnected_event')
         self.connect()
+
+    def enable_strategy(self, strategy_meta: StrategyMetadata) -> SuccessFail[StrategyState]:
+        logging.debug('enable_strategy: {}'.format(strategy_meta))
+        try:
+            return self.zmq_strategy_client.rpc().enable_strategy(strategy_meta)
+        except Exception as ex:
+            logging.error('enable_strategy: {}'.format(ex))
+            return SuccessFail.fail(exception=ex)
+
+    def disable_strategy(self, strategy_meta: StrategyMetadata) -> SuccessFail[StrategyState]:
+        logging.debug('disable_strategy: {}'.format(strategy_meta))
+        try:
+            return self.zmq_strategy_client.rpc().disable_strategy(strategy_meta)
+        except Exception as ex:
+            logging.error('disable_strategy: {}'.format(ex))
+            return SuccessFail.fail(exception=ex)
+
+    def get_strategies(self) -> SuccessFail[List[StrategyMetadata]]:
+        logging.debug('get_strategies()')
+        try:
+            return SuccessFail.success(obj=self.zmq_strategy_client.rpc().get_strategies())
+        except Exception as ex:
+            return SuccessFail.fail(exception=ex)
 
     def clear_portfolio_universe(self):
         logging.debug('clearing portfolio universe')

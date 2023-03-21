@@ -5,7 +5,7 @@ from reactivex.disposable import Disposable
 from reactivex.observable import Observable
 from reactivex.observer import Observer
 from reactivex.subject import Subject
-from typing import Awaitable, Callable, cast, List, Optional, TypeVar, Union
+from typing import Awaitable, Callable, cast, Generic, List, Optional, TypeVar, Union
 
 import reactivex.abc as abc
 
@@ -26,21 +26,27 @@ class SuccessFailEnum(Enum):
         if self.value == 1: return 'FAIL'
 
 
-class SuccessFail():
-    def __init__(self, success_fail: SuccessFailEnum, error=None, exception=None, obj=None, disposable=None):
+class SuccessFail(Generic[TSource]):
+    def __init__(self, success_fail: SuccessFailEnum, error=None, exception=None, obj: Optional[TSource] = None, disposable=None):
         self.success_fail = success_fail
         self.error = error
         self.exception = exception
-        self.obj = obj
+        self.obj: Optional[TSource] = obj
         self.disposable = disposable
 
     @staticmethod
-    def success():
-        return SuccessFail(SuccessFailEnum.SUCCESS)
+    def success(obj: Optional[TSource] = None):
+        return SuccessFail(SuccessFailEnum.SUCCESS, obj=obj)
+
+    @staticmethod
+    def fail(error=None, exception=None):
+        return SuccessFail(SuccessFailEnum.FAIL, error=error, exception=exception)
 
     def __str__(self):
         return '{}: obj: {}, error: {}'.format(self.success_fail, self.obj, self.error)
 
+    def is_success(self):
+        return self.success_fail == SuccessFailEnum.SUCCESS
 
 _T_out = TypeVar('_T_out')
 

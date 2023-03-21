@@ -27,6 +27,7 @@ from trader.listeners.ibreactive import IBAIORx, WhatToShow
 from trader.messaging.clientserver import RemotedClient
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.objects import BarSize
+from trader.trading.strategy import Strategy, StrategyMetadata, StrategyState
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import asyncio
@@ -1023,9 +1024,9 @@ def book_orders():
 @click.option('--order_id', required=True, type=int, help='order_id to cancel')
 def book_order_cancel(order_id: int):
     # todo: untested
-    order: Optional[Trade] = remoted_client.rpc(return_type=Optional[Trade]).cancel_order(order_id)
+    order: SuccessFail[Trade] = remoted_client.rpc(return_type=SuccessFail[Trade]).cancel_order(order_id)
     if order:
-        renderer.rich_dict(DictHelper.dict_from_object(order))
+        renderer.rich_dict(DictHelper.dict_from_object(order.obj))
     else:
         click.echo('no Trade object returned')
 
@@ -1037,12 +1038,56 @@ def strategy():
 
 @strategy.command('list')
 def strategy_list():
-    renderer.rich_empty_table(message='not implemented')
+    strategy_list: SuccessFail[List[StrategyMetadata]] = remoted_client.rpc(
+        return_type=SuccessFail[List[StrategyMetadata]]).get_strategies()
+    if strategy_list.is_success() and strategy_list.obj:
+        renderer.rich_list(strategy_list.obj)
+    else:
+        click.echo('no strategies returned, or strategy_service.py is not running')
 
 
 @strategy.command('enable')
-def strategy_enable():
-    renderer.rich_empty_table(message='not implemented')
+@click.option('--strategy_name', required=True, help='name of strategy')
+@click.option('--conids', required=True, multiple=True, help='conids to enable strategy on')
+@click.option('--bar_size', required=True, help='bar_size to run on')
+@click.option('--historical_days_prior', required=True, help='historical data')
+def strategy_enable(
+    strategy_name: str,
+    conids: List[int],
+    bar_size: str,
+    historical_days_prior: int,
+):
+    success_fail = remoted_client.rpc().enable_strategy(
+        StrategyMetadata(
+            name=strategy_name,
+            conids=conids,
+            bar_size=BarSize.parse_str(bar_size),
+            state=StrategyState.NOT_INSTALLED,
+            historical_days_prior=historical_days_prior,
+        )
+    )
+    if success_fail.is_success():
+        renderer.rich_dict({'state': success_fail.obj})
+    else:
+        renderer.rich_empty_table(message='strategy enable failed')
+
+
+@strategy.command('disable')
+@click.option('--strategy_name', required=True, help='name of strategy')
+def strategy_disable(
+    strategy_name: str,
+):
+    success_fail = remoted_client.rpc().enable_strategy(
+        StrategyMetadata(
+            name=strategy_name,
+            state=StrategyState.DISABLED,
+        )
+    )
+    if success_fail.is_success():
+        renderer.rich_dict({'state': success_fail.obj})
+    else:
+        renderer.rich_empty_table(message='strategy enable failed')
+
 
 
 @cli.group()
@@ -1129,7 +1174,7 @@ def __trade_helper(
     contract = Universe.to_contract(security)
 
     action = 'BUY' if buy else 'SELL'
-    trade: SuccessFail = remoted_client.rpc(return_type=SuccessFail).place_order(
+    trade: SuccessFail[Trade] = remoted_client.rpc(return_type=SuccessFail[Trade]).place_order(
         contract=contract,
         action=action,
         equity_amount=equity_amount,
@@ -1258,8 +1303,8 @@ def trade_cancel(
     order_id: int,
     **args,
 ):
-    trade: Optional[Trade] = remoted_client.rpc(return_type=SuccessFail).cancel_order(order_id)
-    if trade:
+    trade: SuccessFail[Trade] = remoted_client.rpc(return_type=SuccessFail[Trade]).cancel_order(order_id)
+    if trade.is_success():
         renderer.rich_dict(DictHelper.dict_from_object(trade))
     else:
         click.echo('cancellation unsuccessful; either order_id did not exist or order was already completed')
@@ -1313,8 +1358,8 @@ def trade_update(
             error_out()
             return
 
-        cancelled_trade: Optional[Trade] = remoted_client.rpc(return_type=Optional[Trade]).cancel_order(order_id=order_id)
-        if not cancelled_trade:
+        cancelled_trade: SuccessFail[Trade] = remoted_client.rpc(return_type=SuccessFail[Trade]).cancel_order(order_id=order_id)
+        if not cancelled_trade.is_success():
             error_out()
             return
 

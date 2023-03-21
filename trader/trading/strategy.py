@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from enum import IntEnum
 from logging import Logger
+from trader.common.helpers import DictHelper
 from trader.data.data_access import TickStorage
 from trader.data.universe import UniverseAccessor
 from trader.objects import Action, BarSize
@@ -101,3 +102,41 @@ class Strategy(ABC):
     @abstractmethod
     def on_next(self, prices: pd.DataFrame) -> Optional[Signal]:
         pass
+
+
+class StrategyMetadata():
+    def __init__(
+        self,
+        name: str,
+        state: StrategyState,
+        bar_size: Optional[BarSize] = None,
+        conids: Optional[List[int]] = None,
+        universe: Optional[str] = None,
+        historical_days_prior: Optional[int] = None,
+        runs_when_crontab: Optional[str] = None,
+        description: Optional[str] = None,
+    ):
+        self.name = name
+        self.bar_size = bar_size
+        self.conids = conids
+        self.universe = universe
+        self.historical_days_prior = historical_days_prior
+        self.runs_when_crontab = runs_when_crontab
+        self.description = description
+        self.state = state
+
+    @staticmethod
+    def from_strategy(strategy: Strategy) -> 'StrategyMetadata':
+        return StrategyMetadata(
+            name=strategy.name,
+            bar_size=strategy.bar_size,
+            conids=strategy.conids,
+            universe=strategy.universe,
+            historical_days_prior=strategy.historical_days_prior,
+            runs_when_crontab=strategy.runs_when_crontab,
+            description=strategy.description,
+            state=strategy.state,
+        )
+
+    def __str__(self):
+        return DictHelper.dict_from_object(self).__str__()
