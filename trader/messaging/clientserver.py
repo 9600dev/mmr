@@ -2,6 +2,7 @@ from aiozmq.rpc.base import ParametersError, Service
 from aiozmq.rpc.packer import _Packer
 from aiozmq.rpc.pubsub import PubSubClient, PubSubService
 from aiozmq.rpc.rpc import _BaseServerProtocol, _ServerProtocol
+from contextlib import contextmanager
 from datetime import date, time, timedelta, tzinfo
 from functools import partial
 from msgpack import unpackb
@@ -223,6 +224,16 @@ class TopicPubSub(Generic[T]):
         self.handler: Optional[_Handler[T]] = None
         self.zmq_subscriber: Optional[PubSubService] = None
         self.zmq_publisher: Optional[PubSubClient] = None
+        self.lock = threading.Lock()
+
+    @contextmanager
+    def aquire_timeout(self, lock: threading.Lock, timeout):
+        result = lock.acquire(timeout=timeout)
+        try:
+            yield result
+        finally:
+            if result:
+                lock.release()
 
     async def subscriber(
         self,
@@ -257,17 +268,14 @@ class TopicPubSub(Generic[T]):
         topic: str = 'default'
     ):
         try:
-            if not self.zmq_publisher:
-                logging.debug(f'clientserver.publisher() self.zmq_server_address: {self.zmq_server_address}, self.zmq_server_port: {self.zmq_server_port}')
-                self.zmq_publisher = await aiozmq.rpc.connect_pubsub(
-                    # connect='{}:{}'.format(self.zmq_server_address, self.zmq_server_port),
-                    bind='{}:{}'.format(self.zmq_server_address, self.zmq_server_port),
-                    translation_table=self.translation_table
-                )  # type: ignore
-            await self.zmq_publisher.publish(topic).on_message(obj)
+            if self.zmq_publisher:
+                await self.zmq_publisher.publish(topic).on_message(obj)
+            else:
+                raise ValueError('self.zmq_publisher not initialized')
         except Exception as e:
             logging.exception(e)
             logging.debug(f'self.zmq_server_address: {self.zmq_server_address}, self.zmq_server_port: {self.zmq_server_port}')
+            raise e
 
     async def publisher_close(self):
         if self.zmq_publisher:
@@ -297,6 +305,23 @@ class MultithreadedTopicPubSub(Generic[T], TopicPubSub[T]):
         # self.wait_handle.queue.put_nowait(topic_item)  # type: ignore
 
     def _publisher_loop(self, wait_handle: threading.Event):
+        try:
+            if not self.zmq_publisher:
+                with self.aquire_timeout(self.lock, 5) as acquired:
+                    # double check lock
+                    if acquired and not self.zmq_publisher:
+                        logging.debug(
+                            f'clientserver.publisher() self.zmq_server_address: {self.zmq_server_address}, '
+                            f'self.zmq_server_port: {self.zmq_server_port}'
+                        )
+                        self.zmq_publisher = asyncio.run(aiozmq.rpc.connect_pubsub(
+                            # connect='{}:{}'.format(self.zmq_server_address, self.zmq_server_port),
+                            bind='{}:{}'.format(self.zmq_server_address, self.zmq_server_port),
+                            translation_table=self.translation_table
+                        ))  # type: ignore
+        except Exception as e:
+            logging.exception(e)
+            raise e
 
         async def main():
             wait_handle.loop = asyncio.get_running_loop()  # type: ignore
@@ -320,15 +345,6 @@ class MultithreadedTopicPubSub(Generic[T], TopicPubSub[T]):
     def start(self):
         logging.debug('starting _publisher_loop')
         self.wait_handle = threading.Event()
-
-        # race condition above, make sure we start the publisher here
-        if not self.zmq_publisher:
-            logging.debug(f'clientserver.publisher() self.zmq_server_address: {self.zmq_server_address}, self.zmq_server_port: {self.zmq_server_port}')
-            self.zmq_publisher = asyncio.get_event_loop().run_until_complete(aiozmq.rpc.connect_pubsub(
-                # connect='{}:{}'.format(self.zmq_server_address, self.zmq_server_port),
-                bind='{}:{}'.format(self.zmq_server_address, self.zmq_server_port),
-                translation_table=self.translation_table
-            ))  # type: ignore
 
         th = threading.Thread(target=self._publisher_loop, args=(self.wait_handle,))
         th.start()

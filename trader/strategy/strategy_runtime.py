@@ -109,7 +109,11 @@ class StrategyRuntime(metaclass=Singleton):
         try:
             self.storage = TickStorage(self.arctic_server_address)
             self.universe_accessor = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
-            self.remoted_client = RemotedClient[TraderServiceApi](error_table=error_table)
+            self.remoted_client = RemotedClient[TraderServiceApi](
+                zmq_server_address=self.zmq_rpc_server_address,
+                zmq_server_port=self.zmq_rpc_server_port,
+                error_table=error_table
+            )
             self.last_connect_time = dt.datetime.now()
 
             self.zmq_strategy_rpc_server = RPCServer[bus.StrategyServiceApi](

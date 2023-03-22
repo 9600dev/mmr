@@ -28,7 +28,7 @@ class TraderServiceApi(RPCHandler):
     # so we often have to convert to weird containers like List[Tuple]
     @RPCHandler.rpcmethod
     def get_positions(self) -> list[Position]:
-        return self.trader.portfolio.get_positions()
+        return self.trader.get_positions()
 
     @RPCHandler.rpcmethod
     def get_portfolio(self) -> list[PortfolioItem]:

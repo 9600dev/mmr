@@ -21,7 +21,7 @@ from trader.common.contract_sink import ContractSink
 from trader.common.dataclass_cache import DataClassCache, DataClassEvent, UpdateEvent
 from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.helpers import ListHelper
-from trader.common.logging_helper import get_callstack, setup_logging
+from trader.common.logging_helper import get_callstack, log_method, setup_logging
 from trader.common.reactivex import SuccessFail
 from trader.common.singleton import Singleton
 from trader.data.data_access import PortfolioSummary, SecurityDefinition, TickStorage
@@ -145,6 +145,7 @@ class Trader(metaclass=Singleton):
 
     @backoff.on_exception(backoff.expo, ConnectionRefusedError, max_tries=10, max_time=120)
     def connect(self):
+        logging.debug('trading_runtime.connect() connecting to services: %s:%s' % (self.ib_server_address, self.ib_server_port))
         try:
             self.client = IBAIORx(self.ib_server_address, self.ib_server_port, self.trading_runtime_ib_client_id)
             self.data = TickStorage(self.arctic_server_address)
@@ -191,8 +192,8 @@ class Trader(metaclass=Singleton):
         except Exception as ex:
             raise self.create_trader_exception(TraderConnectionException, message='trading_runtime connect() exception', inner=ex)
 
+    @log_method
     async def shutdown(self):
-        logging.debug('trading_runtime.shutdown()')
         self.client.ib.connectedEvent -= self.connected_event
         self.client.ib.disconnectedEvent -= self.disconnected_event
         self.client.ib.disconnect()
@@ -211,6 +212,7 @@ class Trader(metaclass=Singleton):
         self.book.dispose()
         await self.client.shutdown()
 
+    @log_method
     def reconnect(self):
         # this will force a reconnect through the disconnected event
         self.client.ib.disconnect()
@@ -232,6 +234,7 @@ class Trader(metaclass=Singleton):
         # logging.debug('__dataclass_server_put: {}'.format(message))
         self.zmq_dataclass_server.put(('dataclass', message))
 
+    @log_method
     async def setup_subscriptions(self):
         if not self.is_ib_connected():
             raise ConnectionError('not connected to interactive brokers')
@@ -318,39 +321,39 @@ class Trader(metaclass=Singleton):
         scheduled_disposable = self.scheduler.schedule_periodic(10, lambda x: self.pnl.post_all())
         self.disposables.append(scheduled_disposable)
 
+    @log_method
     async def connected_event(self):
-        logging.debug('connected_event')
         await self.setup_subscriptions()
 
+    @log_method
     async def disconnected_event(self):
-        logging.debug('disconnected_event')
         self.connect()
 
+    @log_method
     def enable_strategy(self, strategy_meta: StrategyMetadata) -> SuccessFail[StrategyState]:
-        logging.debug('enable_strategy: {}'.format(strategy_meta))
         try:
             return self.zmq_strategy_client.rpc().enable_strategy(strategy_meta)
         except Exception as ex:
             logging.error('enable_strategy: {}'.format(ex))
             return SuccessFail.fail(exception=ex)
 
+    @log_method
     def disable_strategy(self, strategy_meta: StrategyMetadata) -> SuccessFail[StrategyState]:
-        logging.debug('disable_strategy: {}'.format(strategy_meta))
         try:
             return self.zmq_strategy_client.rpc().disable_strategy(strategy_meta)
         except Exception as ex:
             logging.error('disable_strategy: {}'.format(ex))
             return SuccessFail.fail(exception=ex)
 
+    @log_method
     def get_strategies(self) -> SuccessFail[List[StrategyMetadata]]:
-        logging.debug('get_strategies()')
         try:
             return SuccessFail.success(obj=self.zmq_strategy_client.rpc().get_strategies())
         except Exception as ex:
             return SuccessFail.fail(exception=ex)
 
+    @log_method
     def clear_portfolio_universe(self):
-        logging.debug('clearing portfolio universe')
         universe = self.universe_accessor.get('portfolio')
         universe.security_definitions.clear()
         self.universe_accessor.update(universe)
@@ -376,6 +379,7 @@ class Trader(metaclass=Singleton):
                 return [universe_definition]
             return []
 
+    @log_method
     def publish_contract(self, contract: Contract, delayed: bool) -> Observable[IBAIORxError]:
         if contract.conId in self.zmq_pubsub_contract_filters:
             return self.zmq_pubsub_contracts[contract.conId]
@@ -408,6 +412,7 @@ class Trader(metaclass=Singleton):
         self.zmq_pubsub_contracts[contract.conId] = error_observable
         return error_observable
 
+    @log_method
     def update_portfolio_universe(self, portfolio_item: PortfolioItem):
         """
         Grabs the current portfolio from TWS and adds a new version to the 'portfolio' table.
@@ -451,6 +456,7 @@ class Trader(metaclass=Singleton):
             #     )
             #     self.market_data_subscriptions[security] = security_stream
 
+    @log_method
     async def place_order(
         self,
         contract: Contract,
@@ -465,6 +471,7 @@ class Trader(metaclass=Singleton):
             raise self.create_trader_exception(TraderException, message='place_order()', inner=ex)
         return disposable
 
+    @log_method
     async def handle_order(
         self,
         contract: Contract,
@@ -561,6 +568,7 @@ class Trader(metaclass=Singleton):
         disposable = await self.place_order(contract=contract, order=order, observer=subject)
         return disposable
 
+    @log_method
     def cancel_order(self, order_id: int) -> Optional[Trade]:
         # get the Order
         order = self.book.get_order(order_id)
@@ -576,9 +584,11 @@ class Trader(metaclass=Singleton):
     def is_ib_connected(self) -> bool:
         return self.client.ib.isConnected()
 
+    @log_method
     def red_button(self):
         self.client.ib.reqGlobalCancel()
 
+    @log_method
     def status(self) -> Dict[str, bool]:
         # todo lots of work here
         status = {
@@ -587,18 +597,22 @@ class Trader(metaclass=Singleton):
         }
         return status
 
+    @log_method
     def get_universes(self) -> List[Universe]:
         return self.universes
 
+    @log_method
     def get_unique_client_id(self) -> int:
         new_client_id = max(self.tws_client_ids) + 1
         self.tws_client_ids.append(new_client_id)
         self.tws_client_ids.append(new_client_id + 1)
         return new_client_id
 
+    @log_method
     def get_pnl(self) -> List[PnLSingle]:
         return self.pnl.get_all()
 
+    @log_method
     def get_portfolio_summary(self) -> List[PortfolioSummary]:
         def find_pnl_or_nan(account: str, contract: Contract) -> float:
             if str((account, contract.conId)) in self.pnl.cache:
@@ -622,6 +636,11 @@ class Trader(metaclass=Singleton):
             ))
         return summary
 
+    @log_method
+    def get_positions(self) -> List[Position]:
+        return self.portfolio.get_positions()
+
+    @log_method
     def release_client_id(self, client_id: int):
         if client_id in self.tws_client_ids:
             self.tws_client_ids.remove(client_id)

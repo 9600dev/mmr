@@ -1,6 +1,6 @@
 from ib_insync.contract import Contract
 from ib_insync.objects import PortfolioItem, Position
-from trader.common.logging_helper import setup_logging
+from trader.common.logging_helper import log_method, setup_logging
 
 
 logging = setup_logging(module_name='portfolio')
