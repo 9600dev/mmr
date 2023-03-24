@@ -33,7 +33,7 @@ from trader.objects import Action
 from trader.trading.book import BookSubject
 from trader.trading.executioner import TradeExecutioner
 from trader.trading.portfolio import Portfolio
-from trader.trading.strategy import Strategy, StrategyMetadata, StrategyState
+from trader.trading.strategy import Strategy, StrategyConfig, StrategyState
 from typing import cast, Dict, List, NamedTuple, Optional, Tuple, Union
 
 import asyncio
@@ -330,23 +330,23 @@ class Trader(metaclass=Singleton):
         self.connect()
 
     @log_method
-    def enable_strategy(self, strategy_meta: StrategyMetadata) -> SuccessFail[StrategyState]:
+    def enable_strategy(self, name: str, paper: bool) -> SuccessFail[StrategyState]:
         try:
-            return self.zmq_strategy_client.rpc().enable_strategy(strategy_meta)
+            return self.zmq_strategy_client.rpc().enable_strategy(name, paper)
         except Exception as ex:
             logging.error('enable_strategy: {}'.format(ex))
             return SuccessFail.fail(exception=ex)
 
     @log_method
-    def disable_strategy(self, strategy_meta: StrategyMetadata) -> SuccessFail[StrategyState]:
+    def disable_strategy(self, name: str) -> SuccessFail[StrategyState]:
         try:
-            return self.zmq_strategy_client.rpc().disable_strategy(strategy_meta)
+            return self.zmq_strategy_client.rpc().disable_strategy(name)
         except Exception as ex:
             logging.error('disable_strategy: {}'.format(ex))
             return SuccessFail.fail(exception=ex)
 
     @log_method
-    def get_strategies(self) -> SuccessFail[List[StrategyMetadata]]:
+    def get_strategies(self) -> SuccessFail[List[StrategyConfig]]:
         try:
             return SuccessFail.success(obj=self.zmq_strategy_client.rpc().get_strategies())
         except Exception as ex:

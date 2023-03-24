@@ -6,12 +6,15 @@ strategies:
     bar_size: '1 min'
     historical_days_prior: 180
     module: strategies/global.py
-  - name: smi_crossover
+    class_name: Global
+  - name: smi_crossover_amd
     description: moving average example
     bar_size: '1 min'
     historical_days_prior: 180
     module: strategies/smi_crossover.py
+    class_name: SMICrossOver
     conids:
       - 4931
       - 34805876
+    paper: True
 

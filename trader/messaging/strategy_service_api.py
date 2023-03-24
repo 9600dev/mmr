@@ -10,7 +10,7 @@ from trader.common.reactivex import SuccessFail, SuccessFailEnum
 from trader.data.data_access import PortfolioSummary, SecurityDefinition
 from trader.data.universe import Universe
 from trader.messaging.clientserver import RPCHandler
-from trader.trading.strategy import Strategy, StrategyMetadata, StrategyState
+from trader.trading.strategy import Strategy, StrategyConfig, StrategyState
 from typing import Dict, List, Optional, Tuple, Union
 
 import trader.strategy.strategy_runtime as runtime
@@ -24,12 +24,12 @@ class StrategyServiceApi(RPCHandler):
         self.strategy: runtime.StrategyRuntime = strategy_runtime
 
     @RPCHandler.rpcmethod
-    def enable_strategy(self, strategy_meta: StrategyMetadata) -> SuccessFail[StrategyState]:
+    def enable_strategy(self, name: str, paper: bool) -> SuccessFail[StrategyState]:
         try:
             # find the strategy
-            strategy = self.strategy.get_strategy(strategy_meta.name)
+            strategy = self.strategy.get_strategy(name)
             if strategy:
-                state = self.strategy.enable_strategy(strategy)
+                state = self.strategy.enable_strategy(name, paper)
                 return SuccessFail.success(state)
             else:
                 return SuccessFail.fail(error='Strategy not found or error')
@@ -37,12 +37,12 @@ class StrategyServiceApi(RPCHandler):
             return SuccessFail.fail(exception=ex)
 
     @RPCHandler.rpcmethod
-    def disable_strategy(self, strategy_meta: StrategyMetadata) -> SuccessFail[StrategyState]:
+    def disable_strategy(self, name: str) -> SuccessFail[StrategyState]:
         try:
             # find the strategy
-            strategy = self.strategy.get_strategy(strategy_meta.name)
+            strategy = self.strategy.get_strategy(name)
             if strategy:
-                state = self.strategy.enable_strategy(strategy)
+                state = self.strategy.disable_strategy(name)
                 return SuccessFail.success(obj=state)
             else:
                 return SuccessFail.fail(error='Strategy not found or error')
@@ -50,5 +50,5 @@ class StrategyServiceApi(RPCHandler):
             return SuccessFail.fail(exception=ex)
 
     @RPCHandler.rpcmethod
-    def get_strategies(self) -> List[StrategyMetadata]:
-        return [StrategyMetadata.from_strategy(strategy) for strategy in self.strategy.get_strategies()]
+    def get_strategies(self) -> List[StrategyConfig]:
+        return [StrategyConfig.from_strategy(strategy) for strategy in self.strategy.get_strategies()]

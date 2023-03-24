@@ -11,16 +11,18 @@ from trader.data.universe import UniverseAccessor
 from trader.listeners.ib_history_worker import IBHistoryWorker
 from trader.messaging.clientserver import MultithreadedTopicPubSub, RemotedClient, RPCServer, TopicPubSub
 from trader.objects import Action, BarSize, WhatToShow
-from trader.trading.strategy import Strategy, StrategyMetadata, StrategyState
+from trader.trading.strategy import Strategy, StrategyConfig, StrategyState
 from typing import cast, Dict, List, Optional
 
 import asyncio
 import backoff
 import datetime as dt
 import importlib
+import importlib.util
 import inspect
 import os
 import pandas as pd
+import sys
 import trader.messaging.strategy_service_api as bus
 import yaml
 
@@ -127,17 +129,18 @@ class StrategyRuntime(metaclass=Singleton):
             raise self.create_strategy_exception(TraderConnectionException, message='strategy_runtime.connect() exception', inner=ex)
 
     @log_method
-    def enable_strategy(self, strategy: Strategy) -> StrategyState:
-        for strategy in self.strategy_implementations:
-            if strategy.name == strategy.name:
-                return strategy.enable()
+    def enable_strategy(self, name: str, paper: bool) -> StrategyState:
+        for implementation in self.strategy_implementations:
+            if name == implementation.name:
+                implementation.paper = paper
+                return implementation.enable()
         return StrategyState.ERROR
 
     @log_method
-    def disable_strategy(self, strategy: Strategy) -> StrategyState:
-        for strategy in self.strategy_implementations:
-            if strategy.name == strategy.name:
-                return strategy.disable()
+    def disable_strategy(self, name: str) -> StrategyState:
+        for implementation in self.strategy_implementations:
+            if name == implementation.name:
+                return implementation.disable()
         return StrategyState.ERROR
 
     @log_method
@@ -156,32 +159,6 @@ class StrategyRuntime(metaclass=Singleton):
     @log_method
     def get_strategies(self) -> List[Strategy]:
         return self.strategy_implementations
-
-    @log_method
-    def load_strategies(self):
-        for root, dirs, files in os.walk(self.strategies_directory):
-            for file_name in files:
-                file = os.path.join(root, file_name)
-                try:
-                    relative_import = os.path.relpath(file).replace('.py', '').replace('.pyc', '').replace('/', '.')
-                    module = importlib.import_module(relative_import)
-                    for x in dir(module):
-                        obj = getattr(module, x)
-
-                        if inspect.isclass(obj) and issubclass(obj, Strategy) and obj is not Strategy:
-                            logging.debug('found implementation of Strategy {}'.format(obj))
-                            # todo: fix this
-                            # here's where we need bar_size to strategy
-                            instance = obj(self.storage, self.universe_accessor, logging)
-                            self.strategy_implementations.append(cast(Strategy, instance))
-
-                            # logic to install and download data for the strategy
-                            # todo: once bugs are out, automatically enable strategies
-                            instance.install(self)
-                            # instance.enable()
-
-                except Exception as ex:
-                    logging.debug(ex)
 
     def on_ticker_next(self, ticker: Ticker):
         if ticker.contract:
@@ -206,7 +183,7 @@ class StrategyRuntime(metaclass=Singleton):
 
         # execute the strategies attached to the conId's
         for strategy in self.__get_enabled_strategies(conId):
-            signal = strategy.on_next(self.streams[conId])
+            signal = strategy.on_prices(self.streams[conId])
             if signal and signal.action == Action.BUY:
                 logging.info('BUY action')
             elif signal and signal.action == Action.SELL:
@@ -242,36 +219,64 @@ class StrategyRuntime(metaclass=Singleton):
         universe: Optional[str],
         historical_days_prior: int,
         module: str,
+        class_name: str,
         description: str,
+        live: bool = False,
     ) -> None:
-        root_path = os.path.abspath(os.getcwd())
-        file = os.path.join(root_path, module)
+
+        if not name or not class_name or not module or not bar_size_str:
+            raise ValueError('invalid config. need name, bar_size, class_name and module specified')
+
+        def load_class_from_file(filename, classname):
+            # Get the absolute path of the file
+            filepath = os.path.abspath(filename)
+
+            # Create a module name based on the filename
+            module_name = os.path.splitext(os.path.basename(filename))[0]
+
+            # Load the module using importlib
+            spec = importlib.util.spec_from_file_location(module_name, filepath)
+            if spec:
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                if spec.loader:
+                    spec.loader.exec_module(module)
+                else:
+                    return None
+
+                # Get the class object using getattr
+                class_object = getattr(module, classname)
+                return class_object
+            else:
+                return None
+
         try:
-            relative_import = os.path.relpath(file).replace('.py', '').replace('/', '.')
-            loaded_module = importlib.import_module(relative_import)
-            for x in dir(loaded_module):
-                obj = getattr(loaded_module, x)
+            class_object = load_class_from_file(module, class_name)
+            if not class_object:
+                return
 
-                # todo, might have to find StrategyConfig and load that too
-                if inspect.isclass(obj) and issubclass(obj, Strategy) and obj is not Strategy:
-                    logging.debug('found implementation of Strategy {}'.format(obj))
+            # todo, might have to find StrategyConfig and load that too
+            if inspect.isclass(class_object) and issubclass(class_object, Strategy) and class_object is not Strategy:
+                logging.debug('found implementation of Strategy {}'.format(class_object))
 
-                    # todo: fix this
-                    # here's where we need bar_size to strategy
-                    instance = obj(self.storage, self.universe_accessor, logging)
-                    instance.name = name
-                    instance.bar_size = BarSize.parse_str(bar_size_str)
-                    instance.description = description
-                    instance.conids = conids
-                    instance.universe = universe
-                    instance.historical_days_prior = historical_days_prior
-                    instance.description = description
+                # todo: fix this
+                # here's where we need bar_size to strategy
+                instance = class_object(self.storage, self.universe_accessor, logging)
+                instance.name = name
+                instance.bar_size = BarSize.parse_str(bar_size_str)
+                instance.description = description
+                instance.conids = conids
+                instance.universe = universe
+                instance.historical_days_prior = historical_days_prior
+                instance.description = description
+                instance.module = module
+                instance.class_name = class_name
+                instance.live = live
 
-                    self.strategy_implementations.append(cast(Strategy, instance))
+                self.strategy_implementations.append(cast(Strategy, instance))
 
-                    # logic to install and download data for the strategy
-                    if instance.install(self):
-                        instance.enable()
+                # logic to install and download data for the strategy
+                instance.install(self)
 
         except Exception as ex:
             logging.debug(ex)
@@ -289,7 +294,9 @@ class StrategyRuntime(metaclass=Singleton):
                 universe=strategy_config['universe'] if 'universe' in strategy_config else None,
                 historical_days_prior=strategy_config['historical_days_prior'] if 'historical_days_prior' in strategy_config else 1,
                 module=strategy_config['module'] if 'module' in strategy_config else '',
+                class_name=strategy_config['class_name'] if 'class_name' in strategy_config else '',
                 description=strategy_config['description'] if 'description' in strategy_config else '',
+                live=strategy_config['live'] if 'live' in strategy_config else False,
             )
 
     async def get_historical_data(self):
@@ -298,13 +305,19 @@ class StrategyRuntime(metaclass=Singleton):
 
             if strategy.conids:
                 for conId in strategy.conids:
-                    await self.historical_data_client.get_contract_history(
-                        security=Contract(conId=conId),
-                        what_to_show=WhatToShow.MIDPOINT,
-                        bar_size=strategy.bar_size,
-                        start_date=dt.datetime.now() - dt.timedelta(days=historical_days),
-                        end_date=dt.datetime.now(),
-                    )
+                    definition = self.universe_accessor.resolve_first_symbol(conId)
+                    if definition:
+                        universe, security_definition = definition
+
+                        await self.historical_data_client.get_contract_history(
+                            security=SecurityDefinition.to_contract(security_definition),
+                            what_to_show=WhatToShow.MIDPOINT,
+                            bar_size=strategy.bar_size,
+                            start_date=dt.datetime.now() - dt.timedelta(days=historical_days),
+                            end_date=dt.datetime.now(),
+                        )
+                    else:
+                        logging.error('could not find security definition for conId {} for strategy {}'.format(conId, strategy))
 
             if strategy.universe:
                 conids = [x.conId for x in self.universe_accessor.get(strategy.universe).security_definitions]
@@ -345,7 +358,12 @@ class StrategyRuntime(metaclass=Singleton):
         for strategy in self.strategy_implementations:
             if strategy.conids:
                 for conId in strategy.conids:
-                    self.subscribe(strategy, Contract(conId=conId))
+                    definition = self.universe_accessor.resolve_first_symbol(conId)
+                    if definition:
+                        universe, security_definition = definition
+                        self.subscribe(strategy, SecurityDefinition.to_contract(security_definition))
+                    else:
+                        logging.error('could not find security definition for conId {} for strategy {}'.format(conId, strategy))
 
             if strategy.universe:
                 self.subscribe_universe(strategy, strategy.universe)

@@ -10,7 +10,7 @@ from trader.common.reactivex import SuccessFail, SuccessFailEnum
 from trader.data.data_access import PortfolioSummary, SecurityDefinition
 from trader.data.universe import Universe
 from trader.messaging.clientserver import RPCHandler
-from trader.trading.strategy import StrategyMetadata, StrategyState
+from trader.trading.strategy import StrategyConfig, StrategyState
 from typing import List, Optional, Tuple, Union
 
 import asyncio
@@ -145,16 +145,16 @@ class TraderServiceApi(RPCHandler):
         return True
 
     @RPCHandler.rpcmethod
-    def get_strategies(self) -> SuccessFail[List[StrategyMetadata]]:
+    def get_strategies(self) -> SuccessFail[List[StrategyConfig]]:
         return self.trader.get_strategies()
 
     @RPCHandler.rpcmethod
-    def enable_strategy(self, strategy_meta: StrategyMetadata) -> SuccessFail[StrategyState]:
-        return self.trader.enable_strategy(strategy_meta)
+    def enable_strategy(self, name: str, paper: bool) -> SuccessFail[StrategyState]:
+        return self.trader.enable_strategy(name, paper)
 
     @RPCHandler.rpcmethod
-    def disable_strategy(self, strategy_meta: StrategyMetadata) -> SuccessFail[StrategyState]:
-        return self.trader.disable_strategy(strategy_meta)
+    def disable_strategy(self, name: str) -> SuccessFail[StrategyState]:
+        return self.trader.disable_strategy(name)
 
     @RPCHandler.rpcmethod
     def start_load_test(self) -> int:

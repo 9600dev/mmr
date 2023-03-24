@@ -23,9 +23,11 @@ class Global(Strategy):
 
     def install(self, strategy_runtime: runtime.StrategyRuntime) -> bool:
         self.strategy_runtime = strategy_runtime
+        self.state = StrategyState.INSTALLED
         return True
 
     def uninstall(self) -> bool:
+        self.state = StrategyState.NOT_INSTALLED
         return True
 
     def enable(self) -> StrategyState:
@@ -36,8 +38,11 @@ class Global(Strategy):
         self.state = StrategyState.DISABLED
         return self.state
 
-    def signals(self, open_price: pd.Series) -> Optional[Tuple[pd.Series, pd.Series]]:
+    def on_prices(self, prices: pd.DataFrame) -> Optional[Signal]:
         return None
 
-    def on_next(self, prices: pd.DataFrame) -> Optional[Signal]:
+    def on_signal(self, signal: Signal) -> Optional[Signal]:
         return None
+
+    def on_error(self, error):
+        return super().on_error(error)

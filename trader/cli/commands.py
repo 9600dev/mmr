@@ -27,7 +27,7 @@ from trader.listeners.ibreactive import IBAIORx, WhatToShow
 from trader.messaging.clientserver import RemotedClient
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.objects import BarSize
-from trader.trading.strategy import Strategy, StrategyMetadata, StrategyState
+from trader.trading.strategy import Strategy, StrategyConfig, StrategyState
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import asyncio
@@ -604,6 +604,25 @@ def portfolio_helper() -> pd.DataFrame:
 
     return df.sort_values(by='dailyPNL', ascending=False)
 
+def strategy_helper() -> pd.DataFrame:
+    connect()
+    strategy_list: SuccessFail[List[StrategyConfig]] = remoted_client.rpc(
+        return_type=SuccessFail[List[StrategyConfig]]).get_strategies()
+    if strategy_list.is_success() and strategy_list.obj:
+        result = []
+        for s in strategy_list.obj:
+            result.append({
+                'name': s.name,
+                'conids': s.conids if s.conids else '[]',
+                'paper': s.paper,
+                'state': str(s.state),
+                'bar_size': str(s.bar_size),
+                'hist_days_prior': s.historical_days_prior,
+            })
+        return pd.DataFrame(result)
+    else:
+        return pd.DataFrame()
+
 
 @cli.command()
 def portfolio():
@@ -1038,34 +1057,19 @@ def strategy():
 
 @strategy.command('list')
 def strategy_list():
-    strategy_list: SuccessFail[List[StrategyMetadata]] = remoted_client.rpc(
-        return_type=SuccessFail[List[StrategyMetadata]]).get_strategies()
-    if strategy_list.is_success() and strategy_list.obj:
-        renderer.rich_list(strategy_list.obj)
-    else:
-        click.echo('no strategies returned, or strategy_service.py is not running')
+    result = strategy_helper()
+    if len(result) > 0:
+        renderer.rich_table(result)
 
 
 @strategy.command('enable')
-@click.option('--strategy_name', required=True, help='name of strategy')
-@click.option('--conids', required=True, multiple=True, help='conids to enable strategy on')
-@click.option('--bar_size', required=True, help='bar_size to run on')
-@click.option('--historical_days_prior', required=True, help='historical data')
+@click.option('--name', required=True, help='name of strategy')
+@click.option('--paper', required=False, is_flag=True, default=True, help='dont trade, just paper trade it')
 def strategy_enable(
-    strategy_name: str,
-    conids: List[int],
-    bar_size: str,
-    historical_days_prior: int,
+    name: str,
+    paper: bool,
 ):
-    success_fail = remoted_client.rpc().enable_strategy(
-        StrategyMetadata(
-            name=strategy_name,
-            conids=conids,
-            bar_size=BarSize.parse_str(bar_size),
-            state=StrategyState.NOT_INSTALLED,
-            historical_days_prior=historical_days_prior,
-        )
-    )
+    success_fail = remoted_client.rpc().enable_strategy(name, paper)
     if success_fail.is_success():
         renderer.rich_dict({'state': success_fail.obj})
     else:
@@ -1075,19 +1079,13 @@ def strategy_enable(
 @strategy.command('disable')
 @click.option('--strategy_name', required=True, help='name of strategy')
 def strategy_disable(
-    strategy_name: str,
+    name: str,
 ):
-    success_fail = remoted_client.rpc().enable_strategy(
-        StrategyMetadata(
-            name=strategy_name,
-            state=StrategyState.DISABLED,
-        )
-    )
+    success_fail = remoted_client.rpc().disable_strategy(name)
     if success_fail.is_success():
         renderer.rich_dict({'state': success_fail.obj})
     else:
         renderer.rich_empty_table(message='strategy enable failed')
-
 
 
 @cli.group()

@@ -14,12 +14,6 @@ import trader.strategy.strategy_runtime as runtime
 import vectorbt as vbt
 
 
-@StrategyConfig(
-    name='SMICrossOver',
-    conids=[4391, 34805876],
-    bar_size=BarSize.Mins1,
-    historical_days_prior=180
-)
 class SMICrossOver(Strategy):
     def __init__(
         self,
@@ -35,14 +29,19 @@ class SMICrossOver(Strategy):
 
     def install(self, strategy_runtime: runtime.StrategyRuntime) -> bool:
         self.strategy_runtime = strategy_runtime
+        self.state = StrategyState.INSTALLED
         return True
 
     def uninstall(self) -> bool:
+        self.state = StrategyState.NOT_INSTALLED
         return True
 
     def enable(self) -> StrategyState:
         if not self.strategy_runtime:
             raise ValueError('install() has not been called')
+
+        if not self.conids:
+            raise ValueError('conids not set')
 
         date_range: Optional[DateRange] = None
         if self.historical_days_prior:
@@ -73,7 +72,7 @@ class SMICrossOver(Strategy):
         self.state = StrategyState.DISABLED
         return self.state
 
-    def signals(self, open_price: pd.Series) -> Optional[Tuple[pd.Series, pd.Series]]:
+    def __signals(self, open_price: pd.Series) -> Optional[Tuple[pd.Series, pd.Series]]:
         if len(open_price) <= 50:
             return None
 
@@ -83,11 +82,17 @@ class SMICrossOver(Strategy):
         exits = fast_ma.ma_crossed_below(slow_ma)  # type: ignore
         return (entries, exits)
 
-    def on_next(self, prices: pd.DataFrame) -> Optional[Signal]:
-        result = self.signals(prices.ask)
+    def on_prices(self, prices: pd.DataFrame) -> Optional[Signal]:
+        result = self.__signals(prices.ask)
         if result and result[0].iloc[-1] is True:
             return Signal(Action.BUY, 0.0, 0.0)
         elif result and result[1].iloc[-1] is True:
             return Signal(Action.SELL, 0.0, 0.0)
         else:
             return None
+
+    def on_signal(self, signal: Signal) -> Optional[Signal]:
+        pass
+
+    def on_error(self, error):
+        return super().on_error(error)

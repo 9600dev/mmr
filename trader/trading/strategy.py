@@ -29,36 +29,11 @@ class Signal():
 
 class StrategyState(IntEnum):
     NOT_INSTALLED = 0,
-    WAITING_HISTORICAL_DATA = 1,
-    RUNNING = 2,
-    DISABLED = 3,
-    ERROR = 4,
-
-
-def StrategyConfig(
-    name: str,
-    bar_size: BarSize = BarSize.Mins1,
-    conids: Optional[List[int]] = None,
-    universe: Optional[str] = None,
-    historical_days_prior: Optional[int] = None,
-    runs_when_crontab: Optional[str] = None,
-    description: Optional[str] = None,
-):
-    class StrategyWrapper:
-        def __init__(self, cls):
-            self.strategy_class = cls
-
-        def __call__(self, *cls_args):
-            strategy = self.strategy_class(*cls_args)
-            strategy.name = name
-            strategy.bar_size = bar_size
-            strategy.conids = conids
-            strategy.universe = universe
-            strategy.historical_days_prior = historical_days_prior
-            strategy.runs_when_crontab = runs_when_crontab
-            strategy.description = description
-            return strategy
-    return StrategyWrapper
+    INSTALLED = 1,
+    WAITING_HISTORICAL_DATA = 2,
+    RUNNING = 3,
+    DISABLED = 4,
+    ERROR = 5,
 
 
 class Strategy(ABC):
@@ -74,14 +49,16 @@ class Strategy(ABC):
         self.logging = logging
         self.state = StrategyState.NOT_INSTALLED
 
-        # set by the StrategyConfig decorator, or by the strategy_runtime.yaml file
-        self.name: str = ''
+        self.name: Optional[str] = None
         self.bar_size: BarSize = BarSize.Mins1
         self.conids: Optional[List[int]] = None
         self.universe: Optional[str] = None
+        self.module: Optional[str] = None
+        self.class_name: Optional[str] = None
         self.historical_days_prior: Optional[int] = None
         self.runs_when_crontab: Optional[str] = None
         self.description: Optional[str] = None
+        self.paper: bool = True
 
     @abstractmethod
     def install(self, strategy_runtime) -> bool:
@@ -100,11 +77,19 @@ class Strategy(ABC):
         pass
 
     @abstractmethod
-    def on_next(self, prices: pd.DataFrame) -> Optional[Signal]:
+    def on_prices(self, prices: pd.DataFrame) -> Optional[Signal]:
+        pass
+
+    @abstractmethod
+    def on_signal(self, signal: Signal) -> Optional[Signal]:
+        pass
+
+    @abstractmethod
+    def on_error(self, error):
         pass
 
 
-class StrategyMetadata():
+class StrategyConfig():
     def __init__(
         self,
         name: str,
@@ -112,31 +97,37 @@ class StrategyMetadata():
         bar_size: Optional[BarSize] = None,
         conids: Optional[List[int]] = None,
         universe: Optional[str] = None,
+        module: Optional[str] = None,
+        class_name: Optional[str] = None,
         historical_days_prior: Optional[int] = None,
         runs_when_crontab: Optional[str] = None,
         description: Optional[str] = None,
+        paper: bool = True,
     ):
         self.name = name
         self.bar_size = bar_size
         self.conids = conids
         self.universe = universe
+        self.module = module
+        self.class_name = class_name
         self.historical_days_prior = historical_days_prior
         self.runs_when_crontab = runs_when_crontab
         self.description = description
         self.state = state
+        self.paper = paper
 
     @staticmethod
-    def from_strategy(strategy: Strategy) -> 'StrategyMetadata':
-        return StrategyMetadata(
-            name=strategy.name,
+    def from_strategy(strategy: Strategy) -> 'StrategyConfig':
+        return StrategyConfig(
+            name=strategy.name if strategy.name is not None else 'not_set',
             bar_size=strategy.bar_size,
             conids=strategy.conids,
             universe=strategy.universe,
+            module=strategy.module,
+            class_name=strategy.class_name,
             historical_days_prior=strategy.historical_days_prior,
             runs_when_crontab=strategy.runs_when_crontab,
             description=strategy.description,
             state=strategy.state,
+            paper=strategy.paper
         )
-
-    def __str__(self):
-        return DictHelper.dict_from_object(self).__str__()

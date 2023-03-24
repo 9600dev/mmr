@@ -72,7 +72,8 @@ from trader.cli.commands import (
     monkeypatch_click_echo,
     portfolio_helper,
     resolve_conid_to_security_definition,
-    setup_cli
+    setup_cli,
+    strategy_helper
 )
 from trader.cli.custom_footer import CustomFooter
 from trader.cli.dialog import Dialog
@@ -268,12 +269,15 @@ class ReplWidget(Widget):
                 try:
                     ctx.command.no_args_is_help = True
                     group.invoke(ctx)
-                except click.exceptions.Exit:
+                except click.exceptions.Exit as ex:
+                    self.output.write(ex)
                     pass
                 output.seek(0)
                 self.output.write(output.read())
         except click.ClickException as e:
-            self.output.write(e.message)
+            e.show(file=output)
+            output.seek(0)
+            self.output.write(output.read())
 
     def write_debug(self, text: str):
         if self.logging:
@@ -500,6 +504,10 @@ class AsyncCli(App):
         self.render_book()
         self.switch_widget('#bottom-left', 'book-table')
 
+    def action_strategy(self) -> None:
+        self.render_strategies()
+        self.switch_widget('#bottom-left', 'strategy-table')
+
     def render_portfolio(self) -> None:
         df = portfolio_helper()
         df.drop(columns=['account', 'currency', 'averageCost'], inplace=True)
@@ -518,8 +526,8 @@ class AsyncCli(App):
         TuiRenderer(self.book_table).rich_table(df, financial=True, column_key='orderId')
 
     def render_strategies(self) -> None:
-        # df = book_helper()
-        # TuiRenderer(self.book_table).rich_table(df, financial=True, column_key='orderId')
+        df = strategy_helper()
+        TuiRenderer(self.strategy_table).rich_table(df, financial=True, column_key='name')
         pass
 
     def start_plot(self, conid: Union[int, str]) -> None:
@@ -611,6 +619,7 @@ class AsyncCli(App):
         self.render_portfolio()
         self.scheduler.schedule_periodic(3.0, lambda x: self.render_portfolio())
         self.scheduler.schedule_periodic(3.0, lambda x: self.render_book())
+        self.scheduler.schedule_periodic(3.0, lambda x: self.render_strategies())
 
         # setup the plot to start drawing on startup
         cell = self.portfolio_table.get_cell_at(Coordinate(0, 0))

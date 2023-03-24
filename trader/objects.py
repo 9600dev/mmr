@@ -68,7 +68,7 @@ class BarSize(IntEnum):
 
     @staticmethod
     def parse_str(bar_size_str: str):
-        return BarSize(BarSize.bar_sizes().index(bar_size_str))
+        return BarSize(BarSize.bar_sizes().index(bar_size_str))  # type: ignore
 
     def __str__(self):
         return BarSize.bar_sizes()[int(self.value)]
