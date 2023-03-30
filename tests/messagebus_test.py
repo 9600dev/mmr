@@ -83,11 +83,19 @@ import time
 asyncio.get_event_loop().run_until_complete(asyncio.sleep(2))
 
 print('disconnecting clients')
-c1.disconnect()
-c2.disconnect()
+# c1.disconnect()
+asyncio.run(c2.disconnect())
 
+c1.write('test', 'you should not see this')
+
+c3 = asyncio.run(c.get_client())
+d3 = c3.subscribe('test', MyObserver())
+
+c1.write('test', 'but you should see this')
+
+
+asyncio.get_event_loop().run_until_complete(asyncio.sleep(2))
 print('stopping server')
-
 c.server.stop()
 
 asyncio.get_event_loop().run_until_complete(c.server.wait())
