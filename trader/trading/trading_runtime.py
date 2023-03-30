@@ -28,7 +28,7 @@ from trader.data.data_access import PortfolioSummary, SecurityDefinition, TickSt
 from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
-from trader.messaging.clientserver import MultithreadedTopicPubSub, RemotedClient, RPCServer
+from trader.messaging.clientserver import MultithreadedTopicPubSub, RPCClient, RPCServer
 from trader.objects import Action
 from trader.trading.book import BookSubject
 from trader.trading.executioner import TradeExecutioner
@@ -114,7 +114,7 @@ class Trader(metaclass=Singleton):
         self.zmq_pubsub_contract_filters: Dict[int, bool] = {}
         self.zmq_pubsub_contract_subscription: DisposableBase = Disposable()
 
-        self.zmq_strategy_client: RemotedClient[strategy_bus.StrategyServiceApi]
+        self.zmq_strategy_client: RPCClient[strategy_bus.StrategyServiceApi]
 
         self.startup_time: dt.datetime = dt.datetime.now()
         self.last_connect_time: dt.datetime
@@ -180,7 +180,7 @@ class Trader(metaclass=Singleton):
             self.zmq_pubsub_contract_subscription = Disposable()
 
             # connect to the strategy server
-            self.zmq_strategy_client = RemotedClient[strategy_bus.StrategyServiceApi](
+            self.zmq_strategy_client = RPCClient[strategy_bus.StrategyServiceApi](
                 self.zmq_strategy_rpc_server_address,
                 self.zmq_strategy_rpc_server_port,
                 timeout=5,

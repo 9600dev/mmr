@@ -24,7 +24,7 @@ from trader.container import Container as TraderContainer
 from trader.data.data_access import DictData, PortfolioSummary, TickData, TickStorage
 from trader.data.universe import SecurityDefinition, Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, WhatToShow
-from trader.messaging.clientserver import RemotedClient
+from trader.messaging.clientserver import RPCClient
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.objects import BarSize
 from trader.trading.strategy import Strategy, StrategyConfig, StrategyState
@@ -60,7 +60,7 @@ error_table = {
 invoke_context = None
 container = TraderContainer()
 
-remoted_client = RemotedClient[TraderServiceApi](
+remoted_client = RPCClient[TraderServiceApi](
     zmq_server_address=container.config()['zmq_rpc_server_address'],
     zmq_server_port=container.config()['zmq_rpc_server_port'],
     error_table=error_table,

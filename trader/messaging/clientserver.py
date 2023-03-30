@@ -8,8 +8,12 @@ from datetime import date, time, timedelta, tzinfo
 from functools import partial
 from msgpack import unpackb
 from pickle import dumps, HIGHEST_PROTOCOL, loads
+from reactivex.disposable import Disposable
+from reactivex.observable import Observable
+from reactivex.observer import Observer
 from reactivex.subject import Subject
 from trader.common.logging_helper import setup_logging
+from trader.common.reactivex import ObservableIterHelper
 from typing import Any, Callable, Dict, Generic, Optional, Tuple, Type, TypeVar
 
 import aiozmq
@@ -17,11 +21,13 @@ import aiozmq.rpc
 import asyncio
 import ctypes
 import dill
+import functools
 import inspect
 import nest_asyncio
 import pandas as pd
 import pyarrow as pa
 import reactivex as rx
+import reactivex.abc as abc
 import threading
 import time as time_
 import types
@@ -215,7 +221,7 @@ class _Handler(RPCHandler, Generic[T]):
         return self.subject
 
 
-class MessageBusServer(Generic[T]):
+class MessageBusServer():
     def __init__(
         self,
         zmq_address: str,
@@ -238,12 +244,13 @@ class MessageBusServer(Generic[T]):
         self.read_thread: Optional[threading.Thread] = None
         self.message_thread: Optional[threading.Thread] = None
 
-    def put(self, topic_item: Tuple[str, T]):
+    def put(self, topic_item: Tuple[str, Any]):
         self.wait_handle.loop.call_soon_threadsafe(self.wait_handle.queue.put_nowait, topic_item)  # type: ignore
-        # this is faster:
-        # self.wait_handle.queue.put_nowait(topic_item)  # type: ignore
 
-    async def _message(self, client_id: str, topic: str, val: T):
+    def write(self, topic: str, val: Any):
+        self.put((topic, val))
+
+    async def __message(self, client_id: str, topic: str, val: Any):
         if not self.server:
             raise ValueError('server is not initialized')
 
@@ -255,7 +262,7 @@ class MessageBusServer(Generic[T]):
         for id in client_ids:
             self.server.write((id, topic, val))
 
-    def _message_loop(self, wait_handle: threading.Event):
+    def __message_loop(self, wait_handle: threading.Event):
         import time
         while not self.server:
             time.sleep(0.1)
@@ -276,13 +283,13 @@ class MessageBusServer(Generic[T]):
                 topic = item[1]
                 val = item[2]
 
-                task = asyncio.create_task(self._message(id, topic, val))
+                task = asyncio.create_task(self.__message(id, topic, val))
                 task.add_done_callback(lambda _: task_queue.task_done())
             await task_queue.join()
 
         asyncio.run(main())
 
-    def _read_loop(self, loop):
+    def __read_loop(self, loop):
         self.server = asyncio.run(aiozmq.create_zmq_stream(
             zmq.ROUTER,
             bind='{}:{}'.format(self.zmq_address, self.zmq_port),
@@ -298,7 +305,6 @@ class MessageBusServer(Generic[T]):
                 result = task.result()
                 self.put(result)
 
-        # asyncio.run(main())
         self.read_loop = asyncio.get_event_loop()
         self.read_task = self.read_loop.create_task(main())
         try:
@@ -315,12 +321,9 @@ class MessageBusServer(Generic[T]):
         self.wait_handle = threading.Event()
 
         self.sentinel_flag = False
-        # self.read_thread = threading.Thread(target=self._read_loop, args=(asyncio.get_event_loop(),))
-        self.read_thread = threading.Thread(target=self._read_loop, args=(asyncio.get_event_loop(),))
+        self.read_thread = threading.Thread(target=self.__read_loop, args=(asyncio.get_event_loop(),))
         self.read_thread.start()
-
-        # self.message_thread = threading.Thread(target=self._message_loop, args=(self.wait_handle,))
-        self.message_thread = threading.Thread(target=self._message_loop, args=(self.wait_handle,))
+        self.message_thread = threading.Thread(target=self.__message_loop, args=(self.wait_handle,))
         self.message_thread.start()
 
         self.wait_handle.wait()
@@ -365,7 +368,25 @@ class MessageBusClient(Generic[T]):
             connect='{}:{}'.format(self.zmq_address, self.zmq_port),
         )  # type: ignore
 
-    def subscribe(self, topic: str) -> None:
+    async def __iterable_read(self):
+        while True:
+            try:
+                yield await self.read()
+            except aiozmq.ZmqStreamClosed as ex:
+                return
+
+    def subscribe(
+        self,
+        topic: str,
+        observer: abc.ObserverBase[T]
+    ) -> abc.DisposableBase:
+        if not self.client:
+            raise ValueError('client is not initialized')
+
+        self.client.write([topic.encode(), 'subscribe'.encode()])
+        return ObservableIterHelper(asyncio.get_event_loop()).from_aiter(self.__iterable_read()).subscribe(observer)
+
+    def subscribe_topic(self, topic: str) -> None:
         if not self.client:
             raise ValueError('client is not initialized')
 
@@ -570,7 +591,7 @@ class RPCServer(Generic[T]):
             )  # type: ignore
 
 
-class RemotedClient(Generic[T]):
+class RPCClient(Generic[T]):
     def __init__(
         self,
         zmq_server_address: str,
@@ -591,7 +612,7 @@ class RemotedClient(Generic[T]):
 
     async def connect(self):
         if not self.client:
-            logging.debug('trying RemotedClient.connect()')
+            logging.debug('trying RPCClient.connect()')
             bind = '{}:{}'.format(self.zmq_server_address, self.zmq_server_port)
             self.client = await aiozmq.rpc.connect_rpc(
                 connect=bind,

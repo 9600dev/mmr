@@ -1,5 +1,6 @@
-import sys
 import os
+import sys
+
 
 # in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
 PACKAGE_PARENT = '../'
@@ -7,14 +8,16 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.
 sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
 
 
-import asyncio
-from trader.messaging.clientserver import RemotedClient
+from ib_insync import PortfolioItem, Stock
 from test_mmr_server import MyService
+from trader.messaging.clientserver import RPCClient
 from typing import cast, List
-from ib_insync import Stock, PortfolioItem
+
+import asyncio
+
 
 async def gogo():
-    client = RemotedClient[MyService](zmq_server_address='tcp://127.0.0.1', zmq_server_port=42050)
+    client = RPCClient[MyService](zmq_server_address='tcp://127.0.0.1', zmq_server_port=42050)
     await client.connect()
 
     for i in range(0, 10):

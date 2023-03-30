@@ -88,7 +88,7 @@ from trader.data.data_access import DictData, TickData, TickStorage
 from trader.data.market_data import MarketData
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, WhatToShow
-from trader.messaging.clientserver import RemotedClient, TopicPubSub
+from trader.messaging.clientserver import RPCClient, TopicPubSub
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.objects import BarSize
 from typing import Any, cast, Dict, List, Optional, Union
@@ -369,7 +369,7 @@ class AsyncCli(App):
             zmq_pubsub_server_address,
             zmq_pubsub_server_port + 1,
         )
-        self.remoted_client: RemotedClient[TraderServiceApi]
+        self.remoted_client: RPCClient[TraderServiceApi]
         self.scheduler = AsyncIOScheduler(asyncio.get_running_loop())
         self.arctic_server_address = arctic_server_address
         self.arctic_universe_library = arctic_universe_library

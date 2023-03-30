@@ -7,6 +7,8 @@ from reactivex.observer import Observer
 from reactivex.subject import Subject
 from typing import Awaitable, Callable, cast, Generic, List, Optional, TypeVar, Union
 
+import asyncio
+import functools
 import reactivex.abc as abc
 
 
@@ -152,3 +154,27 @@ def awaitify(sync_func):
     async def async_func(*args, **kwargs):
         return sync_func(*args, **kwargs)
     return async_func
+
+
+class ObservableIterHelper():
+    def __init__(self, loop):
+        self.loop = loop
+
+    def from_aiter(self, iter):
+        from reactivex import create
+
+        def on_subscribe(observer, scheduler):
+            async def _aio_sub():
+                try:
+                    async for i in iter:
+                        observer.on_next(i)
+                    self.loop.call_soon(observer.on_completed)
+                except Exception as e:
+                    self.loop.call_soon(functools.partial(observer.on_error, e))
+
+            task = asyncio.ensure_future(_aio_sub(), loop=self.loop)
+            return Disposable(lambda: task.cancel())  # type: ignore
+
+        return create(on_subscribe)
+
+

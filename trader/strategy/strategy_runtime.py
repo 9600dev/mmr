@@ -9,7 +9,7 @@ from trader.common.singleton import Singleton
 from trader.data.data_access import SecurityDefinition, TickStorage
 from trader.data.universe import UniverseAccessor
 from trader.listeners.ib_history_worker import IBHistoryWorker
-from trader.messaging.clientserver import MultithreadedTopicPubSub, RemotedClient, RPCServer, TopicPubSub
+from trader.messaging.clientserver import MultithreadedTopicPubSub, RPCClient, RPCServer, TopicPubSub
 from trader.objects import Action, BarSize, WhatToShow
 from trader.trading.strategy import Signal, Strategy, StrategyConfig, StrategyState
 from typing import cast, Dict, List, Optional
@@ -118,7 +118,7 @@ class StrategyRuntime(metaclass=Singleton):
         try:
             self.storage = TickStorage(self.arctic_server_address)
             self.universe_accessor = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
-            self.remoted_client = RemotedClient[TraderServiceApi](
+            self.remoted_client = RPCClient[TraderServiceApi](
                 zmq_server_address=self.zmq_rpc_server_address,
                 zmq_server_port=self.zmq_rpc_server_port,
                 error_table=error_table

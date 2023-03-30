@@ -34,7 +34,7 @@ from trader.data.data_access import DictData, TickData, TickStorage
 from trader.data.market_data import MarketData
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, WhatToShow
-from trader.messaging.clientserver import RemotedClient
+from trader.messaging.clientserver import RPCClient
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.objects import BarSize
 from typing import Any, Dict, List, Optional, Union
@@ -129,7 +129,7 @@ def setup_ipython():
     print()
     print(' amd: Contract, nvda: Contract, a2m: Contract, cl: Contract')
     print(' container: Container, accessor: UniverseAccessor, client: IBAIORx')
-    print(' store: Arctic, tickstorage: TickStorage, marketdata: MarketData, remoted_client: RemotedClient')
+    print(' store: Arctic, tickstorage: TickStorage, marketdata: MarketData, remoted_client: RPCClient')
 
 
 if get_ipython().__class__.__name__ == 'TerminalInteractiveShell':  # type: ignore
