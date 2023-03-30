@@ -42,6 +42,7 @@ def setup_logging(default_path='/home/trader/mmr/configs/logging.yaml',
     logging.getLogger('parso.python.diff').setLevel(logging.WARNING)
     logging.getLogger('parso').setLevel(logging.WARNING)
     logging.getLogger('parso.cache.pickle').setLevel(logging.WARNING)
+    logging.getLogger('asyncio').setLevel(logging.WARNING)
 
     if module_name in global_loggers:
         return global_loggers[module_name]

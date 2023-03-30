@@ -23,3 +23,5 @@ zmq_pubsub_server_address: tcp://127.0.0.1
 zmq_pubsub_server_port: 42002
 zmq_strategy_rpc_server_address: tcp://127.0.0.1
 zmq_strategy_rpc_server_port: 42005
+zmq_signal_pubsub_server_address: tcp://127.0.0.1
+zmq_signal_pubsub_server_port: 42006

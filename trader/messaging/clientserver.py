@@ -2,7 +2,8 @@ from aiozmq.rpc.base import ParametersError, Service
 from aiozmq.rpc.packer import _Packer
 from aiozmq.rpc.pubsub import PubSubClient, PubSubService
 from aiozmq.rpc.rpc import _BaseServerProtocol, _ServerProtocol
-from contextlib import contextmanager
+from asyncio import CancelledError
+from contextlib import contextmanager, suppress
 from datetime import date, time, timedelta, tzinfo
 from functools import partial
 from msgpack import unpackb
@@ -11,8 +12,10 @@ from reactivex.subject import Subject
 from trader.common.logging_helper import setup_logging
 from typing import Any, Callable, Dict, Generic, Optional, Tuple, Type, TypeVar
 
+import aiozmq
 import aiozmq.rpc
 import asyncio
+import ctypes
 import dill
 import inspect
 import nest_asyncio
@@ -23,6 +26,8 @@ import threading
 import time as time_
 import types
 import typing
+import uuid
+import zmq
 
 
 logging = setup_logging(module_name='trader.messaging.clientserver')
@@ -210,6 +215,183 @@ class _Handler(RPCHandler, Generic[T]):
         return self.subject
 
 
+class MessageBusServer(Generic[T]):
+    def __init__(
+        self,
+        zmq_address: str,
+        zmq_port: int,
+        translation_table: Dict[int, Tuple[Any, partial[Any], Callable]] = translation_table,  # type: ignore
+    ):
+        nest_asyncio.apply()
+        self.zmq_address = zmq_address
+        self.zmq_port = zmq_port
+        self.translation_table = translation_table
+        self.lock = threading.Lock()
+
+        self._sentinel = ('stop', 'stop', 'stop')
+        self.sentinel_flag: bool = True
+        self.clients: Dict[Tuple[str, str], bool] = {}
+        self.server: Optional[aiozmq.ZmqStream] = None
+        self.read_task: Optional[asyncio.Task] = None
+        self.read_loop = None
+
+        self.read_thread: Optional[threading.Thread] = None
+        self.message_thread: Optional[threading.Thread] = None
+
+    def put(self, topic_item: Tuple[str, T]):
+        self.wait_handle.loop.call_soon_threadsafe(self.wait_handle.queue.put_nowait, topic_item)  # type: ignore
+        # this is faster:
+        # self.wait_handle.queue.put_nowait(topic_item)  # type: ignore
+
+    async def _message(self, client_id: str, topic: str, val: T):
+        if not self.server:
+            raise ValueError('server is not initialized')
+
+        if val == b'subscribe' and (client_id, topic) not in self.clients:
+            self.clients[(client_id, topic)] = True
+            return
+
+        client_ids = [id for (id, topic), _ in self.clients.items() if id != client_id and topic == topic]
+        for id in client_ids:
+            self.server.write((id, topic, val))
+
+    def _message_loop(self, wait_handle: threading.Event):
+        import time
+        while not self.server:
+            time.sleep(0.1)
+
+        async def main():
+            wait_handle.loop = asyncio.get_running_loop()  # type: ignore
+            wait_handle.queue = task_queue = asyncio.Queue()  # type: ignore
+            wait_handle.set()
+
+            while True:
+                item = await task_queue.get()
+                if item == self._sentinel:
+                    task_queue.task_done()
+                    self.sentinel_flag = True
+                    break
+
+                id = item[0]
+                topic = item[1]
+                val = item[2]
+
+                task = asyncio.create_task(self._message(id, topic, val))
+                task.add_done_callback(lambda _: task_queue.task_done())
+            await task_queue.join()
+
+        asyncio.run(main())
+
+    def _read_loop(self, loop):
+        self.server = asyncio.run(aiozmq.create_zmq_stream(
+            zmq.ROUTER,
+            bind='{}:{}'.format(self.zmq_address, self.zmq_port),
+        ))  # type: ignore
+
+        async def main():
+            if not self.server:
+                raise ValueError('server is not initialized')
+
+            while not self.sentinel_flag:
+                task = asyncio.create_task(self.server.read())
+                await task
+                result = task.result()
+                self.put(result)
+
+        # asyncio.run(main())
+        self.read_loop = asyncio.get_event_loop()
+        self.read_task = self.read_loop.create_task(main())
+        try:
+            self.read_loop.run_until_complete(self.read_task)
+        except Exception as ex:
+            pass
+
+    async def start(self):
+        logging.debug('starting MessageBus server work queue')
+
+        if self.server and self.sentinel_flag is False:
+            raise ValueError('server already started')
+
+        self.wait_handle = threading.Event()
+
+        self.sentinel_flag = False
+        # self.read_thread = threading.Thread(target=self._read_loop, args=(asyncio.get_event_loop(),))
+        self.read_thread = threading.Thread(target=self._read_loop, args=(asyncio.get_event_loop(),))
+        self.read_thread.start()
+
+        # self.message_thread = threading.Thread(target=self._message_loop, args=(self.wait_handle,))
+        self.message_thread = threading.Thread(target=self._message_loop, args=(self.wait_handle,))
+        self.message_thread.start()
+
+        self.wait_handle.wait()
+
+    def stop(self):
+        if self.server is None or self.read_task is None or self.read_loop is None:
+            raise ValueError('server not initialized')
+
+        self.sentinel_flag = True
+        self.put(self._sentinel)  # type: ignore
+        # self.read_task.cancel()
+        self.server.close()
+
+        loop = self.read_loop
+
+        if loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
+            with suppress(CancelledError):
+                with suppress(RuntimeError):
+                    loop.run_until_complete(self.read_task)
+
+        asyncio.run(asyncio.sleep(0.1))
+
+    async def wait(self):
+        while not self.sentinel_flag:
+            await asyncio.sleep(1)
+
+
+class MessageBusClient(Generic[T]):
+    def __init__(
+        self,
+        zmq_address: str,
+        zmq_port: int,
+    ):
+        self.zmq_address = zmq_address
+        self.zmq_port = zmq_port
+        self.client: Optional[aiozmq.ZmqStream] = None
+
+    async def connect(self) -> None:
+        self.client = await aiozmq.create_zmq_stream(
+            zmq.DEALER,
+            connect='{}:{}'.format(self.zmq_address, self.zmq_port),
+        )  # type: ignore
+
+    def subscribe(self, topic: str) -> None:
+        if not self.client:
+            raise ValueError('client is not initialized')
+
+        self.client.write([topic.encode(), 'subscribe'.encode()])
+
+    def write(self, topic: str, val: T) -> None:
+        if not self.client:
+            raise ValueError('client is not initialized')
+
+        self.client.write([topic.encode(), dill_dumps(val)])
+
+    def disconnect(self) -> None:
+        if not self.client:
+            raise ValueError('client is not initialized')
+
+        self.client.close()
+
+    async def read(self) -> T:
+        if not self.client:
+            raise ValueError('client is not initialized')
+
+        _, val = await self.client.read()  # type: ignore
+        result = dill_loads(val)
+        return result
+
+
 class TopicPubSub(Generic[T]):
     def __init__(
         self,
@@ -268,10 +450,14 @@ class TopicPubSub(Generic[T]):
         topic: str = 'default'
     ):
         try:
-            if self.zmq_publisher:
-                await self.zmq_publisher.publish(topic).on_message(obj)
+            if not self.zmq_publisher:
+                self.zmq_publisher = asyncio.run(aiozmq.rpc.connect_pubsub(
+                    # connect='{}:{}'.format(self.zmq_server_address, self.zmq_server_port),
+                    bind='{}:{}'.format(self.zmq_server_address, self.zmq_server_port),
+                    translation_table=self.translation_table
+                ))  # type: ignore
             else:
-                raise ValueError('self.zmq_publisher not initialized')
+                await self.zmq_publisher.publish(topic).on_message(obj)
         except Exception as e:
             logging.exception(e)
             logging.debug(f'self.zmq_server_address: {self.zmq_server_address}, self.zmq_server_port: {self.zmq_server_port}')

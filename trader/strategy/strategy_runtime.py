@@ -11,7 +11,7 @@ from trader.data.universe import UniverseAccessor
 from trader.listeners.ib_history_worker import IBHistoryWorker
 from trader.messaging.clientserver import MultithreadedTopicPubSub, RemotedClient, RPCServer, TopicPubSub
 from trader.objects import Action, BarSize, WhatToShow
-from trader.trading.strategy import Strategy, StrategyConfig, StrategyState
+from trader.trading.strategy import Signal, Strategy, StrategyConfig, StrategyState
 from typing import cast, Dict, List, Optional
 
 import asyncio
@@ -50,6 +50,8 @@ class StrategyRuntime(metaclass=Singleton):
         zmq_rpc_server_port: int,
         zmq_strategy_rpc_server_address: str,
         zmq_strategy_rpc_server_port: int,
+        zmq_signal_pubsub_server_address: str,
+        zmq_signal_pubsub_server_port: int,
         strategies_directory: str,
         strategy_config_file: str,
         paper_trading: bool = False,
@@ -68,12 +70,17 @@ class StrategyRuntime(metaclass=Singleton):
         self.zmq_rpc_server_port = zmq_rpc_server_port
         self.zmq_strategy_rpc_server_address = zmq_strategy_rpc_server_address
         self.zmq_strategy_rpc_server_port = zmq_strategy_rpc_server_port
+        self.zmq_signal_pubsub_server_address = zmq_signal_pubsub_server_address
+        self.zmq_signal_pubsub_server_port = zmq_signal_pubsub_server_port
+
         self.strategies_directory = strategies_directory
         self.strategy_config_file = strategy_config_file
         self.startup_time: dt.datetime = dt.datetime.now()
         self.last_connect_time: dt.datetime
 
         self.zmq_strategy_rpc_server: RPCServer[bus.StrategyServiceApi]
+        self.zmq_signal_pubsub_server: MultithreadedTopicPubSub[Signal]
+        self.zmq_signal_client: TopicPubSub[Signal]
         # todo: this is wrong as we'll have a whole bunch of different tickdata libraries for
         # different bartypes etc.
         self.storage: TickStorage
@@ -124,9 +131,17 @@ class StrategyRuntime(metaclass=Singleton):
                 zmq_rpc_server_port=self.zmq_strategy_rpc_server_port,
             )
 
+            self.zmq_signal_pubsub_server = MultithreadedTopicPubSub[Signal](
+                zmq_pubsub_server_address=self.zmq_signal_pubsub_server_address,
+                zmq_pubsub_server_port=self.zmq_signal_pubsub_server_port,
+            )
+            self.zmq_signal_pubsub_server.start()
             asyncio.run(self.zmq_strategy_rpc_server.serve())
         except Exception as ex:
-            raise self.create_strategy_exception(TraderConnectionException, message='strategy_runtime.connect() exception', inner=ex)
+            raise self.create_strategy_exception(
+                TraderConnectionException,
+                message='strategy_runtime.connect() exception', inner=ex
+            )
 
     @log_method
     def enable_strategy(self, name: str, paper: bool) -> StrategyState:
