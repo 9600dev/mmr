@@ -88,7 +88,7 @@ from trader.data.data_access import DictData, TickData, TickStorage
 from trader.data.market_data import MarketData
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, WhatToShow
-from trader.messaging.clientserver import RPCClient, TopicPubSub
+from trader.messaging.clientserver import MessageBusClient, RPCClient, TopicPubSub
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.objects import BarSize
 from typing import Any, cast, Dict, List, Optional, Union
@@ -355,6 +355,8 @@ class AsyncCli(App):
         arctic_universe_library: str,
         zmq_pubsub_server_address: str,
         zmq_pubsub_server_port: int,
+        zmq_messagebus_server_address: str,
+        zmq_messagebus_server_port: int,
         group_ctx: Optional[click.core.Context] = None,
     ):
         super().__init__()
@@ -369,6 +371,7 @@ class AsyncCli(App):
             zmq_pubsub_server_address,
             zmq_pubsub_server_port + 1,
         )
+        self.zmq_messagebus_client = MessageBusClient(zmq_messagebus_server_address, zmq_messagebus_server_port)
         self.remoted_client: RPCClient[TraderServiceApi]
         self.scheduler = AsyncIOScheduler(asyncio.get_running_loop())
         self.arctic_server_address = arctic_server_address
@@ -377,7 +380,7 @@ class AsyncCli(App):
     """A Textual app to manage stopwatches."""
     CSS_PATH = 'trader/cli/css.css'
     BINDINGS = [
-        Binding('ctrl+d', 'toggle_dark', 'Toggle dark mode'),
+        # Binding('ctrl+d', 'toggle_dark', 'Toggle dark mode'),
         # Binding('ctrl+u', 'dialog', 'Dialog'),
         Binding('ctrl+p', 'plot', 'Plot'),
         Binding('ctrl+b', 'book', 'Book'),
@@ -610,6 +613,11 @@ class AsyncCli(App):
             pass
 
         self.remoted_client, _ = setup_cli(self.renderer)
+
+        await self.zmq_messagebus_client.connect()
+        self.signal_observer = AutoDetachObserver(on_next=on_next, on_error=on_error, on_completed=on_completed)
+        disposable = self.zmq_messagebus_client.subscribe(topic='signal', observer=self.signal_observer)
+
         observable = await self.zmq_subscriber.subscriber(topic='dataclass')
         self.observer = AutoDetachObserver(on_next=on_next, on_error=on_error, on_completed=on_completed)
         self.subscription = observable.subscribe(self.observer)

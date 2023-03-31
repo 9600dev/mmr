@@ -28,7 +28,7 @@ from trader.data.data_access import PortfolioSummary, SecurityDefinition, TickSt
 from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
-from trader.messaging.clientserver import MultithreadedTopicPubSub, RPCClient, RPCServer
+from trader.messaging.clientserver import MessageBusServer, MultithreadedTopicPubSub, RPCClient, RPCServer
 from trader.objects import Action
 from trader.trading.book import BookSubject
 from trader.trading.executioner import TradeExecutioner
@@ -66,6 +66,8 @@ class Trader(metaclass=Singleton):
                  zmq_rpc_server_port: int,
                  zmq_strategy_rpc_server_address: str,
                  zmq_strategy_rpc_server_port: int,
+                 zmq_messagebus_server_address: str,
+                 zmq_messagebus_server_port: int,
                  paper_trading: bool = False,
                  simulation: bool = False):
         self.ib_server_address = ib_server_address
@@ -83,6 +85,8 @@ class Trader(metaclass=Singleton):
         self.zmq_rpc_server_port = zmq_rpc_server_port
         self.zmq_strategy_rpc_server_address = zmq_strategy_rpc_server_address
         self.zmq_strategy_rpc_server_port = zmq_strategy_rpc_server_port
+        self.zmq_messagebus_server_address = zmq_messagebus_server_address
+        self.zmq_messagebus_server_port = zmq_messagebus_server_port
 
         # todo I think you can have up to 24 connections to TWS (and have multiple TWS instances running)
         # so we need to take this from single client, to multiple client
@@ -115,6 +119,7 @@ class Trader(metaclass=Singleton):
         self.zmq_pubsub_contract_subscription: DisposableBase = Disposable()
 
         self.zmq_strategy_client: RPCClient[strategy_bus.StrategyServiceApi]
+        self.zmq_messagebus: MessageBusServer
 
         self.startup_time: dt.datetime = dt.datetime.now()
         self.last_connect_time: dt.datetime
@@ -174,6 +179,9 @@ class Trader(metaclass=Singleton):
                 zmq_pubsub_server_port=self.zmq_pubsub_server_port + 1
             )
             self.zmq_dataclass_server.start()
+
+            self.zmq_messagebus = MessageBusServer(self.zmq_messagebus_server_address, self.zmq_messagebus_server_port)
+            self.run(self.zmq_messagebus.start())
 
             self.zmq_pubsub_contracts = {}
             self.zmq_pubsub_contract_filters = {}

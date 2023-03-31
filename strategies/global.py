@@ -1,6 +1,7 @@
 from logging import Logger
 from trader.data.data_access import TickStorage
 from trader.data.universe import UniverseAccessor
+from trader.messaging.clientserver import MessageBusClient
 from trader.trading.strategy import Signal, Strategy, StrategyState
 from typing import Optional, Tuple
 
@@ -13,12 +14,14 @@ class Global(Strategy):
         self,
         storage: TickStorage,
         accessor: UniverseAccessor,
+        zmq_messagebus_client: MessageBusClient,
         logging: Logger,
     ):
         super().__init__(
             storage,
             accessor,
-            logging
+            zmq_messagebus_client,
+            logging,
         )
 
     def install(self, strategy_runtime: runtime.StrategyRuntime) -> bool:
@@ -39,9 +42,6 @@ class Global(Strategy):
         return self.state
 
     def on_prices(self, prices: pd.DataFrame) -> Optional[Signal]:
-        return None
-
-    def on_signal(self, signal: Signal) -> Optional[Signal]:
         return None
 
     def on_error(self, error):

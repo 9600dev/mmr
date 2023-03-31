@@ -618,7 +618,6 @@ class IBAIORx():
                 what_to_show=what_to_show,
             )
 
-            print(data)
             subject.on_next(data)
 
             start_date = end_date

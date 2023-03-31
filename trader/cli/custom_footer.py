@@ -147,7 +147,7 @@ class CustomFooter(Widget):
             text.append_text(Text(' Unrlzd: $0.00', style=base_style))
 
         if self.realized_pnl is not None:
-            text.append_text(Text(f' Realized: ${self.realized_pnl:,.2f} '))
+            text.append_text(Text(f' Rlzd: ${self.realized_pnl:,.2f} '))
         else:
             text.append_text(Text(' Realized: $0.00 ', style=base_style))
 

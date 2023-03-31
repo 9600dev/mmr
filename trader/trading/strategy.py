@@ -4,6 +4,7 @@ from logging import Logger
 from trader.common.helpers import DictHelper
 from trader.data.data_access import TickStorage
 from trader.data.universe import UniverseAccessor
+from trader.messaging.clientserver import MessageBusClient
 from trader.objects import Action, BarSize
 from typing import List, Optional
 
@@ -14,12 +15,14 @@ import pandas as pd
 class Signal():
     def __init__(
         self,
+        source_name: str,
         action: Action,
         probability: float,
         risk: float,
         date_time: dt.datetime = dt.datetime.now(),
         generating_frame: object = None
     ):
+        self.source_name: str = source_name
         self.action: Action = action
         self.probability: float = probability
         self.risk: float = risk
@@ -41,11 +44,13 @@ class Strategy(ABC):
         self,
         storage: TickStorage,
         accessor: UniverseAccessor,
+        zmq_messagebus_client: MessageBusClient,
         logging: Logger,
     ):
         self.storage = storage
         self.accessor = accessor
         self.strategy_runtime = None
+        self.zmq_messagebus_client = zmq_messagebus_client
         self.logging = logging
         self.state = StrategyState.NOT_INSTALLED
 
@@ -78,10 +83,6 @@ class Strategy(ABC):
 
     @abstractmethod
     def on_prices(self, prices: pd.DataFrame) -> Optional[Signal]:
-        pass
-
-    @abstractmethod
-    def on_signal(self, signal: Signal) -> Optional[Signal]:
         pass
 
     @abstractmethod

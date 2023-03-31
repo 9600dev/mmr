@@ -28,6 +28,29 @@ class SuccessFailEnum(Enum):
         if self.value == 1: return 'FAIL'
 
 
+class AnonymousObserver(Observer[TSource]):
+    def __init__(
+        self,
+        on_next: Optional[Callable[[TSource], None]] = None,
+        on_error: Optional[Callable[[Exception], None]] = None,
+        on_completed: Optional[Callable[[], None]] = None
+    ):
+        self._on_next = on_next
+        self._on_error = on_error
+        self._on_completed = on_completed
+
+    def on_next(self, value: TSource):
+        if self._on_next is not None:
+            self._on_next(value)
+
+    def on_error(self, error: Exception):
+        if self._on_error is not None:
+            self._on_error(error)
+
+    def on_completed(self):
+        if self._on_completed is not None:
+            self._on_completed()
+
 class SuccessFail(Generic[TSource]):
     def __init__(self, success_fail: SuccessFailEnum, error=None, exception=None, obj: Optional[TSource] = None, disposable=None):
         self.success_fail = success_fail

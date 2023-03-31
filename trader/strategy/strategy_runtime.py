@@ -9,7 +9,13 @@ from trader.common.singleton import Singleton
 from trader.data.data_access import SecurityDefinition, TickStorage
 from trader.data.universe import UniverseAccessor
 from trader.listeners.ib_history_worker import IBHistoryWorker
-from trader.messaging.clientserver import MultithreadedTopicPubSub, RPCClient, RPCServer, TopicPubSub
+from trader.messaging.clientserver import (
+    MessageBusClient,
+    MultithreadedTopicPubSub,
+    RPCClient,
+    RPCServer,
+    TopicPubSub
+)
 from trader.objects import Action, BarSize, WhatToShow
 from trader.trading.strategy import Signal, Strategy, StrategyConfig, StrategyState
 from typing import cast, Dict, List, Optional
@@ -50,8 +56,8 @@ class StrategyRuntime(metaclass=Singleton):
         zmq_rpc_server_port: int,
         zmq_strategy_rpc_server_address: str,
         zmq_strategy_rpc_server_port: int,
-        zmq_signal_pubsub_server_address: str,
-        zmq_signal_pubsub_server_port: int,
+        zmq_messagebus_server_address: str,
+        zmq_messagebus_server_port: int,
         strategies_directory: str,
         strategy_config_file: str,
         paper_trading: bool = False,
@@ -70,8 +76,8 @@ class StrategyRuntime(metaclass=Singleton):
         self.zmq_rpc_server_port = zmq_rpc_server_port
         self.zmq_strategy_rpc_server_address = zmq_strategy_rpc_server_address
         self.zmq_strategy_rpc_server_port = zmq_strategy_rpc_server_port
-        self.zmq_signal_pubsub_server_address = zmq_signal_pubsub_server_address
-        self.zmq_signal_pubsub_server_port = zmq_signal_pubsub_server_port
+        self.zmq_messagebus_server_address = zmq_messagebus_server_address
+        self.zmq_messagebus_server_port = zmq_messagebus_server_port
 
         self.strategies_directory = strategies_directory
         self.strategy_config_file = strategy_config_file
@@ -79,8 +85,8 @@ class StrategyRuntime(metaclass=Singleton):
         self.last_connect_time: dt.datetime
 
         self.zmq_strategy_rpc_server: RPCServer[bus.StrategyServiceApi]
-        self.zmq_signal_pubsub_server: MultithreadedTopicPubSub[Signal]
-        self.zmq_signal_client: TopicPubSub[Signal]
+        self.zmq_messagebus_client: MessageBusClient
+
         # todo: this is wrong as we'll have a whole bunch of different tickdata libraries for
         # different bartypes etc.
         self.storage: TickStorage
@@ -131,12 +137,14 @@ class StrategyRuntime(metaclass=Singleton):
                 zmq_rpc_server_port=self.zmq_strategy_rpc_server_port,
             )
 
-            self.zmq_signal_pubsub_server = MultithreadedTopicPubSub[Signal](
-                zmq_pubsub_server_address=self.zmq_signal_pubsub_server_address,
-                zmq_pubsub_server_port=self.zmq_signal_pubsub_server_port,
+            self.zmq_messagebus_client = MessageBusClient(
+                zmq_address=self.zmq_messagebus_server_address,
+                zmq_port=self.zmq_messagebus_server_port,
             )
-            self.zmq_signal_pubsub_server.start()
+
+            asyncio.run(self.zmq_messagebus_client.connect())
             asyncio.run(self.zmq_strategy_rpc_server.serve())
+
         except Exception as ex:
             raise self.create_strategy_exception(
                 TraderConnectionException,
@@ -236,7 +244,7 @@ class StrategyRuntime(metaclass=Singleton):
         module: str,
         class_name: str,
         description: str,
-        live: bool = False,
+        paper: bool = False,
     ) -> None:
 
         if not name or not class_name or not module or not bar_size_str:
@@ -276,7 +284,7 @@ class StrategyRuntime(metaclass=Singleton):
 
                 # todo: fix this
                 # here's where we need bar_size to strategy
-                instance = class_object(self.storage, self.universe_accessor, logging)
+                instance = class_object(self.storage, self.universe_accessor, self.zmq_messagebus_client, logging)
                 instance.name = name
                 instance.bar_size = BarSize.parse_str(bar_size_str)
                 instance.description = description
@@ -286,7 +294,7 @@ class StrategyRuntime(metaclass=Singleton):
                 instance.description = description
                 instance.module = module
                 instance.class_name = class_name
-                instance.live = live
+                instance.paper = paper
 
                 self.strategy_implementations.append(cast(Strategy, instance))
 
@@ -311,7 +319,7 @@ class StrategyRuntime(metaclass=Singleton):
                 module=strategy_config['module'] if 'module' in strategy_config else '',
                 class_name=strategy_config['class_name'] if 'class_name' in strategy_config else '',
                 description=strategy_config['description'] if 'description' in strategy_config else '',
-                live=strategy_config['live'] if 'live' in strategy_config else False,
+                paper=strategy_config['paper'] if 'live' in strategy_config else False,
             )
 
     async def get_historical_data(self):

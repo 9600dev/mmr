@@ -244,6 +244,18 @@ class MessageBusServer():
         self.read_thread: Optional[threading.Thread] = None
         self.message_thread: Optional[threading.Thread] = None
 
+    @staticmethod
+    def message_subscribe(topic):
+        return [topic.encode() if type(topic) is str else topic, 'subscribe'.encode()]
+
+    @staticmethod
+    def message_disconnect():
+        return ['disconnect'.encode(), 'disconnect'.encode()]
+
+    @staticmethod
+    def message(topic, val: Any):
+        return [topic.encode() if type(topic) is str else topic, dill.dumps(val)]
+
     def put(self, topic_item: Tuple[str, Any]):
         self.wait_handle.loop.call_soon_threadsafe(self.wait_handle.queue.put_nowait, topic_item)  # type: ignore
 
@@ -254,8 +266,15 @@ class MessageBusServer():
         if not self.server:
             raise ValueError('server is not initialized')
 
-        if val == b'subscribe' and (client_id, topic) not in self.clients:
+        if val == MessageBusServer.message_subscribe('disconnect')[1] and (client_id, topic) not in self.clients:
             self.clients[(client_id, topic)] = True
+            return
+
+        if val == MessageBusServer.message_disconnect()[1]:
+            # remove all subscriptions for this client
+            for (subscribed_client_id, subscribed_topic) in self.clients.copy().keys():
+                if client_id == subscribed_client_id:
+                    self.clients.pop((subscribed_client_id, subscribed_topic))
             return
 
         client_ids = [id for (id, topic), _ in self.clients.items() if id != client_id and topic == topic]
@@ -374,6 +393,9 @@ class MessageBusClient(Generic[T]):
                 yield await self.read()
             except aiozmq.ZmqStreamClosed as ex:
                 return
+            except Exception as ex:
+                # for breakpoints
+                raise ex
 
     def subscribe(
         self,
@@ -383,25 +405,29 @@ class MessageBusClient(Generic[T]):
         if not self.client:
             raise ValueError('client is not initialized')
 
-        self.client.write([topic.encode(), 'subscribe'.encode()])
+        self.client.write(MessageBusServer.message_subscribe(topic))
         return ObservableIterHelper(asyncio.get_event_loop()).from_aiter(self.__iterable_read()).subscribe(observer)
 
     def subscribe_topic(self, topic: str) -> None:
         if not self.client:
             raise ValueError('client is not initialized')
 
-        self.client.write([topic.encode(), 'subscribe'.encode()])
+        self.client.write(MessageBusServer.message_subscribe(topic))
 
     def write(self, topic: str, val: T) -> None:
         if not self.client:
             raise ValueError('client is not initialized')
 
-        self.client.write([topic.encode(), dill_dumps(val)])
+        self.client.write(MessageBusServer.message(topic, val))
 
-    def disconnect(self) -> None:
+    async def disconnect(self) -> None:
         if not self.client:
             raise ValueError('client is not initialized')
 
+        self.client.write(MessageBusServer.message_disconnect())
+        await self.client.drain()  # type: ignore
+        # pump the loop
+        await asyncio.sleep(1.0)
         self.client.close()
 
     async def read(self) -> T:
@@ -409,8 +435,11 @@ class MessageBusClient(Generic[T]):
             raise ValueError('client is not initialized')
 
         _, val = await self.client.read()  # type: ignore
-        result = dill_loads(val)
-        return result
+        try:
+            return dill_loads(val)
+        except Exception as ex:
+            logging.exception('error reading message from message bus: %s', ex)
+            raise ex
 
 
 class TopicPubSub(Generic[T]):
