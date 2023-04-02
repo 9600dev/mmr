@@ -28,7 +28,7 @@ from trader.cli.commands import cli_client_id, invoke_context_wrapper, setup_cli
 from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.helpers import contract_from_dict, DictHelper, rich_dict, rich_json, rich_list, rich_table
 from trader.common.logging_helper import LogLevels, set_log_level, setup_logging
-from trader.common.reactivex import SuccessFail
+from trader.common.reactivex import AnonymousObserver, SuccessFail
 from trader.container import Container
 from trader.data.data_access import DictData, TickData, TickStorage
 from trader.data.market_data import MarketData
@@ -102,18 +102,8 @@ def setup_ipython():
 
     from reactivex import Observer
 
-    class MyObserver(Observer):
-        def on_next(self, value):
-            print(value)
-
-        def on_error(self, error: Exception):
-            print("Got error: %s" % error)
-
-        def on_completed(self):
-            print("Sequence completed")
-
     renderer = ConsoleRenderer()
-    remoted_client, cli_client_id = setup_cli(renderer)
+    _, cli_client_id = setup_cli(renderer)
 
     container = Container()
     accessor = container.resolve(UniverseAccessor)
@@ -122,8 +112,6 @@ def setup_ipython():
     store = Arctic(mongo_host=container.config()['arctic_server_address'])
     tickstorage = container.resolve(TickStorage)
     marketdata = container.resolve(MarketData, **{'client': client})
-
-    asyncio.run(client.subscribe_single_pnl('U2556618', tsla, MyObserver()))
 
     print('Available instance objects:')
     print()

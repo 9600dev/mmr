@@ -11,6 +11,7 @@ from ib_insync.contract import Contract
 from ib_insync.objects import PnLSingle, PortfolioItem, Position
 from ib_insync.order import LimitOrder, MarketOrder, Order, StopLimitOrder, StopOrder, Trade
 from ib_insync.ticker import Ticker
+from reactivex import pipe
 from reactivex.abc import DisposableBase, ObserverBase
 from reactivex.disposable import Disposable
 from reactivex.observable import Observable
@@ -22,7 +23,7 @@ from trader.common.dataclass_cache import DataClassCache, DataClassEvent, Update
 from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.helpers import ListHelper
 from trader.common.logging_helper import get_callstack, log_method, setup_logging
-from trader.common.reactivex import SuccessFail
+from trader.common.reactivex import AnonymousObserver, SuccessFail
 from trader.common.singleton import Singleton
 from trader.data.data_access import PortfolioSummary, SecurityDefinition, TickStorage
 from trader.data.market_data import SecurityDataStream
@@ -39,6 +40,8 @@ from typing import cast, Dict, List, NamedTuple, Optional, Tuple, Union
 import asyncio
 import backoff
 import datetime as dt
+import reactivex as rx
+import reactivex.operators as ops
 import threading
 import trader.messaging.strategy_service_api as strategy_bus
 import trader.messaging.trader_service_api as bus
@@ -129,7 +132,7 @@ class Trader(metaclass=Singleton):
 
         self.disposables: List[DisposableBase] = []
 
-    def create_trader_exception(self, exception_type: type, message: str, inner: Optional[Exception]):
+    def trader_exception(self, exception_type: type, message: str, inner: Optional[Exception]) -> Exception:
         # todo use reflection here to automatically populate trader runtime vars that we care about
         # given a particular exception type
         data = self.data if hasattr(self, 'data') else None
@@ -198,7 +201,7 @@ class Trader(metaclass=Singleton):
             self.run(self.zmq_rpc_server.serve())
 
         except Exception as ex:
-            raise self.create_trader_exception(TraderConnectionException, message='trading_runtime connect() exception', inner=ex)
+            raise self.trader_exception(TraderConnectionException, message='trading_runtime connect() exception', inner=ex)
 
     @log_method
     async def shutdown(self):
@@ -248,7 +251,7 @@ class Trader(metaclass=Singleton):
             raise ConnectionError('not connected to interactive brokers')
 
         def handle_subscription_exception(ex):
-            exception = self.create_trader_exception(TraderException, message='setup_subscriptions()', inner=ex)
+            exception = self.trader_exception(TraderException, message='setup_subscriptions()', inner=ex)
             raise exception
 
         def handle_completed():
@@ -271,10 +274,10 @@ class Trader(metaclass=Singleton):
             on_completed=handle_completed
         )
 
-        positions_disposable = await self.client.subscribe_positions(positions_observer)
+        positions_disposable = (await self.client.subscribe_positions()).subscribe(positions_observer)
         self.disposables.append(positions_disposable)
 
-        portfolio_disposable = await self.client.subscribe_portfolio(Observer(
+        portfolio_disposable = (await self.client.subscribe_portfolio()).subscribe(AnonymousObserver(
             on_next=self.__update_portfolio,
             on_error=handle_subscription_exception,
         ))
@@ -285,22 +288,24 @@ class Trader(metaclass=Singleton):
             # todo this is a hack, we need to figure out how to make this work with async
             async def __async_subscribe_pnl(portfolio_item: PortfolioItem):
                 if portfolio_item.contract and (portfolio_item.account, portfolio_item.contract.conId) not in self.pnl_subscriptions:  # noqa: E501
-                    disposable = await self.client.subscribe_single_pnl(
+                    observable = await self.client.subscribe_single_pnl(
                         portfolio_item.account,
                         portfolio_item.contract,
-                        self.pnl.create_observer(error_func=handle_subscription_exception)
                     )
+                    disposable = observable.subscribe(self.pnl.create_observer(error_func=handle_subscription_exception))
+
                     self.disposables.append(disposable)
                     self.pnl_subscriptions.update({(portfolio_item.account, portfolio_item.contract.conId): True})
 
             self.run(__async_subscribe_pnl(portfolio_item))
 
-        await self.client.subscribe_portfolio(
-            Observer(
+        disposable = (await self.client.subscribe_portfolio()).subscribe(
+            AnonymousObserver(
                 on_next=__subscribe_pnl,
                 on_error=handle_subscription_exception,
             )
         )
+        self.disposables.append(disposable)
 
         pnl_router_disposable = self.pnl.subscribe(on_next=self.__dataclass_server_put, on_error=handle_subscription_exception)
         self.disposables.append(pnl_router_disposable)
@@ -387,6 +392,35 @@ class Trader(metaclass=Singleton):
                 return [universe_definition]
             return []
 
+    def resolve_symbol(self, symbol: Union[str, int]) -> Optional[SecurityDefinition]:
+        # todo
+        # because resolving conids is all messed up, we're going to try a few heuristics
+        int_symbol = 0
+
+        if type(symbol) is str and symbol.isnumeric():
+            int_symbol = int(symbol)
+        if type(symbol) is int:
+            int_symbol = symbol
+
+        result = self.resolve_symbol_to_security_definitions(symbol)
+        if result and int_symbol > 0:
+            # we know we used conid here, they're unique so...
+            return result[0][1]
+        if result and int_symbol == 0:
+            for _, security_definition in result:
+                for portfolio_item in self.portfolio.get_portfolio_items():
+                    if (
+                        portfolio_item.contract.symbol == security_definition.symbol
+                        or portfolio_item.contract.localSymbol == security_definition.symbol
+                    ):
+                        return security_definition
+
+        # worst case
+        if result:
+            return result[0][1]
+        else:
+            return None
+
     @log_method
     def publish_contract(self, contract: Contract, delayed: bool) -> Observable[IBAIORxError]:
         if contract.conId in self.zmq_pubsub_contract_filters:
@@ -403,7 +437,7 @@ class Trader(metaclass=Singleton):
         def on_error(ex):
             del self.zmq_pubsub_contracts[contract.conId]
             del self.zmq_pubsub_contract_filters[contract.conId]
-            raise self.create_trader_exception(TraderException, message='publish_contract() on_error', inner=ex)
+            raise self.trader_exception(TraderException, message='publish_contract() on_error', inner=ex)
 
         if len(self.zmq_pubsub_contract_filters) == 0:
             # setup the observable for the first time
@@ -413,7 +447,7 @@ class Trader(metaclass=Singleton):
                 self.zmq_pubsub_contract_subscription = subscription
             except Exception as ex:
                 # todo not sure how to deal with this error condition yet
-                raise self.create_trader_exception(TraderException, message='publish_contract()', inner=ex)
+                raise self.trader_exception(TraderException, message='publish_contract()', inner=ex)
 
         error_observable = self.client.subscribe_contract_direct(contract, delayed=delayed)
         self.zmq_pubsub_contract_filters[contract.conId] = True
@@ -440,44 +474,22 @@ class Trader(metaclass=Singleton):
             logging.debug('updating portfolio universe with {}'.format(portfolio_item))
             self.universe_accessor.update(universe)
 
-            # if not ListHelper.isin(
-            #     list(self.market_data_subscriptions.keys()),
-            #     lambda subscription: subscription.conId == portfolio_item.contract.conId
-            # ):
-            #     logging.debug('subscribing to market data stream for portfolio item {}'.format(portfolio_item.contract))
-            #     security = cast(SecurityDefinition, universe.find_contract(portfolio_item.contract))
-            #     date_range = DateRange(
-            #         start=dateify(dt.datetime.now() - dt.timedelta(days=30)),
-            #         end=timezoneify(dt.datetime.now(), timezone='America/New_York')
-            #     )
-            #     security_stream = SecurityDataStream(
-            #         security=security,
-            #         bar_size='1 min',
-            #         date_range=date_range,
-            #         existing_data=None
-            #     )
-            #     await self.client.subscribe_contract_history(
-            #         contract=portfolio_item.contract,
-            #         start_date=dateify(dt.datetime.now() - dt.timedelta(days=30)),
-            #         what_to_show=WhatToShow.TRADES,
-            #         observer=security_stream
-            #     )
-            #     self.market_data_subscriptions[security] = security_stream
-
     @log_method
-    async def place_order(
+    async def subscribe_place_order(
         self,
         contract: Contract,
         order: Order,
-        observer: ObserverBase[Trade],
-    ) -> DisposableBase:
-        disposable: DisposableBase = Disposable()
+    ) -> Observable[Trade]:
+        def trader_exception(ex):
+            return rx.throw(exception=self.trader_exception(TraderException, message='place_order()', inner=ex))
+
         try:
-            disposable = await self.client.subscribe_place_order(contract, order, observer)
+            observable = await self.client.subscribe_place_order(contract, order)
+            return observable.pipe(
+                ops.catch(lambda ex, src: trader_exception(ex))
+            )
         except Exception as ex:
-            # todo not sure how to deal with this error condition yet
-            raise self.create_trader_exception(TraderException, message='place_order()', inner=ex)
-        return disposable
+            return trader_exception(ex)
 
     @log_method
     async def handle_order(

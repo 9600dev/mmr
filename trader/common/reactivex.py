@@ -51,6 +51,16 @@ class AnonymousObserver(Observer[TSource]):
         if self._on_completed is not None:
             self._on_completed()
 
+
+class PrintObserver(AnonymousObserver):
+    def __init__(self, prefix: str = ''):
+        super().__init__(
+            on_next=lambda x: print(prefix, x),
+            on_error=lambda x: print(prefix, x),
+            on_completed=lambda: print(prefix, 'completed')
+        )
+
+
 class SuccessFail(Generic[TSource]):
     def __init__(self, success_fail: SuccessFailEnum, error=None, exception=None, obj: Optional[TSource] = None, disposable=None):
         self.success_fail = success_fail
@@ -152,13 +162,14 @@ class EventSubject(Subject[TSource]):
         if result:
             return result
 
-    def call_event_subscriber_sync(self, callable_lambda: Callable, asend_result: bool = True):
+    def call_event_subscriber_sync(self, callable_lambda: Callable, asend_result: bool = True) -> Optional[TSource]:
         result = callable_lambda()
         if result and asend_result:
             self.on_next(result)
             return result
         if result:
             return result
+        return None
 
     async def call_cancel_subscription(self, awaitable_canceller: Awaitable):
         await awaitable_canceller

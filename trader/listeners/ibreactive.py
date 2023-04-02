@@ -16,7 +16,7 @@ from trader.common.logging_helper import setup_logging
 from trader.common.reactivex import EventSubject
 from trader.listeners.ib_history_worker import IBHistoryWorker
 from trader.objects import BarSize, WhatToShow
-from typing import cast, Dict, List, Optional, Set, TypeVar, Union
+from typing import cast, Dict, Iterator, List, Optional, Set, TypeVar, Union
 
 import asyncio
 import backoff
@@ -200,8 +200,7 @@ class IBAIORx():
         self,
         contract: Contract,
         order: Order,
-        observer: ObserverBase[Trade]
-    ) -> DisposableBase:
+    ) -> Observable[Trade]:
         # the order object gets filled with the order details (clientId, orderId etc)
         # the trade object returned from 'placeOrder' gets filled later, but we don't return it
         # as we want the subscription stream to contain all relevant trade details
@@ -212,11 +211,16 @@ class IBAIORx():
             ops.filter(filter_trade)
         )
 
-        disposable = xs.subscribe(observer)
-        self.trades_subject.call_event_subscriber_sync(lambda: self.ib.placeOrder(contract, order))
-        # todo, figure out what to do here with the disposable
-        # should it cancel the order, or just stop listening?
-        return disposable
+        trade_result = self.trades_subject.call_event_subscriber_sync(lambda: self.ib.placeOrder(contract, order))
+
+        if trade_result:
+            deferred = rx.defer(lambda _: rx.of(cast(Trade, trade_result)))
+            return deferred.pipe(
+                ops.concat(xs)
+            )
+        else:
+            logging.error('subscribe_place_order, trade_result was None')
+            return rx.throw(Exception('subscribe_place_order, trade_result was None'))
 
     def subscribe_contract_direct(
         self,
@@ -336,52 +340,33 @@ class IBAIORx():
     def unsubscribe_contract(self, contract: Contract):
         raise ValueError('not implemented')
 
-    # async def subscribe_barlist(
-    #     self,
-    #     contract: Contract,
-    #     wts: WhatToShow = WhatToShow.MIDPOINT
-    # ) -> Obser[RealTimeBarList]:
-    #     # todo this method subscribes and populates a RealTimeBarsList object,
-    #     # which I'm sure will end up being a memory leak
-    #     bar_size = 5
-
-    #     if contract in self.bars_cache:
-    #         return self.bars_cache[contract]
-
-    #     await self.bars_data_subject.call_event_subscriber_sync(
-    #         lambda: self.ib.reqRealTimeBars(contract, bar_size, str(wts), False)
-    #     )
-
-    #     xs = pipe(
-    #         self.bars_data_subject,
-    #         rx.filter(lambda bar_data_list: self._filter_contract(contract, bar_data_list)),  # type: ignore
-    #     )
-
-    #     self.bars_cache[contract] = xs
-    #     return xs
-
-    # def unsubscribe_barlist(self, contract: Contract):
-    #     if contract in self.bars_cache and self.bars_data_subject.value():
-    #         self.ib.cancelRealTimeBars(cast(RealTimeBarList, self.bars_data_subject.value()))
-    #         del self.bars_cache[contract]
-    #     else:
-    #         logging.debug('unsubscribe_barlist failed for {}'.format(contract))
-
-    async def subscribe_positions(self, observer: Observer[List[Position]]) -> DisposableBase:
-        disposable = self.positions_subject.subscribe(observer)
+    async def subscribe_positions(self) -> Observable[List[Position]]:
         await self.positions_subject.call_event_subscriber(self.ib.reqPositionsAsync())
-        return disposable
 
-    async def subscribe_portfolio(self, observer: Observer[PortfolioItem]) -> DisposableBase:
-        disposable = self.portfolio_subject.subscribe(observer)
+        def get_positions() -> Iterator[List[Position]]:
+            yield self.ib.positions()
 
-        portfolio_items = self.ib.portfolio()
-        for item in portfolio_items:
-            self.portfolio_subject.on_next(item)
+        # deferred observable, primed with the latest portfolio items
+        deferred = rx.defer(lambda _: rx.from_iterable(get_positions()))
+        return deferred.pipe(
+            ops.concat(self.positions_subject)
+        )
 
-        return disposable
+    async def subscribe_portfolio(self) -> Observable[PortfolioItem]:
+        # def reqAccountUpdates(self, account: str = '') is called at startup
+        # so we don't need to call any particular self.ib.req* method
+        def get_portfolio_items() -> Iterator[PortfolioItem]:
+            portfolio_items = self.ib.portfolio()
+            for item in portfolio_items:
+                yield item
 
-    async def subscribe_single_pnl(self, account: str, contract: Contract, observer: Observer[PnLSingle]) -> DisposableBase:
+        # deferred observable, primed with the latest portfolio items
+        deferred = rx.defer(lambda _: rx.from_iterable(get_portfolio_items()))
+        return deferred.pipe(
+            ops.concat(self.portfolio_subject)
+        )
+
+    async def subscribe_single_pnl(self, account: str, contract: Contract) -> Observable[PnLSingle]:
         logging.debug('subscribe_single_pnl({})'.format(contract))
 
         # if not already subscribed
@@ -398,9 +383,49 @@ class IBAIORx():
         filter: Observable[PnLSingle] = self.pnl_subject.pipe(
             ops.filter(lambda pnl: pnl.conId == contract.conId)  # type: ignore
         )
+        return filter
 
-        disposable = filter.subscribe(observer)
-        return disposable
+    async def subscribe_contract_history(
+        self,
+        contract: Contract,
+        start_date: dt.datetime,
+        what_to_show: WhatToShow,
+        refresh_interval: int = 60,
+    ) -> Observable[pd.DataFrame]:
+        async def __update(
+            subject: Subject,
+            contract: Contract,
+            start_date: dt.datetime,
+            end_date: dt.datetime
+        ):
+            if subject.is_disposed:
+                return
+
+            data = await self.get_contract_history(
+                contract=contract,
+                start_date=start_date,
+                end_date=end_date,
+                what_to_show=what_to_show,
+            )
+
+            subject.on_next(data)
+
+            start_date = end_date
+            end_date = end_date + dt.timedelta(minutes=1)
+            loop = asyncio.get_event_loop()
+            loop.call_later(
+                refresh_interval,
+                asyncio.create_task,
+                __update(subject, contract, start_date, end_date)
+            )
+
+        subject = Subject[pd.DataFrame]()
+
+        end_date = dt.datetime.now(dt.timezone.utc).astimezone(start_date.tzinfo)
+
+        loop = asyncio.get_event_loop()
+        loop.call_later(1, asyncio.create_task, __update(subject, contract, start_date, end_date))
+        return subject
 
     async def cancel_single_pnl(self, account: str, contract: Contract):
         logging.debug('cancel_single_pnl({})'.format(contract))
@@ -593,49 +618,6 @@ class IBAIORx():
             end_date=end_date,
             filter_between_dates=True
         )
-
-    async def subscribe_contract_history(
-        self,
-        contract: Contract,
-        start_date: dt.datetime,
-        what_to_show: WhatToShow,
-        observer: Observer[pd.DataFrame],
-        refresh_interval: int = 60,
-    ) -> DisposableBase:
-        async def __update(
-            subject: Subject,
-            contract: Contract,
-            start_date: dt.datetime,
-            end_date: dt.datetime
-        ):
-            if subject.is_disposed:
-                return
-
-            data = await self.get_contract_history(
-                contract=contract,
-                start_date=start_date,
-                end_date=end_date,
-                what_to_show=what_to_show,
-            )
-
-            subject.on_next(data)
-
-            start_date = end_date
-            end_date = end_date + dt.timedelta(minutes=1)
-            loop = asyncio.get_event_loop()
-            loop.call_later(
-                refresh_interval,
-                asyncio.create_task,
-                __update(subject, contract, start_date, end_date)
-            )
-
-        subject = Subject[pd.DataFrame]()
-
-        end_date = dt.datetime.now(dt.timezone.utc).astimezone(start_date.tzinfo)
-
-        loop = asyncio.get_event_loop()
-        loop.call_later(1, asyncio.create_task, __update(subject, contract, start_date, end_date))
-        return subject.subscribe(observer)
 
     def sleep(self, seconds: float):
         self.ib.sleep(seconds)

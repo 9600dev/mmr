@@ -124,7 +124,7 @@ class StrategyRuntime(metaclass=Singleton):
         try:
             self.storage = TickStorage(self.arctic_server_address)
             self.universe_accessor = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
-            self.remoted_client = RPCClient[TraderServiceApi](
+            self.trader_client = RPCClient[TraderServiceApi](
                 zmq_server_address=self.zmq_rpc_server_address,
                 zmq_server_port=self.zmq_rpc_server_port,
                 error_table=error_table
@@ -223,7 +223,7 @@ class StrategyRuntime(metaclass=Singleton):
         if contract.conId not in self.strategies:
             self.strategies[contract.conId] = []
             self.strategies[contract.conId].append(strategy)
-            self.remoted_client.rpc().publish_contract(contract=contract, delayed=False)
+            self.trader_client.rpc().publish_contract(contract=contract, delayed=False)
         elif contract.conId in self.strategies and strategy not in self.strategies[contract.conId]:
             self.strategies[contract.conId].append(strategy)
 
@@ -328,10 +328,8 @@ class StrategyRuntime(metaclass=Singleton):
 
             if strategy.conids:
                 for conId in strategy.conids:
-                    definition = self.universe_accessor.resolve_first_symbol(conId)
-                    if definition:
-                        universe, security_definition = definition
-
+                    security_definition = self.trader_client.rpc().resolve_symbol(conId)
+                    if security_definition:
                         await self.historical_data_client.get_contract_history(
                             security=SecurityDefinition.to_contract(security_definition),
                             what_to_show=WhatToShow.MIDPOINT,
@@ -358,7 +356,7 @@ class StrategyRuntime(metaclass=Singleton):
         logging.info('starting strategy_runtime')
         logging.debug('StrategyRuntime.run()')
 
-        asyncio.get_event_loop().run_until_complete(self.remoted_client.connect())
+        asyncio.get_event_loop().run_until_complete(self.trader_client.connect())
 
         self.zmq_subscriber = TopicPubSub[Ticker](
             self.zmq_pubsub_server_address,
@@ -378,12 +376,13 @@ class StrategyRuntime(metaclass=Singleton):
         self.config_loader(self.strategy_config_file)
 
         logging.debug('subscribing to streams for all conids')
+        # todo: i'm not sure the runtime should automagically subscribe here.
+        # it's probably up to the strategy how they want to secure data
         for strategy in self.strategy_implementations:
             if strategy.conids:
                 for conId in strategy.conids:
-                    definition = self.universe_accessor.resolve_first_symbol(conId)
-                    if definition:
-                        universe, security_definition = definition
+                    security_definition = self.trader_client.rpc().resolve_symbol(conId)
+                    if security_definition:
                         self.subscribe(strategy, SecurityDefinition.to_contract(security_definition))
                     else:
                         logging.error('could not find security definition for conId {} for strategy {}'.format(conId, strategy))

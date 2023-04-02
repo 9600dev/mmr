@@ -14,7 +14,7 @@ strategies:
     module: strategies/smi_crossover.py
     class_name: SMICrossOver
     conids:
-      - 4931
+      - 4391
       - 34805876
     paper: True
 

@@ -140,6 +140,10 @@ class TraderServiceApi(RPCHandler):
         return self.trader.resolve_symbol_to_security_definitions(symbol)
 
     @RPCHandler.rpcmethod
+    def resolve_symbol(self, symbol: Union[str, int]) -> Optional[SecurityDefinition]:
+        return self.trader.resolve_symbol(symbol)
+
+    @RPCHandler.rpcmethod
     def release_client_id(self, client_id: int) -> bool:
         self.trader.release_client_id(client_id)
         return True

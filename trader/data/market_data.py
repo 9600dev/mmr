@@ -84,6 +84,8 @@ class MarketData():
         start_date: dt.datetime,
         back_fill: bool,
     ) -> SecurityDataStream:
+        # todo this is probably obsolete
+
         # if we backfill, this essentially awaits until back_fill is complete
         if not start_date.tzinfo:
             raise ValueError('start_date must specify a timezone (start_date.tzinfo)')
@@ -117,11 +119,12 @@ class MarketData():
 
         df = self.data.get_data(security, date_range=date_range)
         stream = SecurityDataStream(security=security, bar_size=bar_size, date_range=date_range, existing_data=df)
-        disposable = await self.client.subscribe_contract_history(
+        observable = await self.client.subscribe_contract_history(
             contract=Universe.to_contract(security),
             start_date=df.index[-1].to_pydatetime(),  # type: ignore
             what_to_show=WhatToShow.TRADES,
-            observer=stream
         )
+
+        disposable = observable.subscribe(stream)
 
         return stream
