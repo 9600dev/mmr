@@ -7,6 +7,7 @@ from cloup import option_group
 from cloup.constraints import mutually_exclusive
 from expression import pipe
 from expression.collections import seq
+from functools import partial
 from ib_insync.contract import Contract
 from ib_insync.objects import PortfolioItem, Position
 from ib_insync.order import Order, OrderStatus, Trade
@@ -35,6 +36,7 @@ from trader.data.market_data import MarketData
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, WhatToShow
 from trader.messaging.clientserver import RPCClient
+from trader.messaging.strategy_service_api import StrategyServiceApi
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.objects import BarSize
 from typing import Any, Dict, List, Optional, Union
@@ -99,6 +101,10 @@ def setup_ipython():
     global marketdata
     global tickstorage
     global cli_client_id
+    global remoted_client
+    global trader_client
+    global strategy_client
+    global debug_place_order
 
     from reactivex import Observer
 
@@ -111,13 +117,35 @@ def setup_ipython():
     client.connect()
     store = Arctic(mongo_host=container.config()['arctic_server_address'])
     tickstorage = container.resolve(TickStorage)
-    marketdata = container.resolve(MarketData, **{'client': client})
+    trader_client = remoted_client
+    strategy_client = RPCClient[StrategyServiceApi](
+        zmq_server_address=container.config()['zmq_strategy_rpc_server_address'],
+        zmq_server_port=container.config()['zmq_strategy_rpc_server_port'],
+        timeout=10,
+    )
 
+    def lazy_call(func, *args, **kwargs):
+        def lazy_func():
+            return func(*args, **kwargs)
+        return lazy_func
+
+    debug_place_order = lazy_call(
+        trader_client.rpc().place_order_simple,
+        contract=amd,
+        action='BUY',
+        equity_amount=None,
+        quantity=1.0,
+        limit_price=50.0,
+        stop_loss_percentage=0.10,
+        debug=True,
+    )
+
+    print()
     print('Available instance objects:')
     print()
-    print(' amd: Contract, nvda: Contract, a2m: Contract, cl: Contract')
-    print(' container: Container, accessor: UniverseAccessor, client: IBAIORx')
-    print(' store: Arctic, tickstorage: TickStorage, marketdata: MarketData, remoted_client: RPCClient')
+    print(' amd: Contract, nvda: Contract, a2m: Contract, cl: Contract, debug_place_order: Callable')
+    print(' container: Container, accessor: UniverseAccessor, client: IBAIORx, store: Arctic')
+    print(' tickstorage: TickStorage, trader_client: RPCClient, strategy_client: RPCClient')
 
 
 if get_ipython().__class__.__name__ == 'TerminalInteractiveShell':  # type: ignore

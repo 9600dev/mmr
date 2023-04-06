@@ -1,4 +1,4 @@
-# fires up all the services minus the docker based ones (X, qtile, vnc etc)
+# fires up all the services minus the docker based ones (X, vnc etc)
 root_directory: /home/trader/mmr
 port: 8081
 env: TRADER_CHECK=False

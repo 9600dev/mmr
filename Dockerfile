@@ -128,7 +128,6 @@ RUN mkdir /home/trader/.vnc
 RUN echo 'trader' | vncpasswd -f > /home/trader/.vnc/passwd
 
 RUN mkdir /home/trader/.config
-RUN mkdir /home/trader/.config/qtile
 RUN mkdir /home/trader/.tmp
 RUN mkdir /home/trader/.cache
 
@@ -158,13 +157,6 @@ RUN pyenv rehash
 
 # install poetry
 RUN curl -sSL https://install.python-poetry.org | python3 -
-
-# window manager for vnc
-RUN pip3 install xcffib
-RUN pip3 install --no-cache-dir cairocffi
-
-RUN --mount=type=cache,target=/root/.cache \
-   pip3 install qtile
 
 # pip install packages
 RUN --mount=type=cache,target=/root/.cache \

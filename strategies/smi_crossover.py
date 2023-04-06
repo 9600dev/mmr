@@ -108,4 +108,5 @@ class SMICrossOver(Strategy):
             return None
 
     def on_error(self, error):
+        self.state = StrategyState.ERROR
         return super().on_error(error)

@@ -80,6 +80,9 @@ class SuccessFail(Generic[TSource]):
     def __str__(self):
         return '{}: obj: {}, error: {}'.format(self.success_fail, self.obj, self.error)
 
+    def __repr__(self):
+        return self.__str__()
+
     def is_success(self):
         return self.success_fail == SuccessFailEnum.SUCCESS
 

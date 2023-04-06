@@ -6,6 +6,7 @@ from cloup import option_group
 from cloup.constraints import mutually_exclusive
 from expression import pipe
 from expression.collections import seq
+from ib_insync import TradeLogEntry
 from ib_insync.contract import Contract
 from ib_insync.objects import PortfolioItem, Position
 from ib_insync.order import Order, OrderStatus, Trade
@@ -262,7 +263,7 @@ universes.add_command(universes_cli.list_universe)
 universes.add_command(universes_cli.get)
 universes.add_command(universes_cli.destroy)
 
-@universes.command(no_args_is_help=True)
+@universes.command()
 @common_options()
 @default_config()
 def bootstrap(
@@ -1050,6 +1051,23 @@ def book_order_cancel(order_id: int):
         click.echo('no Trade object returned')
 
 
+@book.command('log')
+def book_log():
+    trade_log = remoted_client.rpc(return_type=list[TradeLogEntry]).get_trade_log()
+    columns = [
+        'time', 'status', 'message', 'errorCode',
+    ]
+    table = []
+    for log in trade_log:
+        table.append(DictHelper[str, str].dict_from_object(log, columns))
+
+    if table:
+        renderer.rich_table(table)
+    else:
+        renderer.rich_empty_table(message='no trades found')
+
+
+
 @cli.group()
 def strategy():
     pass
@@ -1172,7 +1190,7 @@ def __trade_helper(
     contract = Universe.to_contract(security)
 
     action = 'BUY' if buy else 'SELL'
-    trade: SuccessFail[Trade] = remoted_client.rpc(return_type=SuccessFail[Trade]).place_order(
+    trade: SuccessFail[Trade] = remoted_client.rpc(return_type=SuccessFail[Trade]).place_order_simple(
         contract=contract,
         action=action,
         equity_amount=equity_amount,
@@ -1342,7 +1360,7 @@ def trade_update(
     # todo: I don't like this api
     def error_out():
         click.echo('order_id {} already filled or cancelled. Aborting'.format(order_id))
-    # ib_insync groups talk about modifying the order in place, and resubmitting via place_order
+    # ib_insync groups talk about modifying the order in place, and resubmitting via place_order_simple
     # but it feels cleaner to cancel the existing order and resubmit in case the user wants to move
     # from limit to market, or whatever.
 

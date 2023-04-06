@@ -95,7 +95,6 @@ def build_and_load_ib(
         build_and_load_ib_single(market, url, ib_server_address, ib_server_port, ib_client_id, arctic_server_address, arctic_universe_library)
 
 
-
 @cli.command()
 @click.option('--name', required=True, help='Name of universe')
 @common_options()

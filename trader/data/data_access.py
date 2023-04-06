@@ -134,7 +134,6 @@ class SecurityDefinition:
             raise ValueError('unable to cast type to Contract')
 
 
-
 @dataclass(eq=True, frozen=True)
 class MMRBarData():
     date: dt.datetime

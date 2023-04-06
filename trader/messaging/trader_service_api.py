@@ -1,3 +1,4 @@
+from ib_insync import TradeLogEntry
 from ib_insync.contract import Contract
 from ib_insync.objects import PnLSingle, PortfolioItem, Position
 from ib_insync.order import Order, Trade
@@ -47,6 +48,10 @@ class TraderServiceApi(RPCHandler):
         return self.trader.book.get_trades()
 
     @RPCHandler.rpcmethod
+    def get_trade_log(self) -> list[TradeLogEntry]:
+        return self.trader.book.get_trade_log()
+
+    @RPCHandler.rpcmethod
     def get_orders(self) -> dict[int, list[Order]]:
         return self.trader.book.get_orders()
 
@@ -55,7 +60,7 @@ class TraderServiceApi(RPCHandler):
         return self.trader.get_pnl()
 
     @RPCHandler.rpcmethod
-    def place_order(
+    def place_order_simple(
         self, contract: Contract,
         action: str,
         equity_amount: Optional[float],
@@ -67,7 +72,7 @@ class TraderServiceApi(RPCHandler):
     ) -> SuccessFail[Trade]:
         # todo: we'll have to make the cli async so we can subscribe to the trade
         # changes as orders get hit etc
-        logging.warn('place_order() is not complete, your mileage may vary')
+        logging.warn('place_order_simple() is not complete, your mileage may vary')
         from trader.trading.trading_runtime import Action
         act = Action.BUY if 'BUY' in action else Action.SELL
 
@@ -91,8 +96,8 @@ class TraderServiceApi(RPCHandler):
 
         observer = Observer(on_next=on_next, on_completed=on_completed, on_error=on_error)
 
-        disposable = loop.run_until_complete(
-            self.trader.handle_order(
+        observable = loop.run_until_complete(
+            self.trader.place_order_simple(
                 contract=contract,
                 action=act,
                 equity_amount=equity_amount,
@@ -100,10 +105,10 @@ class TraderServiceApi(RPCHandler):
                 limit_price=limit_price,
                 market_order=market_order,
                 stop_loss_percentage=stop_loss_percentage,
-                observer=observer,
                 debug=debug,
             )
         )
+        observable.subscribe(observer)
 
         loop.run_until_complete(task.wait())
         disposable.dispose()

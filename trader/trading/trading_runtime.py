@@ -20,7 +20,7 @@ from reactivex.scheduler.eventloop.asynciothreadsafescheduler import AsyncIOThre
 from reactivex.subject import Subject
 from trader.common.contract_sink import ContractSink
 from trader.common.dataclass_cache import DataClassCache, DataClassEvent, UpdateEvent
-from trader.common.exceptions import TraderConnectionException, TraderException
+from trader.common.exceptions import trader_exception, TraderConnectionException, TraderException
 from trader.common.helpers import ListHelper
 from trader.common.logging_helper import get_callstack, log_method, setup_logging
 from trader.common.reactivex import AnonymousObserver, SuccessFail
@@ -30,7 +30,7 @@ from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
 from trader.messaging.clientserver import MessageBusServer, MultithreadedTopicPubSub, RPCClient, RPCServer
-from trader.objects import Action
+from trader.objects import Action, ContractOrderPair, ExecutorCondition
 from trader.trading.book import BookSubject
 from trader.trading.executioner import TradeExecutioner
 from trader.trading.portfolio import Portfolio
@@ -132,25 +132,6 @@ class Trader(metaclass=Singleton):
 
         self.disposables: List[DisposableBase] = []
 
-    def trader_exception(self, exception_type: type, message: str, inner: Optional[Exception]) -> Exception:
-        # todo use reflection here to automatically populate trader runtime vars that we care about
-        # given a particular exception type
-        data = self.data if hasattr(self, 'data') else None
-        client = self.client.is_connected() if hasattr(self, 'client') else False
-        last_connect_time = self.last_connect_time if hasattr(self, 'last_connect_time') else dt.datetime.min
-
-        exception = exception_type(
-            data is not None,
-            client,
-            self.startup_time,
-            last_connect_time,
-            message,
-            inner,
-            get_callstack(10)
-        )
-        logging.exception(exception)
-        return exception
-
     @backoff.on_exception(backoff.expo, ConnectionRefusedError, max_tries=10, max_time=120)
     def connect(self):
         logging.debug('trading_runtime.connect() connecting to services: %s:%s' % (self.ib_server_address, self.ib_server_port))
@@ -197,11 +178,15 @@ class Trader(metaclass=Singleton):
                 timeout=5,
             )
 
+            # fire up the executioner
+            self.executioner = TradeExecutioner()
+            self.executioner.connect(self)
+
             self.run(self.zmq_strategy_client.connect())
             self.run(self.zmq_rpc_server.serve())
 
         except Exception as ex:
-            raise self.trader_exception(TraderConnectionException, message='trading_runtime connect() exception', inner=ex)
+            raise trader_exception(self, TraderConnectionException, message='trading_runtime connect() exception', inner=ex)
 
     @log_method
     async def shutdown(self):
@@ -251,7 +236,7 @@ class Trader(metaclass=Singleton):
             raise ConnectionError('not connected to interactive brokers')
 
         def handle_subscription_exception(ex):
-            exception = self.trader_exception(TraderException, message='setup_subscriptions()', inner=ex)
+            exception = trader_exception(self, TraderException, message='setup_subscriptions()', inner=ex)
             raise exception
 
         def handle_completed():
@@ -392,7 +377,12 @@ class Trader(metaclass=Singleton):
                 return [universe_definition]
             return []
 
-    def resolve_symbol(self, symbol: Union[str, int]) -> Optional[SecurityDefinition]:
+    @log_method
+    def resolve_symbol(
+        self,
+        symbol: Union[str, int],
+        primary_exchange: str = ''
+    ) -> Optional[SecurityDefinition]:
         # todo
         # because resolving conids is all messed up, we're going to try a few heuristics
         int_symbol = 0
@@ -415,9 +405,14 @@ class Trader(metaclass=Singleton):
                     ):
                         return security_definition
 
-        # worst case
-        if result:
-            return result[0][1]
+        contract_details = self.run(
+            self.client.ib.reqContractDetailsAsync(
+                Contract(symbol=str(symbol), exchange='SMART')
+            )
+        )
+
+        if contract_details:
+            return SecurityDefinition.from_contract_details(contract_details[0])
         else:
             return None
 
@@ -437,7 +432,7 @@ class Trader(metaclass=Singleton):
         def on_error(ex):
             del self.zmq_pubsub_contracts[contract.conId]
             del self.zmq_pubsub_contract_filters[contract.conId]
-            raise self.trader_exception(TraderException, message='publish_contract() on_error', inner=ex)
+            raise trader_exception(self, TraderException, message='publish_contract() on_error', inner=ex)
 
         if len(self.zmq_pubsub_contract_filters) == 0:
             # setup the observable for the first time
@@ -447,7 +442,7 @@ class Trader(metaclass=Singleton):
                 self.zmq_pubsub_contract_subscription = subscription
             except Exception as ex:
                 # todo not sure how to deal with this error condition yet
-                raise self.trader_exception(TraderException, message='publish_contract()', inner=ex)
+                raise trader_exception(self, TraderException, message='publish_contract()', inner=ex)
 
         error_observable = self.client.subscribe_contract_direct(contract, delayed=delayed)
         self.zmq_pubsub_contract_filters[contract.conId] = True
@@ -475,24 +470,16 @@ class Trader(metaclass=Singleton):
             self.universe_accessor.update(universe)
 
     @log_method
-    async def subscribe_place_order(
+    async def place_order(
         self,
         contract: Contract,
         order: Order,
+        condition: ExecutorCondition,
     ) -> Observable[Trade]:
-        def trader_exception(ex):
-            return rx.throw(exception=self.trader_exception(TraderException, message='place_order()', inner=ex))
-
-        try:
-            observable = await self.client.subscribe_place_order(contract, order)
-            return observable.pipe(
-                ops.catch(lambda ex, src: trader_exception(ex))
-            )
-        except Exception as ex:
-            return trader_exception(ex)
+        return await self.executioner.place_order(contract_order=ContractOrderPair(contract, order), condition=condition)
 
     @log_method
-    async def handle_order(
+    async def place_order_simple(
         self,
         contract: Contract,
         action: Action,
@@ -501,92 +488,22 @@ class Trader(metaclass=Singleton):
         limit_price: Optional[float],
         market_order: bool,
         stop_loss_percentage: float,
-        observer: Observer[Trade],
         debug: bool = False,
-    ) -> DisposableBase:
-        # todo make sure amount is less than outstanding profit
+    ) -> Observable[Trade]:
+        latest_tick: Ticker = await self.client.get_snapshot(contract)
 
-        if limit_price and limit_price <= 0.0:
-            raise ValueError('limit_price specified but invalid: {}'.format(limit_price))
-        if stop_loss_percentage >= 1.0 or stop_loss_percentage < 0.0:
-            raise ValueError('stop_loss_percentage invalid: {}'.format(stop_loss_percentage))
-        if not equity_amount and not quantity:
-            raise ValueError('equity_amount or quantity need to be specified')
-
-        # grab the latest price of instrument
-        latest_tick: Ticker = await self.client.get_snapshot(contract, delayed=False)
-        order_price = 0.0
-
-        if not quantity and equity_amount:
-            # assess if we should trade
-            quantity = equity_amount / latest_tick.bid
-
-            if quantity < 1 and quantity > 0:
-                quantity = 1.0
-
-            # toddo round the quantity, but probably shouldn't do this given IB supports fractional shares.
-            quantity = round(quantity)
-
-        logging.debug('handle_order assessed quantity: {} on bid: {}'.format(
-            quantity, latest_tick.bid
-        ))
-
-        if limit_price:
-            order_price = float(limit_price)
-        elif market_order:
-            order_price = latest_tick.ask
-
-        # if debug, move the buy/sell by 10%
-        if debug and action == Action.BUY:
-            order_price = order_price * 0.9
-            order_price = round(order_price * 0.9, ndigits=2)
-        if debug and action == Action.SELL:
-            order_price = round(order_price * 1.1, ndigits=2)
-
-        stop_loss_price = 0.0
-
-        # calculate stop_loss
-        if stop_loss_percentage > 0.0:
-            stop_loss_price = round(order_price - order_price * stop_loss_percentage, ndigits=2)
-
-        subject = Subject[Trade]()
-        disposable: DisposableBase = Disposable()
-
-        def on_next(trade: Trade):
-            logging.debug('handle_order.on_next()')
-            subject.on_next(trade)
-
-        def on_completed():
-            logging.debug('handle_order.on_completed()')
-            subject.on_completed()
-            disposable.dispose()
-
-        def on_error(ex):
-            logging.debug('handle_order.on_error()')
-            # todo: retry logic here
-            subject.on_error(ex)
-
-        # put an order in
-        disposable = subject.subscribe(observer)
-        order: Order = Order()
-
-        if market_order and stop_loss_price > 0:
-            order = StopOrder(action=str(action), totalQuantity=cast(float, quantity), stopPrice=stop_loss_price)
-        elif market_order and stop_loss_price == 0.0:
-            order = MarketOrder(action=str(action), totalQuantity=cast(float, quantity))
-
-        if not market_order and stop_loss_price > 0:
-            order = StopLimitOrder(
-                action=str(action),
-                totalQuantity=cast(float, quantity),
-                lmtPrice=order_price,
-                stopPrice=stop_loss_price
-            )
-        elif not market_order and stop_loss_price == 0.0:
-            order = LimitOrder(action=str(action), totalQuantity=cast(float, quantity), lmtPrice=order_price)
-
-        disposable = await self.place_order(contract=contract, order=order, observer=subject)
-        return disposable
+        contract_order = self.executioner.helper_create_order(
+            contract,
+            action,
+            latest_tick,
+            equity_amount,
+            quantity,
+            limit_price,
+            market_order,
+            stop_loss_percentage,
+            debug=debug
+        )
+        return await self.executioner.place_order(contract_order=contract_order, condition=ExecutorCondition.SANITY_CHECK)
 
     @log_method
     def cancel_order(self, order_id: int) -> Optional[Trade]:

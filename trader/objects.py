@@ -1,4 +1,6 @@
 from enum import Enum, IntEnum
+from ib_insync import Contract, Order
+from typing import List
 
 
 class Action(Enum):
@@ -72,3 +74,39 @@ class BarSize(IntEnum):
 
     def __str__(self):
         return BarSize.bar_sizes()[int(self.value)]
+
+
+class BasketCondition(Enum):
+    NONE = 0
+    ALL_OR_NOTHING = 1
+
+
+class ExecutorCondition(Enum):
+    NO_CHECKS = 0
+    SANITY_CHECK = 1
+
+
+class ContractOrderPair():
+    def __init__(
+        self,
+        contract: Contract,
+        order: Order,
+    ):
+        self.contract = contract
+        self.order = order
+
+    def __str__(self) -> str:
+        return f'{self.contract}, {self.order}'
+
+
+class Basket():
+    def __init__(
+        self,
+        orders: List[ContractOrderPair],
+        hedges: List[ContractOrderPair],
+        conditions: List[BasketCondition] = [],
+    ):
+        self.orders = orders
+        self.hedges = hedges
+        self.conditions = conditions
+

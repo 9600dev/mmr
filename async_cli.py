@@ -158,10 +158,6 @@ class InputBox(Widget):
     def set_input_text(self, input_text: str) -> None:
         self.input_text = input_text
 
-    def on_key(self, event: events.Key):
-        if event.character:
-            self.input_text += event.character
-
 
 class ReplWidget(Widget):
     DEFAULT_CSS = """
@@ -215,6 +211,8 @@ class ReplWidget(Widget):
         self.input_box = ReplInput(classes='line-box line-input')
         self.input_box.focus()
         self.logging = logging
+        self.command_list: List[str] = []
+        self.command_list_index = 0
 
         self.top_container = Container(
             Static('     ', id='repl-label', classes='box'),
@@ -292,12 +290,28 @@ class ReplWidget(Widget):
         else:
             self.write_log(str(event.value))
             self.click_dispatch(event.value)
+        self.command_list.append(event.value)
         self.input_box.value = ''
+        self.command_list_index = len(self.command_list) - 1
         self.input_box.focus()
 
     def on_repl_input_changed(self, event: ReplInput.Changed):
-        self.write_debug(str(event))
+        pass
+        # self.write_debug(str(event))
 
+    def on_repl_up_down(self, event: str):
+        if event == 'up':
+            if self.command_list and self.command_list_index >= 0:
+                self.input_box.value = self.command_list[self.command_list_index]
+                if self.command_list_index > 0:
+                    self.command_list_index -= 1
+        elif event == 'down':
+            if self.command_list and self.command_list_index < len(self.command_list):
+                self.input_box.value = self.command_list[self.command_list_index]
+                self.command_list_index += 1
+            else:
+                self.input_box.value = ''
+                self.command_list_index = len(self.command_list) - 1
 
 class AsyncDialog(Widget):
     def __init__(
@@ -558,7 +572,9 @@ class AsyncCli(App):
                 self.start_plot(str(event.value))
 
     async def on_key(self, event: events.Key) -> None:
-        self.text_log.write(f'key: {event.key}, character: {event.character}')
+        if event.key == 'up' or event.key == 'down':
+            self.repl.on_repl_up_down(event.key)
+        # self.text_log.write(f'key: {event.key}, character: {event.character}')
         self.repl.focus()
 
     def on_repl_input_submitted(self, event: ReplInput.Submitted):

@@ -1,6 +1,34 @@
-from typing import List, Optional
+from trader.common.logging_helper import get_callstack, log_method, setup_logging
+from typing import cast, List, Optional, TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    from trader.trading.trading_runtime import Trader
 
 import datetime as dt
+
+
+logging = setup_logging(module_name='trading_runtime')
+
+
+def trader_exception(trader: 'Trader', exception_type: type, message: str, inner: Optional[Exception] = None) -> Exception:
+    # todo use reflection here to automatically populate trader runtime vars that we care about
+    # given a particular exception type
+    data = trader.data if hasattr(trader, 'data') else None
+    client = trader.client.is_connected() if hasattr(trader, 'client') else False
+    last_connect_time = trader.last_connect_time if hasattr(trader, 'last_connect_time') else dt.datetime.min
+
+    exception = exception_type(
+        data is not None,
+        client,
+        trader.startup_time,
+        last_connect_time,
+        message,
+        inner,
+        get_callstack(10)
+    )
+    logging.exception(exception)
+    return cast(Exception, exception)
 
 
 class TraderException(Exception):

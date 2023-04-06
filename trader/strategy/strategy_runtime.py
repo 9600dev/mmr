@@ -376,6 +376,7 @@ class StrategyRuntime(metaclass=Singleton):
         self.config_loader(self.strategy_config_file)
 
         logging.debug('subscribing to streams for all conids')
+
         # todo: i'm not sure the runtime should automagically subscribe here.
         # it's probably up to the strategy how they want to secure data
         for strategy in self.strategy_implementations:
@@ -385,7 +386,12 @@ class StrategyRuntime(metaclass=Singleton):
                     if security_definition:
                         self.subscribe(strategy, SecurityDefinition.to_contract(security_definition))
                     else:
-                        logging.error('could not find security definition for conId {} for strategy {}'.format(conId, strategy))
+                        logging.error('could not find security definition for conId {} for strategy {}. Disabling strategy.'
+                                      .format(conId, strategy))
+                        strategy.on_error(
+                            Exception('could not find security definition for conId {} for strategy {}. Disabling strategy.'
+                                      .format(conId, strategy))
+                        )
 
             if strategy.universe:
                 self.subscribe_universe(strategy, strategy.universe)

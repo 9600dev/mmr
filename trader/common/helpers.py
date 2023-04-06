@@ -60,6 +60,16 @@ def flatten_json(y):
     return out
 
 
+def flatten_list(nested_list):
+    flat_list = []
+    for item in nested_list:
+        if isinstance(item, list):
+            flat_list.extend(flatten_list(item))
+        else:
+            flat_list.append(item)
+    return flat_list
+
+
 def contract_from_dict(d: Dict[str, Any]) -> Contract:
     contract = Contract(
         conId=d['conId'],

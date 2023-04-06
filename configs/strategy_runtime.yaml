@@ -4,17 +4,17 @@ strategies:
     description: strategy wide configuration
     universe: portfolio
     bar_size: '1 min'
-    historical_days_prior: 180
+    historical_days_prior: 90
     module: strategies/global.py
     class_name: Global
+    paper: False
   - name: smi_crossover_amd
     description: moving average example
     bar_size: '1 min'
-    historical_days_prior: 180
+    historical_days_prior: 90
     module: strategies/smi_crossover.py
     class_name: SMICrossOver
     conids:
       - 4391
       - 34805876
     paper: True
-
