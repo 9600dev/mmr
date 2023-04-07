@@ -73,9 +73,9 @@ class CliRenderer():
 
     def rich_empty_table(self, message: Optional[str] = None):
         if message:
-            self.rich_dict({'message': 'No results found for {}'.format(message)})
+            self.rich_dict({'message': '{}'.format(message)})
         else:
-            self.rich_dict({'message': 'No results found'})
+            self.rich_dict({'message': 'No results'})
 
     def rich_tablify(
         self,

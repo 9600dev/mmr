@@ -488,6 +488,7 @@ class Trader(metaclass=Singleton):
         limit_price: Optional[float],
         market_order: bool,
         stop_loss_percentage: float,
+        algo_name: str = 'global',
         debug: bool = False,
     ) -> Observable[Trade]:
         latest_tick: Ticker = await self.client.get_snapshot(contract)
@@ -501,22 +502,29 @@ class Trader(metaclass=Singleton):
             limit_price,
             market_order,
             stop_loss_percentage,
+            algo_name=algo_name,
             debug=debug
         )
         return await self.executioner.place_order(contract_order=contract_order, condition=ExecutorCondition.SANITY_CHECK)
 
     @log_method
     def cancel_order(self, order_id: int) -> Optional[Trade]:
-        # get the Order
-        order = self.book.get_order(order_id)
-        if order and order.clientId == self.trading_runtime_ib_client_id:
-            logging.info('cancelling order {}'.format(order))
-            trade = self.client.ib.cancelOrder(order)
-            return trade
+        return self.executioner.cancel_order_id(order_id)
+
+    @log_method
+    def cancel_all(self) -> SuccessFail[List[int]]:
+        failed_cancels = []
+        for order_id, _ in self.book.get_orders().items():
+            trade: Optional[Trade] = self.cancel_order(order_id)
+            if not trade:
+                failed_cancels.append(order_id)
+            if trade and trade.orderStatus.status != 'Cancelled':
+                failed_cancels.append(order_id)
+
+        if len(failed_cancels) > 0:
+            return SuccessFail.fail(failed_cancels)
         else:
-            logging.error('either order does not exist, or originating client_id is different: {} {}'
-                          .format(order, self.trading_runtime_ib_client_id))
-            return None
+            return SuccessFail.success()
 
     def is_ib_connected(self) -> bool:
         return self.client.ib.isConnected()

@@ -4,6 +4,7 @@ from ib_insync.order import Order, Trade
 from trader.common.helpers import flatten_list
 from trader.common.logging_helper import setup_logging
 from trader.common.reactivex import EventSubject
+from trader.objects import TradeLogSimple
 
 
 logging = setup_logging(module_name='book')
@@ -61,10 +62,31 @@ class BookSubject(EventSubject[Union[Trade, Order]]):
     def filter_book_by_contract(self, contract: Contract, value: Trade):
         return contract.conId == value.contract.conId
 
-    def get_trade_log(self) -> List[TradeLogEntry]:
+    def get_trade_log(self) -> List[TradeLogSimple]:
         logging.debug('book.get_trade_log()')
-        flat = flatten_list([trade_list for trade_list in [trades for _, trades in self.trades.items()]])
-        trade_logs: List[TradeLogEntry] = flatten_list([trade.log for trade in flat])
+        trade_logs: List[TradeLogSimple] = []
+
+        for _, trades in self.trades.items():
+            last_trade = trades[0]
+            for log in last_trade.log:
+                trade_logs.append(TradeLogSimple(
+                    time=log.time,
+                    conId=last_trade.contract.conId,
+                    secType=last_trade.contract.secType,
+                    symbol=last_trade.contract.symbol,
+                    exchange=last_trade.contract.exchange,
+                    currency=last_trade.contract.currency,
+                    orderId=last_trade.order.orderId,
+                    status=log.status,
+                    message=log.message,
+                    errorCode=log.errorCode,
+                    clientId=last_trade.order.clientId,
+                    action=last_trade.order.action,
+                    totalQuantity=last_trade.order.totalQuantity,
+                    lmtPrice=last_trade.order.lmtPrice,
+                    orderRef=last_trade.order.orderRef,
+                ))
+
         trade_logs.sort(key=lambda log: log.time, reverse=True)
         return trade_logs
 

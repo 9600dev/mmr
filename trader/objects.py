@@ -1,6 +1,10 @@
+from dataclasses import dataclass, field, fields
 from enum import Enum, IntEnum
-from ib_insync import Contract, Order
+from ib_insync import Contract, Order, OrderStatus, Trade
 from typing import List
+
+import datetime as dt
+import sys
 
 
 class Action(Enum):
@@ -110,3 +114,24 @@ class Basket():
         self.hedges = hedges
         self.conditions = conditions
 
+
+UNSET_DOUBLE = sys.float_info.max
+
+
+@dataclass
+class TradeLogSimple():
+    time: dt.datetime
+    conId: int = 0
+    secType: str = ''
+    symbol: str = ''
+    exchange: str = ''
+    currency: str = ''
+    orderId: int = 0
+    status: str = ''
+    message: str = ''
+    errorCode: int = 0
+    clientId: int = 0
+    action: str = ''
+    totalQuantity: float = 0.0
+    lmtPrice: float = UNSET_DOUBLE
+    orderRef: str = ''

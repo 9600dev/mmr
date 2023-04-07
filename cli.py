@@ -83,6 +83,7 @@ amd = Contract(symbol='AMD', conId=4391, exchange='SMART', primaryExchange='NASD
 tsla = Contract(symbol='TSLA', conId=76792991, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
 nvda = Contract(symbol='NVDA', conId=4815747, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
 a2m = Contract(symbol='A2M', conId=189114468, exchange='SMART', primaryExchange='ASX', currency='AUD')
+bhp = Contract(symbol='BHP', conId=4036812, exchange='SMART', primaryExchange='ASX', currency='AUD')
 cl = Contract(conId=457630923, symbol='CL', secType='FUT', exchange='NYMEX', lastTradeDateOrContractMonth='20221122')
 
 marketdata: MarketData
@@ -143,7 +144,7 @@ def setup_ipython():
     print()
     print('Available instance objects:')
     print()
-    print(' amd: Contract, nvda: Contract, a2m: Contract, cl: Contract, debug_place_order: Callable')
+    print(' amd: Contract, nvda: Contract, a2m: Contract, bhp: Contract, cl: Contract, debug_place_order: Callable')
     print(' container: Container, accessor: UniverseAccessor, client: IBAIORx, store: Arctic')
     print(' tickstorage: TickStorage, trader_client: RPCClient, strategy_client: RPCClient')
 

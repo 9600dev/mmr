@@ -78,6 +78,8 @@ class TradeExecutioner():
                         message='sanity_check_order failed for {}'.format(contract_order)
                     )
                 )
+
+        logging.debug('placing order {}'.format(contract_order.order))
         return await self.subscribe_place_order_direct(contract=contract_order.contract, order=contract_order.order)
 
     def place_basket(
@@ -114,6 +116,7 @@ class TradeExecutioner():
         limit_price: Optional[float],
         market_order: bool,
         stop_loss_percentage: float,
+        algo_name: str,
         debug: bool = False,
     ) -> ContractOrderPair:
         if limit_price and limit_price <= 0.0:
@@ -160,18 +163,31 @@ class TradeExecutioner():
         order: Order = Order()
 
         if market_order and stop_loss_price > 0:
-            order = StopOrder(action=str(action), totalQuantity=cast(float, quantity), stopPrice=stop_loss_price)
+            order = StopOrder(
+                action=str(action),
+                totalQuantity=cast(float, quantity),
+                stopPrice=stop_loss_price,
+                orderRef=algo_name,
+            )
         elif market_order and stop_loss_price == 0.0:
-            order = MarketOrder(action=str(action), totalQuantity=cast(float, quantity))
-
+            order = MarketOrder(
+                action=str(action),
+                totalQuantity=cast(float, quantity),
+                orderRef=algo_name
+            )
         if not market_order and stop_loss_price > 0:
             order = StopLimitOrder(
                 action=str(action),
                 totalQuantity=cast(float, quantity),
                 lmtPrice=order_price,
-                stopPrice=stop_loss_price
+                stopPrice=stop_loss_price,
+                orderRef=algo_name
             )
         elif not market_order and stop_loss_price == 0.0:
-            order = LimitOrder(action=str(action), totalQuantity=cast(float, quantity), lmtPrice=order_price)
-
+            order = LimitOrder(
+                action=str(action),
+                totalQuantity=cast(float, quantity),
+                lmtPrice=order_price,
+                orderRef=algo_name
+            )
         return ContractOrderPair(contract=contract, order=order)

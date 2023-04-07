@@ -113,11 +113,18 @@ class IBAIORx():
         if errorCode == 2104 or errorCode == 2158 or errorCode == 2106:
             return
 
-        logging.error(
-            "ibrx reqId: {} errorCode {} errorString {} contract {}".format(
-                reqId, errorCode, errorString, contract
-            )
-        )
+        if errorCode == 202:
+            # for whatever reason, order cancellations are considered errors
+            # we don't want to log these
+            logging.debug(
+                'ibrx reqId: {} errorCode: {} errorString: {} contract: {}'.format(
+                    reqId, errorCode, errorString, contract
+                ))
+        else:
+            logging.error(
+                'ibrx reqId: {} errorCode: {} errorString: {} contract: {}'.format(
+                    reqId, errorCode, errorString, contract
+                ))
         self.error_subject.on_next(IBAIORxError(reqId, errorCode, errorString, contract))
 
     @backoff.on_exception(backoff.expo, Exception, max_tries=3, max_time=30)

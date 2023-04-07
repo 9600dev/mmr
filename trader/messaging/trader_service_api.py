@@ -11,6 +11,7 @@ from trader.common.reactivex import SuccessFail, SuccessFailEnum
 from trader.data.data_access import PortfolioSummary, SecurityDefinition
 from trader.data.universe import Universe
 from trader.messaging.clientserver import RPCHandler
+from trader.objects import TradeLogSimple
 from trader.trading.strategy import StrategyConfig, StrategyState
 from typing import List, Optional, Tuple, Union
 
@@ -48,7 +49,7 @@ class TraderServiceApi(RPCHandler):
         return self.trader.book.get_trades()
 
     @RPCHandler.rpcmethod
-    def get_trade_log(self) -> list[TradeLogEntry]:
+    def get_trade_log(self) -> list[TradeLogSimple]:
         return self.trader.book.get_trade_log()
 
     @RPCHandler.rpcmethod
@@ -68,6 +69,7 @@ class TraderServiceApi(RPCHandler):
         limit_price: Optional[float],
         market_order: bool = False,
         stop_loss_percentage: float = 0.0,
+        algo_name: str = 'global',
         debug: bool = False,
     ) -> SuccessFail[Trade]:
         # todo: we'll have to make the cli async so we can subscribe to the trade
@@ -105,6 +107,7 @@ class TraderServiceApi(RPCHandler):
                 limit_price=limit_price,
                 market_order=market_order,
                 stop_loss_percentage=stop_loss_percentage,
+                algo_name=algo_name,
                 debug=debug,
             )
         )
@@ -121,6 +124,10 @@ class TraderServiceApi(RPCHandler):
             return SuccessFail.success(order)
         else:
             return SuccessFail.fail()
+
+    @RPCHandler.rpcmethod
+    def cancel_all(self) -> SuccessFail[List[int]]:
+        return self.trader.cancel_all()
 
     @RPCHandler.rpcmethod
     def get_snapshot(self, contract: Contract, delayed: bool) -> Ticker:

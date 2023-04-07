@@ -27,7 +27,7 @@ from trader.data.universe import SecurityDefinition, Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, WhatToShow
 from trader.messaging.clientserver import RPCClient
 from trader.messaging.trader_service_api import TraderServiceApi
-from trader.objects import BarSize
+from trader.objects import BarSize, TradeLogSimple
 from trader.trading.strategy import Strategy, StrategyConfig, StrategyState
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -1013,7 +1013,7 @@ def book_trades():
     trades = remoted_client.rpc(return_type=dict[int, list[Trade]]).get_trades()
     columns = [
         'symbol', 'primaryExchange', 'currency', 'orderId',
-        'action', 'status', 'orderType', 'lmtPrice', 'totalQuantity'
+        'action', 'status', 'orderType', 'lmtPrice', 'totalQuantity', 'orderRef',
     ]
     table = []
     for trade_id, trade_list in trades.items():
@@ -1028,8 +1028,8 @@ def book_trades():
 def book_orders():
     orders: dict[int, list[Order]] = remoted_client.rpc(return_type=dict[int, list[Order]]).get_orders()
     columns = [
-        'orderId', 'clientId', 'parentId', 'action',
-        'status', 'orderType', 'allOrNone', 'lmtPrice', 'totalQuantity'
+        'orderId', 'clientId', 'parentId', 'orderRef', 'action',
+        'status', 'orderType', 'allOrNone', 'lmtPrice', 'totalQuantity', 'filledQuantity', 'trailStopPrice', 'trailingPercent'
     ]
     table = []
     for order_id, trade_list in orders.items():
@@ -1053,19 +1053,11 @@ def book_order_cancel(order_id: int):
 
 @book.command('log')
 def book_log():
-    trade_log = remoted_client.rpc(return_type=list[TradeLogEntry]).get_trade_log()
-    columns = [
-        'time', 'status', 'message', 'errorCode',
-    ]
-    table = []
-    for log in trade_log:
-        table.append(DictHelper[str, str].dict_from_object(log, columns))
-
-    if table:
-        renderer.rich_table(table)
+    trade_log = remoted_client.rpc(return_type=list[TradeLogSimple]).get_trade_log()
+    if len(trade_log) > 0:
+        renderer.rich_table(trade_log)
     else:
-        renderer.rich_empty_table(message='no trades found')
-
+        renderer.rich_empty_table()
 
 
 @cli.group()
@@ -1078,6 +1070,8 @@ def strategy_list():
     result = strategy_helper()
     if len(result) > 0:
         renderer.rich_table(result)
+    else:
+        renderer.rich_empty_table(message='no strategies found, or strategy_service not up')
 
 
 @strategy.command('enable')
@@ -1320,10 +1314,23 @@ def trade_cancel(
     **args,
 ):
     trade: SuccessFail[Trade] = remoted_client.rpc(return_type=SuccessFail[Trade]).cancel_order(order_id)
-    if trade.is_success():
-        renderer.rich_dict(DictHelper.dict_from_object(trade))
+    if not trade.is_success():
+        renderer.rich_dict(DictHelper.dict_from_object(trade.obj))
     else:
-        click.echo('cancellation unsuccessful; either order_id did not exist or order was already completed')
+        renderer.rich_empty_table('cancel_all successful')
+
+
+@trade.command('cancel_all')
+@common_options()
+@default_config()
+def trade_cancel_all(
+    **args,
+):
+    cancelled: SuccessFail[List[int]] = remoted_client.rpc(return_type=SuccessFail[List[int]]).cancel_all()
+    if cancelled.is_success():
+        renderer.rich_empty_table(message='success')
+    else:
+        renderer.rich_dict(DictHelper.dict_from_object(cancelled.obj))
 
 
 @trade.command('update', no_args_is_help=True)
