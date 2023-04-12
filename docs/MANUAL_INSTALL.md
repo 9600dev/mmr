@@ -2,7 +2,7 @@
 
 ** Not recommended **
 
-If you want to YOLO the install, and you're on Ubuntu or a derivative, you can try running the ```native_install.sh``` script. Otherwise, this might get you close enough:
+If you want to YOLO the install, and you're on Ubuntu or a derivative, you can try running the following:
 
 * Clone this repository into /home/trader/mmr directory
 * Create a user 'trader' (or chown a new /home/trader directory)
