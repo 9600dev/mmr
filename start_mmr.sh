@@ -65,12 +65,70 @@ function parse_yaml {
    }'
 }
 
-echo ""
-echo " $(tput setab 2)${BLACK}----------------------------------------${RESET}"
-echo " $(tput setab 2)${BLACK}|${RESET}     start_trader.sh started          $(tput setab 2)${BLACK}|${RESET}"
-echo " $(tput setab 2)${BLACK}----------------------------------------${RESET}"
-echo ""
+function rebuild_configuration () {
+    # deal with trading mode option
+    eval $(parse_yaml $TRADER_CONFIG "CONF_")
 
+    echo ""
+    echo ""
+    echo "TWS trading mode configured in $TRADER_CONFIG is: $CONF_trading_mode"
+    echo "Hit enter to keep, or type 'paper' or 'live' to change: "
+    read TRADING_MODE;
+
+    if [ -z "$TRADING_MODE" ]
+    then
+        echo "Using trading mode from $TRADER_CONFIG"
+        TRADING_MODE=$CONF_trading_mode
+    else
+        echo "Using trading mode from user input: $TRADING_MODE"
+        CONF_trading_mode=$TRADING_MODE
+    fi
+
+    echo ""
+    echo -n "Please enter Interactive Brokers username for trading mode $TRADING_MODE: "
+    read USERNAME;
+
+    echo ""
+    echo -n "Please enter Interactive Brokers password for trading mode $TRADING_MODE: "
+    read -s PASSWORD;
+
+    echo ""
+    echo "Please enter Interactive Brokers 'account number' for trading mode $TRADING_MODE "
+    echo -n "(starts with either U or DU, and may also be set as an environment variable IB_ACCOUNT): "
+    read -s IB_ACCOUNT;
+
+    sed -i "s/^TWSUSERID=.*/TWSUSERID=$USERNAME/" $IBC_DIR/twsstart.sh
+    sed -i "s/^TWSPASSWORD=.*/TWSPASSWORD=$PASSWORD/" $IBC_DIR/twsstart.sh
+
+    sed -i "s/^IbLoginId=.*/IbLoginId=$USERNAME/" $IBC_DIR/config.ini
+    sed -i "s/^IbPassword=.*/IbPassword=$PASSWORD/" $IBC_DIR/config.ini
+
+    CONF_trading_mode="$TRADING_MODE"
+    sed -i "s/^TradingMode=.*/TradingMode=$CONF_trading_mode/" $IBC_DIR/config.ini
+    sed -i "s/^trading_mode:.*/trading_mode: $CONF_trading_mode/" $TRADER_CONFIG
+
+    sed -i "s/^ib_account:.*/ib_account: $IB_ACCOUNT/" $TRADER_CONFIG
+
+    # deal with paper/live ports
+    if [ "$TRADING_MODE" = "paper" ]; then
+        sed -i "s/^ib_server_port:.*/ib_server_port: 7497/" $TRADER_CONFIG
+    else
+        sed -i "s/^ib_server_port:.*/ib_server_port: 7496/" $TRADER_CONFIG
+    fi
+}
+
+
+echo ""
+echo " $(tput setab 2)${BLACK}--------------------------------------------${RESET}"
+echo " $(tput setab 2)${BLACK}|${RESET}          start_mmr.sh started            $(tput setab 2)${BLACK}|${RESET}"
+echo " $(tput setab 2)${BLACK}--------------------------------------------${RESET}"
+echo ""
+echo " $(tput setab 2)${BLACK}|${RESET}  This script configures and runs MMR. There are three configuration files that it may read or modify: "
+echo " $(tput setab 2)${BLACK}|${RESET}    * $TRADER_CONFIG "
+echo " $(tput setab 2)${BLACK}|${RESET}    * $IBC_DIR/config.ini "
+echo " $(tput setab 2)${BLACK}|${RESET}    * $JTS_DIR/jts.ini "
+echo ""
+echo ""
 
 set -e
 
@@ -82,8 +140,6 @@ else
 fi
 
 # check for --live and --paper arguments, and update config files if everything is already installed
-# todo: refactor this all out into a singular function to deal with username/passwords and configuration
-
 if [ ! "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ] && [ -f "$IBC_DIR/config.ini" ] && [ -f "$TRADER_CONFIG" ]; then
     eval $(parse_yaml $TRADER_CONFIG "CONF_")
     IBC_TRADING_MODE="$(grep -oP '(?<=TradingMode=).*$' $IBC_DIR/config.ini)"
@@ -98,29 +154,7 @@ if [ ! "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ] && [ -f "$IBC_DIR/config.
         echo "resetting account configuration"
         echo ""
 
-        echo -n "Please enter Interactive Brokers username for trading account $TRADING_MODE: "
-        read USERNAME;
-
-        echo ""
-        echo -n "Please enter Interactive Brokers password for trading account $TRADING_MODE: "
-        read -s PASSWORD;
-
-        sed -i "s/^TWSUSERID=.*/TWSUSERID=$USERNAME/" $IBC_DIR/twsstart.sh
-        sed -i "s/^TWSPASSWORD=.*/TWSPASSWORD=$PASSWORD/" $IBC_DIR/twsstart.sh
-
-        sed -i "s/^IbLoginId=.*/IbLoginId=$USERNAME/" $IBC_DIR/config.ini
-        sed -i "s/^IbPassword=.*/IbPassword=$PASSWORD/" $IBC_DIR/config.ini
-
-        CONF_trading_mode="$TRADING_MODE"
-        sed -i "s/^TradingMode=.*/TradingMode=$CONF_trading_mode/" $IBC_DIR/config.ini
-        sed -i "s/^trading_mode:.*/trading_mode: $CONF_trading_mode/" $TRADER_CONFIG
-    fi
-
-    # deal with paper/live ports
-    if [ "$TRADING_MODE" = "paper" ]; then
-        sed -i "s/^ib_server_port:.*/ib_server_port: 7497/" $TRADER_CONFIG
-    else
-        sed -i "s/^ib_server_port:.*/ib_server_port: 7496/" $TRADER_CONFIG
+        rebuild_configuration
     fi
 fi
 
@@ -155,16 +189,15 @@ fi
 if [ ! -d $JTS_DIR ] || [ ! "$(ls -I *.ini $JTS_DIR)" ]; then
     # likely first time start
     echo "Can't find TWS, first time running? Let's download, install and configure Interactive Brokers!"
+    echo ""
 
     if [ ! -f $MMR_DIR/tws-latest-standalone-linux-x64.sh ]; then
-        echo "latest TWS linux installer not found, downloading"
         rm -f $MMR_DIR/tws-latest-standalone-linux-x64.sh
         wget https://download2.interactivebrokers.com/installers/tws/latest-standalone/tws-latest-standalone-linux-x64.sh -P $MMR_DIR/third_party
         chmod +x $MMR_DIR/third_party/tws-latest-standalone-linux-x64.sh
         chmod +x $MMR_DIR/scripts/installation/install_tws.sh
     fi
 
-    echo ""
     echo ""
     echo "Automating the installation of Trader Workstation to $JTS_DIR..."
     echo ""
@@ -184,57 +217,9 @@ if [ "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ]; then
     echo ""
     echo ""
     echo "[Can't find a username set in $IBC_DIR/twsstart.sh, prompting for credentials]:"
-
-    # deal with trading mode option
-    eval $(parse_yaml $TRADER_CONFIG "CONF_")
-
     echo ""
-    echo "TWS trading mode configured in $TRADER_CONFIG is: $CONF_trading_mode"
-    echo "Hit enter to keep, or type 'paper' or 'live' to change: "
-    read TRADING_MODE;
 
-    if [ -z "$TRADING_MODE" ]
-    then
-        echo "Using trading mode from $TRADER_CONFIG"
-    else
-        echo "Using trading mode from user input: $TRADING_MODE"
-        CONF_trading_mode=$TRADING_MODE
-    fi
-
-    echo -n "Please enter Interactive Brokers username for trading account '$CONF_trading_mode': "
-    read USERNAME;
-
-    echo ""
-    echo -n "Please enter Interactive Brokers password for trading account '$CONF_trading_mode': "
-    read -s PASSWORD;
-
-    if [ -z "$USERNAME" ]
-    then
-        echo "Username is empty, script will fail, exiting"
-        exit 1
-    fi
-
-    if [ -z "$PASSWORD" ]
-    then
-        echo "Password is empty, script will fail, exiting"
-        exit 1
-    fi
-
-    sed -i "s/^TWSUSERID=.*/TWSUSERID=$USERNAME/" $IBC_DIR/twsstart.sh
-    sed -i "s/^TWSPASSWORD=.*/TWSPASSWORD=$PASSWORD/" $IBC_DIR/twsstart.sh
-
-    sed -i "s/^IbLoginId=.*/IbLoginId=$USERNAME/" $IBC_DIR/config.ini
-    sed -i "s/^IbPassword=.*/IbPassword=$PASSWORD/" $IBC_DIR/config.ini
-
-    sed -i "s/^TradingMode=.*/TradingMode=$CONF_trading_mode/" $IBC_DIR/config.ini
-    sed -i "s/^trading_mode:.*/trading_mode: $CONF_trading_mode/" $TRADER_CONFIG
-
-    # deal with paper/live ports
-    if [ "$CONF_trading_mode" = "paper" ]; then
-        sed -i "s/^ib_server_port:.*/ib_server_port: 7497/" $TRADER_CONFIG
-    else
-        sed -i "s/^ib_server_port:.*/ib_server_port: 7496/" $TRADER_CONFIG
-    fi
+    rebuild_configuration
 
     # defaults for IBC config.ini, feel free to change these
     sed -i "s/^ExistingSessionDetectedAction=.*/ExistingSessionDetectedAction=primaryoverride/" $IBC_DIR/config.ini
@@ -260,7 +245,7 @@ if [ "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ]; then
     echo ""
     echo ""
     chmod +x $IBC_DIR/scripts/displaybannerandlaunch.sh
-    chmod +x $IBC_DIR/scripts/ibcstart.sh\
+    chmod +x $IBC_DIR/scripts/ibcstart.sh
 
     read NULL;
 fi

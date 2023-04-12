@@ -56,11 +56,13 @@ class IBAIORx():
         ib_server_address: str,
         ib_server_port: int,
         ib_client_id: int,
+        ib_account: str = '',
         read_only: bool = False
     ):
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
         self.ib_client_id = ib_client_id
+        self.ib_account = ib_account
         self.read_only = read_only
 
         self.ib = IB()
@@ -144,8 +146,8 @@ class IBAIORx():
         net_client = cast(Client, self.ib.client)
         net_client.conn.disconnected += __handle_client_id_error
 
-        logging.debug('ibreactive.connect ib_server_address: {}, ib_server_port: {}, ib_client_id: {}'.format(
-            self.ib_server_address, self.ib_server_port, self.ib_client_id
+        logging.debug('ibreactive.connect ib_server_address: {}, ib_server_port: {}, ib_client_id: {} ib_account: {}'.format(
+            self.ib_server_address, self.ib_server_port, self.ib_client_id, self.ib_account
         ))
 
         self.ib.connect(
@@ -153,11 +155,13 @@ class IBAIORx():
             port=self.ib_server_port,
             clientId=self.ib_client_id,
             timeout=10,
-            readonly=self.read_only
+            readonly=self.read_only,
+            account=self.ib_account,
         )
 
         net_client.conn.disconnected -= __handle_client_id_error
 
+        # todo: check to see if we need to pass through 'ib_account' here.
         self.history_worker = IBHistoryWorker(
             self.ib_server_address,
             self.ib_server_port,
@@ -351,7 +355,7 @@ class IBAIORx():
         await self.positions_subject.call_event_subscriber(self.ib.reqPositionsAsync())
 
         def get_positions() -> Iterator[List[Position]]:
-            yield self.ib.positions()
+            yield self.ib.positions(account=self.ib_account)
 
         # deferred observable, primed with the latest portfolio items
         deferred = rx.defer(lambda _: rx.from_iterable(get_positions()))
@@ -363,7 +367,7 @@ class IBAIORx():
         # def reqAccountUpdates(self, account: str = '') is called at startup
         # so we don't need to call any particular self.ib.req* method
         def get_portfolio_items() -> Iterator[PortfolioItem]:
-            portfolio_items = self.ib.portfolio()
+            portfolio_items = self.ib.portfolio(account=self.ib_account)
             for item in portfolio_items:
                 yield item
 
@@ -373,14 +377,14 @@ class IBAIORx():
             ops.concat(self.portfolio_subject)
         )
 
-    async def subscribe_single_pnl(self, account: str, contract: Contract) -> Observable[PnLSingle]:
+    async def subscribe_single_pnl(self, contract: Contract) -> Observable[PnLSingle]:
         logging.debug('subscribe_single_pnl({})'.format(contract))
 
         # if not already subscribed
         if contract.conId not in self.pnl_cache:
             self.pnl_subject.call_event_subscriber_sync(
                 lambda: self.ib.reqPnLSingle(
-                    account=account,
+                    account=self.ib_account,
                     modelCode='',
                     conId=contract.conId
                 ),
@@ -434,10 +438,10 @@ class IBAIORx():
         loop.call_later(1, asyncio.create_task, __update(subject, contract, start_date, end_date))
         return subject
 
-    async def cancel_single_pnl(self, account: str, contract: Contract):
+    async def cancel_single_pnl(self, contract: Contract):
         logging.debug('cancel_single_pnl({})'.format(contract))
         if contract.conId in self.pnl_cache:
-            self.ib.cancelPnLSingle(account=account, modelCode='', conId=contract.conId)
+            self.ib.cancelPnLSingle(account=self.ib_account, modelCode='', conId=contract.conId)
             del self.pnl_cache[contract.conId]
 
     async def get_open_orders(self) -> List[Order]:

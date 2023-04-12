@@ -171,3 +171,7 @@ class TraderServiceApi(RPCHandler):
     @RPCHandler.rpcmethod
     async def disable_strategy(self, name: str) -> SuccessFail[StrategyState]:
         return await self.trader.disable_strategy(name)
+
+    @RPCHandler.rpcmethod
+    async def get_ib_account(self) -> str:
+        return self.trader.ib_account

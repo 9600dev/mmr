@@ -6,4 +6,4 @@ eval "$(pyenv init -)"
 
 export TRADER_CONFIG="/home/trader/mmr/configs/trader.yaml"
 cd /home/trader/mmr
-/home/trader/mmr/start_trader.sh
+/home/trader/mmr/start_mmr.sh

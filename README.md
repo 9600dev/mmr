@@ -33,7 +33,7 @@ It relies on:
 - [ ] Backtesting
 - [ ] Algorithmic Strategy API and extensibility hooks (started)
 - [ ] Strategy and portfolio risk analysis (started)
-- [ ] Add/remove strategies
+- [x] Add/remove strategies
 - [ ] Hyperparameter search on strategies
 
 There is still about 2-3 months of work left before MMR is 'shippable'. If you want to help speed that up, send me a message.
@@ -92,11 +92,11 @@ $ ssh trader@localhost -p 2222
 
 Enter your Trader Workstation username and password. The script will proceed to automatically install the latest Trader Workstation version.
 
-After this has completed, it will call a script `start_trader.sh` in the MMR root directory, which starts a [tmux](https://github.com/tmux/tmux/wiki) session with five commands:
+After this has completed, it will call a script `start_mmr.sh` in the MMR root directory, which starts a [tmux](https://github.com/tmux/tmux/wiki) session with five commands:
 
 * `pycron` (MMR's process spawner and scheduler) which handles the process scheduling, maintenance and uptime of the MMR trading runtime, ArcticDB, Redis, X Windows, and Trader Workstation, ready for automatic trading. You can manually call this by: ```python3 pycron/pycron.py --config ./configs/pycron.yaml```
 * `cli` which is command line interface to interact with the trading system (check portfolio, check systems, manually create orders etc). You can manually call this using ```python3 cli.py```.
-* `async_cli` TUI (terminal UI) based way to interact with the trading system. (this will replace the `cli` module in the future).
+* `tui_cli` TUI (terminal UI) based way to interact with the trading system. (this will replace the `cli` module in the future).
 * `trader_service_log` displays the trader service log real time (see below for information on this service).
 * `strategy_service_log` displays the trader service log real time.
 
@@ -156,7 +156,7 @@ Trading from your command line interface of choice is also supported:
 
 There's also a terminal based TUI to quickly inspect the runtime, orders, algos and prices [TODO: this is under significant active development].
 
-* ```python3 async_cli.py```
+* ```python3 tui_cli.py```
 
 ![](docs/2023-03-03-09-50-58.png)
 

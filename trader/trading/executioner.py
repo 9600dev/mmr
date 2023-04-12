@@ -54,6 +54,10 @@ class TradeExecutioner():
                 exception=trader_exception(self.trader, exception_type=TraderException, message='place_order()', inner=ex)
             )
 
+        # validate that the order is being placed with the right ib_account number
+        if order.account != self.trader.ib_account:
+            return trader_exception_helper(ValueError('Order.account is not equal to the ib_account configured'))
+
         try:
             observable = await self.trader.client.subscribe_place_order(contract, order)
             return observable.pipe(
@@ -168,12 +172,14 @@ class TradeExecutioner():
                 totalQuantity=cast(float, quantity),
                 stopPrice=stop_loss_price,
                 orderRef=algo_name,
+                account=self.trader.ib_account,
             )
         elif market_order and stop_loss_price == 0.0:
             order = MarketOrder(
                 action=str(action),
                 totalQuantity=cast(float, quantity),
-                orderRef=algo_name
+                orderRef=algo_name,
+                account=self.trader.ib_account,
             )
         if not market_order and stop_loss_price > 0:
             order = StopLimitOrder(
@@ -181,13 +187,15 @@ class TradeExecutioner():
                 totalQuantity=cast(float, quantity),
                 lmtPrice=order_price,
                 stopPrice=stop_loss_price,
-                orderRef=algo_name
+                orderRef=algo_name,
+                account=self.trader.ib_account,
             )
         elif not market_order and stop_loss_price == 0.0:
             order = LimitOrder(
                 action=str(action),
                 totalQuantity=cast(float, quantity),
                 lmtPrice=order_price,
-                orderRef=algo_name
+                orderRef=algo_name,
+                account=self.trader.ib_account,
             )
         return ContractOrderPair(contract=contract, order=order)

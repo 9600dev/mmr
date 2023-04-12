@@ -5,6 +5,10 @@ strategy_config_file: /home/trader/mmr/configs/strategy_runtime.yaml
 logfile: logs/trader.log
 strategies_directory: /home/trader/mmr/strategies
 trading_mode: live
+# your IB account can be set here, or via environment variable "IB_ACCOUNT"
+# if you're trading your paper account, you'll need to switch trading_mode: paper,
+# and set your paper account number here
+ib_account:
 ib_server_address: 127.0.0.1
 ib_server_port: 7496
 trading_runtime_ib_client_id: 5

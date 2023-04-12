@@ -59,6 +59,7 @@ class Trader(metaclass=Singleton):
                  ib_server_address: str,
                  ib_server_port: int,
                  trading_runtime_ib_client_id: int,
+                 ib_account: str,
                  arctic_server_address: str,
                  arctic_universe_library: str,
                  redis_server_address: str,
@@ -76,6 +77,7 @@ class Trader(metaclass=Singleton):
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
         self.trading_runtime_ib_client_id = trading_runtime_ib_client_id
+        self.ib_account = ib_account
         self.arctic_server_address = arctic_server_address
         self.arctic_universe_library = arctic_universe_library
         self.simulation: bool = simulation
@@ -135,7 +137,12 @@ class Trader(metaclass=Singleton):
     def connect(self):
         logging.debug('trading_runtime.connect() connecting to services: %s:%s' % (self.ib_server_address, self.ib_server_port))
         try:
-            self.client = IBAIORx(self.ib_server_address, self.ib_server_port, self.trading_runtime_ib_client_id)
+            self.client = IBAIORx(
+                ib_server_address=self.ib_server_address,
+                ib_server_port=self.ib_server_port,
+                ib_client_id=self.trading_runtime_ib_client_id,
+                ib_account=self.ib_account,
+            )
             self.data = TickStorage(self.arctic_server_address)
             self.universe_accessor = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
             self.clear_portfolio_universe()
@@ -272,7 +279,6 @@ class Trader(metaclass=Singleton):
             async def __async_subscribe_pnl(portfolio_item: PortfolioItem):
                 if portfolio_item.contract and (portfolio_item.account, portfolio_item.contract.conId) not in self.pnl_subscriptions:  # noqa: E501
                     observable = await self.client.subscribe_single_pnl(
-                        portfolio_item.account,
                         portfolio_item.contract,
                     )
                     disposable = observable.subscribe(self.pnl.create_observer(error_func=handle_subscription_exception))

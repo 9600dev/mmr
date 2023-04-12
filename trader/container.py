@@ -27,7 +27,9 @@ class Container(metaclass=Singleton):
                 continue
             if extra_args and param.name in extra_args.keys():
                 args[param.name] = extra_args[param.name]
-            elif param.name in self.configuration:
+            elif os.getenv(param.name.upper()):
+                args[param.name] = os.getenv(param.name.upper())
+            elif param.name in self.configuration and self.configuration[param.name]:
                 args[param.name] = self.configuration[param.name]
         return t(**args)
 
