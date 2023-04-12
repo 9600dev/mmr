@@ -102,47 +102,73 @@ class UniverseAccessor():
                     return universe
         return None
 
-    def resolve_conid(self, conid: int) -> Optional[Tuple[Universe, SecurityDefinition]]:
-        if conid in self._resolver_cache:
-            return self._resolver_cache[conid]
+    def resolve_universe(
+        self,
+        symbol: Union[str, int],
+        exchange: str = '',
+        universe: str = '',
+        first_only: bool = False,
+    ) -> List[Tuple[Universe, SecurityDefinition]]:
+        def check_exchange(exchange, definition: SecurityDefinition) -> bool:
+            if not exchange:
+                return True
+            if definition.exchange == exchange:
+                return True
+            if definition.primaryExchange == exchange:
+                return True
+            return False
 
-        for universe in self.get_all():
-            for definition in universe.security_definitions:
-                if conid == definition.conId:
-                    self._resolver_cache.update({definition.conId: (universe, definition)})
-                    return (universe, definition)
-                else:
-                    self._resolver_cache.update({definition.conId: (universe, definition)})
-        return None
-
-    def resolve_symbol(self, symbol: Union[str, int]) -> List[Tuple[Universe, SecurityDefinition]]:
         results = []
-        for universe in self.get_all():
-            for definition in universe.security_definitions:
-                if type(symbol) is int and int(symbol) == definition.conId:
-                    results.append((universe, definition))
-                    self._resolver_cache.update({definition.conId: (universe, definition)})
-                if type(symbol) is str and symbol.isnumeric() and int(symbol) == definition.conId:
-                    results.append((universe, definition))
-                    self._resolver_cache.update({definition.conId: (universe, definition)})
+        universes = []
+
+        if type(symbol) is int and int(symbol) in self._resolver_cache:
+            u, definition = self._resolver_cache[int(symbol)]
+            if check_exchange(exchange, definition) and not universe or universe == u.name:
+                return [(u, definition)]
+
+        if universe:
+            universes.append(self.get(universe))
+        else:
+            universes.extend(self.get_all())
+
+        for u in universes:
+            for definition in u.security_definitions:
+                if type(symbol) is int and int(symbol) == definition.conId and check_exchange(exchange, definition):
+                    results.append((u, definition))
+                    self._resolver_cache.update({definition.conId: (u, definition)})
+                    if first_only: return results
+                if (type(symbol) is str and symbol.isnumeric() and int(symbol) == definition.conId
+                        and check_exchange(exchange, definition)):
+                    results.append((u, definition))
+                    self._resolver_cache.update({definition.conId: (u, definition)})
+                    if first_only: return results
                 if type(symbol) is str:
-                    if symbol == definition.symbol:
-                        results.append((universe, definition))
-                        self._resolver_cache.update({definition.conId: (universe, definition)})
+                    if symbol == definition.symbol and check_exchange(exchange, definition):
+                        results.append((u, definition))
+                        self._resolver_cache.update({definition.conId: (u, definition)})
+                        if first_only: return results
+
         return results
 
-    def resolve_first_symbol(self, symbol: Union[str, int]) -> Optional[Tuple[Universe, SecurityDefinition]]:
-        for universe in self.get_all():
-            for definition in universe.security_definitions:
-                if type(symbol) is int:
-                    if symbol == definition.conId:
-                        self._resolver_cache.update({definition.conId: (universe, definition)})
-                        return (universe, definition)
-                if type(symbol) is str:
-                    if symbol == definition.symbol:
-                        self._resolver_cache.update({definition.conId: (universe, definition)})
-                        return (universe, definition)
-        return None
+    def resolve_universe_name(
+        self,
+        symbol: Union[str, int],
+        exchange: str = '',
+        universe: str = '',
+        first_only: bool = False,
+    ) -> List[Tuple[str, SecurityDefinition]]:
+        return [(u.name, d) for u, d in self.resolve_universe(symbol, exchange, universe, first_only)]
+
+    def resolve_symbol(
+        self,
+        symbol: Union[str, int],
+        exchange: str = '',
+        universe: str = '',
+        first_only: bool = False,
+    ) -> List[SecurityDefinition]:
+        # unique definitions via set comprehension
+        result = {definition for _, definition in self.resolve_universe(symbol, exchange, universe, first_only)}
+        return list(result)
 
     def update(self, universe: Universe) -> None:
         self.library.write(universe.name, universe, prune_previous_version=True)

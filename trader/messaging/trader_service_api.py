@@ -16,6 +16,7 @@ from trader.trading.strategy import StrategyConfig, StrategyState
 from typing import List, Optional, Tuple, Union
 
 import asyncio
+import time
 import trader.trading.trading_runtime as runtime
 
 
@@ -61,7 +62,7 @@ class TraderServiceApi(RPCHandler):
         return self.trader.get_pnl()
 
     @RPCHandler.rpcmethod
-    def place_order_simple(
+    async def place_order_simple(
         self, contract: Contract,
         action: str,
         equity_amount: Optional[float],
@@ -126,13 +127,12 @@ class TraderServiceApi(RPCHandler):
             return SuccessFail.fail()
 
     @RPCHandler.rpcmethod
-    def cancel_all(self) -> SuccessFail[List[int]]:
+    def cancel_all(self) -> SuccessFail[list[int]]:
         return self.trader.cancel_all()
 
     @RPCHandler.rpcmethod
-    def get_snapshot(self, contract: Contract, delayed: bool) -> Ticker:
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(self.trader.client.get_snapshot(contract=contract, delayed=delayed))
+    async def get_snapshot(self, contract: Contract, delayed: bool) -> Ticker:
+        return await self.trader.client.get_snapshot(contract=contract, delayed=delayed)
 
     @RPCHandler.rpcmethod
     def publish_contract(self, contract: Contract, delayed: bool) -> bool:
@@ -148,12 +148,12 @@ class TraderServiceApi(RPCHandler):
         return self.trader.get_unique_client_id()
 
     @RPCHandler.rpcmethod
-    def resolve_symbol_to_security_definitions(self, symbol: Union[str, int]) -> list[Tuple[Universe, SecurityDefinition]]:
-        return self.trader.resolve_symbol_to_security_definitions(symbol)
+    async def resolve_symbol(self, symbol: Union[str, int], exchange: str, universe: str) -> list[SecurityDefinition]:
+        return await self.trader.resolve_symbol(symbol, exchange, universe)
 
     @RPCHandler.rpcmethod
-    def resolve_symbol(self, symbol: Union[str, int]) -> Optional[SecurityDefinition]:
-        return self.trader.resolve_symbol(symbol)
+    async def resolve_universe(self, symbol: Union[str, int], exchange: str, universe: str) -> list[tuple[str, SecurityDefinition]]:
+        return await self.trader.resolve_universe(symbol, exchange, universe)
 
     @RPCHandler.rpcmethod
     def release_client_id(self, client_id: int) -> bool:
@@ -161,25 +161,13 @@ class TraderServiceApi(RPCHandler):
         return True
 
     @RPCHandler.rpcmethod
-    def get_strategies(self) -> SuccessFail[List[StrategyConfig]]:
-        return self.trader.get_strategies()
+    async def get_strategies(self) -> SuccessFail[list[StrategyConfig]]:
+        return await self.trader.get_strategies()
 
     @RPCHandler.rpcmethod
-    def enable_strategy(self, name: str, paper: bool) -> SuccessFail[StrategyState]:
-        return self.trader.enable_strategy(name, paper)
+    async def enable_strategy(self, name: str, paper: bool) -> SuccessFail[StrategyState]:
+        return await self.trader.enable_strategy(name, paper)
 
     @RPCHandler.rpcmethod
-    def disable_strategy(self, name: str) -> SuccessFail[StrategyState]:
-        return self.trader.disable_strategy(name)
-
-    @RPCHandler.rpcmethod
-    def start_load_test(self) -> int:
-        logging.debug('start_load_test()')
-        self.trader.start_load_test()
-        return 0
-
-    @RPCHandler.rpcmethod
-    def stop_load_test(self) -> int:
-        logging.debug('stop_load_test()')
-        self.trader.load_test = False
-        return 0
+    async def disable_strategy(self, name: str) -> SuccessFail[StrategyState]:
+        return await self.trader.disable_strategy(name)

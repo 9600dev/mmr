@@ -71,7 +71,7 @@ from trader.cli.commands import (
     invoke_context_wrapper,
     monkeypatch_click_echo,
     portfolio_helper,
-    resolve_conid_to_security_definition,
+    resolve_symbol,
     setup_cli,
     strategy_helper
 )
@@ -80,7 +80,15 @@ from trader.cli.dialog import Dialog
 from trader.cli.repl_input import ReplInput
 from trader.common.dataclass_cache import DataClassEvent, UpdateEvent
 from trader.common.exceptions import TraderConnectionException, TraderException
-from trader.common.helpers import contract_from_dict, DictHelper, rich_dict, rich_json, rich_list, rich_table
+from trader.common.helpers import (
+    contract_from_dict,
+    DictHelper,
+    ListHelper,
+    rich_dict,
+    rich_json,
+    rich_list,
+    rich_table
+)
 from trader.common.logging_helper import LogLevels, set_log_level, setup_logging
 from trader.common.reactivex import SuccessFail
 from trader.container import Container as TraderContainer
@@ -121,15 +129,18 @@ class PlotextMixin(JupyterMixin, Widget):
 
     def filter_plot(self, conId: int):
         self.y_values = []
-        self.rich_canvas = Group(*self.decoder.decode('waiting for data...'))
+        self.rich_canvas = Group(*self.decoder.decode('waiting for data for conId: {} ...'.format(conId)))
         self.filter = conId
         self.dt = dt.datetime.now()
 
     def make_plot(self, x, y, width, height):
+        def format_yticks(y_value):
+            return f"{y_value:.2f}"
         plt.clf()
         plt.grid(1, 1)
         plt.title(self.filter)
         plt.xticks([0.0, len(self.y_values) - 1], [self.dt.strftime('%H:%M:%S'), dt.datetime.now().strftime('%H:%M:%S')])
+        plt.yticks(ticks=self.y_values, labels=[format_yticks(y_value) for y_value in self.y_values])
         plt.plot(
             list(range(0, len(self.y_values))),
             self.y_values,
@@ -141,7 +152,7 @@ class PlotextMixin(JupyterMixin, Widget):
     def ticker(self, ticker: Ticker):
         if ticker.contract and ticker.contract.conId == self.filter:
             last = ticker.last if ticker.last >= 0.0 else ticker.close
-            self.y_values.append(last)
+            self.y_values.append(round(last, 2))
             canvas = self.make_plot(range(0, len(self.y_values)), self.y_values, self.width, self.height)
             self.rich_canvas = Group(*self.decoder.decode(canvas))
 
@@ -398,6 +409,7 @@ class AsyncCli(App):
         # Binding('ctrl+u', 'dialog', 'Dialog'),
         Binding('ctrl+p', 'plot', 'Plot'),
         Binding('ctrl+b', 'book', 'Book'),
+        Binding('ctrl+l', 'listen', 'Listen'),
         Binding('ctrl+s', 'strategy', 'Strategies'),
         Binding('ctrl+q', 'quit', 'Quit'),
     ]
@@ -409,6 +421,7 @@ class AsyncCli(App):
         self.data_table: DataTable = DataTable()
         self.portfolio_table: DataTable = DataTable()
         self.book_table: DataTable = DataTable()
+        self.listen_table: DataTable = DataTable()
         self.strategy_table: DataTable = DataTable()
 
         self.repl_log = TextLog(id='text-box', highlight=False, wrap=True)
@@ -420,7 +433,7 @@ class AsyncCli(App):
         )
 
         self.plot = PlotextMixin(self.top.container_size.width, self.top.container_size.height)
-        self.plot_static = Static(self.plot, expand=True, markup=False)
+        self.plot_static = Static(self.plot, expand=True, markup=False, id='plot-static')
 
         self.right_box = Container(
             Container(self.portfolio_table),
@@ -430,6 +443,7 @@ class AsyncCli(App):
         self.left_box = Container(
             Container(self.repl_log, id='repl-log'),
             Container(self.book_table, id='book-table', classes='hidden'),
+            Container(self.listen_table, id='listen-table', classes='hidden'),
             Container(self.strategy_table, id='strategy-table', classes='hidden'),
             id='bottom-left'
         )
@@ -521,6 +535,10 @@ class AsyncCli(App):
         self.render_book()
         self.switch_widget('#bottom-left', 'book-table')
 
+    def action_listen(self) -> None:
+        # self.render_listen()
+        self.switch_widget('#bottom-left', 'listen-table')
+
     def action_strategy(self) -> None:
         self.render_strategies()
         self.switch_widget('#bottom-left', 'strategy-table')
@@ -551,7 +569,7 @@ class AsyncCli(App):
         if type(conid) == str and str(conid).isnumeric():
             conid = int(conid)
 
-        definition = resolve_conid_to_security_definition(int(conid))
+        definition = ListHelper.first(resolve_symbol(int(conid)))
         if definition:
             contract = Universe.to_contract(definition)
 

@@ -18,18 +18,18 @@ from trader.batch.queuer import Queuer
 from trader.cli.cli_renderer import CliRenderer
 from trader.cli.command_line import common_options, default_config
 from trader.common.exceptions import TraderConnectionException, TraderException
-from trader.common.helpers import contract_from_dict, DictHelper
+from trader.common.helpers import contract_from_dict, DictHelper, ListHelper
 from trader.common.logging_helper import LogLevels, set_log_level, setup_logging
 from trader.common.reactivex import SuccessFail
 from trader.container import Container as TraderContainer
 from trader.data.data_access import DictData, PortfolioSummary, TickData, TickStorage
 from trader.data.universe import SecurityDefinition, Universe, UniverseAccessor
 from trader.listeners.ibreactive import IBAIORx, WhatToShow
-from trader.messaging.clientserver import RPCClient
+from trader.messaging.clientserver import consume, RPCClient
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.objects import BarSize, TradeLogSimple
 from trader.trading.strategy import Strategy, StrategyConfig, StrategyState
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, cast, Coroutine, Dict, List, Optional, Tuple, TypeVar, Union
 
 import asyncio
 import click
@@ -65,7 +65,7 @@ remoted_client = RPCClient[TraderServiceApi](
     zmq_server_address=container.config()['zmq_rpc_server_address'],
     zmq_server_port=container.config()['zmq_rpc_server_port'],
     error_table=error_table,
-    timeout=10,
+    timeout=5,
 )
 
 renderer = CliRenderer()
@@ -90,7 +90,7 @@ def monkeypatch_click_echo(stdout):
 
 
 def connect():
-    if not remoted_client.connected:
+    if not remoted_client.is_setup:
         asyncio.get_event_loop().run_until_complete(remoted_client.connect())
 
 
@@ -116,67 +116,68 @@ def setup_cli(cli_renderer: CliRenderer):
 
     return remoted_client, cli_client_id
 
-def resolve_conid_to_security_definition_db(
-    conid: int,
+def resolve_symbol_arctic(
+    symbol: Union[int, str],
     arctic_server_address: str,
     arctic_universe_library: str,
 ) -> Optional[SecurityDefinition]:
     accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
-    universe_security_definition = accessor.resolve_conid(conid)
-    if universe_security_definition:
-        return universe_security_definition[1]
-    else:
-        return None
+    return ListHelper.first(accessor.resolve_symbol(symbol))
 
-def resolve_conid_to_security_definition(
-    conid: int,
-) -> Optional[SecurityDefinition]:
-    result = remoted_client.rpc(
-        return_type=list[tuple[Universe, SecurityDefinition]]
-    ).resolve_symbol_to_security_definitions(conid)
-    if result:
-        return result[0][1]
-    else:
-        return None
 
-def resolve_symbol_to_security_definitions(
+def resolve_symbol(
     symbol: Union[str, int],
-) -> List[Tuple[Universe, SecurityDefinition]]:
-    return remoted_client.rpc(
-        return_type=list[tuple[Universe, SecurityDefinition]]
-    ).resolve_symbol_to_security_definitions(symbol)
+    exchange: str = '',
+    universe: str = '',
+) -> List[SecurityDefinition]:
+    return consume(remoted_client.rpc(return_type=list[SecurityDefinition]).resolve_symbol(symbol, exchange, universe))
+
 
 def __resolve(
     symbol: Union[str, int],
     arctic_server_address: str,
     arctic_universe_library: str,
-    primary_exchange: Optional[str] = ''
+    exchange: str = '',
+    universe: str = '',
 ) -> List[Dict[str, Any]]:
-    if not primary_exchange: primary_exchange = ''
-    accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
-    universe_definitions = accessor.resolve_symbol(symbol)
+    # it's best to call the trader_runtime resolve method, as it can talk to Interactive Brokers if
+    # the symbol is not found in any available universes
+    temp_results: List[Tuple[str, SecurityDefinition]] = []
+
+    if remoted_client.is_setup:
+        temp_results.extend(
+            consume(
+                remoted_client.rpc(return_type=list[tuple[str, SecurityDefinition]]).resolve_universe(symbol, exchange, universe)
+            )
+        )
+    else:
+        accessor = UniverseAccessor(arctic_server_address, arctic_universe_library)
+        temp_results.extend(accessor.resolve_universe_name(symbol=symbol, exchange=exchange, universe=universe))
 
     results: List[Dict] = []
-    for universe, definition in universe_definitions:
+    for universe_name, definition in temp_results:
         results.append({
-            'universe': universe.name,
+            'universe': universe_name,
             'conId': definition.conId,
             'symbol': definition.symbol,
+            'secType': definition.secType,
             'exchange': definition.exchange,
             'primaryExchange': definition.primaryExchange,
             'currency': definition.currency,
             'longName': definition.longName,
             'category': definition.category,
             'minTick': definition.minTick,
+            'bondType': definition.bondType,
+            'description': definition.description,
         })
-    return [r for r in results if primary_exchange in r['primaryExchange']]
+    return results
 
 
 def __resolve_contract(
     symbol: Union[str, int],
     arctic_server_address: str,
     arctic_universe_library: str,
-    primary_exchange: Optional[str] = ''
+    primary_exchange: str = ''
 ) -> List[Contract]:
     results = []
     descriptions = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
@@ -599,7 +600,7 @@ def portfolio_helper() -> pd.DataFrame:
     )
 
     df = pd.DataFrame(data=xs, columns=[
-        'account', 'conId', 'localSymbol', 'dailyPNL', 'unrealizedPNL', 'realizedPNL', 'marketPrice', 'currency',
+        'account', 'conId', 'localSymbol', 'dailyPNL', 'unrealizedPNL', 'marketPrice', 'realizedPNL', 'currency',
         'position', 'marketValue', 'averageCost',
     ])
 
@@ -607,8 +608,9 @@ def portfolio_helper() -> pd.DataFrame:
 
 def strategy_helper() -> pd.DataFrame:
     connect()
-    strategy_list: SuccessFail[List[StrategyConfig]] = remoted_client.rpc(
-        return_type=SuccessFail[List[StrategyConfig]]).get_strategies()
+    strategy_list: SuccessFail[List[StrategyConfig]] = consume(
+        remoted_client.rpc(return_type=SuccessFail[List[StrategyConfig]]).get_strategies()
+    )
     if strategy_list.is_success() and strategy_list.obj:
         result = []
         for s in strategy_list.obj:
@@ -788,7 +790,8 @@ def clear():
 
 @cli.command(no_args_is_help=True)
 @click.option('--symbol', required=True, help='symbol to resolve to conId')
-@click.option('--primary_exchange', required=False, default='NASDAQ', help='exchange for symbol [not required]')
+@click.option('--exchange', required=False, help='exchange for symbol [not required]')
+@click.option('--universe', required=False, help='universe to check for symbol [not required]')
 @click.option('--ib', required=False, default=False, is_flag=True, help='force resolution from IB')
 @click.option('--sec_type', required=False, default='STK', help='IB security type [STK is default]')
 @click.option('--currency', required=False, default='USD', help='IB security currency')
@@ -798,7 +801,8 @@ def resolve(
     symbol: str,
     arctic_server_address: str,
     arctic_universe_library: str,
-    primary_exchange: str,
+    exchange: str,
+    universe: str,
     ib: bool,
     sec_type: str,
     currency: str,
@@ -810,7 +814,7 @@ def resolve(
             contract = asyncio.get_event_loop().run_until_complete(client.get_conid(
                 symbols=symbol,
                 secType=sec_type,
-                primaryExchange=primary_exchange,
+                primaryExchange=exchange,
                 currency=currency
             ))
             if contract and type(contract) is list:
@@ -818,7 +822,7 @@ def resolve(
             elif contract and type(contract) is Contract:
                 renderer.rich_dict(contract.__dict__)
     else:
-        results = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
+        results = __resolve(symbol, arctic_server_address, arctic_universe_library, exchange, universe)
         if len(results) > 0:
             renderer.rich_table(results, False)
         else:
@@ -851,7 +855,7 @@ def snapshot(
         )
 
         # awaitable = remoted_client.rpc(return_type=Ticker).get_snapshot(contract, delayed)
-        ticker = remoted_client.rpc(return_type=Ticker).get_snapshot(contract, delayed)
+        ticker = consume(remoted_client.rpc(return_type=Ticker).get_snapshot(contract, delayed))
         snap = {
             'symbol': ticker.contract.symbol if ticker.contract else '',
             'exchange': ticker.contract.exchange if ticker.contract else '',
@@ -987,21 +991,6 @@ def options(
     plot_chain(symbol, list_dates, date, True, risk_free_rate)
 
 
-# @main.group()
-# def loadtest():
-#     pass
-
-
-# @loadtest.command('start')
-# def load_test_start():
-#     remoted_client.rpc().start_load_test()
-
-
-# @loadtest.command('stop')
-# def load_test_stop():
-#     remoted_client.rpc().stop_load_test()
-
-
 # CLI_BOOK
 @cli.group()
 def book():
@@ -1081,7 +1070,7 @@ def strategy_enable(
     name: str,
     paper: bool,
 ):
-    success_fail = remoted_client.rpc().enable_strategy(name, paper)
+    success_fail = consume(remoted_client.rpc().enable_strategy(name, paper))
     if success_fail.is_success():
         renderer.rich_dict({'state': success_fail.obj})
     else:
@@ -1093,7 +1082,7 @@ def strategy_enable(
 def strategy_disable(
     name: str,
 ):
-    success_fail = remoted_client.rpc().disable_strategy(name)
+    success_fail = consume(remoted_client.rpc().disable_strategy(name))
     if success_fail.is_success():
         renderer.rich_dict({'state': success_fail.obj})
     else:
@@ -1168,8 +1157,7 @@ def __trade_helper(
     if limit and limit <= 0.0:
         raise ValueError('limit price can be less than or equal to 0.0: {}'.format(limit))
 
-    universe_definitions = resolve_symbol_to_security_definitions(symbol)
-    definitions = list({t[1] for t in universe_definitions})
+    definitions = resolve_symbol(symbol)
 
     if len(definitions) == 0:
         click.echo('no contract found for symbol {}'.format(symbol))
@@ -1184,7 +1172,7 @@ def __trade_helper(
     contract = Universe.to_contract(security)
 
     action = 'BUY' if buy else 'SELL'
-    trade: SuccessFail[Trade] = remoted_client.rpc(return_type=SuccessFail[Trade]).place_order_simple(
+    trade: SuccessFail[Trade] = consume(remoted_client.rpc(return_type=SuccessFail[Trade]).place_order_simple(
         contract=contract,
         action=action,
         equity_amount=equity_amount,
@@ -1193,7 +1181,7 @@ def __trade_helper(
         market_order=market,
         stop_loss_percentage=stop_loss_percentage,
         debug=debug,
-    )
+    ))
 
     output_dict = {
         'result': trade.success_fail,
@@ -1400,5 +1388,3 @@ def trade_update(
             arctic_universe_library=arctic_universe_library,
             args=args,
         )
-
-

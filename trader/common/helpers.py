@@ -169,6 +169,13 @@ class ListHelper(Generic[T]):
                 return True
         return False
 
+    @classmethod
+    def first(cls, lst: List[T]) -> Optional[T]:
+        if len(lst) > 0:
+            return lst[0]
+        else:
+            return None
+
 
 def parse_fundamentals(xml: str) -> Dict:
     def type_value(type: str):

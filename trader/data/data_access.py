@@ -76,6 +76,7 @@ class SecurityDefinition:
     marketRuleIds: str
     company_name: str = ''
     industry: str = ''
+    contractMonth: str = ''
 
     @staticmethod
     def from_contract_details(d: ContractDetails):
@@ -119,6 +120,7 @@ class SecurityDefinition:
             marketRuleIds=d.marketRuleIds,
             company_name=d.longName,
             industry=d.industry,
+            contractMonth=d.contractMonth,
         )
 
     @staticmethod

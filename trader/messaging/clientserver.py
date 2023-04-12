@@ -14,7 +14,7 @@ from reactivex.observer import Observer
 from reactivex.subject import Subject
 from trader.common.logging_helper import setup_logging
 from trader.common.reactivex import ObservableIterHelper
-from typing import Any, Callable, Dict, Generic, Optional, Tuple, Type, TypeVar
+from typing import Any, Callable, cast, Coroutine, Dict, Generic, Optional, Tuple, Type, TypeVar
 
 import aiozmq
 import aiozmq.rpc
@@ -132,6 +132,17 @@ def unpackb_monkeypatch(self, packed):
     return unpackb(packed, use_list=False, strict_map_key=False, raw=False, ext_hook=self.ext_type_unpack_hook)
 
 
+C = TypeVar('C')
+
+def consume(coro: Coroutine[Any, Any, C]) -> C:
+    # helper method to consume a rpc coroutine that is actually just a remote call
+    # in theory, coro should never actually be a coroutine, but this is useful for the typechecker
+    import inspect
+    if inspect.iscoroutine(coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+    else:
+        return cast(C, coro)
+
 class _AwaitedMethodCall():
     __slots__ = ('_proto', '_timeout', '_names', '_return_type')
 
@@ -152,14 +163,15 @@ class _AwaitedMethodCall():
         loop = self._proto.loop
 
         # return asyncio.get_event_l
-        rpc_result = asyncio.get_event_loop().run_until_complete(asyncio.Task(
+        # rpc_result = asyncio.get_event_loop().call_soon(asyncio.Task(
+        # rpc_result = asyncio.get_event_loop().call_soon(
+        rpc_result = loop.run_until_complete(
             asyncio.wait_for(
                 fut,
                 timeout=self._timeout,
                 loop=loop
             ),
-            loop=loop
-        ))
+        )
 
         def return_type_converter(obj, return_type):
             if isinstance(obj, tuple) and hasattr(return_type, '__origin__') and return_type.__origin__ == list:
@@ -613,12 +625,15 @@ class RPCServer(Generic[T]):
     async def serve(self):
         if not self.service:
             bind = '{}:{}'.format(self.zmq_server_address, self.zmq_server_port)
-            self.service = await aiozmq.rpc.serve_rpc(
-                self.instance,
-                bind=bind,
-                translation_table=self.translation_table
-            )  # type: ignore
-
+            try:
+                self.service = await aiozmq.rpc.serve_rpc(
+                    self.instance,
+                    bind=bind,
+                    translation_table=self.translation_table
+                )  # type: ignore
+            except RuntimeError as e:
+                logging.exception(e)
+                raise e
 
 class RPCClient(Generic[T]):
     def __init__(
@@ -636,10 +651,10 @@ class RPCClient(Generic[T]):
         self.translation_table = translation_table
         self.client: Optional[aiozmq.rpc.rpc.RPCClient] = None
         self.timeout: Optional[int] = timeout
-        self.connected: bool = False
+        self.is_setup: bool = False
         self.error_table: Optional[Dict[str, Exception]] = error_table
 
-    async def connect(self):
+    async def connect(self, loop=None):
         if not self.client:
             logging.debug('trying RPCClient.connect()')
             bind = '{}:{}'.format(self.zmq_server_address, self.zmq_server_port)
@@ -647,15 +662,28 @@ class RPCClient(Generic[T]):
                 connect=bind,
                 timeout=self.timeout,
                 translation_table=self.translation_table,
-                error_table=self.error_table
+                error_table=self.error_table,
+                loop=loop,
             )  # type: ignore
-            self.connected = True
+            self.is_setup = True
 
-    async def awaitable_rpc(self) -> T:
+    async def awaitable_rpc(self, return_type: Optional[Type] = None) -> T:
         return self.client.call  # type: ignore
 
     def rpc(self, return_type: Optional[Type] = None) -> T:
-        if self.client and self.connected:
+        if self.client and self.is_setup:
             return _AwaitedMethodCall(self.client._proto, timeout=self.client._timeout, return_type=return_type)  # type: ignore
         else:
             raise ConnectionError('not connected')
+
+    def arpc(self, return_type: Optional[Type] = None) -> Coroutine[Any, Any, T]:
+        if self.client and self.is_setup:
+            return _AwaitedMethodCall(self.client._proto, timeout=self.client._timeout, return_type=return_type)  # type: ignore
+        else:
+            raise ConnectionError('not connected')
+
+    def consume(self, future):
+        if future is asyncio.Future:
+            return future.result()
+        else:
+            return future

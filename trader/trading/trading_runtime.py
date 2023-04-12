@@ -112,7 +112,6 @@ class Trader(metaclass=Singleton):
         # takes care of execution of orders
         self.executioner: TradeExecutioner
         # a list of all the universes of stocks we have registered
-        self.universes: List[Universe]
         self.market_data = 3
         self.zmq_rpc_server: RPCServer[bus.TraderServiceApi]
         self.zmq_pubsub_server: MultithreadedTopicPubSub[Ticker]
@@ -139,7 +138,6 @@ class Trader(metaclass=Singleton):
             self.client = IBAIORx(self.ib_server_address, self.ib_server_port, self.trading_runtime_ib_client_id)
             self.data = TickStorage(self.arctic_server_address)
             self.universe_accessor = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
-            self.universes = self.universe_accessor.get_all()
             self.clear_portfolio_universe()
             self.contract_subscriptions = {}
             self.market_data_subscriptions = {}
@@ -175,7 +173,7 @@ class Trader(metaclass=Singleton):
             self.zmq_strategy_client = RPCClient[strategy_bus.StrategyServiceApi](
                 self.zmq_strategy_rpc_server_address,
                 self.zmq_strategy_rpc_server_port,
-                timeout=5,
+                timeout=6,
             )
 
             # fire up the executioner
@@ -328,7 +326,7 @@ class Trader(metaclass=Singleton):
         self.connect()
 
     @log_method
-    def enable_strategy(self, name: str, paper: bool) -> SuccessFail[StrategyState]:
+    async def enable_strategy(self, name: str, paper: bool) -> SuccessFail[StrategyState]:
         try:
             return self.zmq_strategy_client.rpc().enable_strategy(name, paper)
         except Exception as ex:
@@ -336,7 +334,7 @@ class Trader(metaclass=Singleton):
             return SuccessFail.fail(exception=ex)
 
     @log_method
-    def disable_strategy(self, name: str) -> SuccessFail[StrategyState]:
+    async def disable_strategy(self, name: str) -> SuccessFail[StrategyState]:
         try:
             return self.zmq_strategy_client.rpc().disable_strategy(name)
         except Exception as ex:
@@ -344,9 +342,11 @@ class Trader(metaclass=Singleton):
             return SuccessFail.fail(exception=ex)
 
     @log_method
-    def get_strategies(self) -> SuccessFail[List[StrategyConfig]]:
+    async def get_strategies(self) -> SuccessFail[List[StrategyConfig]]:
         try:
-            return SuccessFail.success(obj=self.zmq_strategy_client.rpc().get_strategies())
+            rpc_call = self.zmq_strategy_client.rpc().get_strategies()
+            # rpc_call = SuccessFail.success(await (await self.zmq_strategy_client.awaitable_rpc()).get_strategies())
+            return SuccessFail.success(rpc_call)
         except Exception as ex:
             return SuccessFail.fail(exception=ex)
 
@@ -356,65 +356,68 @@ class Trader(metaclass=Singleton):
         universe.security_definitions.clear()
         self.universe_accessor.update(universe)
 
-    def resolve_symbol_to_security_definitions(self, symbol: Union[str, int]) -> list[Tuple[Universe, SecurityDefinition]]:
-        int_symbol = 0
-
-        if type(symbol) is str and symbol.isnumeric():
-            int_symbol = int(symbol)
-        if type(symbol) is int:
-            int_symbol = symbol
-
-        # see if conid is in the cache
-        if int_symbol > 0:
-            # not in the cache
-            result = self.universe_accessor.resolve_conid(int_symbol)
-            if result: return [result]
-            return []
-        else:
-            # not in the cache
-            universe_definition = self.universe_accessor.resolve_first_symbol(symbol)
-            if universe_definition:
-                return [universe_definition]
-            return []
-
     @log_method
-    def resolve_symbol(
+    async def resolve_symbol(
         self,
         symbol: Union[str, int],
-        primary_exchange: str = ''
-    ) -> Optional[SecurityDefinition]:
-        # todo
-        # because resolving conids is all messed up, we're going to try a few heuristics
-        int_symbol = 0
-
-        if type(symbol) is str and symbol.isnumeric():
-            int_symbol = int(symbol)
-        if type(symbol) is int:
-            int_symbol = symbol
-
-        result = self.resolve_symbol_to_security_definitions(symbol)
-        if result and int_symbol > 0:
-            # we know we used conid here, they're unique so...
-            return result[0][1]
-        if result and int_symbol == 0:
-            for _, security_definition in result:
-                for portfolio_item in self.portfolio.get_portfolio_items():
-                    if (
-                        portfolio_item.contract.symbol == security_definition.symbol
-                        or portfolio_item.contract.localSymbol == security_definition.symbol
-                    ):
-                        return security_definition
-
-        contract_details = self.run(
-            self.client.ib.reqContractDetailsAsync(
-                Contract(symbol=str(symbol), exchange='SMART')
+        exchange: str = '',
+        universe: str = '',
+    ) -> List[SecurityDefinition]:
+        def __blocking_resolve_symbol_to_security_definitions(
+            symbol: Union[str, int],
+            exchange: str = '',
+            universe: str = '',
+            first_only: bool = False,
+        ) -> list[SecurityDefinition]:
+            return self.universe_accessor.resolve_symbol(
+                symbol=symbol,
+                exchange=exchange,
+                universe=universe,
+                first_only=first_only
             )
+
+        # if we're asking about conid's, we only want the first one
+        first_only = False
+        if type(symbol) is int:
+            first_only = True
+
+        # this could take a while
+        result = await asyncio.to_thread(
+            __blocking_resolve_symbol_to_security_definitions,
+            symbol,
+            exchange,
+            universe,
+            first_only
+        )
+
+        if len(result) > 0:
+            return result
+
+        contract_details = await self.client.ib.reqContractDetailsAsync(
+            Contract(symbol=str(symbol), exchange='SMART')
         )
 
         if contract_details:
-            return SecurityDefinition.from_contract_details(contract_details[0])
+            return [SecurityDefinition.from_contract_details(contract_details[0])]
         else:
-            return None
+            return []
+
+    @log_method
+    async def resolve_universe(
+        self,
+        symbol: Union[str, int],
+        exchange: str = '',
+        universe: str = '',
+    ) -> List[Tuple[str, SecurityDefinition]]:
+        def __blocking_resolve_universe(
+            symbol: Union[str, int],
+            exchange: str = '',
+            universe: str = '',
+        ) -> list[Tuple[str, SecurityDefinition]]:
+            return self.universe_accessor.resolve_universe_name(symbol=symbol, exchange=exchange, universe=universe)
+
+        # this could take a while
+        return await asyncio.to_thread(__blocking_resolve_universe, symbol, exchange, universe)
 
     @log_method
     def publish_contract(self, contract: Contract, delayed: bool) -> Observable[IBAIORxError]:
@@ -541,10 +544,6 @@ class Trader(metaclass=Singleton):
             'arctic_connected': self.data is not None
         }
         return status
-
-    @log_method
-    def get_universes(self) -> List[Universe]:
-        return self.universes
 
     @log_method
     def get_unique_client_id(self) -> int:
