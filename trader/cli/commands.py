@@ -588,10 +588,11 @@ def portfolio_helper() -> pd.DataFrame:
             portfolio.unrealizedPNL,
             portfolio.realizedPNL,
             portfolio.marketPrice,
+            portfolio.contract.secType,
+            portfolio.contract.strike,
             portfolio.contract.currency,
             portfolio.position,
             portfolio.marketValue,
-            portfolio.averageCost,
         ]
 
     xs = pipe(
@@ -600,8 +601,8 @@ def portfolio_helper() -> pd.DataFrame:
     )
 
     df = pd.DataFrame(data=xs, columns=[
-        'account', 'conId', 'localSymbol', 'dailyPNL', 'unrealizedPNL', 'marketPrice', 'realizedPNL', 'currency',
-        'position', 'marketValue', 'averageCost',
+        'account', 'conId', 'localSymbol', 'dailyPNL', 'unrealizedPNL', 'realizedPNL', 'marketPrice',
+        'secType', 'strike', 'currency', 'position', 'marketValue',
     ])
 
     return df.sort_values(by='dailyPNL', ascending=False)
@@ -744,11 +745,13 @@ def positions_helper() -> pd.DataFrame:
             position.account,
             position.contract.conId,
             position.contract.localSymbol,
-            position.contract.exchange,
+            position.contract.secType,
             position.position,
             position.avgCost,
             position.contract.currency,
-            position.position * position.avgCost
+            position.contract.strike,
+            position.position * position.avgCost,
+            position.contract.exchange,
         ]
 
     xs = pipe(
@@ -757,7 +760,7 @@ def positions_helper() -> pd.DataFrame:
     )
 
     df = pd.DataFrame(data=list(xs), columns=[
-        'account', 'conId', 'localSymbol', 'exchange', 'position', 'avgCost', 'currency', 'total'
+        'account', 'conId', 'localSymbol', 'secType', 'secType', 'position', 'avgCost', 'currency', 'strike', 'total', 'exchange'
     ])
     return df.sort_values(by='currency')
 
@@ -858,6 +861,8 @@ def snapshot(
         ticker = consume(remoted_client.rpc(return_type=Ticker).get_snapshot(contract, delayed))
         snap = {
             'symbol': ticker.contract.symbol if ticker.contract else '',
+            'conId': ticker.contract.conId if ticker.contract else '',
+            'secType': ticker.contract.secType if ticker.contract else '',
             'exchange': ticker.contract.exchange if ticker.contract else '',
             'primaryExchange': ticker.contract.primaryExchange if ticker.contract else '',
             'currency': ticker.contract.currency if ticker.contract else '',

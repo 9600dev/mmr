@@ -55,6 +55,7 @@ class UniverseAccessor():
         self.library: VersionStore = self.store[self.arctic_universe_library]
         # reverse order
         self.sorted_names = ['LSE', 'ASX', 'NYSE', 'NASDAQ']
+        self.sorted_types = ['STK', 'OPT', 'FUT', 'EFT']
 
         # todo: fix this at the source: Universe shouldn't have a list of SecurityDefinitions
         self._resolver_cache: Dict[int, Tuple[Universe, SecurityDefinition]] = {}
@@ -118,7 +119,7 @@ class UniverseAccessor():
                 return True
             return False
 
-        results = []
+        results: List[Tuple[Universe, SecurityDefinition]] = []
         universes = []
 
         if type(symbol) is int and int(symbol) in self._resolver_cache:
@@ -148,6 +149,9 @@ class UniverseAccessor():
                         self._resolver_cache.update({definition.conId: (u, definition)})
                         if first_only: return results
 
+        results.sort(
+            key=lambda x: self.sorted_types.index(x[1].secType) if x[1].secType in self.sorted_types else len(self.sorted_types)
+        )
         return results
 
     def resolve_universe_name(
