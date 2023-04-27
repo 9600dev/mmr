@@ -545,7 +545,7 @@ class AsyncCli(App):
 
     def render_portfolio(self) -> None:
         df = portfolio_helper()
-        df.drop(columns=['account', 'currency', 'averageCost'], inplace=True)
+        df.drop(columns=['account', 'currency'], inplace=True)
         TuiRenderer(self.portfolio_table).rich_table(df, financial=True, column_key='conId')
 
         # post the pnl to the footer

@@ -632,7 +632,7 @@ def strategy_helper() -> pd.DataFrame:
 def portfolio():
     df = portfolio_helper()
     renderer.rich_table(df, csv=is_repl, financial=True, financial_columns=[
-        'marketPrice', 'marketValue', 'averageCost', 'dailyPNL', 'unrealizedPNL', 'realizedPNL', 'dailyPNL'
+        'marketPrice', 'marketValue', 'dailyPNL', 'unrealizedPNL', 'realizedPNL', 'dailyPNL'
     ])
 
 
@@ -760,7 +760,7 @@ def positions_helper() -> pd.DataFrame:
     )
 
     df = pd.DataFrame(data=list(xs), columns=[
-        'account', 'conId', 'localSymbol', 'secType', 'secType', 'position', 'avgCost', 'currency', 'strike', 'total', 'exchange'
+        'account', 'conId', 'localSymbol', 'secType', 'position', 'avgCost', 'currency', 'strike', 'total', 'exchange'
     ])
     return df.sort_values(by='currency')
 
