@@ -1,7 +1,7 @@
 from arctic import Arctic
 from arctic.exceptions import NoDataFoundException
-from click_help_colors import HelpColorsGroup
 from click_option_group import optgroup, RequiredMutuallyExclusiveOptionGroup
+from cloup import Context, HelpFormatter, HelpTheme
 from cloup import option as cloupoption
 from cloup import option_group
 from cloup.constraints import mutually_exclusive
@@ -41,9 +41,9 @@ from trader.messaging.trader_service_api import TraderServiceApi
 from trader.objects import BarSize
 from typing import Any, Dict, List, Optional, Union
 
-import asyncio
 import click
 import click_repl
+import cloup
 import datetime as dt
 import os
 import pandas as pd
@@ -54,14 +54,10 @@ import trader.cli.universes_cli as universes_cli
 def repl():
     global is_repl
 
-    def bottom_toolbar():
-        return HTML('MMR statusbar <b><style bg="ansired">[feature not complete]</style></b>.')
-
     prompt_kwargs = {
         'history': FileHistory(os.path.expanduser('.trader.history')),
         'vi_mode': True,
         'message': 'mmr> ',
-        'bottom_toolbar': bottom_toolbar,
         'cursor': CursorShape.BLINKING_BLOCK,
         'auto_suggest': AutoSuggestFromHistory(),
     }

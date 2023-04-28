@@ -1,8 +1,8 @@
-from click_help_colors import HelpColorsGroup
 from prompt_toolkit.history import FileHistory
 
 import click
 import click_repl
+import cloup
 import configobj
 import functools
 import os
@@ -183,92 +183,94 @@ def default_config_provider(file_path, cmd_name):
         return yaml.load(conf_file, Loader=yaml.FullLoader)
 
 
-class NotRequiredIf(click.Option):
-    def __init__(self, *args, **kwargs):
-        self.not_required_if = kwargs.pop('not_required_if')
-        assert self.not_required_if, "'not_required_if' parameter required"
-        kwargs['help'] = (kwargs.get('help', '') + ' NOTE: This argument is mutually exclusive with %s' % self.not_required_if).strip()
-        super(NotRequiredIf, self).__init__(*args, **kwargs)
-
-    def handle_parse_result(self, ctx, opts, args):
-        we_are_present = self.name in opts
-        other_present = self.not_required_if in opts
-
-        if other_present:
-            if we_are_present:
-                raise click.UsageError(
-                    "Illegal usage: `%s` is mutually exclusive with `%s`" % (
-                        self.name, self.not_required_if))
-            else:
-                self.prompt = None  # type: ignore
-
-        return super(NotRequiredIf, self).handle_parse_result(
-            ctx, opts, args)
-
-
 def common_options():
     def inner_func(function):
         function = click.option(
             '--zmq_pubsub_server_address',
-            help='zero mq publish/subscribe ticker update server address, eg: 127.0.0.1'
+            help='zero mq publish/subscribe ticker update server address, eg: 127.0.0.1',
+            hidden=True,
         )(function)
         function = click.option(
             '--zmq_pubsub_server_port',
-            help='zero mq publish/subscribe ticker update server port, eg: 42002'
+            help='zero mq publish/subscribe ticker update server port, eg: 42002',
+            hidden=True,
         )(function)
         function = click.option(
             '--zmq_rpc_server_address',
-            help='zero mq rpc server address, eg: 127.0.0.1'
+            help='zero mq rpc server address, eg: 127.0.0.1',
+            hidden=True,
         )(function)
         function = click.option(
             '--zmq_rpc_server_port',
-            help='zero mq rpc server port, eg: 42001'
+            help='zero mq rpc server port, eg: 42001',
+            hidden=True,
         )(function)
         function = click.option(
             '--arctic_universe_library',
-            help='arctic library that describes securities universes, eg: Universes'
+            help='arctic library that describes securities universes, eg: Universes',
+            hidden=True,
         )(function)
         function = click.option(
             '--arctic_server_address',
-            help='arctic server address, eg: 127.0.0.1'
+            help='arctic server address, eg: 127.0.0.1',
+            hidden=True,
         )(function)
         function = click.option(
             '--redis_server_port',
-            help='redis server port, eg: 6379'
+            help='redis server port, eg: 6379',
+            hidden=True,
         )(function)
         function = click.option(
             '--redis_server_address',
-            help='redis server address, eg: 127.0.0.1'
+            help='redis server address, eg: 127.0.0.1',
+            hidden=True,
         )(function)
         function = click.option(
             '--ib_server_port',
             default=7496,
-            help='tws trader API address, eg: 7496'
+            help='tws trader API address, eg: 7496',
+            hidden=True,
         )(function)
         function = click.option(
             '--ib_server_address',
             required=True,
-            help='tws trader instance address, eg: 127.0.0.1'
+            help='tws trader instance address, eg: 127.0.0.1',
+            hidden=True,
         )(function)
         return function
     return inner_func
 
 
-@click.group(
+REPL_CONTEXT_SETTINGS = cloup.Context.settings(
+    # parameters of Command:
+    align_option_groups=False,
+    align_sections=True,
+    show_constraints=True,
+    # parameters of HelpFormatter:
+    formatter_settings=cloup.HelpFormatter.settings(
+        max_width=120,
+        col1_max_width=25,
+        col2_min_width=30,
+        indent_increment=3,
+        col_spacing=3,
+        theme=cloup.HelpTheme.light(),
+    )
+)
+
+
+@cloup.group(
     invoke_without_command=True,
-    cls=HelpColorsGroup,
-    help_headers_color='yellow',
-    help_options_color='green')
-@click.pass_context
+    context_settings=REPL_CONTEXT_SETTINGS,
+)
+@cloup.pass_context
 def cli(ctx):
     pass
 
 
-@click.group(
+@cloup.group(
     invoke_without_command=False,
-    cls=HelpColorsGroup,
-    help_headers_color='yellow',
-    help_options_color='green')
-@click.pass_context
+    context_settings=REPL_CONTEXT_SETTINGS,
+)
+@cloup.pass_context
 def cli_norepl(ctx):
     pass

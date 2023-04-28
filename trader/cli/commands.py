@@ -1,9 +1,6 @@
 from arctic.exceptions import NoDataFoundException
-from click_help_colors import HelpColorsGroup
-from click_option_group import optgroup, RequiredMutuallyExclusiveOptionGroup
-from cloup import option as cloupoption
-from cloup import option_group
-from cloup.constraints import mutually_exclusive
+from cloup import command, Context, group, HelpFormatter, HelpTheme
+from cloup.constraints import mutually_exclusive, require_any, require_one
 from expression import pipe
 from expression.collections import seq
 from ib_insync import TradeLogEntry
@@ -35,6 +32,7 @@ import asyncio
 import click
 import click._compat as compat
 import click.core
+import cloup
 import datetime as dt
 import os
 import pandas as pd
@@ -68,10 +66,8 @@ remoted_client = RPCClient[TraderServiceApi](
     timeout=5,
 )
 
-renderer = CliRenderer()
 
-from click.core import MultiCommand
-from io import StringIO
+renderer = CliRenderer()
 
 
 # hijack click.echo to allow redirect to TUI
@@ -115,6 +111,7 @@ def setup_cli(cli_renderer: CliRenderer):
         click.echo('using client id {}'.format(cli_client_id))
 
     return remoted_client, cli_client_id
+
 
 def resolve_symbol_arctic(
     symbol: Union[int, str],
@@ -196,13 +193,29 @@ def invoke_context_wrapper(ctx):
     invoke_context = ctx
 
 
-@click.group(
+REPL_CONTEXT_SETTINGS = Context.settings(
+    # parameters of Command:
+    align_option_groups=False,
+    align_sections=True,
+    show_constraints=True,
+    # parameters of HelpFormatter:
+    formatter_settings=HelpFormatter.settings(
+        max_width=120,
+        col1_max_width=25,
+        col2_min_width=30,
+        indent_increment=3,
+        col_spacing=3,
+        theme=HelpTheme.light(),
+    )
+)
+
+
+@cloup.group(
     'cli',
     invoke_without_command=True,
-    cls=HelpColorsGroup,
-    help_headers_color='yellow',
-    help_options_color='green')
-@click.pass_context
+    context_settings=REPL_CONTEXT_SETTINGS,
+)
+@cloup.pass_context
 def cli(ctx):
     global invoke_context
     # todo: actually fix this pytz stuff throughout the codebase
@@ -218,8 +231,8 @@ def cli(ctx):
 
 
 @cli.command()
-@click.argument('subcommand', required=False)
-@click.pass_context
+@cloup.argument('subcommand', required=False)
+@cloup.pass_context
 def help(ctx, subcommand):
     subcommand_obj = cli.get_command(ctx, subcommand)
     if subcommand_obj is None:
@@ -229,8 +242,8 @@ def help(ctx, subcommand):
 
 
 @cli.command()
-@click.argument('subcommand', required=False)
-@click.pass_context
+@cloup.argument('subcommand', required=False)
+@cloup.pass_context
 def ls(ctx, subcommand):
     subcommand_obj = cli.get_command(ctx, subcommand)
     if subcommand_obj is None:
@@ -312,8 +325,8 @@ def bootstrap(
 
 
 @universes.command(no_args_is_help=True)
-@click.option('--name', help='Name of the universe to create')
-@click.option('--csv_file', help='optional csv file of securities to load into universe')
+@cloup.option('--name', help='Name of the universe to create')
+@cloup.option('--csv_file', help='optional csv file of securities to load into universe')
 @common_options()
 @default_config()
 def create(
@@ -356,10 +369,10 @@ def create(
 
 
 @universes.command('add-to-universe', no_args_is_help=True)
-@click.option('--name', help='Name of the universe to add instrument to')
-@click.option('--symbol', help='symbol or conId to add to universe')
-@click.option('--primary_exchange', default='SMART', help='primary exchange the symbol is listed on default [SMART]')
-@click.option('--sec_type', required=True, default='STK', help='security type [default STK]')
+@cloup.option('--name', help='Name of the universe to add instrument to')
+@cloup.option('--symbol', help='symbol or conId to add to universe')
+@cloup.option('--primary_exchange', default='SMART', help='primary exchange the symbol is listed on default [SMART]')
+@cloup.option('--sec_type', required=True, default='STK', help='security type [default STK]')
 @common_options()
 @default_config()
 def add_to_universe(
@@ -388,10 +401,10 @@ def add_to_universe(
 
 
 @universes.command('remove-from-universe', no_args_is_help=True)
-@click.option('--name', help='Name of the universe to remove instrument from')
-@click.option('--symbol', help='symbol or conId to add to universe')
-@click.option('--primary_exchange', default='SMART', help='primary exchange the symbol is listed on default [SMART]')
-@click.option('--sec_type', required=True, default='STK', help='security type [default STK]')
+@cloup.option('--name', help='Name of the universe to remove instrument from')
+@cloup.option('--symbol', help='symbol or conId to add to universe')
+@cloup.option('--primary_exchange', default='SMART', help='primary exchange the symbol is listed on default [SMART]')
+@cloup.option('--sec_type', required=True, default='STK', help='security type [default STK]')
 @common_options()
 @default_config()
 def remove_from_universe(
@@ -427,7 +440,7 @@ history.add_command(ib_history_queuer.get_universe_history_ib)
 history.add_command(ib_history_queuer.get_symbol_history_ib)
 
 @history.command('summary', no_args_is_help=True)
-@click.option('--universe', required=True, help='universe to summarize')
+@cloup.option('--universe', required=True, help='universe to summarize')
 @common_options()
 @default_config()
 def history_summary(
@@ -456,8 +469,8 @@ def history_summary(
 
 
 @history.command('read', no_args_is_help=True)
-@click.option('--symbol', required=True, help='historical data statistics for symbol')
-@click.option('--bar_size', required=True, default='1 min', help='bar size to read')
+@cloup.option('--symbol', required=True, help='historical data statistics for symbol')
+@cloup.option('--bar_size', required=True, default='1 min', help='bar size to read')
 @common_options()
 @default_config()
 def history_read(
@@ -487,8 +500,8 @@ def history_jobs(
 
 
 @history.command('security', no_args_is_help=True)
-@click.option('--symbol', required=True, help='historical data statistics for symbol')
-@click.option('--primary_exchange', required=False, default='NASDAQ', help='exchange for symbol [default: NASDAQ]')
+@cloup.option('--symbol', required=True, help='historical data statistics for symbol')
+@cloup.option('--primary_exchange', required=False, default='NASDAQ', help='exchange for symbol [default: NASDAQ]')
 @common_options()
 @default_config()
 def history_security(
@@ -538,7 +551,7 @@ def history_security(
     renderer.rich_table(output)
 
 
-@history.command('bar-sizes', no_args_is_help=True)
+@history.command('bar-sizes')
 def history_bar_sizes():
     renderer.rich_list(BarSize.bar_sizes())
 
@@ -636,26 +649,21 @@ def portfolio():
     ])
 
 
-def pretty_group(
-    name: Optional[str] = None,
-    help: Optional[str] = None,
-    cls=None,
-    **attrs,
-):
-    return optgroup.group(f'\n{name}', help=f'\b--- {help}\n\n', cls=cls, **attrs)
-
-
 @cli.command('plot', no_args_is_help=True)
-@click.option('--symbol', required=True, help='historical data statistics for symbol')
-@pretty_group('Standard plot', help='Plots data over given range and bar_size')
-@optgroup.option('--exchange', required=False, default='', help='primary exchange')
-@optgroup.option('--bar_size', required=True, default='1 min', help='bar size to read')
-@optgroup.option('--prev_days', required=True, type=int, default=1, help='previous days to plot')
-@pretty_group('Live plot', help='Subscribes to tick data and plots')
-@optgroup.option('--live', is_flag=True, help='start live console plot of symbol')
-@optgroup.option('--delayed', is_flag=True, help='use delayed data')
-@optgroup.option('--height', default=0, help='height of plot [default: 0 for fullscreen]')
-@optgroup.option('--topic', default='ticker', help='\b\nzmq topic, default="ticker"\n\n\n  ')
+@cloup.option('--symbol', required=True, help='historical data statistics for symbol')
+@cloup.option_group(
+    'Standard plot',
+    cloup.option('--exchange', required=False, default='', help='primary exchange'),
+    cloup.option('--bar_size', required=True, default='1 min', help='bar size to read'),
+    cloup.option('--prev_days', required=True, type=int, default=1, help='previous days to plot'),
+)
+@cloup.option_group(
+    'Live plot',
+    cloup.option('--live', is_flag=True, help='start live console plot of symbol'),
+    cloup.option('--delayed', is_flag=True, help='use delayed data'),
+    cloup.option('--height', default=0, help='height of plot [default: 0 for fullscreen]'),
+    cloup.option('--topic', default='ticker', help='\b\nzmq topic, default="ticker"\n\n\n  '),
+)
 @common_options()
 @default_config()
 def plot(
@@ -792,12 +800,12 @@ def clear():
 
 
 @cli.command(no_args_is_help=True)
-@click.option('--symbol', required=True, help='symbol to resolve to conId')
-@click.option('--exchange', required=False, help='exchange for symbol [not required]')
-@click.option('--universe', required=False, help='universe to check for symbol [not required]')
-@click.option('--ib', required=False, default=False, is_flag=True, help='force resolution from IB')
-@click.option('--sec_type', required=False, default='STK', help='IB security type [STK is default]')
-@click.option('--currency', required=False, default='USD', help='IB security currency')
+@cloup.option('--symbol', required=True, help='symbol to resolve to conId')
+@cloup.option('--exchange', required=False, help='exchange for symbol [not required]')
+@cloup.option('--universe', required=False, help='universe to check for symbol [not required]')
+@cloup.option('--ib', required=False, default=False, is_flag=True, help='force resolution from IB')
+@cloup.option('--sec_type', required=False, default='STK', help='IB security type [STK is default]')
+@cloup.option('--currency', required=False, default='USD', help='IB security currency')
 @common_options()
 @default_config()
 def resolve(
@@ -833,9 +841,9 @@ def resolve(
 
 
 @cli.command(no_args_is_help=True)
-@click.option('--symbol', required=True, help='symbol to snapshot')
-@click.option('--delayed', required=False, default=False, is_flag=True, help='use delayed data?')
-@click.option('--primary_exchange', required=False, help='primary exchange for symbol')
+@cloup.option('--symbol', required=True, help='symbol to snapshot')
+@cloup.option('--delayed', required=False, default=False, is_flag=True, help='use delayed data?')
+@cloup.option('--primary_exchange', required=False, help='primary exchange for symbol')
 @common_options()
 @default_config()
 def snapshot(
@@ -890,9 +898,9 @@ def subscribe():
 
 
 @subscribe.command('start', no_args_is_help=True)
-@click.option('--symbol', required=True, help='symbol to snapshot')
-@click.option('--delayed', required=False, default=False, is_flag=True, help='use delayed data?')
-@click.option('--primary_exchange', required=False, help='primary exchange for symbol')
+@cloup.option('--symbol', required=True, help='symbol to snapshot')
+@cloup.option('--delayed', required=False, default=False, is_flag=True, help='use delayed data?')
+@cloup.option('--primary_exchange', required=False, help='primary exchange for symbol')
 @common_options()
 @default_config()
 def subscribe_start(
@@ -935,8 +943,8 @@ def subscribe_portfolio(
 
 
 @subscribe.command('universe', no_args_is_help=True)
-@click.option('--name', required=True, help='universe name to tick subscribe')
-@click.option('--delayed', required=True, is_flag=True, default=False, help='subscribe to delayed data')
+@cloup.option('--name', required=True, help='universe name to tick subscribe')
+@cloup.option('--delayed', required=True, is_flag=True, default=False, help='subscribe to delayed data')
 @common_options()
 @default_config()
 def subscribe_universe(
@@ -963,7 +971,7 @@ def subscribe_list(
 
 
 @subscribe.command('listen', no_args_is_help=True)
-@click.option('--topic', required=True, default='ticker', help='zmqtopic to listen to')
+@cloup.option('--topic', required=True, default='ticker', help='zmqtopic to listen to')
 @common_options()
 @default_config()
 def subscribe_listen(
@@ -980,10 +988,10 @@ def option():
     pass
 
 @option.command('plot', no_args_is_help=True)
-@click.option('--symbol', required=True, help='ticker symbol e.g. FB')
-@click.option('--list_dates', required=False, is_flag=True, default=False, help='get the list of expirary dates')
-@click.option('--date', required=False, help='option expiry date, format YYYY-MM-DD')
-@click.option('--risk_free_rate', required=False, default=0.001, help='risk free rate [default 0.001]')
+@cloup.option('--symbol', required=True, help='ticker symbol e.g. FB')
+@cloup.option('--list_dates', required=False, is_flag=True, default=False, help='get the list of expirary dates')
+@cloup.option('--date', required=False, help='option expiry date, format YYYY-MM-DD')
+@cloup.option('--risk_free_rate', required=False, default=0.001, help='risk free rate [default 0.001]')
 @common_options()
 @default_config()
 def options(
@@ -1035,7 +1043,7 @@ def book_orders():
 
 
 @book.command('cancel', no_args_is_help=True)
-@click.option('--order_id', required=True, type=int, help='order_id to cancel')
+@cloup.option('--order_id', required=True, type=int, help='order_id to cancel')
 def book_order_cancel(order_id: int):
     # todo: untested
     order: SuccessFail[Trade] = remoted_client.rpc(return_type=SuccessFail[Trade]).cancel_order(order_id)
@@ -1069,8 +1077,8 @@ def strategy_list():
 
 
 @strategy.command('enable')
-@click.option('--name', required=True, help='name of strategy')
-@click.option('--paper', required=False, is_flag=True, default=True, help='dont trade, just paper trade it')
+@cloup.option('--name', required=True, help='name of strategy')
+@cloup.option('--paper', required=False, is_flag=True, default=True, help='dont trade, just paper trade it')
 def strategy_enable(
     name: str,
     paper: bool,
@@ -1083,7 +1091,7 @@ def strategy_enable(
 
 
 @strategy.command('disable')
-@click.option('--strategy_name', required=True, help='name of strategy')
+@cloup.option('--strategy_name', required=True, help='name of strategy')
 def strategy_disable(
     name: str,
 ):
@@ -1109,7 +1117,7 @@ def pycron_info():
 
 
 @pycron.command('restart')
-@click.option('--service', required=True, help='service to restart')
+@cloup.option('--service', required=True, help='service to restart')
 def pycron_restart(
     service: str,
 ):
@@ -1121,7 +1129,7 @@ def pycron_restart(
 
 
 @cli.command(no_args_is_help=True)
-@click.option('--symbol', required=True, help='symbol of security')
+@cloup.option('--symbol', required=True, help='symbol of security')
 def company_info(symbol: str):
     symbol = symbol.lower()
     financials = TraderContainer().resolve(DictData, arctic_library='HistoricalPolygonFinancials')
@@ -1201,23 +1209,23 @@ def __trade_helper(
 
 
 @trade.command('buy', no_args_is_help=True)
-@click.option('--symbol', required=True, type=str, help='IB conId for security')
-@click.option('--primary_exchange', required=False, default='', type=str, help='exchange [not required]')
-@option_group(
+@cloup.option('--symbol', required=True, type=str, help='IB conId for security')
+@cloup.option('--primary_exchange', required=False, default='', type=str, help='exchange [not required]')
+@cloup.option_group(
     'trade options',
-    cloupoption('--market', is_flag=True, help='market order'),
-    cloupoption('--limit', type=float, help='limit price [requires a decimal price]'),
-    constraint=mutually_exclusive,
+    cloup.option('--market', is_flag=True, help='market order'),
+    cloup.option('--limit', type=float, help='limit price [requires a decimal price]'),
+    constraint=require_one,
 )
-@option_group(
+@cloup.option_group(
     'amount options',
-    cloupoption('--equity_amount', type=float, help='total $$ equity amount to buy/sell, eg 1000.0'),
-    cloupoption('--quantity', type=float, help='quantity of the underlying, eg 100.0'),
-    constraint=mutually_exclusive,
+    cloup.option('--equity_amount', type=float, help='total $$ equity amount to buy/sell, eg 1000.0'),
+    cloup.option('--quantity', type=float, help='quantity of the underlying, eg 100.0'),
+    constraint=require_one,
 )
-@click.option('--stop_loss_percentage', required=False, type=float, default=0.0,
+@cloup.option('--stop_loss_percentage', required=False, type=float, default=0.0,
               help='percentage below price to place stop loss order [default=0.0, no stop loss]')
-@click.option('--debug', is_flag=True, default=False, help='changes the trade to be + or - 10 percent of submitted limit price.')
+@cloup.option('--debug', is_flag=True, default=False, help='changes the trade to be + or - 10 percent of submitted limit price.')
 @common_options()
 @default_config()
 def trade_buy(
@@ -1250,23 +1258,23 @@ def trade_buy(
 
 
 @trade.command('sell', no_args_is_help=True)
-@click.option('--symbol', required=True, type=str, help='IB conId for security')
-@click.option('--primary_exchange', required=False, default='', type=str, help='exchange [not required]')
-@option_group(
+@cloup.option('--symbol', required=True, type=str, help='IB conId for security')
+@cloup.option('--primary_exchange', required=False, default='', type=str, help='exchange [not required]')
+@cloup.option_group(
     'trade options',
-    cloupoption('--market', is_flag=True, help='market order'),
-    cloupoption('--limit', type=float, help='limit price [requires a decimal price]'),
-    constraint=mutually_exclusive,
+    cloup.option('--market', is_flag=True, help='market order'),
+    cloup.option('--limit', type=float, help='limit price [requires a decimal price]'),
+    constraint=require_one,
 )
-@option_group(
+@cloup.option_group(
     'amount options',
-    cloupoption('--equity_amount', type=float, help='total $$ equity amount to buy/sell, eg 1000.0'),
-    cloupoption('--quantity', type=float, help='quantity of the underlying, eg 100.0'),
-    constraint=mutually_exclusive,
+    cloup.option('--equity_amount', type=float, help='total $$ equity amount to buy/sell, eg 1000.0'),
+    cloup.option('--quantity', type=float, help='quantity of the underlying, eg 100.0'),
+    constraint=require_one,
 )
-@click.option('--stop_loss_percentage', required=False, type=float, default=0.0,
+@cloup.option('--stop_loss_percentage', required=False, type=float, default=0.0,
               help='percentage below price to place stop loss order [default=0.0, no stop loss]')
-@click.option('--debug', is_flag=True, default=False, help='changes the trade to be + or - 10 percent of submitted limit price.')
+@cloup.option('--debug', is_flag=True, default=False, help='changes the trade to be + or - 10 percent of submitted limit price.')
 @common_options()
 @default_config()
 def trade_sell(
@@ -1299,7 +1307,7 @@ def trade_sell(
 
 
 @trade.command('cancel', no_args_is_help=True)
-@click.option('--order_id', required=True, type=int, help='order_id for submitted order')
+@cloup.option('--order_id', required=True, type=int, help='order_id for submitted order')
 @common_options()
 @default_config()
 def trade_cancel(
@@ -1327,22 +1335,22 @@ def trade_cancel_all(
 
 
 @trade.command('update', no_args_is_help=True)
-@click.option('--order_id', required=True, type=int, help='order_id for submitted order')
-@option_group(
+@cloup.option('--order_id', required=True, type=int, help='order_id for submitted order')
+@cloup.option_group(
     'trade options',
-    cloupoption('--market', is_flag=True, help='market order'),
-    cloupoption('--limit', type=float, help='limit price [requires a decimal price]'),
-    constraint=mutually_exclusive,
+    cloup.option('--market', is_flag=True, help='market order'),
+    cloup.option('--limit', type=float, help='limit price [requires a decimal price]'),
+    constraint=require_one,
 )
-@option_group(
+@cloup.option_group(
     'amount options',
-    cloupoption('--equity_amount', type=float, help='total $$ equity amount to buy/sell, eg 1000.0'),
-    cloupoption('--quantity', type=float, help='quantity of the underlying, eg 100.0'),
-    constraint=mutually_exclusive,
+    cloup.option('--equity_amount', type=float, help='total $$ equity amount to buy/sell, eg 1000.0'),
+    cloup.option('--quantity', type=float, help='quantity of the underlying, eg 100.0'),
+    constraint=require_one,
 )
-@click.option('--stop_loss_percentage', required=False, type=float, default=0.0,
+@cloup.option('--stop_loss_percentage', required=False, type=float, default=0.0,
               help='percentage below price to place stop loss order [default=0.0, no stop loss]')
-@click.option('--debug', is_flag=True, default=False, help='changes the trade to be + or - 10 percent of submitted limit price.')
+@cloup.option('--debug', is_flag=True, default=False, help='changes the trade to be + or - 10 percent of submitted limit price.')
 @common_options()
 @default_config()
 def trade_update(

@@ -182,6 +182,65 @@ class ConsoleRenderer(CliRenderer):
         self.rich_dict(d)
 
 
+class CSVRenderer(CliRenderer):
+    def rich_json(self, json_str: str):
+        try:
+            df = pd.read_json(json.dumps(json_str))
+            self.rich_table(df)
+        except ValueError as ex:
+            self.rich_dict(json_str)  # type: ignore
+
+    def rich_table(
+        self,
+        df,
+        csv: bool = False,
+        financial: bool = False,
+        financial_columns: List[str] = [],
+        include_index=False,
+    ):
+        if type(df) is list and len(df) > 0 and dataclasses.is_dataclass(df[0]):
+            df = pd.DataFrame([o.__dict__ for o in df])
+        else:
+            df = pd.DataFrame(df)
+
+        if csv:
+            if which('vd'):
+                temp_file = tempfile.NamedTemporaryFile(suffix='.csv')
+                df.to_csv(temp_file.name, index=include_index, float_format='%.2f')
+                os.system('vd {}'.format(temp_file.name))
+                return None
+            else:
+                print(df.to_csv(index=False))
+            return
+
+        table = Table()
+        table = self.rich_tablify(df, table, financial, financial_columns, include_index)
+
+        console = Console()
+        console.print(table)
+
+    def rich_dict(self, d: Dict):
+        table = Table()
+        table.add_column('key')
+        table.add_column('value')
+        for key, value in d.items():
+            if type(value) is float and value >= sys.float_info.max:
+                table.add_row(str(key), 'nan')
+            elif type(value) is int and value >= 2147483647:
+                table.add_row(str(key), '')
+            else:
+                table.add_row(str(key), str(value))
+        console = Console()
+        console.print(table)
+
+    def rich_list(self, list_source: List):
+        d = {}
+        for counter in range(0, len(list_source)):
+            d[counter] = list_source[counter]
+        self.rich_dict(d)
+
+
+
 class TuiRenderer(CliRenderer):
     def __init__(
         self,
