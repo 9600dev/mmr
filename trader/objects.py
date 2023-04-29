@@ -80,6 +80,27 @@ class BarSize(IntEnum):
         return BarSize.bar_sizes()[int(self.value)]
 
 
+# https://interactivebrokers.github.io/tws-api/classIBApi_1_1EClient.html#a7a19258a3a2087c07c1c57b93f659b63
+class TickList(IntEnum):
+    Generic = 0
+    OptionVolume = 100
+    OptionOpenInterest = 101
+    HistoricalVolatility = 104
+    AverageOptionVolume = 105
+    OptionImpliedVolatility = 106
+    IndexFuturePremium = 162
+    MiscellaneousStats = 165
+    MarkPrice = 221
+    AuctionValues = 225
+    RTVolume = 233
+    Shortable = 236
+    Inventory = 256
+    FundamentalRatios = 258
+    RealtimeHistoricalVolatility = 411
+    IBDividends = 456
+
+
+
 class BasketCondition(Enum):
     NONE = 0
     ALL_OR_NOTHING = 1

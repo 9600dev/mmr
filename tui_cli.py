@@ -717,8 +717,11 @@ def setup_ipython():
 if get_ipython().__class__.__name__ == 'TerminalInteractiveShell':  # type: ignore
     setup_ipython()
 
+# cloup doesn't allow overriding of commands, so we need to pop it off from its internals
+cli.commands.pop('exit')
+cli._default_section.commands.pop('exit')
 
-# hickack the exit command and hook action_quit() instead
+
 @cli.command('exit')
 def def_exit():
     global app
@@ -743,26 +746,9 @@ def repl():
         available_commands = group_ctx.command.commands  # type: ignore
     available_commands.pop(repl_command_name, None)
 
-    # while True:
-    #     command = input('> ')
-    #     try:
-    #         args = shlex.split(command)
-    #         print(args)
-    #     except ValueError as e:
-    #         click.echo("{}: {}".format(type(e).__name__, e))
-
-    #     try:
-    #         with group.make_context(None, args, parent=group_ctx) as ctx:  # type: ignore
-    #             group.invoke(ctx)
-    #             ctx.exit()
-    #     except click.ClickException as e:
-    #         e.show()
-    #     except SystemExit:
-    #         pass
-
     asyncio.run(app_main(group_ctx))
 
 
 if __name__ == '__main__':
-    invoke_context_wrapper(repl)
+    invoke_context_wrapper(repl, TuiRenderer(DataTable()))
     cli(prog_name='cli')

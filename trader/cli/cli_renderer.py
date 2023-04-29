@@ -18,6 +18,7 @@ from typing import Any, Callable, cast, Dict, Generic, List, Optional, Tuple, Ty
 
 import asyncio
 import collections
+import csv
 import dataclasses
 import datetime as dt
 import exchange_calendars as ec
@@ -203,42 +204,25 @@ class CSVRenderer(CliRenderer):
         else:
             df = pd.DataFrame(df)
 
-        if csv:
-            if which('vd'):
-                temp_file = tempfile.NamedTemporaryFile(suffix='.csv')
-                df.to_csv(temp_file.name, index=include_index, float_format='%.2f')
-                os.system('vd {}'.format(temp_file.name))
-                return None
-            else:
-                print(df.to_csv(index=False))
-            return
-
-        table = Table()
-        table = self.rich_tablify(df, table, financial, financial_columns, include_index)
-
         console = Console()
-        console.print(table)
+        console.print(df.to_csv(index=False))
 
     def rich_dict(self, d: Dict):
-        table = Table()
-        table.add_column('key')
-        table.add_column('value')
-        for key, value in d.items():
-            if type(value) is float and value >= sys.float_info.max:
-                table.add_row(str(key), 'nan')
-            elif type(value) is int and value >= 2147483647:
-                table.add_row(str(key), '')
-            else:
-                table.add_row(str(key), str(value))
         console = Console()
-        console.print(table)
+        csv_buffer = io.StringIO()
+
+        writer = csv.DictWriter(csv_buffer, fieldnames=d.keys())
+        writer.writeheader()
+        writer.writerows([d])
+        csv_buffer.seek(0)
+        console.print(csv_buffer.read())
+        csv_buffer.close()
 
     def rich_list(self, list_source: List):
         d = {}
         for counter in range(0, len(list_source)):
             d[counter] = list_source[counter]
         self.rich_dict(d)
-
 
 
 class TuiRenderer(CliRenderer):

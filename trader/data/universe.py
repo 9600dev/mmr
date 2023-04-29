@@ -108,6 +108,7 @@ class UniverseAccessor():
         symbol: Union[str, int],
         exchange: str = '',
         universe: str = '',
+        sec_type: str = '',
         first_only: bool = False,
     ) -> List[Tuple[Universe, SecurityDefinition]]:
         def check_exchange(exchange, definition: SecurityDefinition) -> bool:
@@ -118,6 +119,17 @@ class UniverseAccessor():
             if definition.primaryExchange == exchange:
                 return True
             return False
+
+        def check_sec_type(sec_type, definition: SecurityDefinition) -> bool:
+            if not sec_type:
+                return True
+            if definition.secType == sec_type:
+                return True
+            return False
+
+        # support the SYBOL.EXCHANGE format
+        if type(symbol) is str and '.' in symbol and not exchange:
+            symbol, exchange = symbol.split('.')
 
         results: List[Tuple[Universe, SecurityDefinition]] = []
         universes = []
@@ -134,20 +146,34 @@ class UniverseAccessor():
 
         for u in universes:
             for definition in u.security_definitions:
-                if type(symbol) is int and int(symbol) == definition.conId and check_exchange(exchange, definition):
+                if (
+                    type(symbol) is int
+                    and int(symbol) == definition.conId
+                    and check_exchange(exchange, definition)
+                    and check_sec_type(sec_type, definition)
+                ):
                     results.append((u, definition))
                     self._resolver_cache.update({definition.conId: (u, definition)})
                     if first_only: return results
-                if (type(symbol) is str and symbol.isnumeric() and int(symbol) == definition.conId
-                        and check_exchange(exchange, definition)):
+                if (
+                    type(symbol) is str
+                    and symbol.isnumeric()
+                    and int(symbol) == definition.conId
+                    and check_exchange(exchange, definition)
+                    and check_sec_type(sec_type, definition)
+                ):
                     results.append((u, definition))
                     self._resolver_cache.update({definition.conId: (u, definition)})
                     if first_only: return results
-                if type(symbol) is str:
-                    if symbol == definition.symbol and check_exchange(exchange, definition):
-                        results.append((u, definition))
-                        self._resolver_cache.update({definition.conId: (u, definition)})
-                        if first_only: return results
+                if (
+                    type(symbol) is str
+                    and symbol == definition.symbol
+                    and check_exchange(exchange, definition)
+                    and check_sec_type(sec_type, definition)
+                ):
+                    results.append((u, definition))
+                    self._resolver_cache.update({definition.conId: (u, definition)})
+                    if first_only: return results
 
         results.sort(
             key=lambda x: self.sorted_types.index(x[1].secType) if x[1].secType in self.sorted_types else len(self.sorted_types)
@@ -159,19 +185,21 @@ class UniverseAccessor():
         symbol: Union[str, int],
         exchange: str = '',
         universe: str = '',
+        sec_type: str = '',
         first_only: bool = False,
     ) -> List[Tuple[str, SecurityDefinition]]:
-        return [(u.name, d) for u, d in self.resolve_universe(symbol, exchange, universe, first_only)]
+        return [(u.name, d) for u, d in self.resolve_universe(symbol, exchange, universe, sec_type, first_only)]
 
     def resolve_symbol(
         self,
         symbol: Union[str, int],
         exchange: str = '',
         universe: str = '',
+        sec_type: str = '',
         first_only: bool = False,
     ) -> List[SecurityDefinition]:
         # unique definitions via set comprehension
-        result = {definition for _, definition in self.resolve_universe(symbol, exchange, universe, first_only)}
+        result = {definition for _, definition in self.resolve_universe(symbol, exchange, universe, sec_type, first_only)}
         return list(result)
 
     def update(self, universe: Universe) -> None:

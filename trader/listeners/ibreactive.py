@@ -15,7 +15,7 @@ from trader.common.listener_helpers import Helpers
 from trader.common.logging_helper import setup_logging
 from trader.common.reactivex import EventSubject
 from trader.listeners.ib_history_worker import IBHistoryWorker
-from trader.objects import BarSize, WhatToShow
+from trader.objects import BarSize, TickList, WhatToShow
 from typing import cast, Dict, Iterator, List, Optional, Set, TypeVar, Union
 
 import asyncio
@@ -236,9 +236,12 @@ class IBAIORx():
     def subscribe_contract_direct(
         self,
         contract: Contract,
+        tick_list: List[TickList] = [],
         one_time_snapshot: bool = False,
         delayed: bool = False,
     ) -> Observable[IBAIORxError]:
+        generic_tick_list = ''.join(str(int(x)) for x in tick_list)
+
         if delayed:
             # 1 = Live
             # 2 = Frozen
@@ -254,7 +257,7 @@ class IBAIORx():
         self._contracts_source.call_event_subscriber_sync(
             lambda: self.ib.reqMktData(
                 contract=contract,
-                genericTickList='',
+                genericTickList=generic_tick_list,
                 snapshot=one_time_snapshot,
                 regulatorySnapshot=False,
             ),
@@ -277,9 +280,12 @@ class IBAIORx():
     def __subscribe_contract(
         self,
         contract: Contract,
+        tick_list: List[TickList] = [],
         one_time_snapshot: bool = False,
         delayed: bool = False,
     ) -> Observable[Ticker]:
+        generic_tick_list = ''.join(str(int(x)) for x in tick_list)
+
         if delayed:
             # 1 = Live
             # 2 = Frozen
@@ -290,12 +296,11 @@ class IBAIORx():
 
         # reqMktData immediately returns with an empty ticker
         # and starts the subscription
-
         reqId = self.ib.client._reqIdSeq
         result = self._contracts_source.call_event_subscriber_sync(
             lambda: self.ib.reqMktData(
                 contract=contract,
-                genericTickList='',
+                genericTickList=generic_tick_list,
                 snapshot=one_time_snapshot,
                 regulatorySnapshot=False,
             ),
@@ -341,11 +346,12 @@ class IBAIORx():
     def subscribe_contract(
         self,
         contract: Contract,
+        tick_list: List[TickList] = [],
         one_time_snapshot: bool = False,
         delayed: bool = False,
     ) -> Observable[Ticker]:
         if contract not in self.contracts_cache:
-            self.contracts_cache[contract] = self.__subscribe_contract(contract, one_time_snapshot, delayed)
+            self.contracts_cache[contract] = self.__subscribe_contract(contract, tick_list, one_time_snapshot, delayed)
         return self.contracts_cache[contract]
 
     def unsubscribe_contract(self, contract: Contract):
@@ -453,8 +459,13 @@ class IBAIORx():
     async def get_executions(self) -> List[Fill]:
         return await self.ib.reqExecutionsAsync()
 
-    async def get_snapshot(self, contract: Contract, delayed: bool = False) -> Ticker:
-        # trying to do this stuff synchronously in rx is a nightmare
+    async def __get_single_mrkt_data(
+        self,
+        contract: Contract,
+        tick_list: List[TickList] = [],
+        snapshot: bool = False,
+        delayed: bool = False,
+    ) -> Ticker:
         _task: asyncio.Event = asyncio.Event()
         populated_ticker: Optional[Ticker] = None
         thrown_exception: Optional[Exception] = None
@@ -476,7 +487,8 @@ class IBAIORx():
         # cachedeventsource, subscribers get the last value after calling subscribe
         observable: Observable[Ticker] = self.__subscribe_contract(
             contract=contract,
-            one_time_snapshot=True,
+            tick_list=tick_list,
+            one_time_snapshot=snapshot,
             delayed=delayed,
         )
 
@@ -495,6 +507,30 @@ class IBAIORx():
             ex = cast(Exception, thrown_exception)
             raise ex
         return cast(Ticker, populated_ticker)
+
+    async def get_shortable_shares(
+        self,
+        contract: Contract,
+        delayed: bool = False,
+    ) -> float:
+        result = await self.__get_single_mrkt_data(
+            contract,
+            tick_list=[TickList.Shortable],
+            snapshot=False,
+            delayed=delayed,
+        )
+        return result.shortableShares
+
+    async def get_snapshot(
+        self,
+        contract: Contract,
+        delayed: bool = False,
+    ) -> Ticker:
+        return await self.__get_single_mrkt_data(
+            contract=contract,
+            snapshot=True,
+            delayed=delayed,
+        )
 
     def get_contract_details(self, contract: Contract) -> List[ContractDetails]:
         result = self.ib.reqContractDetails(contract)

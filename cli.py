@@ -22,13 +22,19 @@ from scripts.chain import plot_chain
 from scripts.trader_check import health_check
 from scripts.zmq_pub_listener import ZmqPrettyPrinter
 from trader.batch.queuer import Queuer
-from trader.cli.cli_renderer import ConsoleRenderer
+from trader.cli.cli_renderer import ConsoleRenderer, CSVRenderer
 from trader.cli.command_line import cli, common_options, default_config
 from trader.cli.commands import *  # NOQA
-from trader.cli.commands import cli_client_id, invoke_context_wrapper, setup_cli
+from trader.cli.commands import (
+    cli_client_id,
+    invoke_context,
+    invoke_context_renderer,
+    invoke_context_wrapper,
+    setup_cli
+)
 from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.helpers import contract_from_dict, DictHelper, rich_dict, rich_json, rich_list, rich_table
-from trader.common.logging_helper import LogLevels, set_log_level, setup_logging
+from trader.common.logging_helper import LogLevels, set_log_level, setup_logging, suppress_all
 from trader.common.reactivex import AnonymousObserver, SuccessFail
 from trader.container import Container
 from trader.data.data_access import DictData, TickData, TickStorage
@@ -47,12 +53,14 @@ import cloup
 import datetime as dt
 import os
 import pandas as pd
+import sys
 import trader.cli.universes_cli as universes_cli
 
 
-@cli.command()
+@cli.command(hidden=True)
 def repl():
     global is_repl
+    global renderer
 
     prompt_kwargs = {
         'history': FileHistory(os.path.expanduser('.trader.history')),
@@ -150,5 +158,6 @@ if get_ipython().__class__.__name__ == 'TerminalInteractiveShell':  # type: igno
 
 
 if __name__ == '__main__':
-    invoke_context_wrapper(repl)
+    if len(sys.argv) <= 1:
+        invoke_context_wrapper(repl, ConsoleRenderer())
     cli(prog_name='cli')

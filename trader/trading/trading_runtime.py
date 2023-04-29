@@ -368,11 +368,13 @@ class Trader(metaclass=Singleton):
         symbol: Union[str, int],
         exchange: str = '',
         universe: str = '',
+        sec_type: str = '',
     ) -> List[SecurityDefinition]:
         def __blocking_resolve_symbol_to_security_definitions(
             symbol: Union[str, int],
             exchange: str = '',
             universe: str = '',
+            sec_type: str = '',
             first_only: bool = False,
         ) -> list[SecurityDefinition]:
             return self.universe_accessor.resolve_symbol(
@@ -393,7 +395,8 @@ class Trader(metaclass=Singleton):
             symbol,
             exchange,
             universe,
-            first_only
+            sec_type,
+            first_only,
         )
 
         if len(result) > 0:
@@ -414,16 +417,23 @@ class Trader(metaclass=Singleton):
         symbol: Union[str, int],
         exchange: str = '',
         universe: str = '',
+        sec_type: str = '',
     ) -> List[Tuple[str, SecurityDefinition]]:
         def __blocking_resolve_universe(
             symbol: Union[str, int],
             exchange: str = '',
             universe: str = '',
+            sec_type: str = '',
         ) -> list[Tuple[str, SecurityDefinition]]:
-            return self.universe_accessor.resolve_universe_name(symbol=symbol, exchange=exchange, universe=universe)
+            return self.universe_accessor.resolve_universe_name(
+                symbol=symbol,
+                exchange=exchange,
+                universe=universe,
+                sec_type=sec_type
+            )
 
         # this could take a while
-        return await asyncio.to_thread(__blocking_resolve_universe, symbol, exchange, universe)
+        return await asyncio.to_thread(__blocking_resolve_universe, symbol, exchange, universe, sec_type)
 
     @log_method
     def publish_contract(self, contract: Contract, delayed: bool) -> Observable[IBAIORxError]:
@@ -589,6 +599,10 @@ class Trader(metaclass=Singleton):
     @log_method
     def get_positions(self) -> List[Position]:
         return self.portfolio.get_positions()
+
+    @log_method
+    async def get_shortable_shares(self, contract: Contract) -> float:
+        return await self.client.get_shortable_shares(contract)
 
     @log_method
     def release_client_id(self, client_id: int):

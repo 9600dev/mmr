@@ -35,6 +35,11 @@ def setup_logging(default_path='/home/trader/mmr/configs/logging.yaml',
                   suppress_external_info=False) -> Logger:
     global global_loggers
 
+    warnings.filterwarnings(
+        'ignore',
+        message='The zone attribute is specific to pytz\'s interface; please migrate to a new time zone provider. For more details on how to do so, see https://pytz-deprecation-shim.readthedocs.io/en/latest/migration.html'  # noqa: E501
+    )
+
     # rich tracebacks
     # install(show_locals=False)
 

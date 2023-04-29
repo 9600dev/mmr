@@ -258,6 +258,7 @@ REPL_CONTEXT_SETTINGS = cloup.Context.settings(
 )
 
 
+# this gets redefined as you pull in the respective cli module (tui or cli)
 @cloup.group(
     invoke_without_command=True,
     context_settings=REPL_CONTEXT_SETTINGS,

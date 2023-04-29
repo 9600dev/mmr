@@ -12,11 +12,11 @@ from scripts.chain import plot_chain
 from scripts.trader_check import health_check
 from scripts.zmq_pub_listener import ZmqPrettyPrinter
 from trader.batch.queuer import Queuer
-from trader.cli.cli_renderer import CliRenderer
+from trader.cli.cli_renderer import CliRenderer, ConsoleRenderer, CSVRenderer
 from trader.cli.command_line import common_options, default_config
 from trader.common.exceptions import TraderConnectionException, TraderException
 from trader.common.helpers import contract_from_dict, DictHelper, ListHelper
-from trader.common.logging_helper import LogLevels, set_log_level, setup_logging
+from trader.common.logging_helper import LogLevels, set_log_level, setup_logging, suppress_all
 from trader.common.reactivex import SuccessFail
 from trader.container import Container as TraderContainer
 from trader.data.data_access import DictData, PortfolioSummary, TickData, TickStorage
@@ -57,6 +57,8 @@ error_table = {
 }
 
 invoke_context = None
+invoke_context_renderer = None
+renderer = CSVRenderer()
 container = TraderContainer()
 
 remoted_client = RPCClient[TraderServiceApi](
@@ -65,9 +67,6 @@ remoted_client = RPCClient[TraderServiceApi](
     error_table=error_table,
     timeout=5,
 )
-
-
-renderer = CliRenderer()
 
 
 # hijack click.echo to allow redirect to TUI
@@ -126,8 +125,9 @@ def resolve_symbol(
     symbol: Union[str, int],
     exchange: str = '',
     universe: str = '',
+    sec_type: str = '',
 ) -> List[SecurityDefinition]:
-    return consume(remoted_client.rpc(return_type=list[SecurityDefinition]).resolve_symbol(symbol, exchange, universe))
+    return consume(remoted_client.rpc(return_type=list[SecurityDefinition]).resolve_symbol(symbol, exchange, universe, sec_type))
 
 
 def __resolve(
@@ -136,6 +136,7 @@ def __resolve(
     arctic_universe_library: str,
     exchange: str = '',
     universe: str = '',
+    sec_type: str = '',
 ) -> List[Dict[str, Any]]:
     # it's best to call the trader_runtime resolve method, as it can talk to Interactive Brokers if
     # the symbol is not found in any available universes
@@ -144,7 +145,12 @@ def __resolve(
     if remoted_client.is_setup:
         temp_results.extend(
             consume(
-                remoted_client.rpc(return_type=list[tuple[str, SecurityDefinition]]).resolve_universe(symbol, exchange, universe)
+                remoted_client.rpc(return_type=list[tuple[str, SecurityDefinition]]).resolve_universe(
+                    symbol,
+                    exchange,
+                    universe,
+                    sec_type
+                )
             )
         )
     else:
@@ -174,10 +180,11 @@ def __resolve_contract(
     symbol: Union[str, int],
     arctic_server_address: str,
     arctic_universe_library: str,
-    primary_exchange: str = ''
+    exchange: str = '',
+    sec_type: str = '',
 ) -> List[Contract]:
     results = []
-    descriptions = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
+    descriptions = __resolve(symbol, arctic_server_address, arctic_universe_library, exchange, sec_type=sec_type)
     for result in descriptions:
         results.append(Contract(
             conId=result['conId'],
@@ -188,9 +195,12 @@ def __resolve_contract(
     return results
 
 
-def invoke_context_wrapper(ctx):
+def invoke_context_wrapper(ctx, cli_renderer):
     global invoke_context
+    global renderer
+
     invoke_context = ctx
+    renderer = cli_renderer
 
 
 REPL_CONTEXT_SETTINGS = Context.settings(
@@ -218,16 +228,17 @@ REPL_CONTEXT_SETTINGS = Context.settings(
 @cloup.pass_context
 def cli(ctx):
     global invoke_context
-    # todo: actually fix this pytz stuff throughout the codebase
-    import warnings
-    warnings.filterwarnings(
-        'ignore',
-        message='The zone attribute is specific to pytz\'s interface; please migrate to a new time zone provider. For more details on how to do so, see https://pytz-deprecation-shim.readthedocs.io/en/latest/migration.html'  # noqa: E501
-    )
+    global renderer
 
     if ctx.invoked_subcommand is None:
         set_log_level('cli', level=LogLevels.DEBUG)
         ctx.invoke(invoke_context)
+    elif not invoke_context:
+        # invoked with commands, provide csv results
+        # suppress logging
+        suppress_all()
+        renderer = CSVRenderer()
+        setup_cli(renderer)
 
 
 @cli.command()
@@ -241,7 +252,7 @@ def help(ctx, subcommand):
         click.echo(subcommand_obj.get_help(ctx))
 
 
-@cli.command()
+@cli.command(hidden=True)
 @cloup.argument('subcommand', required=False)
 @cloup.pass_context
 def ls(ctx, subcommand):
@@ -258,7 +269,7 @@ def status():
     renderer.rich_dict({'status': result})
 
 
-@cli.command('exit')
+@cli.command('exit', hidden=True)
 def def_exit():
     os._exit(os.EX_OK)
 
@@ -688,7 +699,7 @@ def plot(
         symbol,
         arctic_server_address,
         arctic_universe_library,
-        primary_exchange=exchange
+        exchange=exchange
     )
     # todo fix all this resolution stuff up
     if len(results) == 0:
@@ -794,7 +805,7 @@ def reconnect():
     connect()
 
 
-@cli.command()
+@cli.command(hidden=True)
 def clear():
     print(chr(27) + "[2J")
 
@@ -803,9 +814,9 @@ def clear():
 @cloup.option('--symbol', required=True, help='symbol to resolve to conId')
 @cloup.option('--exchange', required=False, help='exchange for symbol [not required]')
 @cloup.option('--universe', required=False, help='universe to check for symbol [not required]')
+@cloup.option('--sec_type', required=False, help='IB security type')
+@cloup.option('--currency', required=False, help='IB security currency')
 @cloup.option('--ib', required=False, default=False, is_flag=True, help='force resolution from IB')
-@cloup.option('--sec_type', required=False, default='STK', help='IB security type [STK is default]')
-@cloup.option('--currency', required=False, default='USD', help='IB security currency')
 @common_options()
 @default_config()
 def resolve(
@@ -814,9 +825,9 @@ def resolve(
     arctic_universe_library: str,
     exchange: str,
     universe: str,
-    ib: bool,
     sec_type: str,
     currency: str,
+    ib: bool,
     **args,
 ):
     if ib:
@@ -833,7 +844,7 @@ def resolve(
             elif contract and type(contract) is Contract:
                 renderer.rich_dict(contract.__dict__)
     else:
-        results = __resolve(symbol, arctic_server_address, arctic_universe_library, exchange, universe)
+        results = __resolve(symbol, arctic_server_address, arctic_universe_library, exchange, universe, sec_type)
         if len(results) > 0:
             renderer.rich_table(results, False)
         else:
@@ -874,6 +885,7 @@ def snapshot(
             'exchange': ticker.contract.exchange if ticker.contract else '',
             'primaryExchange': ticker.contract.primaryExchange if ticker.contract else '',
             'currency': ticker.contract.currency if ticker.contract else '',
+            'shortableShares': ticker.shortableShares,
             'time': ticker.time,
             'bid': ticker.bid,
             'bidSize': ticker.bidSize,
@@ -891,6 +903,32 @@ def snapshot(
     else:
         click.echo('could not resolve symbol from symbol database')
 
+@cli.group()
+def info():
+    pass
+
+@info.command('shortable', no_args_is_help=True)
+@cloup.option('--symbol', required=True, help='symbol to snapshot')
+@cloup.option('--exchange', required=False, help='primary exchange for symbol')
+@common_options()
+@default_config()
+def info_shortable(
+    symbol: str,
+    exchange: str,
+    arctic_server_address: str,
+    arctic_universe_library: str,
+    **args,
+):
+    connect()
+
+    result = __resolve_contract(symbol, arctic_server_address, arctic_universe_library, exchange, sec_type='STK')
+    if len(result) >= 1:
+        contract = result[0]
+        shortable_shares = consume(remoted_client.rpc(return_type=float).get_shortable_shares(contract))
+        renderer.rich_dict({'symbol': symbol, 'shortable_shares': shortable_shares})
+    else:
+        renderer.rich_empty_table('could not resolve symbol {} from symbol database'.format(symbol))
+
 
 @cli.group()
 def subscribe():
@@ -899,19 +937,21 @@ def subscribe():
 
 @subscribe.command('start', no_args_is_help=True)
 @cloup.option('--symbol', required=True, help='symbol to snapshot')
+@cloup.option('--exchange', required=False, help='primary exchange for symbol')
+@cloup.option('--sec_type', required=False, help='security type')
 @cloup.option('--delayed', required=False, default=False, is_flag=True, help='use delayed data?')
-@cloup.option('--primary_exchange', required=False, help='primary exchange for symbol')
 @common_options()
 @default_config()
 def subscribe_start(
     symbol: str,
+    exchange: str,
+    sec_type: str,
     delayed: bool,
     arctic_server_address: str,
     arctic_universe_library: str,
-    primary_exchange: str,
     **args,
 ):
-    result = __resolve(symbol, arctic_server_address, arctic_universe_library, primary_exchange)
+    result = __resolve(symbol, arctic_server_address, arctic_universe_library, exchange, sec_type)
     if len(result) >= 1:
         r = result[0]
         contract = Contract(
@@ -1128,7 +1168,7 @@ def pycron_restart(
     renderer.rich_json(response.json())
 
 
-@cli.command(no_args_is_help=True)
+@cli.command(no_args_is_help=True, hidden=True)
 @cloup.option('--symbol', required=True, help='symbol of security')
 def company_info(symbol: str):
     symbol = symbol.lower()

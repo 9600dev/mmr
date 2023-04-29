@@ -11,7 +11,7 @@ from trader.common.reactivex import SuccessFail, SuccessFailEnum
 from trader.data.data_access import PortfolioSummary, SecurityDefinition
 from trader.data.universe import Universe
 from trader.messaging.clientserver import RPCHandler
-from trader.objects import TradeLogSimple
+from trader.objects import TickList, TradeLogSimple
 from trader.trading.strategy import StrategyConfig, StrategyState
 from typing import List, Optional, Tuple, Union
 
@@ -148,17 +148,33 @@ class TraderServiceApi(RPCHandler):
         return self.trader.get_unique_client_id()
 
     @RPCHandler.rpcmethod
-    async def resolve_symbol(self, symbol: Union[str, int], exchange: str, universe: str) -> list[SecurityDefinition]:
-        return await self.trader.resolve_symbol(symbol, exchange, universe)
+    async def resolve_symbol(
+        self,
+        symbol: Union[str, int],
+        exchange: str,
+        universe: str,
+        sec_type: str
+    ) -> list[SecurityDefinition]:
+        return await self.trader.resolve_symbol(symbol, exchange, universe, sec_type)
 
     @RPCHandler.rpcmethod
-    async def resolve_universe(self, symbol: Union[str, int], exchange: str, universe: str) -> list[tuple[str, SecurityDefinition]]:
-        return await self.trader.resolve_universe(symbol, exchange, universe)
+    async def resolve_universe(
+        self,
+        symbol: Union[str, int],
+        exchange: str,
+        universe: str,
+        sec_type: str,
+    ) -> list[tuple[str, SecurityDefinition]]:
+        return await self.trader.resolve_universe(symbol, exchange, universe, sec_type)
 
     @RPCHandler.rpcmethod
     def release_client_id(self, client_id: int) -> bool:
         self.trader.release_client_id(client_id)
         return True
+
+    @RPCHandler.rpcmethod
+    async def get_shortable_shares(self, contract: Contract) -> float:
+        return await self.trader.get_shortable_shares(contract)
 
     @RPCHandler.rpcmethod
     async def get_strategies(self) -> SuccessFail[list[StrategyConfig]]:
