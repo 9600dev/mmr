@@ -54,7 +54,7 @@ RUN apt-get install -y libnss3
 RUN apt-get install -y libgbm1
 RUN apt-get install -y libnspr4
 
-# required for pyenv to build 3.9.5 properly
+# required for pyenv to build 3.10.11 properly
 RUN apt-get install -y libbz2-dev
 RUN apt-get install -y libsqlite3-dev
 RUN apt-get install -y libreadline-dev
@@ -139,7 +139,7 @@ RUN touch /home/trader/mmr/logs/strategy_service.log
 
 RUN chown -R trader:trader /home/trader
 
-# install all the python 3.9.5 runtimes and packages
+# install all the python 3.10.11 runtimes and packages
 USER trader
 
 ENV HOME /home/trader
@@ -151,8 +151,8 @@ RUN curl https://pyenv.run | bash
 
 WORKDIR /home/trader/mmr
 
-RUN pyenv install 3.9.5
-RUN pyenv local 3.9.5
+RUN pyenv install 3.10.11
+RUN pyenv virtualenv 3.10.11 mmr
 RUN pyenv rehash
 
 # install poetry

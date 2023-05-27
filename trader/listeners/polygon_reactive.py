@@ -1,11 +1,13 @@
-from polygon import RESTClient
+from polygon import build_option_symbol, ForexClient, StocksClient, StreamClient
 from trader.common.helpers import dateify
 
 import coloredlogs
 import datetime as dt
 import logging
 import numpy as np
+import os
 import pandas as pd
+import polygon
 import pytz
 import time
 
@@ -17,14 +19,23 @@ class PolygonFinancials():
         self.dividends = dividends
 
 
-class PolygonListener():
+class PolygonReactive():
     def __init__(self,
-                 key: str,
+                 polygon_api_key: str,
                  limit: int = 50000,
                  request_sleep: int = 0):
-        self.client: RESTClient = RESTClient(key)
+
+        if polygon_api_key is None or polygon_api_key == '' and os.getenv('POLYGON_API_KEY'):
+            polygon_api_key = os.getenv('POLYGON_API_KEY')  # type: ignore
+        else:
+            raise ValueError('polygon_api_key is not found {} or POLYGON_API_KEY set incorrectly'.format(polygon_api_key))
+
+        self.client: polygon.AsyncClient = polygon.AsyncClient(polygon_api_key)
         self.request_sleep = request_sleep
         self.limit = limit
+
+        # It also exposes a few methods which you could use to create your own reconnect mechanism.
+        # Method polygon.streaming.async_streaming.AsyncStreamClient.reconnect() is one of them
 
     def date(self, date_time: dt.datetime) -> str:
         return dt.datetime.strftime(date_time, '%Y-%m-%d')

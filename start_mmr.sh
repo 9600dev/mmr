@@ -95,7 +95,7 @@ function rebuild_configuration () {
     echo ""
     echo "Please enter Interactive Brokers 'account number' for trading mode $TRADING_MODE "
     echo -n "(starts with either U or DU, and may also be set as an environment variable IB_ACCOUNT): "
-    read -s IB_ACCOUNT;
+    read IB_ACCOUNT;
 
     sed -i "s/^TWSUSERID=.*/TWSUSERID=$USERNAME/" $IBC_DIR/twsstart.sh
     sed -i "s/^TWSPASSWORD=.*/TWSPASSWORD=$PASSWORD/" $IBC_DIR/twsstart.sh

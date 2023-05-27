@@ -13,6 +13,9 @@ ib_server_address: 127.0.0.1
 ib_server_port: 7496
 trading_runtime_ib_client_id: 5
 strategy_runtime_ib_client_id: 7
+# your polygon.io account API key can be set here, or via environment variable
+# "POLYGON_API_KEY". The polygon.io account isn't necessary to run mmr
+polygon_api_key:
 arctic_server_address: 127.0.0.1
 arctic_universe_library: 'Universes'
 arctic_configuration_library: 'Configuration'

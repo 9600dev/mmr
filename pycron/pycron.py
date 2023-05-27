@@ -469,7 +469,6 @@ def main(config_file: str, only_list: List[str], except_list: List[str]):
 
     # required for nested asyncio calls and avoids RuntimeError: This event loop is already running
     nest_asyncio.apply()
-    AsyncIOMainLoop().make_current()
     job_scheduler = JobScheduler(jobs, health_check_eval=health_check_eval)
 
     app = Application([

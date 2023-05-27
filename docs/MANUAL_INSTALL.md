@@ -12,7 +12,7 @@ If you want to YOLO the install, and you're on Ubuntu or a derivative, you can t
 * Make sure ~/ibc/logs and ~/mmr/logs directories are created
 * Install MongoDB: https://docs.mongodb.com/manual/installation/
 * Install Arctic Database (Mongo wrapper basically): https://github.com/man-group/arctic
-* Install Python >= 3.9.5
+* Install Python >= 3.10.11
 * Install Pip and then ```pip3 install -r requirements.txt```
 * Install Redis via ```sudo apt install redis-server```
 * Start pycron:

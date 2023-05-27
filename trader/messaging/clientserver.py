@@ -169,7 +169,6 @@ class _AwaitedMethodCall():
             asyncio.wait_for(
                 fut,
                 timeout=self._timeout,
-                loop=loop
             ),
         )
 

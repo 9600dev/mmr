@@ -191,6 +191,7 @@ def __resolve_contract(
             symbol=result['symbol'],
             exchange=result['exchange'],
             currency=result['currency'],
+            secType=result['secType'],
         ))
     return results
 

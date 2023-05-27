@@ -83,11 +83,11 @@ def repl():
     click_repl.repl(click.get_current_context(), prompt_kwargs=prompt_kwargs)
 
 
-amd = Contract(symbol='AMD', conId=4391, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
-tsla = Contract(symbol='TSLA', conId=76792991, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
-nvda = Contract(symbol='NVDA', conId=4815747, exchange='SMART', primaryExchange='NASDAQ', currency='USD')
-a2m = Contract(symbol='A2M', conId=189114468, exchange='SMART', primaryExchange='ASX', currency='AUD')
-bhp = Contract(symbol='BHP', conId=4036812, exchange='SMART', primaryExchange='ASX', currency='AUD')
+amd = Contract(symbol='AMD', conId=4391, exchange='SMART', primaryExchange='NASDAQ', currency='USD', secType='STK')
+tsla = Contract(symbol='TSLA', conId=76792991, exchange='SMART', primaryExchange='NASDAQ', currency='USD', secType='STK')
+nvda = Contract(symbol='NVDA', conId=4815747, exchange='SMART', primaryExchange='NASDAQ', currency='USD', secType='STK')
+a2m = Contract(symbol='A2M', conId=189114468, exchange='SMART', primaryExchange='ASX', currency='AUD', secType='STK')
+bhp = Contract(symbol='BHP', conId=4036812, exchange='SMART', primaryExchange='ASX', currency='AUD', secType='STK')
 cl = Contract(conId=457630923, symbol='CL', secType='FUT', exchange='NYMEX', lastTradeDateOrContractMonth='20221122')
 
 marketdata: MarketData
