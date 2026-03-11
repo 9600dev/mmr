@@ -1,12 +1,7 @@
-from arctic.date import DateRange
-from ib_insync import Contract
-from logging import Logger
-from trader.common.reactivex import AnonymousObserver
-from trader.data.data_access import TickStorage
-from trader.data.universe import UniverseAccessor
-from trader.messaging.clientserver import MessageBusClient
+from trader.data.store import DateRange
+from ib_async import Contract
+from trader.trading.strategy import Signal, Strategy, StrategyContext, StrategyState
 from trader.objects import Action, BarSize
-from trader.trading.strategy import Signal, Strategy, StrategyConfig, StrategyState
 from typing import Optional, Tuple
 
 import datetime as dt
@@ -17,34 +12,17 @@ import vectorbt as vbt
 
 
 class SMICrossOver(Strategy):
-    def __init__(
-        self,
-        storage: TickStorage,
-        accessor: UniverseAccessor,
-        zmq_messagebus_client: MessageBusClient,
-        logging: Logger,
-    ):
-        super().__init__(
-            storage,
-            accessor,
-            zmq_messagebus_client,
-            logging
-        )
+    def __init__(self):
+        super().__init__()
+        self.strategy_runtime: Optional[runtime.StrategyRuntime] = None
 
-        self.signal_observer: AnonymousObserver
-
-    def install(self, strategy_runtime: runtime.StrategyRuntime) -> bool:
-        self.strategy_runtime = strategy_runtime
-        self.state = StrategyState.INSTALLED
-        return True
-
-    def uninstall(self) -> bool:
-        self.state = StrategyState.NOT_INSTALLED
+    def install(self, context: StrategyContext) -> bool:
+        super().install(context)
         return True
 
     def enable(self) -> StrategyState:
         if not self.strategy_runtime:
-            raise ValueError('install() has not been called')
+            raise ValueError('strategy_runtime not set')
 
         if not self.conids:
             raise ValueError('conids not set')
@@ -54,9 +32,8 @@ class SMICrossOver(Strategy):
             date_range = DateRange(start=dt.datetime.now() - dt.timedelta(days=self.historical_days_prior), end=dt.datetime.now())
 
         # check to see if we have all the available data we need
-        # todo fix this
         for conid in self.conids:
-            missing_data = self.storage.get_tickdata(self.bar_size).missing(
+            missing_data = self.ctx.storage.get_tickdata(self.bar_size).missing(
                 conid,
                 exchange_calendar=exchange_calendars.get_calendar('NASDAQ'),
                 pd_offset=None,
@@ -71,14 +48,7 @@ class SMICrossOver(Strategy):
         for conid in self.conids:
             self.strategy_runtime.subscribe(self, Contract(conId=conid))
 
-        self.signal_observer = AnonymousObserver[Signal]()
-        self.zmq_messagebus_client.subscribe('signal', self.signal_observer)
-
         self.state = StrategyState.RUNNING
-        return self.state
-
-    def disable(self) -> StrategyState:
-        self.state = StrategyState.DISABLED
         return self.state
 
     def __signals(self, open_price: pd.Series) -> Optional[Tuple[pd.Series, pd.Series]]:
@@ -95,15 +65,11 @@ class SMICrossOver(Strategy):
         if self.state != StrategyState.RUNNING:
             return None
 
-        result = self.__signals(prices.ask)
+        result = self.__signals(prices['close'])
         if result and result[0].iloc[-1] is True:
-            signal = Signal('smi_crossover', Action.BUY, 0.0, 0.0)
-            self.zmq_messagebus_client.write('signal', signal)
-            return signal
+            return Signal('smi_crossover', Action.BUY, 0.0, 0.0)
         elif result and result[1].iloc[-1] is True:
-            signal = Signal('smi_crossover', Action.SELL, 0.0, 0.0)
-            self.zmq_messagebus_client.write('signal', signal)
-            return signal
+            return Signal('smi_crossover', Action.SELL, 0.0, 0.0)
         else:
             return None
 

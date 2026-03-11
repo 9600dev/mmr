@@ -1,9 +1,7 @@
-from arctic import Arctic, VERSION_STORE
-from arctic.exceptions import NoDataFoundException
-from arctic.store.version_store import VersionStore
 from dataclasses import fields
-from ib_insync.contract import Contract
+from ib_async.contract import Contract
 from trader.data.data_access import SecurityDefinition
+from trader.data.duckdb_store import DuckDBObjectStore, _default_db_path
 from typing import cast, Dict, List, Optional, Tuple, Union
 
 import csv
@@ -47,12 +45,18 @@ class Universe():
 
 
 class UniverseAccessor():
-    def __init__(self, arctic_server_address: str, arctic_universe_library: str):
-        self.arctic_server_address = arctic_server_address
-        self.arctic_universe_library = arctic_universe_library
-        self.store = Arctic(self.arctic_server_address)
-        self.store.initialize_library(self.arctic_universe_library, lib_type=VERSION_STORE)
-        self.library: VersionStore = self.store[self.arctic_universe_library]
+    def __init__(self, duckdb_path: str, universe_library: str):
+        self.duckdb_path = duckdb_path
+        self.universe_library = universe_library
+        if duckdb_path and (
+            duckdb_path.endswith('.duckdb')
+            or duckdb_path.startswith('/')
+            or duckdb_path.startswith('~')
+        ):
+            db_path = duckdb_path
+        else:
+            db_path = _default_db_path()
+        self.library = DuckDBObjectStore(db_path)
         # reverse order
         self.sorted_names = ['LSE', 'ASX', 'NYSE', 'NASDAQ']
         self.sorted_types = ['STK', 'OPT', 'FUT', 'EFT']
@@ -89,12 +93,12 @@ class UniverseAccessor():
         return result
 
     def get(self, name: str) -> Universe:
-        try:
-            return self.library.read(name).data
-        except NoDataFoundException as ex:
+        data = self.library.read(name)
+        if data is None:
             universe = Universe(name)
             universe.security_definitions = []
             return universe
+        return data
 
     def find_contract(self, contract: Contract) -> Optional[Universe]:
         for universe in self.get_all():
@@ -203,7 +207,7 @@ class UniverseAccessor():
         return list(result)
 
     def update(self, universe: Universe) -> None:
-        self.library.write(universe.name, universe, prune_previous_version=True)
+        self.library.write(universe.name, universe)
 
     def insert(self, universe_name: str, security_definition: SecurityDefinition):
         universe = self.get(universe_name)

@@ -9,22 +9,21 @@ You can use MMR in three ways:
 2. Fully interactive terminal prompt: get quotes, create, cancel, change orders etc from a live terminal prompt.
 2. Command line trading: get quotes, create, cancel and change orders etc, all from the Windows, MacOS or Linux command line.
 
-MMR hosts the Interactive Brokers Trader Workstation instance, maintains connection, ensures consistency and reliabilty between your Interactive Brokers account and your local trading book. It's opinionated about the programming abstractions you should use to program your algos, but will meet you at the level of abstraction you want.
+MMR connects to Interactive Brokers via IB Gateway, maintains connection, ensures consistency and reliability between your Interactive Brokers account and your local trading book. It's opinionated about the programming abstractions you should use to program your algos, but will meet you at the level of abstraction you want.
 
 It relies on:
 
-* [RxPy 4.0](https://github.com/ReactiveX/RxPY) for asyncio pipelining and programming abstraction, and [vectorbt](https://github.com/polakowo/vectorbt) for algorithm programmability and backtesting.
-* Batch download of historical instrument data from [Interactive Brokers](https://www.interactivebrokers.com/en/home.php) and [Polygon.io](https://www.polygon.io).
-* [Arctic Timeseries and Tick Store](https://github.com/man-group/arctic) for tick data storage and super-fast retrieval.
-* [erdewit's ib_insync API](https://github.com/erdewit/ib_insync). A sane sync/asyncio wrapper around the TWS API.
+* [RxPy 4.0](https://github.com/ReactiveX/RxPY) for asyncio pipelining and programming abstraction.
+* Batch download of historical instrument data from [Interactive Brokers](https://www.interactivebrokers.com/en/home.php).
+* [DuckDB](https://duckdb.org/) for tick data storage and retrieval.
+* [ib_async](https://github.com/ib-api-reloaded/ib_async) — async wrapper around the TWS API.
 * No fancy Web x.x technologies, just simple and easily extended Python services.
-* Docker build and deploy on Debian 11.5 + Python 3.10.11.
-* and more...
+* Docker two-container model: IB Gateway + MMR.
+* Python >= 3.12.
 
 ### Status
 
 - [x] Basic technical architecture completed (asyncio, caching, db layer, backtesting, historical data collection, messaging etc)
-- [x] Polygon.io historical data collection
 - [x] Interactive brokers historical data collection
 - [x] Login; logoff; get positions; get portfolio;
 - [x] Subscribe to bars, subscribe to ticks
@@ -35,8 +34,6 @@ It relies on:
 - [ ] Strategy and portfolio risk analysis (started)
 - [x] Add/remove strategies
 - [ ] Hyperparameter search on strategies
-
-There is still about 2-3 months of work left before MMR is 'shippable'. If you want to help speed that up, send me a message.
 
 ## Want to Learn About Finance?
 
@@ -51,7 +48,7 @@ I lean heavily on the following books for the design of this trading system, and
 
 ### Docker Installation
 
-The simplest way to install and run MMR trader is via Docker. It will use a Debian 11.5 image, install Python 3.10.11, install all requirements, and automatically install the latest version of Interactive Brokers Trader Workstation.
+The simplest way to install and run MMR is via Docker. It uses a two-container model: an IB Gateway container (handles the IB connection) and the MMR container (runs trading services).
 
 ```
 $ git clone https://github.com/9600dev/mmr.git
@@ -65,40 +62,26 @@ or:
 $ ./docker.sh --clean  # cleans images and containers
 $ ./docker.sh --build  # builds image
 $ ./docker.sh --run    # deploys container in docker, runs MMR
-
-and then:
-
-$ ./docker.sh --sync   # to sync local code changes to running container
-
 ```
 
 ![Docker build](docs/2022-10-08-09-30-05.png)
 
-The script will build the docker image and run a container instance for you.
+The script will build the docker image and run a container instance for you. On first run it will prompt for your IB credentials and write a `.env` file.
 
-Once it's built and running, ssh into the container to continue the installation and configuration of Trader Workstation:
+Once it's built and running, ssh into the container:
 
 ```
->> 0a97a73dcbccdeadd6b7f9abee1a945dfb1d909b78255a72f97e156063ac4bf1
->>
->> ip address: 172.17.0.2
->> ssh into container via trader@localhost -p 2222, password 'trader'
-
 $ ssh trader@localhost -p 2222
 ```
 
 ![](docs/2022-10-08-09-34-11.png)
 
+After this has completed, it will call `start_mmr.sh` in the MMR root directory, which starts a [tmux](https://github.com/tmux/tmux/wiki) session with:
 
-Enter your Trader Workstation username and password. The script will proceed to automatically install the latest Trader Workstation version.
-
-After this has completed, it will call a script `start_mmr.sh` in the MMR root directory, which starts a [tmux](https://github.com/tmux/tmux/wiki) session with five commands:
-
-* `pycron` (MMR's process spawner and scheduler) which handles the process scheduling, maintenance and uptime of the MMR trading runtime, ArcticDB, Redis, X Windows, and Trader Workstation, ready for automatic trading. You can manually call this by: ```python3 pycron/pycron.py --config ./configs/pycron.yaml```
-* `cli` which is command line interface to interact with the trading system (check portfolio, check systems, manually create orders etc). You can manually call this using ```python3 cli.py```.
-* `tui_cli` TUI (terminal UI) based way to interact with the trading system. (this will replace the `cli` module in the future).
-* `trader_service_log` displays the trader service log real time (see below for information on this service).
-* `strategy_service_log` displays the trader service log real time.
+* `pycron` — process scheduler that manages the trading runtime services. Manually: `python3 pycron/pycron.py --config ./configs/pycron.yaml`
+* `cli` — command line interface to interact with the trading system (check portfolio, check systems, manually create orders etc). Manually: `python3 -m trader.mmr_cli`
+* `trader_service_log` — displays the trader service log in real time.
+* `strategy_service_log` — displays the strategy service log in real time.
 
 ![](docs/2022-10-08-09-43-06.png)
 
@@ -128,23 +111,19 @@ A Universe (like "NASDAQ") is a collection of symbols and their respective Inter
 
 From here you're good to go: either using the `cli` to push manual trades to IB, or by implementing an algo, through extending the `Strategy` abstract class. An example of a strategy implementation can be found [here](https://github.com/9600dev/mmr/blob/master/strategies/smi_crossover.py). There's still a lot to do here, and the implementation of the strategy runtime changes often.
 
-### Manual Installation
-
-See [docs/MANUAL_INSTALL.md](docs/MANUAL_INSTALL.md)
-
 ### Trading Manually from the Command Line
 
 There are two ways to perform trades and inspect the MMR runtime manually: from the command line, or through the CLI helper.
 
 To fire up the CLI helper, type:
 
-* ```python3 cli.py```
+* ```python3 -m trader.mmr_cli```
 
 ![](docs/2022-09-30-11-07-06.png)
 
 This gives you a range of options to interact with the MMR runtime: inspect orders, logs, trades etc, and manually submit trades from the CLI itself:
 
-* ```mmr> trade --symbol AMD --buy --limit 60.00 --amount 100.0```
+* ```mmr> buy AMD --limit 60.00 --amount 100.0```
 
 While most command inputs take the string symbol (in this case "AMD") its best to use the unique contract identifier that Interactive Brokers supplies, and you can do this via the ```mmr> resolve``` command:
 
@@ -152,32 +131,23 @@ While most command inputs take the string symbol (in this case "AMD") its best t
 
 Trading from your command line interface of choice is also supported:
 
-* ```/home/trader/mmr $] python3 cli.py trade --symbol AMD --buy --market --amount 100.0```
+* ```python3 -m trader.mmr_cli buy AMD --market --amount 100.0```
 
-There's also a terminal based TUI to quickly inspect the runtime, orders, algos and prices [TODO: this is under significant active development].
+### CLI commands
 
-* ```python3 tui_cli.py```
-
-![](docs/2023-03-03-09-50-58.png)
-
-I expect this will be the default command line interaction mechanism in a month or so.
-
-### cli.py commands
-
-You can choose to use the REPL (read eval print loop) via ```python3 cli.py``` or by invoking the command directly from the command line, i.e. ```/home/trader/mmr $] python3 cli.py trade --symbol AMD --buy --market --amount 100.0```
+You can use the REPL (read eval print loop) via ```python3 -m trader.mmr_cli``` or by invoking commands directly, e.g. ```python3 -m trader.mmr_cli buy AMD --market --amount 100.0```
 
 | Command       | Sub Commands | Help |
 | :-------------| ----:|:------|
 | book          | cancel orders trades | shows the current order book |
 | clear         | | clears the screen |
-| company-info  | | shows company financials when connected to polygon.io [in progress] |
 | exit          || exits the cli |
-| history       | bar-sizes get-symbol-history-ib get-universe-history-ib jobs read security summary | retrieves historical price data from IB or Polygon.io (in progress) for a given security or universe. Use "history bar-sizes" for a list of bar sizes supported |
+| history       | bar-sizes get-symbol-history-ib get-universe-history-ib jobs read security summary | retrieves historical price data from IB for a given security or universe. Use "history bar-sizes" for a list of bar sizes supported |
 | option        | plot | gets option data for a given date and plots a histogram of future price |
 | portfolio     | | shows the current portfolio |
 | positions     | | shows current positions |
 | pycron        | | shows pycron status |
-| reconnect     | | reconnects to Interactive Brokers TWS |
+| reconnect     | | reconnects to Interactive Brokers |
 | resolve       | | resolves a symbol (i.e. AMD) to a universe and IB connection ID |
 | snapshot      | | gets a price snapshot (delayed or realtime) for a given symbol |
 | status        | | checks the status of all services and systems |
@@ -188,20 +158,14 @@ You can choose to use the REPL (read eval print loop) via ```python3 cli.py``` o
 
 ## Implementing an Automated Algorithm/Strategy
 
-TODO:// there are many different levels of abstraction that MMR can work at, explain all of them.
-
 This is all still in flux, but you can take a look at the source code to get a sense of the different algo implementation abstractions:
 
-* Most flexible, most difficult: Using [trader/listeners/ibreactive.py](https://github.com/9600dev/mmr/blob/master/trader/listeners/ibreactive.py) instead of ib_insync. This is essentially a RxPY wrapper around the ib_insync library to move ib_insync from event driven to reactive/stream driven, which makes real-time algo coding easier.
-* Less flexible: Adding/extending [trader_runtime.py](https://github.com/9600dev/mmr/blob/master/trader/trading/trading_runtime.py). The trader_service.py service hosts trading_runtime, which spins up a ibreactive.py connection to TWS, maintains trade and book state, and enables real-time streaming tick data subscription handling. It also a clean simple library to interact with the Tick Data database, risk analysis, financial math apis and more.
-* Less flexible, but preferred method: extending [trader/trading/strategy.py](https://github.com/9600dev/mmr/blob/master/trader/trading/strategy.py). Build your own strategy by exending this base class. It will be hosted by the [strategy_service.py](https://github.com/9600dev/mmr/blob/master/strategy_service.py) service, a separate process that enables tick subscriptons and routes trades through the trader_service.py service. strategy_service.py will also handle backfilling historical data, ensuring reliability of order routing, and running risk safety checks.
+* Most flexible, most difficult: Using [trader/listeners/ibreactive.py](https://github.com/9600dev/mmr/blob/master/trader/listeners/ibreactive.py). This is a RxPY wrapper around the ib_async library to move from event driven to reactive/stream driven, which makes real-time algo coding easier.
+* Less flexible: Adding/extending [trading_runtime.py](https://github.com/9600dev/mmr/blob/master/trader/trading/trading_runtime.py). The trader_service hosts trading_runtime, which spins up a ibreactive.py connection to IB Gateway, maintains trade and book state, and enables real-time streaming tick data subscription handling. It also provides a clean simple library to interact with the Tick Data database, risk analysis, financial math apis and more.
+* Less flexible, but preferred method: extending [trader/trading/strategy.py](https://github.com/9600dev/mmr/blob/master/trader/trading/strategy.py). Build your own strategy by extending this base class. It will be hosted by the strategy_service, a separate process that enables tick subscriptions and routes trades through the trader_service. strategy_service will also handle backfilling historical data, ensuring reliability of order routing, and running risk safety checks.
 
 
 ## Debugging
-
-You can VNC into the Docker container which will allow you to interact with the running instance of TWS workstation. Screenshot below shows [TigerVNC](https://tigervnc.org/) viewing a stalled TWS instance waiting for authentication:
-
-![](docs/2022-06-03-08-58-08.png)
 
 All services log debug, info, critical and warn to the following log files:
 
@@ -251,8 +215,6 @@ Pycron deals with scheduling, starting, stopping and restarting processes, servi
 * Scheduling the start/stop/restart of jobs for specific times/days
 * Runs periodic health checks
 * Has a small tornado based webservice that allows for remote control of processes
-
-[todo explain the other services]
 
 # License
 

@@ -16,5 +16,4 @@ strategies:
     class_name: SMICrossOver
     conids:
       - 4391
-      - 34805876
     paper: True

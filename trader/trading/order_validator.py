@@ -1,5 +1,5 @@
 from enum import Enum
-from ib_insync import Contract, LimitOrder, MarketOrder, Order, StopLimitOrder, StopOrder, Ticker, Trade
+from ib_async import Contract, LimitOrder, MarketOrder, Order, StopLimitOrder, StopOrder, Ticker, Trade
 from reactivex import Observable, Observer
 from reactivex.abc import DisposableBase
 from reactivex.disposable import Disposable

@@ -23,9 +23,9 @@ import glob
 import vectorbt as vbt
 
 from typing import AsyncIterator, List, Optional, Dict
-from ib_insync.contract import Contract, ContractDetails
+from ib_async.contract import Contract, ContractDetails
 from trader.listeners.ibaiorx import IBAIORx
-from ib_insync.flexreport import FlexReport
+from ib_async.flexreport import FlexReport
 from tabulate import tabulate
 from pandas.core.series import Series
 

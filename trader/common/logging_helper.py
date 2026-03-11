@@ -6,12 +6,38 @@ from rich.traceback import install
 from types import FrameType
 from typing import cast, Dict, List
 
+import datetime as dt
 import inspect
 import logging
 import logging.config
 import os
 import warnings
 import yaml
+
+
+# Session timestamp generated once per process at import time.
+_session_timestamp = dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+
+
+MMR_LOG_DIR = os.path.expanduser('~/.local/share/mmr/logs')
+
+
+def _stamp_log_filenames(config: dict) -> dict:
+    """Expand ~ in log paths, ensure directory exists, and inject session timestamp."""
+    for handler_config in config.get('handlers', {}).values():
+        filename = handler_config.get('filename', '')
+        if not filename:
+            continue
+        # Expand ~ to home directory
+        filename = os.path.expanduser(filename)
+        # Add session timestamp to log files in the mmr log directory
+        if filename.endswith('.log') and MMR_LOG_DIR in filename:
+            base = filename[:-4]
+            filename = f'{base}_{_session_timestamp}.log'
+        handler_config['filename'] = filename
+    # Ensure log directory exists
+    os.makedirs(MMR_LOG_DIR, exist_ok=True)
+    return config
 
 
 class LogLevels(IntEnum):
@@ -28,12 +54,16 @@ class LogLevels(IntEnum):
 global_loggers: Dict[str, Logger] = {}
 
 
-def setup_logging(default_path='/home/trader/mmr/configs/logging.yaml',
+def setup_logging(default_path='',
                   module_name='root',
                   default_level=logging.DEBUG,
                   env_key='LOG_CFG',
                   suppress_external_info=False) -> Logger:
     global global_loggers
+
+    if not default_path:
+        from trader.container import ensure_config_dir
+        default_path = str(ensure_config_dir() / 'logging.yaml')
 
     warnings.filterwarnings(
         'ignore',
@@ -63,6 +93,7 @@ def setup_logging(default_path='/home/trader/mmr/configs/logging.yaml',
         with open(path, 'rt') as f:
             try:
                 config = yaml.safe_load(f.read())
+                _stamp_log_filenames(config)
                 logging.config.dictConfig(config)
             except Exception as e:
                 print(e)
@@ -81,12 +112,9 @@ def set_log_level(module_name: str, level: LogLevels):
         global_loggers[module_name].setLevel(level)
 
 def set_external_log_level(level: LogLevels):
-    logging.getLogger('ib_insync.wrapper').setLevel(level)
-    logging.getLogger('ib_insync.client').setLevel(level)
-    logging.getLogger('ib_insync.ib').setLevel(level)
-    logging.getLogger('arctic.tickstore.tickstore').setLevel(level)
-    logging.getLogger('arctic.arctic').setLevel(level)
-    logging.getLogger('arctic.store.version_store').setLevel(level)
+    logging.getLogger('ib_async.wrapper').setLevel(level)
+    logging.getLogger('ib_async.client').setLevel(level)
+    logging.getLogger('ib_async.ib').setLevel(level)
 
 def set_all_log_level(level: LogLevels):
     set_external_log_level(level)

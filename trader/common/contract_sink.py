@@ -1,5 +1,5 @@
-from ib_insync import Contract
-from ib_insync.ticker import Ticker
+from ib_async import Contract
+from ib_async.ticker import Ticker
 from reactivex import abc, Observable, Observer
 from reactivex.subject import Subject
 from trader.common.logging_helper import setup_logging

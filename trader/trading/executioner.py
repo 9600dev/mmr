@@ -1,5 +1,5 @@
 from enum import Enum
-from ib_insync import (
+from ib_async import (
     Contract,
     ExecutionCondition,
     LimitOrder,
@@ -16,11 +16,14 @@ from reactivex.disposable import Disposable
 from reactivex.subject import Subject
 from trader.common.exceptions import trader_exception, TraderException
 from trader.common.logging_helper import get_callstack, log_method, setup_logging
+from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.data.universe import Universe, UniverseAccessor
 from trader.objects import Action, Basket, ContractOrderPair, ExecutorCondition
 from trader.trading.order_validator import OrderValidator
+from trader.trading.risk_gate import RiskGate, RiskGateResult
 from typing import cast, List, Optional, TYPE_CHECKING
 
+import datetime as dt
 import reactivex as rx
 import reactivex.operators as ops
 
@@ -42,7 +45,22 @@ class TradeExecutioner():
     def connect(self, trader: 'Trader'):
         self.trader = trader
         self.connected = True
-        # todo load trade logs, outstanding trades etc.
+
+    def _log_event(self, event_type: EventType, contract: Contract, order: Order,
+                   strategy_name: str = 'manual') -> None:
+        if hasattr(self.trader, 'event_store'):
+            event = TradingEvent(
+                event_type=event_type,
+                timestamp=dt.datetime.now(),
+                strategy_name=strategy_name,
+                conid=contract.conId or 0,
+                symbol=contract.symbol or '',
+                action=str(order.action),
+                quantity=float(order.totalQuantity or 0),
+                price=float(order.lmtPrice or 0),
+                order_id=order.orderId or 0,
+            )
+            self.trader.event_store.append(event)
 
     async def subscribe_place_order_direct(
         self,
@@ -60,6 +78,7 @@ class TradeExecutioner():
 
         try:
             observable = await self.trader.client.subscribe_place_order(contract, order)
+            self._log_event(EventType.ORDER_SUBMITTED, contract, order)
             return observable.pipe(
                 ops.catch(lambda ex, src: trader_exception_helper(ex))
             )
@@ -71,6 +90,31 @@ class TradeExecutioner():
         contract_order: ContractOrderPair,
         condition: ExecutorCondition,
     ) -> Observable[Trade]:
+        # Run through risk gate if available
+        if hasattr(self.trader, 'risk_gate'):
+            from trader.trading.strategy import Signal
+            # Create a pseudo-signal for risk evaluation
+            signal = Signal(
+                source_name='manual',
+                action=Action.BUY if str(contract_order.order.action) == 'BUY' else Action.SELL,
+                probability=1.0,
+                risk=0.0,
+            )
+            result = self.trader.risk_gate.evaluate(
+                signal=signal,
+                open_order_count=len(self.trader.book.get_orders()) if hasattr(self.trader, 'book') else 0,
+            )
+            if not result.approved:
+                self._log_event(EventType.RISK_GATE_REJECTED, contract_order.contract, contract_order.order)
+                logging.warning(f'risk gate rejected order: {result.reason}')
+                return rx.throw(
+                    trader_exception(
+                        trader=self.trader,
+                        exception_type=TraderException,
+                        message=f'risk gate rejected: {result.reason}'
+                    )
+                )
+
         if condition == condition.SANITY_CHECK:
             logging.debug('sanity_check_order for {}'.format(contract_order))
             snapshot: Ticker = await self.trader.client.get_snapshot(contract_order.contract, delayed=False)
@@ -134,7 +178,8 @@ class TradeExecutioner():
 
         if not quantity and equity_amount:
             # assess if we should trade
-            quantity = equity_amount / latest_tick.bid
+            multiplier = float(contract.multiplier) if contract.multiplier else 1.0
+            quantity = equity_amount / (latest_tick.bid * multiplier)
 
             if quantity < 1 and quantity > 0:
                 quantity = 1.0

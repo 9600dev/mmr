@@ -27,7 +27,7 @@ def trader_exception(trader: 'Trader', exception_type: type, message: str, inner
         inner,
         get_callstack(10)
     )
-    logging.exception(exception)
+    logging.error(exception)
     return cast(Exception, exception)
 
 
@@ -35,16 +35,16 @@ class TraderException(Exception):
     def __init__(
         self,
         message: str,
-        arctic_connected: bool,
+        storage_connected: bool,
         ib_connected: bool,
         startup_time: dt.datetime,
         last_connect_time: dt.datetime,
         inner: Optional[Exception] = None,
         call_stack: Optional[List[str]] = None,
     ):
-        super().__init__(message, arctic_connected, ib_connected, startup_time, last_connect_time, inner, call_stack)
+        super().__init__(message, storage_connected, ib_connected, startup_time, last_connect_time, inner, call_stack)
         self.message = message
-        self.arctic_connected = arctic_connected
+        self.storage_connected = storage_connected
         self.ib_connected = ib_connected
         self.startup_time = startup_time
         self.last_connect_time = last_connect_time
@@ -52,8 +52,8 @@ class TraderException(Exception):
         self.call_stack = call_stack
 
     def __str__(self):
-        builder = '{}\nstartup_time: {}\nlast_connect_time: {}\narctic_connected: {}\nib_connected: {}\n'.format(
-            self.message, self.startup_time, self.last_connect_time, self.ib_connected, self.arctic_connected
+        builder = '{}\nstartup_time: {}\nlast_connect_time: {}\nstorage_connected: {}\nib_connected: {}\n'.format(
+            self.message, self.startup_time, self.last_connect_time, self.ib_connected, self.storage_connected
         )
         if self.call_stack:
             builder += 'call_stack:\n'
@@ -68,7 +68,7 @@ class TraderConnectionException(TraderException):
     def __init__(
         self,
         message: str,
-        arctic_connected: bool,
+        storage_connected: bool,
         ib_connected: bool,
         startup_time: dt.datetime,
         last_connect_time: dt.datetime,
@@ -77,7 +77,7 @@ class TraderConnectionException(TraderException):
     ):
         super().__init__(
             message,
-            arctic_connected,
+            storage_connected,
             ib_connected,
             startup_time,
             last_connect_time,

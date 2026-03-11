@@ -1,6 +1,6 @@
-from ib_insync import TradeLogEntry
-from ib_insync.contract import Contract
-from ib_insync.order import Order, Trade
+from ib_async import TradeLogEntry
+from ib_async.contract import Contract
+from ib_async.order import Order, Trade
 from trader.common.helpers import flatten_list
 from trader.common.logging_helper import setup_logging
 from trader.common.reactivex import EventSubject

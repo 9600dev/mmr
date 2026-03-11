@@ -1,7 +1,7 @@
-from ib_insync.contract import Contract
-from ib_insync.objects import PnLSingle, PortfolioItem, Position
-from ib_insync.order import Order, Trade
-from ib_insync.ticker import Ticker
+from ib_async.contract import Contract
+from ib_async.objects import PnLSingle, PortfolioItem, Position
+from ib_async.order import Order, Trade
+from ib_async.ticker import Ticker
 from reactivex.abc import DisposableBase
 from reactivex.disposable import Disposable
 from reactivex.observer import Observer
@@ -9,7 +9,7 @@ from trader.common.logging_helper import setup_logging
 from trader.common.reactivex import SuccessFail, SuccessFailEnum
 from trader.data.data_access import PortfolioSummary, SecurityDefinition
 from trader.data.universe import Universe
-from trader.messaging.clientserver import RPCHandler
+from trader.messaging.clientserver import RPCHandler, rpcmethod
 from trader.trading.strategy import Strategy, StrategyConfig, StrategyState
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -23,7 +23,7 @@ class StrategyServiceApi(RPCHandler):
     def __init__(self, strategy_runtime):
         self.strategy: runtime.StrategyRuntime = strategy_runtime
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def enable_strategy(self, name: str, paper: bool) -> SuccessFail[StrategyState]:
         try:
             # find the strategy
@@ -36,7 +36,7 @@ class StrategyServiceApi(RPCHandler):
         except Exception as ex:
             return SuccessFail.fail(exception=ex)
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def disable_strategy(self, name: str) -> SuccessFail[StrategyState]:
         try:
             # find the strategy
@@ -49,6 +49,6 @@ class StrategyServiceApi(RPCHandler):
         except Exception as ex:
             return SuccessFail.fail(exception=ex)
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def get_strategies(self) -> List[StrategyConfig]:
         return [StrategyConfig.from_strategy(strategy) for strategy in self.strategy.get_strategies()]

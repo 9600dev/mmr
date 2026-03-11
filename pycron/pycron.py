@@ -13,7 +13,6 @@ import click
 import datetime as dt
 import json
 import logging
-import nest_asyncio
 import os
 import psutil
 import socket
@@ -98,7 +97,7 @@ class Job():
 class JobScheduler():
     def __init__(self, jobs_list: Optional[List[Job]] = None, health_check_eval: Optional[List[str]] = None):
         self.jobs: List[Job] = []
-        self.scheduler = AsyncIOThreadSafeScheduler(asyncio.get_event_loop())
+        self.scheduler: Optional[AsyncIOThreadSafeScheduler] = None
         self.first_start = True
         self.polling_period = 60.0
         self.health_check_eval = health_check_eval
@@ -219,8 +218,11 @@ class JobScheduler():
         def compare_list(a: List[str], b: List[str]):
             return [s.lower() for s in a] == [s.lower() for s in b]
 
-        test_process_name = process.name()
-        test_process_cmdline = process.cmdline()
+        try:
+            test_process_name = process.name()
+            test_process_cmdline = process.cmdline()
+        except (psutil.ZombieProcess, psutil.NoSuchProcess, psutil.AccessDenied):
+            return False
 
         process_names: List[str] = []
         process_names.append(name.lower())
@@ -390,6 +392,8 @@ class JobScheduler():
 
     def start(self):
         log.debug('starting job scheduler with {} jobs'.format(len(self.jobs)))
+        if self.scheduler is None:
+            self.scheduler = AsyncIOThreadSafeScheduler(asyncio.get_event_loop())
         # start now
         self.scheduler.schedule(lambda x, y: self.polling_loop())
         # then schedule every 'n' periods
@@ -468,7 +472,8 @@ def main(config_file: str, only_list: List[str], except_list: List[str]):
         log.debug('adding job: {}'.format(job))
 
     # required for nested asyncio calls and avoids RuntimeError: This event loop is already running
-    nest_asyncio.apply()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     job_scheduler = JobScheduler(jobs, health_check_eval=health_check_eval)
 
     app = Application([
@@ -480,7 +485,7 @@ def main(config_file: str, only_list: List[str], except_list: List[str]):
 
     job_scheduler.start()
     log.debug('run_forever()')
-    asyncio.get_event_loop().run_forever()
+    loop.run_forever()
 
 
 @click.command()

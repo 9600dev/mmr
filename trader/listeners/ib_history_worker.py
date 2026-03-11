@@ -1,7 +1,7 @@
 from datetime import date
 from dateutil.tz import gettz
-from ib_insync import IB
-from ib_insync.contract import Contract
+from ib_async import IB
+from ib_async.contract import Contract
 from trader.common.helpers import dateify, timezoneify, utcify_str
 from trader.common.logging_helper import setup_logging
 from trader.data.data_access import SecurityDefinition
@@ -13,7 +13,7 @@ import asyncio
 import backoff
 import calendar
 import datetime as dt
-import ib_insync
+import ib_async
 import numpy as np
 import pandas as pd
 import pytz
@@ -193,7 +193,7 @@ class IBHistoryWorker():
                 raise Exception('error_code: {}, error_string: {}'.format(self.error_code, self.error_string))
 
             if result:
-                df_result = ib_insync.util.df(result).set_index('date')
+                df_result = ib_async.util.df(result).set_index('date')
                 df_result['bar_size'] = str(bar_size)
                 df_result['what_to_show'] = int(what_to_show)
                 df_result.rename({'barCount': 'bar_count'}, inplace=True, axis=1)
@@ -202,7 +202,7 @@ class IBHistoryWorker():
                 if type(df_result.index[0]) is date:
                     utc = True
 
-                # arctic requires timezone to be set
+                # ensure timezone is set on the index
                 df_result.index = pd.to_datetime(df_result.index, utc=utc)  # type: ignore
 
                 # next line no leonger required as we pass in =2 to formatDate

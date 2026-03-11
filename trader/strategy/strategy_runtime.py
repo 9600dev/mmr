@@ -1,11 +1,11 @@
-from ib_insync import Contract
-from ib_insync.ib import IB
-from ib_insync.ticker import Ticker
+from ib_async import Contract
+from ib_async.ib import IB
+from ib_async.ticker import Ticker
 from reactivex.observer import AutoDetachObserver
 from trader.common.exceptions import TraderConnectionException, TraderException
-from trader.common.listener_helpers import Helpers
 from trader.common.logging_helper import get_callstack, log_method, setup_logging
-from trader.common.singleton import Singleton
+from trader.data.market_data import normalize_ticker
+
 from trader.data.data_access import SecurityDefinition, TickStorage
 from trader.data.universe import UniverseAccessor
 from trader.listeners.ib_history_worker import IBHistoryWorker
@@ -17,7 +17,8 @@ from trader.messaging.clientserver import (
     TopicPubSub
 )
 from trader.objects import Action, BarSize, WhatToShow
-from trader.trading.strategy import Signal, Strategy, StrategyConfig, StrategyState
+from trader.data.event_store import EventStore, EventType, TradingEvent
+from trader.trading.strategy import Signal, Strategy, StrategyConfig, StrategyContext, StrategyState
 from typing import cast, Dict, List, Optional
 
 import asyncio
@@ -42,14 +43,14 @@ error_table = {
 }
 
 
-class StrategyRuntime(metaclass=Singleton):
+class StrategyRuntime():
     def __init__(
         self,
         ib_server_address: str,
         ib_server_port: int,
         strategy_runtime_ib_client_id: int,
-        arctic_server_address: str,
-        arctic_universe_library: str,
+        duckdb_path: str,
+        universe_library: str,
         zmq_pubsub_server_address: str,
         zmq_pubsub_server_port: int,
         zmq_rpc_server_address: str,
@@ -66,8 +67,8 @@ class StrategyRuntime(metaclass=Singleton):
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
         self.strategy_runtime_ib_client_id: int = strategy_runtime_ib_client_id
-        self.arctic_server_address = arctic_server_address
-        self.arctic_universe_library = arctic_universe_library
+        self.duckdb_path = duckdb_path
+        self.universe_library = universe_library
         self.simulation: bool = simulation
         self.paper_trading = paper_trading
         self.zmq_pubsub_server_address = zmq_pubsub_server_address
@@ -122,8 +123,9 @@ class StrategyRuntime(metaclass=Singleton):
         # avoids circular import
         from trader.messaging.trader_service_api import TraderServiceApi
         try:
-            self.storage = TickStorage(self.arctic_server_address)
-            self.universe_accessor = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
+            self.storage = TickStorage(self.duckdb_path)
+            self.universe_accessor = UniverseAccessor(self.duckdb_path, self.universe_library)
+            self.event_store = EventStore(self.duckdb_path)
             self.trader_client = RPCClient[TraderServiceApi](
                 zmq_server_address=self.zmq_rpc_server_address,
                 zmq_server_port=self.zmq_rpc_server_port,
@@ -198,19 +200,35 @@ class StrategyRuntime(metaclass=Singleton):
             conId = ticker.contract.conId
 
         # populate the dataframe subscription cache
+        normalized = normalize_ticker(ticker)
         if conId not in self.streams:
-            self.streams[conId] = pd.DataFrame(Helpers.df(ticker))
+            self.streams[conId] = normalized
         else:
-            result = pd.concat([self.streams[conId], Helpers.df(ticker)], axis=0, copy=False)
-            self.streams[conId] = result
+            self.streams[conId] = pd.concat([self.streams[conId], normalized], axis=0, copy=False)
 
         # execute the strategies attached to the conId's
         for strategy in self.__get_enabled_strategies(conId):
             signal = strategy.on_prices(self.streams[conId])
-            if signal and signal.action == Action.BUY:
-                logging.info('BUY action')
-            elif signal and signal.action == Action.SELL:
-                logging.info('SELL action')
+            if signal:
+                if signal.action == Action.BUY:
+                    logging.info('BUY signal from %s', strategy.name)
+                elif signal.action == Action.SELL:
+                    logging.info('SELL signal from %s', strategy.name)
+
+                # Persist signal to event store
+                event = TradingEvent(
+                    event_type=EventType.SIGNAL,
+                    timestamp=dt.datetime.now(),
+                    strategy_name=signal.source_name,
+                    conid=conId,
+                    action=str(signal.action),
+                    signal_probability=signal.probability,
+                    signal_risk=signal.risk,
+                )
+                self.event_store.append(event)
+
+                # Publish signal via MessageBus for cross-strategy use and subscribers
+                self.zmq_messagebus_client.write('signal', signal)
 
     def on_ticker_error(self, ex: Exception):
         logging.debug('StrategyRuntime.on_error')
@@ -245,6 +263,7 @@ class StrategyRuntime(metaclass=Singleton):
         class_name: str,
         description: str,
         paper: bool = False,
+        auto_execute: bool = False,
     ) -> None:
 
         if not name or not class_name or not module or not bar_size_str:
@@ -278,33 +297,36 @@ class StrategyRuntime(metaclass=Singleton):
             if not class_object:
                 return
 
-            # todo, might have to find StrategyConfig and load that too
             if inspect.isclass(class_object) and issubclass(class_object, Strategy) and class_object is not Strategy:
                 logging.debug('found implementation of Strategy {}'.format(class_object))
 
-                # todo: fix this
-                # here's where we need bar_size to strategy
-                instance = class_object(self.storage, self.universe_accessor, self.zmq_messagebus_client, logging)
-                instance.name = name
-                instance.bar_size = BarSize.parse_str(bar_size_str)
-                instance.description = description
-                instance.conids = conids
-                instance.universe = universe
-                instance.historical_days_prior = historical_days_prior
-                instance.description = description
-                instance.module = module
-                instance.class_name = class_name
-                instance.paper = paper
+                instance = class_object()
+                context = StrategyContext(
+                    name=name,
+                    bar_size=BarSize.parse_str(bar_size_str),
+                    conids=conids if conids else [],
+                    universe=universe,
+                    historical_days_prior=historical_days_prior if historical_days_prior else 0,
+                    paper=paper,
+                    storage=self.storage,
+                    universe_accessor=self.universe_accessor,
+                    logger=logging,
+                    module=module,
+                    class_name=class_name,
+                    description=description,
+                    auto_execute=auto_execute,
+                )
+                instance.install(context)
+                # Give the strategy a reference to the runtime for subscriptions
+                instance.strategy_runtime = self
 
                 self.strategy_implementations.append(cast(Strategy, instance))
-
-                # logic to install and download data for the strategy
-                instance.install(self)
 
         except Exception as ex:
             logging.debug(ex)
 
     def config_loader(self, config_file: str):
+        config_file = os.path.expanduser(config_file)
         logging.debug('loading config file {}'.format(config_file))
         conf_file = open(config_file, 'r')
         config = yaml.load(conf_file, Loader=yaml.FullLoader)
@@ -313,13 +335,14 @@ class StrategyRuntime(metaclass=Singleton):
             self.load_strategy(
                 name=strategy_config['name'],
                 bar_size_str=strategy_config['bar_size'],
-                conids=strategy_config['conids'] if 'conids' in strategy_config else None,
-                universe=strategy_config['universe'] if 'universe' in strategy_config else None,
-                historical_days_prior=strategy_config['historical_days_prior'] if 'historical_days_prior' in strategy_config else 1,
-                module=strategy_config['module'] if 'module' in strategy_config else '',
-                class_name=strategy_config['class_name'] if 'class_name' in strategy_config else '',
-                description=strategy_config['description'] if 'description' in strategy_config else '',
-                paper=strategy_config['paper'] if 'live' in strategy_config else False,
+                conids=strategy_config.get('conids'),
+                universe=strategy_config.get('universe'),
+                historical_days_prior=strategy_config.get('historical_days_prior', 1),
+                module=strategy_config.get('module', ''),
+                class_name=strategy_config.get('class_name', ''),
+                description=strategy_config.get('description', ''),
+                paper=strategy_config.get('paper', False),
+                auto_execute=strategy_config.get('auto_execute', False),
             )
 
     async def get_historical_data(self):
@@ -328,10 +351,10 @@ class StrategyRuntime(metaclass=Singleton):
 
             if strategy.conids:
                 for conId in strategy.conids:
-                    security_definition = self.trader_client.rpc().resolve_symbol(conId)
-                    if security_definition:
+                    security_definitions = self.trader_client.rpc().resolve_symbol(conId)
+                    if security_definitions:
                         await self.historical_data_client.get_contract_history(
-                            security=SecurityDefinition.to_contract(security_definition),
+                            security=SecurityDefinition.to_contract(security_definitions[0]),
                             what_to_show=WhatToShow.MIDPOINT,
                             bar_size=strategy.bar_size,
                             start_date=dt.datetime.now() - dt.timedelta(days=historical_days),
@@ -356,7 +379,7 @@ class StrategyRuntime(metaclass=Singleton):
         logging.info('starting strategy_runtime')
         logging.debug('StrategyRuntime.run()')
 
-        asyncio.get_event_loop().run_until_complete(self.trader_client.connect())
+        await self.trader_client.connect()
 
         self.zmq_subscriber = TopicPubSub[Ticker](
             self.zmq_pubsub_server_address,
@@ -382,9 +405,9 @@ class StrategyRuntime(metaclass=Singleton):
         for strategy in self.strategy_implementations:
             if strategy.conids:
                 for conId in strategy.conids:
-                    security_definition = self.trader_client.rpc().resolve_symbol(conId)
-                    if security_definition:
-                        self.subscribe(strategy, SecurityDefinition.to_contract(security_definition))
+                    security_definitions = self.trader_client.rpc().resolve_symbol(conId)
+                    if security_definitions:
+                        self.subscribe(strategy, SecurityDefinition.to_contract(security_definitions[0]))
                     else:
                         logging.error('could not find security definition for conId {} for strategy {}. Disabling strategy.'
                                       .format(conId, strategy))
@@ -403,6 +426,16 @@ class StrategyRuntime(metaclass=Singleton):
             self.ib_server_port,
             self.strategy_runtime_ib_client_id + 1,
         )
-        self.historical_data_client.connect()
+        try:
+            await self.historical_data_client.ib_client.connectAsync(
+                host=self.ib_server_address,
+                port=self.ib_server_port,
+                clientId=self.strategy_runtime_ib_client_id + 1,
+                timeout=15,
+                readonly=True
+            )
+            self.historical_data_client.connected = True
+        except Exception as ex:
+            logging.error('historical data client connect failed: {}'.format(ex))
         await self.get_historical_data()
 

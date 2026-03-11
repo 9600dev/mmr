@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field, fields
 from enum import Enum, IntEnum
-from ib_insync import Contract, Order, OrderStatus, Trade
-from typing import List
+from ib_async import Contract, Order, OrderStatus, Trade
+from typing import List, Tuple
 
 import datetime as dt
 import sys
@@ -78,6 +78,35 @@ class BarSize(IntEnum):
 
     def __str__(self):
         return BarSize.bar_sizes()[int(self.value)]
+
+    @staticmethod
+    def to_massive_timespan(bar_size: 'BarSize') -> Tuple[int, str]:
+        mapping = {
+            BarSize.Secs1: (1, 'second'),
+            BarSize.Secs5: (5, 'second'),
+            BarSize.Secs10: (10, 'second'),
+            BarSize.Secs15: (15, 'second'),
+            BarSize.Secs30: (30, 'second'),
+            BarSize.Mins1: (1, 'minute'),
+            BarSize.Mins2: (2, 'minute'),
+            BarSize.Mins3: (3, 'minute'),
+            BarSize.Mins5: (5, 'minute'),
+            BarSize.Mins10: (10, 'minute'),
+            BarSize.Mins15: (15, 'minute'),
+            BarSize.Mins20: (20, 'minute'),
+            BarSize.Mins30: (30, 'minute'),
+            BarSize.Hours1: (1, 'hour'),
+            BarSize.Hours2: (2, 'hour'),
+            BarSize.Hours3: (3, 'hour'),
+            BarSize.Hours4: (4, 'hour'),
+            BarSize.Hours8: (8, 'hour'),
+            BarSize.Days1: (1, 'day'),
+            BarSize.Weeks1: (1, 'week'),
+            BarSize.Months1: (1, 'month'),
+        }
+        if bar_size not in mapping:
+            raise ValueError(f'unsupported BarSize for Massive API: {bar_size}')
+        return mapping[bar_size]
 
 
 # https://interactivebrokers.github.io/tws-api/classIBApi_1_1EClient.html#a7a19258a3a2087c07c1c57b93f659b63

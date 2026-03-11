@@ -1,11 +1,11 @@
 # the fundamentals of asyncio: https://www.integralist.co.uk/posts/python-asyncio/
 
-from ib_insync.client import Client
-from ib_insync.contract import Contract, ContractDescription, ContractDetails
-from ib_insync.ib import IB
-from ib_insync.objects import Fill, PnLSingle, PortfolioItem, Position, RealTimeBarList
-from ib_insync.order import Order, Trade
-from ib_insync.ticker import Ticker
+from ib_async.client import Client
+from ib_async.contract import Contract, ContractDescription, ContractDetails
+from ib_async.ib import IB
+from ib_async.objects import Fill, PnLSingle, PortfolioItem, Position, RealTimeBarList
+from ib_async.order import Order, Trade
+from ib_async.ticker import Ticker
 from reactivex import operators as ops
 from reactivex.abc import DisposableBase, ObserverBase
 from reactivex.observable import Observable
@@ -167,6 +167,46 @@ class IBAIORx():
             self.ib_server_port,
             self.ib_client_id + 1,
         )
+
+        return self
+
+    async def connect_async(self) -> 'IBAIORx':
+        """Async connect for use within a running event loop (e.g., reconnection).
+
+        Unlike the sync connect(), this uses ib.connectAsync() so it can be
+        awaited from an already-running asyncio loop without triggering
+        RuntimeError: This event loop is already running.
+        """
+        if self.ib.isConnected():
+            return self
+
+        self._shutdown = False
+
+        if self.__handle_error not in self.ib.errorEvent:
+            self.ib.errorEvent += self.__handle_error
+
+        logging.debug(
+            'ibreactive.connect_async ib_server_address: %s, ib_server_port: %s, '
+            'ib_client_id: %s, ib_account: %s',
+            self.ib_server_address, self.ib_server_port,
+            self.ib_client_id, self.ib_account,
+        )
+
+        await self.ib.connectAsync(
+            host=self.ib_server_address,
+            port=self.ib_server_port,
+            clientId=self.ib_client_id,
+            timeout=10,
+            readonly=self.read_only,
+            account=self.ib_account,
+        )
+
+        if not self.history_worker:
+            self.history_worker = IBHistoryWorker(
+                self.ib_server_address,
+                self.ib_server_port,
+                self.ib_client_id + 1,
+            )
 
         return self
 
@@ -429,7 +469,7 @@ class IBAIORx():
 
             start_date = end_date
             end_date = end_date + dt.timedelta(minutes=1)
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             loop.call_later(
                 refresh_interval,
                 asyncio.create_task,
@@ -440,7 +480,7 @@ class IBAIORx():
 
         end_date = dt.datetime.now(dt.timezone.utc).astimezone(start_date.tzinfo)
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         loop.call_later(1, asyncio.create_task, __update(subject, contract, start_date, end_date))
         return subject
 
@@ -665,6 +705,45 @@ class IBAIORx():
             end_date=end_date,
             filter_between_dates=True
         )
+
+    async def scanner_data(
+        self,
+        scan_code: str = 'TOP_PERC_GAIN',
+        instrument: str = 'STK',
+        location_code: str = 'STK.US.MAJOR',
+        num_rows: int = 20,
+        above_price: float = 0.0,
+        above_volume: int = 0,
+        market_cap_above: float = 0.0,
+    ) -> list[dict]:
+        from ib_async import ScannerSubscription
+        sub = ScannerSubscription(
+            numberOfRows=num_rows,
+            instrument=instrument,
+            locationCode=location_code,
+            scanCode=scan_code,
+        )
+        if above_price > 0:
+            sub.abovePrice = above_price
+        if above_volume > 0:
+            sub.aboveVolume = above_volume
+        if market_cap_above > 0:
+            sub.marketCapAbove = market_cap_above
+
+        results = await self.ib.reqScannerDataAsync(sub, [], [])
+        rows = []
+        for scan in (results or []):
+            cd = scan.contractDetails
+            c = cd.contract
+            rows.append({
+                'rank': scan.rank + 1,
+                'symbol': c.symbol,
+                'secType': c.secType,
+                'exchange': c.primaryExchange or c.exchange,
+                'currency': c.currency,
+                'conId': c.conId,
+            })
+        return rows
 
     def sleep(self, seconds: float):
         self.ib.sleep(seconds)

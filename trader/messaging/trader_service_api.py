@@ -1,8 +1,8 @@
-from ib_insync import TradeLogEntry
-from ib_insync.contract import Contract
-from ib_insync.objects import PnLSingle, PortfolioItem, Position
-from ib_insync.order import Order, Trade
-from ib_insync.ticker import Ticker
+from ib_async import TradeLogEntry
+from ib_async.contract import Contract
+from ib_async.objects import PnLSingle, PortfolioItem, Position
+from ib_async.order import Order, Trade
+from ib_async.ticker import Ticker
 from reactivex.abc import DisposableBase
 from reactivex.disposable import Disposable
 from reactivex.observer import Observer
@@ -10,7 +10,7 @@ from trader.common.logging_helper import setup_logging
 from trader.common.reactivex import SuccessFail, SuccessFailEnum
 from trader.data.data_access import PortfolioSummary, SecurityDefinition
 from trader.data.universe import Universe
-from trader.messaging.clientserver import RPCHandler
+from trader.messaging.clientserver import RPCHandler, rpcmethod
 from trader.objects import TickList, TradeLogSimple
 from trader.trading.strategy import StrategyConfig, StrategyState
 from typing import List, Optional, Tuple, Union
@@ -29,39 +29,39 @@ class TraderServiceApi(RPCHandler):
 
     # json can't encode Dict's with keys that aren't primitive and hashable
     # so we often have to convert to weird containers like List[Tuple]
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def get_positions(self) -> list[Position]:
         return self.trader.get_positions()
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def get_portfolio(self) -> list[PortfolioItem]:
         return self.trader.client.ib.portfolio()
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def get_portfolio_summary(self) -> list[PortfolioSummary]:
         return self.trader.get_portfolio_summary()
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def get_universes(self) -> dict[str, int]:
         return self.trader.universe_accessor.list_universes_count()
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def get_trades(self) -> dict[int, list[Trade]]:
         return self.trader.book.get_trades()
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def get_trade_log(self) -> list[TradeLogSimple]:
         return self.trader.book.get_trade_log()
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def get_orders(self) -> dict[int, list[Order]]:
         return self.trader.book.get_orders()
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def get_pnl(self) -> list[PnLSingle]:
         return self.trader.get_pnl()
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     async def place_order_simple(
         self, contract: Contract,
         action: str,
@@ -83,8 +83,6 @@ class TraderServiceApi(RPCHandler):
         disposable: DisposableBase = Disposable()
         result: Optional[SuccessFail] = None
 
-        loop = asyncio.get_event_loop()
-
         def on_next(trade: Trade):
             nonlocal result
             result = SuccessFail.success(obj=trade)
@@ -99,26 +97,24 @@ class TraderServiceApi(RPCHandler):
 
         observer = Observer(on_next=on_next, on_completed=on_completed, on_error=on_error)
 
-        observable = loop.run_until_complete(
-            self.trader.place_order_simple(
-                contract=contract,
-                action=act,
-                equity_amount=equity_amount,
-                quantity=quantity,
-                limit_price=limit_price,
-                market_order=market_order,
-                stop_loss_percentage=stop_loss_percentage,
-                algo_name=algo_name,
-                debug=debug,
-            )
+        observable = await self.trader.place_order_simple(
+            contract=contract,
+            action=act,
+            equity_amount=equity_amount,
+            quantity=quantity,
+            limit_price=limit_price,
+            market_order=market_order,
+            stop_loss_percentage=stop_loss_percentage,
+            algo_name=algo_name,
+            debug=debug,
         )
         observable.subscribe(observer)
 
-        loop.run_until_complete(task.wait())
+        await task.wait()
         disposable.dispose()
         return result if result else SuccessFail.fail()
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def cancel_order(self, order_id: int) -> SuccessFail[Trade]:
         order = self.trader.cancel_order(order_id)
         if order:
@@ -126,38 +122,42 @@ class TraderServiceApi(RPCHandler):
         else:
             return SuccessFail.fail()
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def cancel_all(self) -> SuccessFail[list[int]]:
         return self.trader.cancel_all()
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     async def get_snapshot(self, contract: Contract, delayed: bool) -> Ticker:
         return await self.trader.client.get_snapshot(contract=contract, delayed=delayed)
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def publish_contract(self, contract: Contract, delayed: bool) -> bool:
         self.trader.publish_contract(contract, delayed)
         return True
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def get_published_contracts(self) -> list[int]:
         return list(self.trader.zmq_pubsub_contracts.keys())
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def get_unique_client_id(self) -> int:
         return self.trader.get_unique_client_id()
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
+    async def resolve_contract(self, contract: Contract) -> list[SecurityDefinition]:
+        return await self.trader.resolve_contract(contract)
+
+    @rpcmethod
     async def resolve_symbol(
         self,
         symbol: Union[str, int],
-        exchange: str,
-        universe: str,
-        sec_type: str
+        exchange: str = '',
+        universe: str = '',
+        sec_type: str = ''
     ) -> list[SecurityDefinition]:
         return await self.trader.resolve_symbol(symbol, exchange, universe, sec_type)
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     async def resolve_universe(
         self,
         symbol: Union[str, int],
@@ -167,27 +167,48 @@ class TraderServiceApi(RPCHandler):
     ) -> list[tuple[str, SecurityDefinition]]:
         return await self.trader.resolve_universe(symbol, exchange, universe, sec_type)
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     def release_client_id(self, client_id: int) -> bool:
         self.trader.release_client_id(client_id)
         return True
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     async def get_shortable_shares(self, contract: Contract) -> float:
         return await self.trader.get_shortable_shares(contract)
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     async def get_strategies(self) -> SuccessFail[list[StrategyConfig]]:
         return await self.trader.get_strategies()
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     async def enable_strategy(self, name: str, paper: bool) -> SuccessFail[StrategyState]:
         return await self.trader.enable_strategy(name, paper)
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
     async def disable_strategy(self, name: str) -> SuccessFail[StrategyState]:
         return await self.trader.disable_strategy(name)
 
-    @RPCHandler.rpcmethod
+    @rpcmethod
+    async def scanner_data(
+        self,
+        scan_code: str = 'TOP_PERC_GAIN',
+        instrument: str = 'STK',
+        location_code: str = 'STK.US.MAJOR',
+        num_rows: int = 20,
+        above_price: float = 0.0,
+        above_volume: int = 0,
+        market_cap_above: float = 0.0,
+    ) -> list[dict]:
+        return await self.trader.scanner_data(
+            scan_code=scan_code,
+            instrument=instrument,
+            location_code=location_code,
+            num_rows=num_rows,
+            above_price=above_price,
+            above_volume=above_volume,
+            market_cap_above=market_cap_above,
+        )
+
+    @rpcmethod
     async def get_ib_account(self) -> str:
         return self.trader.ib_account

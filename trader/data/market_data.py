@@ -1,4 +1,5 @@
-from arctic.date import DateRange
+from trader.data.store import DateRange
+from ib_async.ticker import Ticker
 from reactivex import Observer
 from reactivex.disposable import Disposable
 from reactivex.subject import Subject
@@ -11,10 +12,121 @@ from typing import Optional
 
 import datetime as dt
 import exchange_calendars
+import math
+import numpy as np
 import pandas as pd
 
 
 logging = setup_logging(module_name='data')
+
+# Canonical column schema for on_prices() DataFrames.
+NORMALIZED_COLUMNS = [
+    'open', 'high', 'low', 'close', 'volume',
+    'vwap', 'bar_count',
+    'bid', 'ask', 'last', 'last_size',
+]
+
+
+def _ib_nan(val) -> float:
+    """Convert IB sentinel values to NaN.
+
+    IB uses ``sys.float_info.max`` (1.7976931348623157e+308) as a sentinel
+    for "no data" on bid/ask/last fields.
+    """
+    if val is None:
+        return np.nan
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return np.nan
+    if not math.isfinite(f) or f >= 1e308:
+        return np.nan
+    return f
+
+
+def normalize_ticker(ticker: Ticker) -> pd.DataFrame:
+    """Convert a live IB Ticker into a single-row normalized DataFrame.
+
+    Maps the 70+ Ticker fields down to the 11 canonical columns.
+    The index is a DatetimeIndex from ``ticker.time``.
+    """
+    ts = ticker.time or dt.datetime.now(dt.timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=dt.timezone.utc)
+
+    bid = _ib_nan(ticker.bid)
+    ask = _ib_nan(ticker.ask)
+    last = _ib_nan(ticker.last)
+    last_size = _ib_nan(ticker.lastSize)
+
+    # For open/high/low/close: use last trade price when available,
+    # otherwise midpoint of bid/ask, otherwise NaN.
+    mid = np.nan
+    if not np.isnan(bid) and not np.isnan(ask):
+        mid = (bid + ask) / 2.0
+    price = last if not np.isnan(last) else mid
+
+    row = {
+        'open': price,
+        'high': price,
+        'low': price,
+        'close': price,
+        'volume': _ib_nan(ticker.volume),
+        'vwap': _ib_nan(ticker.vwap),
+        'bar_count': np.nan,
+        'bid': bid,
+        'ask': ask,
+        'last': last,
+        'last_size': last_size,
+    }
+
+    idx = pd.DatetimeIndex([ts], name='date')
+    return pd.DataFrame([row], index=idx, columns=NORMALIZED_COLUMNS)
+
+
+def normalize_historical(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert a DuckDB / backtester historical DataFrame to the normalized schema.
+
+    Renames ``average`` → ``vwap``, adds ``bid``, ``ask``, ``last`` (= close),
+    ``last_size`` as NaN, and drops ``bar_size`` / ``what_to_show``.
+    """
+    if df.empty:
+        return df
+
+    out = df.copy()
+
+    # Rename average → vwap
+    if 'average' in out.columns:
+        out = out.rename(columns={'average': 'vwap'})
+
+    # Drop metadata columns
+    for col in ('bar_size', 'what_to_show'):
+        if col in out.columns:
+            out = out.drop(columns=[col])
+
+    # Add missing columns with appropriate defaults
+    if 'vwap' not in out.columns:
+        out['vwap'] = np.nan
+    if 'bar_count' not in out.columns:
+        out['bar_count'] = np.nan
+    if 'bid' not in out.columns:
+        out['bid'] = np.nan
+    if 'ask' not in out.columns:
+        out['ask'] = np.nan
+    if 'last' not in out.columns:
+        out['last'] = out['close'] if 'close' in out.columns else np.nan
+    if 'last_size' not in out.columns:
+        out['last_size'] = np.nan
+
+    # Ensure column order matches the canonical schema
+    existing = [c for c in NORMALIZED_COLUMNS if c in out.columns]
+    out = out[existing]
+
+    # Ensure index name is 'date'
+    if out.index.name != 'date':
+        out.index.name = 'date'
+
+    return out
 
 class SecurityDataStream(Subject[pd.DataFrame]):
     def __init__(
@@ -40,7 +152,7 @@ class SecurityDataStream(Subject[pd.DataFrame]):
             return
 
         # todo: gotta be a faster way here
-        self.df = self.df.append(value)
+        self.df = pd.concat([self.df, value])
 
         for obv in list(self.observers):
             obv.on_next(self.df)
@@ -68,14 +180,14 @@ class MarketData():
     def __init__(
         self,
         client: IBAIORx,
-        arctic_server_address: str,
-        arctic_universe_library: str,
+        duckdb_path: str,
+        universe_library: str,
     ):
         self.client: IBAIORx = client
-        self.arctic_server_address = arctic_server_address
-        self.arctic_universe_library = arctic_universe_library
-        self.universe = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
-        self.data = TickData(self.arctic_server_address, 'bardata')
+        self.duckdb_path = duckdb_path
+        self.universe_library = universe_library
+        self.universe = UniverseAccessor(self.duckdb_path, self.universe_library)
+        self.data = TickData(self.duckdb_path, 'bardata')
 
     async def subscribe_security(
         self,

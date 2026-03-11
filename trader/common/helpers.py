@@ -3,7 +3,7 @@ from collections import deque
 from dateutil.tz import gettz, tzlocal
 from dateutil.tz.tz import tzfile
 from exchange_calendars import ExchangeCalendar
-from ib_insync.contract import Contract
+from ib_async.contract import Contract
 from pandas import Timestamp
 from pypager.pager import Pager
 from pypager.source import GeneratorSource
@@ -34,7 +34,7 @@ def flatten_dict(d, parent_key='', sep='_'):
     items = []
     for k, v in d.items():
         new_key = parent_key + sep + k if parent_key else k
-        if isinstance(v, collections.MutableMapping):
+        if isinstance(v, collections.abc.MutableMapping):
             items.extend(flatten_dict(v, new_key, sep=sep).items())
         else:
             items.append((new_key, v))
@@ -89,7 +89,10 @@ def symbol_to_contract(symbol: str) -> Contract:
     raise ValueError('todo implement this')
 
 
-def get_contract_from_csv(contract_csv_file: str = '/home/trader/mmr/data/symbols_historical.csv') -> pd.DataFrame:
+def get_contract_from_csv(contract_csv_file: str = '') -> pd.DataFrame:
+    if not contract_csv_file:
+        from trader.container import mmr_root
+        contract_csv_file = str(mmr_root() / 'data' / 'symbols_historical.csv')
     if not os.path.exists(contract_csv_file):
         raise ValueError('csv_file {} not found'.format(contract_csv_file))
     return pd.read_csv(contract_csv_file)
@@ -440,8 +443,11 @@ def get_exchange_calendar(contract: Contract) -> ExchangeCalendar:
     return ec.get_calendar(exchange)
 
 
-def contracts(contract_file_name: str = '/home/trader/mmr/data/ib_symbols_nyse_nasdaq.csv',
+def contracts(contract_file_name: str = '',
               n: Optional[int] = None) -> pd.DataFrame:
+    if not contract_file_name:
+        from trader.container import mmr_root
+        contract_file_name = str(mmr_root() / 'data' / 'ib_symbols_nyse_nasdaq.csv')
     results = pd.read_csv(contract_file_name)
     if n:
         return results.sort_values(by='market cap', ascending=False).head(n)

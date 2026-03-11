@@ -3,11 +3,11 @@
 * trading_mode in trader.yaml and TradingMode in config.ini needs to be tested on startup to ensure they're the same.
 * Sometimes reqHistoricalData returns and error that suggests it can't parse the query. Restarting MMR seems to fix this. Scary.
 * timezonify should move everything that's deailing with internal timezones to timezone.utc
-* there's a timezoneTWS property on IB that gives you the TWS instance timeframe, use that.
+* there's a timezoneTWS property on IB that gives you the IB Gateway instance timeframe, use that.
 * Move timezoneify logic to the SecurityDefinition class, so that timezone updates to dt.datetime's are local to the security/market
 * ```listener_helpers.py``` and ```helpers.py``` need to be consolidated.
 * The batch queuing stuff is a bit wonky (there's a subclass there ```queuer.py``` but it's doesn't have the right abstraction). Given batch data downloads is going to be important, should probably clean all this up.
-* There's no testing framework setup, and no test coverage. Setup test framework. Add tests.
+* Expand test coverage — framework is set up (pytest + conftest.py).
 * For all the command line tools, we have switches that are 'defaulted' to 127.0.0.1 etc, but we also have ```configs/trader.yaml``` configuration file. Reconcile these two. We probably need some sort of dependency injection/configuration injection style thing.
 * IB order "conditions" aren't exposed yet: https://interactivebrokers.github.io/tws-api/order_conditions.html. Enable these.
   * ![](2022-11-18-09-31-11.png)
@@ -15,16 +15,12 @@
 # Development Notes
 
 * Largely following [this guys approach](https://mitelman.engineering/blog/python-best-practice/automating-python-best-practices-for-a-new-project/#how-to-manage-python-versions-with-pyenv) to build/test/package management etc.
-* Using poetry + pyenv for local dev, pinning to Python 3.5.9 (default Ubuntu 21.04 installation)
-* Exporting requirements.txt from poetry for a Docker default pip install
-* We set AcceptIncomingConnectionAction=accept in IBC's config.ini, which should automatically accept incoming API connections to TWS. This is insecure, so either set it to "manual", or configure it yourself when you fire up TWS for the first time.
-* Arctic: don't ever call store.list_libraries() without specifying a cache reset parameter: store.list_libraries(1), otherwise you may get an old cache without the latest libraries you've built.
 * Remove the backoff stuff, implement this properly.
 
 ## What to do when things don't work
 
-* If TWS is failing to start via IBC, have a look at the IBC logs in /home/trader/ibc/logs.
-* ib_status() returning False and you can't start TWS? `export TRADER_CHECK=False` and that call will be ignored. That function screen scrapes (https://www.interactivebrokers.com/en/?f=%2Fen%2Fsoftware%2FsystemStatus.php) and occasionally will get a red status that doesn't actually impact trading.
+* Check IB Gateway container logs: `docker logs ib-gateway`
+* ib_status() returning False? `export TRADER_CHECK=False` and that call will be ignored. That function screen scrapes (https://www.interactivebrokers.com/en/?f=%2Fen%2Fsoftware%2FsystemStatus.php) and occasionally will get a red status that doesn't actually impact trading.
 
 ## Backlog
 
@@ -35,10 +31,9 @@
 
 ## Random code in random places worth knowing about:
 
-  * ```python3 polygon_queuer.py --contracts ../../data/ib_symbols_nyse_nasdaq.csv``` does the same price history download, but using polygon.io.
-* ```trader/scripts``` directory contains a bunch of helpers to grab the complete lists of symbols from various exchanges around the world; contains symbol -> interactive broker 'conId' resolution (```ib_resolve.py```) and more.
-* ```trader/scripts/trader_check.py``` will do a bunch of system checks to make sure all services are up, and interactive brokers is responding
-* ```trader/listeners/ibreactivex.py``` is the RxPY concurrency wrapper around the Interactive Brokers API. If you're not familiar with reactive programming, start with the RxPY website.
+* ```trader/tools/``` directory contains helpers to grab the complete lists of symbols from various exchanges around the world; contains symbol -> interactive broker 'conId' resolution (```ib_resolve.py```) and more.
+* ```trader/tools/trader_check.py``` will do a bunch of system checks to make sure all services are up, and interactive brokers is responding
+* ```trader/listeners/ibreactive.py``` is the RxPY concurrency wrapper around the Interactive Brokers API. If you're not familiar with reactive programming, start with the RxPY website.
 * ```pycron/pycron.py```is the workhorse for process scheduling. It makes sure all services and processes are continuously running (restarting if they're not) and checks for dependencies. It will also start, stop and restart services on a crontab like schedule.
 * Docker build failing, not being able to resolve DNS? Try:
   * sudo pkill docker
@@ -84,7 +79,6 @@ deprecated, moved to rxpy 4.0 instead -- it's significantly fasterx
 ## Devenv reading
 
 
-* https://realpython.com/dependency-management-python-poetry/#add-poetry-to-an-existing-project
 * https://jsvine.github.io/visidata-cheat-sheet/en/
 
 ## Random

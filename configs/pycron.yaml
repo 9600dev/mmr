@@ -1,84 +1,35 @@
-root_directory: /home/trader/mmr
+root_directory: .
 port: 8081
 env: TRADER_CHECK=False
 health_check_eval:
-  - "exec('sys.path.append(\"scripts\")') or exec('from trader_check import health_check') or health_check('configs/trader.yaml')"
+  - "exec('from trader.tools.trader_check import health_check') or health_check('~/.config/mmr/trader.yaml')"
 jobs:
-    - name: xvfb
-      description: starts a virtual display
-      command: /usr/bin/Xvfb
-      arguments: :1 -ac -screen 0 3840x2160x24
-      start: "* * * * *"
-      start_on_pycron_start: True
-      restart_if_found: False
-    - name: x0vncserver
-      description: starts x0vncserver
-      command: /usr/bin/x0vncserver
-      arguments: -display :1 -fg -SecurityTypes VncAuth -PasswordFile /home/trader/.vnc/passwd -localhost no -rfbport 5900 -verbose
-      start: "* * * * *"
-      start_on_pycron_start: True
-      restart_if_found: False
-      depends_on:
-        - xvfb
-      delay: 5
-    - name: tws
-      description: make sure tws is continuously running, and force restart/reauth on Sunday
-      command: DISPLAY=:1 third_party/ibc/twsstart.sh
-      arguments: -inline
-      eval:
-        - "exec('sys.path.append(\"scripts\")') or exec('from ib_status import ib_status') or ib_status()"
-      start: "* * * * *"
-      start_on_pycron_start: True
-      restart_if_found: False
-      restart_if_finished: True
-      depends_on:
-        - xvfb
-      delay: 15
-    - name: mongodb
-      description: ensures mongodb is running
-      command: /usr/bin/mongod
-      arguments: --config configs/mongodb.conf
-      start: "* * * * *"
-      start_on_pycron_start: True
-      restart_if_found: False
-    - name: redis
-      description: redis server
-      command: /usr/bin/redis-server
-      arguments: configs/redis.conf
-      start: "* * * * *"
-      start_on_pycron_start: True
-      restart_if_finished: True
-    - name: worker_service
-      description: worker service for batch job
+    - name: data_service
+      description: historical data download service
       command: python3
-      arguments: worker_service.py start --config configs/trader.yaml --queue_name history
+      arguments: -m trader.data_service
       start: "* * * * *"
       start_on_pycron_start: True
       restart_if_found: False
-      restart_if_finished: True
-      depends_on:
-        - tws
-      delay: 8
+      restart_if_finished: False
+      delay: 5
     - name: trader_service
       description: service that abstracts over and interfaces with Interactive Brokers
       command: python3
-      arguments: trader_service.py
+      arguments: -m trader.trader_service
       start: "* * * * *"
       start_on_pycron_start: True
       restart_if_found: True
       restart_if_finished: True
-      depends_on:
-        - tws
-      delay: 15
+      delay: 10
     - name: strategy_service
       description: service that loads, hosts and executes trading strategies and algorithms
       command: python3
-      arguments: strategy_service.py
+      arguments: -m trader.strategy_service
       start: "* * * * *"
       start_on_pycron_start: True
       restart_if_found: True
       restart_if_finished: True
       depends_on:
-        - tws
         - trader_service
-      delay: 20
+      delay: 15

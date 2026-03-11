@@ -1,5 +1,5 @@
-from ib_insync.contract import Contract
-from ib_insync.objects import PortfolioItem, Position
+from ib_async.contract import Contract
+from ib_async.objects import PortfolioItem, Position
 from trader.common.logging_helper import log_method, setup_logging
 
 

@@ -1,0 +1,72 @@
+name: mmr
+
+services:
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:latest
+    restart: always
+    env_file: .env
+    environment:
+      TWS_USERID: ${TWS_USERID}
+      TWS_PASSWORD: ${TWS_PASSWORD}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      TWS_ACCEPT_INCOMING: ${TWS_ACCEPT_INCOMING:-accept}
+      READ_ONLY_API: ${READ_ONLY_API:-no}
+      VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD:-}
+      TWOFA_TIMEOUT_ACTION: ${TWOFA_TIMEOUT_ACTION:-restart}
+      RELOGIN_AFTER_TWOFA_TIMEOUT: ${RELOGIN_AFTER_TWOFA_TIMEOUT:-yes}
+      EXISTING_SESSION_DETECTED_ACTION: ${EXISTING_SESSION_DETECTED_ACTION:-primaryoverride}
+      AUTO_RESTART_TIME: "${AUTO_RESTART_TIME:-11:59 PM}"
+      ALLOW_BLIND_TRADING: ${ALLOW_BLIND_TRADING:-no}
+      TIME_ZONE: ${TIME_ZONE:-America/New_York}
+      TZ: ${TIME_ZONE:-America/New_York}
+      # Override default 1024x768 — patched run.sh reads XVFB_SCREEN env var
+      XVFB_SCREEN: ${XVFB_SCREEN:-1920x1080x24}
+    volumes:
+      - ./scripts/ib-gateway-run.sh:/home/ibgateway/scripts/run.sh:ro
+    ports:
+      # IB Gateway API ports mapped to standard TWS ports (live: 7496, paper: 7497)
+      - "127.0.0.1:7496:4003"
+      - "127.0.0.1:7497:4004"
+      # VNC for viewing IB Gateway GUI
+      - "127.0.0.1:5901:5900"
+    # Uncomment to persist TWS settings across container restarts
+    # volumes:
+    #   - ./data/tws_settings:/home/ibgateway/Jts
+
+  mmr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    depends_on:
+      - ib-gateway
+    environment:
+      TRADER_CONFIG: /home/trader/mmr/configs/trader.yaml
+      TZ: ${TIME_ZONE:-America/New_York}
+      # IB connection — entrypoint sets IB_SERVER_PORT from TRADING_MODE
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      IB_SERVER_ADDRESS: ib-gateway
+      IB_ACCOUNT: ${IB_ACCOUNT:-}
+      # Bind ZMQ to 0.0.0.0 so host can reach services via port mapping
+      ZMQ_RPC_SERVER_ADDRESS: tcp://0.0.0.0
+      ZMQ_PUBSUB_SERVER_ADDRESS: tcp://0.0.0.0
+      ZMQ_STRATEGY_RPC_SERVER_ADDRESS: tcp://0.0.0.0
+      ZMQ_MESSAGEBUS_SERVER_ADDRESS: tcp://0.0.0.0
+      ZMQ_DATA_RPC_SERVER_ADDRESS: tcp://0.0.0.0
+    ports:
+      # SSH into MMR container
+      - "127.0.0.1:2222:22"
+      # pycron web
+      - "127.0.0.1:8081:8081"
+      # ZMQ RPC/PubSub — allows host CLI to talk to services
+      - "127.0.0.1:42001:42001"   # trader_service RPC
+      - "127.0.0.1:42002:42002"   # ticker PubSub
+      - "127.0.0.1:42003:42003"   # data_service RPC
+      - "127.0.0.1:42005:42005"   # strategy_service RPC
+      - "127.0.0.1:42006:42006"   # strategy MessageBus
+    volumes:
+      # Persist DuckDB data and logs across rebuilds (bind mounts avoid
+      # podman rootless UID-mapping issues with named volumes)
+      - ./data:/home/trader/mmr/data
+      - ./logs:/home/trader/mmr/logs
+

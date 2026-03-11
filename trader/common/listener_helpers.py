@@ -1,10 +1,10 @@
-from bson import json_util
-from ib_insync.contract import Contract, Forex, Stock
-from ib_insync.ticker import Ticker
-from ib_insync.util import df
+from ib_async.contract import Contract, Forex, Stock
+from ib_async.ticker import Ticker
+from ib_async.util import df
 from typing import Any, Awaitable, Dict, List, Optional, Tuple, TypeVar
 
 import asyncio
+import datetime as dt
 import functools
 import json
 import logging
@@ -125,9 +125,16 @@ class Helpers():
         }
 
     @staticmethod
+    def _json_default(obj):
+        if isinstance(obj, (dt.datetime, dt.date)):
+            return obj.isoformat()
+        if isinstance(obj, dt.timedelta):
+            return obj.total_seconds()
+        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+    @staticmethod
     def json_complex(dict: Dict) -> str:
-        # https://stackoverflow.com/questions/11875770/how-to-overcome-datetime-datetime-not-json-serializable
-        return json.dumps(dict, default=json_util.default)
+        return json.dumps(dict, default=Helpers._json_default)
 
     @staticmethod
     def df(t: Ticker) -> pd.DataFrame:

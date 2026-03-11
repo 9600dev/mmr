@@ -1,272 +1,371 @@
 #!/bin/bash
+#
+# start_mmr.sh — start MMR services as foreground child processes
+#
+# Normal mode: starts IB Gateway, waits for connectivity, launches all services
+# CLI mode:    verifies services are running, then launches mmr_cli
+#
 
-export JTS_DIR="/home/trader/mmr/third_party/Jts"
-export IBC_DIR="/home/trader/mmr/third_party/ibc"
-export MMR_DIR="/home/trader/mmr"
-if [[ -z "{TRADER_CONFIG}" ]]; then
-    export TRADER_CONFIG="${TRADER_CONFIG}"
-else
-    export TRADER_CONFIG="$MMR_DIR/configs/trader.yaml"
-fi
+set -e
 
-TMUX_START=true
+MMR_DIR="$(cd "$(dirname "$0")"; pwd)"
+TRADER_CONFIG="${TRADER_CONFIG:-$HOME/.config/mmr/trader.yaml}"
+TRADING_MODE=""
+CLI_MODE=false
 
-RED=`tput setaf 1`
-GREEN=`tput setaf 2`
-BLUE=`tput setaf 4`
-WHITE=`tput setaf 7`
-BLACK=`tput setaf 0`
-CYAN=`tput setaf 6`
-RESET=`tput sgr0`
+# PIDs of child service processes
+DATA_PID=""
+TRADER_PID=""
+STRATEGY_PID=""
 
-# parse arguments
-VALID_ARGS=$(getopt -o tlp --long no-tmux,live,paper -- "$@")
-eval set -- "$VALID_ARGS"
-while [ : ]; do
-  case "$1" in
-    -t | --no-tmux)
-        echo ""
-        echo "will not start with tmux session"
-        TMUX_START=false
-        shift
-        ;;
-    -p | --paper)
-        echo ""
-        echo "updating configurations in $TRADER_CONFIG and IBC config.ini to trade paper account"
+# ─── Argument Parsing ────────────────────────────────────────────────────────
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --paper)
         TRADING_MODE="paper"
         shift
         ;;
-    -l | --live)
-        echo ""
-        echo "updating configurations in $TRADER_CONFIG and IBC config.ini to trade live account"
+    --live)
         TRADING_MODE="live"
         shift
         ;;
-    --) shift;
-        break
+    --config)
+        TRADER_CONFIG="$2"
+        shift; shift
+        ;;
+    --cli)
+        CLI_MODE=true
+        shift
+        ;;
+    -h|--help)
+        echo "usage: start_mmr.sh [options]"
+        echo ""
+        echo "  --paper      Paper trading mode (default)"
+        echo "  --live       Live trading mode"
+        echo "  --config     Path to trader.yaml config file"
+        echo "  --cli        CLI-only mode: verify services are running, launch mmr_cli"
+        echo "  -h, --help   Show this help"
+        echo ""
+        echo "Normal mode starts IB Gateway container, waits for connectivity,"
+        echo "then launches data_service, trader_service, and strategy_service"
+        echo "as child processes with interleaved output."
+        echo ""
+        echo "CLI mode checks that services are already running, then launches"
+        echo "the interactive CLI."
+        echo ""
+        exit 0
+        ;;
+    *)
+        echo "Unknown option: $1"
+        echo "Run with --help for usage."
+        exit 1
         ;;
   esac
 done
 
-function parse_yaml {
-   local prefix=$2
-   local s='[[:space:]]*' w='[a-zA-Z0-9_]*' fs=$(echo @|tr @ '\034')
-   sed -ne "s|^\($s\):|\1|" \
-        -e "s|^\($s\)\($w\)$s:$s[\"']\(.*\)[\"']$s\$|\1$fs\2$fs\3|p" \
-        -e "s|^\($s\)\($w\)$s:$s\(.*\)$s\$|\1$fs\2$fs\3|p"  $1 |
-   awk -F$fs '{
-      indent = length($1)/2;
-      vname[indent] = $2;
-      for (i in vname) {if (i > indent) {delete vname[i]}}
-      if (length($3) > 0) {
-         vn=""; for (i=0; i<indent; i++) {vn=(vn)(vname[i])("_")}
-         printf("%s%s%s=\"%s\"\n", "'$prefix'",vn, $2, $3);
-      }
-   }'
-}
+# Default to paper if no mode specified
+if [ -z "$TRADING_MODE" ]; then
+    TRADING_MODE="paper"
+fi
 
-function rebuild_configuration () {
-    # deal with trading mode option
-    eval $(parse_yaml $TRADER_CONFIG "CONF_")
+export TRADING_MODE
 
-    echo ""
-    echo ""
-    echo "TWS trading mode configured in $TRADER_CONFIG is: $CONF_trading_mode"
-    echo "Hit enter to keep, or type 'paper' or 'live' to change: "
-    read TRADING_MODE;
+# ─── Config Setup ────────────────────────────────────────────────────────────
 
-    if [ -z "$TRADING_MODE" ]
-    then
-        echo "Using trading mode from $TRADER_CONFIG"
-        TRADING_MODE=$CONF_trading_mode
-    else
-        echo "Using trading mode from user input: $TRADING_MODE"
-        CONF_trading_mode=$TRADING_MODE
+if [ ! -d "$HOME/.config/mmr" ]; then
+    mkdir -p "$HOME/.config/mmr"
+    if [ -d "$MMR_DIR/configs" ]; then
+        cp -n "$MMR_DIR"/configs/*.yaml "$HOME/.config/mmr/" 2>/dev/null || true
+        echo "Copied default configs to ~/.config/mmr/"
     fi
+elif [ ! -f "$TRADER_CONFIG" ] && [ -d "$MMR_DIR/configs" ]; then
+    cp -n "$MMR_DIR"/configs/*.yaml "$HOME/.config/mmr/" 2>/dev/null || true
+fi
 
-    echo ""
-    echo -n "Please enter Interactive Brokers username for trading mode $TRADING_MODE: "
-    read USERNAME;
-
-    echo ""
-    echo -n "Please enter Interactive Brokers password for trading mode $TRADING_MODE: "
-    read -s PASSWORD;
-
-    echo ""
-    echo "Please enter Interactive Brokers 'account number' for trading mode $TRADING_MODE "
-    echo -n "(starts with either U or DU, and may also be set as an environment variable IB_ACCOUNT): "
-    read IB_ACCOUNT;
-
-    sed -i "s/^TWSUSERID=.*/TWSUSERID=$USERNAME/" $IBC_DIR/twsstart.sh
-    sed -i "s/^TWSPASSWORD=.*/TWSPASSWORD=$PASSWORD/" $IBC_DIR/twsstart.sh
-
-    sed -i "s/^IbLoginId=.*/IbLoginId=$USERNAME/" $IBC_DIR/config.ini
-    sed -i "s/^IbPassword=.*/IbPassword=$PASSWORD/" $IBC_DIR/config.ini
-
-    CONF_trading_mode="$TRADING_MODE"
-    sed -i "s/^TradingMode=.*/TradingMode=$CONF_trading_mode/" $IBC_DIR/config.ini
-    sed -i "s/^trading_mode:.*/trading_mode: $CONF_trading_mode/" $TRADER_CONFIG
-
-    sed -i "s/^ib_account:.*/ib_account: $IB_ACCOUNT/" $TRADER_CONFIG
-
-    # deal with paper/live ports
-    if [ "$TRADING_MODE" = "paper" ]; then
-        sed -i "s/^ib_server_port:.*/ib_server_port: 7497/" $TRADER_CONFIG
-    else
-        sed -i "s/^ib_server_port:.*/ib_server_port: 7496/" $TRADER_CONFIG
-    fi
-}
-
-
-echo ""
-echo " $(tput setab 2)${BLACK}--------------------------------------------${RESET}"
-echo " $(tput setab 2)${BLACK}|${RESET}          start_mmr.sh started            $(tput setab 2)${BLACK}|${RESET}"
-echo " $(tput setab 2)${BLACK}--------------------------------------------${RESET}"
-echo ""
-echo " $(tput setab 2)${BLACK}|${RESET}  This script configures and runs MMR. There are three configuration files that it may read or modify: "
-echo " $(tput setab 2)${BLACK}|${RESET}    * $TRADER_CONFIG "
-echo " $(tput setab 2)${BLACK}|${RESET}    * $IBC_DIR/config.ini "
-echo " $(tput setab 2)${BLACK}|${RESET}    * $JTS_DIR/jts.ini "
-echo ""
-echo ""
-
-set -e
-
-if [ -t 0 ] ; then
-    echo ""
-else
-    echo "You must start the container with 'interactive mode' enabled (docker run -it ...) or ssh into container"
+if [ ! -f "$TRADER_CONFIG" ]; then
+    echo "Error: config file not found: $TRADER_CONFIG"
     exit 1
 fi
 
-# check for --live and --paper arguments, and update config files if everything is already installed
-if [ ! "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ] && [ -f "$IBC_DIR/config.ini" ] && [ -f "$TRADER_CONFIG" ]; then
-    eval $(parse_yaml $TRADER_CONFIG "CONF_")
-    IBC_TRADING_MODE="$(grep -oP '(?<=TradingMode=).*$' $IBC_DIR/config.ini)"
+# ─── Docker Detection ──────────────────────────────────────────────────────
 
-    if [ -z "$TRADING_MODE" ]; then
-        TRADING_MODE="$CONF_trading_mode"
-    fi
-
-    if [ "$IBC_TRADING_MODE" != "$TRADING_MODE" ]; then
-        echo ""
-        echo "trading mode in $IBC_DIR/config.ini is $IBC_TRADING_MODE, but you passed '$TRADING_MODE' or it was configured as '$TRADING_MODE' in $TRADER_CONFIG"
-        echo "resetting account configuration"
-        echo ""
-
-        rebuild_configuration
-    fi
+# Source Docker env vars if running inside the MMR container
+if [ -f "$HOME/.mmr_env" ]; then
+    source "$HOME/.mmr_env"
 fi
 
-# check to see if we've installed IBC
-if [ ! -d $IBC_DIR ] || [ ! "$(ls $IBC_DIR)" ]; then
-    echo ""
-    echo "Can't find IBC in $IBC_DIR. Either a non-docker install, or it's misconfigured?"
-    echo "Let's try and download and install it anyway..."
-    echo ""
-    LATEST_IBC=$(curl -sL https://api.github.com/repos/IbcAlpha/IBC/releases/latest | jq -r ".tag_name")
-    mkdir -p $IBC_DIR
-    wget https://github.com/IbcAlpha/IBC/releases/download/$LATEST_IBC/IBCLinux-$LATEST_IBC.zip -P $IBC_DIR
-    cd $IBC_DIR
-    unzip IBCLinux-$LATEST_IBC.zip
-    chmod +x $IBC_DIR/*.sh
-    rm -f $IBC_DIR/IBCLinux-$LATEST_IBC.zip
-    echo ""
-    echo "Finished unzipping IBC"
-    echo ""
+IN_DOCKER=false
+if [ -f "$HOME/.mmr_env" ]; then
+    # .mmr_env is written by docker-entrypoint.sh — its presence means we're in the container
+    IN_DOCKER=true
 fi
 
-# deal with trading mode option
-eval $(parse_yaml $TRADER_CONFIG "CONF_")
-if [ -n "$CONF_trading_mode" ] && [ -f "$IBC_DIR/config.ini" ]; then
-    sed -i "s/^TradingMode=.*/TradingMode=$CONF_trading_mode/" $IBC_DIR/config.ini
-elif [ -f "$IBC_DIR/config.ini" ]; then
-    echo "trading mode is not set in $TRADER_CONFIG, defaulting to paper"
-    sed -i "s/^TradingMode=.*/TradingMode=paper/" $IBC_DIR/config.ini
-fi
-
-# check to see if we've installed tws
-if [ ! -d $JTS_DIR ] || [ ! "$(ls -I *.ini $JTS_DIR)" ]; then
-    # likely first time start
-    echo "Can't find TWS, first time running? Let's download, install and configure Interactive Brokers!"
-    echo ""
-
-    if [ ! -f $MMR_DIR/tws-latest-standalone-linux-x64.sh ]; then
-        rm -f $MMR_DIR/tws-latest-standalone-linux-x64.sh
-        wget https://download2.interactivebrokers.com/installers/tws/latest-standalone/tws-latest-standalone-linux-x64.sh -P $MMR_DIR/third_party
-        chmod +x $MMR_DIR/third_party/tws-latest-standalone-linux-x64.sh
-        chmod +x $MMR_DIR/scripts/installation/install_tws.sh
-    fi
-
-    echo ""
-    echo "Automating the installation of Trader Workstation to $JTS_DIR..."
-    echo ""
-    expect $MMR_DIR/scripts/installation/tws-install.exp $MMR_DIR $JTS_DIR
-
-    # move the default jts.ini settings over
-    # this prevents the 'do you want to use SSL dialog' from popping
-    cp $MMR_DIR/scripts/installation/jts.ini $JTS_DIR
-
-    if [ -f $MMR_DIR/third_party/tws-latest-standalone-linux-x64.sh ]; then
-        rm -f $MMR_DIR/third_party/tws-latest-standalone-linux-x64.sh
-    fi
-fi
-
-# now make sure the config files are properly set up
-if [ "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ]; then
-    echo ""
-    echo ""
-    echo "[Can't find a username set in $IBC_DIR/twsstart.sh, prompting for credentials]:"
-    echo ""
-
-    rebuild_configuration
-
-    # defaults for IBC config.ini, feel free to change these
-    sed -i "s/^ExistingSessionDetectedAction=.*/ExistingSessionDetectedAction=primaryoverride/" $IBC_DIR/config.ini
-    sed -i "s/^AcceptIncomingConnectionAction=.*/AcceptIncomingConnectionAction=accept/" $IBC_DIR/config.ini
-    sed -i "s/^AcceptNonBrokerageAccountWarning=.*/AcceptNonBrokerageAccountWarning=yes/" $IBC_DIR/config.ini
-    sed -i "s/^AutoRestartTime=.*/AutoRestartTime=\"01:00 AM\"/" $IBC_DIR/config.ini
-
-    TWS_VERSION=$(ls -m $JTS_DIR | head -n 1 | sed 's/,.*$//')
-    sed -i "s/^TWS_MAJOR_VRSN.*/TWS_MAJOR_VRSN=$TWS_VERSION/" $IBC_DIR/twsstart.sh
-
-    IBC_DIR_ESCAPED=${IBC_DIR//\//\\/}
-    JTS_DIR_ESCAPED=${JTS_DIR//\//\\/}
-
-    sed -i "s/^IBC_PATH=.*/IBC_PATH=$IBC_DIR_ESCAPED/" $IBC_DIR/twsstart.sh
-    sed -i "s/^TWS_PATH=.*/TWS_PATH=$JTS_DIR_ESCAPED/" $IBC_DIR/twsstart.sh
-    sed -i "s/^LOG_PATH=.*/LOG_PATH=$IBC_DIR_ESCAPED\/logs/" $IBC_DIR/twsstart.sh
-    sed -i "s/^IBC_INI=.*/IBC_INI=$IBC_DIR_ESCAPED\/config.ini/" $IBC_DIR/twsstart.sh
-
-    echo ""
-    echo ""
-    echo "Installed. Hit __enter__ to start the pycron tmux session, which starts all"
-    echo "trader services (Arctic DB, Redis, pycron, X windows, VNC Server, etc.)"
-    echo ""
-    echo ""
-    chmod +x $IBC_DIR/scripts/displaybannerandlaunch.sh
-    chmod +x $IBC_DIR/scripts/ibcstart.sh
-
-    read NULL;
-fi
-
-
-
-
-
-echo "Starting or attaching to tmux session to host pycron and start the command line interface."
-cd $MMR_DIR
-
-if [ ! "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ] && [ -z "$TMUX" ] && [ "$TMUX_START" = true ]; then
-    echo "starting new tmux session for mmr trader"
-    cd $MMR_DIR
-    tmux new-session -d -n pycron 'echo; echo "Ctrl-b + n [next window], Ctrl-b + p [previous window]"; echo; python3 pycron/pycron.py --config ./configs/pycron.yaml' \; new-window -d -n cli python3 cli.py \; new-window -d -n trader_service_log lnav logs/trader_service.log \; new-window -d -n strategy_service_log lnav logs/strategy_service.log \; attach
-elif [ ! "$(grep -Fx TWSUSERID= $IBC_DIR/twsstart.sh)" ]; then
-    echo ""
-    echo "starting pycron directly"
-    echo "> python3 pycron/pycron.py --config $MMR_DIR/configs/pycron.yaml"
-    echo ""
-    python3 pycron/pycron.py --config $MMR_DIR/configs/pycron.yaml
+# Use 'uv run python' locally, 'python3' in Docker (no uv installed)
+if [ "$IN_DOCKER" = true ]; then
+    PY="python3"
 else
-    echo "There doesn't seem to be a password set in $IBC_DIR/twsstart.sh, which may mean the installation script failed. Aborting."
+    PY="uv run python"
 fi
+
+# ─── Apply Trading Mode ─────────────────────────────────────────────────────
+
+# IB_SERVER_ADDRESS and IB_SERVER_PORT may already be set by .mmr_env (Docker)
+# Fall back to localhost defaults for non-Docker
+IB_HOST="${IB_SERVER_ADDRESS:-127.0.0.1}"
+
+if [ -n "$IB_SERVER_PORT" ]; then
+    IB_PORT="$IB_SERVER_PORT"
+elif [ "$TRADING_MODE" = "live" ]; then
+    IB_PORT=7496
+else
+    IB_PORT=7497
+fi
+
+# Update trader.yaml so Python config picks up the mode
+sed -i.bak "s/^trading_mode:.*/trading_mode: ${TRADING_MODE}/" "$TRADER_CONFIG"
+rm -f "${TRADER_CONFIG}.bak"
+
+# ─── Helper Functions ────────────────────────────────────────────────────────
+
+check_tcp_port() {
+    local host=$1 port=$2
+    timeout 1 bash -c "echo > /dev/tcp/$host/$port" 2>/dev/null
+}
+
+# ─── Signal Handling ─────────────────────────────────────────────────────────
+
+cleanup() {
+    echo ""
+    echo "Shutting down services..."
+    # Send SIGINT first (services handle it gracefully)
+    for pid in $STRATEGY_PID $TRADER_PID $DATA_PID; do
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill -INT "$pid" 2>/dev/null || true
+        fi
+    done
+    # Give them up to 10 seconds to exit gracefully
+    WAIT=0
+    while [ $WAIT -lt 10 ]; do
+        ALL_DONE=true
+        for pid in $STRATEGY_PID $TRADER_PID $DATA_PID; do
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                ALL_DONE=false
+            fi
+        done
+        if [ "$ALL_DONE" = true ]; then
+            break
+        fi
+        sleep 1
+        WAIT=$((WAIT + 1))
+    done
+    # Force kill anything still alive
+    for pid in $STRATEGY_PID $TRADER_PID $DATA_PID; do
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo "  Force killing PID $pid..."
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+    wait 2>/dev/null || true
+    echo "All services stopped."
+    exit 0
+}
+
+trap cleanup SIGINT SIGTERM
+
+# ─── CLI Mode ────────────────────────────────────────────────────────────────
+
+if [ "$CLI_MODE" = true ]; then
+    echo ""
+    echo "--------------------------------------------"
+    echo "  MMR CLI Mode"
+    echo "--------------------------------------------"
+    echo ""
+
+    # Check IB Gateway container is running
+    if command -v docker &>/dev/null && docker compose -f "$MMR_DIR/docker-compose.yml" ps ib-gateway 2>/dev/null | grep -q "running"; then
+        echo "  IB Gateway: running"
+    else
+        echo "  IB Gateway: not detected (container may not be running)"
+    fi
+
+    # Check services are reachable via TCP
+    SERVICES_OK=true
+    for port_info in "42001:trader_service" "42003:data_service" "42005:strategy_service"; do
+        port="${port_info%%:*}"
+        name="${port_info##*:}"
+        if check_tcp_port 127.0.0.1 "$port"; then
+            echo "  $name (port $port): reachable"
+        else
+            echo "  $name (port $port): NOT reachable"
+            SERVICES_OK=false
+        fi
+    done
+
+    if [ "$SERVICES_OK" = false ]; then
+        echo ""
+        echo "Error: one or more services are not running."
+        echo "Start services first with: ./start_mmr.sh"
+        exit 1
+    fi
+
+    echo ""
+    echo "All services reachable. Starting CLI..."
+    echo ""
+    cd "$MMR_DIR"
+    exec $PY -m trader.mmr_cli
+fi
+
+# ─── Normal Mode ─────────────────────────────────────────────────────────────
+
+echo ""
+echo "--------------------------------------------"
+echo "  MMR — Starting Services"
+echo "--------------------------------------------"
+echo ""
+echo "  Config:       $TRADER_CONFIG"
+echo "  Trading mode: $TRADING_MODE"
+echo "  IB host:      $IB_HOST"
+echo "  IB port:      $IB_PORT"
+if [ "$IN_DOCKER" = true ]; then
+    echo "  Environment:  Docker container"
+fi
+echo ""
+
+cd "$MMR_DIR"
+
+# ─── Start IB Gateway ───────────────────────────────────────────────────────
+
+if [ "$IN_DOCKER" = true ]; then
+    echo "Running inside Docker — IB Gateway is a sibling container, skipping local start."
+else
+    echo "Starting IB Gateway container..."
+    ./docker.sh -i
+fi
+
+# ─── Wait for IB Gateway Readiness ──────────────────────────────────────────
+
+# Phase 1: TCP port check
+echo ""
+echo "Waiting for IB Gateway TCP port ($IB_HOST:$IB_PORT)..."
+ELAPSED=0
+TIMEOUT=120
+while [ $ELAPSED -lt $TIMEOUT ]; do
+    if check_tcp_port "$IB_HOST" "$IB_PORT"; then
+        echo "  $IB_HOST:$IB_PORT is accepting connections (${ELAPSED}s)"
+        break
+    fi
+    sleep 2
+    ELAPSED=$((ELAPSED + 2))
+    if [ $((ELAPSED % 10)) -eq 0 ]; then
+        echo "  Still waiting... (${ELAPSED}s)"
+    fi
+done
+
+if [ $ELAPSED -ge $TIMEOUT ]; then
+    echo "Error: IB Gateway did not open port $IB_HOST:$IB_PORT within ${TIMEOUT}s"
+    echo "Check IB Gateway logs: docker compose logs ib-gateway"
+    exit 1
+fi
+
+# Phase 2: IB API handshake check (connect + managedAccounts)
+echo ""
+echo "Verifying IB Gateway API connectivity..."
+ELAPSED=0
+TIMEOUT=120
+while [ $ELAPSED -lt $TIMEOUT ]; do
+    HC_OUTPUT=$($PY -c "
+from ib_async import IB
+ib = IB()
+try:
+    ib.connect('$IB_HOST', $IB_PORT, clientId=199, timeout=5, readonly=True)
+    print('CONNECTED' if ib.isConnected() else 'FAILED')
+    ib.disconnect()
+except Exception as e:
+    print(f'FAILED: {e}')
+" 2>&1) || true
+    if echo "$HC_OUTPUT" | grep -q "CONNECTED"; then
+        echo "  IB Gateway API connection verified (${ELAPSED}s)"
+        break
+    fi
+    if [ $ELAPSED -eq 0 ]; then
+        echo "  First attempt: $HC_OUTPUT"
+    fi
+    sleep 5
+    ELAPSED=$((ELAPSED + 5))
+    if [ $((ELAPSED % 15)) -eq 0 ]; then
+        echo "  Still waiting... (${ELAPSED}s)"
+    fi
+done
+
+if [ $ELAPSED -ge $TIMEOUT ]; then
+    echo "Error: IB Gateway API not reachable after ${TIMEOUT}s"
+    echo "Port is open but IB may not be fully authenticated."
+    echo "Last output: $HC_OUTPUT"
+    exit 1
+fi
+
+# ─── Launch Services ─────────────────────────────────────────────────────────
+
+echo ""
+echo "Launching services..."
+echo ""
+
+# data_service
+echo "  Starting data_service..."
+$PY -m trader.data_service &
+DATA_PID=$!
+
+sleep 3
+
+# trader_service
+echo "  Starting trader_service..."
+$PY -m trader.trader_service &
+TRADER_PID=$!
+
+sleep 5
+
+# strategy_service
+echo "  Starting strategy_service..."
+$PY -m trader.strategy_service &
+STRATEGY_PID=$!
+
+echo ""
+echo "--------------------------------------------"
+echo "  All services running"
+echo "--------------------------------------------"
+echo "  data_service     PID: $DATA_PID"
+echo "  trader_service   PID: $TRADER_PID"
+echo "  strategy_service PID: $STRATEGY_PID"
+echo ""
+echo "  Press Ctrl-C to stop all services"
+echo "  Run './start_mmr.sh --cli' in another terminal for the CLI"
+echo ""
+
+# ─── Wait for Children ───────────────────────────────────────────────────────
+
+# Monitor child processes — report if any die unexpectedly
+while true; do
+    for pid_info in "$DATA_PID:data_service" "$TRADER_PID:trader_service" "$STRATEGY_PID:strategy_service"; do
+        pid="${pid_info%%:*}"
+        name="${pid_info##*:}"
+        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid" 2>/dev/null || true
+            EXIT_CODE=$?
+            echo ""
+            echo "WARNING: $name (PID $pid) exited with code $EXIT_CODE"
+            # Clear the PID so we don't report it again
+            case "$name" in
+                data_service)     DATA_PID="" ;;
+                trader_service)   TRADER_PID="" ;;
+                strategy_service) STRATEGY_PID="" ;;
+            esac
+            # If all services are dead, exit
+            if [ -z "$DATA_PID" ] && [ -z "$TRADER_PID" ] && [ -z "$STRATEGY_PID" ]; then
+                echo "All services have exited."
+                exit 1
+            fi
+        fi
+    done
+    sleep 2
+done

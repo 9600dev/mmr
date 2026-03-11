@@ -1,9 +1,7 @@
 import datetime
-import ib_insync as ibapi
+import ib_async as ibapi
 import asyncio
 import pandas as pd
-import rx
-import rx.disposable as disposable
 import datetime as dt
 import numpy as np
 import time
@@ -17,25 +15,18 @@ import functools
 from enum import Enum
 from typing import List, Dict, Tuple, Callable, Optional, Set, Generic, TypeVar, cast
 from asyncio import BaseEventLoop
-from rx import operators as ops
-from rx.subject import Subject
-from rx.scheduler import ThreadPoolScheduler, CatchScheduler, CurrentThreadScheduler
-from rx.scheduler.eventloop import AsyncIOThreadSafeScheduler
-from rx.core.typing import Observable, Observer, Disposable, Scheduler
-from ib_insync import Stock, IB, Contract, Forex, BarData, TagValue
-from ib_insync.util import df
-from ib_insync.ticker import Ticker
-from arctic import Arctic, TICK_STORE
-from arctic.tickstore.tickstore import TickStore
-from arctic.date import DateRange
+from ib_async import Stock, IB, Contract, Forex, BarData, TagValue
+from ib_async.util import df
+from ib_async.ticker import Ticker
+from trader.data.store import DateRange
+from trader.data.data_access import TickData
 from trader.common.listener_helpers import Helpers
 from eventkit import Event
 
 class HistoricalIB():
     def __init__(self, logger: logging.Logger):
         self.logger = logger
-        self.store: Arctic = Arctic('localhost')
-        self.library: TickStore
+        self.library: TickData = TickData('data/mmr.duckdb', 'Historical')
         self.ib = IB()
         self.connect()
         self.set_simulation_parameters(start_date=dt.datetime(2020, 8, 27), end_date=dt.datetime.now())
@@ -55,8 +46,6 @@ class HistoricalIB():
                 timeout: float = 4, readonly: bool = False, account: str = ''):
         self.logger.info('connect')
         self._createEvents()
-        self.store.initialize_library('Historical', lib_type=TICK_STORE)
-        self.library = self.store['Historical']
 
     def _createEvents(self):
         self.pendingTickersEvent = Event('pendingTickersEvent')
@@ -80,7 +69,7 @@ class HistoricalIB():
         return self.ib.sleep(value)
 
     def run(self):
-        asyncio.get_event_loop().run_until_complete(self.loop_worker())
+        asyncio.run(self.loop_worker())
         # return self.ib.run()
 
     async def loop_worker(self):

@@ -1,16 +1,7 @@
-import os
-import sys
-
-
-# in order to get __main__ to work, we follow: https://stackoverflow.com/questions/16981921/relative-imports-in-python-3
-PACKAGE_PARENT = '../..'
-SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
-sys.path.append(os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT)))
-
-from ib_insync.contract import Contract
-from ib_insync.objects import PnLSingle, PortfolioItem, Position
-from ib_insync.order import LimitOrder, MarketOrder, Order, StopLimitOrder, StopOrder, Trade
-from ib_insync.ticker import Ticker
+from ib_async.contract import Contract
+from ib_async.objects import PnLSingle, PortfolioItem, Position
+from ib_async.order import LimitOrder, MarketOrder, Order, StopLimitOrder, StopOrder, Trade
+from ib_async.ticker import Ticker
 from reactivex import pipe
 from reactivex.abc import DisposableBase, ObserverBase
 from reactivex.disposable import Disposable
@@ -24,10 +15,12 @@ from trader.common.exceptions import trader_exception, TraderConnectionException
 from trader.common.helpers import ListHelper
 from trader.common.logging_helper import get_callstack, log_method, setup_logging
 from trader.common.reactivex import AnonymousObserver, SuccessFail
-from trader.common.singleton import Singleton
+
 from trader.data.data_access import PortfolioSummary, SecurityDefinition, TickStorage
+from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
+from trader.trading.risk_gate import RiskGate, RiskLimits
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
 from trader.messaging.clientserver import MessageBusServer, MultithreadedTopicPubSub, RPCClient, RPCServer
 from trader.objects import Action, ContractOrderPair, ExecutorCondition
@@ -54,16 +47,14 @@ logging = setup_logging(module_name='trading_runtime')
 # talks about trades/orders being tied to clientId, which means we'll need to always have a consistent clientid
 
 
-class Trader(metaclass=Singleton):
+class Trader():
     def __init__(self,
                  ib_server_address: str,
                  ib_server_port: int,
                  trading_runtime_ib_client_id: int,
                  ib_account: str,
-                 arctic_server_address: str,
-                 arctic_universe_library: str,
-                 redis_server_address: str,
-                 redis_server_port: str,
+                 duckdb_path: str,
+                 universe_library: str,
                  zmq_pubsub_server_address: str,
                  zmq_pubsub_server_port: int,
                  zmq_rpc_server_address: str,
@@ -78,12 +69,10 @@ class Trader(metaclass=Singleton):
         self.ib_server_port = ib_server_port
         self.trading_runtime_ib_client_id = trading_runtime_ib_client_id
         self.ib_account = ib_account
-        self.arctic_server_address = arctic_server_address
-        self.arctic_universe_library = arctic_universe_library
+        self.duckdb_path = duckdb_path
+        self.universe_library = universe_library
         self.simulation: bool = simulation
         self.paper_trading = paper_trading
-        self.redis_server_address = redis_server_address
-        self.redis_server_port = redis_server_port
         self.zmq_pubsub_server_address = zmq_pubsub_server_address
         self.zmq_pubsub_server_port = zmq_pubsub_server_port
         self.zmq_rpc_server_address = zmq_rpc_server_address
@@ -93,7 +82,7 @@ class Trader(metaclass=Singleton):
         self.zmq_messagebus_server_address = zmq_messagebus_server_address
         self.zmq_messagebus_server_port = zmq_messagebus_server_port
 
-        # todo I think you can have up to 24 connections to TWS (and have multiple TWS instances running)
+        # todo you can have up to 24 connections to IB Gateway
         # so we need to take this from single client, to multiple client
         self.client: IBAIORx
         self.data: TickStorage
@@ -116,8 +105,7 @@ class Trader(metaclass=Singleton):
         # a list of all the universes of stocks we have registered
         self.market_data = 3
         self.zmq_rpc_server: RPCServer[bus.TraderServiceApi]
-        self.zmq_pubsub_server: MultithreadedTopicPubSub[Ticker]
-        self.zmq_dataclass_server: MultithreadedTopicPubSub[DataClassEvent]
+        self.zmq_pubsub_server: MultithreadedTopicPubSub
         self.zmq_pubsub_contracts: Dict[int, Observable[IBAIORxError]] = {}
         self.zmq_pubsub_contract_filters: Dict[int, bool] = {}
         self.zmq_pubsub_contract_subscription: DisposableBase = Disposable()
@@ -129,7 +117,7 @@ class Trader(metaclass=Singleton):
         self.last_connect_time: dt.datetime
         self.load_test: bool = False
         self.tws_client_ids: List[int] = [self.trading_runtime_ib_client_id, self.trading_runtime_ib_client_id + 1]
-        self.scheduler = AsyncIOThreadSafeScheduler(asyncio.get_event_loop())
+        self.scheduler: Optional[AsyncIOThreadSafeScheduler] = None
 
         self.disposables: List[DisposableBase] = []
 
@@ -143,31 +131,46 @@ class Trader(metaclass=Singleton):
                 ib_client_id=self.trading_runtime_ib_client_id,
                 ib_account=self.ib_account,
             )
-            self.data = TickStorage(self.arctic_server_address)
-            self.universe_accessor = UniverseAccessor(self.arctic_server_address, self.arctic_universe_library)
+            self.data = TickStorage(self.duckdb_path)
+            self.universe_accessor = UniverseAccessor(self.duckdb_path, self.universe_library)
             self.clear_portfolio_universe()
             self.contract_subscriptions = {}
             self.market_data_subscriptions = {}
             self.client.ib.connectedEvent += self.connected_event
             self.client.ib.disconnectedEvent += self.disconnected_event
             self.client.connect()
+
+            # Safety check: verify IB account matches expected trading mode.
+            # Paper accounts start with "D" (e.g. DU..., DF...), live accounts don't.
+            managed = self.client.ib.managedAccounts()
+            if managed:
+                active_account = self.ib_account if self.ib_account else managed[0]
+                is_paper_account = active_account.startswith('D')
+                if self.paper_trading and not is_paper_account:
+                    self.client.ib.disconnect()
+                    raise TraderConnectionException(
+                        f'SAFETY: trading_mode is "paper" but connected to live account "{active_account}". '
+                        f'Managed accounts: {managed}. Refusing to continue.'
+                    )
+                if not self.paper_trading and is_paper_account:
+                    self.client.ib.disconnect()
+                    raise TraderConnectionException(
+                        f'SAFETY: trading_mode is "live" but connected to paper account "{active_account}". '
+                        f'Managed accounts: {managed}. Check your config.'
+                    )
+                logging.info('trading mode verified: %s, account: %s', 'paper' if self.paper_trading else 'live', active_account)
+
             self.last_connect_time = dt.datetime.now()
             self.zmq_rpc_server = RPCServer[bus.TraderServiceApi](
                 instance=bus.TraderServiceApi(self),
                 zmq_rpc_server_address=self.zmq_rpc_server_address,
                 zmq_rpc_server_port=self.zmq_rpc_server_port
             )
-            self.zmq_pubsub_server = MultithreadedTopicPubSub[Ticker](
+            self.zmq_pubsub_server = MultithreadedTopicPubSub(
                 zmq_pubsub_server_address=self.zmq_pubsub_server_address,
                 zmq_pubsub_server_port=self.zmq_pubsub_server_port
             )
             self.zmq_pubsub_server.start()
-
-            self.zmq_dataclass_server = MultithreadedTopicPubSub[DataClassEvent](
-                zmq_pubsub_server_address=self.zmq_pubsub_server_address,
-                zmq_pubsub_server_port=self.zmq_pubsub_server_port + 1
-            )
-            self.zmq_dataclass_server.start()
 
             self.zmq_messagebus = MessageBusServer(self.zmq_messagebus_server_address, self.zmq_messagebus_server_port)
             self.run(self.zmq_messagebus.start())
@@ -183,6 +186,10 @@ class Trader(metaclass=Singleton):
                 timeout=6,
             )
 
+            # initialize event store and risk gate
+            self.event_store = EventStore(self.duckdb_path)
+            self.risk_gate = RiskGate(RiskLimits(), self.event_store)
+
             # fire up the executioner
             self.executioner = TradeExecutioner()
             self.executioner.connect(self)
@@ -190,6 +197,9 @@ class Trader(metaclass=Singleton):
             self.run(self.zmq_strategy_client.connect())
             self.run(self.zmq_rpc_server.serve())
 
+        except KeyboardInterrupt:
+            logging.info('connect() interrupted, shutting down')
+            raise
         except Exception as ex:
             raise trader_exception(self, TraderConnectionException, message='trading_runtime connect() exception', inner=ex)
 
@@ -233,7 +243,7 @@ class Trader(metaclass=Singleton):
 
     def __dataclass_server_put(self, message: DataClassEvent):
         # logging.debug('__dataclass_server_put: {}'.format(message))
-        self.zmq_dataclass_server.put(('dataclass', message))
+        self.zmq_pubsub_server.put(('dataclass', message))
 
     @log_method
     async def setup_subscriptions(self):
@@ -320,16 +330,52 @@ class Trader(metaclass=Singleton):
             self.book.on_next(o)
 
         # ensure that pnl is getting pumped out of zmq
+        if self.scheduler is None:
+            self.scheduler = AsyncIOThreadSafeScheduler(asyncio.get_running_loop())
         scheduled_disposable = self.scheduler.schedule_periodic(10, lambda x: self.pnl.post_all())
         self.disposables.append(scheduled_disposable)
 
     @log_method
     async def connected_event(self):
+        # Dispose old subscriptions before re-subscribing (happens on reconnect)
+        for disposable in self.disposables:
+            try:
+                disposable.dispose()
+            except Exception:
+                pass
+        self.disposables.clear()
+        self.pnl_subscriptions.clear()
+
         await self.setup_subscriptions()
 
     @log_method
     async def disconnected_event(self):
-        self.connect()
+        # Guard against multiple concurrent reconnection attempts
+        if hasattr(self, '_reconnecting') and self._reconnecting:
+            logging.debug('reconnection already in progress, skipping')
+            return
+
+        self._reconnecting = True
+        try:
+            max_retries = 10
+            for attempt in range(1, max_retries + 1):
+                delay = min(2 ** attempt, 120)  # exponential backoff, cap at 2 minutes
+                logging.warning(
+                    'IB Gateway disconnected — reconnection attempt %d/%d in %ds',
+                    attempt, max_retries, delay
+                )
+                await asyncio.sleep(delay)
+
+                try:
+                    await self.client.connect_async()
+                    logging.info('reconnected to IB Gateway on attempt %d', attempt)
+                    return  # connected_event will fire and call setup_subscriptions
+                except Exception as ex:
+                    logging.error('reconnection attempt %d failed: %s', attempt, ex)
+
+            logging.critical('failed to reconnect to IB Gateway after %d attempts', max_retries)
+        finally:
+            self._reconnecting = False
 
     @log_method
     async def enable_strategy(self, name: str, paper: bool) -> SuccessFail[StrategyState]:
@@ -361,6 +407,14 @@ class Trader(metaclass=Singleton):
         universe = self.universe_accessor.get('portfolio')
         universe.security_definitions.clear()
         self.universe_accessor.update(universe)
+
+    @log_method
+    async def resolve_contract(self, contract: Contract) -> List[SecurityDefinition]:
+        """Resolve a partial Contract (e.g. with strike/expiry/right) to full SecurityDefinitions via IB."""
+        contract_details = await self.client.ib.reqContractDetailsAsync(contract)
+        if contract_details:
+            return [SecurityDefinition.from_contract_details(cd) for cd in contract_details]
+        return []
 
     @log_method
     async def resolve_symbol(
@@ -402,9 +456,15 @@ class Trader(metaclass=Singleton):
         if len(result) > 0:
             return result
 
-        contract_details = await self.client.ib.reqContractDetailsAsync(
-            Contract(symbol=str(symbol), exchange='SMART')
-        )
+        if sec_type == 'CASH':
+            pair = str(symbol).replace('/', '').replace('C:', '').upper()
+            base = pair[:3] if len(pair) == 6 else pair
+            quote_ccy = pair[3:] if len(pair) == 6 else 'USD'
+            fallback_contract = Contract(symbol=base, secType='CASH', exchange='IDEALPRO', currency=quote_ccy)
+        else:
+            fallback_contract = Contract(symbol=str(symbol), exchange='SMART', secType=sec_type or 'STK')
+
+        contract_details = await self.client.ib.reqContractDetailsAsync(fallback_contract)
 
         if contract_details:
             return [SecurityDefinition.from_contract_details(contract_details[0])]
@@ -471,7 +531,7 @@ class Trader(metaclass=Singleton):
     @log_method
     def update_portfolio_universe(self, portfolio_item: PortfolioItem):
         """
-        Grabs the current portfolio from TWS and adds a new version to the 'portfolio' table.
+        Grabs the current portfolio from IB Gateway and adds a new version to the 'portfolio' table.
         """
         universe = self.universe_accessor.get('portfolio')
         if not ListHelper.isin(
@@ -545,6 +605,9 @@ class Trader(metaclass=Singleton):
         else:
             return SuccessFail.success()
 
+    async def scanner_data(self, **kwargs) -> list[dict]:
+        return await self.client.scanner_data(**kwargs)
+
     def is_ib_connected(self) -> bool:
         return self.client.ib.isConnected()
 
@@ -557,7 +620,7 @@ class Trader(metaclass=Singleton):
         # todo lots of work here
         status = {
             'ib_connected': self.client.ib.isConnected(),
-            'arctic_connected': self.data is not None
+            'storage_connected': self.data is not None
         }
         return status
 

@@ -1,15 +1,32 @@
 *.pyc
+__pycache__/
+*.egg-info/
 .mypy_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+.vscode/
+.devcontainer/
+
 *.csv
 *.tar*
-.devcontainer
-!mongodb.conf
-__pycache__
-.ipynb_checkpoints
-.pytest_cache/
-anbox-work/*
-.vscode
+
 scratch/
 .python-version
-.devcontainer/
 .trader.history
+.env
+anbox-work/
+
+# Runtime directories
+/data/
+/logs/
+
+# Local config overrides
+configs/local_*
+
+# Model artifacts
+models/*
+!models/.gitkeep
+
+# Notebook outputs (keep specific notebooks)
+notebooks/*
+!notebooks/modeling_cash_flows.ipynb

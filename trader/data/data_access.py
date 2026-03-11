@@ -1,15 +1,14 @@
-from arctic import Arctic, TICK_STORE, VERSION_STORE
-from arctic.date import DateRange
-from arctic.exceptions import NoDataFoundException, OverlappingDataException
 from dataclasses import dataclass
 from dateutil.tz import gettz
 from dateutil.tz.tz import tzfile
 from durations import Duration
 from exchange_calendars import ExchangeCalendar
-from ib_insync.contract import Contract, ContractDetails
+from ib_async.contract import Contract, ContractDetails
 from pandas.core.base import PandasObject
 from trader.common.helpers import daily_close, daily_open, dateify, market_hours, symbol_to_contract
 from trader.common.logging_helper import setup_logging
+from trader.data.store import DateRange
+from trader.data.duckdb_store import DuckDBDataStore, DuckDBObjectStore, _default_db_path
 from trader.objects import BarSize
 from typing import cast, Generic, List, NamedTuple, Optional, Set, Tuple, TypeVar, Union
 
@@ -330,33 +329,34 @@ T = TypeVar('T')
 
 class Data():
     def __init__(self,
-                 arctic_server_address: str,
-                 arctic_library: str,
-                 lib_type: str,
+                 duckdb_path: str,
+                 library_name: str,
+                 lib_type: str = '',
                  timezone: str = 'America/New_York'):
-        self.arctic_server_address = arctic_server_address
-        self.arctic_library = arctic_library
-        self.store = Arctic(self.arctic_server_address)
-        self.store.initialize_library(self.arctic_library, lib_type=lib_type)
-        # deliberately duck-typed because VersionStore and TickStore share no heirarchy
-        self.library = self.store[self.arctic_library]
+        self.duckdb_path = duckdb_path
+        self.library_name = library_name
+        if duckdb_path and (
+            duckdb_path.endswith('.duckdb')
+            or duckdb_path.startswith('/')
+            or duckdb_path.startswith('~')
+        ):
+            db_path = duckdb_path
+        else:
+            db_path = _default_db_path()
+        self.library = DuckDBDataStore(db_path)
         self.zone: tzfile = gettz(timezone)  # type: ignore
 
-        # filtering arctic version mismatches with pymongo etc.
-        import warnings
-        warnings.filterwarnings(
-            'ignore',
-            message='The zone attribute is specific to pytz\'s interface; please migrate to a new time zone provider. For more details on how to do so, see https://pytz-deprecation-shim.readthedocs.io/en/latest/migration.html'
-        )
-
-    # arctic stupidly returns the read data in the users local timezone
-    # todo:// patch this up properly in the arctic source
     def _fix_df_timezone(self, data_frame: pd.DataFrame):
-        data_frame.index = data_frame.index.tz_convert(self.zone)  # type: ignore
+        if data_frame.empty:
+            return data_frame
+        if data_frame.index.tz is not None:
+            data_frame.index = data_frame.index.tz_convert(self.zone)  # type: ignore
         return data_frame
 
-    def _to_symbol(self, contract: Union[Contract, SecurityDefinition, int]) -> str:
-        if type(contract) == int:
+    def _to_symbol(self, contract: Union[Contract, SecurityDefinition, int, str]) -> str:
+        if type(contract) is str:
+            return contract
+        elif type(contract) == int:
             return str(contract)
         elif type(contract) is Contract:
             return str(cast(Contract, contract).conId)
@@ -373,10 +373,10 @@ class Data():
     def read(self,
              contract: Union[Contract, SecurityDefinition, int],
              date_range: DateRange = DateRange(dt.datetime(1970, 1, 1), dt.datetime.now())) -> pd.DataFrame:
-        try:
-            return self._fix_df_timezone(self.library.read(self._to_symbol(contract), date_range))
-        except NoDataFoundException:
+        result = self.library.read(self._to_symbol(contract), start=date_range.start, end=date_range.end)
+        if result.empty:
             return pd.DataFrame()
+        return self._fix_df_timezone(result)
 
     def write(self,
               contract: Union[Contract, SecurityDefinition, int],
@@ -393,42 +393,69 @@ class Data():
 
 class DictData(Data, Generic[T]):
     def __init__(self,
-                 arctic_server_address: str,
-                 arctic_library: str):
-        if not arctic_library:
-            raise ValueError('arctic_library must be supplied')
-        super().__init__(arctic_server_address=arctic_server_address,
-                         arctic_library=arctic_library,
-                         lib_type=VERSION_STORE)
+                 duckdb_path: str,
+                 library_name: str):
+        if not library_name:
+            raise ValueError('library_name must be supplied')
+        self.duckdb_path = duckdb_path
+        self.library_name = library_name
+        if duckdb_path and (
+            duckdb_path.endswith('.duckdb')
+            or duckdb_path.startswith('/')
+            or duckdb_path.startswith('~')
+        ):
+            db_path = duckdb_path
+        else:
+            db_path = _default_db_path()
+        self.zone: tzfile = gettz('America/New_York')  # type: ignore
+        self.object_store = DuckDBObjectStore(db_path)
+
+    def _to_symbol(self, contract: Union[Contract, SecurityDefinition, int, str]) -> str:
+        if type(contract) is str:
+            return contract
+        elif type(contract) == int:
+            return str(contract)
+        elif type(contract) is Contract:
+            return str(cast(Contract, contract).conId)
+        elif type(contract) is SecurityDefinition:
+            definition = cast(SecurityDefinition, contract)
+            return str(definition.conId)
+        else:
+            raise ValueError('cast not supported')
 
     def read(self,
              contract: Union[Contract, SecurityDefinition, int],
              date_range: DateRange = DateRange(dt.datetime(1970, 1, 1), dt.datetime.now())) -> Optional[T]:
-        try:
-            return self.library.read(self._to_symbol(contract)).data
-        except NoDataFoundException:
-            return None
+        key = self.library_name + '/' + self._to_symbol(contract)
+        return self.object_store.read(key)
 
     def write(self, contract: Union[Contract, SecurityDefinition, int], data: T) -> None:
         logging.info('DictData writing contract {}'.format(contract))
-        self.library.write(self._to_symbol(contract), data, prune_previous_version=True)
+        key = self.library_name + '/' + self._to_symbol(contract)
+        self.object_store.write(key, data)
 
     def delete(self, contract: Union[Contract, SecurityDefinition, int]) -> None:
         logging.info('DictData deleting contract {}'.format(contract))
-        self.library.delete(self._to_symbol(contract))
+        key = self.library_name + '/' + self._to_symbol(contract)
+        self.object_store.delete(key)
+
+    def list_symbols(self) -> List[str]:
+        prefix = self.library_name + '/'
+        all_keys = self.object_store.list_symbols()
+        return [k[len(prefix):] for k in all_keys if k.startswith(prefix)]
 
 
 class TickData(Data):
     def __init__(self,
-                 arctic_server_address: str,
-                 arctic_library: str):
-        super().__init__(arctic_server_address=arctic_server_address,
-                         arctic_library=arctic_library,
-                         lib_type=TICK_STORE)
+                 duckdb_path: str,
+                 library_name: str):
+        super().__init__(duckdb_path=duckdb_path,
+                         library_name=library_name,
+                         lib_type='')
         PandasObject.daily_open = daily_open  # type: ignore
         PandasObject.daily_close = daily_close  # type: ignore
         PandasObject.market_hours = market_hours  # type: ignore
-        logging.info('initializing TickData {} {}'.format(arctic_server_address, arctic_library))
+        logging.info('initializing TickData {} {}'.format(duckdb_path, library_name))
 
     def get_schema(self) -> Set[str]:
         return {'date', 'open', 'high', 'low', 'close', 'volume', 'average', 'bar_count', 'bar_size'}
@@ -437,8 +464,12 @@ class TickData(Data):
         if type(contract) is int:
             contract = Contract(conId=cast(int, contract))
         contract = cast(Contract, contract)
-        min_date = dateify(self.library.min_date(symbol=self._to_symbol(contract)), timezone=self.zone)
-        max_date = dateify(self.library.max_date(symbol=self._to_symbol(contract)), timezone=self.zone)
+        try:
+            min_date = dateify(self.library.min_date(symbol=self._to_symbol(contract)), timezone=self.zone)
+            max_date = dateify(self.library.max_date(symbol=self._to_symbol(contract)), timezone=self.zone)
+        except ValueError:
+            return (dateify(dt.datetime(1970, 1, 1), timezone=self.zone),
+                    dateify(dt.datetime(1970, 1, 1), timezone=self.zone))
         return (min_date, max_date)
 
     def summary(
@@ -449,8 +480,14 @@ class TickData(Data):
             contract = Contract(conId=cast(int, contract))
 
         contract = cast(Contract, contract)
-        min_date = self.library.min_date(symbol=self._to_symbol(contract))
-        max_date = self.library.max_date(symbol=self._to_symbol(contract))
+        try:
+            min_date = self.library.min_date(symbol=self._to_symbol(contract))
+            max_date = self.library.max_date(symbol=self._to_symbol(contract))
+        except ValueError:
+            empty_series = pd.Series(dtype='float64')
+            return (dateify(dt.datetime(1970, 1, 1), self.zone),
+                    dateify(dt.datetime(1970, 1, 1), self.zone),
+                    empty_series, empty_series)
         min_date_range = DateRange(min_date, min_date)
         max_date_range = DateRange(max_date, max_date + dt.timedelta(days=1))
 
@@ -464,26 +501,25 @@ class TickData(Data):
         contract: Union[Contract, SecurityDefinition, int],
         data_frame: pd.DataFrame
     ):
-        try:
-            super().write(contract, data_frame)
-        except OverlappingDataException:
-            # grab all the existing data
-            # merge it with the data_frame
-            # then rewrite it
-            logging.debug('OverlappingDataException, re-writing dataframe')
-            existing_data = self.read(contract)
-            temp_df = existing_data.append(data_frame)
-            result = cast(pd.DataFrame, temp_df[~temp_df.index.duplicated(keep='first')])
-            result.sort_index(inplace=True)
-            self.delete(contract=contract)
+        # DuckDB store handles upserts natively, so overlapping data
+        # is resolved automatically.  We merge with existing data to
+        # maintain dedup semantics when merging overlapping data.
+        existing_data = self.read(contract)
+        if existing_data.empty:
+            self.write(contract, data_frame)
+            return
 
-            # todo this probably shouldn't go here -- there's a bug upstream
-            # somewhere which kicks out a 'Timestamp' object has no attribute 'astype' exception
-            try:
-                result.index = pd.to_datetime(result.index)  # type: ignore
-            except ValueError as ve:
-                logging.debug('pd.to_datetime failed with {}'.format(ve))
-            self.write(contract=contract, data_frame=result)  # type: ignore
+        temp_df = pd.concat([existing_data, data_frame])
+        result = cast(pd.DataFrame, temp_df[~temp_df.index.duplicated(keep='first')])
+        result.sort_index(inplace=True)
+
+        # todo this probably shouldn't go here -- there's a bug upstream
+        # somewhere which kicks out a 'Timestamp' object has no attribute 'astype' exception
+        try:
+            result.index = pd.to_datetime(result.index)  # type: ignore
+        except ValueError as ve:
+            logging.debug('pd.to_datetime failed with {}'.format(ve))
+        self.write(contract=contract, data_frame=result)  # type: ignore
 
     def read(self,
              contract: Union[Contract, SecurityDefinition, int],
@@ -517,14 +553,27 @@ class TickData(Data):
         if period or date_range:
             actual_date_range = self.get_date_range(period, date_range)
         else:
-            actual_date_range = DateRange(self.library.min_date(symbol=self._to_symbol(contract)),
-                                          self.library.max_date(symbol=self._to_symbol(contract)))
+            try:
+                actual_date_range = DateRange(
+                    self.library.min_date(symbol=self._to_symbol(contract)),
+                    self.library.max_date(symbol=self._to_symbol(contract))
+                )
+            except ValueError:
+                return pd.DataFrame()
 
-        try:
-            df = self._fix_df_timezone(self.library.read(symbol=self._to_symbol(contract),
-                                                         date_range=actual_date_range))
-        except NoDataFoundException:
+        # Filter by bar_size (library_name) so that when multiple bar sizes
+        # share the same DuckDB table, only the relevant rows are returned.
+        bar_size_filter = self.library_name if self.library_name else None
+        result = self.library.read(
+            symbol=self._to_symbol(contract),
+            start=actual_date_range.start,
+            end=actual_date_range.end,
+            bar_size=bar_size_filter,
+        )
+        if result.empty:
             return pd.DataFrame()
+
+        df = self._fix_df_timezone(result)
 
         if pd_offset:
             return df.resample(pd_offset).last()  # type: ignore
@@ -542,11 +591,8 @@ class TickData(Data):
                     contract: Union[Contract, SecurityDefinition, int],
                     date_time: dt.datetime) -> bool:
         date_range = DateRange(date_time, date_time + dt.timedelta(days=1))
-        try:
-            result = self.get_data(contract, date_range=date_range)
-            return len(result) > 0
-        except NoDataFoundException:
-            return False
+        result = self.get_data(contract, date_range=date_range)
+        return len(result) > 0
 
     def missing(self,
                 contract: Union[Contract, SecurityDefinition, int],
@@ -555,15 +601,18 @@ class TickData(Data):
                 period: Optional[str] = None,
                 date_range: Optional[DateRange] = None) -> List[DateRange]:
         if not pd_offset and not period and not date_range:
-            date_range = DateRange(dateify(self.library.min_date(symbol=self._to_symbol(contract))),
-                                   dateify() - dt.timedelta(days=1))
+            try:
+                date_range = DateRange(dateify(self.library.min_date(symbol=self._to_symbol(contract))),
+                                       dateify() - dt.timedelta(days=1))
+            except ValueError:
+                return []
 
         df = self.get_data(contract, pd_offset, period, date_range)
 
         no_data_dates: List[dt.date] = []
 
         dates: List[dt.date] = []
-        sessions = exchange_calendar.all_sessions.date  # type: ignore
+        sessions = exchange_calendar.sessions.date  # type: ignore
         # no data case
         if len(df) == 0:
             dates = no_data_dates
@@ -607,24 +656,41 @@ class TickData(Data):
 class TickStorage():
     def __init__(
         self,
-        arctic_server_address: str
+        duckdb_path: str
     ):
-        self.arctic_server_address = arctic_server_address
-        self.store = Arctic(self.arctic_server_address)
+        self.duckdb_path = duckdb_path
 
     def list_libraries(self) -> List[str]:
-        libraries = self.store.list_libraries(1)
-        return [x for x in libraries if x in BarSize.bar_sizes()]
+        # In the DuckDB world, "libraries" are just bar_size strings that have
+        # been used as prefixes.  We look for symbols in the tick_data table
+        # that have an associated bar_size value.
+        if self.duckdb_path and (
+            self.duckdb_path.endswith('.duckdb')
+            or self.duckdb_path.startswith('/')
+            or self.duckdb_path.startswith('~')
+        ):
+            db_path = self.duckdb_path
+        else:
+            db_path = _default_db_path()
+        store = DuckDBDataStore(db_path)
+        try:
+            result = store._db.execute(
+                f"SELECT DISTINCT bar_size FROM {store.TABLE_NAME} WHERE bar_size IS NOT NULL ORDER BY bar_size"
+            )
+            rows = result.fetchall()
+            all_bar_sizes = [row[0] for row in rows]
+        except Exception:
+            all_bar_sizes = []
+        return [x for x in all_bar_sizes if x in BarSize.bar_sizes()]
 
     def list_libraries_barsize(self) -> List[BarSize]:
-        libraries = self.store.list_libraries(1)
         return [BarSize.parse_str(x) for x in self.list_libraries()]
 
     def get_tickdata(self, bar_size: BarSize):
         # todo: sharding this by bar_size doesn't seem right, but
         # neither does universe_name + bar_size
         library_name = TickStorage.history_to_library_hash(bar_size)
-        library = TickData(self.arctic_server_address, library_name)
+        library = TickData(self.duckdb_path, library_name)
         return library
 
     def read(

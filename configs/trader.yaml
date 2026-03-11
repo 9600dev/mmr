@@ -1,29 +1,40 @@
-root_directory: /home/trader/mmr
-config_file: /home/trader/mmr/configs/trader.yaml
-pycron_config_file: /home/trader/mmr/configs/pycron.yaml
-strategy_config_file: /home/trader/mmr/configs/strategy_runtime.yaml
-logfile: logs/trader.log
-strategies_directory: /home/trader/mmr/strategies
-trading_mode: live
-# your IB account can be set here, or via environment variable "IB_ACCOUNT"
-# if you're trading your paper account, you'll need to switch trading_mode: paper,
-# and set your paper account number here
-ib_account:
+# MMR Configuration
+# User configs live in ~/.config/mmr/ (copied from bundled configs on first run)
+# Environment variables override these values (uppercase param name)
+
+root_directory: .
+config_file: ~/.config/mmr/trader.yaml
+pycron_config_file: ~/.config/mmr/pycron.yaml
+strategy_config_file: ~/.config/mmr/strategy_runtime.yaml
+logfile: ~/.local/share/mmr/logs/trader.log
+strategies_directory: strategies
+
+# Trading mode: 'paper' or 'live'
+# This selects which account and port are used.
+trading_mode: paper
+
+# Interactive Brokers connection
+# Set both accounts — trading_mode picks the active one.
+# IB_ACCOUNT env var overrides the auto-selected account.
+# IB_SERVER_PORT env var overrides the auto-selected port.
 ib_server_address: 127.0.0.1
-ib_server_port: 7496
+ib_paper_account: DUM422056
+ib_live_account: ''
+ib_paper_port: 7497
+ib_live_port: 7496
 trading_runtime_ib_client_id: 5
 strategy_runtime_ib_client_id: 7
-# your polygon.io account API key can be set here, or via environment variable
-# "POLYGON_API_KEY". The polygon.io account isn't necessary to run mmr
-polygon_api_key:
-arctic_server_address: 127.0.0.1
-arctic_universe_library: 'Universes'
-arctic_configuration_library: 'Configuration'
-arctic_financials_library: 'Financials'
-redis_server_address: 127.0.0.1
-redis_server_port: 6379
+
+# DuckDB storage
+# Path can be absolute or relative to project root
+duckdb_path: data/mmr.duckdb
+universe_library: 'Universes'
+
+# Pycron process manager
 pycron_server_address: 127.0.0.1
 pycron_server_port: 8081
+
+# ZeroMQ messaging
 zmq_rpc_server_address: tcp://127.0.0.1
 zmq_rpc_server_port: 42001
 zmq_pubsub_server_address: tcp://127.0.0.1
@@ -32,3 +43,10 @@ zmq_strategy_rpc_server_address: tcp://127.0.0.1
 zmq_strategy_rpc_server_port: 42005
 zmq_messagebus_server_address: tcp://127.0.0.1
 zmq_messagebus_server_port: 42006
+zmq_data_rpc_server_address: tcp://127.0.0.1
+zmq_data_rpc_server_port: 42003
+
+# Massive.com (formerly Polygon.io)
+massive_api_key: ''
+massive_feed: stocks
+massive_delayed: false
