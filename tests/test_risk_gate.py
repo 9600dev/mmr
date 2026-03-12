@@ -24,7 +24,7 @@ class TestRiskGate:
     def test_reject_max_open_orders(self, risk_gate):
         result = risk_gate.evaluate(
             _make_signal(),
-            open_order_count=10,
+            open_order_count=15,
         )
         assert result.approved is False
         assert "max open orders" in result.reason
@@ -70,3 +70,54 @@ class TestRiskGate:
 
         result = gate.evaluate(_make_signal(), daily_pnl=-501.0)
         assert result.approved is False
+
+
+class TestLeverageCheck:
+    def test_check_leverage_within_limit(self, risk_gate):
+        """0.5x leverage with default 1.0x limit → approved."""
+        margin_impact = {'initMarginAfter': 50000, 'equityWithLoanAfter': 95000}
+        result = risk_gate.check_leverage(margin_impact, net_liquidation=100000)
+        assert result.approved is True
+
+    def test_check_leverage_exceeds_limit(self, risk_gate):
+        """1.5x leverage with default 1.0x limit → rejected."""
+        margin_impact = {'initMarginAfter': 150000, 'equityWithLoanAfter': 90000}
+        result = risk_gate.check_leverage(margin_impact, net_liquidation=100000)
+        assert result.approved is False
+        assert 'leverage' in result.reason
+        assert '1.50x' in result.reason
+        assert '1.00x' in result.reason
+
+    def test_check_leverage_custom_limit(self, event_store):
+        """1.5x leverage with 2.0x limit → approved."""
+        gate = RiskGate(
+            limits=RiskLimits(max_leverage=2.0),
+            event_store=event_store,
+        )
+        # equity=180k, margin=150k, net_liq=100k → cushion=(180k-150k)/100k=0.30 > 0.10
+        margin_impact = {'initMarginAfter': 150000, 'equityWithLoanAfter': 180000}
+        result = gate.check_leverage(margin_impact, net_liquidation=100000)
+        assert result.approved is True
+
+    def test_check_leverage_cushion_too_low(self, event_store):
+        """Margin cushion below minimum → rejected."""
+        gate = RiskGate(
+            limits=RiskLimits(max_leverage=3.0, min_margin_cushion=0.20),
+            event_store=event_store,
+        )
+        # equity=110k, margin=100k, net_liq=100k → cushion = (110k-100k)/100k = 0.10 < 0.20
+        margin_impact = {'initMarginAfter': 100000, 'equityWithLoanAfter': 110000}
+        result = gate.check_leverage(margin_impact, net_liquidation=100000)
+        assert result.approved is False
+        assert 'cushion' in result.reason
+
+    def test_check_leverage_no_net_liq(self, risk_gate):
+        """Zero net liquidation → skip check, approved."""
+        margin_impact = {'initMarginAfter': 150000, 'equityWithLoanAfter': 90000}
+        result = risk_gate.check_leverage(margin_impact, net_liquidation=0)
+        assert result.approved is True
+
+    def test_check_leverage_empty_impact(self, risk_gate):
+        """Empty margin impact dict → approved (no data to check)."""
+        result = risk_gate.check_leverage({}, net_liquidation=100000)
+        assert result.approved is True

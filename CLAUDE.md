@@ -90,6 +90,7 @@ mmr/
 │   │   ├── duckdb_store.py    # DuckDB implementations (DuckDBDataStore, DuckDBObjectStore)
 │   │   ├── data_access.py     # TickData, DictData, TickStorage, SecurityDefinition
 │   │   ├── event_store.py     # EventStore — trading event audit trail (DuckDB)
+│   │   ├── proposal_store.py  # ProposalStore — trade proposal storage (DuckDB)
 │   │   ├── universe.py        # Universe, UniverseAccessor
 │   │   └── market_data.py     # MarketData, SecurityDataStream
 │   ├── listeners/
@@ -109,7 +110,8 @@ mmr/
 │   │   ├── portfolio.py       # Portfolio positions
 │   │   ├── order_validator.py
 │   │   ├── risk_gate.py       # RiskGate — pre-trade risk limit enforcement
-│   │   └── strategy.py        # Strategy ABC, Signal, StrategyConfig, StrategyContext
+│   │   ├── strategy.py        # Strategy ABC, Signal, StrategyConfig, StrategyContext
+│   │   └── proposal.py        # TradeProposal, ExecutionSpec — propose/review/approve pipeline
 │   ├── strategy/
 │   │   └── strategy_runtime.py # StrategyRuntime (loads/runs strategies)
 │   ├── simulation/
@@ -143,6 +145,8 @@ mmr/
 │   ├── test_duckdb_store.py
 │   ├── test_event_store.py
 │   ├── test_portfolio.py
+│   ├── test_proposal.py
+│   ├── test_proposal_store.py
 │   ├── test_risk_gate.py
 │   ├── test_serialization.py
 │   └── test_strategy.py
@@ -267,6 +271,31 @@ scan hot-volume                  # Hot by volume change
 scan --scan-code HIGH_OPT_VOLUME # Raw IB scanner code
 scan gainers --above-price 10 --num 30  # Filtered
 scan --instrument ETF --location STK.US  # ETFs
+ideas                                        # Momentum scan (default preset)
+ideas gap-up                                 # Gap-up preset
+ideas mean-reversion                         # Mean-reversion preset
+ideas breakout                               # Breakout preset
+ideas gap-down                               # Gap-down preset
+ideas volatile                               # Volatile/scalping preset
+ideas momentum --tickers AAPL MSFT AMD NVDA  # Scan specific tickers
+ideas momentum --universe sp500              # Scan a universe
+ideas gap-up --min-price 10                  # Override preset filter
+ideas volatile --num 25                      # Top 25 results
+ideas --presets                              # List all presets
+ideas momentum --detail                      # Show all columns incl. indicators
+ideas momentum --fundamentals                # Enrich with financial ratios (PE, D/E, ROE, etc.)
+ideas momentum --news                        # Enrich with latest news headline + sentiment
+ideas mean-reversion --news --fundamentals   # Full picture: technicals + fundamentals + news
+ideas gap-up -t AAPL MSFT --fundamentals     # Specific tickers with fundamentals
+propose AMD BUY --market --quantity 100 --bracket 180 150 --reasoning "Breakout above resistance"
+propose AMD BUY --limit 165 --amount 5000 --trailing-stop-pct 2.0 --tif GTC
+propose AAPL SELL --market --quantity 50 --stop-loss 140
+proposals                                    # List pending proposals
+proposals --all                              # All statuses
+proposals --status EXECUTED                  # Filter by status
+proposals show 3                             # Full detail for proposal #3
+approve 3                                    # Execute proposal #3 (requires trader_service)
+reject 3 --reason "Changed thesis"           # Reject proposal #3
 forex snapshot EURUSD                        # Forex snapshot via IB (default)
 forex snapshot EURUSD --source massive       # Forex snapshot via Massive
 forex quote EUR USD                          # Last bid/ask via IB (default)
@@ -406,17 +435,19 @@ mmr --json portfolio                                       # Requires trader_ser
 - `strategies create`, `strategies deploy`, `strategies undeploy`
 - `strategies signals`, `strategies backtest`
 - `universe list`, `universe show`, `universe create`, `universe delete`, `universe remove`, `universe import`
+- `propose`, `proposals`, `reject`
 
 **Requires trader_service**:
 - `portfolio`, `positions`, `orders`, `trades`, `account`, `status`
 - `buy`, `sell`, `cancel`, `cancel-all`, `close`
 - `resolve`, `snapshot`
+- `approve`
 - `strategies enable`, `strategies disable`
 - `listen`, `watch`
 
 **Requires massive_api_key only** (no service):
 - `data download`
-- `financials`, `options`, `news`, `movers`
+- `financials`, `options`, `news`, `movers`, `ideas`
 
 ### ConId Lookup
 
@@ -476,6 +507,16 @@ CPU-bound bar-by-bar replay. Time scales with number of bars × strategy complex
 | 1-min, 1 symbol, 16K bars (simple strategy) | ~14s | Scales linearly with bar count |
 
 **Vectorbt note**: Strategies using `vectorbt` indicators (e.g. `VbtMacdBB`) incur a one-time ~2s numba JIT compilation penalty on first run. Subsequent runs in the same process are fast. The JIT also produces verbose DEBUG logs from numba — these are harmless.
+
+#### Ideas Scanner (`mmr ideas`)
+Discovers candidates via Massive.com API, fetches server-side indicators in parallel, scores and ranks.
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| `ideas` (movers, momentum preset) | ~4s | 2 snapshot + ~40 indicator calls (parallelized) |
+| `ideas momentum --tickers AAPL MSFT AMD` | ~2s | 1 batch snapshot + ~6 indicator calls |
+| `ideas --presets` | ~1s | No API calls, prints preset table |
+| `ideas volatile --num 25` | ~4s | Same as movers, just more output rows |
 
 #### Strategy Management
 All local file/YAML operations.

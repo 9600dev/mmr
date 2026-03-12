@@ -16,6 +16,7 @@ if PROJECT_ROOT not in sys.path:
 from trader.data.duckdb_store import DuckDBConnection, DuckDBDataStore, DuckDBObjectStore
 from trader.data.data_access import TickStorage
 from trader.data.event_store import EventStore
+from trader.data.proposal_store import ProposalStore
 from trader.data.universe import UniverseAccessor
 from trader.objects import Action, BarSize
 from trader.trading.risk_gate import RiskGate, RiskLimits
@@ -84,6 +85,15 @@ trading_mode: paper
 @pytest.fixture
 def event_store(tmp_duckdb_path):
     return EventStore(tmp_duckdb_path)
+
+
+# ---------------------------------------------------------------------------
+# ProposalStore fixture
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def proposal_store(tmp_duckdb_path):
+    return ProposalStore(tmp_duckdb_path)
 
 
 # ---------------------------------------------------------------------------

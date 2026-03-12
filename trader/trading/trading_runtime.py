@@ -239,7 +239,13 @@ class Trader():
     def __update_portfolio(self, portfolio_item: PortfolioItem):
         logging.debug('__update_portfolio')
         self.portfolio.add_portfolio_item(portfolio_item=portfolio_item)
-        self.update_portfolio_universe(portfolio_item)
+        # Schedule async universe update to avoid "event loop already running" error
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.update_portfolio_universe(portfolio_item))
+        except RuntimeError:
+            self._update_portfolio_universe_sync(portfolio_item)
 
     def __dataclass_server_put(self, message: DataClassEvent):
         # logging.debug('__dataclass_server_put: {}'.format(message))
@@ -285,18 +291,25 @@ class Trader():
 
         # subscribe to all portfolio changes, then make sure we're subscribing to the pnl for each
         def __subscribe_pnl(portfolio_item: PortfolioItem):
-            # todo this is a hack, we need to figure out how to make this work with async
             async def __async_subscribe_pnl(portfolio_item: PortfolioItem):
                 if portfolio_item.contract and (portfolio_item.account, portfolio_item.contract.conId) not in self.pnl_subscriptions:  # noqa: E501
-                    observable = await self.client.subscribe_single_pnl(
-                        portfolio_item.contract,
-                    )
-                    disposable = observable.subscribe(self.pnl.create_observer(error_func=handle_subscription_exception))
+                    try:
+                        observable = await self.client.subscribe_single_pnl(
+                            portfolio_item.contract,
+                        )
+                        disposable = observable.subscribe(self.pnl.create_observer(error_func=handle_subscription_exception))
 
-                    self.disposables.append(disposable)
-                    self.pnl_subscriptions.update({(portfolio_item.account, portfolio_item.contract.conId): True})
+                        self.disposables.append(disposable)
+                        self.pnl_subscriptions.update({(portfolio_item.account, portfolio_item.contract.conId): True})
+                    except Exception as ex:
+                        logging.warning(f'Failed to subscribe PnL for {portfolio_item.contract}: {ex}')
 
-            self.run(__async_subscribe_pnl(portfolio_item))
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(__async_subscribe_pnl(portfolio_item))
+            except RuntimeError:
+                self.run(__async_subscribe_pnl(portfolio_item))
 
         disposable = (await self.client.subscribe_portfolio()).subscribe(
             AnonymousObserver(
@@ -528,11 +541,31 @@ class Trader():
         self.zmq_pubsub_contracts[contract.conId] = error_observable
         return error_observable
 
-    @log_method
-    def update_portfolio_universe(self, portfolio_item: PortfolioItem):
+    async def update_portfolio_universe(self, portfolio_item: PortfolioItem):
         """
         Grabs the current portfolio from IB Gateway and adds a new version to the 'portfolio' table.
         """
+        universe = self.universe_accessor.get('portfolio')
+        if not ListHelper.isin(
+            universe.security_definitions,
+            lambda definition: definition.conId == portfolio_item.contract.conId
+        ):
+            contract = portfolio_item.contract
+            try:
+                contract_details = await self.client.get_contract_details_async(contract)
+            except Exception as ex:
+                logging.warning(f'Failed to get contract details for {contract}: {ex}')
+                return
+            if contract_details and len(contract_details) >= 1:
+                universe.security_definitions.append(
+                    SecurityDefinition.from_contract_details(contract_details[0])
+                )
+
+            logging.debug('updating portfolio universe with {}'.format(portfolio_item))
+            self.universe_accessor.update(universe)
+
+    def _update_portfolio_universe_sync(self, portfolio_item: PortfolioItem):
+        """Sync fallback when no event loop is running."""
         universe = self.universe_accessor.get('portfolio')
         if not ListHelper.isin(
             universe.security_definitions,
@@ -556,6 +589,295 @@ class Trader():
         condition: ExecutorCondition,
     ) -> Observable[Trade]:
         return await self.executioner.place_order(contract_order=ContractOrderPair(contract, order), condition=condition)
+
+    @log_method
+    async def check_order_margin(self, contract: Contract, order: Order) -> dict:
+        """Run whatIfOrder to get margin impact without placing."""
+        order_state = await self.client.ib.whatIfOrderAsync(contract, order)
+        numeric = order_state.numeric(2)
+        return {
+            'initMarginBefore': numeric.initMarginBefore,
+            'maintMarginBefore': numeric.maintMarginBefore,
+            'equityWithLoanBefore': numeric.equityWithLoanBefore,
+            'initMarginChange': numeric.initMarginChange,
+            'maintMarginChange': numeric.maintMarginChange,
+            'equityWithLoanChange': numeric.equityWithLoanChange,
+            'initMarginAfter': numeric.initMarginAfter,
+            'maintMarginAfter': numeric.maintMarginAfter,
+            'equityWithLoanAfter': numeric.equityWithLoanAfter,
+            'commission': numeric.commission,
+            'warningText': order_state.warningText,
+        }
+
+    @log_method
+    async def place_expressive_order(
+        self,
+        contract: Contract,
+        action: str,
+        quantity: float,
+        execution_spec: dict,
+        algo_name: str = 'proposal',
+    ) -> SuccessFail:
+        """Place an order with full execution specification (brackets, trailing stops, etc.)."""
+        from trader.trading.proposal import ExecutionSpec
+        spec = ExecutionSpec.from_dict(execution_spec)
+        trades: List[Trade] = []
+
+        reverse_action = 'SELL' if action == 'BUY' else 'BUY'
+
+        common = dict(
+            action=action,
+            totalQuantity=quantity,
+            account=self.ib_account,
+            orderRef=algo_name,
+            tif=spec.tif,
+            outsideRth=spec.outside_rth,
+        )
+        if spec.tif == 'GTD' and spec.good_till_date:
+            common['goodTillDate'] = spec.good_till_date
+
+        def _build_entry(**common) -> Order:
+            if spec.order_type == 'MARKET':
+                return MarketOrder(**common)
+            else:
+                return LimitOrder(lmtPrice=spec.limit_price, **common)
+
+        # --- Pre-trade risk checks ---
+        # Build a temporary entry order for margin simulation
+        probe_order = _build_entry(**common)
+
+        # 1. whatIfOrder margin check
+        margin_impact = None
+        try:
+            margin_impact = await self.check_order_margin(contract, probe_order)
+        except Exception as ex:
+            logging.warning(f'whatIfOrder failed, proceeding without margin check: {ex}')
+
+        # 2. Leverage limit check
+        if margin_impact and hasattr(self, 'risk_gate'):
+            net_liq = 0.0
+            for v in self.client.ib.accountValues():
+                if v.tag == 'NetLiquidation' and v.currency != 'BASE':
+                    net_liq = float(v.value)
+                    break
+
+            leverage_result = self.risk_gate.check_leverage(margin_impact, net_liq)
+            if not leverage_result.approved:
+                return SuccessFail.fail(error=leverage_result.reason)
+
+        # 3. Risk gate checks (open orders, daily loss)
+        if hasattr(self, 'risk_gate'):
+            from trader.trading.strategy import Signal
+            signal = Signal(
+                source_name='proposal',
+                action=Action.BUY if action == 'BUY' else Action.SELL,
+                probability=1.0,
+                risk=0.0,
+            )
+            gate_result = self.risk_gate.evaluate(
+                signal=signal,
+                open_order_count=len(self.book.get_orders()) if hasattr(self, 'book') else 0,
+            )
+            if not gate_result.approved:
+                return SuccessFail.fail(error=f'Risk gate: {gate_result.reason}')
+
+        try:
+            if spec.exit_type == 'BRACKET':
+                entry = _build_entry(**common)
+                entry.transmit = False
+
+                task = asyncio.Event()
+                entry_trade: Optional[Trade] = None
+
+                def on_entry(trade: Trade):
+                    nonlocal entry_trade
+                    entry_trade = trade
+                    task.set()
+
+                observable = await self.executioner.subscribe_place_order_direct(contract, entry)
+                observable.subscribe(Observer(on_next=on_entry, on_error=lambda e: task.set(), on_completed=lambda: None))
+                await task.wait()
+
+                if entry_trade is None:
+                    return SuccessFail.fail(error='Failed to place entry order')
+
+                trades.append(entry_trade)
+                parent_id = entry_trade.order.orderId
+
+                # Take-profit
+                tp = LimitOrder(
+                    action=reverse_action,
+                    totalQuantity=quantity,
+                    lmtPrice=spec.take_profit_price,
+                    parentId=parent_id,
+                    transmit=False,
+                    account=self.ib_account,
+                    tif=spec.tif,
+                    outsideRth=spec.outside_rth,
+                )
+
+                tp_task = asyncio.Event()
+                tp_trade: Optional[Trade] = None
+
+                def on_tp(trade: Trade):
+                    nonlocal tp_trade
+                    tp_trade = trade
+                    tp_task.set()
+
+                tp_obs = await self.executioner.subscribe_place_order_direct(contract, tp)
+                tp_obs.subscribe(Observer(on_next=on_tp, on_error=lambda e: tp_task.set(), on_completed=lambda: None))
+                await tp_task.wait()
+                if tp_trade:
+                    trades.append(tp_trade)
+
+                # Stop-loss (transmit=True triggers the whole bracket)
+                sl = StopOrder(
+                    action=reverse_action,
+                    totalQuantity=quantity,
+                    stopPrice=spec.stop_loss_price,
+                    parentId=parent_id,
+                    transmit=True,
+                    account=self.ib_account,
+                    tif=spec.tif,
+                    outsideRth=spec.outside_rth,
+                )
+
+                sl_task = asyncio.Event()
+                sl_trade: Optional[Trade] = None
+
+                def on_sl(trade: Trade):
+                    nonlocal sl_trade
+                    sl_trade = trade
+                    sl_task.set()
+
+                sl_obs = await self.executioner.subscribe_place_order_direct(contract, sl)
+                sl_obs.subscribe(Observer(on_next=on_sl, on_error=lambda e: sl_task.set(), on_completed=lambda: None))
+                await sl_task.wait()
+                if sl_trade:
+                    trades.append(sl_trade)
+
+            elif spec.exit_type == 'TRAILING_STOP':
+                entry = _build_entry(**common)
+                entry.transmit = False
+
+                task = asyncio.Event()
+                entry_trade = None
+
+                def on_entry_ts(trade: Trade):
+                    nonlocal entry_trade
+                    entry_trade = trade
+                    task.set()
+
+                observable = await self.executioner.subscribe_place_order_direct(contract, entry)
+                observable.subscribe(Observer(on_next=on_entry_ts, on_error=lambda e: task.set(), on_completed=lambda: None))
+                await task.wait()
+
+                if entry_trade is None:
+                    return SuccessFail.fail(error='Failed to place entry order')
+
+                trades.append(entry_trade)
+                parent_id = entry_trade.order.orderId
+
+                trail = Order(
+                    orderType='TRAIL',
+                    action=reverse_action,
+                    totalQuantity=quantity,
+                    parentId=parent_id,
+                    transmit=True,
+                    account=self.ib_account,
+                    tif=spec.tif,
+                    outsideRth=spec.outside_rth,
+                )
+                if spec.trailing_stop_percent:
+                    trail.trailingPercent = spec.trailing_stop_percent
+                elif spec.trailing_stop_amount:
+                    trail.auxPrice = spec.trailing_stop_amount
+
+                trail_task = asyncio.Event()
+                trail_trade: Optional[Trade] = None
+
+                def on_trail(trade: Trade):
+                    nonlocal trail_trade
+                    trail_trade = trade
+                    trail_task.set()
+
+                trail_obs = await self.executioner.subscribe_place_order_direct(contract, trail)
+                trail_obs.subscribe(Observer(on_next=on_trail, on_error=lambda e: trail_task.set(), on_completed=lambda: None))
+                await trail_task.wait()
+                if trail_trade:
+                    trades.append(trail_trade)
+
+            elif spec.exit_type == 'STOP_LOSS':
+                entry = _build_entry(**common)
+                entry.transmit = False
+
+                task = asyncio.Event()
+                entry_trade = None
+
+                def on_entry_sl(trade: Trade):
+                    nonlocal entry_trade
+                    entry_trade = trade
+                    task.set()
+
+                observable = await self.executioner.subscribe_place_order_direct(contract, entry)
+                observable.subscribe(Observer(on_next=on_entry_sl, on_error=lambda e: task.set(), on_completed=lambda: None))
+                await task.wait()
+
+                if entry_trade is None:
+                    return SuccessFail.fail(error='Failed to place entry order')
+
+                trades.append(entry_trade)
+                parent_id = entry_trade.order.orderId
+
+                sl = StopOrder(
+                    action=reverse_action,
+                    totalQuantity=quantity,
+                    stopPrice=spec.stop_loss_price,
+                    parentId=parent_id,
+                    transmit=True,
+                    account=self.ib_account,
+                    tif=spec.tif,
+                    outsideRth=spec.outside_rth,
+                )
+
+                sl_task = asyncio.Event()
+                sl_trade: Optional[Trade] = None
+
+                def on_sl_only(trade: Trade):
+                    nonlocal sl_trade
+                    sl_trade = trade
+                    sl_task.set()
+
+                sl_obs = await self.executioner.subscribe_place_order_direct(contract, sl)
+                sl_obs.subscribe(Observer(on_next=on_sl_only, on_error=lambda e: sl_task.set(), on_completed=lambda: None))
+                await sl_task.wait()
+                if sl_trade:
+                    trades.append(sl_trade)
+
+            else:
+                # NONE — simple entry only
+                entry = _build_entry(**common)
+                entry.transmit = True
+
+                task = asyncio.Event()
+                entry_trade = None
+
+                def on_entry_simple(trade: Trade):
+                    nonlocal entry_trade
+                    entry_trade = trade
+                    task.set()
+
+                observable = await self.executioner.subscribe_place_order_direct(contract, entry)
+                observable.subscribe(Observer(on_next=on_entry_simple, on_error=lambda e: task.set(), on_completed=lambda: None))
+                await task.wait()
+                if entry_trade:
+                    trades.append(entry_trade)
+
+            return SuccessFail.success(obj=trades)
+
+        except Exception as ex:
+            logging.error(f'place_expressive_order error: {ex}')
+            return SuccessFail.fail(exception=ex)
 
     @log_method
     async def place_order_simple(
@@ -592,21 +914,35 @@ class Trader():
 
     @log_method
     def cancel_all(self) -> SuccessFail[List[int]]:
+        cancelled = []
         failed_cancels = []
         for order_id, _ in self.book.get_orders().items():
             trade: Optional[Trade] = self.cancel_order(order_id)
-            if not trade:
-                failed_cancels.append(order_id)
-            if trade and trade.orderStatus.status != 'Cancelled':
+            if trade:
+                cancelled.append(order_id)
+            else:
                 failed_cancels.append(order_id)
 
-        if len(failed_cancels) > 0:
-            return SuccessFail.fail(failed_cancels)
+        if failed_cancels:
+            return SuccessFail.fail(error=f'Failed to cancel: {failed_cancels}')
         else:
-            return SuccessFail.success()
+            return SuccessFail.success(obj=cancelled)
 
     async def scanner_data(self, **kwargs) -> list[dict]:
         return await self.client.scanner_data(**kwargs)
+
+    async def get_snapshots_batch(self, contracts, delayed: bool = False) -> list[dict]:
+        return await self.client.get_snapshots_batch(contracts, delayed)
+
+    async def get_history_bars(self, contract, duration: str = '60 D', bar_size: str = '1 day') -> list[dict]:
+        return await self.client.get_history_bars(contract, duration, bar_size)
+
+    async def get_fundamental_data(self, contract, report_type: str = 'ReportSnapshot') -> str:
+        return await self.client.get_fundamental_data(contract, report_type)
+
+    async def get_news_headlines(self, conId: int, provider_codes: str = '',
+                                  total_results: int = 5) -> list[dict]:
+        return await self.client.get_news_headlines(conId, provider_codes, total_results)
 
     def is_ib_connected(self) -> bool:
         return self.client.ib.isConnected()

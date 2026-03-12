@@ -73,7 +73,7 @@ class MMR:
         rpc_port: Optional[int] = None,
         pubsub_address: Optional[str] = None,
         pubsub_port: Optional[int] = None,
-        timeout: int = 10,
+        timeout: int = 30,
     ):
         from trader.container import Container
 
@@ -170,13 +170,32 @@ class MMR:
         )
 
     def _resolve_contract(self, symbol: Union[str, int], sec_type: str = 'STK') -> Contract:
-        """Resolve *symbol* to a single Contract, raising on ambiguity."""
+        """Resolve *symbol* to a single Contract, raising on ambiguity.
+
+        Prefers USD contracts on US exchanges when multiple matches exist.
+        """
         definitions = self.resolve(symbol, sec_type=sec_type)
         if not definitions:
             raise ValueError(f"Could not resolve symbol: {symbol}")
+
+        # Prefer USD on a US exchange when there are multiple results
         sec = definitions[0]
-        # Build Contract from attributes directly (avoid isinstance checks
-        # that can fail on deserialized objects).
+        if len(definitions) > 1:
+            us_exchanges = {'SMART', 'NYSE', 'NASDAQ', 'AMEX', 'ARCA', 'BATS', 'IEX', 'ISLAND'}
+            for d in definitions:
+                currency = getattr(d, 'currency', '')
+                exchange = getattr(d, 'exchange', '')
+                primary = getattr(d, 'primaryExchange', '')
+                if currency == 'USD' and (exchange in us_exchanges or primary in us_exchanges):
+                    sec = d
+                    break
+            else:
+                # Fallback: prefer USD even if exchange isn't explicitly US
+                for d in definitions:
+                    if getattr(d, 'currency', '') == 'USD':
+                        sec = d
+                        break
+
         return Contract(
             conId=sec.conId,
             symbol=sec.symbol,
@@ -190,25 +209,50 @@ class MMR:
     # Portfolio & Positions
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _extract_contract(contract) -> dict:
+        """Extract contract fields whether it's a Contract object or a dict."""
+        if isinstance(contract, dict):
+            return {
+                'conId': contract.get('conId', ''),
+                'symbol': contract.get('localSymbol') or contract.get('symbol', ''),
+                'secType': contract.get('secType', ''),
+                'currency': contract.get('currency', ''),
+            }
+        return {
+            'conId': contract.conId,
+            'symbol': contract.localSymbol or contract.symbol,
+            'secType': contract.secType,
+            'currency': contract.currency,
+        }
+
     def portfolio(self) -> pd.DataFrame:
         """Portfolio with P&L (matches the old ``portfolio`` CLI command)."""
-        summaries: list[PortfolioSummary] = self._rpc.rpc(
+        summaries = self._rpc.rpc(
             return_type=list[PortfolioSummary]
         ).get_portfolio_summary()
 
         rows = []
         for p in summaries:
+            # PortfolioSummary is a NamedTuple; msgpack may deserialize as a plain list
+            if isinstance(p, (list, tuple)) and not hasattr(p, 'account'):
+                contract, position, mkt_price, mkt_value, avg_cost, unrealized, realized, account, daily = p
+            else:
+                contract, position, mkt_price, mkt_value = p.contract, p.position, p.marketPrice, p.marketValue
+                avg_cost, unrealized, realized, account, daily = p.averageCost, p.unrealizedPNL, p.realizedPNL, p.account, p.dailyPNL
+
+            con = self._extract_contract(contract)
             rows.append({
-                'account': p.account,
-                'conId': p.contract.conId,
-                'symbol': p.contract.localSymbol or p.contract.symbol,
-                'position': p.position,
-                'mktPrice': p.marketPrice,
-                'avgCost': p.averageCost,
-                'marketValue': p.marketValue,
-                'unrealizedPNL': p.unrealizedPNL,
-                'realizedPNL': p.realizedPNL,
-                'dailyPNL': p.dailyPNL,
+                'account': account,
+                'conId': con['conId'],
+                'symbol': con['symbol'],
+                'position': position,
+                'mktPrice': mkt_price,
+                'avgCost': avg_cost,
+                'marketValue': mkt_value,
+                'unrealizedPNL': unrealized,
+                'realizedPNL': realized,
+                'dailyPNL': daily,
             })
 
         df = pd.DataFrame(rows)
@@ -222,21 +266,28 @@ class MMR:
 
     def positions(self) -> pd.DataFrame:
         """Raw positions (no P&L)."""
-        pos_list: list[Position] = self._rpc.rpc(
+        pos_list = self._rpc.rpc(
             return_type=list[Position]
         ).get_positions()
 
         rows = []
         for p in pos_list:
+            # Position is a NamedTuple; msgpack may deserialize as a plain list
+            if isinstance(p, (list, tuple)) and not hasattr(p, 'account'):
+                account, contract, position, avg_cost = p[0], p[1], p[2], p[3]
+            else:
+                account, contract, position, avg_cost = p.account, p.contract, p.position, p.avgCost
+
+            con = self._extract_contract(contract)
             rows.append({
-                'account': p.account,
-                'conId': p.contract.conId,
-                'symbol': p.contract.localSymbol or p.contract.symbol,
-                'secType': p.contract.secType,
-                'position': p.position,
-                'avgCost': p.avgCost,
-                'currency': p.contract.currency,
-                'total': p.position * p.avgCost,
+                'account': account,
+                'conId': con['conId'],
+                'symbol': con['symbol'],
+                'secType': con['secType'],
+                'position': position,
+                'avgCost': avg_cost,
+                'currency': con['currency'],
+                'total': position * avg_cost,
             })
 
         df = pd.DataFrame(rows)
@@ -374,6 +425,270 @@ class MMR:
         return self._rpc.rpc(return_type=SuccessFail[list[int]]).cancel_all()
 
     # ------------------------------------------------------------------
+    # Trade Proposals
+    # ------------------------------------------------------------------
+
+    def _proposal_store(self):
+        """Lazy-init ProposalStore from config duckdb_path."""
+        if not hasattr(self, '_prop_store'):
+            cfg = self._container.config()
+            duckdb_path = cfg.get('duckdb_path', '')
+            if not duckdb_path:
+                raise ValueError("duckdb_path not configured")
+            from trader.data.proposal_store import ProposalStore
+            self._prop_store = ProposalStore(duckdb_path)
+        return self._prop_store
+
+    def propose(
+        self,
+        symbol: str,
+        action: str,
+        quantity: Optional[float] = None,
+        amount: Optional[float] = None,
+        execution=None,
+        reasoning: str = '',
+        confidence: float = 0.0,
+        thesis: str = '',
+        source: str = 'manual',
+        metadata: Optional[dict] = None,
+        sec_type: str = 'STK',
+    ) -> tuple[int, Optional[dict], Optional[dict]]:
+        """Create a trade proposal. Returns (proposal_id, leverage_info, snapshot_info). No trader_service needed."""
+        from trader.trading.proposal import ExecutionSpec, TradeProposal
+        spec = execution if isinstance(execution, ExecutionSpec) else ExecutionSpec()
+        proposal = TradeProposal(
+            symbol=symbol,
+            action=action,
+            quantity=quantity,
+            amount=amount,
+            execution=spec,
+            reasoning=reasoning,
+            confidence=confidence,
+            thesis=thesis,
+            source=source,
+            metadata=metadata or {},
+            sec_type=sec_type,
+        )
+        proposal_id = self._proposal_store().add(proposal)
+
+        # Attempt to capture snapshot + leverage estimate (requires trader_service, gracefully degrades)
+        leverage_info = None
+        snapshot_info = None
+        try:
+            # Capture bid/ask/last at proposal time
+            snap = self.snapshot(symbol)
+            if snap:
+                snapshot_info = {
+                    'bid': snap.get('bid'),
+                    'ask': snap.get('ask'),
+                    'last': snap.get('last'),
+                    'time': str(snap.get('time', '')),
+                }
+                self._proposal_store().update_metadata(proposal_id, {'snapshot': snapshot_info})
+
+            acct_vals = consume(self._rpc.rpc(return_type=dict).get_account_values())
+            if acct_vals:
+                net_liq = float(acct_vals.get('NetLiquidation', {}).get('value', 0))
+                gross_pos = float(acct_vals.get('GrossPositionValue', {}).get('value', 0))
+                buying_power = float(acct_vals.get('BuyingPower', {}).get('value', 0))
+
+                # Estimate order value using snapshot price if no limit
+                snap_price = snap.get('last') or snap.get('ask') or 0 if snap else 0
+                price = spec.limit_price or snap_price
+                order_value = quantity * price if quantity and price else amount or 0
+
+                if net_liq > 0:
+                    current_leverage = gross_pos / net_liq
+                    estimated_leverage = (gross_pos + order_value) / net_liq
+                    leverage_info = {
+                        'current_leverage': round(current_leverage, 2),
+                        'estimated_leverage': round(estimated_leverage, 2),
+                        'net_liquidation': net_liq,
+                        'buying_power': buying_power,
+                        'uses_margin': estimated_leverage > 1.0,
+                    }
+                    self._proposal_store().update_metadata(proposal_id, {'leverage_estimate': leverage_info})
+        except Exception:
+            pass  # No trader_service connection, skip enrichment
+
+        return proposal_id, leverage_info, snapshot_info
+
+    def proposals(self, status: Optional[str] = None, limit: int = 50) -> pd.DataFrame:
+        """List proposals. No trader_service needed."""
+        props = self._proposal_store().query(status=status, limit=limit)
+        if not props:
+            return pd.DataFrame()
+
+        rows = []
+        for p in props:
+            # Build concise size column: "100 sh" or "$5,000"
+            if p.quantity is not None and p.quantity == p.quantity:  # not NaN
+                size = f'{p.quantity:g} sh'
+            elif p.amount is not None and p.amount == p.amount:
+                size = f'${p.amount:,.0f}'
+            else:
+                size = '-'
+
+            # Build concise order description: "MKT" or "LMT @165"
+            order = 'MKT' if p.execution.order_type == 'MARKET' else f'LMT @{p.execution.limit_price:g}'
+
+            # Compact exit type
+            exit_abbrev = {'NONE': '-', 'BRACKET': 'BKT', 'TRAILING_STOP': 'TSL', 'STOP_LOSS': 'SL'}
+            exit_label = exit_abbrev.get(p.execution.exit_type, p.execution.exit_type[:3])
+
+            # Compact timestamp — full detail in `proposals show N`
+            created = p.created_at.strftime('%m/%d %H:%M') if p.created_at else ''
+
+            row = {
+                'id': p.id,
+                'symbol': p.symbol,
+                'action': p.action,
+                'size': size,
+                'order': order,
+                'exit': exit_label,
+                'conf': f'{p.confidence:.0%}' if p.confidence else '-',
+                'created': created,
+                'reasoning': p.reasoning or '',
+            }
+            # Include status column only when showing mixed statuses (--all)
+            if status is None:
+                row['status'] = p.status
+            # Include leverage warning if available
+            leverage = p.metadata.get('leverage_estimate')
+            if leverage and leverage.get('uses_margin'):
+                row['margin'] = f"{leverage['estimated_leverage']:.1f}x"
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    def proposal_detail(self, proposal_id: int) -> Optional[dict]:
+        """Get full proposal detail as dict. No trader_service needed."""
+        p = self._proposal_store().get(proposal_id)
+        if not p:
+            return None
+        detail = {
+            'id': p.id,
+            'symbol': p.symbol,
+            'action': p.action,
+            'quantity': p.quantity,
+            'amount': p.amount,
+            'sec_type': p.sec_type,
+            'order_type': p.execution.order_type,
+            'limit_price': p.execution.limit_price,
+            'exit_type': p.execution.exit_type,
+            'take_profit_price': p.execution.take_profit_price,
+            'stop_loss_price': p.execution.stop_loss_price,
+            'trailing_stop_percent': p.execution.trailing_stop_percent,
+            'trailing_stop_amount': p.execution.trailing_stop_amount,
+            'tif': p.execution.tif,
+            'outside_rth': p.execution.outside_rth,
+            'good_till_date': p.execution.good_till_date,
+            'reasoning': p.reasoning,
+            'confidence': p.confidence,
+            'thesis': p.thesis,
+            'source': p.source,
+            'metadata': p.metadata,
+            'status': p.status,
+            'created_at': p.created_at,
+            'updated_at': p.updated_at,
+            'order_ids': p.order_ids,
+            'rejection_reason': p.rejection_reason,
+        }
+
+        # Include snapshot from metadata if present
+        snapshot = p.metadata.get('snapshot')
+        if snapshot:
+            detail['snapshot_bid'] = snapshot.get('bid')
+            detail['snapshot_ask'] = snapshot.get('ask')
+            detail['snapshot_last'] = snapshot.get('last')
+            detail['snapshot_time'] = snapshot.get('time')
+
+        # Include leverage estimate from metadata if present
+        leverage = p.metadata.get('leverage_estimate')
+        if leverage:
+            detail['leverage_current'] = leverage.get('current_leverage')
+            detail['leverage_estimated'] = leverage.get('estimated_leverage')
+            detail['uses_margin'] = leverage.get('uses_margin', False)
+
+        return detail
+
+    def reject(self, proposal_id: int, reason: str = '') -> bool:
+        """Reject a proposal. No trader_service needed."""
+        p = self._proposal_store().get(proposal_id)
+        if not p:
+            return False
+        if p.status != 'PENDING':
+            return False
+        self._proposal_store().update_status(proposal_id, 'REJECTED', rejection_reason=reason)
+        return True
+
+    def approve(self, proposal_id: int) -> SuccessFail:
+        """Approve and execute a proposal. REQUIRES trader_service."""
+        from trader.trading.proposal import ProposalStatus
+
+        store = self._proposal_store()
+        proposal = store.get(proposal_id)
+        if not proposal:
+            return SuccessFail.fail(error=f'Proposal #{proposal_id} not found')
+        if proposal.status != 'PENDING':
+            return SuccessFail.fail(error=f'Proposal #{proposal_id} is {proposal.status}, not PENDING')
+
+        # Mark as approved
+        store.update_status(proposal_id, 'APPROVED')
+
+        try:
+            contract = self._resolve_contract(proposal.symbol, sec_type=proposal.sec_type)
+
+            # Determine quantity
+            qty = proposal.quantity
+            if qty is None and proposal.amount is not None:
+                import math
+                snap = self.snapshot(proposal.symbol)
+                # Pick the first valid (non-NaN, positive) price
+                price = None
+                for key in ('last', 'ask', 'bid'):
+                    val = snap.get(key)
+                    if val and isinstance(val, (int, float)) and not math.isnan(val) and val > 0:
+                        price = val
+                        break
+                if not price:
+                    store.update_status(proposal_id, 'FAILED')
+                    return SuccessFail.fail(error='Could not determine price for quantity calculation')
+                qty = round(proposal.amount / price)
+                if qty < 1:
+                    qty = 1
+
+            if qty is None or qty <= 0:
+                store.update_status(proposal_id, 'FAILED')
+                return SuccessFail.fail(error='No valid quantity or amount specified')
+
+            result = consume(
+                self._rpc.rpc(return_type=SuccessFail[list[Trade]]).place_expressive_order(
+                    contract=contract,
+                    action=proposal.action,
+                    quantity=float(qty),
+                    execution_spec=proposal.execution.to_dict(),
+                    algo_name='proposal',
+                )
+            )
+
+            if result.is_success():
+                order_ids = []
+                if result.obj:
+                    for t in result.obj:
+                        oid = getattr(t, 'orderId', None) or getattr(getattr(t, 'order', None), 'orderId', None)
+                        if oid:
+                            order_ids.append(oid)
+                store.update_status(proposal_id, 'EXECUTED', order_ids=order_ids)
+                return SuccessFail.success(obj=order_ids)
+            else:
+                store.update_status(proposal_id, 'FAILED')
+                return SuccessFail.fail(error=result.error, exception=result.exception)
+
+        except Exception as ex:
+            store.update_status(proposal_id, 'FAILED')
+            return SuccessFail.fail(error=str(ex))
+
+    # ------------------------------------------------------------------
     # Position closing
     # ------------------------------------------------------------------
 
@@ -418,24 +733,37 @@ class MMR:
     def snapshot(self, symbol: Union[str, int], delayed: bool = False) -> dict:
         """Get a price snapshot for *symbol*."""
         contract = self._resolve_contract(symbol)
-        ticker: Ticker = consume(
+        ticker = consume(
             self._rpc.rpc(return_type=Ticker).get_snapshot(contract, delayed)
         )
+
+        # Handle deserialized ticker — contract may be dict/list after msgpack round-trip
+        sym = ''
+        con_id = ''
+        tc = getattr(ticker, 'contract', None)
+        if tc:
+            if isinstance(tc, dict):
+                sym = tc.get('symbol', '')
+                con_id = tc.get('conId', '')
+            elif hasattr(tc, 'symbol'):
+                sym = tc.symbol
+                con_id = tc.conId
+
         return {
-            'symbol': ticker.contract.symbol if ticker.contract else '',
-            'conId': ticker.contract.conId if ticker.contract else '',
-            'time': ticker.time,
-            'bid': ticker.bid,
-            'bidSize': ticker.bidSize,
-            'ask': ticker.ask,
-            'askSize': ticker.askSize,
-            'last': ticker.last,
-            'lastSize': ticker.lastSize,
-            'open': ticker.open,
-            'high': ticker.high,
-            'low': ticker.low,
-            'close': ticker.close,
-            'halted': ticker.halted,
+            'symbol': sym,
+            'conId': con_id,
+            'time': getattr(ticker, 'time', None),
+            'bid': getattr(ticker, 'bid', float('nan')),
+            'bidSize': getattr(ticker, 'bidSize', float('nan')),
+            'ask': getattr(ticker, 'ask', float('nan')),
+            'askSize': getattr(ticker, 'askSize', float('nan')),
+            'last': getattr(ticker, 'last', float('nan')),
+            'lastSize': getattr(ticker, 'lastSize', float('nan')),
+            'open': getattr(ticker, 'open', float('nan')),
+            'high': getattr(ticker, 'high', float('nan')),
+            'low': getattr(ticker, 'low', float('nan')),
+            'close': getattr(ticker, 'close', float('nan')),
+            'halted': getattr(ticker, 'halted', float('nan')),
         }
 
     def subscribe_ticks(
@@ -622,10 +950,90 @@ class MMR:
         """Return the IB account ID."""
         return consume(self._rpc.rpc(return_type=str).get_ib_account())
 
+    def get_risk_limits(self) -> dict:
+        """Get current risk gate limits from trader_service."""
+        return consume(self._rpc.rpc(return_type=dict).get_risk_limits())
+
+    def set_risk_limits(self, **kwargs) -> dict:
+        """Update risk gate limits on trader_service. Returns updated limits."""
+        return consume(self._rpc.rpc(return_type=dict).set_risk_limits(**kwargs))
+
     def status(self) -> dict:
-        """Check connectivity to trader_service."""
-        from trader.tools.trader_check import health_check
-        return {'status': health_check(self._container.config_file)}
+        """Check connectivity to trader_service via ZMQ RPC with diagnostics."""
+        try:
+            acct = consume(self._rpc.rpc(return_type=str).get_ib_account())
+        except Exception:
+            return {'connected': False}
+
+        result = {'connected': True, 'account': acct}
+
+        try:
+            acct_vals = consume(
+                self._rpc.rpc(return_type=dict).get_account_values()
+            )
+            if acct_vals:
+                for key in ('NetLiquidation', 'TotalCashValue', 'AvailableFunds', 'BuyingPower'):
+                    entry = acct_vals.get(key)
+                    if entry:
+                        result[key] = f"${float(entry['value']):,.2f} {entry['currency']}"
+
+                # Leverage / margin info
+                net_liq_entry = acct_vals.get('NetLiquidation')
+                gross_pos_entry = acct_vals.get('GrossPositionValue')
+                init_margin_entry = acct_vals.get('InitMarginReq')
+                cushion_entry = acct_vals.get('Cushion')
+
+                if net_liq_entry and gross_pos_entry:
+                    net_liq = float(net_liq_entry['value'])
+                    gross_pos = float(gross_pos_entry['value'])
+                    if net_liq > 0:
+                        result['Leverage'] = f'{gross_pos / net_liq:.2f}x'
+
+                if init_margin_entry and net_liq_entry:
+                    init_margin = float(init_margin_entry['value'])
+                    net_liq = float(net_liq_entry['value'])
+                    result['MarginUsed'] = f'${init_margin:,.2f} / ${net_liq:,.2f}'
+
+                if cushion_entry:
+                    result['Cushion'] = cushion_entry['value']
+        except Exception:
+            pass
+
+        try:
+            portfolio = consume(
+                self._rpc.rpc(return_type=list[PortfolioItem]).get_portfolio()
+            )
+            positions = [p for p in (portfolio or []) if abs(p.position) > 0]
+            result['positions'] = len(positions)
+            result['unrealized_pnl'] = sum(p.unrealizedPNL for p in positions)
+            result['realized_pnl'] = sum(p.realizedPNL for p in positions)
+        except Exception:
+            result['positions'] = '?'
+
+        try:
+            orders = consume(
+                self._rpc.rpc(return_type=dict[int, list[Order]]).get_orders()
+            )
+            result['open_orders'] = sum(len(v) for v in (orders or {}).values())
+        except Exception:
+            result['open_orders'] = '?'
+
+        try:
+            pubs = consume(
+                self._rpc.rpc(return_type=list[int]).get_published_contracts()
+            )
+            result['streaming'] = len(pubs or [])
+        except Exception:
+            pass
+
+        try:
+            store = self._proposal_store()
+            pending = store.query(status='PENDING')
+            result['pending_proposals'] = len(pending)
+        except Exception:
+            pass
+
+        return result
 
     # ------------------------------------------------------------------
     # Financial Statements (via Massive.com REST API)
@@ -1376,6 +1784,228 @@ class MMR:
                 row['change_pct'] = snap.todays_change_percent
             rows.append(row)
         return pd.DataFrame(rows)
+
+    def movers_detail(
+        self,
+        market: str = 'stocks',
+        direction: str = 'gainers',
+        num: int = 20,
+    ) -> list[dict]:
+        """Get movers enriched with company name, ratios, and news."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        snaps = self._massive_client.get_snapshot_direction(
+            market_type=market, direction=direction,
+        )
+
+        # Build base data from snapshots
+        movers = []
+        for snap in snaps[:num]:
+            ticker = snap.ticker or ''
+            if not ticker:
+                continue
+            row = {
+                'ticker': ticker,
+                'open': getattr(snap.day, 'open', None) if snap.day else None,
+                'close': getattr(snap.day, 'close', None) if snap.day else None,
+                'volume': getattr(snap.day, 'volume', None) if snap.day else None,
+                'change': snap.todays_change,
+                'change_pct': snap.todays_change_percent,
+            }
+            movers.append(row)
+
+        if not movers:
+            return []
+
+        tickers = [m['ticker'] for m in movers]
+
+        # Parallel fetch: ticker details, ratios, news
+        details_map = {}
+        ratios_map = {}
+        news_map = {}
+
+        def fetch_details(t):
+            try:
+                d = self._massive_client.get_ticker_details(t)
+                return (t, {'name': d.name, 'market_cap': d.market_cap, 'description': d.description})
+            except Exception:
+                return (t, {})
+
+        def fetch_ratios(t):
+            try:
+                results = list(self._massive_client.list_financials_ratios(ticker=t, limit=1))
+                if not results:
+                    return (t, {})
+                r = results[0]
+                data = {}
+                for attr, label in [
+                    ('price_to_earnings', 'pe'), ('debt_to_equity', 'de'),
+                    ('return_on_equity', 'roe'), ('earnings_per_share', 'eps'),
+                    ('dividend_yield', 'div_yield'),
+                ]:
+                    val = getattr(r, attr, None)
+                    if val is not None:
+                        data[label] = round(float(val), 2)
+                return (t, data)
+            except Exception:
+                return (t, {})
+
+        def fetch_news(t):
+            try:
+                articles = list(self._massive_client.list_ticker_news(ticker=t, limit=1))
+                if not articles:
+                    return (t, {})
+                a = articles[0]
+                sentiment = ''
+                if a.insights:
+                    sentiments = [i.sentiment for i in a.insights if i.sentiment]
+                    sentiment = ', '.join(sentiments)
+                return (t, {'headline': a.title, 'sentiment': sentiment})
+            except Exception:
+                return (t, {})
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = []
+            for t in tickers:
+                futures.append(pool.submit(fetch_details, t))
+                futures.append(pool.submit(fetch_ratios, t))
+                futures.append(pool.submit(fetch_news, t))
+
+            for future in as_completed(futures):
+                ticker, data = future.result()
+                fn = future._args[0] if hasattr(future, '_args') else ''
+                # Determine which map to update based on keys
+                if 'name' in data:
+                    details_map[ticker] = data
+                elif 'headline' in data:
+                    news_map[ticker] = data
+                elif data and 'name' not in data and 'headline' not in data:
+                    ratios_map[ticker] = data
+
+        # Merge into results
+        for m in movers:
+            t = m['ticker']
+            m['details'] = details_map.get(t, {})
+            m['ratios'] = ratios_map.get(t, {})
+            m['news'] = news_map.get(t, {})
+
+        return movers
+
+    def scan_ideas(
+        self,
+        preset: str = 'momentum',
+        source: str = 'movers',
+        tickers: Optional[List[str]] = None,
+        universe: Optional[str] = None,
+        top_n: int = 15,
+        min_price: Optional[float] = None,
+        max_price: Optional[float] = None,
+        min_volume: Optional[int] = None,
+        min_change_pct: Optional[float] = None,
+        max_change_pct: Optional[float] = None,
+        fundamentals: bool = False,
+        news: bool = False,
+        names: bool = False,
+        location: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """Scan for trading ideas using preset-based scoring.
+
+        Parameters
+        ----------
+        preset : str
+            Scoring preset (momentum, gap-up, gap-down, mean-reversion, breakout, volatile).
+        source : str
+            'movers' (default), 'tickers', or 'universe'.
+        tickers : list of str, optional
+            Explicit ticker list (when source='tickers').
+        universe : str, optional
+            Universe name to scan (when source='universe').
+        top_n : int
+            Max results to return.
+        min_price, max_price, min_volume, min_change_pct, max_change_pct
+            Override preset filter defaults.
+        fundamentals : bool
+            If True, enrich results with financial ratios (PE, D/E, ROE, etc.).
+        news : bool
+            If True, enrich results with latest news headline and sentiment.
+        location : str, optional
+            IB market location code (e.g. STK.AU.ASX, STK.CA). When set, uses
+            IB scanner API instead of Massive.com (for international markets).
+        """
+        # Build custom filter overrides
+        custom_filters = {}
+        if min_price is not None:
+            custom_filters['min_price'] = min_price
+        if max_price is not None:
+            custom_filters['max_price'] = max_price
+        if min_volume is not None:
+            custom_filters['min_volume'] = min_volume
+        if min_change_pct is not None:
+            custom_filters['min_change_pct'] = min_change_pct
+        if max_change_pct is not None:
+            custom_filters['max_change_pct'] = max_change_pct
+
+        # IB path: use IBIdeaScanner for international markets
+        if location:
+            from trader.tools.idea_scanner import IBIdeaScanner
+
+            # Resolve universe to symbol list for IB path
+            ib_universe_symbols = None
+            if source == 'universe' and universe:
+                from trader.data.universe import UniverseAccessor
+                cfg = self._container.config()
+                accessor = UniverseAccessor(
+                    cfg.get('duckdb_path', ''),
+                    cfg.get('universe_library', 'Universes'),
+                )
+                u = accessor.get(universe)
+                if u.security_definitions:
+                    ib_universe_symbols = [d.symbol for d in u.security_definitions]
+                else:
+                    return pd.DataFrame()
+
+            scanner = IBIdeaScanner(self._rpc)
+            return scanner.scan(
+                preset=preset,
+                location=location,
+                top_n=top_n,
+                custom_filters=custom_filters or None,
+                fundamentals=fundamentals,
+                news=news,
+                tickers=tickers if source == 'tickers' else None,
+                universe_symbols=ib_universe_symbols,
+            )
+
+        # Massive path (default): US markets
+        from trader.tools.idea_scanner import IdeaScanner
+
+        # Resolve universe to symbol list
+        universe_symbols = None
+        if source == 'universe' and universe:
+            from trader.data.universe import UniverseAccessor
+            cfg = self._container.config()
+            accessor = UniverseAccessor(
+                cfg.get('duckdb_path', ''),
+                cfg.get('universe_library', 'Universes'),
+            )
+            u = accessor.get(universe)
+            if u.security_definitions:
+                universe_symbols = [d.symbol for d in u.security_definitions]
+            else:
+                return pd.DataFrame()
+
+        scanner = IdeaScanner(self._massive_client)
+        return scanner.scan(
+            preset=preset,
+            source=source,
+            tickers=tickers,
+            universe_symbols=universe_symbols,
+            top_n=top_n,
+            custom_filters=custom_filters or None,
+            fundamentals=fundamentals,
+            news=news,
+            names=names,
+        )
 
     def scan(
         self,

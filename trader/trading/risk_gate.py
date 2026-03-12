@@ -14,8 +14,10 @@ logging = setup_logging(module_name='risk_gate')
 class RiskLimits:
     max_position_size_pct: float = 0.10
     max_daily_loss: float = 1000.0
-    max_open_orders: int = 10
+    max_open_orders: int = 15
     max_signals_per_hour: int = 20
+    max_leverage: float = 1.0        # 1.0 = cash only, 2.0 = 2x margin allowed
+    min_margin_cushion: float = 0.10  # minimum Cushion (excess liq / net liq)
 
 
 @dataclass
@@ -74,4 +76,31 @@ class RiskGate:
             )
 
         logging.debug(f'risk gate approved signal from {signal.source_name}')
+        return RiskGateResult(approved=True)
+
+    def check_leverage(
+        self,
+        margin_impact: dict,
+        net_liquidation: float,
+    ) -> RiskGateResult:
+        """Check if an order's margin impact exceeds leverage limits."""
+        init_margin_after = margin_impact.get('initMarginAfter', 0)
+        equity_after = margin_impact.get('equityWithLoanAfter', 0)
+
+        if net_liquidation > 0 and init_margin_after:
+            post_leverage = init_margin_after / net_liquidation
+            if post_leverage > self.limits.max_leverage:
+                return RiskGateResult(
+                    approved=False,
+                    reason=f'post-trade leverage {post_leverage:.2f}x exceeds limit {self.limits.max_leverage:.2f}x'
+                )
+
+        if equity_after and net_liquidation > 0:
+            cushion = (equity_after - init_margin_after) / net_liquidation
+            if cushion < self.limits.min_margin_cushion:
+                return RiskGateResult(
+                    approved=False,
+                    reason=f'margin cushion {cushion:.2%} below minimum {self.limits.min_margin_cushion:.2%}'
+                )
+
         return RiskGateResult(approved=True)

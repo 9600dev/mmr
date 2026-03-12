@@ -71,6 +71,13 @@ class Container():
             self.configuration: Dict = yaml.load(conf_file, Loader=yaml.FullLoader)
             self.type_instance_cache: Dict[Type, object] = {}
 
+        # Resolve relative paths against the project root so CLI works from any cwd
+        root = mmr_root()
+        for key in ('duckdb_path', 'logfile', 'root_directory'):
+            val = self.configuration.get(key)
+            if val and isinstance(val, str) and not os.path.isabs(val) and not val.startswith('~'):
+                self.configuration[key] = str(root / val)
+
         self.mmr_config: MMRConfig = MMRConfig.from_yaml(self.config_file)
 
         # Sync auto-resolved values back to the raw config dict so that

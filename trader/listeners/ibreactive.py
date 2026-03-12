@@ -579,6 +579,13 @@ class IBAIORx():
         else:
             return cast(List[ContractDetails], result)
 
+    async def get_contract_details_async(self, contract: Contract) -> List[ContractDetails]:
+        result = await self.ib.reqContractDetailsAsync(contract)
+        if not result:
+            return []
+        else:
+            return cast(List[ContractDetails], result)
+
     async def get_matching_symbols(self, symbol: str) -> List[ContractDescription]:
         result = await self.ib.reqMatchingSymbolsAsync(symbol)
         if not result: return []
@@ -705,6 +712,64 @@ class IBAIORx():
             end_date=end_date,
             filter_between_dates=True
         )
+
+    async def get_snapshots_batch(self, contracts: list[Contract], delayed: bool = False) -> list[dict]:
+        """Get snapshots for multiple contracts sequentially."""
+        results = []
+        for contract in contracts:
+            try:
+                ticker = await self.get_snapshot(contract, delayed=delayed)
+                results.append({
+                    'symbol': contract.symbol, 'conId': contract.conId,
+                    'exchange': contract.primaryExchange or contract.exchange,
+                    'currency': contract.currency,
+                    'bid': ticker.bid, 'ask': ticker.ask, 'last': ticker.last,
+                    'open': ticker.open, 'high': ticker.high, 'low': ticker.low,
+                    'close': ticker.close, 'volume': ticker.volume,
+                })
+            except Exception as ex:
+                logging.warning(f'Snapshot failed for {contract.symbol}: {ex}')
+        return results
+
+    async def get_history_bars(self, contract: Contract, duration: str = '60 D', bar_size: str = '1 day') -> list[dict]:
+        """Get recent history bars for indicator computation."""
+        bars = await self.ib.reqHistoricalDataAsync(
+            contract, endDateTime='', durationStr=duration,
+            barSizeSetting=bar_size, whatToShow='TRADES', useRTH=True,
+        )
+        return [{'date': str(b.date), 'open': b.open, 'high': b.high,
+                 'low': b.low, 'close': b.close, 'volume': b.volume}
+                for b in (bars or [])]
+
+    async def get_fundamental_data(self, contract: Contract, report_type: str = 'ReportSnapshot') -> str:
+        """Get fundamental data XML for a contract."""
+        return await self.ib.reqFundamentalDataAsync(contract, reportType=report_type)
+
+    async def get_news_headlines(self, conId: int, provider_codes: str = '',
+                                 total_results: int = 5) -> list[dict]:
+        """Get historical news headlines for a contract."""
+        from datetime import datetime, timedelta
+        if not provider_codes:
+            providers = await self.ib.reqNewsProvidersAsync()
+            if providers:
+                provider_codes = '+'.join(p.code for p in providers[:5])
+            else:
+                provider_codes = 'BZ+FLY'
+        end = datetime.now()
+        start = end - timedelta(days=7)
+        items = await self.ib.reqHistoricalNewsAsync(
+            conId, provider_codes, start, end, total_results,
+        )
+        results = []
+        if items:
+            for item in (items if isinstance(items, list) else [items]):
+                results.append({
+                    'time': str(getattr(item, 'time', '')),
+                    'provider': getattr(item, 'providerCode', ''),
+                    'articleId': getattr(item, 'articleId', ''),
+                    'headline': getattr(item, 'headline', ''),
+                })
+        return results
 
     async def scanner_data(
         self,

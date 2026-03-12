@@ -181,6 +181,11 @@ class MMRConfig:
             else:
                 config.ib.server_port = config.ib.live_port
 
+        # Resolve relative duckdb_path against the project root
+        if config.storage.duckdb_path and not os.path.isabs(config.storage.duckdb_path):
+            from trader.container import mmr_root
+            config.storage.duckdb_path = str(mmr_root() / config.storage.duckdb_path)
+
         return config
 
     def to_flat_dict(self) -> Dict[str, Any]:

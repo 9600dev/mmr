@@ -210,5 +210,83 @@ class TraderServiceApi(RPCHandler):
         )
 
     @rpcmethod
+    async def get_snapshots_batch(self, contracts: list, delayed: bool = False) -> list[dict]:
+        return await self.trader.get_snapshots_batch(contracts, delayed)
+
+    @rpcmethod
+    async def get_history_bars(self, contract: Contract, duration: str = '60 D', bar_size: str = '1 day') -> list[dict]:
+        return await self.trader.get_history_bars(contract, duration, bar_size)
+
+    @rpcmethod
+    async def get_fundamental_data(self, contract: Contract, report_type: str = 'ReportSnapshot') -> str:
+        return await self.trader.get_fundamental_data(contract, report_type)
+
+    @rpcmethod
+    async def get_news_headlines(self, conId: int, provider_codes: str = '',
+                                  total_results: int = 5) -> list[dict]:
+        return await self.trader.get_news_headlines(conId, provider_codes, total_results)
+
+    @rpcmethod
+    async def place_expressive_order(
+        self,
+        contract: Contract,
+        action: str,
+        quantity: float,
+        execution_spec: dict,
+        algo_name: str = 'proposal',
+    ) -> SuccessFail[list[Trade]]:
+        """Place an order with full execution specification (brackets, trailing stops, etc.)."""
+        result = await self.trader.place_expressive_order(
+            contract=contract,
+            action=action,
+            quantity=quantity,
+            execution_spec=execution_spec,
+            algo_name=algo_name,
+        )
+        return result
+
+    @rpcmethod
+    async def check_order_margin(
+        self,
+        contract: Contract,
+        order: Order,
+    ) -> dict:
+        """Simulate order to get margin impact without placing it."""
+        return await self.trader.check_order_margin(contract, order)
+
+    @rpcmethod
+    def get_risk_limits(self) -> dict:
+        """Return current risk gate limits."""
+        from dataclasses import asdict
+        return asdict(self.trader.risk_gate.limits)
+
+    @rpcmethod
+    def set_risk_limits(self, **kwargs) -> dict:
+        """Update risk gate limits. Only provided fields are changed."""
+        from dataclasses import asdict
+        limits = self.trader.risk_gate.limits
+        for key, value in kwargs.items():
+            if hasattr(limits, key):
+                setattr(limits, key, type(getattr(limits, key))(value))
+        return asdict(limits)
+
+    @rpcmethod
     async def get_ib_account(self) -> str:
         return self.trader.ib_account
+
+    @rpcmethod
+    def get_account_values(self) -> dict:
+        """Return key account values (cash, net liquidation, buying power, etc.)."""
+        vals = self.trader.client.ib.accountValues()
+        keys = {
+            'TotalCashValue', 'NetLiquidation', 'AvailableFunds',
+            'BuyingPower', 'GrossPositionValue', 'MaintMarginReq',
+            'InitMarginReq', 'ExcessLiquidity', 'Cushion',
+            'FullInitMarginReq', 'FullMaintMarginReq',
+            'DayTradesRemaining',
+        }
+        result = {}
+        for v in vals:
+            if v.tag in keys and v.currency != 'BASE':
+                result[v.tag] = {'value': v.value, 'currency': v.currency}
+        return result

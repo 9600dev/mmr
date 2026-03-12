@@ -46,29 +46,52 @@ def print_df(df, title=None):
         console.print("[dim]No data[/dim]")
         return
 
-    table = Table(title=title, show_lines=False)
+    # Columns that benefit from wrapping (long text)
+    wrap_cols = {'reasoning', 'thesis', 'rejection_reason'}
+
+    table = Table(title=title, show_lines=False, expand=True)
     for col in df.columns:
         justify = 'right' if df[col].dtype in ('float64', 'int64', 'float32', 'int32') else 'left'
-        table.add_column(str(col), justify=justify)
+        if col in wrap_cols:
+            table.add_column(str(col), justify=justify, no_wrap=False, ratio=2, min_width=20)
+        else:
+            table.add_column(str(col), justify=justify, no_wrap=True)
+
+    # Columns that show signed, colored values
+    _signed_cols = {'unrealizedPNL', 'realizedPNL', 'dailyPNL', 'change', 'pnl'}
+    _pct_cols = {'%', 'change_pct'}
 
     for _, row in df.iterrows():
         cells = []
         for col in df.columns:
             val = row[col]
             if isinstance(val, float):
-                if col in ('unrealizedPNL', 'realizedPNL', 'dailyPNL'):
+                if val != val:  # NaN
+                    cells.append('[dim]-[/dim]')
+                elif col in _signed_cols:
                     color = 'green' if val >= 0 else 'red'
-                    cells.append(f'[{color}]{val:,.2f}[/{color}]')
-                elif col == '%':
+                    sign = '+' if val > 0 else ''
+                    cells.append(f'[{color}]{sign}{val:,.2f}[/{color}]')
+                elif col in _pct_cols:
                     color = 'green' if val >= 0 else 'red'
-                    cells.append(f'[{color}]{val:+.2f}%[/{color}]')
+                    sign = '+' if val > 0 else ''
+                    cells.append(f'[{color}]{sign}{val:.2f}%[/{color}]')
+                elif col == 'volume':
+                    cells.append(f'{val:,.0f}')
                 else:
                     cells.append(f'{val:,.2f}')
             else:
                 cells.append(str(val))
         table.add_row(*cells)
 
-    console.print(table)
+    # Use pager for tall output (more rows than terminal height)
+    import shutil
+    term_height = shutil.get_terminal_size().lines
+    if len(df) > term_height - 6:
+        with console.pager(styles=True):
+            console.print(table)
+    else:
+        console.print(table)
 
 
 def print_dict(d, title=None):
@@ -141,9 +164,11 @@ def print_status(message, success=True):
 
 def build_parser() -> argparse.ArgumentParser:
     fmt = argparse.RawDescriptionHelpFormatter
-    parser = argparse.ArgumentParser(prog='mmr', description='MMR Trading CLI', add_help=False)
+    parser = argparse.ArgumentParser(prog='mmr', description='MMR Trading CLI')
     parser.add_argument('--json', action='store_true', default=False,
                         help='Output JSON instead of Rich tables')
+    parser.add_argument('--debug', '-d', action='store_true', default=False,
+                        help='Show debug/info log output')
     sub = parser.add_subparsers(dest='command')
 
     # portfolio
@@ -317,6 +342,21 @@ def build_parser() -> argparse.ArgumentParser:
                    epilog='Examples:\n'
                           '  status',
                    formatter_class=fmt)
+
+    # risk
+    risk_p = sub.add_parser('risk', help='View/adjust risk gate limits',
+                            epilog='Examples:\n'
+                                   '  risk                              # show current limits\n'
+                                   '  risk --max-open-orders 20         # raise open order limit\n'
+                                   '  risk --max-leverage 2.0           # allow 2x margin\n'
+                                   '  risk --max-daily-loss 5000        # raise daily loss limit\n',
+                            formatter_class=fmt)
+    risk_p.add_argument('--max-open-orders', type=int, default=None, help='Max open orders')
+    risk_p.add_argument('--max-daily-loss', type=float, default=None, help='Max daily loss ($)')
+    risk_p.add_argument('--max-position-size-pct', type=float, default=None, help='Max position concentration (0.10 = 10%%)')
+    risk_p.add_argument('--max-signals-per-hour', type=int, default=None, help='Max signals per hour')
+    risk_p.add_argument('--max-leverage', type=float, default=None, help='Max leverage (1.0 = cash only)')
+    risk_p.add_argument('--min-margin-cushion', type=float, default=None, help='Min margin cushion (0.10 = 10%%)')
 
     # history
     bar_sizes = ('1 secs, 5 secs, 10 secs, 15 secs, 30 secs, '
@@ -509,6 +549,10 @@ def build_parser() -> argparse.ArgumentParser:
                            help='Market type (default: stocks)')
     movers_p.add_argument('--losers', action='store_true', default=False,
                            help='Show losers instead of gainers')
+    movers_p.add_argument('--detail', action='store_true', default=False,
+                           help='Enrich with company name, ratios, and news (card view)')
+    movers_p.add_argument('--num', '-n', type=int, default=20,
+                           help='Number of results (default: 20)')
 
     # scan
     scan_p = sub.add_parser('scan', help='IB market scanner',
@@ -537,6 +581,115 @@ def build_parser() -> argparse.ArgumentParser:
                          help='Min volume filter')
     scan_p.add_argument('--market-cap-above', type=float, default=0.0,
                          help='Min market cap filter')
+
+    # ideas
+    ideas_p = sub.add_parser('ideas', aliases=['scan-ideas'], help='Scan for trading ideas',
+                              epilog='Examples:\n'
+                                     '  ideas                             # Momentum scan (default, US/Massive)\n'
+                                     '  ideas gap-up                      # Gap-up scan\n'
+                                     '  ideas momentum --tickers AAPL MSFT AMD NVDA\n'
+                                     '  ideas mean-reversion --universe sp500\n'
+                                     '  ideas gap-up --min-price 10\n'
+                                     '  ideas volatile --num 25\n'
+                                     '  ideas --presets                   # List all presets\n'
+                                     '  ideas momentum --detail           # With fundamentals + news\n'
+                                     '  ideas momentum --location STK.AU.ASX  # ASX (IB-backed)\n'
+                                     '  ideas gap-up --location STK.CA        # Canada (IB-backed)',
+                              formatter_class=fmt)
+    ideas_p.add_argument('preset', nargs='?', default='momentum',
+                          help='Preset: momentum, gap-up, gap-down, mean-reversion, breakout, volatile')
+    ideas_p.add_argument('--tickers', '-t', nargs='+', default=None,
+                          help='Explicit ticker list to scan')
+    ideas_p.add_argument('--universe', '-u', default=None,
+                          help='Universe name to scan')
+    ideas_p.add_argument('--num', '-n', type=int, default=15,
+                          help='Top N results (default: 15)')
+    ideas_p.add_argument('--min-price', type=float, default=None,
+                          help='Override min price filter')
+    ideas_p.add_argument('--max-price', type=float, default=None,
+                          help='Override max price filter')
+    ideas_p.add_argument('--min-volume', type=int, default=None,
+                          help='Override min volume filter')
+    ideas_p.add_argument('--min-change', type=float, default=None,
+                          help='Override min change%% filter')
+    ideas_p.add_argument('--max-change', type=float, default=None,
+                          help='Override max change%% filter')
+    ideas_p.add_argument('--presets', action='store_true', default=False,
+                          help='List all available presets and exit')
+    ideas_p.add_argument('--detail', action='store_true', default=False,
+                          help='Enrich with fundamentals + news (shortcut for --fundamentals --news)')
+    ideas_p.add_argument('--fundamentals', '-f', action='store_true', default=False,
+                          help='Enrich results with financial ratios (PE, D/E, ROE, etc.)')
+    ideas_p.add_argument('--news', action='store_true', default=False,
+                          help='Enrich results with latest news headline and sentiment')
+    ideas_p.add_argument('--location', '-l', default=None,
+                          help='IB market location (e.g. STK.AU.ASX, STK.CA, STK.HK.SEHK)')
+
+    # propose
+    propose_p = sub.add_parser('propose', help='Create a trade proposal',
+                                epilog='Examples:\n'
+                                       '  propose AMD BUY --market --quantity 100 --bracket 180 150\n'
+                                       '  propose AMD BUY --limit 165 --amount 5000 --trailing-stop-pct 2.0 --tif GTC\n'
+                                       '  propose AAPL SELL --market --quantity 50 --stop-loss 140\n'
+                                       '  propose AMD BUY --market --quantity 10 --reasoning "Breakout above resistance"',
+                                formatter_class=fmt)
+    propose_p.add_argument('symbol', help='Symbol to trade')
+    propose_p.add_argument('action', choices=['BUY', 'SELL'], help='BUY or SELL')
+    propose_p.add_argument('--quantity', '-q', type=float, default=None, help='Number of shares')
+    propose_p.add_argument('--amount', '-a', type=float, default=None, help='Dollar amount (auto-calculates quantity)')
+    propose_p.add_argument('--market', action='store_true', default=False, help='Market order (default)')
+    propose_p.add_argument('--limit', type=float, default=None, help='Limit price')
+    propose_p.add_argument('--bracket', nargs=2, type=float, metavar=('TP', 'SL'),
+                            default=None, help='Bracket order: take-profit and stop-loss prices')
+    propose_p.add_argument('--trailing-stop-pct', type=float, default=None,
+                            help='Trailing stop by percent (e.g. 2.0 = 2%%)')
+    propose_p.add_argument('--trailing-stop-amt', type=float, default=None,
+                            help='Trailing stop by fixed dollar amount')
+    propose_p.add_argument('--stop-loss', type=float, default=None, help='Stop-loss price only')
+    propose_p.add_argument('--tif', default='DAY', choices=['DAY', 'GTC', 'GTD', 'IOC', 'OPG'],
+                            help='Time in force (default: DAY)')
+    propose_p.add_argument('--no-outside-rth', action='store_true', default=False,
+                            help='Disable extended hours (default: outside RTH enabled)')
+    propose_p.add_argument('--reasoning', default='', help='Why this trade')
+    propose_p.add_argument('--confidence', type=float, default=0.0, help='Confidence 0-1')
+    propose_p.add_argument('--thesis', default='', help='Short thesis label')
+    propose_p.add_argument('--source', default='manual', help='Source label (manual, llm, scanner)')
+    propose_p.add_argument('--sectype', default='STK', help='Security type (STK, CASH, OPT, etc.)')
+
+    # proposals
+    proposals_p = sub.add_parser('proposals', help='List or view trade proposals',
+                                  epilog='Examples:\n'
+                                         '  proposals                    # List pending proposals\n'
+                                         '  proposals --all              # All statuses\n'
+                                         '  proposals --status EXECUTED  # Filter by status\n'
+                                         '  proposals show 3             # Full detail for proposal #3',
+                                  formatter_class=fmt)
+    proposals_sub = proposals_p.add_subparsers(dest='proposals_action')
+    proposals_show_p = proposals_sub.add_parser('show', help='Show full proposal detail')
+    proposals_show_p.add_argument('proposal_id', type=int, help='Proposal ID')
+    proposals_p.add_argument('--status', default=None, help='Filter by status (PENDING, APPROVED, EXECUTED, etc.)')
+    proposals_p.add_argument('--all', action='store_true', default=False, help='Show all statuses')
+    proposals_p.add_argument('--limit', type=int, default=50, help='Max results (default: 50)')
+
+    # approve
+    approve_p = sub.add_parser('approve', help='Approve and execute a trade proposal',
+                                epilog='Examples:\n'
+                                       '  approve 3                    # Execute proposal #3\n'
+                                       '  approve --all                # Execute all pending proposals',
+                                formatter_class=fmt)
+    approve_p.add_argument('proposal_id', type=int, nargs='?', default=None, help='Proposal ID to approve')
+    approve_p.add_argument('--all', action='store_true', default=False, help='Approve all pending proposals')
+
+    # reject
+    reject_p = sub.add_parser('reject', help='Reject a trade proposal',
+                               epilog='Examples:\n'
+                                      '  reject 3\n'
+                                      '  reject 3 --reason "Changed thesis"\n'
+                                      '  reject --all                 # Reject all pending proposals',
+                               formatter_class=fmt)
+    reject_p.add_argument('proposal_id', type=int, nargs='?', default=None, help='Proposal ID to reject')
+    reject_p.add_argument('--all', action='store_true', default=False, help='Reject all pending proposals')
+    reject_p.add_argument('--reason', default='', help='Rejection reason')
 
     # stream
     stream_p = sub.add_parser('stream', help='Stream live ticks from Massive.com',
@@ -663,7 +816,10 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
             print_df(df, title='Portfolio')
 
         elif cmd in ('positions', 'pos'):
-            print_df(mmr.positions(), title='Positions')
+            df = mmr.positions()
+            if not df.empty:
+                df.insert(0, '#', range(1, len(df) + 1))
+            print_df(df, title='Positions')
 
         elif cmd == 'orders':
             print_df(mmr.orders(), title='Orders')
@@ -753,6 +909,9 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
                 _logging.disable(_logging.NOTSET)
             print_dict(result, title='Status')
 
+        elif cmd == 'risk':
+            _handle_risk(mmr, args)
+
         elif cmd == 'history':
             _handle_history(mmr, args)
 
@@ -773,6 +932,21 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
 
         elif cmd == 'scan':
             _handle_scan(mmr, args)
+
+        elif cmd in ('ideas', 'scan-ideas'):
+            _handle_ideas(mmr, args)
+
+        elif cmd == 'propose':
+            _handle_propose(mmr, args)
+
+        elif cmd == 'proposals':
+            _handle_proposals(mmr, args)
+
+        elif cmd == 'approve':
+            _handle_approve(mmr, args)
+
+        elif cmd == 'reject':
+            _handle_reject(mmr, args)
 
         elif cmd == 'stream':
             _handle_stream(args)
@@ -834,21 +1008,298 @@ def _print_trade_result(result, action: str, symbol: str):
             console.print(f'[red]  {result.exception}[/red]')
 
 
+def _handle_propose(mmr: MMR, args: argparse.Namespace):
+    from trader.trading.proposal import ExecutionSpec
+
+    # Determine order type
+    order_type = 'LIMIT' if args.limit is not None else 'MARKET'
+
+    # Determine exit type
+    exit_type = 'NONE'
+    take_profit_price = None
+    stop_loss_price = None
+    trailing_stop_percent = None
+    trailing_stop_amount = None
+
+    if args.bracket:
+        exit_type = 'BRACKET'
+        take_profit_price = args.bracket[0]
+        stop_loss_price = args.bracket[1]
+    elif args.trailing_stop_pct is not None:
+        exit_type = 'TRAILING_STOP'
+        trailing_stop_percent = args.trailing_stop_pct
+    elif args.trailing_stop_amt is not None:
+        exit_type = 'TRAILING_STOP'
+        trailing_stop_amount = args.trailing_stop_amt
+    elif args.stop_loss is not None:
+        exit_type = 'STOP_LOSS'
+        stop_loss_price = args.stop_loss
+
+    spec = ExecutionSpec(
+        order_type=order_type,
+        limit_price=args.limit,
+        exit_type=exit_type,
+        take_profit_price=take_profit_price,
+        stop_loss_price=stop_loss_price,
+        trailing_stop_percent=trailing_stop_percent,
+        trailing_stop_amount=trailing_stop_amount,
+        tif=args.tif,
+        outside_rth=not args.no_outside_rth,
+    )
+
+    errors = spec.validate()
+    if errors:
+        for e in errors:
+            print_status(e, success=False)
+        return
+
+    proposal_id, leverage_info, snapshot_info = mmr.propose(
+        symbol=args.symbol,
+        action=args.action,
+        quantity=args.quantity,
+        amount=args.amount,
+        execution=spec,
+        reasoning=args.reasoning,
+        confidence=args.confidence,
+        thesis=args.thesis,
+        source=args.source,
+        sec_type=args.sectype,
+    )
+
+    summary = f'{args.action} {args.symbol}'
+    if args.quantity:
+        summary += f' x{args.quantity}'
+    elif args.amount:
+        summary += f' ${args.amount}'
+    summary += f' ({order_type}'
+    if args.limit:
+        summary += f' @{args.limit}'
+    summary += ')'
+    if exit_type != 'NONE':
+        summary += f' [{exit_type}]'
+
+    print_status(f'Proposal #{proposal_id} created (PENDING): {summary}')
+
+    if snapshot_info:
+        bid = snapshot_info.get('bid')
+        ask = snapshot_info.get('ask')
+        last = snapshot_info.get('last')
+        parts = []
+        if bid is not None and bid == bid:
+            parts.append(f'bid {bid:g}')
+        if ask is not None and ask == ask:
+            parts.append(f'ask {ask:g}')
+        if last is not None and last == last:
+            parts.append(f'last {last:g}')
+        if parts:
+            console.print(f'[dim]  Snapshot: {" / ".join(parts)}[/dim]')
+
+    if leverage_info:
+        current = leverage_info.get('current_leverage', 0)
+        estimated = leverage_info.get('estimated_leverage', 0)
+        buying_power = leverage_info.get('buying_power', 0)
+        if leverage_info.get('uses_margin'):
+            console.print(
+                f'[yellow]  MARGIN WARNING: Estimated leverage {estimated:.2f}x '
+                f'(current: {current:.2f}x)[/yellow]'
+            )
+        else:
+            console.print(f'[dim]  Leverage: {estimated:.2f}x (current: {current:.2f}x)[/dim]')
+        console.print(f'[dim]  Buying power: ${buying_power:,.2f}[/dim]')
+
+
+def _handle_proposals(mmr: MMR, args: argparse.Namespace):
+    action = getattr(args, 'proposals_action', None)
+
+    if action == 'show':
+        detail = mmr.proposal_detail(args.proposal_id)
+        if detail:
+            print_dict(detail, title=f'Proposal #{args.proposal_id}')
+            # Show leverage estimate if present
+            leverage = (detail.get('metadata') or {}).get('leverage_estimate')
+            if leverage:
+                current = leverage.get('current_leverage', 0)
+                estimated = leverage.get('estimated_leverage', 0)
+                net_liq = leverage.get('net_liquidation', 0)
+                buying_power = leverage.get('buying_power', 0)
+                uses_margin = leverage.get('uses_margin', False)
+                margin_label = ' [yellow]USES MARGIN[/yellow]' if uses_margin else ''
+                console.print(f'\n[bold]Leverage Estimate:[/bold]')
+                console.print(f'  Current:     {current:.2f}x')
+                console.print(f'  After trade: {estimated:.2f}x{margin_label}')
+                console.print(f'  Net Liq:     ${net_liq:,.2f}')
+                console.print(f'  Buying Power: ${buying_power:,.2f}')
+        else:
+            print_status(f'Proposal #{args.proposal_id} not found', success=False)
+        return
+
+    # List proposals
+    status_filter = None
+    if not args.all:
+        status_filter = args.status or 'PENDING'
+
+    from trader.data.proposal_store import ProposalStore
+    store = mmr._proposal_store()
+    props = store.query(status=status_filter, limit=args.limit)
+
+    if _json_mode:
+        df = mmr.proposals(status=status_filter, limit=args.limit)
+        title = 'Proposals'
+        if status_filter:
+            title += f' ({status_filter})'
+        print_df(df, title=title)
+        return
+
+    if not props:
+        console.print('[dim]No proposals[/dim]')
+        return
+
+    title = 'Proposals'
+    if status_filter:
+        title += f' ({status_filter})'
+    console.print(f'[bold]{title}[/bold]\n')
+
+    for p in props:
+        # Size
+        if p.quantity is not None and p.quantity == p.quantity:
+            size = f'{p.quantity:g} shares'
+        elif p.amount is not None and p.amount == p.amount:
+            size = f'${p.amount:,.0f}'
+        else:
+            size = '?'
+
+        # Order type
+        order_desc = 'MARKET' if p.execution.order_type == 'MARKET' else f'LIMIT @{p.execution.limit_price:g}'
+
+        # Exit
+        exit_abbrev = {'NONE': '', 'BRACKET': 'bracket', 'TRAILING_STOP': 'trailing stop', 'STOP_LOSS': 'stop loss'}
+        exit_desc = exit_abbrev.get(p.execution.exit_type, p.execution.exit_type)
+
+        # Status color
+        status_colors = {'PENDING': 'yellow', 'EXECUTED': 'green', 'APPROVED': 'blue', 'REJECTED': 'red', 'FAILED': 'red'}
+        sc = status_colors.get(p.status, 'white')
+
+        # Header line
+        console.print(f'  [bold]#{p.id}[/bold]  [bold]{p.action} {p.symbol}[/bold]  {size}  {order_desc}', end='')
+        if exit_desc:
+            console.print(f'  +{exit_desc}', end='')
+        if status_filter is None:
+            console.print(f'  [{sc}]{p.status}[/{sc}]', end='')
+        console.print()
+
+        # Detail lines
+        details = []
+        if p.reasoning:
+            details.append(f'[dim]{p.reasoning}[/dim]')
+        if p.confidence:
+            details.append(f'[dim]conf: {p.confidence:.0%}[/dim]')
+
+        # Bid/ask snapshot at proposal time
+        snapshot = p.metadata.get('snapshot')
+        if snapshot:
+            bid = snapshot.get('bid')
+            ask = snapshot.get('ask')
+            last = snapshot.get('last')
+            parts = []
+            if bid is not None and bid == bid:  # not NaN
+                parts.append(f'bid {bid:g}')
+            if ask is not None and ask == ask:
+                parts.append(f'ask {ask:g}')
+            if last is not None and last == last:
+                parts.append(f'last {last:g}')
+            if parts:
+                details.append(f'[dim]{" / ".join(parts)}[/dim]')
+
+        leverage = p.metadata.get('leverage_estimate')
+        if leverage and leverage.get('uses_margin'):
+            details.append(f"[yellow]margin: {leverage['estimated_leverage']:.1f}x[/yellow]")
+        created = p.created_at.strftime('%m/%d %H:%M') if p.created_at else ''
+        if created:
+            details.append(f'[dim]{created}[/dim]')
+        if details:
+            console.print(f'      {" | ".join(details)}')
+        console.print()
+
+
+def _handle_approve(mmr: MMR, args: argparse.Namespace):
+    if args.all:
+        pending = mmr._proposal_store().query(status='PENDING')
+        if not pending:
+            print_status('No pending proposals to approve')
+            return
+        console.print(f'Approving {len(pending)} pending proposal(s)...\n')
+        for p in pending:
+            _approve_one(mmr, p.id)
+        return
+
+    if args.proposal_id is None:
+        print_status('Specify a proposal ID or use --all', success=False)
+        return
+
+    _approve_one(mmr, args.proposal_id)
+
+
+def _approve_one(mmr: MMR, proposal_id: int):
+    result = mmr.approve(proposal_id)
+    if result.is_success():
+        order_ids = result.obj if result.obj else []
+        print_status(f'Proposal #{proposal_id} approved and executed. Order IDs: {order_ids}')
+    else:
+        error = str(result.error or result.exception or 'Unknown error')
+        if 'leverage' in error.lower() or 'margin' in error.lower() or 'risk gate' in error.lower():
+            print_status(f'Proposal #{proposal_id} rejected by risk gate: {error}', success=False)
+        else:
+            print_status(f'Approve #{proposal_id} failed: {error}', success=False)
+
+
+def _handle_reject(mmr: MMR, args: argparse.Namespace):
+    if args.all:
+        pending = mmr._proposal_store().query(status='PENDING')
+        if not pending:
+            print_status('No pending proposals to reject')
+            return
+        for p in pending:
+            mmr.reject(p.id, reason=args.reason)
+            print_status(f'Proposal #{p.id} rejected')
+        return
+
+    if args.proposal_id is None:
+        print_status('Specify a proposal ID or use --all', success=False)
+        return
+
+    success = mmr.reject(args.proposal_id, reason=args.reason)
+    if success:
+        print_status(f'Proposal #{args.proposal_id} rejected')
+    else:
+        print_status(f'Reject failed: proposal #{args.proposal_id} not found or not PENDING', success=False)
+
+
 def _handle_close(mmr: MMR, args: argparse.Namespace):
     row = args.row
     if row not in mmr._position_map:
-        console.print(f'[yellow]Row #{row} not found. Run "portfolio" or "watch" first.[/yellow]')
+        console.print(f'[yellow]Row #{row} not found. Run "portfolio" or "positions" first.[/yellow]')
         return
 
     symbol = mmr._position_map[row]
-    # Get current position size for confirmation
+    # Get current position size for confirmation — try portfolio first, fall back to positions
+    pos_size = None
     df = mmr.portfolio()
-    match = df[df['symbol'] == symbol]
-    if match.empty:
-        console.print(f'[yellow]No position found for {symbol}[/yellow]')
+    if not df.empty and 'symbol' in df.columns:
+        match = df[df['symbol'] == symbol]
+        if not match.empty:
+            pos_size = float(match.iloc[0]['position'])
+
+    if pos_size is None:
+        df = mmr.positions()
+        if not df.empty and 'symbol' in df.columns:
+            match = df[df['symbol'] == symbol]
+            if not match.empty:
+                pos_size = float(match.iloc[0]['position'])
+
+    if pos_size is None or pos_size == 0.0:
+        console.print(f'[yellow]{symbol}: position is already flat (0 shares). Nothing to close.[/yellow]')
         return
 
-    pos_size = float(match.iloc[0]['position'])
     close_qty = args.quantity if args.quantity else abs(pos_size)
 
     confirm = input(f'Close #{row}: {symbol} ({close_qty} shares) at market? [y/N] ')
@@ -861,6 +1312,30 @@ def _handle_close(mmr: MMR, args: argparse.Namespace):
         console.print(f'[green]Close {symbol}: submitted[/green]')
     else:
         console.print(f'[red]Close {symbol}: failed — {result.error}[/red]')
+
+
+def _handle_risk(mmr: MMR, args: argparse.Namespace):
+    # Collect any updates
+    updates = {}
+    field_map = {
+        'max_open_orders': args.max_open_orders,
+        'max_daily_loss': args.max_daily_loss,
+        'max_position_size_pct': args.max_position_size_pct,
+        'max_signals_per_hour': args.max_signals_per_hour,
+        'max_leverage': args.max_leverage,
+        'min_margin_cushion': args.min_margin_cushion,
+    }
+    for key, val in field_map.items():
+        if val is not None:
+            updates[key] = val
+
+    if updates:
+        result = mmr.set_risk_limits(**updates)
+        print_status('Risk limits updated')
+        print_dict(result, title='Risk Limits')
+    else:
+        result = mmr.get_risk_limits()
+        print_dict(result, title='Risk Limits')
 
 
 def _handle_strategies(mmr: MMR, args: argparse.Namespace):
@@ -2033,8 +2508,77 @@ def _handle_movers(mmr: MMR, args: argparse.Namespace):
 
     direction = 'losers' if args.losers else 'gainers'
     market = args.market
-    df = mmr.movers(market=market, direction=direction)
-    print_df(df, title=f'{market.title()} Movers ({direction})')
+
+    if not args.detail:
+        df = mmr.movers(market=market, direction=direction)
+        if args.num and len(df) > args.num:
+            df = df.head(args.num)
+        print_df(df, title=f'{market.title()} Movers ({direction})')
+        return
+
+    # Detail card view
+    movers = mmr.movers_detail(market=market, direction=direction, num=args.num)
+    if not movers:
+        console.print('[dim]No data[/dim]')
+        return
+
+    console.print(f'[bold]{market.title()} Movers ({direction}) — {len(movers)} results[/bold]\n')
+
+    for m in movers:
+        ticker = m['ticker']
+        details = m.get('details', {})
+        ratios = m.get('ratios', {})
+        news = m.get('news', {})
+
+        name = details.get('name', '')
+        change = m.get('change', 0) or 0
+        change_pct = m.get('change_pct', 0) or 0
+        close = m.get('close', 0) or 0
+        volume = m.get('volume', 0) or 0
+        mkt_cap = details.get('market_cap')
+
+        color = 'green' if change >= 0 else 'red'
+        sign = '+' if change > 0 else ''
+
+        # Header: ticker, price, change from open
+        open_price = m.get('open', 0) or 0
+        open_str = f' from ${open_price:,.2f}' if open_price else ''
+        console.print(
+            f'[bold]{ticker}[/bold]  '
+            f'${close:,.2f}  '
+            f'[{color}]{sign}{change:,.2f} ({sign}{change_pct:.2f}%){open_str}[/{color}]'
+        )
+
+        # Company name
+        if name:
+            console.print(f'[dim]{name}[/dim]')
+
+        # Stats line: volume, market cap, ratios
+        stats = [f'vol {volume:,.0f}']
+        if mkt_cap:
+            if mkt_cap >= 1e12:
+                stats.append(f'cap ${mkt_cap/1e12:.1f}T')
+            elif mkt_cap >= 1e9:
+                stats.append(f'cap ${mkt_cap/1e9:.1f}B')
+            elif mkt_cap >= 1e6:
+                stats.append(f'cap ${mkt_cap/1e6:.0f}M')
+        for label in ('pe', 'de', 'roe', 'eps'):
+            val = ratios.get(label)
+            if val is not None:
+                stats.append(f'{label.upper()} {val:g}')
+        console.print(f'[dim]{" | ".join(stats)}[/dim]')
+
+        # News line
+        headline = news.get('headline')
+        if headline:
+            sentiment = news.get('sentiment', '')
+            sent_str = ''
+            if sentiment:
+                sent_color = 'green' if 'positive' in sentiment.lower() else 'red' if 'negative' in sentiment.lower() else 'yellow'
+                sent_str = f'  [{sent_color}][{sentiment}][/{sent_color}]'
+            console.print(f'[dim italic]{headline}[/dim italic]{sent_str}')
+
+        console.print()
 
 
 def _handle_scan(mmr: MMR, args: argparse.Namespace):
@@ -2057,6 +2601,146 @@ def _handle_scan(mmr: MMR, args: argparse.Namespace):
         market_cap_above=args.market_cap_above,
     )
     print_df(df, title=f'IB Scanner: {scan_code}')
+
+
+def _handle_ideas(mmr: MMR, args: argparse.Namespace):
+    """Scan for trading ideas using preset-based scoring."""
+    import logging as _logging
+    _logging.getLogger('urllib3').setLevel(_logging.WARNING)
+
+    # --presets flag: list presets and exit
+    if args.presets:
+        from trader.tools.idea_scanner import list_presets
+        print_df(list_presets(), title='Idea Scanner Presets')
+        return
+
+    # Determine source
+    if args.tickers:
+        source = 'tickers'
+    elif args.universe:
+        source = 'universe'
+    else:
+        source = 'movers'
+
+    # --detail is shortcut for --fundamentals --news + company names
+    use_fundamentals = args.fundamentals or args.detail
+    use_news = args.news or args.detail
+    use_names = args.detail
+
+    df = mmr.scan_ideas(
+        preset=args.preset,
+        source=source,
+        tickers=args.tickers,
+        universe=args.universe,
+        top_n=args.num,
+        min_price=args.min_price,
+        max_price=args.max_price,
+        min_volume=args.min_volume,
+        min_change_pct=args.min_change,
+        max_change_pct=args.max_change,
+        fundamentals=use_fundamentals,
+        news=use_news,
+        names=use_names,
+        location=args.location,
+    )
+
+    location_label = f' [{args.location}]' if args.location else ''
+    title = f'Ideas: {args.preset}{location_label}'
+
+    if _json_mode:
+        print_df(df, title=title)
+        return
+
+    if df.empty:
+        if args.location:
+            console.print(
+                '[dim]No ideas found.[/dim]\n'
+                '[dim]The IB scanner may not support this location, or your account '
+                'may lack market data subscriptions for it.[/dim]\n'
+                f'[dim]Try: ideas {args.preset} --location {args.location} '
+                '--tickers SYM1 SYM2 SYM3[/dim]'
+            )
+        else:
+            console.print('[dim]No ideas found[/dim]')
+        return
+
+    console.print(f'[bold]{title}[/bold]  ({len(df)} results)\n')
+
+    for _, row in df.iterrows():
+        ticker = row.get('ticker', '')
+        price = row.get('price', 0) or 0
+        change_pct = row.get('change_pct', 0) or 0
+        volume = row.get('volume', 0) or 0
+        score = row.get('score', 0) or 0
+        signal = row.get('signal', '')
+
+        color = 'green' if change_pct >= 0 else 'red'
+        sign = '+' if change_pct > 0 else ''
+        sig_color = 'green' if signal == 'BUY' else 'red' if signal == 'SELL' else 'yellow'
+
+        # Header: ticker, price, change, signal, score
+        name = row.get('name', '')
+        name_str = f'  [dim]{name}[/dim]' if name and name == name else ''
+        console.print(
+            f'[bold]{ticker}[/bold]{name_str}  '
+            f'${price:,.2f}  '
+            f'[{color}]{sign}{change_pct:.2f}%[/{color}]  '
+            f'[{sig_color}]{signal}[/{sig_color}]  '
+            f'[dim]score {score}[/dim]'
+        )
+
+        # Indicators line
+        indicators = []
+        gap_pct = row.get('gap_pct')
+        if gap_pct is not None and gap_pct == gap_pct:
+            indicators.append(f'gap {gap_pct:+.1f}%')
+        rel_vol = row.get('rel_vol')
+        if rel_vol is not None and rel_vol == rel_vol:
+            indicators.append(f'rvol {rel_vol:.1f}x')
+        range_pct = row.get('range_pct')
+        if range_pct is not None and range_pct == range_pct:
+            indicators.append(f'range {range_pct:.1f}%')
+        rsi = row.get('rsi')
+        if rsi is not None and rsi == rsi:
+            indicators.append(f'RSI {rsi:.0f}')
+        for ema_col in ('ema_9', 'sma_20', 'sma_50'):
+            val = row.get(ema_col)
+            if val is not None and val == val:
+                indicators.append(f'{ema_col.upper()} {val:.2f}')
+        if indicators:
+            console.print(f'[dim]vol {volume:,.0f} | {" | ".join(indicators)}[/dim]')
+        else:
+            console.print(f'[dim]vol {volume:,.0f}[/dim]')
+
+        # Fundamentals line (if present)
+        fund_parts = []
+        for col, label in [('pe_ratio', 'PE'), ('debt_equity', 'D/E'), ('roe', 'ROE'),
+                           ('eps', 'EPS'), ('mkt_cap', 'cap')]:
+            val = row.get(col)
+            if val is not None and val == val:
+                if col == 'mkt_cap':
+                    if val >= 1e12:
+                        fund_parts.append(f'{label} ${val/1e12:.1f}T')
+                    elif val >= 1e9:
+                        fund_parts.append(f'{label} ${val/1e9:.1f}B')
+                    elif val >= 1e6:
+                        fund_parts.append(f'{label} ${val/1e6:.0f}M')
+                else:
+                    fund_parts.append(f'{label} {val:g}')
+        if fund_parts:
+            console.print(f'[dim]{" | ".join(fund_parts)}[/dim]')
+
+        # News line (if present)
+        headline = row.get('headline')
+        if headline and headline == headline:  # not NaN
+            sentiment = row.get('sentiment', '')
+            sent_str = ''
+            if sentiment and sentiment == sentiment:
+                sent_color = 'green' if 'positive' in str(sentiment).lower() else 'red' if 'negative' in str(sentiment).lower() else 'yellow'
+                sent_str = f'  [{sent_color}][{sentiment}][/{sent_color}]'
+            console.print(f'[dim italic]{headline}[/dim italic]{sent_str}')
+
+        console.print()
 
 
 def _handle_stream(args: argparse.Namespace):
@@ -2310,33 +2994,154 @@ def _handle_watch(mmr: MMR):
 # REPL
 # ------------------------------------------------------------------
 
+def _build_completer(parser: argparse.ArgumentParser):
+    """Build a prompt_toolkit completer from the argparse parser."""
+    from prompt_toolkit.completion import Completer, Completion
+
+    # Extract top-level commands and their subcommands + flags
+    commands = {}  # command -> {subcommands: [...], flags: [...]}
+    for action in parser._subparsers._group_actions:
+        for name, subparser in action.choices.items():
+            entry = {'flags': [], 'subcommands': []}
+            for sub_action in subparser._actions:
+                if isinstance(sub_action, argparse._SubParsersAction):
+                    entry['subcommands'] = list(sub_action.choices.keys())
+                elif sub_action.option_strings:
+                    entry['flags'].extend(sub_action.option_strings)
+            commands[name] = entry
+
+    # Global flags
+    global_flags = []
+    for action in parser._actions:
+        if action.option_strings:
+            global_flags.extend(action.option_strings)
+
+    class MMRCompleter(Completer):
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+            words = text.split()
+            word = document.get_word_before_cursor(WORD=True)
+
+            if not words or (len(words) == 1 and not text.endswith(' ')):
+                # Completing the command itself
+                for cmd in sorted(commands.keys()):
+                    if cmd.startswith(word):
+                        yield Completion(cmd, start_position=-len(word))
+                for flag in global_flags:
+                    if flag.startswith(word):
+                        yield Completion(flag, start_position=-len(word))
+            elif len(words) >= 1:
+                cmd = words[0]
+                entry = commands.get(cmd, {})
+                subs = entry.get('subcommands', [])
+                flags = entry.get('flags', [])
+
+                if len(words) == 1 and text.endswith(' '):
+                    # Just typed command + space — show subcommands first, then flags
+                    for sub in sorted(subs):
+                        yield Completion(sub)
+                    for flag in sorted(flags):
+                        yield Completion(flag)
+                elif len(words) == 2 and not text.endswith(' ') and subs:
+                    # Completing subcommand
+                    for sub in sorted(subs):
+                        if sub.startswith(word):
+                            yield Completion(sub, start_position=-len(word))
+                    for flag in sorted(flags):
+                        if flag.startswith(word):
+                            yield Completion(flag, start_position=-len(word))
+                else:
+                    # Completing flags
+                    if word.startswith('-'):
+                        for flag in sorted(flags):
+                            if flag.startswith(word):
+                                yield Completion(flag, start_position=-len(word))
+
+    return MMRCompleter()
+
+
 def repl(mmr: MMR):
     """Interactive REPL with prompt_toolkit."""
     from prompt_toolkit import PromptSession
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
     from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.key_binding import KeyBindings
 
     history_dir = Path('~/.local/share/mmr').expanduser()
     history_dir.mkdir(parents=True, exist_ok=True)
     history_file = history_dir / '.mmr_repl_history'
 
+    parser = build_parser()
+
+    vi_mode = [True]
+
+    bindings = KeyBindings()
+
+    @bindings.add('escape', 'v')  # Alt+V toggles vi mode
+    def _toggle_vi(event):
+        vi_mode[0] = not vi_mode[0]
+        event.app.vi_mode = vi_mode[0]
+        mode_str = 'vi' if vi_mode[0] else 'emacs'
+        event.app.output.write(f'\nInput mode: {mode_str}\n')
+        event.app.output.flush()
+
+    def _get_prompt():
+        if not vi_mode[0]:
+            return [('', 'mmr> ')]
+        from prompt_toolkit.application import get_app
+        try:
+            app = get_app()
+            mode = app.vi_state.input_mode
+            mode_name = mode.value if hasattr(mode, 'value') else str(mode)
+            if 'INSERT' in mode_name.upper():
+                tag, style = 'I', 'fg:ansigreen'
+            elif 'REPLACE' in mode_name.upper():
+                tag, style = 'R', 'fg:ansired'
+            else:
+                tag, style = 'N', 'fg:ansiyellow'
+        except Exception:
+            tag, style = 'I', 'fg:ansigreen'
+        return [(style, f'[{tag}]'), ('', ' mmr> ')]
+
     session = PromptSession(
         history=FileHistory(str(history_file)),
         auto_suggest=AutoSuggestFromHistory(),
+        completer=_build_completer(parser),
+        vi_mode=vi_mode[0],
+        key_bindings=bindings,
     )
 
-    parser = build_parser()
-    console.print('[bold]MMR Trading REPL[/bold]  (type "help" for commands, Ctrl+D to exit)')
+    console.print('[bold]MMR Trading REPL[/bold]  (type "help" for commands, Ctrl+C twice to exit)')
+
+    _last_interrupt = [0.0]
 
     while True:
         try:
-            text = session.prompt('mmr> ').strip()
+            text = session.prompt(_get_prompt).strip()
+            _last_interrupt[0] = 0.0
         except KeyboardInterrupt:
+            now = time.monotonic()
+            if now - _last_interrupt[0] < 1.0:
+                break
+            _last_interrupt[0] = now
+            console.print('[dim]Press Ctrl+C again to exit[/dim]')
             continue
         except EOFError:
             break
 
         if not text:
+            continue
+
+        # Toggle input mode
+        if text in ('set vi', 'set vim'):
+            vi_mode[0] = True
+            session.vi_mode = True
+            console.print('[dim]Input mode: vi[/dim]')
+            continue
+        elif text in ('set emacs', 'set default'):
+            vi_mode[0] = False
+            session.vi_mode = False
+            console.print('[dim]Input mode: emacs[/dim]')
             continue
 
         try:
@@ -2361,7 +3166,7 @@ def repl(mmr: MMR):
 # Entry point
 # ------------------------------------------------------------------
 
-_LOCAL_ONLY_COMMANDS = {'backtest', 'bt', 'data'}
+_LOCAL_ONLY_COMMANDS = {'backtest', 'bt', 'data', 'propose', 'proposals', 'reject'}
 _LOCAL_ONLY_STRAT_ACTIONS = {'create', 'deploy', 'undeploy', 'signals', 'backtest'}
 
 
@@ -2382,10 +3187,10 @@ def main():
             if strat_action in _LOCAL_ONLY_STRAT_ACTIONS:
                 is_local = True
 
-        # In JSON mode, suppress noisy log output (DEBUG, INFO, etc.)
-        if getattr(args, 'json', False):
+        # Suppress logs by default; only show with --debug
+        if not getattr(args, 'debug', False):
             import logging as _logging
-            _logging.getLogger().setLevel(_logging.CRITICAL)
+            _logging.disable(_logging.CRITICAL)
 
         mmr = MMR()
         if not is_local:
@@ -2401,7 +3206,10 @@ def main():
         finally:
             mmr.close()
     else:
-        # Interactive REPL
+        # Interactive REPL — suppress logs by default
+        import logging as _logging
+        _logging.disable(_logging.CRITICAL)
+
         mmr = MMR()
         try:
             mmr.connect()

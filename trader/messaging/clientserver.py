@@ -113,7 +113,7 @@ def pack(obj) -> bytes:
 
 
 def unpack(data: bytes):
-    return msgpack.unpackb(data, ext_hook=ext_unpack, raw=False)
+    return msgpack.unpackb(data, ext_hook=ext_unpack, raw=False, strict_map_key=False)
 
 
 # ---------------------------------------------------------------------------

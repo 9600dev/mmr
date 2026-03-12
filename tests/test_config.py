@@ -25,7 +25,9 @@ class TestMMRConfig:
         assert config.ib.server_address == '10.0.0.1'
         # Default trading_mode is 'live' → live port
         assert config.ib.server_port == IB_LIVE_PORT
-        assert config.storage.duckdb_path == 'data/mmr.duckdb'
+        # duckdb_path is resolved to absolute against project root
+        assert config.storage.duckdb_path.endswith('data/mmr.duckdb')
+        assert os.path.isabs(config.storage.duckdb_path)
         assert config.zmq.rpc_server_port == 42001
 
     def test_env_var_override_port(self, test_config_file, monkeypatch):
