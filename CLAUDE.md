@@ -61,6 +61,12 @@ The reason PubSub and MessageBus are separate (despite overlap) is efficiency: Z
 
 **Risk gate**: `trader/trading/risk_gate.py` enforces pre-trade risk limits (max position size, daily loss, open orders, signal rate) by querying the event store.
 
+**Position sizing**: `trader/trading/position_sizing.py` computes position sizes based on confidence, risk level, portfolio state, and liquidity (ADV, spread). Configured via `configs/position_sizing.yaml`. Used automatically by `propose` when no quantity/amount is specified.
+
+**Trading filter**: `trader/trading/trading_filter.py` enforces symbol/exchange denylist/allowlist rules. Checked by the executioner and risk gate before any order placement.
+
+**Portfolio resizing**: `trader/sdk.py` provides `compute_resize_deltas()` (pure function) and `compute_resize_plan()`/`execute_resize_plan()` (SDK methods) for proportionally scaling all positions to fit within a target portfolio value. The resize workflow: (1) compute scale factor from max/min bounds, (2) find associated protective orders (stops, trailing stops, take-profits) for each position, (3) cancel protective orders, (4) place market orders for position deltas, (5) re-create protective orders at new quantities preserving original prices. Exposed via `resize-positions` CLI command. The `place_standalone_order()` RPC method on `trading_runtime.py` supports placing standalone STP/TRAIL/LMT orders for existing positions (used to re-create protectives after resizing).
+
 **Reactive streams (RxPY)**: `IBAIORx` converts IB events into RxPY Subjects/Observables. Strategies receive accumulated DataFrames via reactive pipelines.
 
 ## Project Structure
@@ -74,6 +80,8 @@ mmr/
 │   ├── pycron.yaml            # Service job definitions (Docker mode)
 │   ├── no_docker_pycron.yaml  # Service job definitions (non-Docker)
 │   ├── strategy_runtime.yaml  # Strategy definitions
+│   ├── position_sizing.yaml   # Position sizing defaults (base size, risk level, limits)
+│   ├── trading_filters.yaml   # Trading filter config (denylist, allowlist, exchanges)
 │   └── logging.yaml           # Python logging config
 │
 ├── trader/                    # Core library + entry points
@@ -120,6 +128,8 @@ mmr/
 │   │   ├── portfolio.py       # Portfolio positions
 │   │   ├── order_validator.py
 │   │   ├── risk_gate.py       # RiskGate — pre-trade risk limit enforcement
+│   │   ├── position_sizing.py # PositionSizer — confidence/risk/liquidity-aware sizing
+│   │   ├── trading_filter.py  # TradingFilter — denylist/allowlist/exchange filtering
 │   │   ├── strategy.py        # Strategy ABC, Signal, StrategyConfig, StrategyContext
 │   │   └── proposal.py        # TradeProposal, ExecutionSpec — propose/review/approve pipeline
 │   ├── strategy/
@@ -157,11 +167,14 @@ mmr/
 │   ├── test_event_store.py
 │   ├── test_idea_scanner.py   # 123 tests: presets, indicators, IB scanner, tickers path, fundamentals, news
 │   ├── test_portfolio.py
+│   ├── test_position_sizing.py # 72 tests: sizing, confidence, risk, liquidity, resize deltas
 │   ├── test_proposal.py
 │   ├── test_proposal_store.py
 │   ├── test_risk_gate.py
+│   ├── test_sdk.py
 │   ├── test_serialization.py
-│   └── test_strategy.py
+│   ├── test_strategy.py
+│   └── test_trading_filter.py
 │
 ├── Dockerfile                 # Debian bookworm + Python venv
 ├── docker-compose.yml         # IB Gateway sidecar + MMR container
@@ -311,6 +324,10 @@ proposals --status EXECUTED                  # Filter by status
 proposals show 3                             # Full detail for proposal #3
 approve 3                                    # Execute proposal #3 (requires trader_service)
 reject 3 --reason "Changed thesis"           # Reject proposal #3
+resize-positions --max-bound 500000          # Trim portfolio to $500k
+resize-positions --min-bound 300000          # Grow portfolio to $300k
+resize-positions --max-bound 500000 --min-bound 300000  # Both bounds
+resize-positions --max-bound 500000 --dry-run  # Preview without executing
 forex snapshot EURUSD                        # Forex snapshot via IB (default)
 forex snapshot EURUSD --source massive       # Forex snapshot via Massive
 forex quote EUR USD                          # Last bid/ask via IB (default)
@@ -424,13 +441,14 @@ pytest tests/ -v             # Run all tests
 pytest tests/test_book.py    # Run a specific test file
 ```
 
-The working test suite (246 tests across 13 files):
+The working test suite (384 tests across 16 files):
 ```bash
 pytest tests/test_idea_scanner.py tests/test_config.py tests/test_risk_gate.py \
   tests/test_proposal.py tests/test_proposal_store.py tests/test_book.py \
   tests/test_backtester.py tests/test_container.py tests/test_duckdb_store.py \
   tests/test_event_store.py tests/test_portfolio.py tests/test_serialization.py \
-  tests/test_strategy.py -v
+  tests/test_strategy.py tests/test_position_sizing.py tests/test_sdk.py \
+  tests/test_trading_filter.py -v
 ```
 
 Some test files have import errors due to missing optional dependencies (`aioreactive`) — these are pre-existing and can be ignored: `test_aiorx.py`, `test_aiozmq_simple.py`, `test_disposable.py`, `test_mmr_client.py`, `test_mmr_server.py`, `test_perf2.py`, `test_performance.py`.
@@ -528,6 +546,7 @@ mmr --json portfolio                                       # Requires trader_ser
 **Requires trader_service**:
 - `portfolio`, `positions`, `orders`, `trades`, `account`, `status`
 - `buy`, `sell`, `cancel`, `cancel-all`, `close`
+- `resize-positions` (reads portfolio + orders, places market orders + protective orders)
 - `resolve`, `snapshot`
 - `approve`
 - `strategies enable`, `strategies disable`
@@ -621,7 +640,7 @@ All local file/YAML operations.
 #### Test Suite
 | Operation | Time |
 |-----------|------|
-| Full working suite (246 tests) | ~3s |
+| Full working suite (384 tests) | ~4s |
 | Single test file | ~1-2s |
 
 #### Python Import Overhead
