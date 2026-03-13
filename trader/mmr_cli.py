@@ -12,8 +12,11 @@ Usage::
 
 from pathlib import Path
 from rich.console import Console
+from rich.columns import Columns
 from rich.live import Live
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 from trader.sdk import MMR
 
 import argparse
@@ -112,6 +115,106 @@ def print_dict(d, title=None):
     console.print(table)
 
 
+def _build_portfolio_cards(df, title='Portfolio', account_summary=None):
+    """Build a renderable Group of portfolio cards from a DataFrame."""
+    from rich.console import Group
+    import math
+
+    if df is None or df.empty:
+        return Text('No positions', style='dim')
+
+    def _fmt(v, decimals=2):
+        if isinstance(v, float) and (math.isnan(v) or v != v):
+            return '-'
+        return f'{v:,.{decimals}f}'
+
+    panels = []
+    total_daily = 0.0
+    total_unrealized = 0.0
+    total_value = 0.0
+
+    # Sort by symbol for stable ordering
+    if 'symbol' in df.columns:
+        df = df.sort_values('symbol', key=lambda s: s.str.upper()).reset_index(drop=True)
+
+    for _, row in df.iterrows():
+        symbol = row.get('symbol', '?')
+        position = row.get('position', 0)
+        mkt_price = row.get('mktPrice', 0)
+        avg_cost = row.get('avgCost', 0)
+        mkt_value = row.get('marketValue', 0)
+        unrealized = row.get('unrealizedPNL', 0)
+        daily = row.get('dailyPNL', 0)
+        pct = row.get('%', 0)
+        con_id = row.get('conId', '')
+
+        total_daily += daily if isinstance(daily, (int, float)) and daily == daily else 0
+        total_unrealized += unrealized if isinstance(unrealized, (int, float)) and unrealized == unrealized else 0
+        total_value += mkt_value if isinstance(mkt_value, (int, float)) and mkt_value == mkt_value else 0
+
+        pnl_color = 'green' if unrealized >= 0 else 'red'
+        daily_color = 'green' if daily >= 0 else 'red'
+        pct_sign = '+' if pct > 0 else ''
+
+        lines = Text()
+        lines.append(f'  Qty: {_fmt(position, 0):>10}', style='bold')
+        lines.append(f'    Price: {_fmt(mkt_price)}\n')
+        lines.append(f'  Avg: {_fmt(avg_cost):>10}')
+        lines.append(f'    Value: {_fmt(mkt_value)}\n')
+        lines.append(f'  ConId: {con_id}\n', style='dim')
+        lines.append(f'  P&L: ')
+        lines.append(f'{_fmt(unrealized):>9}', style=pnl_color)
+        lines.append(f'    Daily: ')
+        lines.append(f'{_fmt(daily)}', style=daily_color)
+        lines.append(f'\n  Return: ')
+        lines.append(f'{pct_sign}{_fmt(pct)}%', style=pnl_color)
+
+        border_color = 'green' if unrealized >= 0 else 'red'
+        panel = Panel(lines, title=f'[bold]{symbol}[/bold]', border_style=border_color, width=40)
+        panels.append(panel)
+
+    # Summary header (shown above cards so it's always visible)
+    header = Text()
+    daily_color = 'green' if total_daily >= 0 else 'red'
+    daily_sign = '+' if total_daily > 0 else ''
+    unr_color = 'green' if total_unrealized >= 0 else 'red'
+    unr_sign = '+' if total_unrealized > 0 else ''
+
+    if account_summary:
+        cash = account_summary.get('cash', '')
+        available = account_summary.get('available', '')
+        net_liq = account_summary.get('net_liq', '')
+        if cash or available or net_liq:
+            header.append('  Cash:       ')
+            header.append(f'{cash:>12}', style='bold')
+            header.append(f'   Available:  ')
+            header.append(f'{available:>12}')
+            header.append(f'   Net Liq:   {net_liq:>12}')
+            header.append('\n')
+
+    header.append('  Daily P&L:  ')
+    header.append(f'{daily_sign}{_fmt(total_daily):>12}', style=f'bold {daily_color}')
+    header.append(f'   Unrealized: ')
+    header.append(f'{unr_sign}{_fmt(total_unrealized):>12}', style=unr_color)
+    header.append(f'   Positions: ${_fmt(total_value):>12}')
+
+    return Group(
+        Text(f'\n{title}', style='bold'),
+        header,
+        Text(''),
+        Columns(panels, padding=(0, 1)),
+        Text(''),
+    )
+
+
+def print_portfolio_cards(df, title='Portfolio'):
+    """Render portfolio as cards — one panel per position, readable in narrow terminals."""
+    if _json_mode:
+        print_df(df, title=title)
+        return
+    console.print(_build_portfolio_cards(df, title=title))
+
+
 def print_list(items, title=None):
     """Render a list as a single-column rich table (or JSON if _json_mode)."""
     if _json_mode:
@@ -172,11 +275,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest='command')
 
     # portfolio
-    sub.add_parser('portfolio', aliases=['p'], help='Portfolio with P&L',
+    portfolio_p = sub.add_parser('portfolio', aliases=['p'], help='Portfolio with P&L',
                    epilog='Examples:\n'
                           '  portfolio\n'
+                          '  portfolio --table\n'
                           '  p',
                    formatter_class=fmt)
+    portfolio_p.add_argument('--table', action='store_true', help='Use table format instead of cards')
 
     # positions
     sub.add_parser('positions', aliases=['pos'], help='Raw positions',
@@ -256,6 +361,14 @@ def build_parser() -> argparse.ArgumentParser:
                           '  cancel-all',
                    formatter_class=fmt)
 
+    # to-market
+    to_market_p = sub.add_parser('to-market', help='Convert an open order to market',
+                                 description='Cancel limit order and re-place as market. Preserves stop-loss children.',
+                                 epilog='Examples:\n'
+                                        '  to-market 36',
+                                 formatter_class=fmt)
+    to_market_p.add_argument('order_id', type=int, help='Order ID to convert')
+
     # close
     close_p = sub.add_parser('close', aliases=['c'], help='Close a position by row number',
                              epilog='Examples:\n'
@@ -265,6 +378,17 @@ def build_parser() -> argparse.ArgumentParser:
                              formatter_class=fmt)
     close_p.add_argument('row', type=int, help='Row number from portfolio/watch output')
     close_p.add_argument('--quantity', type=float, default=None, help='Partial quantity (default: entire position)')
+
+    # resize-positions
+    resize_p = sub.add_parser('resize-positions', aliases=['resize'], help='Proportionally resize all positions',
+                              epilog='Examples:\n'
+                                     '  resize-positions --max-bound 500000   # trim to $500k\n'
+                                     '  resize-positions --min-bound 300000   # grow to $300k\n'
+                                     '  resize --max-bound 500000 --dry-run   # preview only',
+                              formatter_class=fmt)
+    resize_p.add_argument('--max-bound', type=float, default=None, help='Maximum portfolio value (trim positions)')
+    resize_p.add_argument('--min-bound', type=float, default=None, help='Minimum portfolio value (grow positions)')
+    resize_p.add_argument('--dry-run', action='store_true', help='Show plan without executing')
 
     # strategies
     strat_p = sub.add_parser('strategies', aliases=['strat'], help='List or manage strategies',
@@ -343,6 +467,32 @@ def build_parser() -> argparse.ArgumentParser:
                           '  status',
                    formatter_class=fmt)
 
+    # market-hours
+    sub.add_parser('market-hours', aliases=['mh'], help='Show market open/close status',
+                   epilog='Examples:\n'
+                          '  market-hours\n'
+                          '  mh',
+                   formatter_class=fmt)
+
+    # logs
+    logs_p = sub.add_parser('logs', help='View service logs (errors/warnings by default)',
+                            epilog='Examples:\n'
+                                   '  logs                        # last 50 errors/warnings\n'
+                                   '  logs --tail 100             # last 100 lines\n'
+                                   '  logs --level DEBUG          # all log levels\n'
+                                   '  logs --service trader       # trader service only\n'
+                                   '  logs --today                # only today\'s logs',
+                            formatter_class=fmt)
+    logs_p.add_argument('--tail', '-n', type=int, default=50, help='Number of lines to show (default: 50)')
+    logs_p.add_argument('--level', '-l', default='WARNING',
+                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+                        help='Minimum log level (default: WARNING)')
+    logs_p.add_argument('--service', '-s', default=None,
+                        choices=['trader', 'strategy', 'data'],
+                        help='Filter to a specific service')
+    logs_p.add_argument('--today', action='store_true', default=False,
+                        help='Only show logs from today')
+
     # risk
     risk_p = sub.add_parser('risk', help='View/adjust risk gate limits',
                             epilog='Examples:\n'
@@ -357,6 +507,54 @@ def build_parser() -> argparse.ArgumentParser:
     risk_p.add_argument('--max-signals-per-hour', type=int, default=None, help='Max signals per hour')
     risk_p.add_argument('--max-leverage', type=float, default=None, help='Max leverage (1.0 = cash only)')
     risk_p.add_argument('--min-margin-cushion', type=float, default=None, help='Min margin cushion (0.10 = 10%%)')
+
+    # filter
+    filter_p = sub.add_parser('filter', help='View/manage trading filters (denylist, allowlist, exchanges)',
+                              epilog='Examples:\n'
+                                     '  filter                              # show current filters\n'
+                                     '  filter deny NKLA RIDE               # add to denylist\n'
+                                     '  filter allow AAPL MSFT NVDA         # set exclusive allowlist\n'
+                                     '  filter remove NKLA                  # remove from deny+allowlist\n'
+                                     '  filter set --min-price 5.0          # set price floor\n'
+                                     '  filter set --deny-exchanges OTC     # block an exchange\n'
+                                     '  filter set --deny-locations STK.CA  # block Canadian instruments\n'
+                                     '  filter reset                        # clear all filters\n',
+                              formatter_class=fmt)
+    filter_sub = filter_p.add_subparsers(dest='filter_action')
+    filter_sub.add_parser('show', help='Show current filters')
+    filter_deny_p = filter_sub.add_parser('deny', help='Add symbols to denylist')
+    filter_deny_p.add_argument('symbols', nargs='+', help='Symbols to deny')
+    filter_allow_p = filter_sub.add_parser('allow', help='Add symbols to allowlist (exclusive)')
+    filter_allow_p.add_argument('symbols', nargs='+', help='Symbols to allow')
+    filter_remove_p = filter_sub.add_parser('remove', help='Remove symbols from denylist/allowlist')
+    filter_remove_p.add_argument('symbols', nargs='+', help='Symbols to remove')
+    filter_sub.add_parser('reset', help='Clear all filters')
+    filter_set_p = filter_sub.add_parser('set', help='Set filter parameters')
+    filter_set_p.add_argument('--min-price', type=float, default=None, help='Minimum price for discovery')
+    filter_set_p.add_argument('--deny-exchanges', nargs='+', default=None, help='Denied exchanges')
+    filter_set_p.add_argument('--exchanges', nargs='+', default=None, help='Allowed exchanges (exclusive)')
+    filter_set_p.add_argument('--sec-types', nargs='+', default=None, help='Allowed sec types (exclusive)')
+    filter_set_p.add_argument('--deny-sec-types', nargs='+', default=None, help='Denied sec types')
+    filter_set_p.add_argument('--locations', nargs='+', default=None, help='Allowed IB locations (exclusive, e.g. STK.US.MAJOR)')
+    filter_set_p.add_argument('--deny-locations', nargs='+', default=None, help='Denied IB locations (e.g. STK.CA)')
+
+    # session (position sizing)
+    session_p = sub.add_parser('session', help='Position sizing & session status',
+                                epilog='Examples:\n'
+                                       '  session                          # show config + portfolio + capacity\n'
+                                       '  session set risk aggressive      # set risk level\n'
+                                       '  session set base 3000            # set base position size\n'
+                                       '  session set base_pct 0.03        # set base to 3% of net liq\n'
+                                       '  session limits                   # show hard limits only\n'
+                                       '  session reset                    # reset to config defaults',
+                                formatter_class=fmt)
+    session_sub = session_p.add_subparsers(dest='session_action')
+    session_sub.add_parser('limits', help='Show hard limits')
+    session_sub.add_parser('reset', help='Reset to config defaults')
+    session_set_p = session_sub.add_parser('set', help='Set a session parameter')
+    session_set_p.add_argument('key', choices=['risk', 'base', 'base_pct', 'daily_loss_limit'],
+                                help='Parameter to set')
+    session_set_p.add_argument('value', help='New value')
 
     # history
     bar_sizes = ('1 secs, 5 secs, 10 secs, 15 secs, 30 secs, '
@@ -655,6 +853,8 @@ def build_parser() -> argparse.ArgumentParser:
     propose_p.add_argument('--thesis', default='', help='Short thesis label')
     propose_p.add_argument('--source', default='manual', help='Source label (manual, llm, scanner)')
     propose_p.add_argument('--sectype', default='STK', help='Security type (STK, CASH, OPT, etc.)')
+    propose_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
+    propose_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
 
     # proposals
     proposals_p = sub.add_parser('proposals', help='List or view trade proposals',
@@ -813,7 +1013,10 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
             if not df.empty and 'avgCost' in df.columns and 'mktPrice' in df.columns:
                 df['%'] = ((df['mktPrice'] - df['avgCost']) / df['avgCost'] * 100).round(2)
                 df.insert(0, '#', range(1, len(df) + 1))
-            print_df(df, title='Portfolio')
+            if getattr(args, 'table', False):
+                print_df(df, title='Portfolio')
+            else:
+                print_portfolio_cards(df, title='Portfolio')
 
         elif cmd in ('positions', 'pos'):
             df = mmr.positions()
@@ -822,7 +1025,127 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
             print_df(df, title='Positions')
 
         elif cmd == 'orders':
-            print_df(mmr.orders(), title='Orders')
+            df = mmr.orders()
+            if _json_mode:
+                print_df(df, title='Orders')
+            elif df.empty:
+                console.print('[dim]No open orders[/dim]')
+            else:
+                import math
+
+                def _safe_int(v, default=0):
+                    try:
+                        return int(v) if v is not None and not (isinstance(v, float) and math.isnan(v)) else default
+                    except (ValueError, TypeError):
+                        return default
+
+                def _safe_float(v):
+                    try:
+                        if v is not None and not (isinstance(v, float) and math.isnan(v)):
+                            return float(v)
+                    except (ValueError, TypeError):
+                        pass
+                    return None
+
+                for _, row in df.iterrows():
+                    oid = _safe_int(row.get('orderId'))
+                    sym = row.get('symbol', '?')
+                    name = row.get('name', '')
+                    action = row.get('action', '?')
+                    otype = row.get('orderType', '?')
+                    qty = _safe_float(row.get('quantity')) or 0
+                    status = row.get('status', '?')
+
+                    # Build price string based on order type
+                    price_parts = []
+                    lmt = _safe_float(row.get('lmtPrice'))
+                    aux = _safe_float(row.get('auxPrice'))
+                    if lmt:
+                        price_parts.append(f'limit ${lmt:.2f}')
+                    if aux:
+                        price_parts.append(f'stop ${aux:.2f}')
+                    price_str = ', '.join(price_parts) if price_parts else 'MARKET'
+
+                    # Order value and account %
+                    order_val = _safe_float(row.get('orderValue'))
+                    acct_pct = _safe_float(row.get('acctPct'))
+                    value_str = ''
+                    if order_val:
+                        value_str = f'  [dim]${order_val:,.0f}'
+                        if acct_pct:
+                            value_str += f' ({acct_pct:.1f}% of account)'
+                        value_str += '[/dim]'
+
+                    # Market context — show bid/ask and distance from order price
+                    bid = _safe_float(row.get('bid'))
+                    ask = _safe_float(row.get('ask'))
+                    last = _safe_float(row.get('last'))
+                    market_str = ''
+                    if bid or ask:
+                        parts = []
+                        if bid:
+                            parts.append(f'bid ${bid:.2f}')
+                        if ask:
+                            parts.append(f'ask ${ask:.2f}')
+                        market_str = f'  [dim]mkt: {" / ".join(parts)}[/dim]'
+
+                        # Show why a limit order isn't filling
+                        order_price = lmt or aux
+                        if order_price and status in ('Submitted', 'PreSubmitted'):
+                            if action == 'BUY' and ask:
+                                gap = ask - order_price
+                                if gap > 0:
+                                    market_str += f'  [yellow]${gap:.2f} below ask[/yellow]'
+                                else:
+                                    market_str += f'  [green]at/above ask[/green]'
+                            elif action == 'SELL' and bid:
+                                if otype == 'STP':
+                                    gap = bid - order_price
+                                    if gap > 0:
+                                        market_str += f'  [dim]stop ${gap:.2f} below bid[/dim]'
+                                elif lmt:
+                                    gap = order_price - bid
+                                    if gap > 0:
+                                        market_str += f'  [yellow]${gap:.2f} above bid[/yellow]'
+                                    else:
+                                        market_str += f'  [green]at/below bid[/green]'
+
+                    # Color the action
+                    action_color = 'green' if action == 'BUY' else 'red'
+
+                    # Status color
+                    if status in ('Submitted', 'PreSubmitted'):
+                        status_style = 'yellow'
+                    elif status == 'Filled':
+                        status_style = 'green'
+                    elif status in ('Cancelled', 'Inactive'):
+                        status_style = 'red'
+                    else:
+                        status_style = 'dim'
+
+                    # Parent/child relationship
+                    parent_str = ''
+                    parent_id = _safe_int(row.get('parentId'))
+                    if parent_id:
+                        parent_str = f'  [dim]parent order #{parent_id}[/dim]'
+
+                    # Fill info
+                    fill_str = ''
+                    filled = _safe_float(row.get('filled')) or 0
+                    if filled > 0:
+                        avg = _safe_float(row.get('avgFillPrice'))
+                        fill_str = f'  [dim]filled {filled:.0f}/{qty:.0f}' + (f' @ ${avg:.2f}' if avg else '') + '[/dim]'
+
+                    # Company name line
+                    name_str = f'  [dim]{name}[/dim]' if name else ''
+
+                    console.print(
+                        f'  [bold]#{oid}[/bold] [{action_color}]{action}[/{action_color}] '
+                        f'[bold]{sym}[/bold] x{qty:.0f} {otype} ({price_str}) '
+                        f'[{status_style}]{status}[/{status_style}] '
+                        f'[dim]{row.get("tif", "")}[/dim]'
+                        f'{value_str}{market_str}{parent_str}{fill_str}{name_str}'
+                    )
 
         elif cmd == 'trades':
             print_df(mmr.trades(), title='Trades')
@@ -884,8 +1207,18 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
             else:
                 print_status(f'Cancel-all failed: {result.error}', success=False)
 
+        elif cmd == 'to-market':
+            result = mmr.to_market(args.order_id)
+            if result.is_success():
+                print_status(f'Order #{args.order_id} converted to market')
+            else:
+                print_status(f'to-market failed: {result.error}', success=False)
+
         elif cmd in ('close', 'c'):
             _handle_close(mmr, args)
+
+        elif cmd in ('resize-positions', 'resize'):
+            _handle_resize_positions(mmr, args)
 
         elif cmd in ('strategies', 'strat'):
             _handle_strategies(mmr, args)
@@ -909,8 +1242,39 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
                 _logging.disable(_logging.NOTSET)
             print_dict(result, title='Status')
 
+        elif cmd in ('market-hours', 'mh'):
+            rows = mmr.market_hours()
+            if _json_mode:
+                print_json_result(rows, title='Market Hours')
+            else:
+                table = Table(title='Market Hours')
+                table.add_column('Exchange', no_wrap=True)
+                table.add_column('Region', no_wrap=True)
+                table.add_column('Status', no_wrap=True)
+                table.add_column('Next Event', no_wrap=True)
+                table.add_column('Time (UTC)', no_wrap=True)
+                table.add_column('Relative', no_wrap=True)
+                for r in rows:
+                    status_str = (f'[green]{r["status"]}[/green]'
+                                  if r['status'] == 'OPEN'
+                                  else f'[red]{r["status"]}[/red]')
+                    table.add_row(
+                        r['exchange'], r['region'], status_str,
+                        r['next_event'], r['next_event_time'], r['relative'],
+                    )
+                console.print(table)
+
+        elif cmd == 'logs':
+            _handle_logs(args)
+
         elif cmd == 'risk':
             _handle_risk(mmr, args)
+
+        elif cmd == 'filter':
+            _handle_filter(mmr, args)
+
+        elif cmd == 'session':
+            _handle_session(mmr, args)
 
         elif cmd == 'history':
             _handle_history(mmr, args)
@@ -1064,6 +1428,8 @@ def _handle_propose(mmr: MMR, args: argparse.Namespace):
         thesis=args.thesis,
         source=args.source,
         sec_type=args.sectype,
+        exchange=args.exchange,
+        currency=args.currency,
     )
 
     summary = f'{args.action} {args.symbol}'
@@ -1314,6 +1680,205 @@ def _handle_close(mmr: MMR, args: argparse.Namespace):
         console.print(f'[red]Close {symbol}: failed — {result.error}[/red]')
 
 
+def _handle_resize_positions(mmr: MMR, args: argparse.Namespace):
+    max_bound = args.max_bound
+    min_bound = args.min_bound
+    dry_run = args.dry_run
+
+    if max_bound is None and min_bound is None:
+        console.print('[yellow]Specify --max-bound and/or --min-bound[/yellow]')
+        return
+
+    if max_bound is not None and min_bound is not None and min_bound > max_bound:
+        console.print('[yellow]--min-bound cannot be greater than --max-bound[/yellow]')
+        return
+
+    plan = mmr.compute_resize_plan(max_bound=max_bound, min_bound=min_bound)
+
+    if not plan['adjustments']:
+        console.print('[dim]Portfolio already within bounds. No adjustments needed.[/dim]')
+        return
+
+    # Display plan
+    current = plan['current_total']
+    target = plan['target_total']
+    factor = plan['scale_factor']
+    console.print(
+        f'\n[bold]Resize Plan:[/bold] ${current:,.0f} → ${target:,.0f} (scale: {factor:.2f}x)\n'
+    )
+
+    from rich.table import Table
+    table = Table(show_header=True, header_style='bold')
+    table.add_column('Symbol')
+    table.add_column('Curr Qty', justify='right')
+    table.add_column('Target Qty', justify='right')
+    table.add_column('Delta', justify='right')
+    table.add_column('Action')
+    table.add_column('Curr Value', justify='right')
+    table.add_column('Target Value', justify='right')
+
+    for adj in plan['adjustments']:
+        delta_str = f'{adj["delta_qty"]:+d}'
+        action_style = 'green' if adj['action'] == 'BUY' else 'red'
+        table.add_row(
+            adj['symbol'],
+            str(int(adj['current_qty'])),
+            str(int(adj['target_qty'])),
+            delta_str,
+            f'[{action_style}]{adj["action"]}[/{action_style}]',
+            f'${adj["current_value"]:,.0f}',
+            f'${adj["target_value"]:,.0f}',
+        )
+    console.print(table)
+
+    # Show associated orders that will be adjusted
+    has_orders = any(adj.get('associated_orders') for adj in plan['adjustments'])
+    if has_orders:
+        console.print('\n[bold]Associated orders to adjust:[/bold]')
+        for adj in plan['adjustments']:
+            for o in adj.get('associated_orders', []):
+                old_qty = int(o['quantity'])
+                new_qty = abs(int(adj['target_qty']))
+                if o['orderType'] == 'TRAIL' and o['trailingPercent']:
+                    price_str = f'{o["trailingPercent"]}%'
+                elif o['orderType'] in ('STP', 'STP LMT'):
+                    price_str = f'@ ${o["auxPrice"]:,.2f}'
+                elif o['orderType'] == 'LMT':
+                    price_str = f'@ ${o["lmtPrice"]:,.2f}'
+                else:
+                    price_str = ''
+                console.print(
+                    f'  {adj["symbol"]}: {o["orderType"]} {o["action"]} {old_qty} {price_str}'
+                    f' → {o["orderType"]} {o["action"]} {new_qty} {price_str}'
+                )
+
+    if dry_run:
+        console.print('\n[dim]Dry run — no orders placed.[/dim]')
+        return
+
+    confirm = input('\nProceed? [y/N] ')
+    if confirm.lower() != 'y':
+        console.print('[dim]Cancelled[/dim]')
+        return
+
+    results = mmr.execute_resize_plan(plan)
+
+    for msg in results['successes']:
+        console.print(f'[green]{msg}[/green]')
+    for msg in results['failures']:
+        console.print(f'[red]{msg}[/red]')
+    for msg in results['warnings']:
+        console.print(f'[yellow]{msg}[/yellow]')
+
+    total_ok = len(results['successes'])
+    total_fail = len(results['failures'])
+    console.print(f'\n[bold]Done:[/bold] {total_ok} succeeded, {total_fail} failed')
+
+
+def _handle_logs(args: argparse.Namespace):
+    """Read and display service logs from disk. No service connection needed."""
+    import datetime as dt
+    import glob
+    import os
+    import re
+
+    log_dir = os.path.expanduser('~/.local/share/mmr/logs')
+    if not os.path.isdir(log_dir):
+        console.print('[yellow]No log directory found[/yellow]')
+        return
+
+    level_priority = {'DEBUG': 10, 'INFO': 20, 'WARNING': 30, 'ERROR': 40, 'CRITICAL': 50}
+    min_level = level_priority.get(args.level, 30)
+
+    # Map service filter to log file prefix
+    service_prefixes = {
+        'trader': 'trader_',
+        'strategy': 'strategy_',
+        'data': 'data_service_',
+    }
+
+    # Find log files
+    pattern = os.path.join(log_dir, '*.log')
+    all_files = glob.glob(pattern)
+
+    if args.service:
+        prefix = service_prefixes.get(args.service, args.service)
+        all_files = [f for f in all_files if os.path.basename(f).startswith(prefix)]
+
+    if args.today:
+        today_str = dt.date.today().strftime('%Y-%m-%d')
+        all_files = [f for f in all_files if today_str in os.path.basename(f)]
+
+    if not all_files:
+        console.print('[yellow]No log files found matching filters[/yellow]')
+        return
+
+    # Skip empty files, sort by modification time (newest first)
+    all_files = [f for f in all_files if os.path.getsize(f) > 0]
+    all_files.sort(key=os.path.getmtime, reverse=True)
+    # Read from the most recent non-empty files (limit to avoid reading thousands)
+    files_to_read = all_files[:20]
+
+    # Parse log lines: "2026-03-12 14:43:46,123::module::LEVEL::message"
+    log_line_re = re.compile(r'^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}),?\d*::(.+?)::(\w+)::(.*)$')
+    entries = []
+
+    for filepath in files_to_read:
+        try:
+            with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+                current_entry = None
+                for line in f:
+                    m = log_line_re.match(line)
+                    if m:
+                        # Flush previous multiline entry
+                        if current_entry and level_priority.get(current_entry['level'], 0) >= min_level:
+                            entries.append(current_entry)
+                        current_entry = {
+                            'timestamp': m.group(1),
+                            'module': m.group(2),
+                            'level': m.group(3),
+                            'message': m.group(4).strip(),
+                            'source': os.path.basename(filepath),
+                        }
+                    elif current_entry:
+                        # Continuation of multiline message
+                        current_entry['message'] += '\n' + line.rstrip()
+                # Flush last entry
+                if current_entry and level_priority.get(current_entry['level'], 0) >= min_level:
+                    entries.append(current_entry)
+        except Exception:
+            continue
+
+    if not entries:
+        console.print(f'[dim]No log entries at level {args.level} or above[/dim]')
+        return
+
+    # Sort chronologically, take last N
+    entries.sort(key=lambda e: e['timestamp'])
+    entries = entries[-args.tail:]
+
+    if _json_mode:
+        print_json_result(entries, title=f'Logs ({len(entries)} entries)')
+    else:
+        for entry in entries:
+            level = entry['level']
+            if level == 'ERROR' or level == 'CRITICAL':
+                style = 'red'
+            elif level == 'WARNING':
+                style = 'yellow'
+            elif level == 'INFO':
+                style = 'green'
+            else:
+                style = 'dim'
+            ts = entry['timestamp']
+            mod = entry['module']
+            msg = entry['message']
+            # Truncate very long messages for display
+            if len(msg) > 300:
+                msg = msg[:300] + '...'
+            console.print(f'[{style}]{ts} [{level:>8}] [{mod}] {msg}[/{style}]')
+
+
 def _handle_risk(mmr: MMR, args: argparse.Namespace):
     # Collect any updates
     updates = {}
@@ -1329,13 +1894,208 @@ def _handle_risk(mmr: MMR, args: argparse.Namespace):
         if val is not None:
             updates[key] = val
 
+    _risk_descriptions = {
+        'max_position_size_pct': 'Max single position as % of portfolio (0.1 = 10%)',
+        'max_daily_loss': 'Max allowed daily loss in $ before blocking new orders',
+        'max_open_orders': 'Max number of simultaneous open orders',
+        'max_signals_per_hour': 'Max strategy signals allowed per hour (rate limit)',
+        'max_leverage': 'Max leverage ratio (1.0 = cash only, 2.0 = 2x margin)',
+        'min_margin_cushion': 'Min margin cushion (excess liquidity / net liquidity)',
+    }
+
     if updates:
         result = mmr.set_risk_limits(**updates)
         print_status('Risk limits updated')
-        print_dict(result, title='Risk Limits')
     else:
         result = mmr.get_risk_limits()
-        print_dict(result, title='Risk Limits')
+
+    import pandas as pd
+    rows = [{'limit': k, 'value': v, 'description': _risk_descriptions.get(k, '')}
+            for k, v in result.items()]
+    print_df(pd.DataFrame(rows), title='Risk Limits')
+
+
+def _handle_filter(mmr: MMR, args: argparse.Namespace):
+    import pandas as pd
+
+    action = getattr(args, 'filter_action', None)
+
+    if action == 'deny':
+        result = mmr.add_to_filter_list('denylist', args.symbols)
+        print_status(f'Added to denylist: {", ".join(s.upper() for s in args.symbols)}')
+    elif action == 'allow':
+        result = mmr.add_to_filter_list('allowlist', args.symbols)
+        print_status(f'Added to allowlist: {", ".join(s.upper() for s in args.symbols)}')
+    elif action == 'remove':
+        # Remove from both denylist and allowlist
+        mmr.remove_from_filter_list('denylist', args.symbols)
+        result = mmr.remove_from_filter_list('allowlist', args.symbols)
+        print_status(f'Removed from filters: {", ".join(s.upper() for s in args.symbols)}')
+    elif action == 'reset':
+        result = mmr.reset_filters()
+        print_status('All filters reset to defaults')
+    elif action == 'set':
+        updates = {}
+        if args.min_price is not None:
+            updates['min_price'] = args.min_price
+        if args.deny_exchanges is not None:
+            updates['deny_exchanges'] = [e.upper() for e in args.deny_exchanges]
+        if args.exchanges is not None:
+            updates['exchanges'] = [e.upper() for e in args.exchanges]
+        if args.sec_types is not None:
+            updates['sec_types'] = [t.upper() for t in args.sec_types]
+        if args.deny_sec_types is not None:
+            updates['deny_sec_types'] = [t.upper() for t in args.deny_sec_types]
+        if args.locations is not None:
+            updates['locations'] = [l.upper() for l in args.locations]
+        if args.deny_locations is not None:
+            updates['deny_locations'] = [l.upper() for l in args.deny_locations]
+        if updates:
+            result = mmr.set_filters(**updates)
+            print_status('Filters updated')
+        else:
+            result = mmr.get_filters()
+    else:
+        # Default: show
+        result = mmr.get_filters()
+
+    _filter_descriptions = {
+        'denylist': 'Symbols blocked from discovery and trading',
+        'allowlist': 'If non-empty, ONLY these symbols are allowed (exclusive)',
+        'exchanges': 'Allowed exchanges (empty = all)',
+        'deny_exchanges': 'Blocked exchanges',
+        'sec_types': 'Allowed security types (empty = all)',
+        'deny_sec_types': 'Blocked security types',
+        'locations': 'Allowed IB locations (empty = all)',
+        'deny_locations': 'Denied IB locations (e.g. STK.CA)',
+        'min_price': 'Price floor for discovery filtering',
+    }
+    rows = []
+    for k, v in result.items():
+        display = ', '.join(v) if isinstance(v, list) else str(v)
+        rows.append({'filter': k, 'value': display or '(none)',
+                     'description': _filter_descriptions.get(k, '')})
+    print_df(pd.DataFrame(rows), title='Trading Filters')
+
+
+def _handle_session(mmr: MMR, args: argparse.Namespace):
+    from trader.trading.position_sizing import PositionSizingConfig
+
+    action = getattr(args, 'session_action', None)
+
+    if action == 'set':
+        cfg = PositionSizingConfig.load()
+        key = args.key
+        value = args.value
+        if key == 'risk':
+            if value not in ('conservative', 'moderate', 'aggressive'):
+                print_status(f'Invalid risk level: {value} (choose conservative/moderate/aggressive)', success=False)
+                return
+            cfg.risk_level = value
+        elif key == 'base':
+            cfg.base_position_usd = float(value)
+        elif key == 'base_pct':
+            cfg.base_position_pct = float(value)
+        elif key == 'daily_loss_limit':
+            cfg.daily_loss_limit_usd = float(value)
+        cfg.save()
+        print_status(f'Set {key} = {value}')
+        return
+
+    if action == 'reset':
+        cfg = PositionSizingConfig()
+        cfg.save()
+        print_status('Session config reset to defaults')
+        return
+
+    if action == 'limits':
+        cfg = PositionSizingConfig.load()
+        limits = {
+            'min_position_usd': f'${cfg.min_position_usd:,.0f}',
+            'max_position_usd': f'${cfg.max_position_usd:,.0f}',
+            'max_position_pct': f'{cfg.max_position_pct:.0%}',
+            'max_total_exposure_pct': f'{cfg.max_total_exposure_pct:.0%}',
+            'max_positions': str(cfg.max_positions),
+        }
+        print_dict(limits, title='Hard Limits')
+        return
+
+    # Default: full session status
+    summary = mmr.session_status()
+
+    if _json_mode:
+        print_json_result(summary, title='Session Status')
+        return
+
+    # Config section
+    cfg = summary['config']
+    config_table = Table(title='Position Sizing Config', show_header=False)
+    config_table.add_column('Key', style='bold')
+    config_table.add_column('Value')
+    config_table.add_row('Risk Level', f'[bold]{cfg["risk_level"]}[/bold]')
+    if cfg.get('base_position_pct', 0) > 0 and cfg.get('effective_base_usd', 0) != cfg['base_position_usd']:
+        config_table.add_row('Base Position', f'${cfg["effective_base_usd"]:,.0f} ({cfg["base_position_pct"]:.1%} of net liq)')
+    else:
+        config_table.add_row('Base Position', f'${cfg["base_position_usd"]:,.0f} (fixed)')
+    config_table.add_row('Daily Loss Limit', f'${cfg["daily_loss_limit_usd"]:,.0f}')
+    config_table.add_row('Min Position', f'${cfg["min_position_usd"]:,.0f}')
+    config_table.add_row('Max Position', f'${cfg["max_position_usd"]:,.0f}')
+    config_table.add_row('Max Position %', f'{cfg["max_position_pct"]:.0%} of net liq')
+    config_table.add_row('Max Exposure', f'{cfg["max_total_exposure_pct"]:.0%} of net liq')
+    config_table.add_row('Max Positions', str(cfg['max_positions']))
+    config_table.add_row('Max ADV %', f'{cfg["max_adv_pct"]:.1%} of daily volume')
+    config_table.add_row('Spread Penalty', f'above {cfg["spread_penalty_threshold"]:.2%} spread, up to {cfg["spread_penalty_factor"]:.0%} reduction')
+    console.print(config_table)
+
+    # Portfolio section
+    port = summary['portfolio']
+    if port['net_liquidation'] > 0:
+        port_table = Table(title='Portfolio State', show_header=False)
+        port_table.add_column('Key', style='bold')
+        port_table.add_column('Value')
+        port_table.add_row('Net Liquidation', f'${port["net_liquidation"]:,.0f}')
+        port_table.add_row('Position Value', f'${port["gross_position_value"]:,.0f}')
+        port_table.add_row('Available Funds', f'${port["available_funds"]:,.0f}')
+        pnl_color = 'green' if port['daily_pnl'] >= 0 else 'red'
+        pnl_sign = '+' if port['daily_pnl'] > 0 else ''
+        port_table.add_row('Daily P&L', f'[{pnl_color}]{pnl_sign}${port["daily_pnl"]:,.0f}[/{pnl_color}]')
+        port_table.add_row('Exposure', f'{port["exposure_pct"]:.0%}')
+        port_table.add_row('Positions', str(port['position_count']))
+        if port['pending_proposal_value'] > 0:
+            port_table.add_row('Pending Proposals', f'${port["pending_proposal_value"]:,.0f}')
+        console.print(port_table)
+    else:
+        console.print('[dim]No portfolio data (trader_service not connected)[/dim]')
+
+    # Capacity section
+    cap = summary['capacity']
+    cap_table = Table(title='Remaining Capacity', show_header=False)
+    cap_table.add_column('Key', style='bold')
+    cap_table.add_column('Value')
+    if port['net_liquidation'] > 0:
+        cap_table.add_row('Remaining Budget', f'${cap["remaining_usd"]:,.0f}')
+    cap_table.add_row('Remaining Positions', f'{cap["remaining_positions"]}')
+    console.print(cap_table)
+
+    # Recommended sizes
+    sizes = summary['recommended_sizes']
+    size_table = Table(title='Recommended Position Sizes')
+    size_table.add_column('Confidence', style='bold')
+    size_table.add_column('Amount', justify='right')
+    size_table.add_column('Note', style='dim')
+    for label, key in [('High (0.9)', 'high_confidence'),
+                        ('Medium (0.5)', 'medium_confidence'),
+                        ('Low (0.2)', 'low_confidence')]:
+        s = sizes[key]
+        note = s['capped_by'] if s['capped_by'] else ''
+        size_table.add_row(label, f'${s["amount_usd"]:,.0f}', note)
+    console.print(size_table)
+
+    # Warnings
+    if summary['warnings']:
+        console.print()
+        for w in summary['warnings']:
+            console.print(f'[yellow]  Warning: {w}[/yellow]')
 
 
 def _handle_strategies(mmr: MMR, args: argparse.Namespace):
@@ -2942,49 +3702,39 @@ def _handle_universe(mmr: MMR, args: argparse.Namespace):
 
 
 def _handle_watch(mmr: MMR):
-    """Live-updating portfolio table until Ctrl+C."""
+    """Live-updating portfolio cards until Ctrl+C."""
     console.print('[dim]Watching portfolio (Ctrl+C to stop)...[/dim]')
 
     try:
-        with Live(console=console, refresh_per_second=1) as live:
+        with Live(console=console, refresh_per_second=2) as live:
             while True:
                 try:
                     df = mmr.portfolio()
                 except Exception:
-                    time.sleep(3)
+                    time.sleep(1)
                     continue
 
-                table = Table(title='Portfolio (live)')
-                if df.empty:
-                    table.add_column('info')
-                    table.add_row('No positions')
-                else:
+                if not df.empty:
                     if 'avgCost' in df.columns and 'mktPrice' in df.columns:
                         df['%'] = ((df['mktPrice'] - df['avgCost']) / df['avgCost'] * 100).round(2)
                     df.insert(0, '#', range(1, len(df) + 1))
 
-                    for col in df.columns:
-                        justify = 'right' if col not in ('#', 'account', 'symbol') else 'left'
-                        table.add_column(str(col), justify=justify)
+                # Fetch account summary for footer
+                account_summary = None
+                try:
+                    from trader.messaging.clientserver import consume
+                    acct_vals = consume(mmr._rpc.rpc(return_type=dict).get_account_values())
+                    if acct_vals:
+                        account_summary = {}
+                        for key, display in (('TotalCashValue', 'cash'), ('AvailableFunds', 'available'), ('NetLiquidation', 'net_liq')):
+                            entry = acct_vals.get(key)
+                            if entry:
+                                account_summary[display] = f'${float(entry["value"]):,.2f}'
+                except Exception:
+                    pass
 
-                    for _, row in df.iterrows():
-                        cells = []
-                        for col in df.columns:
-                            val = row[col]
-                            if isinstance(val, float) and col in ('unrealizedPNL', 'realizedPNL', 'dailyPNL'):
-                                color = 'green' if val >= 0 else 'red'
-                                cells.append(f'[{color}]{val:,.2f}[/{color}]')
-                            elif isinstance(val, float) and col == '%':
-                                color = 'green' if val >= 0 else 'red'
-                                cells.append(f'[{color}]{val:+.2f}%[/{color}]')
-                            elif isinstance(val, float):
-                                cells.append(f'{val:,.2f}')
-                            else:
-                                cells.append(str(val))
-                        table.add_row(*cells)
-
-                live.update(table)
-                time.sleep(3)
+                live.update(_build_portfolio_cards(df, title='Portfolio (live)', account_summary=account_summary))
+                time.sleep(1)
     except KeyboardInterrupt:
         pass
     console.print('[dim]Stopped watching.[/dim]')
@@ -3166,7 +3916,7 @@ def repl(mmr: MMR):
 # Entry point
 # ------------------------------------------------------------------
 
-_LOCAL_ONLY_COMMANDS = {'backtest', 'bt', 'data', 'propose', 'proposals', 'reject'}
+_LOCAL_ONLY_COMMANDS = {'backtest', 'bt', 'data', 'propose', 'proposals', 'reject', 'market-hours', 'mh', 'session'}
 _LOCAL_ONLY_STRAT_ACTIONS = {'create', 'deploy', 'undeploy', 'signals', 'backtest'}
 
 

@@ -2,7 +2,17 @@
 
 ## Project Overview
 
-MMR (Make Me Rich) is a Python-based algorithmic trading platform for Interactive Brokers. It supports automated strategy execution, interactive CLI trading, historical data collection, and real-time market data streaming.
+MMR (Make Me Rich) is a Python-based algorithmic trading platform for Interactive Brokers. It supports automated strategy execution, interactive CLI trading, historical data collection, real-time market data streaming, and idea scanning across US and international markets.
+
+## Design Principles
+
+**Precision over convenience**: This is a trading system — wrong data is worse than no data. Contract identifiers (conIds) must resolve exactly or fail. Never fall back to fuzzy matching, string coercion, or "close enough" lookups. If a conId isn't found, return an error. If a symbol resolves to the wrong exchange, that's a bug. Integer conIds passed to `resolve_symbol` must not be converted to string symbol lookups (e.g. conId `4391` must not become ticker `"4391"` which matches a Japanese stock on TSEJ).
+
+**Fail loudly, not silently**: When an IB API call fails (scanner error 162, market data not subscribed, contract not found), surface the error to the caller. Don't swallow exceptions and return empty results — the user needs to know *why* something failed so they can fix it (subscribe to market data, use a different location code, etc.).
+
+**Massive first, IB fallback**: For US markets, Massive.com (Polygon.io) is the primary data source — it's fast (~4s for a full scan), has server-side indicators, and doesn't require trader_service. For international markets (ASX, TSE, SEHK, etc.), fall back to IB's APIs (scanner, snapshots, reqHistoricalData). Don't use Yahoo Finance.
+
+**No sentiment analysis on IB path**: IB's news API doesn't provide sentiment scoring. On the Massive path, sentiment comes from Polygon's insights. On the IB path, we only show the headline — no fake or estimated sentiment.
 
 ## Architecture
 
@@ -118,6 +128,7 @@ mmr/
 │   │   ├── historical_simulator.py
 │   │   └── backtester.py      # Backtester — replay historical data through strategies
 │   └── tools/                 # Importable scripts (moved from scripts/)
+│       ├── idea_scanner.py    # IdeaScanner (Massive) + IBIdeaScanner (IB international)
 │       ├── chain.py           # Options chain analysis
 │       ├── trader_check.py    # Service health check
 │       ├── zmq_pub_listener.py # ZMQ PubSub pretty printer
@@ -144,6 +155,7 @@ mmr/
 │   ├── test_container.py
 │   ├── test_duckdb_store.py
 │   ├── test_event_store.py
+│   ├── test_idea_scanner.py   # 123 tests: presets, indicators, IB scanner, tickers path, fundamentals, news
 │   ├── test_portfolio.py
 │   ├── test_proposal.py
 │   ├── test_proposal_store.py
@@ -271,7 +283,7 @@ scan hot-volume                  # Hot by volume change
 scan --scan-code HIGH_OPT_VOLUME # Raw IB scanner code
 scan gainers --above-price 10 --num 30  # Filtered
 scan --instrument ETF --location STK.US  # ETFs
-ideas                                        # Momentum scan (default preset)
+ideas                                        # Momentum scan (default, US/Massive)
 ideas gap-up                                 # Gap-up preset
 ideas mean-reversion                         # Mean-reversion preset
 ideas breakout                               # Breakout preset
@@ -287,6 +299,9 @@ ideas momentum --fundamentals                # Enrich with financial ratios (PE,
 ideas momentum --news                        # Enrich with latest news headline + sentiment
 ideas mean-reversion --news --fundamentals   # Full picture: technicals + fundamentals + news
 ideas gap-up -t AAPL MSFT --fundamentals     # Specific tickers with fundamentals
+ideas momentum --location STK.AU.ASX --tickers BHP CBA CSL  # ASX via IB
+ideas mean-reversion --location STK.AU.ASX --tickers BHP CBA --detail  # ASX with enrichment
+ideas gap-up --location STK.HK.SEHK --tickers 0700 0005     # Hong Kong via IB
 propose AMD BUY --market --quantity 100 --bracket 180 150 --reasoning "Breakout above resistance"
 propose AMD BUY --limit 165 --amount 5000 --trailing-stop-pct 2.0 --tif GTC
 propose AAPL SELL --market --quantity 50 --stop-loss 140
@@ -305,6 +320,66 @@ forex movers                                 # Top forex gainers (Massive only)
 forex movers --losers                        # Top forex losers (Massive only)
 forex convert EUR USD 1000                   # Currency conversion (Massive only)
 ```
+
+## Ideas Scanner Architecture
+
+The ideas scanner has two backends that share scoring/filtering logic:
+
+```
+ideas momentum                                  → IdeaScanner (Massive.com, US only, ~4s)
+ideas momentum --location STK.AU.ASX --tickers   → IBIdeaScanner (IB API, international, ~30-90s)
+```
+
+### IdeaScanner (Massive path — default)
+
+```
+Massive movers API  →  snapshots  →  filter  →  Massive indicator API (parallel)  →  score  →  rank
+```
+
+- Fast (~4s for full scan) — server-side indicators, batch snapshots
+- US markets only (Polygon.io coverage)
+- Fundamentals from `list_financials_ratios`, news from `list_ticker_news` with sentiment
+
+### IBIdeaScanner (IB path — `--location`)
+
+```
+IB scanner / resolve_contract  →  get_snapshot (sequential)  →  reqHistoricalData  →  local RSI/EMA/SMA  →  score  →  rank
+```
+
+- Slower (~30-90s) — sequential IB snapshot requests, IB pacing limits
+- Works for any IB-supported market: ASX, TSE, SEHK, EU exchanges, etc.
+- Discovery: IB scanner API (when available) or explicit `--tickers`/`--universe`
+- The IB scanner API may not support all location codes (error 162). When this happens, use `--tickers` to specify symbols explicitly
+- Indicators computed locally from history bars (pure pandas) — `compute_rsi()`, `compute_ema()`, `compute_sma()`
+- Fundamentals from `reqFundamentalData` (ReportSnapshot XML), news from `reqHistoricalNews` (no sentiment)
+- IB news headlines include metadata prefixes like `{A:800015:L:en}...` which are stripped before display
+
+### Shared module-level functions (used by both scanners)
+
+- `PRESETS` dict, `ScanFilter`/`ScanPreset` dataclasses
+- Scoring functions: `_score_momentum`, `_score_gap_up`, `_score_gap_down`, `_score_mean_reversion`, `_score_breakout`, `_score_volatile`
+- `apply_filters()`, `to_dataframe()`, `merge_filters()`
+- `PRESET_SCAN_CODES` maps preset names to IB scan codes
+
+### IB Scanner Location Codes
+
+Common codes: `STK.US.MAJOR` (US), `STK.AU.ASX` (Australia), `STK.CA` (Canada), `STK.HK.SEHK` (Hong Kong), `STK.JP.TSE` (Japan), `STK.EU` (Europe).
+
+The scanner API requires market data subscriptions for the target exchange. If the scanner returns error 162 ("Market Scanner is not configured for one of the chosen locations"), use `--tickers` to provide symbols explicitly — they'll be resolved via `resolve_contract` with the exchange extracted from the location code.
+
+When explicit tickers are provided with `--location`, the `min_change_pct`/`max_change_pct` preset defaults are relaxed (the user chose these symbols specifically and shouldn't have them filtered out).
+
+## Contract Resolution
+
+`resolve_symbol()` in `trading_runtime.py` handles symbol/conId lookups:
+
+1. First checks the local DuckDB universe database
+2. If not found:
+   - **Integer (conId)**: Returns empty — no fallback. ConIds are exact identifiers; if a conId isn't in the local DB, it's stale or wrong. Fuzzy matching would be dangerous (e.g. conId `4391` as a string matches Japanese ticker "4391" on TSEJ instead of AMD).
+   - **String (symbol)**: Falls back to IB `reqContractDetailsAsync` with the exchange hint if provided
+   - **CASH sec_type**: Constructs forex pair on IDEALPRO
+
+The `IBIdeaScanner` uses `resolve_contract` (not `resolve_symbol`) to resolve tickers for international markets. This takes a partial `Contract` object with the exchange set from the location code (e.g. `STK.AU.ASX` → `exchange=ASX`), ensuring resolution to the local listing rather than a US ADR.
 
 ## Configuration
 
@@ -349,6 +424,17 @@ pytest tests/ -v             # Run all tests
 pytest tests/test_book.py    # Run a specific test file
 ```
 
+The working test suite (246 tests across 13 files):
+```bash
+pytest tests/test_idea_scanner.py tests/test_config.py tests/test_risk_gate.py \
+  tests/test_proposal.py tests/test_proposal_store.py tests/test_book.py \
+  tests/test_backtester.py tests/test_container.py tests/test_duckdb_store.py \
+  tests/test_event_store.py tests/test_portfolio.py tests/test_serialization.py \
+  tests/test_strategy.py -v
+```
+
+Some test files have import errors due to missing optional dependencies (`aioreactive`) — these are pre-existing and can be ignored: `test_aiorx.py`, `test_aiozmq_simple.py`, `test_disposable.py`, `test_mmr_client.py`, `test_mmr_server.py`, `test_perf2.py`, `test_performance.py`.
+
 ## Writing a Strategy
 
 Subclass `trader.trading.strategy.Strategy` and implement `on_prices()`:
@@ -373,9 +459,11 @@ strategies:
     module: strategies.my_strategy
     class_name: MyStrategy
     bar_size: "1 min"
-    conids: [4391]  # AMD
+    conids: [265598]  # AAPL — use current conIds, verify with `mmr resolve AAPL`
     historical_days_prior: 5
 ```
+
+**Important**: ConIds can change. Always verify with `mmr resolve SYMBOL` before hardcoding. If a conId is stale, the strategy will log an error and be disabled — it will NOT silently subscribe to a different instrument.
 
 ## Claude Code Agent Workflow
 
@@ -387,7 +475,7 @@ All CLI commands support `--json` for machine-readable output:
 mmr --json portfolio
 mmr --json resolve AAPL
 mmr --json data summary
-mmr --json backtest -s strategies/my_strategy.py --class MyStrategy --conids 4391
+mmr --json backtest -s strategies/my_strategy.py --class MyStrategy --conids 265598
 ```
 
 JSON output always follows the structure `{"data": ..., "title": ...}` for data commands and `{"success": bool, "message": ...}` for status messages.
@@ -413,12 +501,12 @@ mmr strategies create my_strategy                          # Creates strategies/
 
 **Step 4: Backtest** (no service needed)
 ```bash
-mmr --json backtest -s strategies/my_strategy.py --class MyStrategy --conids 4391 --days 365
+mmr --json backtest -s strategies/my_strategy.py --class MyStrategy --conids 265598 --days 365
 ```
 
 **Step 5: Deploy to paper trading** (no service needed — writes to config)
 ```bash
-mmr strategies deploy my_strategy --conids 4391 --paper
+mmr strategies deploy my_strategy --conids 265598 --paper
 ```
 
 **Step 6: Monitor signals** (no service needed)
@@ -444,10 +532,13 @@ mmr --json portfolio                                       # Requires trader_ser
 - `approve`
 - `strategies enable`, `strategies disable`
 - `listen`, `watch`
+- `ideas --location` (IB path for international markets)
+- `scan` (IB scanner)
 
 **Requires massive_api_key only** (no service):
 - `data download`
-- `financials`, `options`, `news`, `movers`, `ideas`
+- `financials`, `options`, `news`, `movers`
+- `ideas` (without `--location` — default Massive path)
 
 ### ConId Lookup
 
@@ -456,7 +547,7 @@ Symbols in DuckDB are stored by conId (IB contract ID). To find a conId:
 mmr --json resolve AAPL    # Returns conId in JSON data
 ```
 
-Common conIds: AAPL=265598, AMD=4391, MSFT=272093, NVDA=4815747.
+Common conIds: AAPL=265598, MSFT=272093, NVDA=4815747. Note: conIds can become stale — always verify before use.
 
 ### Valid Bar Sizes
 
@@ -509,14 +600,14 @@ CPU-bound bar-by-bar replay. Time scales with number of bars × strategy complex
 **Vectorbt note**: Strategies using `vectorbt` indicators (e.g. `VbtMacdBB`) incur a one-time ~2s numba JIT compilation penalty on first run. Subsequent runs in the same process are fast. The JIT also produces verbose DEBUG logs from numba — these are harmless.
 
 #### Ideas Scanner (`mmr ideas`)
-Discovers candidates via Massive.com API, fetches server-side indicators in parallel, scores and ranks.
 
 | Operation | Time | Notes |
 |-----------|------|-------|
-| `ideas` (movers, momentum preset) | ~4s | 2 snapshot + ~40 indicator calls (parallelized) |
+| `ideas` (Massive, movers, momentum preset) | ~4s | 2 snapshot + ~40 indicator calls (parallelized) |
 | `ideas momentum --tickers AAPL MSFT AMD` | ~2s | 1 batch snapshot + ~6 indicator calls |
 | `ideas --presets` | ~1s | No API calls, prints preset table |
 | `ideas volatile --num 25` | ~4s | Same as movers, just more output rows |
+| `ideas momentum --location STK.AU.ASX --tickers BHP CBA CSL` | ~30-90s | IB path: sequential snapshots + history |
 
 #### Strategy Management
 All local file/YAML operations.
@@ -530,7 +621,7 @@ All local file/YAML operations.
 #### Test Suite
 | Operation | Time |
 |-----------|------|
-| Full suite (359 tests) | ~8s |
+| Full working suite (246 tests) | ~3s |
 | Single test file | ~1-2s |
 
 #### Python Import Overhead

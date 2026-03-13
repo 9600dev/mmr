@@ -90,6 +90,24 @@ class TradeExecutioner():
         contract_order: ContractOrderPair,
         condition: ExecutorCondition,
     ) -> Observable[Trade]:
+        # Check trading filter (denylist/allowlist) if available
+        if hasattr(self.trader, 'risk_gate'):
+            instrument_result = self.trader.risk_gate.check_instrument(
+                symbol=contract_order.contract.symbol,
+                exchange=contract_order.contract.exchange or '',
+                sec_type=contract_order.contract.secType or '',
+            )
+            if not instrument_result.approved:
+                self._log_event(EventType.RISK_GATE_REJECTED, contract_order.contract, contract_order.order)
+                logging.warning(f'trading filter rejected order: {instrument_result.reason}')
+                return rx.throw(
+                    trader_exception(
+                        trader=self.trader,
+                        exception_type=TraderException,
+                        message=f'trading filter rejected: {instrument_result.reason}'
+                    )
+                )
+
         # Run through risk gate if available
         if hasattr(self.trader, 'risk_gate'):
             from trader.trading.strategy import Signal

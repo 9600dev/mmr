@@ -290,10 +290,22 @@ _SCORE_FUNCTIONS: Dict[str, Callable] = {
 # Module-level filtering and formatting (shared by both scanners)
 # ------------------------------------------------------------------
 
-def apply_filters(candidates: List[Dict], filters: ScanFilter) -> List[Dict]:
-    """Apply ScanFilter criteria to candidate list."""
+def apply_filters(candidates: List[Dict], filters: ScanFilter,
+                  trading_filter=None) -> List[Dict]:
+    """Apply ScanFilter criteria to candidate list.
+
+    Parameters
+    ----------
+    trading_filter : TradingFilter, optional
+        If provided, also apply denylist/allowlist/exchange/sec_type checks.
+    """
     result = []
     for c in candidates:
+        # Trading filter check (denylist, allowlist, etc.)
+        if trading_filter:
+            allowed, _ = trading_filter.is_allowed(c['ticker'], price=c.get('price', 0))
+            if not allowed:
+                continue
         if c['price'] < filters.min_price or c['price'] > filters.max_price:
             continue
         if c['volume'] < filters.min_volume:
@@ -657,7 +669,9 @@ class IdeaScanner:
     # ------------------------------------------------------------------
 
     def _apply_filters(self, candidates: List[Dict], filters: ScanFilter) -> List[Dict]:
-        return apply_filters(candidates, filters)
+        from trader.trading.trading_filter import TradingFilter
+        tf = TradingFilter.load()
+        return apply_filters(candidates, filters, trading_filter=tf if not tf.is_empty() else None)
 
     # ------------------------------------------------------------------
     # Indicator fetching (parallel)
@@ -993,6 +1007,15 @@ class IBIdeaScanner:
         universe_symbols : list of str, optional
             Symbol list from a universe. Resolved via IB (bypasses scanner).
         """
+        # Check location against trading filters before doing any work
+        from trader.trading.trading_filter import TradingFilter
+        tf = TradingFilter.load()
+        if not tf.is_empty():
+            allowed, reason = tf.is_allowed('', location=location)
+            if not allowed:
+                logger.warning('Trading filter blocked location %s: %s', location, reason)
+                return pd.DataFrame()
+
         from ib_async.contract import Contract
         from trader.messaging.clientserver import consume
 
@@ -1077,7 +1100,10 @@ class IBIdeaScanner:
             return pd.DataFrame()
 
         # 6. Filter
-        candidates = apply_filters(candidates, filters)
+        from trader.trading.trading_filter import TradingFilter
+        tf = TradingFilter.load()
+        candidates = apply_filters(candidates, filters,
+                                   trading_filter=tf if not tf.is_empty() else None)
         if not candidates:
             return pd.DataFrame()
 

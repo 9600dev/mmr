@@ -1,0 +1,29 @@
+# Trading Filters — allowlist/denylist for symbols, exchanges, and instrument types.
+# Edit this file or use the `filter` CLI command.
+
+# Symbol denylist — these symbols are blocked from discovery and trading.
+denylist: []
+
+# Symbol allowlist — if non-empty, ONLY these symbols are allowed (exclusive).
+allowlist: []
+
+# Allowed exchanges — if non-empty, only these (e.g. [SMART, NASDAQ, NYSE]).
+exchanges: []
+
+# Denied exchanges — always blocked.
+deny_exchanges: []
+
+# Allowed security types — if non-empty, only these (e.g. [STK]).
+sec_types: []
+
+# Denied security types — always blocked (e.g. [WAR, BOND]).
+deny_sec_types: []
+
+# Allowed IB location codes — if non-empty, only these (e.g. [STK.US.MAJOR]).
+locations: []
+
+# Denied IB location codes — always blocked (e.g. [STK.CA, STK.HK.SEHK]).
+deny_locations: []
+
+# Price floor — instruments below this price are filtered from discovery.
+min_price: 0.0

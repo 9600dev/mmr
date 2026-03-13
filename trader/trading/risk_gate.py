@@ -2,9 +2,12 @@ from dataclasses import dataclass
 from trader.common.logging_helper import setup_logging
 from trader.data.event_store import EventStore, EventType
 from trader.trading.strategy import Signal
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import datetime as dt
+
+if TYPE_CHECKING:
+    from trader.trading.trading_filter import TradingFilter
 
 
 logging = setup_logging(module_name='risk_gate')
@@ -30,6 +33,7 @@ class RiskGate:
     def __init__(self, limits: RiskLimits, event_store: EventStore):
         self.limits = limits
         self.event_store = event_store
+        self.trading_filter: Optional['TradingFilter'] = None
 
     def evaluate(
         self,
@@ -76,6 +80,20 @@ class RiskGate:
             )
 
         logging.debug(f'risk gate approved signal from {signal.source_name}')
+        return RiskGateResult(approved=True)
+
+    def check_instrument(
+        self,
+        symbol: str,
+        exchange: str = '',
+        sec_type: str = '',
+    ) -> RiskGateResult:
+        """Check if an instrument is allowed by trading filters."""
+        if not self.trading_filter:
+            return RiskGateResult(approved=True)
+        allowed, reason = self.trading_filter.is_allowed(symbol, exchange, sec_type)
+        if not allowed:
+            return RiskGateResult(approved=False, reason=f'trading filter: {reason}')
         return RiskGateResult(approved=True)
 
     def check_leverage(

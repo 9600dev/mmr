@@ -1,0 +1,23 @@
+# Position Sizing — hard limits and risk appetite.
+# Edit this file or use the `session` CLI command.
+
+# Hard limits (code and LLMs cannot exceed these)
+min_position_usd: 500.0
+max_position_usd: 25000.0
+max_position_pct: 0.10       # max 10% of net liq per position
+max_total_exposure_pct: 0.80 # max 80% of net liq deployed
+max_positions: 20
+
+# Risk appetite (adjustable per session)
+base_position_usd: 5000.0
+base_position_pct: 0.0        # % of net liq as base (0 = use fixed base_position_usd)
+risk_level: moderate         # conservative / moderate / aggressive
+daily_loss_limit_usd: 2000.0
+
+# Confidence scaling
+min_confidence_scale: 0.3    # at confidence=0, size = base * 0.3
+
+# Liquidity constraints
+max_adv_pct: 0.02            # max 2% of avg daily volume (ensures exit within a day)
+spread_penalty_threshold: 0.005  # start penalizing position size above 0.5% spread
+spread_penalty_factor: 0.5   # max 50% size reduction for wide spreads

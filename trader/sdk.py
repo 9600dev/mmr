@@ -47,6 +47,73 @@ class Subscription:
         return self._thread is not None and self._thread.is_alive()
 
 
+def compute_resize_deltas(
+    positions: list[dict],
+    max_bound: Optional[float],
+    min_bound: Optional[float],
+) -> tuple[float, list[dict]]:
+    """Compute proportional resize plan from portfolio positions.
+
+    Returns (scale_factor, adjustments).
+
+    Each adjustment: {symbol, conId, current_qty, target_qty, delta_qty, action,
+                      current_value, target_value, mkt_price}
+    """
+    import math
+
+    total_value = sum(abs(p.get('marketValue', 0) or 0) for p in positions)
+
+    if total_value == 0:
+        return 1.0, []
+
+    scale_factor = 1.0
+    if max_bound is not None and total_value > max_bound:
+        scale_factor = max_bound / total_value
+    elif min_bound is not None and total_value < min_bound:
+        scale_factor = min_bound / total_value
+
+    if scale_factor == 1.0:
+        return 1.0, []
+
+    adjustments = []
+    for p in positions:
+        current_qty = p.get('position', 0)
+        if current_qty == 0:
+            continue
+
+        mkt_price = p.get('mktPrice', 0) or 0
+        current_value = p.get('marketValue', 0) or 0
+
+        target_qty = int(current_qty * scale_factor)
+        delta_qty = target_qty - current_qty
+
+        if delta_qty == 0:
+            continue
+
+        # For long positions: selling reduces, buying increases
+        # For short positions: buying reduces (covers), selling increases
+        if current_qty > 0:
+            action = 'BUY' if delta_qty > 0 else 'SELL'
+        else:
+            action = 'SELL' if delta_qty < 0 else 'BUY'
+
+        target_value = target_qty * mkt_price if mkt_price else current_value * scale_factor
+
+        adjustments.append({
+            'symbol': p.get('symbol', ''),
+            'conId': p.get('conId', 0),
+            'current_qty': current_qty,
+            'target_qty': target_qty,
+            'delta_qty': delta_qty,
+            'action': action,
+            'current_value': current_value,
+            'target_value': target_value,
+            'mkt_price': mkt_price,
+        })
+
+    return scale_factor, adjustments
+
+
 class MMR:
     """Synchronous Python SDK for the MMR trader_service.
 
@@ -161,32 +228,93 @@ class MMR:
         sec_type: str = 'STK',
         exchange: str = '',
         universe: str = '',
+        currency: str = '',
     ) -> List[SecurityDefinition]:
-        """Resolve a symbol string or conId to SecurityDefinition(s) via trader_service."""
-        return consume(
+        """Resolve a symbol string or conId to SecurityDefinition(s) via trader_service.
+
+        First checks the local universe DB.  If not found and the symbol is a
+        string, falls back to explicit IB discovery via ``resolve_contract``
+        with a fully-specified Contract (currency='USD' for STK, IDEALPRO for
+        CASH).  Integer conIds never fall back — they must exist locally.
+        """
+        result = consume(
             self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_symbol(
                 symbol, exchange, universe, sec_type
             )
         )
+        if result:
+            return result
 
-    def _resolve_contract(self, symbol: Union[str, int], sec_type: str = 'STK') -> Contract:
+        # No IB fallback for integer conIds — must be exact.
+        if type(symbol) is int:
+            return []
+
+        # Explicit IB discovery with a fully-specified Contract.
+        if sec_type == 'CASH':
+            pair = str(symbol).replace('/', '').replace('C:', '').upper()
+            base = pair[:3] if len(pair) == 6 else pair
+            quote_ccy = pair[3:] if len(pair) == 6 else 'USD'
+            contract = Contract(symbol=base, secType='CASH', exchange='IDEALPRO', currency=quote_ccy)
+        else:
+            contract = Contract(
+                symbol=str(symbol),
+                exchange=exchange or 'SMART',
+                secType=sec_type or 'STK',
+                currency=currency or 'USD',
+            )
+
+        return consume(
+            self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_contract(contract)
+        )
+
+    def _resolve_contract(self, symbol: Union[str, int], sec_type: str = 'STK',
+                          exchange: str = '', currency: str = '') -> Contract:
         """Resolve *symbol* to a single Contract, raising on ambiguity.
 
-        Prefers USD contracts on US exchanges when multiple matches exist.
+        When *exchange* or *currency* are provided, prefer definitions matching
+        those hints (e.g. exchange='ASX', currency='AUD' for Australian stocks).
+        Otherwise, prefers USD contracts on US exchanges.
         """
-        definitions = self.resolve(symbol, sec_type=sec_type)
+        definitions = self.resolve(symbol, sec_type=sec_type, exchange=exchange, currency=currency)
         if not definitions:
             raise ValueError(f"Could not resolve symbol: {symbol}")
 
-        # Prefer USD on a US exchange when there are multiple results
         sec = definitions[0]
-        if len(definitions) > 1:
+        if exchange or currency:
+            # Prefer definition matching the exchange/currency hint
+            for d in definitions:
+                d_exchange = getattr(d, 'exchange', '') or ''
+                d_primary = getattr(d, 'primaryExchange', '') or ''
+                d_currency = getattr(d, 'currency', '') or ''
+                if exchange and exchange.upper() not in (d_exchange.upper(), d_primary.upper()):
+                    continue
+                if currency and d_currency.upper() != currency.upper():
+                    continue
+                sec = d
+                break
+            else:
+                # No definition matched the hints — re-resolve via IB directly
+                if isinstance(symbol, str):
+                    direct = consume(
+                        self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_contract(
+                            Contract(
+                                symbol=symbol,
+                                exchange=exchange or 'SMART',
+                                secType=sec_type or 'STK',
+                                currency=currency or 'USD',
+                            )
+                        )
+                    )
+                    if direct:
+                        sec = direct[0]
+        elif len(definitions) > 1:
+            # Default: prefer USD on a US exchange
             us_exchanges = {'SMART', 'NYSE', 'NASDAQ', 'AMEX', 'ARCA', 'BATS', 'IEX', 'ISLAND'}
             for d in definitions:
-                currency = getattr(d, 'currency', '')
-                exchange = getattr(d, 'exchange', '')
-                primary = getattr(d, 'primaryExchange', '')
-                if currency == 'USD' and (exchange in us_exchanges or primary in us_exchanges):
+                d_currency = getattr(d, 'currency', '')
+                d_exchange = getattr(d, 'exchange', '')
+                d_primary = getattr(d, 'primaryExchange', '')
+                if d_currency == 'USD' and (d_exchange in us_exchanges or d_primary in us_exchanges):
                     sec = d
                     break
             else:
@@ -196,12 +324,26 @@ class MMR:
                         sec = d
                         break
 
+        # Use SMART routing for non-US exchanges to avoid IB Error 10311
+        # ("direct routed orders may result in higher trade fees").
+        # Keep the real exchange in primaryExchange so IB routes correctly.
+        sec_exchange = sec.exchange or ''
+        sec_primary = getattr(sec, 'primaryExchange', '') or ''
+        us_smart = {'SMART', 'NYSE', 'NASDAQ', 'AMEX', 'ARCA', 'BATS', 'IEX', 'ISLAND'}
+        if sec_exchange.upper() in us_smart:
+            order_exchange = sec_exchange
+            primary_exchange = sec_primary
+        else:
+            # Non-US exchange (ASX, TSE, SEHK, etc.) — use SMART routing
+            order_exchange = 'SMART'
+            primary_exchange = sec_primary or sec_exchange
+
         return Contract(
             conId=sec.conId,
             symbol=sec.symbol,
             secType=sec.secType,
-            exchange=sec.exchange,
-            primaryExchange=getattr(sec, 'primaryExchange', ''),
+            exchange=order_exchange,
+            primaryExchange=primary_exchange,
             currency=sec.currency,
         )
 
@@ -303,22 +445,95 @@ class MMR:
     # ------------------------------------------------------------------
 
     def orders(self) -> pd.DataFrame:
-        """Open orders."""
-        orders_raw: dict[int, list[Order]] = self._rpc.rpc(
-            return_type=dict[int, list[Order]]
-        ).get_orders()
+        """Open orders with full detail (symbol, name, prices, account %)."""
+        trades_raw: dict[int, list[Trade]] = self._rpc.rpc(
+            return_type=dict[int, list[Trade]]
+        ).get_trades()
+
+        if not trades_raw:
+            return pd.DataFrame()
+
+        # Filter to active (non-terminal) orders only
+        _terminal = {'Cancelled', 'Filled', 'Inactive', 'ApiCancelled'}
+        trades_raw = {
+            tid: tl for tid, tl in trades_raw.items()
+            if tl[0].orderStatus.status not in _terminal
+        }
+        if not trades_raw:
+            return pd.DataFrame()
+
+        # Get net liquidation for account % calculation
+        net_liq = 0.0
+        try:
+            acct_vals = consume(self._rpc.rpc(return_type=dict).get_account_values())
+            net_liq = float(acct_vals.get('NetLiquidation', {}).get('value', 0))
+        except Exception:
+            pass
+
+        # Resolve company names + snapshots for unique symbols
+        name_cache: dict[str, str] = {}
+        snap_cache: dict[str, dict] = {}
+        unique_symbols: set[str] = set()
+        for trade_list in trades_raw.values():
+            unique_symbols.add(trade_list[0].contract.symbol)
+
+        for sym in unique_symbols:
+            # Company name from local universe DB
+            try:
+                defs = consume(
+                    self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_symbol(sym)
+                )
+                name_cache[sym] = defs[0].longName if defs and defs[0].longName else ''
+            except Exception:
+                name_cache[sym] = ''
+            # Live snapshot for bid/ask context
+            try:
+                snap_cache[sym] = self.snapshot(sym, delayed=True)
+            except Exception:
+                snap_cache[sym] = {}
 
         rows = []
-        for order_id, order_list in orders_raw.items():
-            o = order_list[0]
+        for trade_id, trade_list in trades_raw.items():
+            t = trade_list[0]
+            o = t.order
+            snap = snap_cache.get(t.contract.symbol, {})
+            bid = snap.get('bid')
+            ask = snap.get('ask')
+            last = snap.get('last')
+            # Estimate order value from the best available price
+            # IB uses 1.7976931348623157e+308 as sentinel for "no price"
+            _lmt = o.lmtPrice if o.lmtPrice and o.lmtPrice < 1e300 else 0
+            _aux = o.auxPrice if o.auxPrice and o.auxPrice < 1e300 else 0
+            price = _lmt or _aux or 0
+            order_value = price * (o.totalQuantity or 0) if price else None
+            acct_pct = (order_value / net_liq * 100) if order_value and net_liq > 0 else None
+
             rows.append({
                 'orderId': o.orderId,
+                'symbol': t.contract.symbol,
+                'name': name_cache.get(t.contract.symbol, ''),
                 'action': o.action,
                 'orderType': o.orderType,
-                'lmtPrice': o.lmtPrice,
-                'totalQuantity': o.totalQuantity,
+                'quantity': o.totalQuantity,
+                'lmtPrice': o.lmtPrice if o.lmtPrice and o.lmtPrice < 1e300 else None,
+                'auxPrice': o.auxPrice if o.auxPrice and o.auxPrice < 1e300 else None,
+                'orderValue': round(order_value, 2) if order_value else None,
+                'acctPct': round(acct_pct, 1) if acct_pct else None,
+                'status': t.orderStatus.status,
+                'filled': t.orderStatus.filled,
+                'remaining': t.orderStatus.remaining,
+                'avgFillPrice': t.orderStatus.avgFillPrice if t.orderStatus.avgFillPrice else None,
+                'tif': o.tif,
+                'parentId': o.parentId if o.parentId else None,
+                'bid': bid,
+                'ask': ask,
+                'last': last,
             })
-        return pd.DataFrame(rows)
+
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df = df.sort_values(by='orderId', ascending=True)
+        return df
 
     def trades(self) -> pd.DataFrame:
         """Active trades in the book."""
@@ -424,6 +639,52 @@ class MMR:
         """Cancel all open orders."""
         return self._rpc.rpc(return_type=SuccessFail[list[int]]).cancel_all()
 
+    def to_market(self, order_id: int) -> SuccessFail:
+        """Cancel an open limit order and re-place as market, preserving stop-loss children."""
+        trades_raw: dict[int, list[Trade]] = self._rpc.rpc(
+            return_type=dict[int, list[Trade]]
+        ).get_trades()
+
+        if not trades_raw or order_id not in trades_raw:
+            return SuccessFail.fail(error=f'Order #{order_id} not found')
+
+        trade = trades_raw[order_id][0]
+        contract = trade.contract
+        order = trade.order
+        action = order.action
+        quantity = float(order.totalQuantity)
+
+        if order.orderType == 'MKT':
+            return SuccessFail.fail(error=f'Order #{order_id} is already a market order')
+
+        # Find stop-loss child (parentId == this order)
+        stop_price = None
+        for tid, tlist in trades_raw.items():
+            child = tlist[0]
+            if child.order.parentId == order_id and child.order.orderType in ('STP', 'STP LMT'):
+                stop_price = child.order.auxPrice
+                break
+
+        # Cancel parent (IB auto-cancels bracket children)
+        self.cancel(order_id)
+
+        # Build execution spec and re-place as market
+        from trader.trading.proposal import ExecutionSpec
+        if stop_price:
+            spec = ExecutionSpec(order_type='MARKET', exit_type='STOP_LOSS', stop_loss_price=stop_price)
+        else:
+            spec = ExecutionSpec(order_type='MARKET')
+
+        return consume(
+            self._rpc.rpc(return_type=SuccessFail[list[Trade]]).place_expressive_order(
+                contract=contract,
+                action=action,
+                quantity=quantity,
+                execution_spec=spec.to_dict(),
+                algo_name='to_market',
+            )
+        )
+
     # ------------------------------------------------------------------
     # Trade Proposals
     # ------------------------------------------------------------------
@@ -439,6 +700,47 @@ class MMR:
             self._prop_store = ProposalStore(duckdb_path)
         return self._prop_store
 
+    def _get_portfolio_state(self):
+        """Build a PortfolioState snapshot. Gracefully degrades if trader_service unavailable."""
+        from trader.trading.position_sizing import PortfolioState
+        state = PortfolioState()
+        try:
+            acct_vals = consume(self._rpc.rpc(return_type=dict).get_account_values())
+            if acct_vals:
+                state.net_liquidation = float(acct_vals.get('NetLiquidation', {}).get('value', 0))
+                state.gross_position_value = float(acct_vals.get('GrossPositionValue', {}).get('value', 0))
+                state.available_funds = float(acct_vals.get('AvailableFunds', {}).get('value', 0))
+        except Exception:
+            pass
+
+        try:
+            portfolio_df = self.portfolio()
+            if portfolio_df is not None and not portfolio_df.empty:
+                state.position_count = len(portfolio_df)
+                if 'dailyPNL' in portfolio_df.columns:
+                    state.daily_pnl = portfolio_df['dailyPNL'].sum()
+        except Exception:
+            pass
+
+        try:
+            store = self._proposal_store()
+            pending = store.query(status='PENDING')
+            if pending:
+                state.pending_proposal_value = sum(
+                    p.amount for p in pending if p.amount is not None and p.amount == p.amount
+                )
+        except Exception:
+            pass
+
+        return state
+
+    def session_status(self) -> dict:
+        """Return position sizing config, portfolio state, capacity, and recommended sizes."""
+        from trader.trading.position_sizing import PositionSizingConfig, PositionSizer
+        config = PositionSizingConfig.load()
+        state = self._get_portfolio_state()
+        return PositionSizer(config).session_summary(state)
+
     def propose(
         self,
         symbol: str,
@@ -452,10 +754,83 @@ class MMR:
         source: str = 'manual',
         metadata: Optional[dict] = None,
         sec_type: str = 'STK',
+        exchange: str = '',
+        currency: str = '',
     ) -> tuple[int, Optional[dict], Optional[dict]]:
         """Create a trade proposal. Returns (proposal_id, leverage_info, snapshot_info). No trader_service needed."""
         from trader.trading.proposal import ExecutionSpec, TradeProposal
         spec = execution if isinstance(execution, ExecutionSpec) else ExecutionSpec()
+        validation_errors = spec.validate()
+        if validation_errors:
+            raise ValueError(f'Invalid execution spec: {"; ".join(validation_errors)}')
+
+        # Auto-size when neither quantity nor amount is provided
+        if metadata is None:
+            metadata = {}
+        if quantity is None and amount is None:
+            try:
+                from trader.trading.position_sizing import (
+                    LiquidityInfo, PositionSizingConfig, PositionSizer,
+                )
+                config = PositionSizingConfig.load()
+                state = self._get_portfolio_state()
+                sizer = PositionSizer(config)
+
+                # Build liquidity info from snapshot (gracefully degrades)
+                liq = None
+                try:
+                    snap = self.snapshot(symbol, exchange=exchange, currency=currency)
+                    if snap:
+                        import math
+                        _bid = snap.get('bid', 0) or 0
+                        _ask = snap.get('ask', 0) or 0
+                        _last = snap.get('last', 0) or 0
+                        _bid_sz = snap.get('bidSize', 0) or 0
+                        _ask_sz = snap.get('askSize', 0) or 0
+                        # NaN guard
+                        if isinstance(_bid, float) and math.isnan(_bid): _bid = 0
+                        if isinstance(_ask, float) and math.isnan(_ask): _ask = 0
+                        if isinstance(_last, float) and math.isnan(_last): _last = 0
+                        if isinstance(_bid_sz, float) and math.isnan(_bid_sz): _bid_sz = 0
+                        if isinstance(_ask_sz, float) and math.isnan(_ask_sz): _ask_sz = 0
+                        liq = LiquidityInfo(
+                            bid=_bid, ask=_ask, last=_last,
+                            bid_size=_bid_sz, ask_size=_ask_sz,
+                        )
+                        # Try to get ADV from local historical data
+                        try:
+                            from trader.data.duckdb_store import DuckDBDataStore
+                            cfg = self._container.config()
+                            duckdb_path = cfg.get('duckdb_path', '')
+                            if duckdb_path:
+                                ds = DuckDBDataStore(duckdb_path)
+                                # Look up conId for the symbol
+                                defs = self.resolve(symbol, sec_type=sec_type, exchange=exchange)
+                                if defs:
+                                    con_id = defs[0].conId
+                                    hist = ds.read(con_id, '1 day', count=20)
+                                    if hist is not None and not hist.empty and 'volume' in hist.columns:
+                                        liq.avg_daily_volume = float(hist['volume'].mean())
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                result = sizer.compute(
+                    confidence=confidence, portfolio_state=state, liquidity=liq,
+                )
+                if result.amount_usd > 0:
+                    amount = result.amount_usd
+                    metadata['auto_sized'] = True
+                    metadata['sizing_result'] = {
+                        'amount': result.amount_usd,
+                        'reasoning': result.reasoning,
+                        'capped_by': result.capped_by,
+                        'warnings': result.warnings,
+                    }
+            except Exception:
+                pass  # Fall through — proposal will have no size, same as before
+
         proposal = TradeProposal(
             symbol=symbol,
             action=action,
@@ -468,6 +843,8 @@ class MMR:
             source=source,
             metadata=metadata or {},
             sec_type=sec_type,
+            exchange=exchange,
+            currency=currency,
         )
         proposal_id = self._proposal_store().add(proposal)
 
@@ -476,7 +853,7 @@ class MMR:
         snapshot_info = None
         try:
             # Capture bid/ask/last at proposal time
-            snap = self.snapshot(symbol)
+            snap = self.snapshot(symbol, exchange=exchange, currency=currency)
             if snap:
                 snapshot_info = {
                     'bid': snap.get('bid'),
@@ -636,13 +1013,23 @@ class MMR:
         store.update_status(proposal_id, 'APPROVED')
 
         try:
-            contract = self._resolve_contract(proposal.symbol, sec_type=proposal.sec_type)
+            contract = self._resolve_contract(
+                proposal.symbol, sec_type=proposal.sec_type,
+                exchange=proposal.exchange, currency=proposal.currency,
+            )
 
             # Determine quantity
             qty = proposal.quantity
             if qty is None and proposal.amount is not None:
                 import math
-                snap = self.snapshot(proposal.symbol)
+                ticker = consume(
+                    self._rpc.rpc(return_type=Ticker).get_snapshot(contract, False)
+                )
+                snap = {
+                    'last': getattr(ticker, 'last', float('nan')),
+                    'ask': getattr(ticker, 'ask', float('nan')),
+                    'bid': getattr(ticker, 'bid', float('nan')),
+                }
                 # Pick the first valid (non-NaN, positive) price
                 price = None
                 for key in ('last', 'ask', 'bid'):
@@ -727,12 +1114,189 @@ class MMR:
         )
 
     # ------------------------------------------------------------------
+    # Portfolio Resizing
+    # ------------------------------------------------------------------
+
+    def compute_resize_plan(
+        self,
+        max_bound: Optional[float] = None,
+        min_bound: Optional[float] = None,
+    ) -> dict:
+        """Compute a resize plan for the portfolio.
+
+        Returns a dict with scale_factor, current_total, target_total,
+        and adjustments (each with associated_orders info).
+        """
+        portfolio_df = self.portfolio()
+        if portfolio_df.empty:
+            return {'scale_factor': 1.0, 'current_total': 0, 'target_total': 0, 'adjustments': []}
+
+        positions = portfolio_df.to_dict('records')
+        total_value = sum(abs(p.get('marketValue', 0) or 0) for p in positions)
+
+        scale_factor, adjustments = compute_resize_deltas(positions, max_bound, min_bound)
+
+        if scale_factor == 1.0:
+            return {
+                'scale_factor': 1.0,
+                'current_total': total_value,
+                'target_total': total_value,
+                'adjustments': [],
+            }
+
+        target_total = total_value * scale_factor
+
+        # Find associated protective orders for each position
+        trades_raw: dict = {}
+        try:
+            trades_raw = self._rpc.rpc(
+                return_type=dict[int, list[Trade]]
+            ).get_trades()
+        except Exception:
+            pass
+
+        if trades_raw:
+            _terminal = {'Cancelled', 'Filled', 'Inactive', 'ApiCancelled'}
+            trades_raw = {
+                tid: tl for tid, tl in trades_raw.items()
+                if tl[0].orderStatus.status not in _terminal
+            }
+
+        for adj in adjustments:
+            associated = []
+            if trades_raw:
+                con_id = adj['conId']
+                pos_direction = 'LONG' if adj['current_qty'] > 0 else 'SHORT'
+                for tid, tl in trades_raw.items():
+                    t = tl[0]
+                    t_con_id = t.contract.conId if hasattr(t.contract, 'conId') else (t.contract.get('conId') if isinstance(t.contract, dict) else 0)
+                    if t_con_id != con_id:
+                        continue
+                    o = t.order
+                    order_type = o.orderType or ''
+                    order_action = o.action or ''
+
+                    # Protective orders are opposite direction to position
+                    is_protective = (
+                        (pos_direction == 'LONG' and order_action == 'SELL') or
+                        (pos_direction == 'SHORT' and order_action == 'BUY')
+                    )
+                    is_stop_type = order_type in ('STP', 'STP LMT', 'TRAIL')
+                    is_tp = order_type == 'LMT' and (o.parentId or 0) > 0
+
+                    if is_protective and (is_stop_type or is_tp):
+                        aux = o.auxPrice if hasattr(o, 'auxPrice') and o.auxPrice and o.auxPrice < 1e300 else 0
+                        lmt = o.lmtPrice if hasattr(o, 'lmtPrice') and o.lmtPrice and o.lmtPrice < 1e300 else 0
+                        trail_pct = getattr(o, 'trailingPercent', 0) or 0
+
+                        associated.append({
+                            'orderId': o.orderId,
+                            'orderType': order_type,
+                            'action': order_action,
+                            'quantity': float(o.totalQuantity or 0),
+                            'auxPrice': float(aux),
+                            'lmtPrice': float(lmt),
+                            'trailingPercent': float(trail_pct),
+                            'tif': o.tif or 'GTC',
+                        })
+
+            adj['associated_orders'] = associated
+
+        return {
+            'scale_factor': scale_factor,
+            'current_total': total_value,
+            'target_total': target_total,
+            'adjustments': adjustments,
+        }
+
+    def execute_resize_plan(self, plan: dict) -> dict:
+        """Execute a resize plan: cancel protective orders, place deltas, re-create protectives.
+
+        Returns a summary dict with successes, failures, and warnings.
+        """
+        results = {
+            'successes': [],
+            'failures': [],
+            'warnings': [],
+        }
+
+        for adj in plan.get('adjustments', []):
+            symbol = adj['symbol']
+            delta_qty = adj['delta_qty']
+            action = adj['action']
+            target_qty = adj['target_qty']
+            associated = adj.get('associated_orders', [])
+
+            # 1. Cancel associated protective orders
+            for order_info in associated:
+                try:
+                    cancel_result = self.cancel(order_info['orderId'])
+                    if not cancel_result.is_success():
+                        results['warnings'].append(
+                            f'{symbol}: failed to cancel order #{order_info["orderId"]}: {cancel_result.error}'
+                        )
+                except Exception as ex:
+                    results['warnings'].append(
+                        f'{symbol}: error cancelling order #{order_info["orderId"]}: {ex}'
+                    )
+
+            # 2. Place market order for delta shares
+            try:
+                order_result = self._place_order(
+                    symbol=symbol,
+                    action=action,
+                    quantity=abs(delta_qty),
+                    market=True,
+                )
+                if order_result.is_success():
+                    results['successes'].append(
+                        f'{symbol}: {action} {abs(delta_qty)} shares'
+                    )
+                else:
+                    results['failures'].append(
+                        f'{symbol}: {action} {abs(delta_qty)} failed — {order_result.error}'
+                    )
+                    continue  # Skip re-creating protectives if delta order failed
+            except Exception as ex:
+                results['failures'].append(f'{symbol}: {action} {abs(delta_qty)} error — {ex}')
+                continue
+
+            # 3. Re-create protective orders with new quantity
+            for order_info in associated:
+                try:
+                    contract = self._resolve_contract(symbol)
+                    new_qty = abs(target_qty)
+
+                    consume(
+                        self._rpc.rpc(return_type=SuccessFail[Trade]).place_standalone_order(
+                            contract=contract,
+                            action=order_info['action'],
+                            quantity=new_qty,
+                            order_type=order_info['orderType'],
+                            aux_price=order_info['auxPrice'],
+                            limit_price=order_info['lmtPrice'],
+                            trailing_percent=order_info['trailingPercent'],
+                            tif=order_info['tif'],
+                        )
+                    )
+                    results['successes'].append(
+                        f'{symbol}: re-created {order_info["orderType"]} {order_info["action"]} {new_qty}'
+                    )
+                except Exception as ex:
+                    results['warnings'].append(
+                        f'{symbol}: failed to re-create {order_info["orderType"]}: {ex}'
+                    )
+
+        return results
+
+    # ------------------------------------------------------------------
     # Market Data
     # ------------------------------------------------------------------
 
-    def snapshot(self, symbol: Union[str, int], delayed: bool = False) -> dict:
+    def snapshot(self, symbol: Union[str, int], delayed: bool = False,
+                 exchange: str = '', currency: str = '') -> dict:
         """Get a price snapshot for *symbol*."""
-        contract = self._resolve_contract(symbol)
+        contract = self._resolve_contract(symbol, exchange=exchange, currency=currency)
         ticker = consume(
             self._rpc.rpc(return_type=Ticker).get_snapshot(contract, delayed)
         )
@@ -957,6 +1521,55 @@ class MMR:
     def set_risk_limits(self, **kwargs) -> dict:
         """Update risk gate limits on trader_service. Returns updated limits."""
         return consume(self._rpc.rpc(return_type=dict).set_risk_limits(**kwargs))
+
+    # ------------------------------------------------------------------
+    # Trading filters (local YAML, no RPC needed)
+    # ------------------------------------------------------------------
+
+    def get_filters(self) -> dict:
+        """Load current trading filters from YAML config."""
+        from trader.trading.trading_filter import TradingFilter
+        return TradingFilter.load().to_dict()
+
+    def set_filters(self, **kwargs) -> dict:
+        """Update specific filter fields and save."""
+        from trader.trading.trading_filter import TradingFilter
+        tf = TradingFilter.load()
+        for key, value in kwargs.items():
+            if hasattr(tf, key):
+                setattr(tf, key, value)
+        tf.save()
+        return tf.to_dict()
+
+    def add_to_filter_list(self, list_name: str, symbols: list[str]) -> dict:
+        """Add symbols to a named list (denylist, allowlist, etc.)."""
+        from trader.trading.trading_filter import TradingFilter
+        tf = TradingFilter.load()
+        current = getattr(tf, list_name, [])
+        for sym in symbols:
+            s = sym.upper()
+            if s not in current:
+                current.append(s)
+        setattr(tf, list_name, current)
+        tf.save()
+        return tf.to_dict()
+
+    def remove_from_filter_list(self, list_name: str, symbols: list[str]) -> dict:
+        """Remove symbols from a named list."""
+        from trader.trading.trading_filter import TradingFilter
+        tf = TradingFilter.load()
+        current = getattr(tf, list_name, [])
+        upper_syms = {s.upper() for s in symbols}
+        setattr(tf, list_name, [s for s in current if s.upper() not in upper_syms])
+        tf.save()
+        return tf.to_dict()
+
+    def reset_filters(self) -> dict:
+        """Reset all filters to defaults."""
+        from trader.trading.trading_filter import TradingFilter
+        tf = TradingFilter.default()
+        tf.save()
+        return tf.to_dict()
 
     def status(self) -> dict:
         """Check connectivity to trader_service via ZMQ RPC with diagnostics."""
@@ -2018,6 +2631,13 @@ class MMR:
         market_cap_above: float = 0.0,
     ) -> pd.DataFrame:
         """Run an IB market scanner."""
+        # Check location against trading filters
+        from trader.trading.trading_filter import TradingFilter
+        tf = TradingFilter.load()
+        if not tf.is_empty():
+            allowed, reason = tf.is_allowed('', location=location_code)
+            if not allowed:
+                raise ValueError(f'Trading filter blocked location {location_code}: {reason}')
         results = consume(
             self._rpc.rpc(return_type=list[dict]).scanner_data(
                 scan_code=scan_code,
@@ -2163,4 +2783,75 @@ class MMR:
                 })
                 if len(results) >= limit:
                     break
+        return results
+
+    # ------------------------------------------------------------------
+    # Market hours (local-only, no service needed)
+    # ------------------------------------------------------------------
+
+    _MARKET_CALENDARS = [
+        ('XNYS',  'NYSE',       'US'),
+        ('XNAS',  'NASDAQ',     'US'),
+        ('XASX',  'ASX',        'Australia'),
+        ('XTSE',  'TSX',        'Canada'),
+        ('XLON',  'LSE',        'UK'),
+        ('XHKG',  'HKEX',       'Hong Kong'),
+        ('XTKS',  'TSE',        'Japan'),
+        ('XFRA',  'Frankfurt',  'Germany'),
+        ('XPAR',  'Euronext',   'France'),
+    ]
+
+    def market_hours(self) -> List[Dict]:
+        """Return open/close status for major exchanges. No RPC needed."""
+        import exchange_calendars as xcals
+
+        now = pd.Timestamp.now(tz='UTC')
+        today = pd.Timestamp(now.date())  # tz-naive date for session lookups
+        results = []
+
+        for cal_code, name, region in self._MARKET_CALENDARS:
+            cal = xcals.get_calendar(cal_code)
+            is_open = cal.is_open_on_minute(now)
+            status = 'OPEN' if is_open else 'CLOSED'
+
+            if is_open:
+                # Next event is market close
+                session = cal.minute_to_session(now)
+                next_event_time = cal.session_close(session)
+                next_event = 'closes'
+            else:
+                # Next event is market open — search upcoming sessions
+                next_event_time = None
+                next_event = 'opens'
+                try:
+                    for offset in range(5):
+                        candidate = today + pd.Timedelta(days=offset)
+                        if cal.is_session(candidate):
+                            open_time = cal.session_open(candidate)
+                            if open_time > now:
+                                next_event_time = open_time
+                                break
+                except Exception:
+                    pass
+
+            if next_event_time is not None:
+                delta = next_event_time - now
+                total_minutes = int(delta.total_seconds() // 60)
+                hours, minutes = divmod(total_minutes, 60)
+                if hours > 0:
+                    relative = f'in {hours}h {minutes}m'
+                else:
+                    relative = f'in {minutes}m'
+            else:
+                relative = ''
+
+            results.append({
+                'exchange': name,
+                'region': region,
+                'status': status,
+                'next_event': next_event,
+                'next_event_time': str(next_event_time)[:19] if next_event_time else '',
+                'relative': relative,
+            })
+
         return results

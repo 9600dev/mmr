@@ -69,6 +69,8 @@ class ExecutionSpec:
         if self.exit_type == 'TRAILING_STOP':
             if self.trailing_stop_percent is None and self.trailing_stop_amount is None:
                 errors.append('TRAILING_STOP exit requires trailing_stop_percent or trailing_stop_amount')
+            if self.order_type == 'MARKET':
+                errors.append('TRAILING_STOP exit cannot be attached to a MARKET order (IB requires LIMIT or STOP-LIMIT parent)')
         return errors
 
 
@@ -95,3 +97,5 @@ class TradeProposal:
     order_ids: List[int] = field(default_factory=list)
     rejection_reason: str = ''
     sec_type: str = 'STK'
+    exchange: str = ''     # Exchange hint (e.g. 'ASX', 'TSE', 'SEHK')
+    currency: str = ''     # Currency hint (e.g. 'AUD', 'JPY', 'HKD')

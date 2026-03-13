@@ -72,6 +72,27 @@ class TestRiskGate:
         assert result.approved is False
 
 
+class TestInstrumentCheck:
+    def test_check_instrument_no_filter(self, risk_gate):
+        """No trading filter set → always approved."""
+        result = risk_gate.check_instrument('NKLA', exchange='NASDAQ', sec_type='STK')
+        assert result.approved is True
+
+    def test_check_instrument_denied(self, risk_gate):
+        from trader.trading.trading_filter import TradingFilter
+        risk_gate.trading_filter = TradingFilter(denylist=['NKLA'])
+        result = risk_gate.check_instrument('NKLA')
+        assert result.approved is False
+        assert 'trading filter' in result.reason
+        assert 'denylist' in result.reason
+
+    def test_check_instrument_allowed(self, risk_gate):
+        from trader.trading.trading_filter import TradingFilter
+        risk_gate.trading_filter = TradingFilter(denylist=['NKLA'])
+        result = risk_gate.check_instrument('AAPL', exchange='NASDAQ', sec_type='STK')
+        assert result.approved is True
+
+
 class TestLeverageCheck:
     def test_check_leverage_within_limit(self, risk_gate):
         """0.5x leverage with default 1.0x limit → approved."""

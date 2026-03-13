@@ -56,7 +56,13 @@ class ProposalStore:
         """Add a proposal and return its assigned id."""
         now = dt.datetime.now()
         execution_json = json.dumps(proposal.execution.to_dict())
-        metadata_json = json.dumps(proposal.metadata)
+        # Persist exchange/currency hints in metadata (avoids DB schema migration)
+        meta = dict(proposal.metadata)
+        if proposal.exchange:
+            meta['_exchange'] = proposal.exchange
+        if proposal.currency:
+            meta['_currency'] = proposal.currency
+        metadata_json = json.dumps(meta)
         order_ids_json = json.dumps(proposal.order_ids)
 
         def _insert(conn):
@@ -159,6 +165,10 @@ class ProposalStore:
             metadata_dict = json.loads(row[10]) if row[10] else {}
             order_ids_list = json.loads(row[14]) if row[14] else []
 
+            # Restore exchange/currency from metadata (stored with _ prefix)
+            exchange = metadata_dict.pop('_exchange', '')
+            currency = metadata_dict.pop('_currency', '')
+
             proposals.append(TradeProposal(
                 id=row[0],
                 symbol=row[1],
@@ -177,5 +187,7 @@ class ProposalStore:
                 order_ids=order_ids_list,
                 rejection_reason=row[15],
                 sec_type=row[16],
+                exchange=exchange,
+                currency=currency,
             ))
         return proposals

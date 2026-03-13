@@ -246,6 +246,32 @@ class TraderServiceApi(RPCHandler):
         return result
 
     @rpcmethod
+    async def place_standalone_order(
+        self,
+        contract: Contract,
+        action: str,
+        quantity: float,
+        order_type: str,
+        aux_price: float = 0,
+        limit_price: float = 0,
+        trailing_percent: float = 0,
+        tif: str = 'GTC',
+        outside_rth: bool = True,
+    ) -> SuccessFail[Trade]:
+        """Place a standalone protective order (stop, trailing stop, limit)."""
+        return await self.trader.place_standalone_order(
+            contract=contract,
+            action=action,
+            quantity=quantity,
+            order_type=order_type,
+            aux_price=aux_price,
+            limit_price=limit_price,
+            trailing_percent=trailing_percent,
+            tif=tif,
+            outside_rth=outside_rth,
+        )
+
+    @rpcmethod
     async def check_order_margin(
         self,
         contract: Contract,

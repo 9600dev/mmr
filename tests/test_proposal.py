@@ -97,12 +97,17 @@ class TestExecutionSpec:
         assert any('trailing_stop' in e for e in errors)
 
     def test_validate_trailing_stop_with_pct_ok(self):
-        spec = ExecutionSpec(exit_type='TRAILING_STOP', trailing_stop_percent=2.0)
+        spec = ExecutionSpec(exit_type='TRAILING_STOP', trailing_stop_percent=2.0, order_type='LIMIT', limit_price=100.0)
         assert spec.validate() == []
 
     def test_validate_trailing_stop_with_amt_ok(self):
-        spec = ExecutionSpec(exit_type='TRAILING_STOP', trailing_stop_amount=5.0)
+        spec = ExecutionSpec(exit_type='TRAILING_STOP', trailing_stop_amount=5.0, order_type='LIMIT', limit_price=100.0)
         assert spec.validate() == []
+
+    def test_validate_trailing_stop_rejects_market_parent(self):
+        spec = ExecutionSpec(exit_type='TRAILING_STOP', trailing_stop_percent=2.0, order_type='MARKET')
+        errors = spec.validate()
+        assert any('MARKET' in e for e in errors)
 
 
 class TestTradeProposal:

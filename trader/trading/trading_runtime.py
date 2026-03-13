@@ -190,6 +190,10 @@ class Trader():
             self.event_store = EventStore(self.duckdb_path)
             self.risk_gate = RiskGate(RiskLimits(), self.event_store)
 
+            # load trading filters (allowlist/denylist)
+            from trader.trading.trading_filter import TradingFilter
+            self.risk_gate.trading_filter = TradingFilter.load()
+
             # fire up the executioner
             self.executioner = TradeExecutioner()
             self.executioner.connect(self)
@@ -469,20 +473,17 @@ class Trader():
         if len(result) > 0:
             return result
 
-        if sec_type == 'CASH':
-            pair = str(symbol).replace('/', '').replace('C:', '').upper()
-            base = pair[:3] if len(pair) == 6 else pair
-            quote_ccy = pair[3:] if len(pair) == 6 else 'USD'
-            fallback_contract = Contract(symbol=base, secType='CASH', exchange='IDEALPRO', currency=quote_ccy)
+        # No IB fallback. resolve_symbol is a local DB lookup only.
+        # Guessing with a partially-specified Contract can resolve to the
+        # wrong instrument (e.g. SOXL → AEQLIT/CAD, 4391 → TSEJ).
+        # Use resolve_contract() for explicit IB discovery with a
+        # fully-specified Contract.
+        if type(symbol) is int:
+            logging.warning('conId %d not found in local universe DB', symbol)
         else:
-            fallback_contract = Contract(symbol=str(symbol), exchange='SMART', secType=sec_type or 'STK')
-
-        contract_details = await self.client.ib.reqContractDetailsAsync(fallback_contract)
-
-        if contract_details:
-            return [SecurityDefinition.from_contract_details(contract_details[0])]
-        else:
-            return []
+            logging.warning("Symbol '%s' not found in local universe DB — "
+                            "add it with `universe add` or use `resolve` CLI command", symbol)
+        return []
 
     @log_method
     async def resolve_universe(
@@ -621,6 +622,12 @@ class Trader():
         """Place an order with full execution specification (brackets, trailing stops, etc.)."""
         from trader.trading.proposal import ExecutionSpec
         spec = ExecutionSpec.from_dict(execution_spec)
+
+        # Validate execution spec before placing any orders
+        validation_errors = spec.validate()
+        if validation_errors:
+            return SuccessFail.fail(error=f'Invalid execution spec: {"; ".join(validation_errors)}')
+
         trades: List[Trade] = []
 
         reverse_action = 'SELL' if action == 'BUY' else 'BUY'
@@ -643,6 +650,15 @@ class Trader():
                 return LimitOrder(lmtPrice=spec.limit_price, **common)
 
         # --- Pre-trade risk checks ---
+
+        # 0. Trading filter check (denylist/allowlist)
+        if hasattr(self, 'risk_gate'):
+            instrument_result = self.risk_gate.check_instrument(
+                symbol=contract.symbol, exchange=contract.exchange or '', sec_type=contract.secType or '',
+            )
+            if not instrument_result.approved:
+                return SuccessFail.fail(error=instrument_result.reason)
+
         # Build a temporary entry order for margin simulation
         probe_order = _build_entry(**common)
 
@@ -877,6 +893,81 @@ class Trader():
 
         except Exception as ex:
             logging.error(f'place_expressive_order error: {ex}')
+            return SuccessFail.fail(exception=ex)
+
+    async def place_standalone_order(
+        self,
+        contract: Contract,
+        action: str,
+        quantity: float,
+        order_type: str,
+        aux_price: float = 0,
+        limit_price: float = 0,
+        trailing_percent: float = 0,
+        tif: str = 'GTC',
+        outside_rth: bool = True,
+    ) -> SuccessFail:
+        """Place a standalone order (e.g. protective stop for an existing position).
+
+        order_type: 'STP' (stop), 'TRAIL' (trailing stop), 'LMT' (take-profit limit)
+        """
+        try:
+            if order_type == 'STP':
+                order = StopOrder(
+                    action=action,
+                    totalQuantity=quantity,
+                    stopPrice=aux_price,
+                    account=self.ib_account,
+                    tif=tif,
+                    outsideRth=outside_rth,
+                    transmit=True,
+                )
+            elif order_type == 'TRAIL':
+                order = Order(
+                    orderType='TRAIL',
+                    action=action,
+                    totalQuantity=quantity,
+                    account=self.ib_account,
+                    tif=tif,
+                    outsideRth=outside_rth,
+                    transmit=True,
+                )
+                if trailing_percent:
+                    order.trailingPercent = trailing_percent
+                elif aux_price:
+                    order.auxPrice = aux_price
+            elif order_type == 'LMT':
+                order = LimitOrder(
+                    action=action,
+                    totalQuantity=quantity,
+                    lmtPrice=limit_price,
+                    account=self.ib_account,
+                    tif=tif,
+                    outsideRth=outside_rth,
+                    transmit=True,
+                )
+            else:
+                return SuccessFail.fail(error=f'Unsupported order_type: {order_type}')
+
+            task = asyncio.Event()
+            result_trade: Optional[Trade] = None
+
+            def on_next(trade: Trade):
+                nonlocal result_trade
+                result_trade = trade
+                task.set()
+
+            observable = await self.executioner.subscribe_place_order_direct(contract, order)
+            observable.subscribe(Observer(on_next=on_next, on_error=lambda e: task.set(), on_completed=lambda: None))
+            await task.wait()
+
+            if result_trade:
+                return SuccessFail.success(obj=result_trade)
+            else:
+                return SuccessFail.fail(error='Failed to place standalone order')
+
+        except Exception as ex:
+            logging.error(f'place_standalone_order error: {ex}')
             return SuccessFail.fail(exception=ex)
 
     @log_method
