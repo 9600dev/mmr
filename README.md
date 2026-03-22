@@ -31,19 +31,66 @@ Most trading platforms are built for humans staring at charts. MMR is built for 
 - **Risk reports before and after** — `portfolio-risk` returns concentration (HHI), group budget compliance, correlation clusters, and plain-English warnings. Run it before proposing to catch existing issues; run it after to catch issues the new trade would create.
 - **Position groups with budgets** — tag trades into named groups (e.g. "mining" at 20% max allocation) so the LLM can manage sector exposure without manual tracking.
 
+## Getting Started
+
+The fastest way to get running is Docker — one command builds the image, starts IB Gateway, prompts for your credentials, and SSH's you in:
+
+```bash
+git clone https://github.com/9600dev/mmr.git
+cd mmr
+./docker.sh -g
+```
+
+`./docker.sh -g` handles everything: builds the Docker image, prompts for your IB username/password/account, writes credentials to `.env` (gitignored), starts the IB Gateway sidecar + MMR container, and drops you into an SSH session. From there, run `./start_mmr.sh` to launch all services.
+
+```bash
+# Once inside the container:
+./start_mmr.sh              # Paper trading (default)
+./start_mmr.sh --live        # Live trading
+./start_mmr.sh --cli         # CLI only (services already running)
+```
+
+### Other Docker Commands
+
+```bash
+./docker.sh -u    # Start containers
+./docker.sh -d    # Stop containers
+./docker.sh -s    # Sync code to running container
+./docker.sh -e    # SSH into container
+./docker.sh -l    # Tail logs
+./docker.sh -c    # Clean images/volumes
+./docker.sh -i    # IB Gateway only (for local dev)
+```
+
+### Local Install (No Docker)
+
+```bash
+pip install -e ".[test]"
+./start_mmr.sh --setup       # Interactive wizard: IB connection, accounts, API keys
+./start_mmr.sh               # Start services
+```
+
+On first run, `start_mmr.sh` auto-launches the setup wizard to configure IB Gateway host/port, account numbers, Massive.com API key, and trading mode. Re-run anytime with `./start_mmr.sh --setup`. Settings are saved to `~/.config/mmr/trader.yaml`.
+
+### Requirements
+
+- Python >= 3.12
+- Interactive Brokers account with [IB Gateway](https://www.interactivebrokers.com/en/trading/ibgateway-stable.php) or TWS
+- Market data subscriptions for target exchanges
+
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                      Claude Code / LLM Agent                        │
 │  CLAUDE.md (context) + mmr CLI --json (tools)                       │
-│  MONITOR → ANALYZE → PROPOSE → DIGEST → sleep → repeat             │
+│  MONITOR → ANALYZE → PROPOSE → DIGEST → sleep → repeat              │
 └────────────────────────────┬────────────────────────────────────────┘
                              │ Bash: mmr --json <command>
 ┌────────────────────────────▼────────────────────────────────────────┐
 │                         mmr_cli / sdk.py                            │
 │              80+ commands, JSON output, prompt_toolkit REPL         │
-└──────┬──────────────────┬──────────────────┬───────────────────────┘
+└──────┬──────────────────┬──────────────────┬────────────────────────┘
        │ ZMQ RPC          │ ZMQ RPC          │ ZMQ PubSub
        ▼                  ▼                  ▼
 ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐
@@ -56,7 +103,7 @@ Most trading platforms are built for humans staring at charts. MMR is built for 
 │ Risk Gate    │  │              │  │                      │
 │ Book Subject │  │              │  │                      │
 └──────────────┘  └──────────────┘  └──────────────────────┘
-       │                                      │
+       │                                       │
        │          ┌──────────────┐             │
        └──────────┤  IB Gateway  ├─────────────┘
                   │  (ib_async)  │
@@ -175,73 +222,6 @@ mmr reject 42 --reason "Group over budget"
 
 Position sizing is automatic: `base_position × risk_multiplier × confidence_scale × ATR_volatility_adjustment`. Volatile stocks (high ATR%) get smaller positions; stable stocks get larger ones. Configured in `configs/position_sizing.yaml`.
 
-## Installation
-
-### Requirements
-
-- Python >= 3.12
-- Interactive Brokers account with [IB Gateway](https://www.interactivebrokers.com/en/trading/ibgateway-stable.php) or TWS
-- Market data subscriptions for target exchanges
-
-### From Source
-
-```bash
-git clone https://github.com/9600dev/mmr.git
-cd mmr
-pip install -e ".[test]"
-```
-
-### Docker (Recommended)
-
-Two-container setup: IB Gateway sidecar + MMR application.
-
-```bash
-# First run — prompts for IB credentials, writes .env
-./docker.sh -g
-
-# Individual commands
-./docker.sh -b    # Build image
-./docker.sh -u    # Start containers
-./docker.sh -d    # Stop containers
-./docker.sh -s    # Sync code to running container
-./docker.sh -e    # SSH into container
-./docker.sh -l    # Tail logs
-./docker.sh -c    # Clean images/volumes
-./docker.sh -i    # IB Gateway only (for local dev)
-```
-
-### Configuration
-
-On first run, `start_mmr.sh` automatically launches an interactive setup wizard that walks you through:
-
-- **Trading mode** — paper or live
-- **IB Gateway connection** — host and port
-- **IB account numbers** — paper (DU...) and live (U...)
-- **Massive.com API key** — for US market data, scanning, and fundamentals
-- **DuckDB storage path**
-
-Settings are saved to `~/.config/mmr/trader.yaml`. Re-run the wizard anytime:
-
-```bash
-./start_mmr.sh --setup
-```
-
-Docker users get a separate credential prompt via `./docker.sh -g` that writes IB Gateway login credentials to `.env` (gitignored).
-
-### Starting Services
-
-```bash
-# All services (auto-starts IB Gateway container)
-./start_mmr.sh              # Paper trading (default)
-./start_mmr.sh --live        # Live trading
-./start_mmr.sh --cli         # CLI only, no services
-
-# Individual services
-trader-service               # or: python -m trader.trader_service
-strategy-service             # or: python -m trader.strategy_service
-data-service                 # or: python -m trader.data_service
-mmr                          # or: python -m trader.mmr_cli
-```
 
 ## CLI Reference
 
