@@ -158,16 +158,16 @@ def _build_portfolio_cards(df, title='Portfolio', account_summary=None):
 
         lines = Text()
         lines.append(f'  Qty: {_fmt(position, 0):>10}', style='bold')
-        lines.append(f'    Price: {_fmt(mkt_price)}\n')
+        lines.append(f'  Price: {_fmt(mkt_price):>9}\n')
         lines.append(f'  Avg: {_fmt(avg_cost):>10}')
-        lines.append(f'    Value: {_fmt(mkt_value)}\n')
-        lines.append(f'  ConId: {con_id}\n', style='dim')
+        lines.append(f'  Value: {_fmt(mkt_value):>9}\n')
         lines.append(f'  P&L: ')
-        lines.append(f'{_fmt(unrealized):>9}', style=pnl_color)
-        lines.append(f'    Daily: ')
-        lines.append(f'{_fmt(daily)}', style=daily_color)
+        lines.append(f'{_fmt(unrealized):>10}', style=pnl_color)
+        lines.append(f'  Daily: ')
+        lines.append(f'{_fmt(daily):>9}', style=daily_color)
         lines.append(f'\n  Return: ')
         lines.append(f'{pct_sign}{_fmt(pct)}%', style=pnl_color)
+        lines.append(f'    cId: {con_id}', style='dim')
 
         border_color = 'green' if unrealized >= 0 else 'red'
         panel = Panel(lines, title=f'[bold]{symbol}[/bold]', border_style=border_color, width=40)
@@ -310,6 +310,34 @@ def build_parser() -> argparse.ArgumentParser:
                             formatter_class=fmt)
     snap_p.add_argument('symbol', help='Symbol to snapshot')
     snap_p.add_argument('--delayed', action='store_true', default=False, help='Use delayed market data')
+    snap_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
+    snap_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
+
+    # snapshot-batch
+    snap_batch_p = sub.add_parser('snapshot-batch', help='Batch price snapshots (JSON)',
+                                   epilog='Examples:\n'
+                                          '  snapshot-batch AAPL MSFT AMD\n'
+                                          '  snapshot-batch BHP CBA --exchange ASX --currency AUD',
+                                   formatter_class=fmt)
+    snap_batch_p.add_argument('symbols', nargs='+', help='Symbols to snapshot')
+    snap_batch_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
+    snap_batch_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
+
+    # depth
+    depth_p = sub.add_parser('depth', help='Market depth (Level 2 order book)',
+                              epilog='Examples:\n'
+                                     '  depth AAPL\n'
+                                     '  depth BHP --exchange ASX --rows 10\n'
+                                     '  depth AAPL --no-chart\n'
+                                     '  depth AAPL --no-open',
+                              formatter_class=fmt)
+    depth_p.add_argument('symbol', help='Symbol to query')
+    depth_p.add_argument('--rows', type=int, default=5, help='Number of price levels (default: 5)')
+    depth_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
+    depth_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
+    depth_p.add_argument('--smart', action='store_true', default=False, help='Use SMART depth aggregation')
+    depth_p.add_argument('--no-open', action='store_true', default=False, help='Do not open PNG in Preview')
+    depth_p.add_argument('--no-chart', action='store_true', default=False, help='Skip chart rendering')
 
     # resolve
     res_p = sub.add_parser('resolve', help='Resolve symbol to contract details',
@@ -319,6 +347,8 @@ def build_parser() -> argparse.ArgumentParser:
                            formatter_class=fmt)
     res_p.add_argument('symbol', help='Symbol or conId')
     res_p.add_argument('--sectype', default='STK', help='Security type (STK, CASH, OPT, FUT, etc.)')
+    res_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
+    res_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
 
     # buy
     buy_p = sub.add_parser('buy', help='Place a buy order',
@@ -333,6 +363,8 @@ def build_parser() -> argparse.ArgumentParser:
     buy_p.add_argument('--quantity', type=float, default=None, help='Number of shares')
     buy_p.add_argument('--amount', type=float, default=None, help='Dollar amount (auto-calculates quantity)')
     buy_p.add_argument('--sectype', default='STK', help='Security type (STK, CASH, OPT, FUT, etc.)')
+    buy_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
+    buy_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
 
     # sell
     sell_p = sub.add_parser('sell', help='Place a sell order',
@@ -347,6 +379,8 @@ def build_parser() -> argparse.ArgumentParser:
     sell_p.add_argument('--quantity', type=float, default=None, help='Number of shares')
     sell_p.add_argument('--amount', type=float, default=None, help='Dollar amount (auto-calculates quantity)')
     sell_p.add_argument('--sectype', default='STK', help='Security type (STK, CASH, OPT, FUT, etc.)')
+    sell_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
+    sell_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
 
     # cancel
     cancel_p = sub.add_parser('cancel', help='Cancel an order',
@@ -378,6 +412,12 @@ def build_parser() -> argparse.ArgumentParser:
                              formatter_class=fmt)
     close_p.add_argument('row', type=int, help='Row number from portfolio/watch output')
     close_p.add_argument('--quantity', type=float, default=None, help='Partial quantity (default: entire position)')
+
+    # close-all-positions
+    sub.add_parser('close-all-positions', help='Close all positions at market',
+                   epilog='Examples:\n'
+                          '  close-all-positions',
+                   formatter_class=fmt)
 
     # resize-positions
     resize_p = sub.add_parser('resize-positions', aliases=['resize'], help='Proportionally resize all positions',
@@ -447,6 +487,8 @@ def build_parser() -> argparse.ArgumentParser:
                               formatter_class=fmt)
     listen_p.add_argument('symbol', help='Symbol to stream')
     listen_p.add_argument('--topic', default='ticker', help='ZMQ topic filter (default: ticker)')
+    listen_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
+    listen_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
 
     # watch
     sub.add_parser('watch', aliases=['w'], help='Live portfolio monitor (Ctrl+C to stop)',
@@ -855,6 +897,7 @@ def build_parser() -> argparse.ArgumentParser:
     propose_p.add_argument('--sectype', default='STK', help='Security type (STK, CASH, OPT, etc.)')
     propose_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
     propose_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
+    propose_p.add_argument('--group', default='', help='Position group name (e.g. mining, tech)')
 
     # proposals
     proposals_p = sub.add_parser('proposals', help='List or view trade proposals',
@@ -890,6 +933,51 @@ def build_parser() -> argparse.ArgumentParser:
     reject_p.add_argument('proposal_id', type=int, nargs='?', default=None, help='Proposal ID to reject')
     reject_p.add_argument('--all', action='store_true', default=False, help='Reject all pending proposals')
     reject_p.add_argument('--reason', default='', help='Rejection reason')
+
+    # group (position groups)
+    group_p = sub.add_parser('group', help='Manage position groups',
+                              epilog='Examples:\n'
+                                     '  group list                              # groups with member counts + allocation\n'
+                                     '  group create mining --budget 20         # 20% max allocation\n'
+                                     '  group delete mining\n'
+                                     '  group show mining                       # members + allocation\n'
+                                     '  group add mining BHP RIO FMG\n'
+                                     '  group remove mining BHP\n'
+                                     '  group set mining --budget 25',
+                              formatter_class=fmt)
+    group_sub = group_p.add_subparsers(dest='group_action')
+    group_sub.add_parser('list', help='List all groups with member counts')
+    group_create_p = group_sub.add_parser('create', help='Create a new group')
+    group_create_p.add_argument('name', help='Group name')
+    group_create_p.add_argument('--budget', type=float, default=0.0, help='Max allocation %% (e.g. 20 = 20%%)')
+    group_create_p.add_argument('--description', default='', help='Group description')
+    group_delete_p = group_sub.add_parser('delete', help='Delete a group')
+    group_delete_p.add_argument('name', help='Group name')
+    group_show_p = group_sub.add_parser('show', help='Show group details')
+    group_show_p.add_argument('name', help='Group name')
+    group_add_p = group_sub.add_parser('add', help='Add symbols to a group')
+    group_add_p.add_argument('name', help='Group name')
+    group_add_p.add_argument('symbols', nargs='+', help='Symbols to add')
+    group_remove_p = group_sub.add_parser('remove', help='Remove a symbol from a group')
+    group_remove_p.add_argument('name', help='Group name')
+    group_remove_p.add_argument('symbol', help='Symbol to remove')
+    group_set_p = group_sub.add_parser('set', help='Update group settings')
+    group_set_p.add_argument('name', help='Group name')
+    group_set_p.add_argument('--budget', type=float, default=None, help='Max allocation %% (e.g. 25 = 25%%)')
+    group_set_p.add_argument('--description', default=None, help='Group description')
+
+    # portfolio-risk
+    prisk_p = sub.add_parser('portfolio-risk', aliases=['prisk'], help='Portfolio risk analysis',
+                              epilog='Examples:\n'
+                                     '  portfolio-risk                  # full risk report\n'
+                                     '  portfolio-risk --json           # JSON for LLM consumption',
+                              formatter_class=fmt)
+
+    # portfolio-snapshot (compact JSON for LLM loop)
+    sub.add_parser('portfolio-snapshot', aliases=['psnap'], help='Compact portfolio snapshot (JSON)')
+
+    # portfolio-diff (delta since last snapshot)
+    sub.add_parser('portfolio-diff', aliases=['pdiff'], help='Portfolio changes since last snapshot (JSON)')
 
     # stream
     stream_p = sub.add_parser('stream', help='Stream live ticks from Massive.com',
@@ -1010,8 +1098,11 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
     try:
         if cmd in ('portfolio', 'p'):
             df = mmr.portfolio()
-            if not df.empty and 'avgCost' in df.columns and 'mktPrice' in df.columns:
-                df['%'] = ((df['mktPrice'] - df['avgCost']) / df['avgCost'] * 100).round(2)
+            if not df.empty:
+                if 'position' in df.columns:
+                    df = df[df['position'] != 0].reset_index(drop=True)
+                if 'avgCost' in df.columns and 'mktPrice' in df.columns:
+                    df['%'] = ((df['mktPrice'] - df['avgCost']) / df['avgCost'] * 100).round(2)
                 df.insert(0, '#', range(1, len(df) + 1))
             if getattr(args, 'table', False):
                 print_df(df, title='Portfolio')
@@ -1151,11 +1242,21 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
             print_df(mmr.trades(), title='Trades')
 
         elif cmd in ('snapshot', 'snap'):
-            result = mmr.snapshot(args.symbol, delayed=args.delayed)
+            result = mmr.snapshot(args.symbol, delayed=args.delayed,
+                                  exchange=args.exchange, currency=args.currency)
             print_dict(result, title=f'Snapshot: {args.symbol}')
 
+        elif cmd == 'snapshot-batch':
+            results = mmr.snapshot_batch(args.symbols, exchange=args.exchange,
+                                          currency=args.currency)
+            print(json.dumps({"data": results, "title": "Snapshots"}, default=str))
+
+        elif cmd == 'depth':
+            _handle_depth(mmr, args)
+
         elif cmd == 'resolve':
-            defs = mmr.resolve(args.symbol, sec_type=args.sectype)
+            defs = mmr.resolve(args.symbol, sec_type=args.sectype,
+                               exchange=args.exchange, currency=args.currency)
             if defs:
                 import pandas as pd
                 rows = [{
@@ -1179,6 +1280,8 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
                 limit_price=args.limit,
                 market=args.market,
                 sec_type=args.sectype,
+                exchange=args.exchange,
+                currency=args.currency,
             )
             _print_trade_result(result, 'BUY', args.symbol)
 
@@ -1190,6 +1293,8 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
                 limit_price=args.limit,
                 market=args.market,
                 sec_type=args.sectype,
+                exchange=args.exchange,
+                currency=args.currency,
             )
             _print_trade_result(result, 'SELL', args.symbol)
 
@@ -1216,6 +1321,9 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
 
         elif cmd in ('close', 'c'):
             _handle_close(mmr, args)
+
+        elif cmd == 'close-all-positions':
+            _handle_close_all(mmr)
 
         elif cmd in ('resize-positions', 'resize'):
             _handle_resize_positions(mmr, args)
@@ -1311,6 +1419,18 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
 
         elif cmd == 'reject':
             _handle_reject(mmr, args)
+
+        elif cmd == 'group':
+            _handle_group(mmr, args)
+
+        elif cmd in ('portfolio-risk', 'prisk'):
+            _handle_portfolio_risk(mmr, args)
+
+        elif cmd in ('portfolio-snapshot', 'psnap'):
+            print_dict(mmr.portfolio_snapshot(), title='Portfolio Snapshot')
+
+        elif cmd in ('portfolio-diff', 'pdiff'):
+            print_dict(mmr.portfolio_diff(), title='Portfolio Diff')
 
         elif cmd == 'stream':
             _handle_stream(args)
@@ -1430,7 +1550,30 @@ def _handle_propose(mmr: MMR, args: argparse.Namespace):
         sec_type=args.sectype,
         exchange=args.exchange,
         currency=args.currency,
+        group=getattr(args, 'group', ''),
     )
+
+    if _json_mode:
+        # Fetch the stored proposal to get sizing_result from metadata
+        detail = mmr.proposal_detail(proposal_id)
+        sizing = (detail.get('metadata') or {}).get('sizing_result') if detail else None
+        result = {
+            'proposal_id': proposal_id,
+            'symbol': args.symbol,
+            'action': args.action,
+            'amount': detail.get('amount') if detail else args.amount,
+            'quantity': detail.get('quantity') if detail else args.quantity,
+            'confidence': args.confidence,
+            'group': getattr(args, 'group', ''),
+            'order_type': order_type,
+            'exit_type': exit_type,
+            'status': 'PENDING',
+            'sizing_result': sizing,
+            'snapshot': snapshot_info,
+            'leverage': leverage_info,
+        }
+        print(json.dumps({"data": result, "title": f"Proposal #{proposal_id}"}, default=str))
+        return
 
     summary = f'{args.action} {args.symbol}'
     if args.quantity:
@@ -1481,20 +1624,21 @@ def _handle_proposals(mmr: MMR, args: argparse.Namespace):
         detail = mmr.proposal_detail(args.proposal_id)
         if detail:
             print_dict(detail, title=f'Proposal #{args.proposal_id}')
-            # Show leverage estimate if present
-            leverage = (detail.get('metadata') or {}).get('leverage_estimate')
-            if leverage:
-                current = leverage.get('current_leverage', 0)
-                estimated = leverage.get('estimated_leverage', 0)
-                net_liq = leverage.get('net_liquidation', 0)
-                buying_power = leverage.get('buying_power', 0)
-                uses_margin = leverage.get('uses_margin', False)
-                margin_label = ' [yellow]USES MARGIN[/yellow]' if uses_margin else ''
-                console.print(f'\n[bold]Leverage Estimate:[/bold]')
-                console.print(f'  Current:     {current:.2f}x')
-                console.print(f'  After trade: {estimated:.2f}x{margin_label}')
-                console.print(f'  Net Liq:     ${net_liq:,.2f}')
-                console.print(f'  Buying Power: ${buying_power:,.2f}')
+            # Show leverage estimate if present (skip in JSON mode — already in metadata)
+            if not _json_mode:
+                leverage = (detail.get('metadata') or {}).get('leverage_estimate')
+                if leverage:
+                    current = leverage.get('current_leverage', 0)
+                    estimated = leverage.get('estimated_leverage', 0)
+                    net_liq = leverage.get('net_liquidation', 0)
+                    buying_power = leverage.get('buying_power', 0)
+                    uses_margin = leverage.get('uses_margin', False)
+                    margin_label = ' [yellow]USES MARGIN[/yellow]' if uses_margin else ''
+                    console.print(f'\n[bold]Leverage Estimate:[/bold]')
+                    console.print(f'  Current:     {current:.2f}x')
+                    console.print(f'  After trade: {estimated:.2f}x{margin_label}')
+                    console.print(f'  Net Liq:     ${net_liq:,.2f}')
+                    console.print(f'  Buying Power: ${buying_power:,.2f}')
         else:
             print_status(f'Proposal #{args.proposal_id} not found', success=False)
         return
@@ -1640,6 +1784,163 @@ def _handle_reject(mmr: MMR, args: argparse.Namespace):
         print_status(f'Reject failed: proposal #{args.proposal_id} not found or not PENDING', success=False)
 
 
+def _handle_group(mmr: MMR, args: argparse.Namespace):
+    action = getattr(args, 'group_action', None)
+
+    try:
+        gs = mmr._group_store()
+    except Exception as e:
+        print_status(f'Could not initialize group store: {e}', success=False)
+        return
+
+    if action == 'create':
+        budget = args.budget / 100.0 if args.budget > 1 else args.budget
+        try:
+            gs.create_group(args.name, description=args.description, max_allocation_pct=budget)
+            if budget >= 0.01:
+                label = f' (budget {budget:.0%})'
+            elif budget > 0:
+                label = f' (budget {budget:.1%})'
+            else:
+                label = ''
+            print_status(f'Group "{args.name}" created{label}')
+        except ValueError as e:
+            print_status(str(e), success=False)
+
+    elif action == 'delete':
+        if gs.delete_group(args.name):
+            print_status(f'Group "{args.name}" deleted')
+        else:
+            print_status(f'Group "{args.name}" not found', success=False)
+
+    elif action == 'show':
+        group = gs.get_group(args.name)
+        if not group:
+            print_status(f'Group "{args.name}" not found', success=False)
+            return
+        if _json_mode:
+            from dataclasses import asdict
+            print_dict(asdict(group), title=f'Group: {args.name}')
+            return
+        console.print(f'[bold]Group: {group.name}[/bold]')
+        if group.description:
+            console.print(f'  Description: {group.description}')
+        if group.max_allocation_pct > 0:
+            console.print(f'  Budget: {group.max_allocation_pct:.0%}')
+        if group.members:
+            console.print(f'  Members ({len(group.members)}): {", ".join(group.members)}')
+        else:
+            console.print('  [dim]No members[/dim]')
+
+    elif action == 'add':
+        added = []
+        for sym in args.symbols:
+            if gs.add_member(args.name, sym.upper()):
+                added.append(sym.upper())
+        if added:
+            print_status(f'Added {", ".join(added)} to "{args.name}"')
+        else:
+            print_status('No symbols added (group not found or already members)', success=False)
+
+    elif action == 'remove':
+        if gs.remove_member(args.name, args.symbol.upper()):
+            print_status(f'Removed {args.symbol.upper()} from "{args.name}"')
+        else:
+            print_status(f'{args.symbol.upper()} not in group "{args.name}"', success=False)
+
+    elif action == 'set':
+        budget = None
+        if args.budget is not None:
+            budget = args.budget / 100.0 if args.budget > 1 else args.budget
+        if gs.update_group(args.name, description=args.description, max_allocation_pct=budget):
+            print_status(f'Group "{args.name}" updated')
+        else:
+            print_status(f'Group "{args.name}" not found', success=False)
+
+    else:
+        # Default: list groups
+        groups = gs.list_groups()
+        if _json_mode:
+            from dataclasses import asdict
+            data = [asdict(g) for g in groups]
+            print_dict({'groups': data}, title='Position Groups')
+            return
+        if not groups:
+            console.print('[dim]No position groups[/dim]')
+            return
+        console.print('[bold]Position Groups[/bold]\n')
+        for g in groups:
+            budget_label = f' (budget {g.max_allocation_pct:.0%})' if g.max_allocation_pct > 0 else ''
+            console.print(
+                f'  [bold]{g.name}[/bold]{budget_label}  '
+                f'{len(g.members)} members: {", ".join(g.members) if g.members else "-"}'
+            )
+
+
+def _handle_portfolio_risk(mmr: MMR, args: argparse.Namespace):
+    try:
+        report = mmr.risk_report()
+    except Exception as e:
+        print_status(f'Risk report failed: {e}', success=False)
+        return
+
+    if _json_mode:
+        print_dict(report, title='Portfolio Risk Report')
+        return
+
+    console.print('[bold]Portfolio Risk Report[/bold]\n')
+
+    # Summary
+    console.print(f'  {report.get("summary", "")}')
+    console.print()
+
+    # Top positions
+    top = report.get('top_positions', [])
+    if top:
+        console.print('[bold]Top Positions:[/bold]')
+        for p in top[:5]:
+            console.print(f'  {p["symbol"]:8s}  {p["pct"]:.1%}  ${p["value"]:,.0f}')
+        console.print()
+
+    # Concentration
+    hhi = report.get('hhi', 0)
+    console.print(f'[bold]Concentration:[/bold] HHI = {hhi:.3f}')
+    exposure = report.get('gross_exposure_pct', 0)
+    console.print(f'[bold]Gross Exposure:[/bold] {exposure:.1%}')
+    console.print()
+
+    # Group allocations
+    groups = report.get('group_allocations', [])
+    if groups:
+        console.print('[bold]Group Allocations:[/bold]')
+        for g in groups:
+            over = ' [red]OVER BUDGET[/red]' if g['over_budget'] else ''
+            budget = f' / {g["budget_pct"]:.0%} budget' if g['budget_pct'] > 0 else ''
+            console.print(
+                f'  {g["name"]:15s}  {g["pct"]:.1%}  ${g["value"]:,.0f}{budget}{over}'
+            )
+        console.print()
+
+    # Correlation clusters
+    clusters = report.get('correlation_clusters', [])
+    if clusters:
+        console.print('[bold]Correlated Clusters:[/bold]')
+        for c in clusters:
+            console.print(
+                f'  {", ".join(c["symbols"])}  '
+                f'avg corr={c["avg_corr"]:.2f}  weight={c["combined_weight_pct"]:.1%}'
+            )
+        console.print()
+
+    # Warnings
+    warnings = report.get('warnings', [])
+    if warnings:
+        console.print('[bold]Warnings:[/bold]')
+        for w in warnings:
+            color = 'red' if w['level'] == 'critical' else 'yellow'
+            console.print(f'  [{color}]{w["level"].upper()}: {w["message"]}[/{color}]')
+
+
 def _handle_close(mmr: MMR, args: argparse.Namespace):
     row = args.row
     if row not in mmr._position_map:
@@ -1666,6 +1967,12 @@ def _handle_close(mmr: MMR, args: argparse.Namespace):
         console.print(f'[yellow]{symbol}: position is already flat (0 shares). Nothing to close.[/yellow]')
         return
 
+    con_id = None
+    if not df.empty and 'conId' in df.columns:
+        match = df[df['symbol'] == symbol]
+        if not match.empty:
+            con_id = int(match.iloc[0]['conId'])
+
     close_qty = args.quantity if args.quantity else abs(pos_size)
 
     confirm = input(f'Close #{row}: {symbol} ({close_qty} shares) at market? [y/N] ')
@@ -1673,11 +1980,57 @@ def _handle_close(mmr: MMR, args: argparse.Namespace):
         console.print('[dim]Cancelled[/dim]')
         return
 
-    result = mmr.close_position(symbol, quantity=args.quantity)
+    result = mmr.close_position(symbol, quantity=args.quantity, con_id=con_id,
+                                _pos_size=pos_size)
     if result.is_success():
         console.print(f'[green]Close {symbol}: submitted[/green]')
     else:
         console.print(f'[red]Close {symbol}: failed — {result.error}[/red]')
+
+
+def _handle_close_all(mmr: MMR):
+    df = mmr.portfolio()
+    if df.empty:
+        console.print('[dim]No positions to close.[/dim]')
+        return
+
+    # Filter to non-zero positions
+    df = df[df['position'] != 0].reset_index(drop=True)
+    if df.empty:
+        console.print('[dim]All positions are already flat.[/dim]')
+        return
+
+    console.print(f'[bold]Positions to close ({len(df)}):[/bold]')
+    for _, row in df.iterrows():
+        pos = row['position']
+        direction = 'LONG' if pos > 0 else 'SHORT'
+        console.print(f'  {row["symbol"]}: {abs(pos):.0f} shares ({direction})')
+
+    confirm = input(f'\nClose all {len(df)} positions at market? (will cancel all open orders first) [y/N] ')
+    if confirm.lower() != 'y':
+        console.print('[dim]Cancelled[/dim]')
+        return
+
+    # Cancel all open orders first (stops, trailing stops, etc.)
+    result = mmr.cancel_all()
+    if result.is_success():
+        console.print('[green]All open orders cancelled[/green]')
+    else:
+        console.print(f'[yellow]Warning: cancel-all failed: {result.error}[/yellow]')
+
+    # Close each position — skip_risk_gate because this is a liquidation command.
+    # Pass _pos_size to avoid re-fetching portfolio for each position.
+    for _, row in df.iterrows():
+        symbol = row['symbol']
+        con_id = int(row['conId']) if row.get('conId') else None
+        pos_size = float(row['position'])
+        result = mmr.close_position(
+            symbol, con_id=con_id, skip_risk_gate=True, _pos_size=pos_size
+        )
+        if result.is_success():
+            console.print(f'[green]Close {symbol}: submitted[/green]')
+        else:
+            console.print(f'[red]Close {symbol}: failed — {result.error}[/red]')
 
 
 def _handle_resize_positions(mmr: MMR, args: argparse.Namespace):
@@ -2729,6 +3082,71 @@ def _handle_data_download(args: argparse.Namespace):
         print_status(f'Download complete: {completed} succeeded, {failed} failed')
 
 
+def _handle_depth(mmr: MMR, args: argparse.Namespace):
+    """Fetch and display market depth (Level 2 order book)."""
+    from trader.tools.depth_chart import render_depth_chart, render_depth_table
+    from datetime import datetime
+    import subprocess
+
+    try:
+        data = mmr.depth(
+            args.symbol,
+            num_rows=args.rows,
+            exchange=args.exchange,
+            currency=args.currency,
+            is_smart_depth=args.smart,
+        )
+    except ValueError as e:
+        if _json_mode:
+            print(json.dumps({'success': False, 'message': str(e)}))
+        else:
+            console.print(f'[red]Error: {e}[/red]')
+            if args.exchange:
+                console.print(
+                    f'[yellow]Hint: verify the exchange code is correct '
+                    f'(e.g. ASX, not Ax). Common codes: ASX, TSE, SEHK, NYSE, NASDAQ.[/yellow]'
+                )
+            else:
+                console.print(
+                    '[yellow]Hint: for international stocks, use --exchange and --currency '
+                    '(e.g. depth STO --exchange ASX --currency AUD)[/yellow]'
+                )
+        return
+    except Exception as e:
+        if _json_mode:
+            print(json.dumps({'success': False, 'message': str(e)}))
+        else:
+            console.print(f'[red]Error: {e}[/red]')
+        return
+
+    # Rich table to terminal
+    if not _json_mode:
+        table = render_depth_table(data)
+        console.print(table)
+
+    # Render chart PNG
+    chart_path = None
+    if not args.no_chart:
+        depth_dir = Path.home() / '.local' / 'share' / 'mmr' / 'depth'
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        png_path = depth_dir / f'{args.symbol.upper()}_{ts}.png'
+        chart_path = render_depth_chart(data, str(png_path))
+
+        if not _json_mode:
+            console.print(f'[dim]Chart saved: {chart_path}[/dim]')
+
+        # Open in macOS Preview
+        if not args.no_open:
+            try:
+                subprocess.run(['open', chart_path], check=False)
+            except FileNotFoundError:
+                pass  # not on macOS
+
+    if _json_mode:
+        output = {'data': data, 'chart_path': chart_path}
+        print(json.dumps(output, default=str))
+
+
 def _handle_listen(mmr: MMR, args: argparse.Namespace):
     """Stream ticks until Ctrl+C."""
     console.print(f'[dim]Listening to {args.symbol} (Ctrl+C to stop)...[/dim]')
@@ -2746,7 +3164,8 @@ def _handle_listen(mmr: MMR, args: argparse.Namespace):
         else:
             console.print(f'  {tick}')
 
-    sub = mmr.subscribe_ticks(args.symbol, on_tick, topic=args.topic)
+    sub = mmr.subscribe_ticks(args.symbol, on_tick, topic=args.topic,
+                              exchange=args.exchange, currency=args.currency)
     try:
         while sub.is_active():
             time.sleep(0.5)
@@ -3371,7 +3790,17 @@ def _handle_ideas(mmr: MMR, args: argparse.Namespace):
     # --presets flag: list presets and exit
     if args.presets:
         from trader.tools.idea_scanner import list_presets
-        print_df(list_presets(), title='Idea Scanner Presets')
+        if _json_mode:
+            print_df(list_presets(), title='Idea Scanner Presets')
+        else:
+            df = list_presets()
+            table = Table(title='Idea Scanner Presets', show_lines=True)
+            table.add_column('Preset', style='bold cyan', no_wrap=True)
+            table.add_column('Filters', no_wrap=True)
+            table.add_column('Indicators', no_wrap=True)
+            for _, row in df.iterrows():
+                table.add_row(row['preset'], row['filters'], row['indicators'])
+            console.print(table)
         return
 
     # Determine source
@@ -3715,6 +4144,9 @@ def _handle_watch(mmr: MMR):
                     continue
 
                 if not df.empty:
+                    # Filter out closed positions (qty=0) that IB still reports in-session
+                    if 'position' in df.columns:
+                        df = df[df['position'] != 0].reset_index(drop=True)
                     if 'avgCost' in df.columns and 'mktPrice' in df.columns:
                         df['%'] = ((df['mktPrice'] - df['avgCost']) / df['avgCost'] * 100).round(2)
                     df.insert(0, '#', range(1, len(df) + 1))
@@ -3916,7 +4348,7 @@ def repl(mmr: MMR):
 # Entry point
 # ------------------------------------------------------------------
 
-_LOCAL_ONLY_COMMANDS = {'backtest', 'bt', 'data', 'propose', 'proposals', 'reject', 'market-hours', 'mh', 'session'}
+_LOCAL_ONLY_COMMANDS = {'backtest', 'bt', 'data', 'propose', 'proposals', 'reject', 'market-hours', 'mh', 'session', 'group'}
 _LOCAL_ONLY_STRAT_ACTIONS = {'create', 'deploy', 'undeploy', 'signals', 'backtest'}
 
 

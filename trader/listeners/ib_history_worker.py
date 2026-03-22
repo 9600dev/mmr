@@ -96,6 +96,27 @@ class IBHistoryWorker():
         self.connected = True
         return self
 
+    async def connect_async(self):
+        if self.connected:
+            return self
+
+        if self.__handle_error not in self.ib_client.errorEvent:
+            self.ib_client.errorEvent += self.__handle_error
+
+        await self.ib_client.connectAsync(
+            host=self.ib_server_address,
+            port=self.ib_server_port,
+            clientId=self.ib_client_id,
+            timeout=15,
+            readonly=True
+        )
+
+        self.error_code = 0
+        self.error_string = ''
+        self.error_contract = None
+        self.connected = True
+        return self
+
     def shutdown(self):
         self.ib_client.disconnect()
         self.error_code = 0
@@ -125,7 +146,7 @@ class IBHistoryWorker():
         contract = Universe.to_contract(security)
 
         if not self.connected:
-            self.connect()
+            await self.connect_async()
 
         # solves for errorCode 321 "please enter exchange"
         if not contract.exchange:

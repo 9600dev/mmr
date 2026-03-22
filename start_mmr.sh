@@ -12,6 +12,7 @@ MMR_DIR="$(cd "$(dirname "$0")"; pwd)"
 TRADER_CONFIG="${TRADER_CONFIG:-$HOME/.config/mmr/trader.yaml}"
 TRADING_MODE=""
 CLI_MODE=false
+SETUP_MODE=false
 
 # PIDs of child service processes
 DATA_PID=""
@@ -38,6 +39,10 @@ while [[ $# -gt 0 ]]; do
         CLI_MODE=true
         shift
         ;;
+    --setup)
+        SETUP_MODE=true
+        shift
+        ;;
     -h|--help)
         echo "usage: start_mmr.sh [options]"
         echo ""
@@ -45,6 +50,7 @@ while [[ $# -gt 0 ]]; do
         echo "  --live       Live trading mode"
         echo "  --config     Path to trader.yaml config file"
         echo "  --cli        CLI-only mode: verify services are running, launch mmr_cli"
+        echo "  --setup      Run interactive setup wizard"
         echo "  -h, --help   Show this help"
         echo ""
         echo "Normal mode starts IB Gateway container, waits for connectivity,"
@@ -73,8 +79,10 @@ export TRADING_MODE
 
 # ─── Config Setup ────────────────────────────────────────────────────────────
 
+FIRST_RUN=false
 if [ ! -d "$HOME/.config/mmr" ]; then
     mkdir -p "$HOME/.config/mmr"
+    FIRST_RUN=true
     if [ -d "$MMR_DIR/configs" ]; then
         cp -n "$MMR_DIR"/configs/*.yaml "$HOME/.config/mmr/" 2>/dev/null || true
         echo "Copied default configs to ~/.config/mmr/"
@@ -86,6 +94,145 @@ fi
 if [ ! -f "$TRADER_CONFIG" ]; then
     echo "Error: config file not found: $TRADER_CONFIG"
     exit 1
+fi
+
+# ─── Setup Wizard ─────────────────────────────────────────────────────────────
+
+run_setup() {
+    echo ""
+    echo "============================================================"
+    echo "  MMR Setup Wizard"
+    echo "============================================================"
+    echo ""
+    echo "  Config file: $TRADER_CONFIG"
+    echo ""
+
+    # ── Trading Mode ──
+    local current_mode
+    current_mode=$(grep '^trading_mode:' "$TRADER_CONFIG" | awk '{print $2}')
+    echo "Trading mode determines which IB account and port are used."
+    read -p "Trading mode (paper/live) [${current_mode:-paper}]: " mode
+    mode="${mode:-${current_mode:-paper}}"
+    sed -i.bak "s/^trading_mode:.*/trading_mode: ${mode}/" "$TRADER_CONFIG"
+
+    # ── IB Gateway Connection ──
+    echo ""
+    echo "IB Gateway connection settings."
+    echo "If running IB Gateway locally, the defaults are usually correct."
+    echo ""
+
+    local current_address
+    current_address=$(grep '^ib_server_address:' "$TRADER_CONFIG" | awk '{print $2}')
+    read -p "IB Gateway host [${current_address:-127.0.0.1}]: " ib_host
+    ib_host="${ib_host:-${current_address:-127.0.0.1}}"
+    sed -i.bak "s/^ib_server_address:.*/ib_server_address: ${ib_host}/" "$TRADER_CONFIG"
+
+    # ── IB Accounts ──
+    echo ""
+    echo "IB account numbers. Paper accounts start with 'DU', live with 'U'."
+    echo "You can find these in TWS/Gateway under Account > Account Number."
+    echo ""
+
+    local current_paper
+    current_paper=$(grep '^ib_paper_account:' "$TRADER_CONFIG" | awk '{print $2}')
+    read -p "Paper trading account [${current_paper}]: " paper_acct
+    paper_acct="${paper_acct:-${current_paper}}"
+    sed -i.bak "s/^ib_paper_account:.*/ib_paper_account: ${paper_acct}/" "$TRADER_CONFIG"
+
+    local current_live
+    current_live=$(grep '^ib_live_account:' "$TRADER_CONFIG" | awk '{print $2}')
+    read -p "Live trading account (leave empty to skip) [${current_live}]: " live_acct
+    live_acct="${live_acct:-${current_live}}"
+    if [ -n "$live_acct" ] && [ "$live_acct" != "''" ]; then
+        sed -i.bak "s/^ib_live_account:.*/ib_live_account: ${live_acct}/" "$TRADER_CONFIG"
+    fi
+
+    # ── IB Ports ──
+    echo ""
+    echo "IB Gateway API ports. Defaults: 7497 (paper), 7496 (live)."
+    echo "Docker maps 4003→7497 and 4004→7496 — use the host-side ports."
+    echo ""
+
+    local current_paper_port current_live_port
+    current_paper_port=$(grep '^ib_paper_port:' "$TRADER_CONFIG" | awk '{print $2}')
+    current_live_port=$(grep '^ib_live_port:' "$TRADER_CONFIG" | awk '{print $2}')
+    read -p "Paper trading port [${current_paper_port:-7497}]: " paper_port
+    paper_port="${paper_port:-${current_paper_port:-7497}}"
+    sed -i.bak "s/^ib_paper_port:.*/ib_paper_port: ${paper_port}/" "$TRADER_CONFIG"
+
+    read -p "Live trading port [${current_live_port:-7496}]: " live_port
+    live_port="${live_port:-${current_live_port:-7496}}"
+    sed -i.bak "s/^ib_live_port:.*/ib_live_port: ${live_port}/" "$TRADER_CONFIG"
+
+    # ── Massive API Key ──
+    echo ""
+    echo "Massive.com (Polygon.io) API key for US market data."
+    echo "Required for: ideas scanner, historical data downloads, news, fundamentals."
+    echo "Get one at: https://massive.com or https://polygon.io"
+    echo ""
+
+    local current_key
+    current_key=$(grep '^massive_api_key:' "$TRADER_CONFIG" | awk '{print $2}' | tr -d "'\"")
+    if [ -n "$current_key" ]; then
+        # Mask all but last 4 chars
+        local masked="${current_key:0:4}...${current_key: -4}"
+        read -p "Massive/Polygon API key [${masked}]: " api_key
+    else
+        read -p "Massive/Polygon API key (leave empty to skip): " api_key
+    fi
+    if [ -n "$api_key" ]; then
+        sed -i.bak "s/^massive_api_key:.*/massive_api_key: '${api_key}'/" "$TRADER_CONFIG"
+    fi
+
+    # ── DuckDB Path ──
+    echo ""
+    local current_db
+    current_db=$(grep '^duckdb_path:' "$TRADER_CONFIG" | awk '{print $2}')
+    read -p "DuckDB storage path [${current_db:-data/mmr.duckdb}]: " db_path
+    db_path="${db_path:-${current_db:-data/mmr.duckdb}}"
+    sed -i.bak "s|^duckdb_path:.*|duckdb_path: ${db_path}|" "$TRADER_CONFIG"
+
+    # ── Cleanup sed backups ──
+    rm -f "${TRADER_CONFIG}.bak"
+
+    echo ""
+    echo "============================================================"
+    echo "  Setup complete!"
+    echo "============================================================"
+    echo ""
+    echo "  Config saved to: $TRADER_CONFIG"
+    echo "  Trading mode:    $mode"
+    echo "  IB Gateway:      $ib_host (paper:$paper_port / live:$live_port)"
+    echo "  Paper account:   $paper_acct"
+    if [ -n "$live_acct" ] && [ "$live_acct" != "''" ]; then
+        echo "  Live account:    $live_acct"
+    fi
+    if [ -n "$api_key" ] || [ -n "$current_key" ]; then
+        echo "  Massive API key: configured"
+    else
+        echo "  Massive API key: not set (US scanning/data disabled)"
+    fi
+    echo "  DuckDB:          $db_path"
+    echo ""
+    echo "  Run again anytime with: ./start_mmr.sh --setup"
+    echo ""
+}
+
+# Auto-trigger setup on first run (non-Docker), or if --setup flag
+if [ "$SETUP_MODE" = true ]; then
+    run_setup
+    exit 0
+fi
+
+if [ "$FIRST_RUN" = true ] && [ ! -f "$HOME/.mmr_env" ]; then
+    echo ""
+    echo "First run detected. Running setup wizard..."
+    echo "(You can re-run this later with: ./start_mmr.sh --setup)"
+    run_setup
+    read -p "Start services now? [Y/n]: " start_now
+    case "${start_now:-y}" in
+        n|N|no) echo "Exiting. Start services later with: ./start_mmr.sh"; exit 0 ;;
+    esac
 fi
 
 # ─── Docker Detection ──────────────────────────────────────────────────────

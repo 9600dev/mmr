@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import yaml
 
@@ -14,6 +14,43 @@ RISK_MULTIPLIERS = {
     'moderate': 1.0,
     'aggressive': 1.5,
 }
+
+
+@dataclass
+class VolatilityInfo:
+    """ATR-based volatility snapshot for a symbol."""
+    atr: float = 0.0        # 14-period ATR in dollars
+    price: float = 0.0
+
+    @property
+    def atr_pct(self) -> float:
+        """ATR as a percentage of price."""
+        return self.atr / self.price if self.price > 0 and self.atr > 0 else 0.0
+
+
+def compute_atr(highs: List[float], lows: List[float], closes: List[float],
+                period: int = 14) -> Optional[float]:
+    """Compute Average True Range (ATR) from OHLC data.
+
+    TR = max(H-L, |H-prevC|, |L-prevC|), then SMA over period.
+    Returns None if insufficient data.
+    """
+    n = len(highs)
+    if n < period + 1 or len(lows) != n or len(closes) != n:
+        return None
+
+    true_ranges = []
+    for i in range(1, n):
+        hl = highs[i] - lows[i]
+        hc = abs(highs[i] - closes[i - 1])
+        lc = abs(lows[i] - closes[i - 1])
+        true_ranges.append(max(hl, hc, lc))
+
+    if len(true_ranges) < period:
+        return None
+
+    # SMA of last `period` true ranges
+    return sum(true_ranges[-period:]) / period
 
 
 def _default_path() -> Path:
@@ -41,6 +78,12 @@ class PositionSizingConfig:
     # Confidence scaling
     min_confidence_scale: float = 0.3     # at confidence=0.0, size = base * 0.3
 
+    # Volatility adjustment
+    volatility_adjustment: bool = True
+    reference_atr_pct: float = 0.02      # 2% ATR = "normal" → multiplier 1.0
+    vol_scale_min: float = 0.25          # volatile stock still gets ≥25% of base
+    vol_scale_max: float = 2.0           # stable stock gets up to 2x base
+
     # Liquidity constraints
     max_adv_pct: float = 0.02            # max 2% of avg daily volume (exit within a day)
     spread_penalty_threshold: float = 0.005  # start penalizing above 0.5% spread
@@ -66,6 +109,10 @@ class PositionSizingConfig:
                 risk_level=str(data.get('risk_level', 'moderate')),
                 daily_loss_limit_usd=float(data.get('daily_loss_limit_usd', 2000.0)),
                 min_confidence_scale=float(data.get('min_confidence_scale', 0.3)),
+                volatility_adjustment=bool(data.get('volatility_adjustment', True)),
+                reference_atr_pct=float(data.get('reference_atr_pct', 0.02)),
+                vol_scale_min=float(data.get('vol_scale_min', 0.25)),
+                vol_scale_max=float(data.get('vol_scale_max', 2.0)),
                 max_adv_pct=float(data.get('max_adv_pct', 0.02)),
                 spread_penalty_threshold=float(data.get('spread_penalty_threshold', 0.005)),
                 spread_penalty_factor=float(data.get('spread_penalty_factor', 0.5)),
@@ -172,11 +219,13 @@ class PositionSizer:
         portfolio_state: Optional[PortfolioState] = None,
         price: float = 0.0,
         liquidity: Optional[LiquidityInfo] = None,
+        volatility: Optional[VolatilityInfo] = None,
     ) -> SizingResult:
         """Compute position size.
 
         1. Start with base_position_usd * risk_multiplier
         2. Scale by confidence (min_confidence_scale -> 1.0)
+        2b. Apply volatility adjustment (ATR-inverse scaling)
         3. Clamp to [min_position_usd, max_position_usd]
         4. Check portfolio constraints (max_position_pct, max_total_exposure_pct, max_positions)
         5. Check daily loss limit
@@ -208,6 +257,19 @@ class PositionSizer:
         if risk_mult != 1.0:
             parts.append(f'risk {cfg.risk_level} ({risk_mult}x)')
         parts.append(f'confidence {confidence:.1f} (scale {scale:.2f})')
+
+        # 2b. Volatility adjustment — inverse ATR scaling
+        vol = volatility
+        if cfg.volatility_adjustment and vol and vol.atr_pct > 0:
+            # Higher ATR% → smaller multiplier (more volatile = fewer shares)
+            floor = cfg.reference_atr_pct * 0.25
+            vol_multiplier = cfg.reference_atr_pct / max(vol.atr_pct, floor)
+            vol_multiplier = max(cfg.vol_scale_min, min(cfg.vol_scale_max, vol_multiplier))
+            sized *= vol_multiplier
+            parts.append(f'vol ATR {vol.atr_pct:.2%} (mult {vol_multiplier:.2f}x)')
+        elif cfg.volatility_adjustment and (vol is None or vol.atr_pct == 0):
+            parts.append('no volatility data')
+
         parts.append(f'= ${sized:,.0f}')
 
         # 3. Clamp to hard limits
@@ -393,6 +455,10 @@ class PositionSizer:
                 'risk_level': cfg.risk_level,
                 'daily_loss_limit_usd': cfg.daily_loss_limit_usd,
                 'min_confidence_scale': cfg.min_confidence_scale,
+                'volatility_adjustment': cfg.volatility_adjustment,
+                'reference_atr_pct': cfg.reference_atr_pct,
+                'vol_scale_min': cfg.vol_scale_min,
+                'vol_scale_max': cfg.vol_scale_max,
                 'max_adv_pct': cfg.max_adv_pct,
                 'spread_penalty_threshold': cfg.spread_penalty_threshold,
                 'spread_penalty_factor': cfg.spread_penalty_factor,

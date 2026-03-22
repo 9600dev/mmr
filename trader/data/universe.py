@@ -65,7 +65,7 @@ class UniverseAccessor():
         self._resolver_cache: Dict[int, Tuple[Universe, SecurityDefinition]] = {}
 
     def list_universes(self) -> List[str]:
-        result = self.library.list_symbols()
+        result = [k for k in self.library.list_symbols() if not k.startswith('_')]
         # move the portfolio universe to the front
         if 'portfolio' in result:
             result.remove('portfolio')
@@ -98,6 +98,8 @@ class UniverseAccessor():
             universe = Universe(name)
             universe.security_definitions = []
             return universe
+        if not isinstance(data, Universe):
+            return None
         return data
 
     def find_contract(self, contract: Contract) -> Optional[Universe]:

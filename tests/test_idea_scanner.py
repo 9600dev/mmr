@@ -1649,8 +1649,14 @@ class TestIBIdeaScannerTickersPath:
         assert 'pe_ratio' in df.columns
         assert 'headline' in df.columns
 
-    def test_location_without_exchange_suffix(self, mock_rpc):
+    @patch('trader.trading.trading_filter.TradingFilter.load')
+    def test_location_without_exchange_suffix(self, mock_tf_load, mock_rpc):
         """Location like STK.CA (no third part) should use empty exchange hint."""
+        # Mock trading filter to allow STK.CA (user config may deny it)
+        mock_tf = MagicMock()
+        mock_tf.is_empty.return_value = True
+        mock_tf_load.return_value = mock_tf
+
         rpc_mock = MagicMock()
         mock_rpc.rpc.return_value = rpc_mock
         rpc_mock.resolve_contract.return_value = [

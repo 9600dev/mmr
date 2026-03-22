@@ -61,7 +61,11 @@ The reason PubSub and MessageBus are separate (despite overlap) is efficiency: Z
 
 **Risk gate**: `trader/trading/risk_gate.py` enforces pre-trade risk limits (max position size, daily loss, open orders, signal rate) by querying the event store.
 
-**Position sizing**: `trader/trading/position_sizing.py` computes position sizes based on confidence, risk level, portfolio state, and liquidity (ADV, spread). Configured via `configs/position_sizing.yaml`. Used automatically by `propose` when no quantity/amount is specified.
+**Position sizing**: `trader/trading/position_sizing.py` computes position sizes based on confidence, risk level, ATR volatility, portfolio state, and liquidity (ADV, spread). The sizing pipeline is: `base_position × risk_multiplier × confidence_scale × volatility_adjustment`. Volatile stocks (high ATR%) automatically get smaller positions; stable stocks get larger ones. Configured via `configs/position_sizing.yaml`. Used automatically by `propose` when no quantity/amount is specified.
+
+**Position groups**: `trader/data/position_groups.py` stores named groups with allocation budgets in DuckDB (e.g. "mining" at 20% max). The `propose` command accepts `--group` to tag trades and auto-register membership. The portfolio risk analyzer checks group allocations against budgets.
+
+**Portfolio risk**: `trader/trading/portfolio_risk.py` analyzes concentration (HHI), position weights, group budget compliance, and return correlation clusters. Produces warnings (>10% single position, >15% critical, group over budget, correlated cluster >30%) and a plain-English summary for LLM consumption.
 
 **Trading filter**: `trader/trading/trading_filter.py` enforces symbol/exchange denylist/allowlist rules. Checked by the executioner and risk gate before any order placement.
 
@@ -109,6 +113,7 @@ mmr/
 │   │   ├── data_access.py     # TickData, DictData, TickStorage, SecurityDefinition
 │   │   ├── event_store.py     # EventStore — trading event audit trail (DuckDB)
 │   │   ├── proposal_store.py  # ProposalStore — trade proposal storage (DuckDB)
+│   │   ├── position_groups.py # PositionGroupStore — named groups with allocation budgets (DuckDB)
 │   │   ├── universe.py        # Universe, UniverseAccessor
 │   │   └── market_data.py     # MarketData, SecurityDataStream
 │   ├── listeners/
@@ -128,7 +133,8 @@ mmr/
 │   │   ├── portfolio.py       # Portfolio positions
 │   │   ├── order_validator.py
 │   │   ├── risk_gate.py       # RiskGate — pre-trade risk limit enforcement
-│   │   ├── position_sizing.py # PositionSizer — confidence/risk/liquidity-aware sizing
+│   │   ├── position_sizing.py # PositionSizer — confidence/risk/volatility/liquidity-aware sizing
+│   │   ├── portfolio_risk.py  # PortfolioRiskAnalyzer — concentration, correlation, group budgets
 │   │   ├── trading_filter.py  # TradingFilter — denylist/allowlist/exchange filtering
 │   │   ├── strategy.py        # Strategy ABC, Signal, StrategyConfig, StrategyContext
 │   │   └── proposal.py        # TradeProposal, ExecutionSpec — propose/review/approve pipeline
@@ -139,6 +145,7 @@ mmr/
 │   │   └── backtester.py      # Backtester — replay historical data through strategies
 │   └── tools/                 # Importable scripts (moved from scripts/)
 │       ├── idea_scanner.py    # IdeaScanner (Massive) + IBIdeaScanner (IB international)
+│       ├── depth_chart.py     # Market depth chart (PNG) + Rich table rendering
 │       ├── chain.py           # Options chain analysis
 │       ├── trader_check.py    # Service health check
 │       ├── zmq_pub_listener.py # ZMQ PubSub pretty printer
@@ -165,9 +172,12 @@ mmr/
 │   ├── test_container.py
 │   ├── test_duckdb_store.py
 │   ├── test_event_store.py
+│   ├── test_depth.py          # 19 tests: depth chart PNG rendering, Rich table output
 │   ├── test_idea_scanner.py   # 123 tests: presets, indicators, IB scanner, tickers path, fundamentals, news
 │   ├── test_portfolio.py
-│   ├── test_position_sizing.py # 72 tests: sizing, confidence, risk, liquidity, resize deltas
+│   ├── test_position_sizing.py # 90 tests: sizing, confidence, risk, volatility/ATR, liquidity, resize deltas
+│   ├── test_position_groups.py # 22 tests: group store CRUD, member management
+│   ├── test_portfolio_risk.py  # 18 tests: concentration, HHI, group budgets, correlation, warnings
 │   ├── test_proposal.py
 │   ├── test_proposal_store.py
 │   ├── test_risk_gate.py
@@ -250,6 +260,12 @@ close 1                      # Close position by row number
 strategies                   # List strategies
 strategies enable my_strat   # Enable a strategy
 snapshot AMD                 # Price snapshot
+depth AAPL                   # Level 2 order book (bids/asks + PNG chart)
+depth AAPL --rows 10         # More price levels (max depends on subscription)
+depth BHP --exchange ASX --currency AUD  # International depth
+depth AAPL --no-chart        # Table only, skip PNG rendering
+depth AAPL --no-open         # Render PNG but don't open in Preview
+depth AAPL --smart           # SMART depth aggregation across exchanges
 listen AMD                   # Stream live ticks via ZMQ
 watch                        # Live portfolio monitor
 history list                     # List all downloaded history
@@ -318,12 +334,24 @@ ideas gap-up --location STK.HK.SEHK --tickers 0700 0005     # Hong Kong via IB
 propose AMD BUY --market --quantity 100 --bracket 180 150 --reasoning "Breakout above resistance"
 propose AMD BUY --limit 165 --amount 5000 --trailing-stop-pct 2.0 --tif GTC
 propose AAPL SELL --market --quantity 50 --stop-loss 140
+propose BHP BUY --market --confidence 0.7 --group mining --exchange ASX --currency AUD
 proposals                                    # List pending proposals
 proposals --all                              # All statuses
 proposals --status EXECUTED                  # Filter by status
 proposals show 3                             # Full detail for proposal #3
 approve 3                                    # Execute proposal #3 (requires trader_service)
 reject 3 --reason "Changed thesis"           # Reject proposal #3
+group list                                   # List groups with members + allocation
+group create mining --budget 20              # Create group with 20% max allocation
+group delete mining                          # Delete group and members
+group show mining                            # Members + allocation details
+group add mining BHP RIO FMG                 # Add symbols to group
+group remove mining BHP                      # Remove symbol from group
+group set mining --budget 25                 # Update group budget
+portfolio-risk                               # Full risk analysis report
+portfolio-risk --json                        # JSON for LLM consumption (alias: prisk)
+portfolio-snapshot                           # Compact JSON: value, P&L, movers (alias: psnap)
+portfolio-diff                               # Delta since last snapshot (alias: pdiff)
 resize-positions --max-bound 500000          # Trim portfolio to $500k
 resize-positions --min-bound 300000          # Grow portfolio to $300k
 resize-positions --max-bound 500000 --min-bound 300000  # Both bounds
@@ -441,14 +469,15 @@ pytest tests/ -v             # Run all tests
 pytest tests/test_book.py    # Run a specific test file
 ```
 
-The working test suite (384 tests across 16 files):
+The working test suite (483 tests across 19 files):
 ```bash
 pytest tests/test_idea_scanner.py tests/test_config.py tests/test_risk_gate.py \
   tests/test_proposal.py tests/test_proposal_store.py tests/test_book.py \
   tests/test_backtester.py tests/test_container.py tests/test_duckdb_store.py \
   tests/test_event_store.py tests/test_portfolio.py tests/test_serialization.py \
   tests/test_strategy.py tests/test_position_sizing.py tests/test_sdk.py \
-  tests/test_trading_filter.py -v
+  tests/test_trading_filter.py tests/test_depth.py tests/test_position_groups.py \
+  tests/test_portfolio_risk.py -v
 ```
 
 Some test files have import errors due to missing optional dependencies (`aioreactive`) — these are pre-existing and can be ignored: `test_aiorx.py`, `test_aiozmq_simple.py`, `test_disposable.py`, `test_mmr_client.py`, `test_mmr_server.py`, `test_perf2.py`, `test_performance.py`.
@@ -533,6 +562,62 @@ mmr --json strategies signals my_strategy
 mmr --json portfolio                                       # Requires trader_service
 ```
 
+### LLM Trading Loop
+
+The preferred workflow for an LLM trading autonomously. Each step is designed to give the LLM the information it needs to make good decisions and catch mistakes before they become real trades.
+
+**Step 1: Assess current state** (requires trader_service)
+```bash
+mmr --json portfolio-snapshot               # compact: value, P&L, top movers (~500 tokens)
+mmr --json portfolio-diff                   # what changed since last cycle
+mmr --json portfolio-risk                   # HHI, group budgets, warnings, summary
+mmr --json session                          # sizing config, remaining capacity
+```
+Use `portfolio-snapshot` and `portfolio-diff` every cycle — they're small. If `portfolio-diff` shows `unchanged_count == position_count` (nothing moved), skip the ANALYZE/PROPOSE phases entirely. Only pull the full `portfolio-risk` report when something moved or before approving a trade. The session status shows `remaining_positions` — if at the limit, the LLM should stop proposing.
+
+**Step 2: Scan for opportunities**
+```bash
+mmr --json ideas momentum --num 10          # US stocks via Massive (~4s)
+mmr --json ideas gap-up --tickers AAPL MSFT NVDA  # Specific tickers
+mmr --json ideas momentum --location STK.AU.ASX --tickers BHP RIO  # International via IB
+```
+
+**Step 3: Research candidates**
+```bash
+mmr --json snapshot AAPL                    # Current price + bid/ask
+mmr --json news AAPL --detail               # Recent news + sentiment
+mmr --json ratios AAPL                      # P/E, ROE, D/E, etc.
+```
+
+**Step 4: Create proposals with group tagging**
+```bash
+mmr --json propose AAPL BUY --market --confidence 0.7 --group tech \
+  --reasoning "Strong momentum, RSI 65, above 200-day MA" --source llm
+```
+Returns JSON with `proposal_id`, `sizing_result` (reasoning chain), `amount`, `group`. Position sizing is automatic: `base × risk × confidence × ATR_volatility`. The `--group` flag auto-registers the symbol into the named group.
+
+**Step 5: Review before approving**
+```bash
+mmr --json proposals                        # List pending proposals with sizing details
+mmr --json proposals show 42                # Full detail — check sizing_result.reasoning
+mmr --json portfolio-risk                   # Re-check: would this trade cause any warnings?
+```
+The LLM should check: (1) the sizing reasoning makes sense, (2) no new risk warnings would be triggered, (3) the group isn't going over budget.
+
+**Step 6: Approve or reject**
+```bash
+mmr approve 42                              # Execute (requires trader_service)
+mmr reject 42 --reason "Group over budget"  # Reject with reason
+```
+
+**Key design decisions for the LLM loop:**
+- **Propose first, execute later**: The propose→review→approve pipeline means the LLM never places a trade without a chance to review. An LLM can propose freely (no service needed) and review the sizing/risk before committing.
+- **ATR-inverse sizing**: The LLM doesn't need to reason about position size — volatile stocks automatically get smaller positions. A $1M account with 2% base, NVDA (3.5% ATR) gets ~$10K while JNJ (1.8% ATR) gets ~$19K.
+- **Group budgets as soft limits**: Over-budget groups produce warnings, not rejections. The LLM sees the warning and decides whether to proceed (maybe it has a strong thesis) or redirect to an under-allocated group.
+- **Risk report before and after**: Running `portfolio-risk` before proposing catches existing issues; running it after proposing (before approving) catches issues the new trade would create.
+- **Snapshot/diff for context efficiency**: `portfolio-snapshot` (~500 tokens) and `portfolio-diff` (only deltas) replace the full `portfolio` call (~2000+ tokens) for loop monitoring. The LLM should use these for every cycle and only pull full portfolio when investigating specific positions.
+- **JSON everywhere for the loop**: `propose --json` returns structured data (proposal_id, sizing_result), `portfolio-snapshot`, `portfolio-diff`, `portfolio-risk`, `session`, `group list` all return JSON. The LLM never needs to parse Rich tables during autonomous operation.
+
 ### Command Service Requirements
 
 **No service needed** (fully local):
@@ -542,13 +627,18 @@ mmr --json portfolio                                       # Requires trader_ser
 - `strategies signals`, `strategies backtest`
 - `universe list`, `universe show`, `universe create`, `universe delete`, `universe remove`, `universe import`
 - `propose`, `proposals`, `reject`
+- `group list`, `group create`, `group delete`, `group show`, `group add`, `group remove`, `group set`
+- `session`
 
 **Requires trader_service**:
 - `portfolio`, `positions`, `orders`, `trades`, `account`, `status`
 - `buy`, `sell`, `cancel`, `cancel-all`, `close`
 - `resize-positions` (reads portfolio + orders, places market orders + protective orders)
-- `resolve`, `snapshot`
+- `resolve`, `snapshot`, `depth`
 - `approve`
+- `portfolio-risk` / `prisk` (reads live portfolio for risk analysis)
+- `portfolio-snapshot` / `psnap` (compact portfolio JSON)
+- `portfolio-diff` / `pdiff` (delta since last snapshot)
 - `strategies enable`, `strategies disable`
 - `listen`, `watch`
 - `ideas --location` (IB path for international markets)
@@ -640,7 +730,7 @@ All local file/YAML operations.
 #### Test Suite
 | Operation | Time |
 |-----------|------|
-| Full working suite (384 tests) | ~4s |
+| Full working suite (483 tests) | ~20s |
 | Single test file | ~1-2s |
 
 #### Python Import Overhead

@@ -13,6 +13,8 @@ from trader.trading.position_sizing import (
     PortfolioState,
     RISK_MULTIPLIERS,
     SizingResult,
+    VolatilityInfo,
+    compute_atr,
 )
 
 
@@ -28,6 +30,10 @@ class TestPositionSizingConfig:
         assert cfg.risk_level == 'moderate'
         assert cfg.daily_loss_limit_usd == 2000.0
         assert cfg.min_confidence_scale == 0.3
+        assert cfg.volatility_adjustment is True
+        assert cfg.reference_atr_pct == 0.02
+        assert cfg.vol_scale_min == 0.25
+        assert cfg.vol_scale_max == 2.0
         assert cfg.max_adv_pct == 0.02
         assert cfg.spread_penalty_threshold == 0.005
         assert cfg.spread_penalty_factor == 0.5
@@ -338,6 +344,10 @@ class TestSessionSummary:
         assert summary['config']['base_position_usd'] == 5000.0
         assert summary['config']['risk_level'] == 'moderate'
         assert summary['config']['max_positions'] == 20
+        assert summary['config']['volatility_adjustment'] is True
+        assert summary['config']['reference_atr_pct'] == 0.02
+        assert summary['config']['vol_scale_min'] == 0.25
+        assert summary['config']['vol_scale_max'] == 2.0
 
         # Portfolio section
         assert summary['portfolio']['net_liquidation'] == 100_000.0
@@ -688,6 +698,286 @@ class TestBasePositionPct:
             assert loaded.base_position_usd == 5000.0
         finally:
             os.unlink(tmp_path)
+
+
+class TestComputeATR:
+    def test_basic_atr(self):
+        """ATR computed correctly for simple data."""
+        # 16 bars: need period+1 = 15 bars minimum
+        highs = [10.0 + i * 0.1 for i in range(16)]
+        lows = [9.0 + i * 0.1 for i in range(16)]
+        closes = [9.5 + i * 0.1 for i in range(16)]
+        result = compute_atr(highs, lows, closes, period=14)
+        assert result is not None
+        assert result > 0
+
+    def test_insufficient_data_returns_none(self):
+        """Less than period+1 bars returns None."""
+        highs = [10.0, 11.0, 12.0]
+        lows = [9.0, 10.0, 11.0]
+        closes = [9.5, 10.5, 11.5]
+        result = compute_atr(highs, lows, closes, period=14)
+        assert result is None
+
+    def test_mismatched_lengths(self):
+        highs = [10.0] * 20
+        lows = [9.0] * 19
+        closes = [9.5] * 20
+        assert compute_atr(highs, lows, closes) is None
+
+    def test_constant_price_zero_atr(self):
+        """Flat price → ATR = H-L only (no gaps)."""
+        n = 20
+        highs = [100.5] * n
+        lows = [99.5] * n
+        closes = [100.0] * n
+        result = compute_atr(highs, lows, closes)
+        assert result is not None
+        assert abs(result - 1.0) < 0.01  # TR = 100.5 - 99.5 = 1.0
+
+    def test_gap_up_increases_atr(self):
+        """Gap-up creates larger true range."""
+        n = 20
+        highs = [100.0] * n
+        lows = [99.0] * n
+        closes = [99.5] * n
+        # Force a gap: previous close at 95, high at 100 → |H - prevC| = 5
+        closes[5] = 95.0
+        result = compute_atr(highs, lows, closes)
+        assert result is not None
+        assert result > 1.0  # bigger than the simple H-L range
+
+
+class TestVolatilityInfo:
+    def test_atr_pct(self):
+        v = VolatilityInfo(atr=2.0, price=100.0)
+        assert abs(v.atr_pct - 0.02) < 1e-6
+
+    def test_atr_pct_zero_price(self):
+        v = VolatilityInfo(atr=2.0, price=0.0)
+        assert v.atr_pct == 0.0
+
+    def test_atr_pct_zero_atr(self):
+        v = VolatilityInfo(atr=0.0, price=100.0)
+        assert v.atr_pct == 0.0
+
+
+class TestVolatilityAdjustment:
+    def test_normal_volatility_no_adjustment(self):
+        """ATR% matching reference → multiplier 1.0."""
+        cfg = PositionSizingConfig(
+            base_position_usd=5000.0,
+            volatility_adjustment=True,
+            reference_atr_pct=0.02,
+        )
+        sizer = PositionSizer(cfg)
+        vol = VolatilityInfo(atr=2.0, price=100.0)  # atr_pct = 0.02
+        result = sizer.compute(confidence=1.0, volatility=vol)
+        assert result.amount_usd == 5000.0
+
+    def test_high_volatility_reduces_size(self):
+        """4% ATR (2x reference) → multiplier 0.5."""
+        cfg = PositionSizingConfig(
+            base_position_usd=10000.0,
+            volatility_adjustment=True,
+            reference_atr_pct=0.02,
+            vol_scale_min=0.25,
+            vol_scale_max=2.0,
+        )
+        sizer = PositionSizer(cfg)
+        vol = VolatilityInfo(atr=4.0, price=100.0)  # atr_pct = 0.04 = 2x reference
+        result = sizer.compute(confidence=1.0, volatility=vol)
+        # multiplier = 0.02 / 0.04 = 0.5
+        assert result.amount_usd == 5000.0
+        assert 'vol ATR' in result.reasoning
+
+    def test_low_volatility_increases_size(self):
+        """1% ATR (0.5x reference) → multiplier 2.0 (capped by vol_scale_max)."""
+        cfg = PositionSizingConfig(
+            base_position_usd=5000.0,
+            volatility_adjustment=True,
+            reference_atr_pct=0.02,
+            vol_scale_min=0.25,
+            vol_scale_max=2.0,
+        )
+        sizer = PositionSizer(cfg)
+        vol = VolatilityInfo(atr=1.0, price=100.0)  # atr_pct = 0.01 = 0.5x reference
+        result = sizer.compute(confidence=1.0, volatility=vol)
+        # multiplier = 0.02 / 0.01 = 2.0 (at max)
+        assert result.amount_usd == 10000.0
+
+    def test_very_volatile_capped_at_min(self):
+        """Extremely high ATR → multiplier floored at vol_scale_min."""
+        cfg = PositionSizingConfig(
+            base_position_usd=10000.0,
+            volatility_adjustment=True,
+            reference_atr_pct=0.02,
+            vol_scale_min=0.25,
+            vol_scale_max=2.0,
+        )
+        sizer = PositionSizer(cfg)
+        vol = VolatilityInfo(atr=20.0, price=100.0)  # atr_pct = 0.20 = 10x reference
+        result = sizer.compute(confidence=1.0, volatility=vol)
+        # multiplier = 0.02 / 0.20 = 0.1, clamped to 0.25
+        assert result.amount_usd == 2500.0
+
+    def test_very_stable_capped_at_max(self):
+        """Very low ATR → multiplier capped at vol_scale_max."""
+        cfg = PositionSizingConfig(
+            base_position_usd=5000.0,
+            volatility_adjustment=True,
+            reference_atr_pct=0.02,
+            vol_scale_min=0.25,
+            vol_scale_max=2.0,
+        )
+        sizer = PositionSizer(cfg)
+        vol = VolatilityInfo(atr=0.1, price=100.0)  # atr_pct = 0.001
+        result = sizer.compute(confidence=1.0, volatility=vol)
+        # multiplier = 0.02 / 0.001 = 20.0, clamped to 2.0
+        assert result.amount_usd == 10000.0
+
+    def test_volatility_disabled(self):
+        """volatility_adjustment=False → no adjustment."""
+        cfg = PositionSizingConfig(
+            base_position_usd=5000.0,
+            volatility_adjustment=False,
+        )
+        sizer = PositionSizer(cfg)
+        vol = VolatilityInfo(atr=10.0, price=100.0)
+        result = sizer.compute(confidence=1.0, volatility=vol)
+        assert result.amount_usd == 5000.0
+
+    def test_no_volatility_data_no_adjustment(self):
+        """No VolatilityInfo → multiplier 1.0."""
+        cfg = PositionSizingConfig(
+            base_position_usd=5000.0,
+            volatility_adjustment=True,
+        )
+        sizer = PositionSizer(cfg)
+        result = sizer.compute(confidence=1.0)
+        assert result.amount_usd == 5000.0
+        assert 'no volatility data' in result.reasoning
+
+    def test_volatility_with_confidence_scaling(self):
+        """Confidence and volatility both apply multiplicatively."""
+        cfg = PositionSizingConfig(
+            base_position_usd=10000.0,
+            min_confidence_scale=0.3,
+            volatility_adjustment=True,
+            reference_atr_pct=0.02,
+        )
+        sizer = PositionSizer(cfg)
+        vol = VolatilityInfo(atr=4.0, price=100.0)  # atr_pct = 0.04, mult = 0.5
+        result = sizer.compute(confidence=0.5, volatility=vol)
+        # base=10000, confidence_scale = 0.3 + 0.7*0.5 = 0.65
+        # after confidence: 10000 * 0.65 = 6500
+        # after vol: 6500 * 0.5 = 3250
+        assert result.amount_usd == 3250.0
+
+    def test_volatility_yaml_round_trip(self):
+        """Volatility config fields survive YAML save/load."""
+        cfg = PositionSizingConfig(
+            volatility_adjustment=True,
+            reference_atr_pct=0.03,
+            vol_scale_min=0.3,
+            vol_scale_max=1.5,
+        )
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            tmp_path = f.name
+        try:
+            cfg.save(path=tmp_path)
+            loaded = PositionSizingConfig.load(path=tmp_path)
+            assert loaded.volatility_adjustment is True
+            assert loaded.reference_atr_pct == 0.03
+            assert loaded.vol_scale_min == 0.3
+            assert loaded.vol_scale_max == 1.5
+        finally:
+            os.unlink(tmp_path)
+
+    def test_volatility_then_portfolio_cap(self):
+        """Volatility adjustment increases size, but max_position_pct caps it."""
+        cfg = PositionSizingConfig(
+            base_position_usd=10_000.0,
+            volatility_adjustment=True,
+            reference_atr_pct=0.02,
+            vol_scale_max=2.0,
+            max_position_pct=0.10,
+            max_position_usd=50_000.0,
+        )
+        sizer = PositionSizer(cfg)
+        # Very stable stock → vol_mult 2.0x → $20k, but portfolio cap = 10% of $100k = $10k
+        vol = VolatilityInfo(atr=0.5, price=100.0)  # atr_pct = 0.005 → mult capped at 2.0
+        state = PortfolioState(net_liquidation=100_000.0)
+        result = sizer.compute(confidence=1.0, portfolio_state=state, volatility=vol)
+        # After vol: 10000 * 2.0 = 20000, after portfolio cap: 10000
+        assert result.amount_usd == 10_000.0
+        assert result.capped_by == 'max_position_pct'
+
+    def test_volatility_then_adv_cap(self):
+        """Volatility adjustment + ADV cap — strictest wins."""
+        cfg = PositionSizingConfig(
+            base_position_usd=10_000.0,
+            volatility_adjustment=True,
+            reference_atr_pct=0.02,
+            max_adv_pct=0.01,
+            max_position_usd=50_000.0,
+        )
+        sizer = PositionSizer(cfg)
+        # Normal volatility → no vol adjustment. But thin ADV caps it.
+        vol = VolatilityInfo(atr=2.0, price=100.0)  # atr_pct = 0.02, mult = 1.0
+        liq = LiquidityInfo(
+            avg_daily_volume=5_000,  # thin stock
+            bid=100.0, ask=100.10, last=100.05,
+        )
+        result = sizer.compute(confidence=1.0, volatility=vol, liquidity=liq)
+        # After vol: $10k * 1.0 = $10k. ADV cap: 1% of 5k * $100 = $5k
+        assert result.capped_by == 'adv_liquidity'
+        assert result.amount_usd < 10_000.0
+
+    def test_high_vol_reduces_before_spread_penalty(self):
+        """Volatility reduces size first, then spread penalty applies on top."""
+        cfg = PositionSizingConfig(
+            base_position_usd=10_000.0,
+            volatility_adjustment=True,
+            reference_atr_pct=0.02,
+            spread_penalty_threshold=0.005,
+            spread_penalty_factor=0.5,
+        )
+        sizer = PositionSizer(cfg)
+        vol = VolatilityInfo(atr=4.0, price=100.0)  # atr_pct=0.04, mult=0.5
+        liq = LiquidityInfo(bid=100.0, ask=102.0)   # 2% spread
+        result = sizer.compute(confidence=1.0, volatility=vol, liquidity=liq)
+        # After vol: $10k * 0.5 = $5k, then spread penalty reduces further
+        assert result.amount_usd < 5_000.0
+        assert any('spread' in w.lower() for w in result.warnings)
+
+
+class TestComputeATREdgeCases:
+    def test_custom_period(self):
+        """ATR with a shorter period."""
+        n = 10
+        highs = [100.5 + i * 0.1 for i in range(n)]
+        lows = [99.5 + i * 0.1 for i in range(n)]
+        closes = [100.0 + i * 0.1 for i in range(n)]
+        result = compute_atr(highs, lows, closes, period=5)
+        assert result is not None
+        assert result > 0
+
+    def test_period_equals_data_minus_one(self):
+        """Exactly period+1 bars → valid ATR from one window."""
+        n = 15
+        highs = [100.5] * n
+        lows = [99.5] * n
+        closes = [100.0] * n
+        result = compute_atr(highs, lows, closes, period=14)
+        assert result is not None
+        assert abs(result - 1.0) < 0.01
+
+    def test_empty_lists(self):
+        assert compute_atr([], [], []) is None
+
+    def test_single_bar(self):
+        assert compute_atr([100.0], [99.0], [99.5]) is None
 
 
 # ---------------------------------------------------------------------------

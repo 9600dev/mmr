@@ -572,6 +572,85 @@ class IBAIORx():
             delayed=delayed,
         )
 
+    async def get_market_depth(
+        self,
+        contract: Contract,
+        num_rows: int = 5,
+        is_smart_depth: bool = False,
+    ) -> dict:
+        """Request Level 2 market depth (order book) for *contract*.
+
+        Returns dict with bids, asks, and top-of-book quote data.
+        Raises TimeoutError if no depth data arrives within 5 seconds.
+        """
+        # IB's reqMktDepth does not support SMART routing (error 10092).
+        # If the contract uses SMART with a primaryExchange, swap to the
+        # real exchange for the depth request.
+        depth_contract = contract
+        if getattr(contract, 'exchange', '') == 'SMART' and getattr(contract, 'primaryExchange', ''):
+            depth_contract = Contract(
+                conId=contract.conId,
+                symbol=contract.symbol,
+                secType=contract.secType,
+                exchange=contract.primaryExchange,
+                currency=contract.currency,
+            )
+
+        ticker = self.ib.reqMktDepth(depth_contract, numRows=num_rows, isSmartDepth=is_smart_depth)
+
+        # Event-driven wait: use asyncio.Event + ticker.updateEvent callback
+        # instead of polling.  The callback fires on the event loop whenever
+        # ib_async pushes a depth update, so we wake up immediately rather
+        # than burning 200ms sleep cycles.
+        _ready = asyncio.Event()
+
+        def _on_depth_update(ticker):
+            if ticker.domBids or ticker.domAsks:
+                _ready.set()
+
+        ticker.updateEvent += _on_depth_update
+
+        try:
+            await asyncio.wait_for(_ready.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            self.ib.cancelMktDepth(depth_contract, isSmartDepth=is_smart_depth)
+            raise TimeoutError(
+                f'No market depth data received for {contract.symbol} within 5s. '
+                f'Check that you have Level 2 market data subscriptions for this exchange.'
+            )
+        finally:
+            ticker.updateEvent -= _on_depth_update
+
+        # Capture data before cancelling
+        bids = [
+            {'price': d.price, 'size': d.size, 'marketMaker': d.marketMaker}
+            for d in ticker.domBids
+        ]
+        asks = [
+            {'price': d.price, 'size': d.size, 'marketMaker': d.marketMaker}
+            for d in ticker.domAsks
+        ]
+
+        self.ib.cancelMktDepth(depth_contract, isSmartDepth=is_smart_depth)
+
+        sym = ''
+        con_id = ''
+        if contract:
+            sym = getattr(contract, 'symbol', '')
+            con_id = getattr(contract, 'conId', '')
+
+        return {
+            'symbol': sym,
+            'conId': con_id,
+            'bids': bids,
+            'asks': asks,
+            'last': getattr(ticker, 'last', float('nan')),
+            'bid': getattr(ticker, 'bid', float('nan')),
+            'ask': getattr(ticker, 'ask', float('nan')),
+            'close': getattr(ticker, 'close', float('nan')),
+            'time': getattr(ticker, 'time', None),
+        }
+
     def get_contract_details(self, contract: Contract) -> List[ContractDetails]:
         result = self.ib.reqContractDetails(contract)
         if not result:

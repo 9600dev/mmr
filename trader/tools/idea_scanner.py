@@ -308,7 +308,7 @@ def apply_filters(candidates: List[Dict], filters: ScanFilter,
                 continue
         if c['price'] < filters.min_price or c['price'] > filters.max_price:
             continue
-        if c['volume'] < filters.min_volume:
+        if c['volume'] > 0 and c['volume'] < filters.min_volume:
             continue
         if filters.min_change_pct is not None and c['change_pct'] < filters.min_change_pct:
             continue
@@ -1067,11 +1067,16 @@ class IBIdeaScanner:
             contracts = []
             conid_map: Dict[str, int] = {}  # symbol → conId for news lookup
             for r in scanner_results:
-                c = Contract(conId=r['conId'])
-                c.symbol = r['symbol']
-                c.exchange = r.get('exchange', 'SMART')
-                c.currency = r.get('currency', '')
-                c.secType = r.get('secType', 'STK')
+                raw_exchange = r.get('exchange', '') or exchange_hint or 'SMART'
+                primary = raw_exchange if raw_exchange != 'SMART' else ''
+                c = Contract(
+                    conId=r['conId'],
+                    symbol=r['symbol'],
+                    secType=r.get('secType', 'STK'),
+                    exchange='SMART',
+                    primaryExchange=primary,
+                    currency=r.get('currency', ''),
+                )
                 contracts.append(c)
                 conid_map[r['symbol']] = r['conId']
 
@@ -1200,19 +1205,27 @@ class IBIdeaScanner:
                 d = defs[0]
                 # Handle both SecurityDefinition objects and dicts
                 if hasattr(d, 'conId'):
-                    c = Contract(conId=d.conId)
-                    c.symbol = d.symbol
-                    c.exchange = d.primaryExchange or exchange_hint or 'SMART'
-                    c.currency = d.currency or ''
-                    c.secType = 'STK'
+                    primary = d.primaryExchange or exchange_hint or ''
+                    c = Contract(
+                        conId=d.conId,
+                        symbol=d.symbol,
+                        secType='STK',
+                        exchange='SMART',
+                        primaryExchange=primary,
+                        currency=d.currency or '',
+                    )
                     contracts.append(c)
                     conid_map[d.symbol] = d.conId
                 elif isinstance(d, dict):
-                    c = Contract(conId=d.get('conId', 0))
-                    c.symbol = d.get('symbol', sym)
-                    c.exchange = d.get('primaryExchange', '') or exchange_hint or 'SMART'
-                    c.currency = d.get('currency', '')
-                    c.secType = 'STK'
+                    primary = d.get('primaryExchange', '') or exchange_hint or ''
+                    c = Contract(
+                        conId=d.get('conId', 0),
+                        symbol=d.get('symbol', sym),
+                        secType='STK',
+                        exchange='SMART',
+                        primaryExchange=primary,
+                        currency=d.get('currency', ''),
+                    )
                     contracts.append(c)
                     conid_map[c.symbol] = c.conId
             except Exception:

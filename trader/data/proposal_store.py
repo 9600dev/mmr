@@ -62,6 +62,8 @@ class ProposalStore:
             meta['_exchange'] = proposal.exchange
         if proposal.currency:
             meta['_currency'] = proposal.currency
+        if proposal.group:
+            meta['_group'] = proposal.group
         metadata_json = json.dumps(meta)
         order_ids_json = json.dumps(proposal.order_ids)
 
@@ -165,9 +167,10 @@ class ProposalStore:
             metadata_dict = json.loads(row[10]) if row[10] else {}
             order_ids_list = json.loads(row[14]) if row[14] else []
 
-            # Restore exchange/currency from metadata (stored with _ prefix)
+            # Restore exchange/currency/group from metadata (stored with _ prefix)
             exchange = metadata_dict.pop('_exchange', '')
             currency = metadata_dict.pop('_currency', '')
+            group = metadata_dict.pop('_group', '')
 
             proposals.append(TradeProposal(
                 id=row[0],
@@ -189,5 +192,6 @@ class ProposalStore:
                 sec_type=row[16],
                 exchange=exchange,
                 currency=currency,
+                group=group,
             ))
         return proposals

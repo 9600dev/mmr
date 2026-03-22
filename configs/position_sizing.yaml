@@ -10,12 +10,18 @@ max_positions: 20
 
 # Risk appetite (adjustable per session)
 base_position_usd: 5000.0
-base_position_pct: 0.0        # % of net liq as base (0 = use fixed base_position_usd)
+base_position_pct: 0.02       # % of net liq as base (0 = use fixed base_position_usd)
 risk_level: moderate         # conservative / moderate / aggressive
 daily_loss_limit_usd: 2000.0
 
 # Confidence scaling
 min_confidence_scale: 0.3    # at confidence=0, size = base * 0.3
+
+# Volatility adjustment (ATR-inverse sizing)
+volatility_adjustment: true
+reference_atr_pct: 0.02     # 2% ATR = "normal" → multiplier 1.0
+vol_scale_min: 0.25          # volatile stock still gets ≥25% of base
+vol_scale_max: 2.0           # stable stock gets up to 2x base
 
 # Liquidity constraints
 max_adv_pct: 0.02            # max 2% of avg daily volume (ensures exit within a day)

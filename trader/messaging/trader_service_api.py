@@ -72,6 +72,7 @@ class TraderServiceApi(RPCHandler):
         stop_loss_percentage: float = 0.0,
         algo_name: str = 'global',
         debug: bool = False,
+        skip_risk_gate: bool = False,
     ) -> SuccessFail[Trade]:
         # todo: we'll have to make the cli async so we can subscribe to the trade
         # changes as orders get hit etc
@@ -91,9 +92,10 @@ class TraderServiceApi(RPCHandler):
         def on_error(ex):
             nonlocal result
             result = SuccessFail.fail(exception=ex)
+            task.set()
 
         def on_completed():
-            pass
+            task.set()
 
         observer = Observer(on_next=on_next, on_completed=on_completed, on_error=on_error)
 
@@ -107,10 +109,15 @@ class TraderServiceApi(RPCHandler):
             stop_loss_percentage=stop_loss_percentage,
             algo_name=algo_name,
             debug=debug,
+            skip_risk_gate=skip_risk_gate,
         )
         observable.subscribe(observer)
 
-        await task.wait()
+        try:
+            await asyncio.wait_for(task.wait(), timeout=10.0)
+        except asyncio.TimeoutError:
+            if result is None:
+                result = SuccessFail.fail(error='order placement timed out waiting for confirmation')
         disposable.dispose()
         return result if result else SuccessFail.fail()
 
@@ -129,6 +136,10 @@ class TraderServiceApi(RPCHandler):
     @rpcmethod
     async def get_snapshot(self, contract: Contract, delayed: bool) -> Ticker:
         return await self.trader.client.get_snapshot(contract=contract, delayed=delayed)
+
+    @rpcmethod
+    async def get_market_depth(self, contract: Contract, num_rows: int = 5, is_smart_depth: bool = False) -> dict:
+        return await self.trader.get_market_depth(contract, num_rows, is_smart_depth)
 
     @rpcmethod
     def publish_contract(self, contract: Contract, delayed: bool) -> bool:

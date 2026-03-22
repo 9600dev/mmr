@@ -45,6 +45,7 @@ def _make_mmr_with_mock(mock_client) -> MMR:
     mmr._timeout = 5
     mmr._subscriptions = []
     mmr._position_map = {}
+    mmr._contract_map = {}
     mmr._container = MagicMock()
     mmr._container.config_file = '/tmp/test_trader.yaml'
     return mmr

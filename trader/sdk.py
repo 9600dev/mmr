@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import asyncio
 import dataclasses
+import datetime as dt
 import pandas as pd
 import threading
 import zmq
@@ -162,6 +163,8 @@ class MMR:
 
         # position_map: row_number -> symbol string (set by portfolio/positions)
         self._position_map: Dict[int, str] = {}
+        # contract_map: symbol -> Contract object (set by portfolio, used by close_position)
+        self._contract_map: Dict[str, Contract] = {}
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -352,6 +355,39 @@ class MMR:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _to_contract(contract) -> Contract:
+        """Build a Contract from a Contract object or dict (msgpack-deserialized)."""
+        us = {'SMART', 'NYSE', 'NASDAQ', 'AMEX', 'ARCA', 'BATS', 'IEX', 'ISLAND'}
+        if isinstance(contract, dict):
+            exchange = contract.get('exchange', '') or ''
+            primary = contract.get('primaryExchange', '') or ''
+            if exchange.upper() not in us:
+                primary = primary or exchange
+                exchange = 'SMART'
+            return Contract(
+                conId=contract.get('conId', 0),
+                symbol=contract.get('symbol', ''),
+                secType=contract.get('secType', 'STK'),
+                exchange=exchange,
+                primaryExchange=primary,
+                currency=contract.get('currency', ''),
+            )
+        # Contract object (or any object with matching attributes)
+        exchange = getattr(contract, 'exchange', '') or ''
+        primary = getattr(contract, 'primaryExchange', '') or ''
+        if exchange.upper() not in us:
+            primary = primary or exchange
+            exchange = 'SMART'
+        return Contract(
+            conId=contract.conId,
+            symbol=contract.symbol,
+            secType=getattr(contract, 'secType', 'STK') or 'STK',
+            exchange=exchange,
+            primaryExchange=primary,
+            currency=getattr(contract, 'currency', ''),
+        )
+
+    @staticmethod
     def _extract_contract(contract) -> dict:
         """Extract contract fields whether it's a Contract object or a dict."""
         if isinstance(contract, dict):
@@ -384,10 +420,11 @@ class MMR:
                 avg_cost, unrealized, realized, account, daily = p.averageCost, p.unrealizedPNL, p.realizedPNL, p.account, p.dailyPNL
 
             con = self._extract_contract(contract)
+            symbol = con['symbol']
             rows.append({
                 'account': account,
                 'conId': con['conId'],
-                'symbol': con['symbol'],
+                'symbol': symbol,
                 'position': position,
                 'mktPrice': mkt_price,
                 'avgCost': avg_cost,
@@ -396,6 +433,10 @@ class MMR:
                 'realizedPNL': realized,
                 'dailyPNL': daily,
             })
+
+            # Cache the raw contract for close_position (avoids re-resolution
+            # which fails for international stocks not in the local universe).
+            self._contract_map[symbol] = self._to_contract(contract)
 
         df = pd.DataFrame(rows)
         if not df.empty:
@@ -470,27 +511,42 @@ class MMR:
         except Exception:
             pass
 
-        # Resolve company names + snapshots for unique symbols
+        # Resolve company names + snapshots for unique symbols.
+        # Use the contract from the trade (has correct exchange/currency) to avoid
+        # failing on international stocks not in the local universe.
         name_cache: dict[str, str] = {}
         snap_cache: dict[str, dict] = {}
-        unique_symbols: set[str] = set()
+        contract_cache: dict[str, object] = {}
         for trade_list in trades_raw.values():
-            unique_symbols.add(trade_list[0].contract.symbol)
+            con = trade_list[0].contract
+            contract_cache.setdefault(con.symbol, con)
 
-        for sym in unique_symbols:
-            # Company name from local universe DB
+        # Batch snapshot for bid/ask context — single RPC instead of N.
+        order_contracts = []
+        sym_order = []
+        for sym, con in contract_cache.items():
+            order_contracts.append(self._to_contract(con))
+            sym_order.append(sym)
+            name_cache[sym] = ''  # company name not available without per-symbol resolve
+
+        if order_contracts:
             try:
-                defs = consume(
-                    self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_symbol(sym)
+                batch_snaps = consume(
+                    self._rpc.rpc(return_type=list[dict]).get_snapshots_batch(
+                        order_contracts, True
+                    )
                 )
-                name_cache[sym] = defs[0].longName if defs and defs[0].longName else ''
+                for i, snap_dict in enumerate(batch_snaps or []):
+                    sym = sym_order[i]
+                    snap_cache[sym] = {
+                        'bid': snap_dict.get('bid'),
+                        'ask': snap_dict.get('ask'),
+                        'last': snap_dict.get('last'),
+                    }
             except Exception:
-                name_cache[sym] = ''
-            # Live snapshot for bid/ask context
-            try:
-                snap_cache[sym] = self.snapshot(sym, delayed=True)
-            except Exception:
-                snap_cache[sym] = {}
+                pass
+        for sym in sym_order:
+            snap_cache.setdefault(sym, {})
 
         rows = []
         for trade_id, trade_list in trades_raw.items():
@@ -576,13 +632,19 @@ class MMR:
         stop_loss_percentage: float = 0.0,
         debug: bool = False,
         sec_type: str = 'STK',
+        exchange: str = '',
+        currency: str = '',
     ) -> SuccessFail:
         if not market and limit_price is None:
             raise ValueError("Specify market=True or provide a limit_price")
         if amount is None and quantity is None:
             raise ValueError("Specify amount (dollar value) or quantity")
 
-        contract = self._resolve_contract(symbol, sec_type=sec_type)
+        # Use cached contract from portfolio if available (international stocks).
+        contract = self._contract_map.get(symbol) if isinstance(symbol, str) else None
+        if contract is None:
+            contract = self._resolve_contract(symbol, sec_type=sec_type,
+                                              exchange=exchange, currency=currency)
 
         return consume(
             self._rpc.rpc(return_type=SuccessFail[Trade]).place_order_simple(
@@ -607,11 +669,14 @@ class MMR:
         stop_loss_percentage: float = 0.0,
         debug: bool = False,
         sec_type: str = 'STK',
+        exchange: str = '',
+        currency: str = '',
     ) -> SuccessFail:
         """Place a buy order."""
         return self._place_order(
             symbol, 'BUY', amount, quantity, limit_price, market,
             stop_loss_percentage, debug, sec_type=sec_type,
+            exchange=exchange, currency=currency,
         )
 
     def sell(
@@ -624,11 +689,14 @@ class MMR:
         stop_loss_percentage: float = 0.0,
         debug: bool = False,
         sec_type: str = 'STK',
+        exchange: str = '',
+        currency: str = '',
     ) -> SuccessFail:
         """Place a sell order."""
         return self._place_order(
             symbol, 'SELL', amount, quantity, limit_price, market,
             stop_loss_percentage, debug, sec_type=sec_type,
+            exchange=exchange, currency=currency,
         )
 
     def cancel(self, order_id: int) -> SuccessFail:
@@ -741,6 +809,203 @@ class MMR:
         state = self._get_portfolio_state()
         return PositionSizer(config).session_summary(state)
 
+    def risk_report(self) -> dict:
+        """Generate a portfolio risk report. Requires trader_service for portfolio data."""
+        from trader.trading.portfolio_risk import PortfolioRiskAnalyzer
+        cfg = self._container.config()
+        duckdb_path = cfg.get('duckdb_path', '')
+
+        portfolio_df = self.portfolio()
+        positions = portfolio_df.to_dict('records') if portfolio_df is not None and not portfolio_df.empty else []
+
+        net_liq = 0.0
+        try:
+            acct_vals = consume(self._rpc.rpc(return_type=dict).get_account_values())
+            if acct_vals:
+                net_liq = float(acct_vals.get('NetLiquidation', {}).get('value', 0))
+        except Exception:
+            pass
+
+        analyzer = PortfolioRiskAnalyzer(duckdb_path)
+        try:
+            gs = self._group_store()
+        except Exception:
+            gs = None
+
+        report = analyzer.analyze(positions, net_liq, group_store=gs)
+        return report.to_dict()
+
+    def portfolio_snapshot(self) -> dict:
+        """Compact portfolio snapshot for LLM loop monitoring.
+
+        Returns a small JSON object with just the key metrics an LLM needs
+        to decide whether to dig deeper: total value, daily P&L, position count,
+        and the top movers (biggest daily % changes). Requires trader_service.
+        """
+        import math
+
+        portfolio_df = self.portfolio()
+        if portfolio_df is None or portfolio_df.empty:
+            return {'total_value': 0, 'daily_pnl': 0, 'position_count': 0,
+                    'exposure_pct': 0, 'movers': [], 'timestamp': str(dt.datetime.now())}
+
+        net_liq = 0.0
+        try:
+            acct_vals = consume(self._rpc.rpc(return_type=dict).get_account_values())
+            if acct_vals:
+                net_liq = float(acct_vals.get('NetLiquidation', {}).get('value', 0))
+        except Exception:
+            pass
+
+        total_value = 0.0
+        daily_pnl = 0.0
+        movers = []
+        for _, row in portfolio_df.iterrows():
+            mv = float(row.get('marketValue', 0) or 0)
+            dp = float(row.get('dailyPNL', 0) or 0)
+            price = float(row.get('mktPrice', 0) or 0)
+            avg = float(row.get('avgCost', 0) or 0)
+            if isinstance(mv, float) and math.isnan(mv):
+                mv = 0.0
+            if isinstance(dp, float) and math.isnan(dp):
+                dp = 0.0
+            total_value += abs(mv)
+            daily_pnl += dp
+
+            # Compute daily change % from dailyPNL / marketValue
+            change_pct = (dp / abs(mv)) if abs(mv) > 0 else 0.0
+            movers.append({
+                'symbol': row.get('symbol', ''),
+                'change_pct': round(change_pct, 4),
+                'daily_pnl': round(dp, 2),
+                'value': round(abs(mv), 2),
+            })
+
+        # Sort by absolute change — biggest movers first
+        movers.sort(key=lambda m: abs(m['change_pct']), reverse=True)
+
+        exposure_pct = total_value / net_liq if net_liq > 0 else 0.0
+
+        return {
+            'total_value': round(total_value, 2),
+            'net_liquidation': round(net_liq, 2),
+            'daily_pnl': round(daily_pnl, 2),
+            'position_count': len(portfolio_df),
+            'exposure_pct': round(exposure_pct, 4),
+            'movers': movers[:10],  # top 10 by absolute change
+            'timestamp': str(dt.datetime.now()),
+        }
+
+    def portfolio_diff(self) -> dict:
+        """Compare current portfolio to the last stored snapshot.
+
+        Returns {changed, new, removed, unchanged_count, prev_timestamp}.
+        Stores current snapshot in DuckDB for next call. First call returns
+        all positions as 'new' (no previous snapshot exists).
+        """
+        import math
+        from trader.data.duckdb_store import DuckDBObjectStore
+
+        portfolio_df = self.portfolio()
+        cfg = self._container.config()
+        duckdb_path = cfg.get('duckdb_path', '')
+
+        # Build current snapshot as symbol -> {value, daily_pnl, position}
+        current = {}
+        if portfolio_df is not None and not portfolio_df.empty:
+            for _, row in portfolio_df.iterrows():
+                sym = row.get('symbol', '')
+                mv = float(row.get('marketValue', 0) or 0)
+                dp = float(row.get('dailyPNL', 0) or 0)
+                pos = float(row.get('position', 0) or 0)
+                if isinstance(mv, float) and math.isnan(mv):
+                    mv = 0.0
+                if isinstance(dp, float) and math.isnan(dp):
+                    dp = 0.0
+                current[sym] = {
+                    'value': round(abs(mv), 2),
+                    'daily_pnl': round(dp, 2),
+                    'position': pos,
+                }
+
+        # Load previous snapshot
+        prev = {}
+        prev_ts = None
+        if duckdb_path:
+            try:
+                obj_store = DuckDBObjectStore(duckdb_path)
+                stored = obj_store.read('_portfolio_snapshot')
+                if stored and isinstance(stored, dict):
+                    prev = stored.get('positions', {})
+                    prev_ts = stored.get('timestamp')
+            except Exception:
+                pass
+
+        # Compute diff
+        new_symbols = []
+        removed_symbols = []
+        changed = []
+        unchanged_count = 0
+
+        all_symbols = set(list(current.keys()) + list(prev.keys()))
+        for sym in sorted(all_symbols):
+            cur = current.get(sym)
+            prv = prev.get(sym)
+
+            if cur and not prv:
+                new_symbols.append({'symbol': sym, **cur})
+            elif prv and not cur:
+                removed_symbols.append({'symbol': sym, **prv})
+            elif cur and prv:
+                # Check if value changed by more than 0.5%
+                pct_change = abs(cur['value'] - prv['value']) / prv['value'] if prv['value'] > 0 else 0
+                if pct_change > 0.005 or cur['position'] != prv['position']:
+                    changed.append({
+                        'symbol': sym,
+                        'value': cur['value'],
+                        'prev_value': prv['value'],
+                        'value_change': round(cur['value'] - prv['value'], 2),
+                        'daily_pnl': cur['daily_pnl'],
+                        'position': cur['position'],
+                        'prev_position': prv['position'],
+                    })
+                else:
+                    unchanged_count += 1
+
+        # Store current snapshot for next diff
+        if duckdb_path:
+            try:
+                obj_store = DuckDBObjectStore(duckdb_path)
+                obj_store.write('_portfolio_snapshot', {
+                    'positions': current,
+                    'timestamp': str(dt.datetime.now()),
+                })
+            except Exception:
+                pass
+
+        # Sort changed by absolute value change
+        changed.sort(key=lambda c: abs(c.get('value_change', 0)), reverse=True)
+
+        return {
+            'changed': changed,
+            'new': new_symbols,
+            'removed': removed_symbols,
+            'unchanged_count': unchanged_count,
+            'prev_timestamp': prev_ts,
+            'timestamp': str(dt.datetime.now()),
+        }
+
+    def _group_store(self):
+        """Lazy-init PositionGroupStore from config duckdb_path."""
+        if not hasattr(self, '_grp_store'):
+            cfg = self._container.config()
+            duckdb_path = cfg.get('duckdb_path', '')
+            if not duckdb_path:
+                raise ValueError("duckdb_path not configured")
+            from trader.data.position_groups import PositionGroupStore
+            self._grp_store = PositionGroupStore(duckdb_path)
+        return self._grp_store
+
     def propose(
         self,
         symbol: str,
@@ -756,6 +1021,7 @@ class MMR:
         sec_type: str = 'STK',
         exchange: str = '',
         currency: str = '',
+        group: str = '',
     ) -> tuple[int, Optional[dict], Optional[dict]]:
         """Create a trade proposal. Returns (proposal_id, leverage_info, snapshot_info). No trader_service needed."""
         from trader.trading.proposal import ExecutionSpec, TradeProposal
@@ -767,10 +1033,12 @@ class MMR:
         # Auto-size when neither quantity nor amount is provided
         if metadata is None:
             metadata = {}
+        _cached_snap = None  # reused below to avoid duplicate snapshot RPC
         if quantity is None and amount is None:
             try:
                 from trader.trading.position_sizing import (
                     LiquidityInfo, PositionSizingConfig, PositionSizer,
+                    VolatilityInfo, compute_atr,
                 )
                 config = PositionSizingConfig.load()
                 state = self._get_portfolio_state()
@@ -778,8 +1046,10 @@ class MMR:
 
                 # Build liquidity info from snapshot (gracefully degrades)
                 liq = None
+                vol_info = None
                 try:
-                    snap = self.snapshot(symbol, exchange=exchange, currency=currency)
+                    _cached_snap = self.snapshot(symbol, exchange=exchange, currency=currency)
+                    snap = _cached_snap
                     if snap:
                         import math
                         _bid = snap.get('bid', 0) or 0
@@ -797,27 +1067,39 @@ class MMR:
                             bid=_bid, ask=_ask, last=_last,
                             bid_size=_bid_sz, ask_size=_ask_sz,
                         )
-                        # Try to get ADV from local historical data
+                        # Try to get ADV + ATR from local historical data
                         try:
+                            import datetime as _dt
                             from trader.data.duckdb_store import DuckDBDataStore
                             cfg = self._container.config()
                             duckdb_path = cfg.get('duckdb_path', '')
                             if duckdb_path:
                                 ds = DuckDBDataStore(duckdb_path)
-                                # Look up conId for the symbol
-                                defs = self.resolve(symbol, sec_type=sec_type, exchange=exchange)
-                                if defs:
-                                    con_id = defs[0].conId
-                                    hist = ds.read(con_id, '1 day', count=20)
-                                    if hist is not None and not hist.empty and 'volume' in hist.columns:
-                                        liq.avg_daily_volume = float(hist['volume'].mean())
+                                start = _dt.datetime.now() - _dt.timedelta(days=60)
+                                hist = ds.read(symbol, start=start, bar_size='1 day')
+                                if hist is not None and not hist.empty:
+                                    # Use last 20 bars for ADV
+                                    recent = hist.tail(20)
+                                    if 'volume' in recent.columns:
+                                        liq.avg_daily_volume = float(recent['volume'].mean())
+                                    # Compute ATR for volatility-aware sizing
+                                    if all(c in hist.columns for c in ('high', 'low', 'close')):
+                                        atr_val = compute_atr(
+                                            hist['high'].tolist(),
+                                            hist['low'].tolist(),
+                                            hist['close'].tolist(),
+                                        )
+                                        if atr_val is not None:
+                                            last_price = _last or _bid or _ask or float(hist['close'].iloc[-1])
+                                            vol_info = VolatilityInfo(atr=atr_val, price=last_price)
                         except Exception:
                             pass
                 except Exception:
                     pass
 
                 result = sizer.compute(
-                    confidence=confidence, portfolio_state=state, liquidity=liq,
+                    confidence=confidence, portfolio_state=state,
+                    liquidity=liq, volatility=vol_info,
                 )
                 if result.amount_usd > 0:
                     amount = result.amount_usd
@@ -845,15 +1127,27 @@ class MMR:
             sec_type=sec_type,
             exchange=exchange,
             currency=currency,
+            group=group,
         )
         proposal_id = self._proposal_store().add(proposal)
 
+        # Register group membership if specified
+        if group:
+            try:
+                gs = self._group_store()
+                gs.add_member(group, symbol)
+            except Exception:
+                pass
+
         # Attempt to capture snapshot + leverage estimate (requires trader_service, gracefully degrades)
+        # Reuse snapshot from sizing if available to avoid a duplicate RPC call.
         leverage_info = None
         snapshot_info = None
         try:
-            # Capture bid/ask/last at proposal time
-            snap = self.snapshot(symbol, exchange=exchange, currency=currency)
+            # Capture bid/ask/last at proposal time — reuse cached snapshot from sizing
+            snap = _cached_snap
+            if snap is None:
+                snap = self.snapshot(symbol, exchange=exchange, currency=currency)
             if snap:
                 snapshot_info = {
                     'bid': snap.get('bid'),
@@ -969,6 +1263,7 @@ class MMR:
             'updated_at': p.updated_at,
             'order_ids': p.order_ids,
             'rejection_reason': p.rejection_reason,
+            'group': p.group,
         }
 
         # Include snapshot from metadata if present
@@ -1079,27 +1374,46 @@ class MMR:
     # Position closing
     # ------------------------------------------------------------------
 
-    def close_position(self, symbol: str, quantity: Optional[float] = None) -> SuccessFail:
+    def close_position(self, symbol: str, quantity: Optional[float] = None,
+                       con_id: Optional[int] = None,
+                       skip_risk_gate: bool = False,
+                       _pos_size: Optional[float] = None) -> SuccessFail:
         """Close (or reduce) a position.
 
         If *quantity* is None, sells the entire position at market.
+        Uses the cached contract from the last portfolio() call when available,
+        avoiding re-resolution (which fails for international stocks not in the
+        local universe).
+        If *skip_risk_gate* is True, bypasses risk gate checks (used by close-all).
+        If *_pos_size* is provided, skip the portfolio lookup (caller already has it).
         """
-        portfolio_df = self.portfolio()
-        if portfolio_df.empty:
-            return SuccessFail.fail(error=f"No positions found")
+        if _pos_size is not None:
+            pos_size = _pos_size
+        else:
+            portfolio_df = self.portfolio()
+            if portfolio_df.empty:
+                return SuccessFail.fail(error=f"No positions found")
 
-        match = portfolio_df[portfolio_df['symbol'] == symbol]
-        if match.empty:
-            return SuccessFail.fail(error=f"No position for {symbol}")
+            match = portfolio_df[portfolio_df['symbol'] == symbol]
+            if match.empty:
+                return SuccessFail.fail(error=f"No position for {symbol}")
 
-        pos_size = float(match.iloc[0]['position'])
+            pos_size = float(match.iloc[0]['position'])
+
         if pos_size == 0:
             return SuccessFail.fail(error=f"Position for {symbol} is zero")
 
         close_qty = abs(quantity) if quantity is not None else abs(pos_size)
         action = 'SELL' if pos_size > 0 else 'BUY'
 
-        contract = self._resolve_contract(symbol)
+        # Prefer cached contract from portfolio (works for all exchanges).
+        # Fall back to resolve only if no cached contract exists.
+        contract = self._contract_map.get(symbol)
+        if contract is None:
+            try:
+                contract = self._resolve_contract(con_id or symbol)
+            except ValueError:
+                return SuccessFail.fail(error=f"Could not resolve symbol: {symbol}")
         return consume(
             self._rpc.rpc(return_type=SuccessFail[Trade]).place_order_simple(
                 contract=contract,
@@ -1110,6 +1424,7 @@ class MMR:
                 market_order=True,
                 stop_loss_percentage=0.0,
                 debug=False,
+                skip_risk_gate=skip_risk_gate,
             )
         )
 
@@ -1241,13 +1556,29 @@ class MMR:
                     )
 
             # 2. Place market order for delta shares
+            #    Use cached contract from portfolio to support international stocks.
             try:
-                order_result = self._place_order(
-                    symbol=symbol,
-                    action=action,
-                    quantity=abs(delta_qty),
-                    market=True,
-                )
+                cached_contract = self._contract_map.get(symbol)
+                if cached_contract:
+                    order_result = consume(
+                        self._rpc.rpc(return_type=SuccessFail[Trade]).place_order_simple(
+                            contract=cached_contract,
+                            action=action,
+                            equity_amount=None,
+                            quantity=abs(delta_qty),
+                            limit_price=None,
+                            market_order=True,
+                            stop_loss_percentage=0.0,
+                            debug=False,
+                        )
+                    )
+                else:
+                    order_result = self._place_order(
+                        symbol=symbol,
+                        action=action,
+                        quantity=abs(delta_qty),
+                        market=True,
+                    )
                 if order_result.is_success():
                     results['successes'].append(
                         f'{symbol}: {action} {abs(delta_qty)} shares'
@@ -1264,7 +1595,9 @@ class MMR:
             # 3. Re-create protective orders with new quantity
             for order_info in associated:
                 try:
-                    contract = self._resolve_contract(symbol)
+                    contract = self._contract_map.get(symbol)
+                    if contract is None:
+                        contract = self._resolve_contract(symbol)
                     new_qty = abs(target_qty)
 
                     consume(
@@ -1330,19 +1663,41 @@ class MMR:
             'halted': getattr(ticker, 'halted', float('nan')),
         }
 
+    def snapshot_batch(self, symbols: list[str], exchange: str = '',
+                       currency: str = '') -> list[dict]:
+        """Get price snapshots for multiple *symbols* in one batch RPC call."""
+        contracts = []
+        for sym in symbols:
+            contract = self._resolve_contract(sym, exchange=exchange, currency=currency)
+            contracts.append(contract)
+        return consume(
+            self._rpc.rpc(return_type=list[dict]).get_snapshots_batch(contracts, True)
+        ) or []
+
+    def depth(self, symbol: Union[str, int], num_rows: int = 5,
+              exchange: str = '', currency: str = '',
+              is_smart_depth: bool = False) -> dict:
+        """Get Level 2 market depth (order book) for *symbol*."""
+        contract = self._resolve_contract(symbol, exchange=exchange, currency=currency)
+        return consume(
+            self._rpc.rpc(return_type=dict).get_market_depth(contract, num_rows, is_smart_depth)
+        )
+
     def subscribe_ticks(
         self,
         symbol: Union[str, int],
         callback: Callable[[Any], None],
         topic: str = 'ticker',
         delayed: bool = False,
+        exchange: str = '',
+        currency: str = '',
     ) -> Subscription:
         """Subscribe to live tick data for *symbol*.
 
         *callback* fires on a background thread each time a tick arrives.
         Call ``subscription.stop()`` to unsubscribe.
         """
-        contract = self._resolve_contract(symbol)
+        contract = self._resolve_contract(symbol, exchange=exchange, currency=currency)
         # Tell trader_service to publish ticks for this contract
         self._rpc.rpc().publish_contract(contract, delayed)
 
@@ -1613,13 +1968,35 @@ class MMR:
             pass
 
         try:
-            portfolio = consume(
-                self._rpc.rpc(return_type=list[PortfolioItem]).get_portfolio()
+            summaries = consume(
+                self._rpc.rpc(return_type=list[PortfolioSummary]).get_portfolio_summary()
             )
-            positions = [p for p in (portfolio or []) if abs(p.position) > 0]
+            positions = []
+            for p in (summaries or []):
+                if isinstance(p, (list, tuple)) and not hasattr(p, 'account'):
+                    _, position, _, _, _, unrealized, realized, _, daily = p
+                else:
+                    position, unrealized, realized, daily = (
+                        p.position, p.unrealizedPNL, p.realizedPNL, p.dailyPNL
+                    )
+                if abs(position) > 0:
+                    positions.append((unrealized, realized, daily))
+
             result['positions'] = len(positions)
-            result['unrealized_pnl'] = sum(p.unrealizedPNL for p in positions)
-            result['realized_pnl'] = sum(p.realizedPNL for p in positions)
+
+            unrealized = sum(u for u, _, _ in positions)
+            realized = sum(r for _, r, _ in positions)
+            daily = sum(d for _, _, d in positions)
+
+            def _pnl_str(val):
+                color = 'green' if val >= 0 else 'red'
+                sign = '+' if val >= 0 else '-'
+                return f'[{color}]{sign}${abs(val):,.2f}[/{color}]'
+
+            result['DailyPnL'] = _pnl_str(daily)
+            result['UnrealizedPnL'] = _pnl_str(unrealized)
+            result['RealizedPnL'] = _pnl_str(realized)
+            result['TotalPnL'] = _pnl_str(unrealized + realized)
         except Exception:
             result['positions'] = '?'
 

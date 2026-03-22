@@ -374,14 +374,30 @@ class Trader():
 
         self._reconnecting = True
         try:
-            max_retries = 10
-            for attempt in range(1, max_retries + 1):
-                delay = min(2 ** attempt, 120)  # exponential backoff, cap at 2 minutes
+            attempt = 0
+            while True:
+                attempt += 1
+                delay = min(2 ** min(attempt, 7), 120)  # exponential backoff, cap at 2 minutes
+
                 logging.warning(
-                    'IB Gateway disconnected — reconnection attempt %d/%d in %ds',
-                    attempt, max_retries, delay
+                    'IB Gateway disconnected — reconnection attempt %d in %ds',
+                    attempt, delay
                 )
+
+                t_before = asyncio.get_event_loop().time()
                 await asyncio.sleep(delay)
+                t_after = asyncio.get_event_loop().time()
+
+                # Detect system sleep: if the actual elapsed time is much longer
+                # than the requested delay, the system likely slept. Reset backoff
+                # so we get a fresh set of fast retries after wake.
+                elapsed = t_after - t_before
+                if elapsed > delay * 3 and delay > 4:
+                    logging.info(
+                        'detected system sleep (requested %ds, elapsed %.0fs) — resetting backoff',
+                        delay, elapsed,
+                    )
+                    attempt = 1
 
                 try:
                     await self.client.connect_async()
@@ -389,8 +405,6 @@ class Trader():
                     return  # connected_event will fire and call setup_subscriptions
                 except Exception as ex:
                     logging.error('reconnection attempt %d failed: %s', attempt, ex)
-
-            logging.critical('failed to reconnect to IB Gateway after %d attempts', max_retries)
         finally:
             self._reconnecting = False
 
@@ -982,6 +996,7 @@ class Trader():
         stop_loss_percentage: float,
         algo_name: str = 'global',
         debug: bool = False,
+        skip_risk_gate: bool = False,
     ) -> Observable[Trade]:
         latest_tick: Ticker = await self.client.get_snapshot(contract)
 
@@ -997,7 +1012,11 @@ class Trader():
             algo_name=algo_name,
             debug=debug
         )
-        return await self.executioner.place_order(contract_order=contract_order, condition=ExecutorCondition.SANITY_CHECK)
+        return await self.executioner.place_order(
+            contract_order=contract_order,
+            condition=ExecutorCondition.SANITY_CHECK,
+            skip_risk_gate=skip_risk_gate,
+        )
 
     @log_method
     def cancel_order(self, order_id: int) -> Optional[Trade]:
@@ -1030,6 +1049,9 @@ class Trader():
 
     async def get_fundamental_data(self, contract, report_type: str = 'ReportSnapshot') -> str:
         return await self.client.get_fundamental_data(contract, report_type)
+
+    async def get_market_depth(self, contract, num_rows: int = 5, is_smart_depth: bool = False) -> dict:
+        return await self.client.get_market_depth(contract, num_rows=num_rows, is_smart_depth=is_smart_depth)
 
     async def get_news_headlines(self, conId: int, provider_codes: str = '',
                                   total_results: int = 5) -> list[dict]:

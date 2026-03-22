@@ -243,3 +243,28 @@ class TestProposalStore:
         proposal_store.update_status(pid, 'APPROVED')
         p2 = proposal_store.get(pid)
         assert p2.updated_at >= p1.updated_at
+
+    def test_group_round_trip(self, proposal_store):
+        """Group field survives storage via _group metadata key."""
+        proposal = TradeProposal(
+            symbol='BHP',
+            action='BUY',
+            quantity=100,
+            group='mining',
+            exchange='ASX',
+            currency='AUD',
+        )
+        pid = proposal_store.add(proposal)
+        result = proposal_store.get(pid)
+        assert result.group == 'mining'
+        assert result.exchange == 'ASX'
+        assert result.currency == 'AUD'
+        # _group should not leak into user-visible metadata
+        assert '_group' not in result.metadata
+
+    def test_group_empty_not_stored(self, proposal_store):
+        """Empty group string is not stored in metadata."""
+        pid = proposal_store.add(_make_proposal())
+        result = proposal_store.get(pid)
+        assert result.group == ''
+        assert '_group' not in result.metadata

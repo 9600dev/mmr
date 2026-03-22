@@ -14,19 +14,15 @@ scratch/
 .python-version
 .trader.history
 .env
-anbox-work/
+.claude/
 
 # Runtime directories
 /data/
 /logs/
+*.duckdb
+*.duckdb.wal
 
 # Local config overrides
 configs/local_*
 
-# Model artifacts
-models/*
-!models/.gitkeep
-
-# Notebook outputs (keep specific notebooks)
-notebooks/*
-!notebooks/modeling_cash_flows.ipynb
+notebooks/

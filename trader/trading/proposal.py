@@ -99,3 +99,4 @@ class TradeProposal:
     sec_type: str = 'STK'
     exchange: str = ''     # Exchange hint (e.g. 'ASX', 'TSE', 'SEHK')
     currency: str = ''     # Currency hint (e.g. 'AUD', 'JPY', 'HKD')
+    group: str = ''        # Position group name (e.g. 'mining', 'tech')
