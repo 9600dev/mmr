@@ -1,6 +1,6 @@
 #!/bin/bash
 # MMR container entrypoint
-# Sets IB Gateway connection env vars based on TRADING_MODE, then starts SSH
+# Sets IB Gateway connection env vars based on TRADING_MODE, then idles
 
 # Default IB Gateway connection (overridable via env vars)
 IB_SERVER_ADDRESS="${IB_SERVER_ADDRESS:-ib-gateway}"
@@ -43,9 +43,6 @@ mkdir -p /home/trader/mmr/data
 # Fix permissions — use chmod to avoid chown failures in podman rootless
 chown -R trader:trader /home/trader/.local/share/mmr/logs 2>/dev/null || chmod -R 777 /home/trader/.local/share/mmr/logs
 chown -R trader:trader /home/trader/mmr/data 2>/dev/null || chmod -R 777 /home/trader/mmr/data
-
-# Start SSH so we can connect
-service ssh restart
 
 # Keep container running
 exec tail -f /dev/null

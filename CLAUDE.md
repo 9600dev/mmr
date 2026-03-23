@@ -197,7 +197,7 @@ mmr/
 
 Two-container model via docker-compose:
 - **ib-gateway**: `ghcr.io/gnzsnz/ib-gateway:latest` — runs IB Gateway. Configured via `.env` file.
-- **mmr**: Built from Dockerfile. Connects to ib-gateway via Docker DNS. SSH on port 2222.
+- **mmr**: Built from Dockerfile. Connects to ib-gateway via Docker DNS. Access via `docker exec`.
 
 IB Gateway ports: 4003 (live), 4004 (paper), mapped to host as 4001/4002.
 
@@ -207,12 +207,12 @@ Data and logs are bind-mounted from `./data` and `./logs` on the host.
 
 ```bash
 # Docker (first-time prompts for IB credentials, writes .env)
-./docker.sh -g              # Build + start + SSH in
+./docker.sh -g              # Build + start + exec in
 ./docker.sh -b              # Build image only
 ./docker.sh -u              # Start containers
 ./docker.sh -d              # Stop containers
 ./docker.sh -s              # Sync code to running container
-./docker.sh -e              # SSH into container
+./docker.sh -e              # Exec into container
 ./docker.sh -l              # Tail logs
 ./docker.sh -c              # Clean all images/volumes
 

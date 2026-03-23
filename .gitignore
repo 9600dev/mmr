@@ -15,6 +15,7 @@ scratch/
 .trader.history
 .env
 .claude/
+.venv/
 
 # Runtime directories
 /data/

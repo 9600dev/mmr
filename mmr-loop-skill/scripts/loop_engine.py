@@ -144,6 +144,20 @@ class TradingLoop:
         if not cls._state["running"]:
             return HookResult()
 
+        # If the user typed something (interrupt + new instruction), let the
+        # LLM respond immediately instead of sleeping through it.
+        if ctx.messages:
+            last_msg = ctx.messages[-1]
+            if isinstance(last_msg, User):
+                msg_id = id(last_msg)
+                if msg_id != cls._state.get("_last_user_msg_id"):
+                    content = str(last_msg)
+                    # Ignore messages injected by this hook
+                    if not content.startswith("[Trading Loop]") and not content.startswith("[Position Monitor]"):
+                        cls._state["_last_user_msg_id"] = msg_id
+                        print(f"[loop] User instruction detected — giving LLM a turn")
+                        return HookResult(continue_loop=True)
+
         now = time.time()
         cycle_elapsed = now - cls._state["last_cycle_time"]
         cycle_interval = cls.config["scan_interval_seconds"]
@@ -163,6 +177,10 @@ class TradingLoop:
                 cls._state["preset_index"] % len(cls.config["scan_presets"])
             ] if cls.config["scan_presets"] else "momentum"
             cls._state["preset_index"] += 1
+
+            tracked = cls._state["tracked_positions"]
+            tracked_str = f" | tracking {len(tracked)}: {', '.join(tracked.keys())}" if tracked else ""
+            print(f"[loop] ▶ Cycle {cycle_num} starting — preset: {preset}{tracked_str}")
 
             prompt = cls._build_cycle_prompt(cycle_num, preset)
 
@@ -195,6 +213,18 @@ class TradingLoop:
         next_monitor_in = monitor_interval - monitor_elapsed if cls._state["tracked_positions"] else next_cycle_in
         next_event_in = min(next_cycle_in, next_monitor_in)
         sleep_time = min(next_event_in, 30)  # sleep up to 30s at a time
+
+        # Build a status line with context
+        cycle_num = cls._state["cycle"]
+        next_preset = cls.config["scan_presets"][
+            cls._state["preset_index"] % len(cls.config["scan_presets"])
+        ] if cls.config["scan_presets"] else "momentum"
+        last = cls._state.get("last_summary", "")
+        parts = [f"[loop] ⏳ Cycle {cycle_num + 1} in {int(next_cycle_in)}s (preset: {next_preset})"]
+        if last:
+            parts.append(f"  Last: {last}")
+        print("\n".join(parts))
+
         await asyncio.sleep(sleep_time)
         return HookResult(continue_loop=True)
 
@@ -229,7 +259,7 @@ If ALL positions are unchanged AND no relevant markets are open, skip to PHASE 4
 If any position moved >{move_threshold:.1%}, note it for deeper analysis.
 
 ## PHASE 2: ANALYZE
-Run these in parallel with `asyncio.gather()` or `delegate_task()`:
+Run these sequentially (DuckDB single-writer lock):
 1. `await MMRHelpers.portfolio_risk()` — check warnings, HHI, group budgets
 2. `await MMRHelpers.session_status()` — check remaining_positions capacity"""
 
@@ -254,7 +284,7 @@ Analyze results:
 - If remaining_positions = 0, do NOT propose new positions
 
 ## PHASE 3: PROPOSE (max {max_proposals} this cycle)
-For each actionable idea, create a proposal:
+For each actionable idea, create a proposal **sequentially** (do NOT use asyncio.gather — DuckDB allows only one writer at a time):
 ```python
 result = await MMRHelpers.propose(symbol, "BUY", confidence=X,
     reasoning="...", group="...", source="llm\""""
@@ -281,7 +311,8 @@ Write a ONE-LINE summary, then compact:
 _cycle = {cycle_num}
 _preset = "{preset}"
 summary = f"Cycle {{_cycle}} — [key finding]. [action taken or 'no action']. [risk status]."
-write_memory(f"trading_loop_cycle_{{_cycle}}", summary,
+TradingLoop._state["last_summary"] = summary
+write_memory(f"trading_loop_cycle_{{_cycle}}", summary, summary,
     metadata={{"type": "cycle", "cycle": _cycle, "preset": _preset}})
 print(summary)
 await compact("drop-helpers-results")

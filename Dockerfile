@@ -7,13 +7,13 @@ ENV LC_ALL=C.UTF-8
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN useradd -m -d /home/trader -s /bin/bash -G sudo trader \
-    && mkdir -p /var/run/sshd /run/sshd /tmp
+    && mkdir -p /tmp
 
 # System packages (no TWS/VNC/X11 — IB Gateway runs in a separate container)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     dialog apt-utils ca-certificates python3 python3-pip python3-venv python3-dev \
     git wget vim dpkg build-essential \
-    curl locales-all openssh-server sudo unzip tmux \
+    curl locales-all sudo unzip tmux \
     iproute2 net-tools rsync iputils-ping lnav jq \
     # required for native Python packages that compile C extensions
     libssl-dev libffi-dev \
@@ -23,11 +23,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV TZ=America/New_York
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-RUN echo 'trader:trader' | chpasswd \
-    && service ssh start
-
-# ports: SSH, pycron, zmq
-EXPOSE 22 8081
+# ports: pycron, zmq
+EXPOSE 8081
 
 # spin up the directories required
 RUN mkdir -p /home/trader/mmr/data \

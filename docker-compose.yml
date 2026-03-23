@@ -54,8 +54,6 @@ services:
       ZMQ_MESSAGEBUS_SERVER_ADDRESS: tcp://0.0.0.0
       ZMQ_DATA_RPC_SERVER_ADDRESS: tcp://0.0.0.0
     ports:
-      # SSH into MMR container
-      - "127.0.0.1:2222:22"
       # pycron web
       - "127.0.0.1:8081:8081"
       # ZMQ RPC/PubSub — allows host CLI to talk to services

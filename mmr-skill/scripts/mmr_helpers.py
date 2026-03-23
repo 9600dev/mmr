@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -9,16 +10,20 @@ from typing import Any, Dict, List, Optional, Union
 
 # Resolve paths once at import time
 _MMR_ROOT = str(Path(__file__).resolve().parent.parent.parent)
-_VENV_PYTHON = os.path.join(_MMR_ROOT, ".venv", "bin", "python")
 
-# Fall back to sys.executable if venv doesn't exist
-if not os.path.exists(_VENV_PYTHON):
-    _VENV_PYTHON = sys.executable
+# Use uv run --project to resolve dependencies automatically.
+# This avoids maintaining a .venv and matches the shell function pattern.
+_UV_PREFIX = ["uv", "run", "--project", _MMR_ROOT]
+
+# Serialize all CLI calls to avoid DuckDB single-writer lock contention.
+# Each _run_cli/_run_cli_json/_run_sdk_script spawns a subprocess that opens
+# its own DuckDB connection; concurrent writes will fail with a lock error.
+_CLI_LOCK = asyncio.Lock()
 
 
-def _run_cli(*args: str, timeout: int = 30) -> str:
+def _run_cli_sync(*args: str, timeout: int = 30) -> str:
     """Run an mmr CLI command and return combined stdout+stderr as a string."""
-    cmd = [_VENV_PYTHON, "-m", "trader.mmr_cli"] + list(args)
+    cmd = _UV_PREFIX + ["python", "-m", "trader.mmr_cli"] + list(args)
     result = subprocess.run(
         cmd,
         capture_output=True,
@@ -29,24 +34,38 @@ def _run_cli(*args: str, timeout: int = 30) -> str:
     )
     output = (result.stdout + result.stderr).strip()
     # Strip any remaining ANSI escape sequences (covers all CSI sequences)
-    import re
     output = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', output)
     return output
 
 
-def _run_cli_json(*args: str, timeout: int = 30) -> dict:
-    """Run mmr CLI with --json and return parsed JSON."""
-    raw = _run_cli("--json", *args, timeout=timeout)
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return {"data": raw, "title": None, "error": "Failed to parse JSON"}
+def _run_cli_json_sync(*args: str, timeout: int = 30) -> dict:
+    """Run mmr CLI with --json and return parsed JSON.
 
-
-def _run_sdk_script(script: str, timeout: int = 30) -> str:
-    """Run a Python script in the mmr venv and return output."""
+    Uses only stdout for JSON parsing (stderr may contain uv warnings,
+    Python logging, etc. that would break json.loads).
+    """
+    cmd = _UV_PREFIX + ["python", "-m", "trader.mmr_cli", "--json"] + list(args)
     result = subprocess.run(
-        [_VENV_PYTHON, "-c", script],
+        cmd,
+        capture_output=True,
+        text=True,
+        cwd=_MMR_ROOT,
+        timeout=timeout,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1"},
+    )
+    stdout = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', result.stdout.strip())
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError:
+        stderr = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', result.stderr.strip())
+        return {"data": stdout or stderr, "title": None, "error": "Failed to parse JSON"}
+
+
+def _run_sdk_script_sync(script: str, timeout: int = 30) -> str:
+    """Run a Python script in the mmr venv and return output."""
+    cmd = _UV_PREFIX + ["python", "-c", script]
+    result = subprocess.run(
+        cmd,
         capture_output=True,
         text=True,
         cwd=_MMR_ROOT,
@@ -54,9 +73,26 @@ def _run_sdk_script(script: str, timeout: int = 30) -> str:
         env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1"},
     )
     output = (result.stdout + result.stderr).strip()
-    import re
     output = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', output)
     return output
+
+
+async def _run_cli(*args: str, timeout: int = 30) -> str:
+    """Async wrapper: acquires lock, runs CLI in a thread."""
+    async with _CLI_LOCK:
+        return await asyncio.to_thread(_run_cli_sync, *args, timeout=timeout)
+
+
+async def _run_cli_json(*args: str, timeout: int = 30) -> dict:
+    """Async wrapper: acquires lock, runs CLI JSON in a thread."""
+    async with _CLI_LOCK:
+        return await asyncio.to_thread(_run_cli_json_sync, *args, timeout=timeout)
+
+
+async def _run_sdk_script(script: str, timeout: int = 30) -> str:
+    """Async wrapper: acquires lock, runs SDK script in a thread."""
+    async with _CLI_LOCK:
+        return await asyncio.to_thread(_run_sdk_script_sync, script, timeout=timeout)
 
 
 class MMRHelpers:
@@ -78,7 +114,7 @@ class MMRHelpers:
         result = await MMRHelpers.portfolio()
         # result["data"] → [{"symbol": "AAPL", "position": 100, ...}, ...]
         """
-        return await asyncio.to_thread(_run_cli_json, "portfolio")
+        return await _run_cli_json("portfolio")
 
     @staticmethod
     async def positions() -> str:
@@ -90,7 +126,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.positions()
         """
-        return await asyncio.to_thread(_run_cli, "positions")
+        return await _run_cli("positions")
 
     @staticmethod
     async def orders() -> dict:
@@ -103,7 +139,7 @@ class MMRHelpers:
         result = await MMRHelpers.orders()
         # result["data"] → [{"orderId": 123, "action": "BUY", ...}, ...]
         """
-        return await asyncio.to_thread(_run_cli_json, "orders")
+        return await _run_cli_json("orders")
 
     @staticmethod
     async def trades() -> dict:
@@ -116,7 +152,7 @@ class MMRHelpers:
         result = await MMRHelpers.trades()
         # result["data"] → [{"symbol": "AAPL", "orderId": 123, ...}, ...]
         """
-        return await asyncio.to_thread(_run_cli_json, "trades")
+        return await _run_cli_json("trades")
 
     @staticmethod
     async def account() -> str:
@@ -127,7 +163,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.account()
         """
-        return await asyncio.to_thread(_run_cli, "account")
+        return await _run_cli("account")
 
     @staticmethod
     async def status() -> dict:
@@ -140,7 +176,7 @@ class MMRHelpers:
         # result["data"]["connected"] → True
         # result["data"]["DailyPnL"] → "-$241.78"
         """
-        return await asyncio.to_thread(_run_cli_json, "status")
+        return await _run_cli_json("status")
 
     # ------------------------------------------------------------------
     # Symbol Resolution & Market Data
@@ -169,7 +205,7 @@ class MMRHelpers:
             args.extend(["--exchange", exchange])
         if currency:
             args.extend(["--currency", currency])
-        return await asyncio.to_thread(_run_cli_json, *args)
+        return await _run_cli_json(*args)
 
     @staticmethod
     async def snapshot(symbol: str, delayed: bool = False,
@@ -197,7 +233,7 @@ class MMRHelpers:
             args.extend(["--exchange", exchange])
         if currency:
             args.extend(["--currency", currency])
-        return await asyncio.to_thread(_run_cli_json, *args)
+        return await _run_cli_json(*args)
 
     @staticmethod
     async def snapshots_batch(
@@ -225,7 +261,7 @@ class MMRHelpers:
             args.extend(["--exchange", exchange])
         if currency:
             args.extend(["--currency", currency])
-        return await asyncio.to_thread(_run_cli_json, *args, timeout=120)
+        return await _run_cli_json(*args, timeout=120)
 
     @staticmethod
     async def depth(symbol: str, rows: int = 5,
@@ -258,7 +294,7 @@ class MMRHelpers:
         if no_chart:
             args.append("--no-chart")
         args.append("--no-open")  # never open Preview from LLM context
-        return await asyncio.to_thread(_run_cli, *args)
+        return await _run_cli(*args)
 
     @staticmethod
     async def depth_json(symbol: str, rows: int = 5,
@@ -289,7 +325,7 @@ class MMRHelpers:
             args.extend(["--currency", currency])
         if smart:
             args.append("--smart")
-        return await asyncio.to_thread(_run_cli_json, *args)
+        return await _run_cli_json(*args)
 
     # ------------------------------------------------------------------
     # Trading
@@ -340,7 +376,7 @@ class MMRHelpers:
             args.extend(["--exchange", exchange])
         if currency:
             args.extend(["--currency", currency])
-        return await asyncio.to_thread(_run_cli, *args, timeout=30)
+        return await _run_cli(*args, timeout=30)
 
     @staticmethod
     async def sell(
@@ -386,7 +422,7 @@ class MMRHelpers:
             args.extend(["--exchange", exchange])
         if currency:
             args.extend(["--currency", currency])
-        return await asyncio.to_thread(_run_cli, *args, timeout=30)
+        return await _run_cli(*args, timeout=30)
 
     @staticmethod
     async def cancel(order_id: int) -> str:
@@ -399,7 +435,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.cancel(12345)
         """
-        return await asyncio.to_thread(_run_cli, "cancel", str(order_id))
+        return await _run_cli("cancel", str(order_id))
 
     @staticmethod
     async def cancel_all() -> str:
@@ -410,7 +446,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.cancel_all()
         """
-        return await asyncio.to_thread(_run_cli, "cancel-all")
+        return await _run_cli("cancel-all")
 
     # ------------------------------------------------------------------
     # Strategies
@@ -425,7 +461,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.strategies()
         """
-        return await asyncio.to_thread(_run_cli, "strategies")
+        return await _run_cli("strategies")
 
     @staticmethod
     async def enable_strategy(name: str) -> str:
@@ -438,7 +474,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.enable_strategy("smi_crossover")
         """
-        return await asyncio.to_thread(_run_cli, "strategies", "enable", name)
+        return await _run_cli("strategies", "enable", name)
 
     @staticmethod
     async def disable_strategy(name: str) -> str:
@@ -451,7 +487,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.disable_strategy("smi_crossover")
         """
-        return await asyncio.to_thread(_run_cli, "strategies", "disable", name)
+        return await _run_cli("strategies", "disable", name)
 
     # ------------------------------------------------------------------
     # Universe Management (most commands work without trader_service)
@@ -466,7 +502,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.universe_list()
         """
-        return await asyncio.to_thread(_run_cli, "universe", "list")
+        return await _run_cli("universe", "list")
 
     @staticmethod
     async def universe_show(name: str) -> str:
@@ -479,7 +515,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.universe_show("portfolio")
         """
-        return await asyncio.to_thread(_run_cli, "universe", "show", name)
+        return await _run_cli("universe", "show", name)
 
     @staticmethod
     async def universe_create(name: str) -> str:
@@ -492,7 +528,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.universe_create("my_watchlist")
         """
-        return await asyncio.to_thread(_run_cli, "universe", "create", name)
+        return await _run_cli("universe", "create", name)
 
     @staticmethod
     async def universe_delete(name: str) -> str:
@@ -534,7 +570,7 @@ class MMRHelpers:
         result = await MMRHelpers.universe_add("tech_stocks", ["AAPL", "MSFT", "NVDA", "AMD"])
         """
         args = ["universe", "add", name] + symbols
-        return await asyncio.to_thread(_run_cli, *args, timeout=120)
+        return await _run_cli(*args, timeout=120)
 
     @staticmethod
     async def universe_remove(name: str, symbol: str) -> str:
@@ -548,7 +584,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.universe_remove("tech_stocks", "INTC")
         """
-        return await asyncio.to_thread(_run_cli, "universe", "remove", name, symbol)
+        return await _run_cli("universe", "remove", name, symbol)
 
     @staticmethod
     async def universe_import(name: str, csv_file: str) -> str:
@@ -564,7 +600,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.universe_import("my_universe", "/path/to/symbols.csv")
         """
-        return await asyncio.to_thread(_run_cli, "universe", "import", name, csv_file)
+        return await _run_cli("universe", "import", name, csv_file)
 
     # ------------------------------------------------------------------
     # Financial Statements (no trader_service needed, uses Massive.com API)
@@ -589,7 +625,7 @@ class MMRHelpers:
         result = await MMRHelpers.balance_sheet("NVDA", limit=8, timeframe="annual")
         """
         args = ["financials", "balance", symbol, "--limit", str(limit), "--timeframe", timeframe]
-        return await asyncio.to_thread(_run_cli, *args)
+        return await _run_cli(*args)
 
     @staticmethod
     async def income_statement(
@@ -610,7 +646,7 @@ class MMRHelpers:
         result = await MMRHelpers.income_statement("NVDA", limit=8, timeframe="annual")
         """
         args = ["financials", "income", symbol, "--limit", str(limit), "--timeframe", timeframe]
-        return await asyncio.to_thread(_run_cli, *args)
+        return await _run_cli(*args)
 
     @staticmethod
     async def cash_flow(
@@ -631,7 +667,7 @@ class MMRHelpers:
         result = await MMRHelpers.cash_flow("AAPL", limit=8, timeframe="annual")
         """
         args = ["financials", "cashflow", symbol, "--limit", str(limit), "--timeframe", timeframe]
-        return await asyncio.to_thread(_run_cli, *args)
+        return await _run_cli(*args)
 
     @staticmethod
     async def filing_section(
@@ -653,7 +689,7 @@ class MMRHelpers:
         result = await MMRHelpers.filing_section("NVDA", section="risk_factors")
         """
         args = ["financials", "filing", symbol, "--section", section, "--limit", str(limit)]
-        return await asyncio.to_thread(_run_cli, *args, timeout=60)
+        return await _run_cli(*args, timeout=60)
 
     @staticmethod
     async def ratios(symbol: str) -> str:
@@ -668,7 +704,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.ratios("AAPL")
         """
-        return await asyncio.to_thread(_run_cli, "financials", "ratios", symbol)
+        return await _run_cli("financials", "ratios", symbol)
 
     # ------------------------------------------------------------------
     # Historical Data
@@ -700,7 +736,7 @@ class MMRHelpers:
             args.extend(["--symbol", symbol])
         if universe:
             args.extend(["--universe", universe])
-        return await asyncio.to_thread(_run_cli, *args, timeout=300)
+        return await _run_cli(*args, timeout=300)
 
     @staticmethod
     async def history_ib(
@@ -727,7 +763,7 @@ class MMRHelpers:
             args.extend(["--symbol", symbol])
         if universe:
             args.extend(["--universe", universe])
-        return await asyncio.to_thread(_run_cli, *args, timeout=300)
+        return await _run_cli(*args, timeout=300)
 
     # ------------------------------------------------------------------
     # Options
@@ -745,7 +781,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.options_expirations("AAPL")
         """
-        return await asyncio.to_thread(_run_cli, "options", "expirations", symbol)
+        return await _run_cli("options", "expirations", symbol)
 
     @staticmethod
     async def options_chain(
@@ -779,7 +815,7 @@ class MMRHelpers:
             args.extend(["--strike-min", str(strike_min)])
         if strike_max is not None:
             args.extend(["--strike-max", str(strike_max)])
-        return await asyncio.to_thread(_run_cli, *args)
+        return await _run_cli(*args)
 
     @staticmethod
     async def options_snapshot(option_ticker: str) -> str:
@@ -793,7 +829,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.options_snapshot("O:AAPL260320C00250000")
         """
-        return await asyncio.to_thread(_run_cli, "options", "snapshot", option_ticker)
+        return await _run_cli("options", "snapshot", option_ticker)
 
     @staticmethod
     async def options_implied(
@@ -815,7 +851,7 @@ class MMRHelpers:
         """
         args = ["options", "implied", symbol, "-e", expiration,
                 "--risk-free-rate", str(risk_free_rate)]
-        return await asyncio.to_thread(_run_cli, *args)
+        return await _run_cli(*args)
 
     @staticmethod
     async def buy_option(
@@ -849,7 +885,7 @@ class MMRHelpers:
             args.append("--market")
         if limit_price is not None:
             args.extend(["--limit", str(limit_price)])
-        return await asyncio.to_thread(_run_cli, *args, timeout=30)
+        return await _run_cli(*args, timeout=30)
 
     @staticmethod
     async def sell_option(
@@ -883,7 +919,7 @@ class MMRHelpers:
             args.append("--market")
         if limit_price is not None:
             args.extend(["--limit", str(limit_price)])
-        return await asyncio.to_thread(_run_cli, *args, timeout=30)
+        return await _run_cli(*args, timeout=30)
 
     # ------------------------------------------------------------------
     # Data Exploration (no service needed)
@@ -899,7 +935,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.data_summary()
         """
-        result = await asyncio.to_thread(_run_cli_json, "data", "summary")
+        result = await _run_cli_json("data", "summary")
         return json.dumps(result, indent=2)
 
     @staticmethod
@@ -924,7 +960,7 @@ class MMRHelpers:
         args = ["data", "query", symbol, "--bar-size", bar_size, "--days", str(days)]
         if tail is not None:
             args.extend(["--tail", str(tail)])
-        result = await asyncio.to_thread(_run_cli_json, *args)
+        result = await _run_cli_json(*args)
         return json.dumps(result, indent=2)
 
     @staticmethod
@@ -945,7 +981,7 @@ class MMRHelpers:
         result = await MMRHelpers.data_download(["AAPL", "MSFT"], bar_size="1 day", days=365)
         """
         args = ["data", "download"] + symbols + ["--bar-size", bar_size, "--days", str(days)]
-        result = await asyncio.to_thread(_run_cli_json, *args, timeout=300)
+        result = await _run_cli_json(*args, timeout=300)
         return json.dumps(result, indent=2)
 
     # ------------------------------------------------------------------
@@ -983,7 +1019,7 @@ class MMRHelpers:
             args.extend(["--conids"] + [str(c) for c in conids])
         if universe:
             args.extend(["--universe", universe])
-        result = await asyncio.to_thread(_run_cli_json, *args, timeout=300)
+        result = await _run_cli_json(*args, timeout=300)
         return json.dumps(result, indent=2)
 
     # ------------------------------------------------------------------
@@ -1003,7 +1039,7 @@ class MMRHelpers:
         result = await MMRHelpers.strategy_create("momentum_breakout")
         """
         args = ["strategies", "create", name, "--directory", directory]
-        result = await asyncio.to_thread(_run_cli_json, *args)
+        result = await _run_cli_json(*args)
         return json.dumps(result, indent=2)
 
     @staticmethod
@@ -1036,7 +1072,7 @@ class MMRHelpers:
             args.extend(["--universe", universe])
         if paper:
             args.append("--paper")
-        result = await asyncio.to_thread(_run_cli_json, *args)
+        result = await _run_cli_json(*args)
         return json.dumps(result, indent=2)
 
     @staticmethod
@@ -1050,7 +1086,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.strategy_undeploy("my_strategy")
         """
-        result = await asyncio.to_thread(_run_cli_json, "strategies", "undeploy", name)
+        result = await _run_cli_json("strategies", "undeploy", name)
         return json.dumps(result, indent=2)
 
     @staticmethod
@@ -1065,7 +1101,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.strategy_signals("my_strategy")
         """
-        result = await asyncio.to_thread(_run_cli_json, "strategies", "signals", name,
+        result = await _run_cli_json("strategies", "signals", name,
                                          "--limit", str(limit))
         return json.dumps(result, indent=2)
 
@@ -1087,7 +1123,7 @@ class MMRHelpers:
         result = await MMRHelpers.strategy_backtest("smi_crossover_amd", days=365)
         """
         args = ["strategies", "backtest", name, "--days", str(days), "--capital", str(capital)]
-        result = await asyncio.to_thread(_run_cli_json, *args, timeout=300)
+        result = await _run_cli_json(*args, timeout=300)
         return json.dumps(result, indent=2)
 
     # ------------------------------------------------------------------
@@ -1139,7 +1175,7 @@ class MMRHelpers:
             args.extend(["--min-bound", str(min_bound)])
         if dry_run:
             args.append("--dry-run")
-        return await asyncio.to_thread(_run_cli, *args, timeout=120)
+        return await _run_cli(*args, timeout=120)
 
     # ------------------------------------------------------------------
     # Trade Proposals (no service needed to create; approve needs trader_service)
@@ -1211,7 +1247,7 @@ class MMRHelpers:
             args.extend(["--exchange", exchange])
         if currency:
             args.extend(["--currency", currency])
-        return await asyncio.to_thread(_run_cli_json, *args, timeout=30)
+        return await _run_cli_json(*args, timeout=30)
 
     @staticmethod
     async def proposals(status: Optional[str] = None, all_statuses: bool = False) -> str:
@@ -1230,7 +1266,7 @@ class MMRHelpers:
             args.extend(["--status", status])
         if all_statuses:
             args.append("--all")
-        return await asyncio.to_thread(_run_cli, *args)
+        return await _run_cli(*args)
 
     @staticmethod
     async def approve(proposal_id: int) -> str:
@@ -1242,7 +1278,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.approve(42)
         """
-        return await asyncio.to_thread(_run_cli, "approve", str(proposal_id), timeout=30)
+        return await _run_cli("approve", str(proposal_id), timeout=30)
 
     @staticmethod
     async def reject(proposal_id: int, reason: str = "") -> str:
@@ -1258,7 +1294,7 @@ class MMRHelpers:
         args = ["reject", str(proposal_id)]
         if reason:
             args.extend(["--reason", reason])
-        return await asyncio.to_thread(_run_cli, *args)
+        return await _run_cli(*args)
 
     # ------------------------------------------------------------------
     # Market Scanning & Ideas
@@ -1312,7 +1348,7 @@ class MMRHelpers:
         if news:
             args.append("--news")
         timeout = 120 if location else 30
-        return await asyncio.to_thread(_run_cli_json, *args, timeout=timeout)
+        return await _run_cli_json(*args, timeout=timeout)
 
     @staticmethod
     async def news(ticker: str = "", limit: int = 10, detail: bool = False) -> str:
@@ -1334,7 +1370,7 @@ class MMRHelpers:
         args.extend(["--limit", str(limit)])
         if detail:
             args.append("--detail")
-        return await asyncio.to_thread(_run_cli, *args)
+        return await _run_cli(*args)
 
     @staticmethod
     async def movers(market: str = "stocks", losers: bool = False, num: int = 20) -> str:
@@ -1353,7 +1389,7 @@ class MMRHelpers:
         args = ["movers", "--market", market, "--num", str(num)]
         if losers:
             args.append("--losers")
-        return await asyncio.to_thread(_run_cli, *args)
+        return await _run_cli(*args)
 
     @staticmethod
     async def market_hours() -> dict:
@@ -1365,7 +1401,7 @@ class MMRHelpers:
         result = await MMRHelpers.market_hours()
         # result["data"] → [{"exchange": "ASX", "status": "OPEN", ...}, ...]
         """
-        return await asyncio.to_thread(_run_cli_json, "market-hours")
+        return await _run_cli_json("market-hours")
 
     # ------------------------------------------------------------------
     # Forex
@@ -1383,7 +1419,7 @@ class MMRHelpers:
         result = await MMRHelpers.forex_snapshot("EURUSD")
         result = await MMRHelpers.forex_snapshot("GBPUSD", source="massive")
         """
-        return await asyncio.to_thread(_run_cli, "forex", "snapshot", pair, "--source", source)
+        return await _run_cli("forex", "snapshot", pair, "--source", source)
 
     @staticmethod
     async def forex_movers(losers: bool = False) -> str:
@@ -1398,7 +1434,7 @@ class MMRHelpers:
         args = ["forex", "movers"]
         if losers:
             args.append("--losers")
-        return await asyncio.to_thread(_run_cli, *args)
+        return await _run_cli(*args)
 
     # ------------------------------------------------------------------
     # Risk & Session Management
@@ -1414,7 +1450,7 @@ class MMRHelpers:
         result = await MMRHelpers.risk()
         # result["data"] → [{"limit": "max_daily_loss", "value": 1000, ...}, ...]
         """
-        return await asyncio.to_thread(_run_cli_json, "risk")
+        return await _run_cli_json("risk")
 
     @staticmethod
     async def session_limits() -> str:
@@ -1425,7 +1461,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.session_limits()
         """
-        return await asyncio.to_thread(_run_cli, "session", "limits")
+        return await _run_cli("session", "limits")
 
     @staticmethod
     async def portfolio_snapshot() -> dict:
@@ -1443,7 +1479,7 @@ class MMRHelpers:
         # snap["data"]["daily_pnl"] → -51.23
         # snap["data"]["movers"][0] → {"symbol": "XRO", "change_pct": -0.0215, ...}
         """
-        return await asyncio.to_thread(_run_cli_json, "portfolio-snapshot")
+        return await _run_cli_json("portfolio-snapshot")
 
     @staticmethod
     async def portfolio_diff() -> dict:
@@ -1463,7 +1499,7 @@ class MMRHelpers:
         # diff["data"]["removed"] → []
         # diff["data"]["unchanged_count"] → 15
         """
-        return await asyncio.to_thread(_run_cli_json, "portfolio-diff")
+        return await _run_cli_json("portfolio-diff")
 
     @staticmethod
     async def session_status() -> dict:
@@ -1477,7 +1513,7 @@ class MMRHelpers:
         # status["data"]["config"]["volatility_adjustment"] → True
         # status["data"]["recommended_sizes"]["high_confidence"]["reasoning"]
         """
-        return await asyncio.to_thread(_run_cli_json, "session")
+        return await _run_cli_json("session")
 
     @staticmethod
     async def portfolio_risk() -> dict:
@@ -1493,7 +1529,7 @@ class MMRHelpers:
         # report["data"]["group_allocations"] → [{name, pct, budget_pct, over_budget}]
         # report["data"]["summary"] → "Portfolio has 17 positions..."
         """
-        return await asyncio.to_thread(_run_cli_json, "portfolio-risk")
+        return await _run_cli_json("portfolio-risk")
 
     # ------------------------------------------------------------------
     # Position Groups
@@ -1509,7 +1545,7 @@ class MMRHelpers:
         groups = await MMRHelpers.group_list()
         # groups["data"]["groups"] → [{name, members, max_allocation_pct, ...}]
         """
-        return await asyncio.to_thread(_run_cli_json, "group", "list")
+        return await _run_cli_json("group", "list")
 
     @staticmethod
     async def group_create(name: str, budget: float = 0.0, description: str = "") -> str:
@@ -1529,7 +1565,7 @@ class MMRHelpers:
             args.extend(["--budget", str(budget)])
         if description:
             args.extend(["--description", description])
-        return await asyncio.to_thread(_run_cli, *args)
+        return await _run_cli(*args)
 
     @staticmethod
     async def group_delete(name: str) -> str:
@@ -1540,7 +1576,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.group_delete("mining")
         """
-        return await asyncio.to_thread(_run_cli, "group", "delete", name)
+        return await _run_cli("group", "delete", name)
 
     @staticmethod
     async def group_show(name: str) -> dict:
@@ -1552,7 +1588,7 @@ class MMRHelpers:
         group = await MMRHelpers.group_show("mining")
         # group["data"]["members"] → ["BHP", "RIO", "FMG"]
         """
-        return await asyncio.to_thread(_run_cli_json, "group", "show", name)
+        return await _run_cli_json("group", "show", name)
 
     @staticmethod
     async def group_add(name: str, symbols: List[str]) -> str:
@@ -1566,7 +1602,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.group_add("mining", ["BHP", "RIO", "FMG"])
         """
-        return await asyncio.to_thread(_run_cli, "group", "add", name, *symbols)
+        return await _run_cli("group", "add", name, *symbols)
 
     @staticmethod
     async def group_remove(name: str, symbol: str) -> str:
@@ -1577,7 +1613,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.group_remove("mining", "BHP")
         """
-        return await asyncio.to_thread(_run_cli, "group", "remove", name, symbol)
+        return await _run_cli("group", "remove", name, symbol)
 
     @staticmethod
     async def group_set(name: str, budget: Optional[float] = None, description: Optional[str] = None) -> str:
@@ -1597,7 +1633,7 @@ class MMRHelpers:
             args.extend(["--budget", str(budget)])
         if description is not None:
             args.extend(["--description", description])
-        return await asyncio.to_thread(_run_cli, *args)
+        return await _run_cli(*args)
 
     # ------------------------------------------------------------------
     # Direct CLI (escape hatch)
@@ -1616,4 +1652,4 @@ class MMRHelpers:
         result = await MMRHelpers.cli("resolve AAPL")
         """
         args = command.split()
-        return await asyncio.to_thread(_run_cli, *args)
+        return await _run_cli(*args)

@@ -82,9 +82,9 @@ echo_usage() {
     echo "  -f (force clean: also remove build cache)"
     echo "  -s (sync code to running MMR container)"
     echo "  -a (sync all files to running MMR container)"
-    echo "  -g (go: build, then start all containers and SSH in)"
+    echo "  -g (go: build, then start all containers and exec in)"
     echo "  -l (logs: tail logs from all containers)"
-    echo "  -e (exec: SSH into running MMR container)"
+    echo "  -e (exec: shell into running MMR container)"
     echo ""
 }
 
@@ -257,7 +257,7 @@ up() {
     $RUNTIME network rm mmr_default 2>/dev/null || true
     $COMPOSE -f "$BUILDDIR/docker-compose.yml" up -d
     echo ""
-    echo "Containers started. Use './docker.sh -e' to SSH in, or './docker.sh -l' for logs."
+    echo "Containers started. Use './docker.sh -e' to exec in, or './docker.sh -l' for logs."
     echo "IB Gateway VNC available at localhost:5901 (if VNC_SERVER_PASSWORD is set in .env)"
 }
 
@@ -318,9 +318,17 @@ logs() {
     $COMPOSE -f "$BUILDDIR/docker-compose.yml" logs -f
 }
 
-ssh_in() {
-    echo "SSH'ing into MMR container (password: 'trader')..."
-    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null trader@localhost -p 2222
+exec_in() {
+    CONTID="$($RUNTIME ps -aqf name=mmr-mmr)"
+    if [[ -z "$CONTID" ]]; then
+        CONTID="$($RUNTIME ps -aqf name=mmr_mmr || true)"
+    fi
+    if [[ -z "$CONTID" ]]; then
+        echo "Can't find running MMR container"
+        exit 1
+    fi
+    echo "Exec'ing into MMR container ($CONTID)..."
+    $RUNTIME exec -it -u trader -w /home/trader/mmr "$CONTID" bash -l
 }
 
 sync() {
@@ -388,7 +396,7 @@ if [[ $l == "y" ]]; then
     logs
 fi
 if [[ $e == "y" ]]; then
-    ssh_in
+    exec_in
 fi
 if [[ $g == "y" ]]; then
     build
@@ -397,5 +405,5 @@ if [[ $g == "y" ]]; then
     echo ""
     echo "Waiting for containers to start..."
     sleep 3
-    ssh_in
+    exec_in
 fi
