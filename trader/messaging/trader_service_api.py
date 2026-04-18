@@ -200,6 +200,14 @@ class TraderServiceApi(RPCHandler):
         return await self.trader.disable_strategy(name)
 
     @rpcmethod
+    async def reload_strategies(self) -> SuccessFail[list[StrategyConfig]]:
+        return await self.trader.reload_strategies()
+
+    @rpcmethod
+    def get_status(self) -> dict:
+        return self.trader.status()
+
+    @rpcmethod
     async def scanner_data(
         self,
         scan_code: str = 'TOP_PERC_GAIN',

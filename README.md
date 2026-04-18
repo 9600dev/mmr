@@ -114,9 +114,9 @@ On first run, `start_mmr.sh` auto-launches the setup wizard to configure IB Gate
 
 | Service | Port | Role |
 |---------|------|------|
-| **trader_service** | 42001 (RPC), 42002 (PubSub) | Trading runtime — order execution, portfolio, market data streaming, risk gate |
+| **trader_service** | 42001 (RPC), 42002 (PubSub) | Trading runtime — order execution, portfolio, market data streaming, risk gate. Detects IB Gateway upstream connectivity loss and exposes it via `status` |
 | **data_service** | 42003 (RPC) | Historical data downloads (Massive.com + IB), DuckDB storage |
-| **strategy_service** | 42005 (RPC), 42006 (MessageBus) | Loads and runs strategies, receives tick streams, emits signals |
+| **strategy_service** | 42005 (RPC), 42006 (MessageBus) | Loads and runs strategies, receives tick streams, emits signals. Reconciliation loop (30s) auto-detects new strategies and portfolio changes |
 | **mmr_cli** | — | Interactive REPL or one-shot commands, connects to services via ZMQ |
 
 ### Messaging (ZeroMQ)
@@ -371,6 +371,7 @@ universe delete my_universe
 strategies                   # List all strategies
 strategies enable my_strat
 strategies disable my_strat
+strategies reload            # Reload YAML config + re-subscribe instruments
 ```
 
 ### Portfolio Resizing
@@ -433,6 +434,20 @@ User configs live in `~/.config/mmr/` (auto-copied from `configs/` on first run)
 | `logging.yaml` | Rich console + rotating file handlers |
 
 Environment variables override config values (uppercased parameter name). The `TRADER_CONFIG` env var overrides the config file path.
+
+### IB Gateway Container Settings
+
+The IB Gateway container (`ghcr.io/gnzsnz/ib-gateway`) is configured via environment variables in `docker-compose.yml` and `.env`:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `TWS_SETTINGS_PATH` | `/home/ibgateway/tws_settings` | Persist runtime settings (auto-restart state, sessions) to a bind mount without overwriting Jts template files |
+| `BYPASS_WARNING` | `yes` | Auto-dismiss precaution dialogs that IBC can't handle (e.g. "restart now?" prompt) |
+| `SAVE_TWS_SETTINGS` | `"08:00 17:00"` | Periodic settings saves — without this, settings only persist on clean shutdown |
+| `AUTO_RESTART_TIME` | `11:59 PM` | IB Gateway daily restart time (avoids 2FA re-authentication) |
+| `VNC_SERVER_PASSWORD` | (from `.env`) | VNC password for gateway GUI access at `vnc://localhost:5901` |
+
+See the [ib-gateway-docker README](https://github.com/gnzsnz/ib-gateway-docker) for the full list of environment variables.
 
 ## Project Structure
 

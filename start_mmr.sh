@@ -487,6 +487,7 @@ echo "  strategy_service PID: $STRATEGY_PID"
 echo ""
 echo "  Press Ctrl-C to stop all services"
 echo "  Run './start_mmr.sh --cli' in another terminal for the CLI"
+echo "  IB Gateway VNC: vnc://localhost:5901"
 echo ""
 
 # ─── Wait for Children ───────────────────────────────────────────────────────

@@ -448,6 +448,7 @@ def build_parser() -> argparse.ArgumentParser:
     enable_p.add_argument('--paper', action='store_true', default=True)
     disable_p = strat_sub.add_parser('disable', help='Disable a strategy')
     disable_p.add_argument('name', help='Strategy name')
+    strat_sub.add_parser('reload', help='Reload strategies from YAML and re-subscribe')
 
     # strategies create
     strat_create_p = strat_sub.add_parser('create', help='Create a strategy template file')
@@ -1095,6 +1096,37 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
         build_parser().print_help()
         return True
 
+    # Commands that require a live IB upstream connection
+    _ib_commands = {
+        'portfolio', 'p', 'positions', 'pos', 'orders', 'trades', 'account',
+        'buy', 'sell', 'cancel', 'cancel-all', 'close',
+        'snapshot', 'snap', 'snapshot-batch', 'depth', 'resolve',
+        'listen', 'watch', 'scan',
+        'approve',
+        'resize-positions',
+        'portfolio-risk', 'prisk',
+        'portfolio-snapshot', 'psnap',
+        'portfolio-diff', 'pdiff',
+    }
+
+    if cmd in _ib_commands:
+        upstream_err = mmr.check_ib_upstream()
+        if upstream_err:
+            if _json_mode:
+                print(json.dumps({
+                    'error': True,
+                    'message': f'IB Gateway is not connected to IBKR servers: {upstream_err}',
+                    'hint': 'Check IB Gateway via VNC (vnc://localhost:5901) or restart it with: docker compose restart ib-gateway',
+                }))
+            else:
+                console.print(
+                    f'[bold red]IB Gateway is not connected to IBKR servers[/bold red]\n'
+                    f'[dim]{upstream_err}[/dim]\n\n'
+                    f'Check IB Gateway via VNC: [cyan]vnc://localhost:5901[/cyan]\n'
+                    f'Restart IB Gateway:       [cyan]docker compose restart ib-gateway[/cyan]'
+                )
+            return True
+
     try:
         if cmd in ('portfolio', 'p'):
             df = mmr.portfolio()
@@ -1349,6 +1381,13 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
                 import logging as _logging
                 _logging.disable(_logging.NOTSET)
             print_dict(result, title='Status')
+            if not _json_mode and not result.get('ib_upstream_connected', True):
+                console.print(
+                    f'\n[bold red]IB Gateway is not connected to IBKR servers[/bold red]\n'
+                    f'[dim]{result.get("ib_upstream_error", "")}[/dim]\n'
+                    f'Check VNC: [cyan]vnc://localhost:5901[/cyan]  |  '
+                    f'Restart: [cyan]docker compose restart ib-gateway[/cyan]'
+                )
 
         elif cmd in ('market-hours', 'mh'):
             rows = mmr.market_hours()
@@ -2465,6 +2504,12 @@ def _handle_strategies(mmr: MMR, args: argparse.Namespace):
             print_status(f'Disabled: {args.name}')
         else:
             print_status(f'Disable failed: {result.error}', success=False)
+    elif action == 'reload':
+        result = mmr.reload_strategies()
+        if result.is_success():
+            print_status('Strategies reloaded')
+        else:
+            print_status(f'Reload failed: {result.error}', success=False)
     elif action == 'create':
         _handle_strategy_create(args)
     elif action == 'deploy':

@@ -21,6 +21,37 @@ import pytz
 
 logging = setup_logging(module_name='ib_history')
 
+
+# Error codes that indicate informational messages, not real errors
+IB_INFO_CODES = {2104, 2158, 2106}
+
+# Error codes that indicate connectivity/session issues (retryable after reconnect)
+IB_CONNECTIVITY_CODES = {1100, 1101, 1102, 504}
+
+# Error 162 substrings that indicate "no data" (skippable) vs fatal issues
+_162_NO_DATA_SUBSTRINGS = [
+    'HMDS query returned no data',
+    'No market data permissions',
+    'No data of type',
+    'no items retrieved',
+]
+
+_162_FATAL_SUBSTRINGS = [
+    'connected from a different IP address',
+    'API client has been unsubscribed',
+]
+
+
+class IBConnectivityError(Exception):
+    """IB connection/session lost — caller should reconnect and retry."""
+    pass
+
+
+class IBNoDataError(Exception):
+    """IB returned no data for this contract/period — skip and continue."""
+    pass
+
+
 class IBHistoryWorker():
     def __init__(
         self,
@@ -55,13 +86,13 @@ class IBHistoryWorker():
         self.error_string = errorString
         self.error_contract = contract
 
-        # ignore the following:
-        # ib error reqId: -1 errorCode 2104 errorString Market data farm connection is OK:usfarm.nj contract None
-        if errorCode == 2104 or errorCode == 2158 or errorCode == 2106:
-            self.error_code = 0
-            self.error_string = ''
-            self.error_contract = None
+        if errorCode in IB_INFO_CODES:
+            self.__clear_error()
             return
+
+        if errorCode in IB_CONNECTIVITY_CODES:
+            self.connected = False
+
         logging.error('ib error reqId: {} errorCode {} errorString {} contract {}'.format(reqId,
                                                                                           errorCode,
                                                                                           errorString,
@@ -208,10 +239,28 @@ class IBHistoryWorker():
                 keepUpToDate=False,
             )
 
-            # skip if 'no data' returned
-            # 162 is 'Historical Market data error' so we gotta parse the message
             if self.error_code > 0:
-                raise Exception('error_code: {}, error_string: {}'.format(self.error_code, self.error_string))
+                code = self.error_code
+                msg = self.error_string
+                self.__clear_error()
+
+                if code in IB_CONNECTIVITY_CODES:
+                    raise IBConnectivityError(
+                        'error_code: {}, error_string: {}'.format(code, msg))
+
+                if code == 162:
+                    if any(s in msg for s in _162_FATAL_SUBSTRINGS):
+                        raise IBConnectivityError(
+                            'error_code: {}, error_string: {}'.format(code, msg))
+                    if any(s in msg for s in _162_NO_DATA_SUBSTRINGS):
+                        raise IBNoDataError(
+                            'error_code: {}, error_string: {}'.format(code, msg))
+                    # unknown 162 variant — treat as no-data to avoid crashing
+                    logging.warning('unrecognized 162 error, treating as no-data: {}'.format(msg))
+                    raise IBNoDataError(
+                        'error_code: {}, error_string: {}'.format(code, msg))
+
+                raise Exception('error_code: {}, error_string: {}'.format(code, msg))
 
             if result:
                 df_result = ib_async.util.df(result).set_index('date')

@@ -17,21 +17,24 @@ services:
       EXISTING_SESSION_DETECTED_ACTION: ${EXISTING_SESSION_DETECTED_ACTION:-primaryoverride}
       AUTO_RESTART_TIME: "${AUTO_RESTART_TIME:-11:59 PM}"
       ALLOW_BLIND_TRADING: ${ALLOW_BLIND_TRADING:-no}
+      BYPASS_WARNING: ${BYPASS_WARNING:-yes}
+      SAVE_TWS_SETTINGS: ${SAVE_TWS_SETTINGS:-"08:00 17:00"}
       TIME_ZONE: ${TIME_ZONE:-America/New_York}
       TZ: ${TIME_ZONE:-America/New_York}
+      # Persist settings to a separate path so /home/ibgateway/Jts templates stay intact
+      TWS_SETTINGS_PATH: /home/ibgateway/tws_settings
       # Override default 1024x768 — patched run.sh reads XVFB_SCREEN env var
       XVFB_SCREEN: ${XVFB_SCREEN:-1920x1080x24}
     volumes:
       - ./scripts/ib-gateway-run.sh:/home/ibgateway/scripts/run.sh:ro
+      # Persist TWS runtime settings (auto-restart state, login sessions) across restarts
+      - ./data/tws_settings:/home/ibgateway/tws_settings
     ports:
       # IB Gateway API ports mapped to standard TWS ports (live: 7496, paper: 7497)
       - "127.0.0.1:7496:4003"
       - "127.0.0.1:7497:4004"
       # VNC for viewing IB Gateway GUI
       - "127.0.0.1:5901:5900"
-    # Uncomment to persist TWS settings across container restarts
-    # volumes:
-    #   - ./data/tws_settings:/home/ibgateway/Jts
 
   mmr:
     build:
@@ -41,7 +44,7 @@ services:
     depends_on:
       - ib-gateway
     environment:
-      TRADER_CONFIG: /home/trader/mmr/configs/trader.yaml
+      TRADER_CONFIG: /home/trader/.config/mmr/trader.yaml
       TZ: ${TIME_ZONE:-America/New_York}
       # IB connection — entrypoint sets IB_SERVER_PORT from TRADING_MODE
       TRADING_MODE: ${TRADING_MODE:-paper}

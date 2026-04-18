@@ -1761,6 +1761,20 @@ class MMR:
         """Disable a strategy by name."""
         return consume(self._rpc.rpc().disable_strategy(name))
 
+    def reload_strategies(self) -> SuccessFail:
+        """Reload strategies from YAML config and re-subscribe to instruments."""
+        return consume(self._rpc.rpc().reload_strategies())
+
+    def check_ib_upstream(self) -> Optional[str]:
+        """Check if IB Gateway has upstream connectivity. Returns error string or None if OK."""
+        try:
+            svc_status = consume(self._rpc.rpc(return_type=dict).get_status())
+            if not svc_status.get('ib_upstream_connected', True):
+                return svc_status.get('ib_upstream_error', 'IB Gateway is not connected to IBKR servers')
+        except Exception:
+            pass
+        return None
+
     # ------------------------------------------------------------------
     # Historical Data (via data_service RPC)
     # ------------------------------------------------------------------
@@ -1934,6 +1948,14 @@ class MMR:
             return {'connected': False}
 
         result = {'connected': True, 'account': acct}
+
+        try:
+            svc_status = consume(self._rpc.rpc(return_type=dict).get_status())
+            result['ib_upstream_connected'] = svc_status.get('ib_upstream_connected', True)
+            if not result['ib_upstream_connected']:
+                result['ib_upstream_error'] = svc_status.get('ib_upstream_error', 'unknown')
+        except Exception:
+            pass
 
         try:
             acct_vals = consume(

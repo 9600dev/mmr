@@ -26,6 +26,7 @@ trader.trader_service ──► Trader (trading_runtime.py)
 
 trader.strategy_service ──► StrategyRuntime (strategy_runtime.py)
                               ├── Loads strategies from strategy_runtime.yaml
+                              ├── Reconciliation loop (30s) — picks up new strategies + portfolio changes
                               ├── ZMQ RPC Client → trader_service
                               ├── ZMQ PubSub Subscriber ← tickers
                               └── ZMQ RPC Server (port 42005)
@@ -70,6 +71,10 @@ The reason PubSub and MessageBus are separate (despite overlap) is efficiency: Z
 **Trading filter**: `trader/trading/trading_filter.py` enforces symbol/exchange denylist/allowlist rules. Checked by the executioner and risk gate before any order placement.
 
 **Portfolio resizing**: `trader/sdk.py` provides `compute_resize_deltas()` (pure function) and `compute_resize_plan()`/`execute_resize_plan()` (SDK methods) for proportionally scaling all positions to fit within a target portfolio value. The resize workflow: (1) compute scale factor from max/min bounds, (2) find associated protective orders (stops, trailing stops, take-profits) for each position, (3) cancel protective orders, (4) place market orders for position deltas, (5) re-create protective orders at new quantities preserving original prices. Exposed via `resize-positions` CLI command. The `place_standalone_order()` RPC method on `trading_runtime.py` supports placing standalone STP/TRAIL/LMT orders for existing positions (used to re-create protectives after resizing).
+
+**Strategy reconciliation**: The strategy_service runs a reconciliation loop every 30 seconds (`strategy_runtime.py:_reconcile()`). It re-reads the portfolio universe from DuckDB and re-subscribes strategies to any new instruments (idempotent — `subscribe()` skips already-subscribed conIds). It also checks the YAML config file's modification time and loads any newly added strategies. This means: (1) an empty portfolio at startup automatically picks up positions as they're added via trades, (2) new strategies deployed to the YAML are loaded without restarting the service, (3) the `reload_strategies` RPC method triggers immediate reconciliation without waiting for the 30-second cycle. Note: modifying an existing strategy's config (changing conIds or bar_size) still requires a service restart.
+
+**IB upstream connectivity detection**: The trader_service tracks IB Gateway's upstream connection to IBKR servers via IB error codes (1100/2103/2105/2157 = lost, 1102/2104/2106/2158 = restored). The `get_status()` RPC exposes `ib_upstream_connected` and `ib_upstream_error`. The CLI checks this before any IB-dependent command (portfolio, orders, buy/sell, snapshot, etc.) and shows a clear error with VNC/restart instructions instead of silently timing out. The `status` command also shows upstream connectivity and a warning when it's down.
 
 **Reactive streams (RxPY)**: `IBAIORx` converts IB events into RxPY Subjects/Observables. Strategies receive accumulated DataFrames via reactive pipelines.
 
@@ -259,6 +264,7 @@ cancel-all                   # Cancel all orders
 close 1                      # Close position by row number
 strategies                   # List strategies
 strategies enable my_strat   # Enable a strategy
+strategies reload            # Reload strategies from YAML + re-subscribe (immediate reconciliation)
 snapshot AMD                 # Price snapshot
 depth AAPL                   # Level 2 order book (bids/asks + PNG chart)
 depth AAPL --rows 10         # More price levels (max depends on subscription)
@@ -554,6 +560,8 @@ mmr --json backtest -s strategies/my_strategy.py --class MyStrategy --conids 265
 **Step 5: Deploy to paper trading** (no service needed — writes to config)
 ```bash
 mmr strategies deploy my_strategy --conids 265598 --paper
+# strategy_service auto-detects the YAML change within 30s, or force with:
+mmr strategies reload
 ```
 
 **Step 6: Monitor signals** (no service needed)
@@ -639,7 +647,7 @@ mmr reject 42 --reason "Group over budget"  # Reject with reason
 - `portfolio-risk` / `prisk` (reads live portfolio for risk analysis)
 - `portfolio-snapshot` / `psnap` (compact portfolio JSON)
 - `portfolio-diff` / `pdiff` (delta since last snapshot)
-- `strategies enable`, `strategies disable`
+- `strategies enable`, `strategies disable`, `strategies reload`
 - `listen`, `watch`
 - `ideas --location` (IB path for international markets)
 - `scan` (IB scanner)

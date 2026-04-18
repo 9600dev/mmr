@@ -129,7 +129,7 @@ class IBAIORx():
                 ))
         self.error_subject.on_next(IBAIORxError(reqId, errorCode, errorString, contract))
 
-    @backoff.on_exception(backoff.expo, Exception, max_tries=3, max_time=30)
+    @backoff.on_exception(backoff.expo, Exception, max_tries=5, max_time=60)
     def connect(self) -> 'IBAIORx':
         def __handle_client_id_error(msg):
             logging.error('clientId already in use, msg: {}, object ib_client_id: {}'.format(msg, self.ib_client_id))
@@ -137,6 +137,17 @@ class IBAIORx():
 
         if self.ib.isConnected():
             return self
+
+        # Force-disconnect any stale IB connection before retrying.
+        # This releases the client ID in the Gateway so the new
+        # connection can claim it.
+        try:
+            self.ib.disconnect()
+        except Exception:
+            pass
+
+        # Create a fresh IB instance to avoid stale socket state
+        self.ib = IB()
 
         self._shutdown = False
 
@@ -179,6 +190,13 @@ class IBAIORx():
         """
         if self.ib.isConnected():
             return self
+
+        # Force-disconnect stale connection and create fresh IB instance
+        try:
+            self.ib.disconnect()
+        except Exception:
+            pass
+        self.ib = IB()
 
         self._shutdown = False
 

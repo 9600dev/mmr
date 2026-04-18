@@ -84,11 +84,12 @@ echo_usage() {
     echo "  -a (sync all files to running MMR container)"
     echo "  -g (go: build, then start all containers and exec in)"
     echo "  -l (logs: tail logs from all containers)"
+    echo "  -r (restart-ib: restart the IB Gateway container)"
     echo "  -e (exec: shell into running MMR container)"
     echo ""
 }
 
-b=n c=n f=n u=n d=n s=n a=n g=n l=n e=n i=n
+b=n c=n f=n u=n d=n s=n a=n g=n l=n e=n i=n r=n
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -136,6 +137,10 @@ while [[ $# -gt 0 ]]; do
       i=y
       shift
       ;;
+    -r|--restart-ib)
+      r=y
+      shift
+      ;;
     -*|--*)
       echo "Unknown option $1"
       echo_usage
@@ -148,7 +153,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # show usage if no action flags were set
-if [[ $b == "n" && $c == "n" && $f == "n" && $u == "n" && $d == "n" && $s == "n" && $a == "n" && $g == "n" && $l == "n" && $e == "n" && $i == "n" ]]; then
+if [[ $b == "n" && $c == "n" && $f == "n" && $u == "n" && $d == "n" && $s == "n" && $a == "n" && $g == "n" && $l == "n" && $e == "n" && $i == "n" && $r == "n" ]]; then
     echo_usage
     exit 0
 fi
@@ -245,6 +250,9 @@ build() {
 
 up() {
     check_env
+    echo "Pulling latest IB Gateway image..."
+    $COMPOSE -f "$BUILDDIR/docker-compose.yml" pull ib-gateway
+    echo ""
     echo "Starting IB Gateway + MMR containers..."
     echo ""
     # Ensure bind-mount directories exist on host
@@ -263,6 +271,9 @@ up() {
 
 ib_only() {
     check_env
+    echo "Pulling latest IB Gateway image..."
+    $COMPOSE -f "$BUILDDIR/docker-compose.yml" pull ib-gateway
+    echo ""
     echo "Starting IB Gateway only (for local development)..."
     echo ""
     # Force recreate so .env changes are always picked up
@@ -287,6 +298,13 @@ ib_only() {
     echo "  python3 -m trader.trader_service"
     echo "  python3 -m trader.strategy_service"
     echo "  python3 -m trader.mmr_cli"
+}
+
+restart_ib() {
+    echo "Restarting IB Gateway container..."
+    $COMPOSE -f "$BUILDDIR/docker-compose.yml" up -d --force-recreate ib-gateway
+    echo ""
+    echo "IB Gateway restarted."
 }
 
 down() {
@@ -366,7 +384,7 @@ sync_all() {
     rsync -e "$RSYNC_RSH" -av --delete $BUILDDIR/ $CONTID:/home/trader/mmr/ --exclude='.git'
 }
 
-echo "action: build=$b clean=$c force=$f up=$u down=$d sync=$s sync_all=$a go=$g logs=$l exec=$e ib-only=$i | runtime: $RUNTIME"
+echo "action: build=$b clean=$c force=$f up=$u down=$d sync=$s sync_all=$a go=$g logs=$l exec=$e ib-only=$i restart-ib=$r | runtime: $RUNTIME"
 
 if [[ $b == "y" ]]; then
     build
@@ -385,6 +403,9 @@ if [[ $u == "y" ]]; then
 fi
 if [[ $i == "y" ]]; then
     ib_only
+fi
+if [[ $r == "y" ]]; then
+    restart_ib
 fi
 if [[ $s == "y" ]]; then
     sync

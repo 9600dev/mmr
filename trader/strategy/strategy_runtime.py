@@ -8,7 +8,7 @@ from trader.data.market_data import normalize_ticker
 
 from trader.data.data_access import SecurityDefinition, TickStorage
 from trader.data.universe import UniverseAccessor
-from trader.listeners.ib_history_worker import IBHistoryWorker
+from trader.listeners.ib_history_worker import IBHistoryWorker, IBConnectivityError, IBNoDataError
 from trader.messaging.clientserver import (
     MessageBusClient,
     MultithreadedTopicPubSub,
@@ -266,6 +266,11 @@ class StrategyRuntime():
         auto_execute: bool = False,
     ) -> None:
 
+        # Skip if strategy with this name already loaded
+        if any(s.name == name for s in self.strategy_implementations):
+            logging.debug('strategy {} already loaded, skipping'.format(name))
+            return
+
         if not name or not class_name or not module or not bar_size_str:
             raise ValueError('invalid config. need name, bar_size, class_name and module specified')
 
@@ -345,6 +350,43 @@ class StrategyRuntime():
                 auto_execute=strategy_config.get('auto_execute', False),
             )
 
+    async def _reconcile(self):
+        """Re-check config and subscriptions. Safe to call repeatedly (idempotent)."""
+        # 1. Check for config file changes
+        try:
+            current_mtime = os.path.getmtime(self.strategy_config_file)
+        except OSError:
+            current_mtime = self._config_mtime
+
+        if current_mtime != self._config_mtime:
+            logging.info('strategy config changed, reloading')
+            self.config_loader(self.strategy_config_file)
+            self._config_mtime = current_mtime
+
+        # 2. Re-subscribe all strategies (idempotent — only new conIds trigger publish_contract)
+        # Wrapped in try/except so RPC timeouts (e.g. trader_service restarting) don't block the loop
+        try:
+            for strategy in self.strategy_implementations:
+                if strategy.conids:
+                    for conId in strategy.conids:
+                        security_definitions = self.trader_client.rpc().resolve_symbol(conId)
+                        if security_definitions:
+                            self.subscribe(strategy, SecurityDefinition.to_contract(security_definitions[0]))
+
+                if strategy.universe:
+                    self.subscribe_universe(strategy, strategy.universe)
+        except (TimeoutError, ConnectionError, Exception) as ex:
+            logging.debug('reconciliation RPC failed (trader_service may be restarting): %s', ex)
+
+    async def _reconnect_historical_client(self):
+        """Disconnect and reconnect the IB historical data client."""
+        logging.info('reconnecting historical data IB client')
+        try:
+            self.historical_data_client.shutdown()
+        except Exception:
+            pass
+        await self.historical_data_client.connect_async()
+
     async def get_historical_data(self):
         for strategy in self.strategy_implementations:
             historical_days = strategy.historical_days_prior if strategy.historical_days_prior else 1
@@ -353,26 +395,38 @@ class StrategyRuntime():
                 for conId in strategy.conids:
                     security_definitions = self.trader_client.rpc().resolve_symbol(conId)
                     if security_definitions:
-                        await self.historical_data_client.get_contract_history(
-                            security=SecurityDefinition.to_contract(security_definitions[0]),
-                            what_to_show=WhatToShow.MIDPOINT,
-                            bar_size=strategy.bar_size,
-                            start_date=dt.datetime.now() - dt.timedelta(days=historical_days),
-                            end_date=dt.datetime.now(),
-                        )
+                        try:
+                            await self.historical_data_client.get_contract_history(
+                                security=SecurityDefinition.to_contract(security_definitions[0]),
+                                what_to_show=WhatToShow.MIDPOINT,
+                                bar_size=strategy.bar_size,
+                                start_date=dt.datetime.now() - dt.timedelta(days=historical_days),
+                                end_date=dt.datetime.now(),
+                            )
+                        except IBNoDataError as ex:
+                            logging.warning('no historical data for conId {} strategy {}: {}'.format(
+                                conId, strategy.name, ex))
+                        except IBConnectivityError:
+                            raise
                     else:
                         logging.error('could not find security definition for conId {} for strategy {}'.format(conId, strategy))
 
             if strategy.universe:
                 conids = [x.conId for x in self.universe_accessor.get(strategy.universe).security_definitions]
                 for conId in conids:
-                    await self.historical_data_client.get_contract_history(
-                        security=Contract(conId=conId),
-                        what_to_show=WhatToShow.MIDPOINT,
-                        bar_size=strategy.bar_size,
-                        start_date=dt.datetime.now() - dt.timedelta(days=historical_days),
-                        end_date=dt.datetime.now(),
-                    )
+                    try:
+                        await self.historical_data_client.get_contract_history(
+                            security=Contract(conId=conId),
+                            what_to_show=WhatToShow.MIDPOINT,
+                            bar_size=strategy.bar_size,
+                            start_date=dt.datetime.now() - dt.timedelta(days=historical_days),
+                            end_date=dt.datetime.now(),
+                        )
+                    except IBNoDataError as ex:
+                        logging.warning('no historical data for conId {} strategy {}: {}'.format(
+                            conId, strategy.name, ex))
+                    except IBConnectivityError:
+                        raise
         logging.debug('finished get_historical_data()')
 
     async def run(self):
@@ -426,16 +480,49 @@ class StrategyRuntime():
             self.ib_server_port,
             self.strategy_runtime_ib_client_id + 1,
         )
+        max_retries = 5
+        for attempt in range(1, max_retries + 1):
+            try:
+                if not self.historical_data_client.connected:
+                    await self.historical_data_client.connect_async()
+                await self.get_historical_data()
+                break
+            except IBConnectivityError as ex:
+                if attempt == max_retries:
+                    logging.error('historical data failed after {} attempts, giving up: {}'.format(max_retries, ex))
+                    break
+                wait = min(2 ** attempt, 30)
+                logging.warning('IB connectivity error (attempt {}/{}), retrying in {}s: {}'.format(
+                    attempt, max_retries, wait, ex))
+                try:
+                    await self._reconnect_historical_client()
+                except Exception as reconnect_ex:
+                    logging.error('reconnect failed: {}'.format(reconnect_ex))
+                await asyncio.sleep(wait)
+            except ConnectionError:
+                if attempt == max_retries:
+                    logging.error('IB not connected after {} attempts, giving up'.format(max_retries))
+                    break
+                wait = min(2 ** attempt, 30)
+                logging.warning('IB not connected (attempt {}/{}), retrying in {}s'.format(
+                    attempt, max_retries, wait))
+                await asyncio.sleep(wait)
+            except Exception as ex:
+                logging.error('unexpected error fetching historical data: {}'.format(ex))
+                break
+
+        # Track config mtime for change detection
         try:
-            await self.historical_data_client.ib_client.connectAsync(
-                host=self.ib_server_address,
-                port=self.ib_server_port,
-                clientId=self.strategy_runtime_ib_client_id + 1,
-                timeout=15,
-                readonly=True
-            )
-            self.historical_data_client.connected = True
-        except Exception as ex:
-            logging.error('historical data client connect failed: {}'.format(ex))
-        await self.get_historical_data()
+            self._config_mtime = os.path.getmtime(self.strategy_config_file)
+        except OSError:
+            self._config_mtime = 0.0
+
+        # Stay alive and periodically reconcile subscriptions
+        logging.info('entering reconciliation loop (30s interval)')
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await self._reconcile()
+            except Exception as ex:
+                logging.error('reconciliation error: {}'.format(ex))
 

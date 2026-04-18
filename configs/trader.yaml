@@ -18,7 +18,7 @@ trading_mode: paper
 # IB_ACCOUNT env var overrides the auto-selected account.
 # IB_SERVER_PORT env var overrides the auto-selected port.
 ib_server_address: 127.0.0.1
-ib_paper_account: DUM422056
+ib_paper_account: ''
 ib_live_account: ''
 ib_paper_port: 7497
 ib_live_port: 7496

@@ -52,3 +52,13 @@ class StrategyServiceApi(RPCHandler):
     @rpcmethod
     def get_strategies(self) -> List[StrategyConfig]:
         return [StrategyConfig.from_strategy(strategy) for strategy in self.strategy.get_strategies()]
+
+    @rpcmethod
+    async def reload_strategies(self) -> SuccessFail[List[StrategyConfig]]:
+        try:
+            await self.strategy._reconcile()
+            return SuccessFail.success(
+                [StrategyConfig.from_strategy(s) for s in self.strategy.get_strategies()]
+            )
+        except Exception as ex:
+            return SuccessFail.fail(exception=ex)

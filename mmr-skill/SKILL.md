@@ -12,7 +12,7 @@ metadata:
 
 ## Service Requirements
 
-- **trader_service required**: portfolio, positions, orders, trades, account, resolve, snapshot, depth, buy, sell, cancel, cancel_all, close_all_positions, resize_positions, approve, strategies (list/enable/disable), `universe_add`, `buy_option`, `sell_option`, `risk`, `scan`, `ideas` (with `--location` for international markets), `listen`, `watch`
+- **trader_service required**: portfolio, positions, orders, trades, account, resolve, snapshot, depth, buy, sell, cancel, cancel_all, close_all_positions, resize_positions, approve, strategies (list/enable/disable/reload), `universe_add`, `buy_option`, `sell_option`, `risk`, `scan`, `ideas` (with `--location` for international markets), `listen`, `watch`
 - **data_service required**: history_massive, history_ib
 - **massive_api_key only** (no service needed): balance_sheet, income_statement, cash_flow, ratios, filing_section, `options_expirations`, `options_chain`, `options_snapshot`, `options_implied`, `data_download`, `ideas` (default US path), `news`, `movers`, `forex_snapshot` (massive source), `forex_movers`, `stream`
 - **No service needed**: universe_list, universe_show, universe_create, universe_delete, universe_remove, universe_import, status, market_hours, `data_summary`, `data_query`, `backtest`, `strategy_create`, `strategy_deploy`, `strategy_undeploy`, `strategy_signals`, `strategy_backtest`, `propose`, `proposals`, `reject`, `session_limits`, `session_status`, `group_list`, `group_create`, `group_delete`, `group_show`, `group_add`, `group_remove`, `group_set`, `logs`
@@ -160,6 +160,7 @@ Requires `massive_api_key` in config. No trader_service needed. `timeframe`: `"q
 | `MMRHelpers.strategies()` | **Yes** | List strategies (name, state, paper, bar_size) |
 | `MMRHelpers.enable_strategy(name)` | **Yes** | Enable a strategy |
 | `MMRHelpers.disable_strategy(name)` | **Yes** | Disable a strategy |
+| `MMRHelpers.reload_strategies()` | **Yes** | Reload strategies from YAML + re-subscribe (immediate reconciliation) |
 
 ### Strategy Development (No Service Required)
 
@@ -233,7 +234,114 @@ Must specify either `symbol` or `universe`. Requires `data_service` to be runnin
 |--------|-------------|
 | `MMRHelpers.cli(command)` | Run any CLI command directly (e.g. `MMRHelpers.cli("resolve AAPL")`) |
 
+## Concurrency & Best Practices
+
+### CRITICAL: Do NOT over-parallelize RPC calls
+
+All trader_service calls (resolve, snapshot, buy, sell, orders, portfolio, etc.) go through a single ZMQ RPC connection. Firing many calls concurrently with `asyncio.gather()` will **queue them up and cause cascading timeouts**. Each call that times out (30s) blocks the next one.
+
+**BAD** — will timeout and fail:
+```python
+# DON'T DO THIS — 8 concurrent RPC calls will all timeout
+results = await asyncio.gather(
+    *[MMRHelpers.resolve(t) for t in ["AAPL", "MSFT", "AMD", "NVDA", "GOOG", "META", "TSLA", "AMZN"]],
+)
+```
+
+**GOOD** — sequential with early exit on failure:
+```python
+# Serialize RPC calls to trader_service
+resolved = {}
+for ticker in ["AAPL", "MSFT", "AMD", "NVDA"]:
+    try:
+        result = await MMRHelpers.resolve(ticker)
+        if result.get("data"):
+            resolved[ticker] = result["data"][0]
+    except Exception:
+        break  # Service is down, stop trying
+```
+
+**GOOD** — use batch methods when available:
+```python
+# snapshots_batch does ONE RPC call for multiple symbols (~4s total)
+result = await MMRHelpers.snapshots_batch(["AAPL", "MSFT", "AMD", "NVDA"])
+```
+
+### Safe parallelism: only across DIFFERENT services
+
+You CAN parallelize calls that hit **different backends**:
+```python
+# OK — movers/ideas use Massive.com API, not trader_service
+results = await asyncio.gather(
+    MMRHelpers.movers(num=15),           # Massive.com
+    MMRHelpers.ideas("momentum", num=10), # Massive.com
+)
+```
+
+But do NOT mix Massive.com calls with trader_service calls in a single gather — if a trader_service call hangs, the gather blocks everything.
+
+### Always check health before trading
+
+Before any trading session, verify IB Gateway is connected upstream:
+```python
+status = await MMRHelpers.status()
+if not status.get("data", {}).get("ib_upstream_connected", True) == False:
+    # Safe to proceed
+    pass
+else:
+    emit("IB Gateway is not connected to IBKR servers — cannot trade")
+    # Fall back to Massive.com-only operations (movers, ideas, news, financials)
+```
+
+### Prefer batch operations
+
+| Instead of... | Use... |
+|---------------|--------|
+| Multiple `snapshot()` calls | `snapshots_batch(symbols)` — single RPC call |
+| Multiple `resolve()` calls | Resolve one at a time, sequentially |
+| Multiple `ideas()` presets in gather | Call them sequentially — each takes ~4s |
+
+### Error handling pattern
+
+Timeouts don't raise exceptions — they return error dicts/strings. Check for them:
+
+```python
+# JSON methods return {"error": "timed out ...", "timed_out": True} on timeout
+result = await MMRHelpers.resolve("AAPL")
+if result.get("timed_out") or result.get("error"):
+    emit("trader_service is not responding — stop calling it until you verify status()")
+    # Don't retry — the service needs to recover first
+else:
+    # Safe to proceed
+    conId = result["data"][0]["conId"]
+
+# String methods return "ERROR: Command timed out..." on timeout
+result = await MMRHelpers.buy("AAPL", market=True, quantity=10)
+if result.startswith("ERROR"):
+    emit("Buy failed — " + result)
+```
+
+**Key rule**: if ANY trader_service call times out, assume the service is down and stop making more calls. Check `status()` before trying again.
+
 ## Patterns
+
+### Pattern 0: Pre-Flight Check (ALWAYS do this first)
+
+```python
+# 1. Check market hours
+hours = await MMRHelpers.market_hours()
+emit(hours)
+
+# 2. Check service health and IB connectivity
+status = await MMRHelpers.status()
+if "error" in status or not status.get("data", {}).get("connected"):
+    emit("trader_service is not reachable — can only use Massive.com methods (movers, ideas, news, financials)")
+elif status.get("data", {}).get("ib_upstream_connected") == False:
+    emit("IB Gateway not connected to IBKR — cannot resolve, snapshot, or trade")
+else:
+    emit(f"Connected: {status['data'].get('account', '?')}")
+    # Now safe to call resolve, snapshot, buy, sell, etc.
+```
 
 ### Pattern 1: Scan for Ideas and Create Proposals
 
@@ -442,6 +550,8 @@ emit(result)
 
 # 4. Deploy to paper trading
 result = await MMRHelpers.strategy_deploy("momentum_breakout", conids=[265598], paper=True)
+# strategy_service auto-detects the YAML change within 30s, or force immediate:
+result = await MMRHelpers.reload_strategies()
 
 # 5. Monitor
 signals = await MMRHelpers.strategy_signals("momentum_breakout")
@@ -511,4 +621,4 @@ with MMR() as mmr:
     result = mmr.pull_ib(symbols=["AAPL"], bar_size="1 min", prev_days=5)
 ```
 
-Key SDK methods: `portfolio()`, `positions()`, `orders()`, `trades()`, `resolve()`, `snapshot()`, `depth()`, `buy()`, `sell()`, `cancel()`, `cancel_all()`, `close_position()`, `close_all_positions()`, `resize_positions()`, `propose()`, `proposals()`, `approve()`, `reject()`, `risk_report()`, `session_status()`, `strategies()`, `enable_strategy()`, `disable_strategy()`, `account()`, `status()`, `market_hours()`, `subscribe_ticks()`, `pull_massive()`, `pull_ib()`, `data_service_status()`, `balance_sheet()`, `income_statement()`, `cash_flow()`, `ratios()`, `filing_sections()`, `options_expirations()`, `options_chain()`, `options_snapshot()`, `options_implied()`, `buy_option()`, `sell_option()`, `news()`, `movers()`, `ideas()`, `forex_snapshot()`, `forex_movers()`.
+Key SDK methods: `portfolio()`, `positions()`, `orders()`, `trades()`, `resolve()`, `snapshot()`, `depth()`, `buy()`, `sell()`, `cancel()`, `cancel_all()`, `close_position()`, `close_all_positions()`, `resize_positions()`, `propose()`, `proposals()`, `approve()`, `reject()`, `risk_report()`, `session_status()`, `strategies()`, `enable_strategy()`, `disable_strategy()`, `reload_strategies()`, `check_ib_upstream()`, `account()`, `status()`, `market_hours()`, `subscribe_ticks()`, `pull_massive()`, `pull_ib()`, `data_service_status()`, `balance_sheet()`, `income_statement()`, `cash_flow()`, `ratios()`, `filing_sections()`, `options_expirations()`, `options_chain()`, `options_snapshot()`, `options_implied()`, `buy_option()`, `sell_option()`, `news()`, `movers()`, `ideas()`, `forex_snapshot()`, `forex_movers()`.

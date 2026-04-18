@@ -60,7 +60,7 @@ RUN printf '%s\n' \
     'export HOME=/home/trader' \
     'export PATH="$HOME/.venv/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"' \
     'export TMPDIR="$HOME/.tmp"' \
-    'export TRADER_CONFIG="$HOME/mmr/configs/trader.yaml"' \
+    'export TRADER_CONFIG="$HOME/.config/mmr/trader.yaml"' \
     '' \
     '# Source IB Gateway env vars written by docker-entrypoint.sh' \
     '[ -f "$HOME/.mmr_env" ] && . "$HOME/.mmr_env"' \
@@ -69,6 +69,11 @@ RUN printf '%s\n' \
     '$HOME/mmr/start_mmr.sh' \
     > /home/trader/.bash_profile \
     && chown trader:trader /home/trader/.bash_profile
+
+# Pre-populate user config from bundled defaults so TRADER_CONFIG resolves
+RUN mkdir -p /home/trader/.config/mmr \
+    && cp /home/trader/mmr/configs/*.yaml /home/trader/.config/mmr/ \
+    && chown -R trader:trader /home/trader/.config/mmr
 
 RUN touch /home/trader/mmr/logs/trader_service.log \
     && touch /home/trader/mmr/logs/strategy_service.log \

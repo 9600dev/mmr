@@ -11,6 +11,9 @@ import signal
 
 logging = setup_logging(module_name='strategy_service')
 
+MAX_RUNTIME_RESTARTS = 5
+RESTART_DELAY_BASE = 5
+
 
 @click.command()
 @click.option('--simulation', required=False, default=False, help='load with historical data')
@@ -59,7 +62,36 @@ def main(simulation: bool,
 
         strategy_runtime.connect()
 
-        loop.create_task(strategy_runtime.run())
+        restart_count = 0
+
+        def on_runtime_done(task: asyncio.Task):
+            nonlocal restart_count, is_stopping
+            if is_stopping:
+                return
+            ex = task.exception() if not task.cancelled() else None
+            if ex is None:
+                logging.info('strategy_runtime task completed normally')
+                return
+
+            restart_count += 1
+            logging.error('strategy_runtime crashed (attempt {}/{}): {}'.format(
+                restart_count, MAX_RUNTIME_RESTARTS, ex))
+
+            if restart_count > MAX_RUNTIME_RESTARTS:
+                logging.error('strategy_runtime exceeded max restarts ({}), stopping service'.format(
+                    MAX_RUNTIME_RESTARTS))
+                loop.call_soon(stop_loop, loop)
+                return
+
+            delay = min(RESTART_DELAY_BASE * restart_count, 60)
+            logging.info('restarting strategy_runtime in {}s'.format(delay))
+            loop.call_later(delay, _start_runtime)
+
+        def _start_runtime():
+            task = loop.create_task(strategy_runtime.run())
+            task.add_done_callback(on_runtime_done)
+
+        _start_runtime()
         loop.run_forever()
     except KeyboardInterrupt:
         logging.debug('KeyboardInterrupt')

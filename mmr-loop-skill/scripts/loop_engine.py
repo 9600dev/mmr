@@ -242,6 +242,22 @@ class TradingLoop:
 
 Run the trading cycle. Follow these phases IN ORDER. Be concise — save context.
 
+## PHASE 0: PRE-FLIGHT
+```python
+status = await MMRHelpers.status()
+if status.get("error") or status.get("timed_out"):
+    print("trader_service unreachable — skipping to DIGEST")
+elif not status.get("data", {{}}).get("connected"):
+    print("trader_service not connected — skipping to DIGEST")
+elif status.get("data", {{}}).get("ib_upstream_connected") == False:
+    print(f"IB Gateway not connected to IBKR: {{status['data'].get('ib_upstream_error', 'unknown')}}")
+    print("Cannot resolve, snapshot, or trade — skipping to DIGEST")
+else:
+    print(f"Connected: {{status['data'].get('account', '?')}}")
+```
+
+If pre-flight fails, skip directly to PHASE 4 (DIGEST) with a note about the failure. Do NOT attempt portfolio, snapshot, or trading calls.
+
 ## PHASE 1: MONITOR
 ```python
 snap = await MMRHelpers.portfolio_snapshot()

@@ -119,9 +119,14 @@ class Trader():
         self.tws_client_ids: List[int] = [self.trading_runtime_ib_client_id, self.trading_runtime_ib_client_id + 1]
         self.scheduler: Optional[AsyncIOThreadSafeScheduler] = None
 
+        # IB upstream connectivity tracking
+        # These error codes indicate Gateway is connected locally but lost upstream IBKR connection
+        self._ib_upstream_connected: bool = True
+        self._ib_upstream_error: str = ''
+
         self.disposables: List[DisposableBase] = []
 
-    @backoff.on_exception(backoff.expo, ConnectionRefusedError, max_tries=10, max_time=120)
+    @backoff.on_exception(backoff.expo, (ConnectionRefusedError, TimeoutError), max_tries=10, max_time=120)
     def connect(self):
         logging.debug('trading_runtime.connect() connecting to services: %s:%s' % (self.ib_server_address, self.ib_server_port))
         try:
@@ -139,6 +144,12 @@ class Trader():
             self.client.ib.connectedEvent += self.connected_event
             self.client.ib.disconnectedEvent += self.disconnected_event
             self.client.connect()
+
+            # Track IB upstream connectivity via error codes
+            self.client.error_subject.subscribe(AnonymousObserver(
+                on_next=self._on_ib_error,
+                on_error=lambda e: None,
+            ))
 
             # Safety check: verify IB account matches expected trading mode.
             # Paper accounts start with "D" (e.g. DU..., DF...), live accounts don't.
@@ -352,6 +363,26 @@ class Trader():
         scheduled_disposable = self.scheduler.schedule_periodic(10, lambda x: self.pnl.post_all())
         self.disposables.append(scheduled_disposable)
 
+    def _on_ib_error(self, error: IBAIORxError):
+        """Track IB upstream connectivity from error codes."""
+        # 1100: connectivity lost between IB and TWS/Gateway
+        # 2103: market data farm connection broken
+        # 2105: HMDS data farm connection broken
+        # 2157: sec-def data farm connection broken
+        if error.errorCode in (1100, 2103, 2105, 2157):
+            self._ib_upstream_connected = False
+            self._ib_upstream_error = error.errorString
+            logging.warning('IB upstream connection lost: %s', error.errorString)
+
+        # 1102: connectivity restored (with possible data loss)
+        # 2104: market data farm connection OK
+        # 2106: HMDS data farm connection OK
+        # 2158: sec-def data farm connection OK
+        elif error.errorCode in (1102, 2104, 2106, 2158):
+            self._ib_upstream_connected = True
+            self._ib_upstream_error = ''
+            logging.info('IB upstream connection restored: %s', error.errorString)
+
     @log_method
     async def connected_event(self):
         # Dispose old subscriptions before re-subscribing (happens on reconnect)
@@ -401,8 +432,14 @@ class Trader():
 
                 try:
                     await self.client.connect_async()
+                    # Re-attach event handlers to the fresh IB instance
+                    if self.connected_event not in self.client.ib.connectedEvent:
+                        self.client.ib.connectedEvent += self.connected_event
+                    if self.disconnected_event not in self.client.ib.disconnectedEvent:
+                        self.client.ib.disconnectedEvent += self.disconnected_event
                     logging.info('reconnected to IB Gateway on attempt %d', attempt)
-                    return  # connected_event will fire and call setup_subscriptions
+                    await self.connected_event()
+                    return
                 except Exception as ex:
                     logging.error('reconnection attempt %d failed: %s', attempt, ex)
         finally:
@@ -431,6 +468,14 @@ class Trader():
             # rpc_call = SuccessFail.success(await (await self.zmq_strategy_client.awaitable_rpc()).get_strategies())
             return SuccessFail.success(rpc_call)
         except Exception as ex:
+            return SuccessFail.fail(exception=ex)
+
+    @log_method
+    async def reload_strategies(self) -> SuccessFail[List[StrategyConfig]]:
+        try:
+            return self.zmq_strategy_client.rpc().reload_strategies()
+        except Exception as ex:
+            logging.error('reload_strategies: {}'.format(ex))
             return SuccessFail.fail(exception=ex)
 
     @log_method
@@ -1065,12 +1110,14 @@ class Trader():
         self.client.ib.reqGlobalCancel()
 
     @log_method
-    def status(self) -> Dict[str, bool]:
-        # todo lots of work here
+    def status(self) -> dict:
         status = {
             'ib_connected': self.client.ib.isConnected(),
-            'storage_connected': self.data is not None
+            'ib_upstream_connected': self._ib_upstream_connected,
+            'storage_connected': self.data is not None,
         }
+        if not self._ib_upstream_connected:
+            status['ib_upstream_error'] = self._ib_upstream_error
         return status
 
     @log_method

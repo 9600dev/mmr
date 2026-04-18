@@ -7,6 +7,7 @@ All configuration is set via `TradingLoop.config` before starting the loop.
 | Key | Default | Description |
 |-----|---------|-------------|
 | `scan_interval_seconds` | `120` | Seconds between cycles. Market open + volatile → 120s. Calm → 300s. Closed → 3600s. |
+| `monitor_interval_seconds` | `180` | Seconds between position monitor checks (between full cycles). Uses `snapshots_batch()` for efficiency. |
 
 ## Scanning
 

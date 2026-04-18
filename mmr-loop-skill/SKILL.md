@@ -22,8 +22,10 @@ await load_skill("mmr-loop", "all")
 The loop runs a repeating cycle with four phases:
 
 ```
-MONITOR → ANALYZE → PROPOSE → DIGEST → (sleep) → MONITOR → ...
+PRE-FLIGHT → MONITOR → ANALYZE → PROPOSE → DIGEST → (sleep) → PRE-FLIGHT → ...
 ```
+
+**PRE-FLIGHT**: Checks `status()` for trader_service connectivity and IB Gateway upstream connection. If IB Gateway can't reach IBKR servers, the cycle skips directly to DIGEST — no wasted API calls that would timeout.
 
 **MONITOR**: Quick health check. Calls `portfolio_snapshot()` and `portfolio_diff()` (~500 tokens). If nothing moved (all positions unchanged), skips directly to DIGEST — no wasted API calls or context.
 

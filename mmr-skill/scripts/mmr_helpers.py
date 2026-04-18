@@ -24,14 +24,17 @@ _CLI_LOCK = asyncio.Lock()
 def _run_cli_sync(*args: str, timeout: int = 30) -> str:
     """Run an mmr CLI command and return combined stdout+stderr as a string."""
     cmd = _UV_PREFIX + ["python", "-m", "trader.mmr_cli"] + list(args)
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        cwd=_MMR_ROOT,
-        timeout=timeout,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1"},
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=_MMR_ROOT,
+            timeout=timeout,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1"},
+        )
+    except subprocess.TimeoutExpired:
+        return f"ERROR: Command timed out after {timeout}s — trader_service may be unresponsive (check IB Gateway connectivity)"
     output = (result.stdout + result.stderr).strip()
     # Strip any remaining ANSI escape sequences (covers all CSI sequences)
     output = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', output)
@@ -45,14 +48,17 @@ def _run_cli_json_sync(*args: str, timeout: int = 30) -> dict:
     Python logging, etc. that would break json.loads).
     """
     cmd = _UV_PREFIX + ["python", "-m", "trader.mmr_cli", "--json"] + list(args)
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        cwd=_MMR_ROOT,
-        timeout=timeout,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1"},
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=_MMR_ROOT,
+            timeout=timeout,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1"},
+        )
+    except subprocess.TimeoutExpired:
+        return {"data": None, "error": f"timed out after {timeout}s", "timed_out": True}
     stdout = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', result.stdout.strip())
     try:
         return json.loads(stdout)
@@ -64,14 +70,17 @@ def _run_cli_json_sync(*args: str, timeout: int = 30) -> dict:
 def _run_sdk_script_sync(script: str, timeout: int = 30) -> str:
     """Run a Python script in the mmr venv and return output."""
     cmd = _UV_PREFIX + ["python", "-c", script]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        cwd=_MMR_ROOT,
-        timeout=timeout,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1"},
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=_MMR_ROOT,
+            timeout=timeout,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1"},
+        )
+    except subprocess.TimeoutExpired:
+        return f"ERROR: Script timed out after {timeout}s — trader_service may be unresponsive"
     output = (result.stdout + result.stderr).strip()
     output = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', output)
     return output
@@ -169,10 +178,15 @@ class MMRHelpers:
     async def status() -> dict:
         """
         Check service health / connectivity to trader_service.
-        Returns JSON dict with: connected, account, NetLiquidation, positions, DailyPnL, etc.
+        Returns JSON dict with: connected, account, ib_upstream_connected, NetLiquidation, positions, DailyPnL, etc.
+
+        IMPORTANT: Always check ib_upstream_connected before trading. If False, IB Gateway
+        cannot reach IBKR servers — resolve, snapshot, buy, sell will all timeout.
 
         Example:
         result = await MMRHelpers.status()
+        # result["data"]["ib_upstream_connected"] → True (or False if Gateway can't reach IBKR)
+        # result["data"]["ib_upstream_error"] → "..." (only present when ib_upstream_connected is False)
         # result["data"]["connected"] → True
         # result["data"]["DailyPnL"] → "-$241.78"
         """
@@ -489,6 +503,18 @@ class MMRHelpers:
         """
         return await _run_cli("strategies", "disable", name)
 
+    @staticmethod
+    async def reload_strategies() -> str:
+        """
+        Reload strategies from YAML config and re-subscribe to instruments.
+        Triggers immediate reconciliation without waiting for the 30-second cycle.
+        Requires trader_service to be running.
+
+        Example:
+        result = await MMRHelpers.reload_strategies()
+        """
+        return await _run_cli("strategies", "reload")
+
     # ------------------------------------------------------------------
     # Universe Management (most commands work without trader_service)
     # ------------------------------------------------------------------
@@ -542,7 +568,7 @@ class MMRHelpers:
         result = await MMRHelpers.universe_delete("old_universe")
         """
         # Pipe "y" to auto-confirm the deletion prompt
-        cmd = [_VENV_PYTHON, "-m", "trader.mmr_cli", "universe", "delete", name]
+        cmd = _UV_PREFIX + ["python", "-m", "trader.mmr_cli", "universe", "delete", name]
         result = subprocess.run(
             cmd,
             input="y\n",
@@ -550,11 +576,11 @@ class MMRHelpers:
             text=True,
             cwd=_MMR_ROOT,
             timeout=15,
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1"},
         )
         output = (result.stdout + result.stderr).strip()
-        import re
-        return re.sub(r'\x1b\[[0-9;]*m', '', output)
+        output = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', output)
+        return output
 
     @staticmethod
     async def universe_add(name: str, symbols: List[str]) -> str:
@@ -1141,15 +1167,15 @@ class MMRHelpers:
         result = await MMRHelpers.close_all_positions()
         """
         # Pipe "y" to auto-confirm
-        cmd = [_VENV_PYTHON, "-m", "trader.mmr_cli", "close-all-positions"]
+        cmd = _UV_PREFIX + ["python", "-m", "trader.mmr_cli", "close-all-positions"]
         result = subprocess.run(
             cmd, input="y\n", capture_output=True, text=True,
             cwd=_MMR_ROOT, timeout=120,
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1"},
         )
         output = (result.stdout + result.stderr).strip()
-        import re
-        return re.sub(r'\x1b\[[0-9;]*m', '', output)
+        output = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', output)
+        return output
 
     @staticmethod
     async def resize_positions(
