@@ -16,9 +16,14 @@ _MMR_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 _UV_PREFIX = ["uv", "run", "--project", _MMR_ROOT]
 
 # Serialize all CLI calls to avoid DuckDB single-writer lock contention.
-# Each _run_cli/_run_cli_json/_run_sdk_script spawns a subprocess that opens
-# its own DuckDB connection; concurrent writes will fail with a lock error.
-_CLI_LOCK = asyncio.Lock()
+# Bounded-parallel subprocess launch. Replaces the old asyncio.Lock() that
+# forced strict serialization — making `backtest_batch(concurrency=6)` a
+# no-op. The MMR-side DuckDB layer now retries on lock contention, so
+# concurrent subprocess launches are safe. The Semaphore caps total
+# concurrency at a sane upper bound (16) to prevent a 100-job batch from
+# fork-bombing the host while still letting explicitly-requested
+# concurrency (e.g. concurrency=6) actually execute in parallel.
+_CLI_SLOTS = asyncio.Semaphore(16)
 
 
 def _run_cli_sync(*args: str, timeout: int = 30) -> str:
@@ -88,19 +93,19 @@ def _run_sdk_script_sync(script: str, timeout: int = 30) -> str:
 
 async def _run_cli(*args: str, timeout: int = 30) -> str:
     """Async wrapper: acquires lock, runs CLI in a thread."""
-    async with _CLI_LOCK:
+    async with _CLI_SLOTS:
         return await asyncio.to_thread(_run_cli_sync, *args, timeout=timeout)
 
 
 async def _run_cli_json(*args: str, timeout: int = 30) -> dict:
     """Async wrapper: acquires lock, runs CLI JSON in a thread."""
-    async with _CLI_LOCK:
+    async with _CLI_SLOTS:
         return await asyncio.to_thread(_run_cli_json_sync, *args, timeout=timeout)
 
 
 async def _run_sdk_script(script: str, timeout: int = 30) -> str:
     """Async wrapper: acquires lock, runs SDK script in a thread."""
-    async with _CLI_LOCK:
+    async with _CLI_SLOTS:
         return await asyncio.to_thread(_run_sdk_script_sync, script, timeout=timeout)
 
 

@@ -73,9 +73,41 @@ class DuckDBConnection:
         The function receives a DuckDBPyConnection and can perform
         multiple operations atomically.  The connection is closed
         after the function returns.
+
+        **Multi-process contention**: DuckDB uses file-level locking — a
+        second process trying to open the same DB while another has a
+        R/W connection will fail with an IOException. This matters when
+        running parallel backtest subprocesses (the helper's
+        ``backtest_batch(concurrency=N)``). We retry with exponential
+        backoff + jitter so short-lived connections (open → write one
+        row → close, typical at backtest end) don't all fail the first
+        time they collide.
         """
+        import random
+        import time as _time
+
         with self._lock:
-            conn = duckdb.connect(self.db_path)
+            delay = 0.05
+            last_err: Optional[Exception] = None
+            for attempt in range(8):
+                try:
+                    conn = duckdb.connect(self.db_path)
+                    break
+                except duckdb.IOException as ex:
+                    # Only retry on lock contention — not on malformed
+                    # files or permission errors. The error string is
+                    # the most portable signal across DuckDB versions.
+                    msg = str(ex).lower()
+                    if 'lock' not in msg and 'conflict' not in msg:
+                        raise
+                    last_err = ex
+                    _time.sleep(delay + random.uniform(0, delay))
+                    delay = min(delay * 2, 1.5)
+            else:
+                # Exhausted retries. Propagate so the caller (usually a
+                # backtest subprocess) exits loudly rather than silently
+                # dropping the write.
+                raise last_err  # type: ignore[misc]
             try:
                 return fn(conn)
             finally:
