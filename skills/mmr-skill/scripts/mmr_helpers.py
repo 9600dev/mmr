@@ -1492,7 +1492,7 @@ class MMRHelpers:
         runs (useful for reviewing before purging or bulk unarchiving).
 
         :param sort_by: Sort column (default "score")
-        :param limit: Max rows (default 25)
+        :param limit: Max rows (default 25; ``0`` or ``-1`` = no cap)
         :param strategy: Filter by class name (optional)
         :param descending: Descending order (default True — "best first")
         :param include_archived: Show archived runs alongside active (default False)

@@ -339,7 +339,7 @@ class BacktestStore:
     def list(
         self,
         strategy_class: Optional[str] = None,
-        limit: int = 50,
+        limit: Optional[int] = 50,
         sort_by: str = 'created_at',
         descending: bool = True,
         include_archived: bool = False,
@@ -351,6 +351,9 @@ class BacktestStore:
         ``sort_by`` accepts any column in ``_SORTABLE_COLUMNS`` (e.g.
         ``'sharpe_ratio'``). Unknown columns raise ValueError — we don't
         interpolate arbitrary strings into SQL.
+
+        ``limit`` caps result size; pass ``None`` or ``≤ 0`` for no cap
+        (drops the SQL LIMIT clause so the caller gets every matching row).
 
         By default archived rows are **excluded** — they're the history
         equivalent of deleting, just reversible. Pass
@@ -382,10 +385,13 @@ class BacktestStore:
             clauses.append('archived = FALSE')
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ''
 
-        params.append(limit)
+        unlimited = limit is None or limit <= 0
+        limit_sql = '' if unlimited else ' LIMIT ?'
+        if not unlimited:
+            params.append(limit)
         rows = self.db.execute(
             f"SELECT {self._SELECT_FIELDS} FROM backtest_runs"
-            f"{where} ORDER BY {sort_by} {order}, id DESC LIMIT ?",
+            f"{where} ORDER BY {sort_by} {order}, id DESC{limit_sql}",
             params,
             fetch='all',
         ) or []
@@ -464,14 +470,21 @@ class BacktestStore:
         ) or []
         return self._rows_to_sweeps(rows)[0] if rows else None
 
-    def list_sweeps(self, limit: int = 25) -> List[SweepRecord]:
+    def list_sweeps(self, limit: Optional[int] = 25) -> List[SweepRecord]:
         """Most-recent sweeps first. Used by ``mmr sweep list`` to show
-        what's run historically."""
-        rows = self.db.execute(
-            f"SELECT {self._SWEEP_SELECT} FROM sweeps "
-            f"ORDER BY started_at DESC LIMIT ?",
-            [limit], fetch='all',
-        ) or []
+        what's run historically. ``limit=None`` or ``≤0`` returns every row."""
+        unlimited = limit is None or limit <= 0
+        if unlimited:
+            rows = self.db.execute(
+                f"SELECT {self._SWEEP_SELECT} FROM sweeps ORDER BY started_at DESC",
+                [], fetch='all',
+            ) or []
+        else:
+            rows = self.db.execute(
+                f"SELECT {self._SWEEP_SELECT} FROM sweeps "
+                f"ORDER BY started_at DESC LIMIT ?",
+                [limit], fetch='all',
+            ) or []
         return self._rows_to_sweeps(rows)
 
     def _rows_to_sweeps(self, rows: list) -> List[SweepRecord]:

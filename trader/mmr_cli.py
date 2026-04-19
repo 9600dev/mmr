@@ -1141,7 +1141,8 @@ def build_parser() -> argparse.ArgumentParser:
                                  'conid lacks a bar from the last 3 trading days)')
 
     swp_list_p = swp_sub.add_parser('list', help='List past sweeps')
-    swp_list_p.add_argument('--limit', type=int, default=25)
+    swp_list_p.add_argument('--limit', type=int, default=25,
+                              help='Max rows (default 25; use 0 or -1 for no cap)')
 
     swp_show_p = swp_sub.add_parser('show', help='Show sweep detail + leaderboard')
     swp_show_p.add_argument('sweep_id', type=int)
@@ -1200,7 +1201,8 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument('--strategy', default=None, help='Filter by strategy class name')
         p.add_argument('--sweep', type=int, default=None, dest='sweep_id',
                        help='Filter to runs from a specific sweep (see `mmr sweep list`)')
-        p.add_argument('--limit', type=int, default=25, help='Max rows (default 25)')
+        p.add_argument('--limit', type=int, default=25,
+                       help='Max rows (default 25; use 0 or -1 for no cap)')
         p.add_argument('--sort-by', default='score', choices=_sort_choices,
                        help='Sort column (default: score — a composite quality '
                             'ranking; use "time" for most-recent-first)')
@@ -3405,14 +3407,21 @@ def _handle_backtests(args: argparse.Namespace):
         archived_only = getattr(args, 'archived_only', False)
         sweep_id = getattr(args, 'sweep_id', None)
 
+        # --limit 0 or negative means "no cap" — pass None through to the
+        # store so the SQL LIMIT clause is dropped entirely.
+        effective_limit: Optional[int] = None if limit <= 0 else limit
+
         try:
             if sort_column == _BTS_SCORE_SENTINEL:
                 # Composite score is computed in Python (not a DB column).
                 # Pull a bigger pool than `limit` so the top-`limit` by
                 # quality isn't skewed by the arbitrary created_at cutoff,
-                # then truncate after ranking. Cap the pool to avoid
-                # scanning the entire history when someone asks for --limit 5.
-                pool_size = max(limit * 4, 100)
+                # then truncate after ranking. When `limit` is unbounded,
+                # pull all rows.
+                pool_size: Optional[int] = (
+                    None if effective_limit is None
+                    else max(effective_limit * 4, 100)
+                )
                 records = store.list(
                     strategy_class=strategy,
                     limit=pool_size,
@@ -3426,11 +3435,12 @@ def _handle_backtests(args: argparse.Namespace):
                     key=_bt_composite_score,
                     reverse=descending,
                 )
-                records = records[:limit]
+                if effective_limit is not None:
+                    records = records[:effective_limit]
             else:
                 records = store.list(
                     strategy_class=strategy,
-                    limit=limit,
+                    limit=effective_limit,
                     sort_by=sort_column,
                     descending=descending,
                     include_archived=include_archived,

@@ -119,6 +119,20 @@ class TestBacktestStore:
             store.add(_make_record(note=f'run-{i}'))
         assert len(store.list(limit=3)) == 3
 
+    def test_list_limit_none_or_zero_is_unlimited(self, tmp_duckdb_path):
+        """`backtests --limit 0` UX: None and <=0 both drop the LIMIT
+        clause and return every matching row. Otherwise a user with 300
+        runs asking for "no cap" would silently get only the first 50
+        from the default."""
+        store = BacktestStore(tmp_duckdb_path)
+        for i in range(30):
+            store.add(_make_record(note=f'run-{i}'))
+        assert len(store.list(limit=None)) == 30
+        assert len(store.list(limit=0)) == 30
+        assert len(store.list(limit=-1)) == 30
+        # Sanity: positive limit still caps.
+        assert len(store.list(limit=10)) == 10
+
     def test_delete(self, tmp_duckdb_path):
         store = BacktestStore(tmp_duckdb_path)
         rid = store.add(_make_record())
