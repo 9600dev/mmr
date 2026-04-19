@@ -622,20 +622,26 @@ class MMRHelpers:
         symbol: str,
         limit: int = 4,
         timeframe: str = "quarterly",
+        source: str = "massive",
     ) -> str:
         """
-        Get balance sheet data for a company from Massive.com.
-        Does NOT require trader_service. Requires massive_api_key in config.
+        Get balance sheet data. Does NOT require trader_service.
 
         :param symbol: Stock ticker (e.g. "AAPL")
         :param limit: Number of periods to return (default 4)
         :param timeframe: "quarterly" or "annual" (default "quarterly")
+        :param source: "massive" (default) or "twelvedata" — see
+            references/DATA.md for coverage/cost differences. TwelveData
+            statements have deeper line-item detail but cost ~100 credits
+            per call on a Grow plan.
 
         Example:
         result = await MMRHelpers.balance_sheet("AAPL")
         result = await MMRHelpers.balance_sheet("NVDA", limit=8, timeframe="annual")
+        result = await MMRHelpers.balance_sheet("AAPL", source="twelvedata")
         """
-        args = ["financials", "balance", symbol, "--limit", str(limit), "--timeframe", timeframe]
+        args = ["financials", "balance", symbol, "--limit", str(limit),
+                "--timeframe", timeframe, "--source", source]
         return await _run_cli(*args)
 
     @staticmethod
@@ -643,20 +649,22 @@ class MMRHelpers:
         symbol: str,
         limit: int = 4,
         timeframe: str = "quarterly",
+        source: str = "massive",
     ) -> str:
         """
-        Get income statement data for a company from Massive.com.
-        Does NOT require trader_service. Requires massive_api_key in config.
+        Get income statement data. Does NOT require trader_service.
 
         :param symbol: Stock ticker (e.g. "AAPL")
         :param limit: Number of periods to return (default 4)
         :param timeframe: "quarterly" or "annual" (default "quarterly")
+        :param source: "massive" (default) or "twelvedata"
 
         Example:
         result = await MMRHelpers.income_statement("AAPL")
         result = await MMRHelpers.income_statement("NVDA", limit=8, timeframe="annual")
         """
-        args = ["financials", "income", symbol, "--limit", str(limit), "--timeframe", timeframe]
+        args = ["financials", "income", symbol, "--limit", str(limit),
+                "--timeframe", timeframe, "--source", source]
         return await _run_cli(*args)
 
     @staticmethod
@@ -664,20 +672,22 @@ class MMRHelpers:
         symbol: str,
         limit: int = 4,
         timeframe: str = "quarterly",
+        source: str = "massive",
     ) -> str:
         """
-        Get cash flow statement data for a company from Massive.com.
-        Does NOT require trader_service. Requires massive_api_key in config.
+        Get cash flow statement data. Does NOT require trader_service.
 
         :param symbol: Stock ticker (e.g. "AAPL")
         :param limit: Number of periods to return (default 4)
         :param timeframe: "quarterly" or "annual" (default "quarterly")
+        :param source: "massive" (default) or "twelvedata"
 
         Example:
         result = await MMRHelpers.cash_flow("MSFT")
         result = await MMRHelpers.cash_flow("AAPL", limit=8, timeframe="annual")
         """
-        args = ["financials", "cashflow", symbol, "--limit", str(limit), "--timeframe", timeframe]
+        args = ["financials", "cashflow", symbol, "--limit", str(limit),
+                "--timeframe", timeframe, "--source", source]
         return await _run_cli(*args)
 
     @staticmethod
@@ -703,19 +713,27 @@ class MMRHelpers:
         return await _run_cli(*args, timeout=60)
 
     @staticmethod
-    async def ratios(symbol: str) -> str:
+    async def ratios(symbol: str, source: str = "massive") -> str:
         """
-        Get financial ratios (TTM) for a company from Massive.com.
-        Includes P/E, P/B, P/S, EV/EBITDA, ROA, ROE, current ratio,
-        debt-to-equity, dividend yield, EPS, market cap, and more.
-        Does NOT require trader_service. Requires massive_api_key in config.
+        Get financial ratios / key statistics. Does NOT require trader_service.
+
+        - ``source="massive"`` (default): ~11 TTM fields from Polygon-style
+          ratios (P/E, P/B, P/S, EV/EBITDA, ROA, ROE, D/E, dividend yield,
+          EPS, market cap, free cash flow).
+        - ``source="twelvedata"``: ~60 flat-keyed fields — valuations,
+          margins, income statement TTM, balance sheet MRQ, cash flow TTM,
+          share statistics, 52-week price summary, dividend history,
+          split history. Significantly richer, but each call costs ~100
+          TwelveData credits (Grow plan = 610/min).
 
         :param symbol: Stock ticker (e.g. "AAPL")
+        :param source: "massive" (default) or "twelvedata"
 
         Example:
         result = await MMRHelpers.ratios("AAPL")
+        deep = await MMRHelpers.ratios("AAPL", source="twelvedata")
         """
-        return await _run_cli("financials", "ratios", symbol)
+        return await _run_cli("financials", "ratios", symbol, "--source", source)
 
     # ------------------------------------------------------------------
     # Historical Data
@@ -746,6 +764,45 @@ class MMRHelpers:
         result = await MMRHelpers.history_massive(universe="portfolio", prev_days=60)
         """
         args = ["history", "massive", "--bar_size", bar_size, "--prev_days", str(prev_days)]
+        if symbol:
+            args.extend(["--symbol", symbol])
+        if universe:
+            args.extend(["--universe", universe])
+        return await _run_cli(*args, timeout=timeout)
+
+    @staticmethod
+    async def history_twelvedata(
+        symbol: Optional[str] = None,
+        universe: Optional[str] = None,
+        bar_size: str = "1 day",
+        prev_days: int = 30,
+        timeout: int = 300,
+    ) -> str:
+        """
+        Download historical data from TwelveData via data_service.
+        Requires trader_service + data_service running (RPC path) and
+        twelvedata_api_key configured (trader.yaml or TWELVEDATA_API_KEY
+        env var).
+
+        Coverage difference vs history_massive: TwelveData intraday
+        (1/5/15/30-min) includes pre-market (from 04:00 ET) + post-market
+        (to 19:59 ET) bars by default. Massive is 24h. Daily+ is a single
+        bar per session in both cases.
+
+        Requires data_service running. For no-service direct pulls, use
+        ``data_download(symbols, source="twelvedata")`` instead.
+
+        :param symbol: Single symbol (e.g. "AAPL")
+        :param universe: Universe name (e.g. "portfolio")
+        :param bar_size: Bar size (default "1 day"). Extended-hours is only
+            added to intraday (1/5/15/30-min) bars — daily+ ignores it.
+        :param prev_days: Days of history to download (default 30)
+        :param timeout: Seconds before the CLI subprocess is killed.
+
+        Example:
+        result = await MMRHelpers.history_twelvedata(symbol="AAPL", bar_size="1 min", prev_days=30)
+        """
+        args = ["history", "twelvedata", "--bar_size", bar_size, "--prev_days", str(prev_days)]
         if symbol:
             args.extend(["--symbol", symbol])
         if universe:
@@ -985,18 +1042,32 @@ class MMRHelpers:
         days: int = 365,
         timeout: int = 300,
         progress: bool = False,
+        source: str = "massive",
+        force: bool = False,
     ) -> str:
-        """Download data from Massive.com to local DuckDB. Requires
-        ``massive_api_key`` in config. ``timeout`` is total (batch) by
+        """Download data to local DuckDB. ``timeout`` is total (batch) by
         default; per-symbol with ``progress=True``, which also prints a
         live status line and makes partial progress on failure easy to
         reason about (prior symbols are already persisted).
 
+        :param source: "massive" (default) or "twelvedata". TwelveData's
+            intraday (1/5/15/30-min) returns extended hours by default
+            (04:00-19:59 ET, ~960 bars/day on 1-min). Massive returns
+            full 24h (~860 bars/day on 1-min including overnight prints).
+            See references/DATA.md for coverage and cost tradeoffs.
+        :param force: bypass the freshness guard. Needed when re-fetching
+            already-stored days to pick up extended-hours bars you didn't
+            have before, or to backfill coverage after toggling source.
+
         Just ``await`` this directly — no create_task/run_coroutine_threadsafe
         (the helper cell has no running loop to attach to).
         """
+        extra = ["--source", source]
+        if force:
+            extra.append("--force")
         if not progress:
-            args = ["data", "download"] + symbols + ["--bar-size", bar_size, "--days", str(days)]
+            args = ["data", "download"] + symbols + ["--bar-size", bar_size,
+                    "--days", str(days)] + extra
             return await _run_cli_json_str(*args, timeout=timeout)
 
         # progress=True: one subprocess per symbol so we can stream progress.
@@ -1006,12 +1077,13 @@ class MMRHelpers:
         failed = 0
         per_symbol = []
         print(
-            f"Downloading {total} symbols ({bar_size}, {days}d)...",
+            f"Downloading {total} symbols ({bar_size}, {days}d, source={source})...",
             flush=True, file=_sys.stdout,
         )
         for i, symbol in enumerate(symbols, 1):
             print(f"  [{i}/{total}] {symbol}...", flush=True, file=_sys.stdout)
-            args = ["data", "download", symbol, "--bar-size", bar_size, "--days", str(days)]
+            args = ["data", "download", symbol, "--bar-size", bar_size,
+                    "--days", str(days)] + extra
             r = await _run_cli_json(*args, timeout=timeout)
             success = bool(r.get("success") or r.get("completed", 0) > 0) and not r.get("error")
             per_symbol.append({
@@ -1744,28 +1816,37 @@ class MMRHelpers:
         detail: bool = False,
         fundamentals: bool = False,
         news: bool = False,
+        source: str = "massive",
     ) -> dict:
         """
         Scan for trading ideas using technical indicators and scoring.
         Returns JSON dict with list of scored candidates.
-        Default path uses Massive.com (US only, ~4s). Use --location for
-        international markets via IB (slower, ~30-90s).
-        Requires massive_api_key (default) or trader_service (with --location).
+
+        Source selection:
+        - ``source="massive"`` (default): US only, ~4s scan, news+sentiment
+          enrichment available, Polygon-style ratios.
+        - ``source="twelvedata"``: US only, ~8-15s scan (local indicator
+          compute from one time_series call per ticker), richer fundamentals
+          via get_statistics. NEWS IS NOT AVAILABLE on this path — news=True
+          silently drops to empty columns with a one-line notice.
+        - ``location="STK.XX.YYY"``: uses IB for international markets. When
+          set, ``source`` is ignored.
 
         :param preset: momentum, gap-up, gap-down, mean-reversion, breakout, volatile
         :param tickers: Scan specific tickers instead of movers
         :param universe: Scan a universe instead of movers
         :param num: Number of results (default 15)
-        :param location: IB location code for international markets (e.g. "STK.AU.ASX")
+        :param location: IB location code (e.g. "STK.AU.ASX"). Overrides source.
         :param detail: Show all columns including indicators
-        :param fundamentals: Enrich with financial ratios (slower)
-        :param news: Enrich with latest news + sentiment (slower)
-        :return: Dict with list of ideas: ticker, price, change_pct, volume, score, signal, etc.
+        :param fundamentals: Enrich with financial ratios (slower). On
+            TwelveData, ~100 credits per enriched ticker.
+        :param news: Enrich with latest news + sentiment. MASSIVE ONLY.
+        :param source: "massive" (default) or "twelvedata". Ignored if location is set.
 
         Example:
         result = await MMRHelpers.ideas()
-        # result["data"] → [{"ticker": "AAPL", "price": 150, "score": 8.2, "signal": "BUY", ...}]
         result = await MMRHelpers.ideas("momentum", tickers=["AAPL", "MSFT", "AMD"])
+        result = await MMRHelpers.ideas("momentum", tickers=["AAPL"], source="twelvedata", fundamentals=True)
         result = await MMRHelpers.ideas("momentum", location="STK.AU.ASX", tickers=["BHP", "RIO"])
         """
         args = ["ideas", preset, "--num", str(num)]
@@ -1775,13 +1856,17 @@ class MMRHelpers:
             args.extend(["--universe", universe])
         if location:
             args.extend(["--location", location])
+        else:
+            args.extend(["--source", source])
         if detail:
             args.append("--detail")
         if fundamentals:
             args.append("--fundamentals")
         if news:
             args.append("--news")
-        timeout = 120 if location else 30
+        # TwelveData scans add ~1s per indicator-fetched ticker (one time_series
+        # call each) vs Massive's batched server-side indicators.
+        timeout = 120 if location else (60 if source == "twelvedata" else 30)
         return await _run_cli_json(*args, timeout=timeout)
 
     @staticmethod
@@ -1807,20 +1892,29 @@ class MMRHelpers:
         return await _run_cli(*args)
 
     @staticmethod
-    async def movers(market: str = "stocks", losers: bool = False, num: int = 20) -> str:
+    async def movers(
+        market: str = "stocks",
+        losers: bool = False,
+        num: int = 20,
+        source: str = "massive",
+    ) -> str:
         """
-        Get top market movers from Massive.com.
-        Requires massive_api_key. Does NOT require trader_service.
+        Get top market movers. Does NOT require trader_service.
 
         :param market: stocks, crypto, indices, options, futures
         :param losers: Show losers instead of gainers
         :param num: Number of results (default 20)
+        :param source: "massive" (default) or "twelvedata". TwelveData's
+            list includes a name column that Massive doesn't; coverage
+            overlaps heavily on the top entries. Non-stocks markets
+            (crypto/indices/options/futures) are Massive-only in practice.
 
         Example:
         result = await MMRHelpers.movers()
         result = await MMRHelpers.movers(market="crypto", losers=True)
+        result = await MMRHelpers.movers(source="twelvedata")
         """
-        args = ["movers", "--market", market, "--num", str(num)]
+        args = ["movers", "--market", market, "--num", str(num), "--source", source]
         if losers:
             args.append("--losers")
         return await _run_cli(*args)

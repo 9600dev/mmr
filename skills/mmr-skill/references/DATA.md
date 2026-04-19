@@ -69,8 +69,22 @@ CREATE TABLE object_store (
 - **Data**: US stocks, ETFs, indices, forex, crypto
 - **Bar sizes**: All sizes supported
 - **History depth**: Up to 20+ years for daily, less for intraday
+- **Intraday session**: **24h** — pre-market, regular, post-market, and overnight prints all included (~860 bars/day on 1-min US equity)
 - **No service needed**: Direct API calls, data stored in local DuckDB
 - **CLI**: `mmr data download AAPL --bar-size "1 day" --days 365`
+
+### TwelveData
+
+- **API key**: Set `twelvedata_api_key` in `~/.config/mmr/trader.yaml` or `TWELVEDATA_API_KEY` env var
+- **Subscription**: Grow plan or higher. Pre/post-market on intraday requires Pro+.
+- **Data**: US stocks (primary), some ADRs and international names via dual listings
+- **Bar sizes supported**: `1 min`, `5 mins`, `15 mins`, `30 mins`, `1 hour`, `2 hours`, `4 hours`, `1 day`, `1 week`, `1 month`. **Unsupported**: `1/5/10/15/30 secs`, `2/3/10/20 mins`, `3/8 hours`.
+- **Intraday session**: **04:00 – 19:59 ET** by default (pre-market + regular + post-market, ~960 bars/day on 1-min US equity). No overnight. Controlled by `prepost=true`, which is on by default for 1/5/15/30-min; off for 1h+ (TwelveData doesn't support extended hours on coarser bars).
+- **Rate limits**: cost model is per-minute credits, not per-call. Grow ≈ 610 credits/min; each `get_statistics` call ≈ 100 credits, each `time_series` or `quote` ≈ 1 credit, `get_market_movers` ≈ 1 credit.
+- **Known data-quality gotcha**: specific sessions have volume reporting at ~2–7% of actual while prices and bar counts look normal. Observed on 2025-04-28, 2025-07-03, 2026-04-15 across multiple symbols — looks like an upstream feed outage TwelveData didn't re-stitch. If a strategy relies on absolute volume or volume breakouts, validate suspect days against Massive before trusting them.
+- **Pagination**: the backend caps each `time_series` response at 5000 bars. `TwelveDataHistoryWorker` chunks wide date ranges transparently; 1-min × 1-year ≈ 52 chunks per symbol and takes ~30–50s with extended hours enabled.
+- **Service requirements**: `data_download` and `ratios`/statements work directly with just the API key; `history_twelvedata` helper uses the data_service RPC path.
+- **CLI**: `mmr data download AAPL --source twelvedata --bar-size "1 min" --days 30`
 
 ### Interactive Brokers (IB)
 
@@ -79,6 +93,20 @@ CREATE TABLE object_store (
 - **Bar sizes**: All sizes supported
 - **History depth**: Varies by instrument and bar size (IB limits apply)
 - **CLI**: `mmr history ib --symbol AAPL --bar_size "1 min" --prev_days 5`
+
+## Picking a source (US equities)
+
+| Need | Use |
+|---|---|
+| Overnight prints / 24h coverage on 1-min | **Massive** |
+| Pre/post + regular session only, no overnight | **TwelveData** (default 04:00-19:59 ET) |
+| News + sentiment | **Massive** (TwelveData has no news endpoint) |
+| Deep fundamentals (60+ fields: valuation, margins, MRQ bal sheet, TTM CF, share stats, dividends) | **TwelveData** |
+| Quick TTM ratios (11 core fields, fast + cheap) | **Massive** |
+| 10-K filing text (business, risk_factors) | **Massive** (only source) |
+| Tight credit budget, bursty usage | **Massive** (no per-minute cap) |
+| International equities | **IB** (`location=STK.XX.YYY`) |
+| Full-market bulk snapshot scan | **Massive** (`get_snapshot_all`); TwelveData has no equivalent |
 
 ## TickStorage Read Patterns
 

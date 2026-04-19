@@ -13,9 +13,21 @@ metadata:
 ## Service Requirements
 
 - **trader_service required**: portfolio, positions, orders, trades, account, resolve, snapshot, depth, buy, sell, cancel, cancel_all, close_all_positions, resize_positions, approve, strategies (list/enable/disable/reload), `universe_add`, `buy_option`, `sell_option`, `risk`, `scan`, `ideas` (with `--location` for international markets), `listen`, `watch`
-- **data_service required**: history_massive, history_ib
-- **massive_api_key only** (no service needed): balance_sheet, income_statement, cash_flow, ratios, filing_section, `options_expirations`, `options_chain`, `options_snapshot`, `options_implied`, `data_download`, `ideas` (default US path), `news`, `movers`, `forex_snapshot` (massive source), `forex_movers`, `stream`
+- **data_service required**: history_massive, history_twelvedata, history_ib
+- **massive_api_key or twelvedata_api_key** (no service needed): balance_sheet, income_statement, cash_flow, ratios, `data_download`, `ideas` (default US path), `movers` — all accept `source="massive"|"twelvedata"`
+- **massive_api_key only** (no service needed): filing_section, `options_expirations`, `options_chain`, `options_snapshot`, `options_implied`, `news`, `forex_snapshot` (massive source), `forex_movers`, `stream`
 - **No service needed**: universe_list, universe_show, universe_create, universe_delete, universe_remove, universe_import, status, market_hours, `data_summary`, `data_query`, `backtest`, `backtest_sweep`, `backtest_batch`, `backtests_list`, `backtests_show`, `backtests_confidence`, `backtests_archive`, `backtests_unarchive`, `sweep_run`, `sweeps_list`, `sweeps_show`, `strategies_inspect`, `strategy_create`, `strategy_deploy`, `strategy_undeploy`, `strategy_signals`, `strategy_backtest`, `propose`, `proposals`, `reject`, `session_limits`, `session_status`, `group_list`, `group_create`, `group_delete`, `group_show`, `group_add`, `group_remove`, `group_set`, `logs`
+
+## Picking a data source
+
+Most data-fetching helpers accept `source="massive"|"twelvedata"`. Quick rules:
+
+- **Default is `"massive"`** for every method that takes `source`. Keep it unless you have a reason to switch.
+- **TwelveData for fundamentals depth** — `ratios(..., source="twelvedata")` returns ~60 flat-keyed fields (valuations, margins, MRQ balance sheet, TTM cash flow, share stats, dividend history) vs Massive's ~11 TTM ratios.
+- **Massive for news** — TwelveData's Python client has no news endpoint. `ideas(..., news=True, source="twelvedata")` silently returns empty news columns; `filing_section` explicitly refuses TwelveData.
+- **TwelveData for 1-min data with pre/post-market** — intraday (1/5/15/30-min) defaults to `prepost=true` returning ~960 bars/day (04:00-19:59 ET). Massive returns 24h. If you care about overnight prints, stay on Massive; if you want regular+extended session and nothing else, TwelveData is fine.
+- **Watch rate limits on TwelveData.** A Grow plan is 610 credits/min and `get_statistics` costs ~100 credits per call. Scanner's `_fetch_fundamentals` now handles this gracefully — it short-circuits remaining tickers when it sees a rate-limit error and returns partial fundamentals rather than raising. Single-shot `ratios(source="twelvedata")` in tight loops will hit the wall after ~6 calls.
+- **Known data-quality gotcha on TwelveData**: specific session dates show ~95% volume under-reporting across multiple symbols (2025-04-28, 2025-07-03, 2026-04-15 observed in the batch we downloaded). Prices on those days are correct; bar counts are correct; only volume is off. If a strategy leans on absolute volume, cross-check against Massive for those days before trusting it.
 
 ## International Stocks (ASX, TSE, SEHK, etc.)
 
@@ -149,13 +161,15 @@ If you're running a long/short book, read `net_exposure_pct` first — a $1M lon
 
 | Method | Service? | Description |
 |--------|----------|-------------|
-| `MMRHelpers.ideas(preset, tickers=, universe=, num=, location=, ...)` | No*/Yes** | scan for trading ideas with technical scoring |
-| `MMRHelpers.news(ticker="", limit=10, detail=False)` | No* | Market news with optional sentiment |
-| `MMRHelpers.movers(market="stocks", losers=False, num=20)` | No* | Top market movers |
+| `MMRHelpers.ideas(preset, tickers=, universe=, num=, location=, source=, ...)` | No*/Yes** | scan for trading ideas with technical scoring |
+| `MMRHelpers.news(ticker="", limit=10, detail=False)` | No* | Market news with optional sentiment (Massive only) |
+| `MMRHelpers.movers(market="stocks", losers=False, num=20, source="massive")` | No* | Top market movers |
 
-*Requires `massive_api_key`. **Requires trader_service when using `location=` for international markets.
+*Requires `massive_api_key` (default) or `twelvedata_api_key` (when `source="twelvedata"`). **Requires trader_service when using `location=` for international markets; `location=` overrides `source=`.
 
 Presets: `momentum`, `gap-up`, `gap-down`, `mean-reversion`, `breakout`, `volatile`.
+
+`source="twelvedata"` notes: `news=True` is silently empty (TD has no news endpoint); fundamentals enrichment costs ~100 credits per enriched ticker on a Grow plan.
 
 **Fail-loudly behaviour**: `ideas()` with `location=` raises / returns an error instead of an empty list when the IB scanner returns nothing for that location or when every supplied ticker fails to resolve. This is intentional — those two cases used to be indistinguishable from "no matches", and the usual cause is either a missing market-data subscription (→ use `--tickers`) or a typo. The CLI returns the error in the JSON payload; check for `result.get("error")` and surface the message rather than treating an empty DataFrame as "nothing found."
 
@@ -163,13 +177,15 @@ Presets: `momentum`, `gap-up`, `gap-down`, `mean-reversion`, `breakout`, `volati
 
 | Method | Description |
 |--------|-------------|
-| `MMRHelpers.balance_sheet(symbol, limit=4, timeframe="quarterly")` | Balance sheet (assets, liabilities, equity) |
-| `MMRHelpers.income_statement(symbol, limit=4, timeframe="quarterly")` | Income statement (revenue, earnings, margins) |
-| `MMRHelpers.cash_flow(symbol, limit=4, timeframe="quarterly")` | Cash flow statement (operating, investing, financing) |
-| `MMRHelpers.ratios(symbol)` | Financial ratios TTM (P/E, P/B, ROE, EV/EBITDA, etc.) |
-| `MMRHelpers.filing_section(symbol, section="business", limit=1)` | 10-K filing section text (business or risk_factors) |
+| `MMRHelpers.balance_sheet(symbol, limit=4, timeframe="quarterly", source="massive")` | Balance sheet (assets, liabilities, equity) |
+| `MMRHelpers.income_statement(symbol, limit=4, timeframe="quarterly", source="massive")` | Income statement (revenue, earnings, margins) |
+| `MMRHelpers.cash_flow(symbol, limit=4, timeframe="quarterly", source="massive")` | Cash flow statement (operating, investing, financing) |
+| `MMRHelpers.ratios(symbol, source="massive")` | Financial ratios — Massive: ~11 TTM fields; TwelveData: ~60 flat-keyed fields |
+| `MMRHelpers.filing_section(symbol, section="business", limit=1)` | 10-K filing section text (Massive only) |
 
-Requires `massive_api_key` in config. No trader_service needed. `timeframe`: `"quarterly"` or `"annual"` (not applicable to ratios/filing).
+`source="massive"` (default) requires `massive_api_key`; `source="twelvedata"` requires `twelvedata_api_key` (Pro tier). No trader_service needed either way. `timeframe`: `"quarterly"` or `"annual"` (not applicable to ratios/filing).
+
+Shapes deliberately differ between sources — we pass through what each provider returns rather than merging into a synthetic schema. Massive returns Polygon-style camelCase fields; TwelveData returns nested groups flattened to dot-keyed columns like `valuations_metrics.trailing_pe` and `financials.income_statement.revenue_ttm`. Inspect `df.columns` to see what each source gave you.
 
 ### Options
 
@@ -228,9 +244,9 @@ Three things to know when working with backtests:
 |--------|-------------|
 | `MMRHelpers.data_summary()` | What historical data is available locally |
 | `MMRHelpers.data_query(symbol, bar_size, days)` | Read OHLCV data from local DuckDB |
-| `MMRHelpers.data_download(symbols, bar_size, days)` | Download from Massive.com to local DuckDB |
+| `MMRHelpers.data_download(symbols, bar_size, days, source="massive", force=False)` | Download to local DuckDB |
 
-`data_download` requires `massive_api_key` in config. All three methods return JSON.
+`data_download` uses the freshness guard by default — repeat calls over the same window are a no-op (no API credits burned). Pass `force=True` only when you want to re-fetch stored days to pick up new coverage (e.g. switching sources, or after enabling TwelveData's extended-hours default). TwelveData intraday (1/5/15/30-min) defaults to `prepost=true` → ~960 bars per US trading day (04:00–19:59 ET); Massive returns 24h. All methods return JSON.
 
 ### Universe Management
 
@@ -253,9 +269,10 @@ Universes are named collections of stock definitions stored in DuckDB.
 | Method | Description |
 |--------|-------------|
 | `MMRHelpers.history_massive(symbol=, universe=, bar_size="1 day", prev_days=30)` | Download from Massive.com (via data_service RPC) |
+| `MMRHelpers.history_twelvedata(symbol=, universe=, bar_size="1 day", prev_days=30)` | Download from TwelveData (via data_service RPC) |
 | `MMRHelpers.history_ib(symbol=, universe=, bar_size="1 min", prev_days=5)` | Download from IB (via data_service RPC) |
 
-Must specify either `symbol` or `universe`. Requires `data_service` to be running.
+Must specify either `symbol` or `universe`. All three require `data_service` to be running. For no-service direct pulls to the local DuckDB, use `data_download(symbols, source=...)` instead.
 
 **Bar sizes**: `1 secs`, `5 secs`, `10 secs`, `15 secs`, `30 secs`, `1 min`, `2 mins`, `3 mins`, `5 mins`, `10 mins`, `15 mins`, `20 mins`, `30 mins`, `1 hour`, `2 hours`, `3 hours`, `4 hours`, `8 hours`, `1 day`, `1 week`, `1 month`
 
