@@ -28,7 +28,8 @@ class IBConfig:
 
 @dataclass
 class StorageConfig:
-    duckdb_path: str = 'data/mmr.duckdb'
+    duckdb_path: str = '~/.local/share/mmr/data/mmr.duckdb'
+    history_duckdb_path: str = '~/.local/share/mmr/data/mmr_history.duckdb'
     universe_library: str = 'Universes'
 
 
@@ -96,6 +97,7 @@ class MMRConfig:
             'strategy_runtime_ib_client_id': ('ib', 'strategy_runtime_client_id'),
             # Storage
             'duckdb_path': ('storage', 'duckdb_path'),
+            'history_duckdb_path': ('storage', 'history_duckdb_path'),
             'universe_library': ('storage', 'universe_library'),
             # ZMQ
             'zmq_rpc_server_address': ('zmq', 'rpc_server_address'),
@@ -181,10 +183,15 @@ class MMRConfig:
             else:
                 config.ib.server_port = config.ib.live_port
 
-        # Resolve relative duckdb_path against the project root
-        if config.storage.duckdb_path and not os.path.isabs(config.storage.duckdb_path):
-            from trader.container import mmr_root
-            config.storage.duckdb_path = str(mmr_root() / config.storage.duckdb_path)
+        # Resolve duckdb paths: expand ~ first, then resolve relative paths against project root
+        from trader.container import mmr_root
+        for attr in ('duckdb_path', 'history_duckdb_path'):
+            val = getattr(config.storage, attr)
+            if val:
+                val = os.path.expanduser(val)
+                if not os.path.isabs(val):
+                    val = str(mmr_root() / val)
+                setattr(config.storage, attr, val)
 
         return config
 

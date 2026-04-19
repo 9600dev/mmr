@@ -132,10 +132,50 @@ class TestProposalStore:
 
     def test_update_status_with_order_ids(self, proposal_store):
         pid = proposal_store.add(_make_proposal())
+        # State machine requires PENDING → APPROVED → EXECUTED
+        proposal_store.update_status(pid, 'APPROVED')
         proposal_store.update_status(pid, 'EXECUTED', order_ids=[101, 102, 103])
         p = proposal_store.get(pid)
         assert p.status == 'EXECUTED'
         assert p.order_ids == [101, 102, 103]
+
+    def test_invalid_transition_raises(self, proposal_store):
+        """Terminal states cannot transition further."""
+        from trader.data.proposal_store import InvalidProposalTransition
+
+        pid = proposal_store.add(_make_proposal())
+        proposal_store.update_status(pid, 'REJECTED', rejection_reason='no')
+        # REJECTED is terminal
+        with pytest.raises(InvalidProposalTransition):
+            proposal_store.update_status(pid, 'APPROVED')
+        with pytest.raises(InvalidProposalTransition):
+            proposal_store.update_status(pid, 'EXECUTED')
+
+    def test_cannot_double_approve(self, proposal_store):
+        """Re-approving an APPROVED proposal is a no-op; re-executing fails."""
+        from trader.data.proposal_store import InvalidProposalTransition
+
+        pid = proposal_store.add(_make_proposal())
+        proposal_store.update_status(pid, 'APPROVED')
+        # Same-state update is a no-op (idempotent)
+        proposal_store.update_status(pid, 'APPROVED')
+        proposal_store.update_status(pid, 'EXECUTED', order_ids=[1])
+        # EXECUTED is terminal — cannot re-approve
+        with pytest.raises(InvalidProposalTransition):
+            proposal_store.update_status(pid, 'APPROVED')
+
+    def test_unknown_status_raises(self, proposal_store):
+        from trader.data.proposal_store import InvalidProposalTransition
+
+        pid = proposal_store.add(_make_proposal())
+        with pytest.raises(InvalidProposalTransition):
+            proposal_store.update_status(pid, 'BOGUS')
+
+    def test_update_status_missing_proposal_raises(self, proposal_store):
+        from trader.data.proposal_store import InvalidProposalTransition
+
+        with pytest.raises(InvalidProposalTransition):
+            proposal_store.update_status(999, 'APPROVED')
 
     def test_update_status_with_rejection_reason(self, proposal_store):
         pid = proposal_store.add(_make_proposal())

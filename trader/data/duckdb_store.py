@@ -39,25 +39,33 @@ class DuckDBConnection:
                 cls._instances[db_path] = DuckDBConnection(db_path)
             return cls._instances[db_path]
 
-    def execute(self, query: str, params: Optional[list] = None) -> duckdb.DuckDBPyConnection:
-        """Execute a query using a short-lived connection.
+    def execute(
+        self,
+        query: str,
+        params: Optional[list] = None,
+        fetch: str = 'none',
+    ):
+        """Execute a query atomically and return results (or None).
 
-        Returns the connection so callers can fetch results.  The caller
-        should NOT close the connection — it will be closed on the next
-        call or via the context manager pattern.
+        fetch: 'none' returns None, 'all' returns list of tuples,
+        'one' returns a single tuple (or None), 'df' returns a DataFrame.
 
-        For simple queries this is fine.  For multi-step operations that
-        need atomicity (register + insert + unregister), use execute_atomic().
+        The connection is opened and closed inside the lock, so callers
+        never hold a connection reference beyond this call. For multi-
+        statement atomicity (register + insert + unregister), use
+        execute_atomic().
         """
-        with self._lock:
-            conn = duckdb.connect(self.db_path)
-            try:
-                if params:
-                    return conn.execute(query, params)
-                return conn.execute(query)
-            except Exception:
-                conn.close()
-                raise
+        def _run(conn):
+            result = conn.execute(query, params) if params else conn.execute(query)
+            if fetch == 'all':
+                return result.fetchall()
+            if fetch == 'one':
+                return result.fetchone()
+            if fetch == 'df':
+                return result.fetchdf()
+            return None
+
+        return self.execute_atomic(_run)
 
     def execute_atomic(self, fn):
         """Execute a function with an exclusive connection.

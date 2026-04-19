@@ -63,6 +63,7 @@ class Trader():
                  zmq_strategy_rpc_server_port: int,
                  zmq_messagebus_server_address: str,
                  zmq_messagebus_server_port: int,
+                 history_duckdb_path: str = '',
                  paper_trading: bool = False,
                  simulation: bool = False):
         self.ib_server_address = ib_server_address
@@ -70,6 +71,7 @@ class Trader():
         self.trading_runtime_ib_client_id = trading_runtime_ib_client_id
         self.ib_account = ib_account
         self.duckdb_path = duckdb_path
+        self.history_duckdb_path = history_duckdb_path or duckdb_path
         self.universe_library = universe_library
         self.simulation: bool = simulation
         self.paper_trading = paper_trading
@@ -100,6 +102,10 @@ class Trader():
         # pnl for current portfolio
         self.pnl: DataClassCache = DataClassCache[PnLSingle](lambda pnl: str((pnl.account, pnl.conId)))
         self.pnl_subscriptions: Dict[Tuple[str, int], bool] = {}
+        self._pnl_subscriptions_lock: threading.Lock = threading.Lock()
+        # The main event loop, captured on connect(). Used when IB callbacks
+        # fire on threads other than the loop thread.
+        self._main_loop: Optional[asyncio.AbstractEventLoop] = None
         # takes care of execution of orders
         self.executioner: TradeExecutioner
         # a list of all the universes of stocks we have registered
@@ -136,7 +142,7 @@ class Trader():
                 ib_client_id=self.trading_runtime_ib_client_id,
                 ib_account=self.ib_account,
             )
-            self.data = TickStorage(self.duckdb_path)
+            self.data = TickStorage(self.history_duckdb_path)
             self.universe_accessor = UniverseAccessor(self.duckdb_path, self.universe_library)
             self.clear_portfolio_universe()
             self.contract_subscriptions = {}
@@ -254,12 +260,25 @@ class Trader():
     def __update_portfolio(self, portfolio_item: PortfolioItem):
         logging.debug('__update_portfolio')
         self.portfolio.add_portfolio_item(portfolio_item=portfolio_item)
-        # Schedule async universe update to avoid "event loop already running" error
-        import asyncio
+        # Schedule the async universe update onto the trader's main loop even
+        # when this callback fires on an IB/eventkit thread. The old code fell
+        # back to a *synchronous* disk-IO path in that case, which blocked
+        # every other IB event on the callback thread.
+        coro = self.update_portfolio_universe(portfolio_item)
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self.update_portfolio_universe(portfolio_item))
+            loop.create_task(coro)
+            return
         except RuntimeError:
+            pass
+
+        main_loop = self._main_loop
+        if main_loop is not None and main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(coro, main_loop)
+        else:
+            # Truly no loop available (shutdown path, tests). Fall back to the
+            # sync version but close the coroutine to avoid "never awaited".
+            coro.close()
             self._update_portfolio_universe_sync(portfolio_item)
 
     def __dataclass_server_put(self, message: DataClassEvent):
@@ -307,23 +326,44 @@ class Trader():
         # subscribe to all portfolio changes, then make sure we're subscribing to the pnl for each
         def __subscribe_pnl(portfolio_item: PortfolioItem):
             async def __async_subscribe_pnl(portfolio_item: PortfolioItem):
-                if portfolio_item.contract and (portfolio_item.account, portfolio_item.contract.conId) not in self.pnl_subscriptions:  # noqa: E501
-                    try:
-                        observable = await self.client.subscribe_single_pnl(
-                            portfolio_item.contract,
-                        )
-                        disposable = observable.subscribe(self.pnl.create_observer(error_func=handle_subscription_exception))
+                if not portfolio_item.contract:
+                    return
+                key = (portfolio_item.account, portfolio_item.contract.conId)
+                # Atomic "first claim wins" — prevents two concurrent portfolio
+                # events from both crossing the earlier check-then-act gap and
+                # leaking duplicate PnL subscriptions on reconnect.
+                with self._pnl_subscriptions_lock:
+                    if key in self.pnl_subscriptions:
+                        return
+                    self.pnl_subscriptions[key] = True
 
-                        self.disposables.append(disposable)
-                        self.pnl_subscriptions.update({(portfolio_item.account, portfolio_item.contract.conId): True})
-                    except Exception as ex:
-                        logging.warning(f'Failed to subscribe PnL for {portfolio_item.contract}: {ex}')
+                try:
+                    observable = await self.client.subscribe_single_pnl(
+                        portfolio_item.contract,
+                    )
+                    disposable = observable.subscribe(
+                        self.pnl.create_observer(error_func=handle_subscription_exception),
+                    )
+                    self.disposables.append(disposable)
+                except Exception as ex:
+                    # Back out the registry entry so a retry can re-attempt.
+                    with self._pnl_subscriptions_lock:
+                        self.pnl_subscriptions.pop(key, None)
+                    logging.warning(f'Failed to subscribe PnL for {portfolio_item.contract}: {ex}')
 
-            import asyncio
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(__async_subscribe_pnl(portfolio_item))
+                return
             except RuntimeError:
+                pass
+
+            # Off-loop-thread callback: hand off to the main loop if captured,
+            # otherwise fall back to the legacy sync-run path.
+            main_loop = self._main_loop
+            if main_loop is not None and main_loop.is_running():
+                asyncio.run_coroutine_threadsafe(__async_subscribe_pnl(portfolio_item), main_loop)
+            else:
                 self.run(__async_subscribe_pnl(portfolio_item))
 
         disposable = (await self.client.subscribe_portfolio()).subscribe(
@@ -385,6 +425,14 @@ class Trader():
 
     @log_method
     async def connected_event(self):
+        # Capture the main event loop now that we're running inside it. Used
+        # to schedule async work from IB callback threads without spinning up
+        # a throwaway loop.
+        try:
+            self._main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
         # Dispose old subscriptions before re-subscribing (happens on reconnect)
         for disposable in self.disposables:
             try:
@@ -392,7 +440,8 @@ class Trader():
             except Exception:
                 pass
         self.disposables.clear()
-        self.pnl_subscriptions.clear()
+        with self._pnl_subscriptions_lock:
+            self.pnl_subscriptions.clear()
 
         await self.setup_subscriptions()
 
@@ -711,7 +760,7 @@ class Trader():
         # --- Pre-trade risk checks ---
 
         # 0. Trading filter check (denylist/allowlist)
-        if hasattr(self, 'risk_gate'):
+        if getattr(self, 'risk_gate', None) is not None:
             instrument_result = self.risk_gate.check_instrument(
                 symbol=contract.symbol, exchange=contract.exchange or '', sec_type=contract.secType or '',
             )
@@ -729,7 +778,7 @@ class Trader():
             logging.warning(f'whatIfOrder failed, proceeding without margin check: {ex}')
 
         # 2. Leverage limit check
-        if margin_impact and hasattr(self, 'risk_gate'):
+        if margin_impact and getattr(self, 'risk_gate', None) is not None:
             net_liq = 0.0
             for v in self.client.ib.accountValues():
                 if v.tag == 'NetLiquidation' and v.currency != 'BASE':
@@ -741,7 +790,7 @@ class Trader():
                 return SuccessFail.fail(error=leverage_result.reason)
 
         # 3. Risk gate checks (open orders, daily loss)
-        if hasattr(self, 'risk_gate'):
+        if getattr(self, 'risk_gate', None) is not None:
             from trader.trading.strategy import Signal
             signal = Signal(
                 source_name='proposal',
@@ -756,23 +805,43 @@ class Trader():
             if not gate_result.approved:
                 return SuccessFail.fail(error=f'Risk gate: {gate_result.reason}')
 
+        async def _place_and_wait(c: Contract, o: Order) -> Optional[Trade]:
+            """Place a single child order and await the IB ack. Returns the
+            Trade object or None on failure (observer emitted on_error)."""
+            event = asyncio.Event()
+            result: Dict[str, Optional[Trade]] = {'trade': None}
+
+            def _on_next(trade: Trade):
+                result['trade'] = trade
+                event.set()
+
+            obs = await self.executioner.subscribe_place_order_direct(c, o)
+            obs.subscribe(Observer(
+                on_next=_on_next,
+                on_error=lambda e: event.set(),
+                on_completed=lambda: None,
+            ))
+            await event.wait()
+            return result['trade']
+
+        def _cancel_trade_safely(trade: Optional[Trade]) -> None:
+            """Best-effort cancel of a staged (transmit=False) child order."""
+            if trade is None or not getattr(trade, 'order', None):
+                return
+            try:
+                self.client.ib.cancelOrder(trade.order)
+            except Exception as ex:
+                logging.warning(
+                    'failed to cancel partial bracket leg %s: %s',
+                    getattr(trade.order, 'orderId', '?'), ex,
+                )
+
         try:
             if spec.exit_type == 'BRACKET':
                 entry = _build_entry(**common)
                 entry.transmit = False
 
-                task = asyncio.Event()
-                entry_trade: Optional[Trade] = None
-
-                def on_entry(trade: Trade):
-                    nonlocal entry_trade
-                    entry_trade = trade
-                    task.set()
-
-                observable = await self.executioner.subscribe_place_order_direct(contract, entry)
-                observable.subscribe(Observer(on_next=on_entry, on_error=lambda e: task.set(), on_completed=lambda: None))
-                await task.wait()
-
+                entry_trade = await _place_and_wait(contract, entry)
                 if entry_trade is None:
                     return SuccessFail.fail(error='Failed to place entry order')
 
@@ -790,20 +859,17 @@ class Trader():
                     tif=spec.tif,
                     outsideRth=spec.outside_rth,
                 )
-
-                tp_task = asyncio.Event()
-                tp_trade: Optional[Trade] = None
-
-                def on_tp(trade: Trade):
-                    nonlocal tp_trade
-                    tp_trade = trade
-                    tp_task.set()
-
-                tp_obs = await self.executioner.subscribe_place_order_direct(contract, tp)
-                tp_obs.subscribe(Observer(on_next=on_tp, on_error=lambda e: tp_task.set(), on_completed=lambda: None))
-                await tp_task.wait()
-                if tp_trade:
-                    trades.append(tp_trade)
+                tp_trade = await _place_and_wait(contract, tp)
+                if tp_trade is None:
+                    # Roll back the staged entry — it was transmit=False so no
+                    # market-side exposure yet; cancelling keeps the book
+                    # consistent with the caller's understanding that the
+                    # bracket failed atomically.
+                    _cancel_trade_safely(entry_trade)
+                    return SuccessFail.fail(
+                        error='Bracket aborted: take-profit order rejected; entry rolled back'
+                    )
+                trades.append(tp_trade)
 
                 # Stop-loss (transmit=True triggers the whole bracket)
                 sl = StopOrder(
@@ -816,20 +882,16 @@ class Trader():
                     tif=spec.tif,
                     outsideRth=spec.outside_rth,
                 )
-
-                sl_task = asyncio.Event()
-                sl_trade: Optional[Trade] = None
-
-                def on_sl(trade: Trade):
-                    nonlocal sl_trade
-                    sl_trade = trade
-                    sl_task.set()
-
-                sl_obs = await self.executioner.subscribe_place_order_direct(contract, sl)
-                sl_obs.subscribe(Observer(on_next=on_sl, on_error=lambda e: sl_task.set(), on_completed=lambda: None))
-                await sl_task.wait()
-                if sl_trade:
-                    trades.append(sl_trade)
+                sl_trade = await _place_and_wait(contract, sl)
+                if sl_trade is None:
+                    # Same as above: cancel TP + entry before the bracket is
+                    # ever transmitted to the market.
+                    _cancel_trade_safely(tp_trade)
+                    _cancel_trade_safely(entry_trade)
+                    return SuccessFail.fail(
+                        error='Bracket aborted: stop-loss order rejected; entry + TP rolled back'
+                    )
+                trades.append(sl_trade)
 
             elif spec.exit_type == 'TRAILING_STOP':
                 entry = _build_entry(**common)

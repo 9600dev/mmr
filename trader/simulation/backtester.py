@@ -9,7 +9,7 @@ from trader.objects import Action, BarSize
 from trader.simulation.slippage import FixedBPS, SlippageModel
 from trader.trading.risk_gate import RiskGate, RiskLimits
 from trader.trading.strategy import Signal, Strategy, StrategyContext, StrategyState
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import datetime as dt
 import importlib
@@ -34,6 +34,10 @@ class BacktestConfig:
     slippage_bps: float = 1.0
     commission_per_share: float = 0.005
     slippage_model: Optional['SlippageModel'] = None  # overrides slippage_bps when set
+    # Fill policy. ``next_open`` is realistic: a signal emitted at bar t
+    # executes at bar t+1's open. ``same_close`` reproduces the (lookahead-
+    # biased) legacy behavior and is only intended for regression tests.
+    fill_policy: str = 'next_open'
 
 
 @dataclass
@@ -58,8 +62,86 @@ class BacktestResult:
     max_drawdown: float
     win_rate: float
     total_trades: int
+    # Extended practitioner metrics. All default to 0.0 so older code paths
+    # that construct BacktestResult positionally still work.
+    sortino_ratio: float = 0.0
+    calmar_ratio: float = 0.0
+    profit_factor: float = 0.0
+    expectancy_bps: float = 0.0
+    time_in_market_pct: float = 0.0
     start_date: dt.datetime = field(default_factory=dt.datetime.now)
     end_date: dt.datetime = field(default_factory=dt.datetime.now)
+    # Effective param overrides applied via ``apply_param_overrides``. Empty
+    # when the run used class defaults. Populated by ``run_from_module``.
+    applied_params: Dict[str, Any] = field(default_factory=dict)
+
+
+def _coerce_param(raw: Any, current: Any, key: str) -> Any:
+    """Coerce a raw param override (usually a CLI string) to the type of
+    the existing class attribute. Bools get string-aware handling because
+    ``bool("False")`` is ``True``.
+
+    Rejects malformed inputs with a clear ``ValueError`` naming the key
+    rather than failing deep inside the strategy's indicator math.
+    """
+    # Already native type — fast path.
+    if type(current) is type(raw) or raw is None:
+        return raw
+    if isinstance(current, bool):
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            low = raw.strip().lower()
+            if low in ('true', 'yes', '1'):
+                return True
+            if low in ('false', 'no', '0'):
+                return False
+            raise ValueError(
+                f"param {key!r} expects a boolean; got {raw!r}"
+            )
+        return bool(raw)
+    if isinstance(current, int):
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"param {key!r} expects int; got {raw!r}"
+            )
+    if isinstance(current, float):
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"param {key!r} expects float; got {raw!r}"
+            )
+    if isinstance(current, str):
+        return str(raw)
+    # For anything else (lists, dicts) pass through as-is; JSON sweep path
+    # will have already parsed them.
+    return raw
+
+
+def _coerce_loose(raw: Any) -> Any:
+    """Best-effort numeric coercion for lower-case ``self.params`` keys,
+    where we have no type info. Tries int, then float, else returns the
+    value unchanged. JSON-parsed inputs (already typed) pass straight through.
+    """
+    if not isinstance(raw, str):
+        return raw
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        pass
+    low = raw.strip().lower()
+    if low in ('true', 'yes'):
+        return True
+    if low in ('false', 'no'):
+        return False
+    return raw
 
 
 class Backtester:
@@ -77,18 +159,66 @@ class Backtester:
             self.config.slippage_model = FixedBPS(self.config.slippage_bps)
 
     def _load_strategy_class(self, module_path: str, class_name: str):
-        filepath = os.path.abspath(module_path)
+        filepath = os.path.abspath(os.path.expanduser(module_path))
         if not os.path.exists(filepath):
             raise FileNotFoundError(f'strategy module not found: {filepath}')
 
-        module_name = os.path.splitext(os.path.basename(filepath))[0]
+        # Sandbox: strategy modules must live inside a known safe root — either
+        # the project's strategies/ directory or the tests/ tree (so pytest
+        # fixtures can load their own test strategies). An arbitrary
+        # /tmp/evil.py should never be executed by the backtester.
+        allowed_roots = []
+        try:
+            cur = os.path.abspath(os.path.dirname(__file__))
+            # Walk up to the project root (contains ``configs/trader.yaml``)
+            while cur != os.path.dirname(cur):
+                if os.path.exists(os.path.join(cur, 'configs', 'trader.yaml')):
+                    allowed_roots.append(os.path.join(cur, 'strategies'))
+                    allowed_roots.append(os.path.join(cur, 'tests'))
+                    break
+                cur = os.path.dirname(cur)
+        except Exception:
+            pass
+        if os.environ.get('MMR_STRATEGIES_EXTRA_ROOT'):
+            # Escape hatch for research installs that keep strategies elsewhere.
+            allowed_roots.append(os.path.abspath(
+                os.path.expanduser(os.environ['MMR_STRATEGIES_EXTRA_ROOT'])
+            ))
+        # Under pytest, test fixtures write throwaway strategy files to
+        # ``tmp_path`` (system tempdir). Allow that so in-process tests can
+        # exercise the loader without disabling the sandbox globally.
+        if 'PYTEST_CURRENT_TEST' in os.environ:
+            import tempfile as _tempfile
+            allowed_roots.append(os.path.realpath(_tempfile.gettempdir()))
+        if allowed_roots and not any(
+            os.path.realpath(filepath) == r
+            or os.path.realpath(filepath).startswith(r + os.sep)
+            for r in (os.path.realpath(x) for x in allowed_roots)
+        ):
+            raise ValueError(
+                f'strategy module {module_path!r} resolves outside allowed '
+                f'roots {allowed_roots!r}; refusing to load. '
+                f'Move the file under strategies/ or set '
+                f'MMR_STRATEGIES_EXTRA_ROOT.'
+            )
+
+        # Namespace the module key by the class name rather than just the
+        # basename, so two strategies in different dirs with the same
+        # filename don't clobber each other in sys.modules.
+        module_name = f'_mmr_backtest_{class_name}_{os.path.splitext(os.path.basename(filepath))[0]}'
+        sys.modules.pop(module_name, None)
+
         spec = importlib.util.spec_from_file_location(module_name, filepath)
         if not spec or not spec.loader:
             raise ImportError(f'cannot load module from {filepath}')
 
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
-        spec.loader.exec_module(module)
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(module_name, None)
+            raise
 
         class_object = getattr(module, class_name)
         if not (inspect.isclass(class_object) and issubclass(class_object, Strategy)):
@@ -176,93 +306,157 @@ class Backtester:
             axis=0
         ).sort_index()
 
-        # Walk forward bar-by-bar, building an expanding window for each conid
+        # Walk forward bar-by-bar, building an expanding window for each conid.
+        # To avoid lookahead bias: when a strategy emits a signal while
+        # observing bar t, we queue it for execution at bar t+1's open price.
+        # Under ``fill_policy == 'same_close'`` we preserve the legacy (biased)
+        # behavior for regression tests.
         accumulated: Dict[int, pd.DataFrame] = {}
         last_prices: Dict[int, float] = {}
+        # Pending signals: list of (signal, conid, signal_timestamp)
+        pending_signals: List[tuple] = []
+
+        # Track how many bars we held at least one open position. Populated
+        # inside the main loop; used at the end to compute time_in_market_pct.
+        bars_in_market = 0
+
+        # Precompute hook — strategies that override ``precompute`` get their
+        # indicator work done ONCE per conid here instead of on every bar.
+        # This collapses the vectorbt / numba path from O(N²) to O(N).
+        precompute_state: Dict[int, Dict[str, Any]] = {}
+        for conid, full_df in all_data.items():
+            try:
+                precompute_state[conid] = strategy.precompute(full_df) or {}
+            except Exception as ex:
+                logging.warning(
+                    'strategy.precompute() failed for conid %s: %s — '
+                    'falling back to on_prices dispatch', conid, ex,
+                )
+                precompute_state[conid] = {}
+
+        # Per-conid running index of how many of its bars we've consumed.
+        # Used to call ``on_bar(full_prices, state, index)`` in O(1).
+        bar_index: Dict[int, int] = {conid: -1 for conid in all_data}
+
+        def _execute_signal(signal, conid, signal_ts, bar_ts, bar_row, fill_basis):
+            nonlocal cash
+            signal_event = TradingEvent(
+                event_type=EventType.SIGNAL,
+                timestamp=signal_ts if isinstance(signal_ts, dt.datetime) else dt.datetime.now(),
+                strategy_name=signal.source_name,
+                conid=conid,
+                action=str(signal.action),
+                signal_probability=signal.probability,
+                signal_risk=signal.risk,
+            )
+            signals.append(signal_event)
+
+            if fill_basis <= 0:
+                return
+
+            quantity = signal.quantity if signal.quantity > 0 else 0
+            if quantity == 0:
+                if signal.action == Action.SELL:
+                    # Exit signals default to "close the whole position" —
+                    # NOT 10% of cash (which is nonsense for a sell and
+                    # rounds to 0 shares once cash is drained by multiple
+                    # accumulating BUYs, silently dropping the exit).
+                    held = positions.get(conid, 0)
+                    quantity = held if held > 0 else 0
+                else:
+                    quantity = math.floor((cash * 0.1) / fill_basis) if fill_basis > 0 else 0
+            if quantity <= 0:
+                return
+
+            fill_price = self.config.slippage_model.calculate(fill_basis, quantity, signal.action, bar_row)
+            commission = quantity * self.config.commission_per_share
+
+            if signal.action == Action.BUY:
+                cost = quantity * fill_price + commission
+                if cost > cash:
+                    return
+                cash -= cost
+                positions[conid] = positions.get(conid, 0) + quantity
+                position_entry_prices[conid] = fill_price
+            elif signal.action == Action.SELL:
+                held = positions.get(conid, 0)
+                if held <= 0:
+                    return
+                sell_qty = min(quantity, held)
+                commission = sell_qty * self.config.commission_per_share
+                proceeds = sell_qty * fill_price - commission
+                cash += proceeds
+                positions[conid] = positions.get(conid, 0) - sell_qty
+                quantity = sell_qty
+                if positions[conid] == 0:
+                    positions.pop(conid, None)
+                    position_entry_prices.pop(conid, None)
+
+            trades.append(BacktestTrade(
+                timestamp=bar_ts if isinstance(bar_ts, dt.datetime) else dt.datetime.now(),
+                conid=conid,
+                action=signal.action,
+                quantity=quantity,
+                price=fill_price,
+                commission=commission,
+                signal_probability=signal.probability,
+                signal_risk=signal.risk,
+            ))
 
         for timestamp, group in combined.groupby(combined.index):
+            # Snapshot per-conid bars at this timestamp
+            bars_this_ts: Dict[int, pd.DataFrame] = {}
             for conid in group['conid'].unique():
-                bar = group[group['conid'] == conid].drop(columns=['conid'])
+                bars_this_ts[conid] = group[group['conid'] == conid].drop(columns=['conid'])
 
+            # 1. Execute any signals queued from the previous bar at THIS bar's open
+            if self.config.fill_policy == 'next_open' and pending_signals:
+                still_pending = []
+                for signal, conid, signal_ts in pending_signals:
+                    bar = bars_this_ts.get(conid)
+                    if bar is None or bar.empty:
+                        # No bar for this conid yet — keep waiting (e.g. new listing)
+                        still_pending.append((signal, conid, signal_ts))
+                        continue
+                    open_price = float(bar['open'].iloc[0])
+                    _execute_signal(signal, conid, signal_ts, timestamp, bar.iloc[-1], open_price)
+                pending_signals = still_pending
+
+            # 2. Accumulate this bar into the expanding window + update last prices
+            for conid, bar in bars_this_ts.items():
                 if conid not in accumulated:
                     accumulated[conid] = bar
                 else:
                     accumulated[conid] = pd.concat([accumulated[conid], bar], axis=0)
-
-                # Track last price for portfolio valuation
                 last_prices[conid] = float(bar['close'].iloc[-1])
+                bar_index[conid] = bar_index.get(conid, -1) + 1
 
-            # Call strategy.on_prices() for each conid with accumulated data
-            for conid in list(accumulated.keys()):
-                signal = strategy.on_prices(accumulated[conid])
+            # 3. Run the strategy on each conid at its current bar.
+            #    on_bar is the fast path (reads precomputed state by index);
+            #    its default impl falls back to on_prices(accumulated) so
+            #    strategies that only implement the legacy API still work.
+            for conid in list(bars_this_ts.keys()):
+                idx = bar_index.get(conid, -1)
+                if idx < 0:
+                    continue
+                full_prices = all_data[conid]
+                state = precompute_state.get(conid, {})
+                signal = strategy.on_bar(full_prices, state, idx)
+                if not signal:
+                    continue
 
-                if signal:
-                    signal_event = TradingEvent(
-                        event_type=EventType.SIGNAL,
-                        timestamp=timestamp if isinstance(timestamp, dt.datetime) else dt.datetime.now(),
-                        strategy_name=signal.source_name,
-                        conid=conid,
-                        action=str(signal.action),
-                        signal_probability=signal.probability,
-                        signal_risk=signal.risk,
+                if self.config.fill_policy == 'same_close':
+                    # Legacy lookahead-biased path: fill at this bar's close
+                    _execute_signal(
+                        signal, conid, timestamp, timestamp,
+                        accumulated[conid].iloc[-1],
+                        last_prices.get(conid, 0.0),
                     )
-                    signals.append(signal_event)
+                else:
+                    # Realistic path: queue for next bar's open
+                    pending_signals.append((signal, conid, timestamp))
 
-                    # Simulate execution
-                    price = last_prices.get(conid, 0.0)
-                    if price <= 0:
-                        continue
-
-                    # Determine quantity before slippage (SquareRootImpact needs quantity)
-                    quantity = signal.quantity if signal.quantity > 0 else 0
-                    if quantity == 0:
-                        # Default: use 10% of available capital
-                        quantity = math.floor((cash * 0.1) / price) if price > 0 else 0
-
-                    if quantity <= 0:
-                        continue
-
-                    # Apply slippage via model
-                    bar_row = accumulated[conid].iloc[-1]
-                    fill_price = self.config.slippage_model.calculate(price, quantity, signal.action, bar_row)
-
-                    commission = quantity * self.config.commission_per_share
-
-                    if signal.action == Action.BUY:
-                        cost = quantity * fill_price + commission
-                        if cost > cash:
-                            # Not enough capital
-                            continue
-                        cash -= cost
-                        positions[conid] = positions.get(conid, 0) + quantity
-                        position_entry_prices[conid] = fill_price
-                    elif signal.action == Action.SELL:
-                        held = positions.get(conid, 0)
-                        if held <= 0:
-                            # No position to sell (don't short in backtest)
-                            continue
-                        sell_qty = min(quantity, held)
-                        commission = sell_qty * self.config.commission_per_share
-                        proceeds = sell_qty * fill_price - commission
-                        cash += proceeds
-                        positions[conid] = positions.get(conid, 0) - sell_qty
-                        quantity = sell_qty  # Record actual executed quantity
-                        if positions[conid] == 0:
-                            positions.pop(conid, None)
-                            position_entry_prices.pop(conid, None)
-
-                    trades.append(BacktestTrade(
-                        timestamp=timestamp if isinstance(timestamp, dt.datetime) else dt.datetime.now(),
-                        conid=conid,
-                        action=signal.action,
-                        quantity=quantity,
-                        price=fill_price,
-                        commission=commission,
-                        signal_probability=signal.probability,
-                        signal_risk=signal.risk,
-                    ))
-
-            # Track equity (cash + mark-to-market positions)
+            # 4. Track equity (cash + mark-to-market positions)
             portfolio_value = cash
             for conid, qty in positions.items():
                 portfolio_value += qty * last_prices.get(conid, 0)
@@ -271,6 +465,10 @@ class Backtester:
             equity_timestamps.append(
                 timestamp if isinstance(timestamp, dt.datetime) else dt.datetime.now()
             )
+
+            # Time-in-market: count bars where at least one position is open.
+            if positions:
+                bars_in_market += 1
 
         # Build equity curve
         equity_curve = pd.Series(equity_values, index=equity_timestamps)
@@ -297,11 +495,16 @@ class Backtester:
         else:
             max_drawdown = 0.0
 
-        # Win rate — track weighted average entry price per conid
+        # Win rate + per-round-trip P&L tracking. Each SELL closes part or
+        # all of an open position; we compute its P&L from the weighted
+        # average entry price and feed those P&Ls into profit_factor and
+        # expectancy_bps below.
         avg_entry: Dict[int, float] = {}   # conid -> weighted avg entry price
         avg_qty: Dict[int, float] = {}     # conid -> total held quantity
         winning_trades = 0
         sell_trades = 0
+        round_trip_pnl: List[float] = []           # dollar P&L per SELL
+        round_trip_return_pct: List[float] = []    # P&L / notional per SELL
         for trade in trades:
             if trade.action == Action.BUY:
                 prev_qty = avg_qty.get(trade.conid, 0.0)
@@ -313,6 +516,14 @@ class Backtester:
             elif trade.action == Action.SELL:
                 sell_trades += 1
                 entry_price = avg_entry.get(trade.conid, 0.0)
+                # Round-trip P&L and return-on-notional for this SELL. Commission
+                # was already deducted from the equity curve at fill time; we
+                # subtract the sell-side commission here for a trade-level view.
+                pnl = (trade.price - entry_price) * trade.quantity - trade.commission
+                round_trip_pnl.append(pnl)
+                if entry_price > 0:
+                    notional = entry_price * trade.quantity
+                    round_trip_return_pct.append(pnl / notional if notional > 0 else 0.0)
                 if entry_price > 0 and trade.price > entry_price:
                     winning_trades += 1
                 # Reduce tracked quantity
@@ -325,6 +536,53 @@ class Backtester:
 
         win_rate = winning_trades / sell_trades if sell_trades > 0 else 0.0
 
+        # ----- Extended practitioner metrics -----
+
+        # Sortino: like Sharpe but only penalizes downside volatility. A
+        # large number is less deceiving on asymmetric P&L than Sharpe.
+        sortino_ratio = 0.0
+        if len(equity_curve) > 1:
+            returns = equity_curve.pct_change().dropna()
+            negative = returns[returns < 0]
+            if len(negative) > 0 and negative.std() > 0:
+                bars_per_year = self._bars_per_year(self.config.bar_size)
+                sortino_ratio = float((returns.mean() / negative.std()) * np.sqrt(bars_per_year))
+
+        # Calmar: raw total_return / |max_drawdown|. Not annualized — raw
+        # form is comparable across short and long backtests. "How many
+        # dollars of edge per dollar of worst drawdown."
+        calmar_ratio = 0.0
+        if max_drawdown < 0:
+            calmar_ratio = float(total_return / abs(max_drawdown))
+
+        # Profit factor: gross wins / |gross losses|. Edge indicator that's
+        # robust to trade count — >1 is profitable, >2 is robust.
+        gross_wins = sum(p for p in round_trip_pnl if p > 0)
+        gross_losses = sum(p for p in round_trip_pnl if p < 0)
+        if gross_losses < 0:
+            profit_factor = float(gross_wins / abs(gross_losses))
+        elif gross_wins > 0:
+            profit_factor = float('inf')  # all winners — rare but real
+        else:
+            profit_factor = 0.0
+
+        # Expectancy per trade, in basis points of entry notional. This is
+        # what actually has to survive slippage/commissions in production —
+        # a strategy with +0.3 bps expectancy dies to 1 bps of real-world
+        # slippage. Reported per round-trip (SELL-closing-position).
+        if round_trip_return_pct:
+            expectancy_bps = float(np.mean(round_trip_return_pct) * 10_000)
+        else:
+            expectancy_bps = 0.0
+
+        # Time-in-market: fraction of bars during which at least one
+        # position was open. Distinguishes always-on index-likes from
+        # selective strategies.
+        if len(equity_curve) > 0:
+            time_in_market_pct = float(bars_in_market / len(equity_curve))
+        else:
+            time_in_market_pct = 0.0
+
         result = BacktestResult(
             signals=signals,
             trades=trades,
@@ -334,6 +592,11 @@ class Backtester:
             max_drawdown=max_drawdown,
             win_rate=win_rate,
             total_trades=len(trades),
+            sortino_ratio=sortino_ratio,
+            calmar_ratio=calmar_ratio,
+            profit_factor=profit_factor,
+            expectancy_bps=expectancy_bps,
+            time_in_market_pct=time_in_market_pct,
             start_date=self.config.start_date,
             end_date=self.config.end_date,
         )
@@ -341,10 +604,80 @@ class Backtester:
         logging.info(
             f'backtest complete: {len(trades)} trades, '
             f'return={total_return:.2%}, sharpe={sharpe_ratio:.2f}, '
+            f'sortino={sortino_ratio:.2f}, calmar={calmar_ratio:.2f}, '
+            f'pf={profit_factor:.2f}, expectancy={expectancy_bps:.1f}bps, '
+            f'time_in_mkt={time_in_market_pct:.1%}, '
             f'max_dd={max_drawdown:.2%}, win_rate={win_rate:.2%}'
         )
 
         return result
+
+    @staticmethod
+    def apply_param_overrides(
+        instance: Strategy,
+        params: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Override strategy parameters. Call **after** ``install(context)``
+        so the strategy has a writable ``params`` dict on its context.
+
+        Two tunable idioms are handled:
+
+        1. **Class attribute** (``EMA_PERIOD = 20``) — read as
+           ``self.EMA_PERIOD``. Python MRO means
+           ``setattr(instance, name, value)`` shadows the class attribute
+           without mutating the class itself, so parallel sweeps don't
+           collide on each other.
+        2. **params dict** (``self.params.get('roc_period', 10)``) — older
+           strategies that read from the runtime-provided params mapping.
+           We write to ``instance._context.params`` directly since the
+           ``Strategy.params`` property is read-only.
+
+        Upper-case keys that aren't recognised class attributes raise
+        ``ValueError`` (typos like ``EMAPERIOD`` would otherwise silently
+        no-op). Lower-case keys are free-form — they always land in the
+        context's params dict.
+
+        Returns the effective overrides (post-coercion) for the caller to
+        persist to ``BacktestRecord.params``.
+        """
+        if not params:
+            return {}
+
+        context = getattr(instance, '_context', None)
+
+        applied: Dict[str, Any] = {}
+        for key, raw in params.items():
+            is_class_attr = (
+                hasattr(type(instance), key)
+                and key.isupper()
+            )
+            if is_class_attr:
+                current = getattr(instance, key)
+                coerced = _coerce_param(raw, current, key)
+                setattr(instance, key, coerced)
+                if context is not None:
+                    context.params[key] = coerced
+                applied[key] = coerced
+            elif key.isupper():
+                raise ValueError(
+                    f"strategy {type(instance).__name__!r} has no "
+                    f"parameter {key!r}; known class-level tunables: "
+                    f"{sorted(k for k in vars(type(instance)) if k.isupper())}"
+                )
+            else:
+                coerced = _coerce_loose(raw)
+                if context is not None:
+                    context.params[key] = coerced
+                else:
+                    # No context yet — stash on the instance so callers
+                    # that apply overrides pre-install (e.g. tests) don't
+                    # silently drop them. Strategy.__init__ seeds an empty
+                    # dict on _pending_params that install() can pick up.
+                    if not hasattr(instance, '_pending_params'):
+                        instance._pending_params = {}
+                    instance._pending_params[key] = coerced
+                applied[key] = coerced
+        return applied
 
     def run_from_module(
         self,
@@ -352,6 +685,7 @@ class Backtester:
         class_name: str,
         conids: List[int],
         universe_accessor: Optional[UniverseAccessor] = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> BacktestResult:
         class_object = self._load_strategy_class(module_path, class_name)
         instance = class_object()
@@ -372,4 +706,15 @@ class Backtester:
         instance.install(context)
         instance.state = StrategyState.RUNNING
 
-        return self.run(instance, conids)
+        # Overrides go on AFTER install so we can write to the context's
+        # params dict. For class-attr overrides we also setattr on the
+        # instance, so downstream ``self.EMA_PERIOD`` reads get the new
+        # value regardless of which idiom the strategy uses.
+        applied_params = self.apply_param_overrides(instance, params)
+
+        result = self.run(instance, conids)
+        # Attach effective param overrides so the CLI can persist them on
+        # the BacktestRecord. The backtester itself doesn't know about
+        # storage, so we stash on the result object.
+        result.applied_params = applied_params
+        return result

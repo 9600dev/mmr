@@ -36,13 +36,12 @@ mkdir -p /home/trader/.config/mmr
 cp -n /home/trader/mmr/configs/*.yaml /home/trader/.config/mmr/ 2>/dev/null || true
 chown -R trader:trader /home/trader/.config/mmr
 
-# Ensure log and data directories exist
+# Ensure data and log directories exist (bind-mounted from host ~/.local/share/mmr/)
+mkdir -p /home/trader/.local/share/mmr/data
 mkdir -p /home/trader/.local/share/mmr/logs
-mkdir -p /home/trader/mmr/data
 
 # Fix permissions — use chmod to avoid chown failures in podman rootless
-chown -R trader:trader /home/trader/.local/share/mmr/logs 2>/dev/null || chmod -R 777 /home/trader/.local/share/mmr/logs
-chown -R trader:trader /home/trader/mmr/data 2>/dev/null || chmod -R 777 /home/trader/mmr/data
+chown -R trader:trader /home/trader/.local/share/mmr 2>/dev/null || chmod -R 777 /home/trader/.local/share/mmr
 
 # Keep container running
 exec tail -f /dev/null

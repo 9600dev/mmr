@@ -15,7 +15,7 @@ metadata:
 - **trader_service required**: portfolio, positions, orders, trades, account, resolve, snapshot, depth, buy, sell, cancel, cancel_all, close_all_positions, resize_positions, approve, strategies (list/enable/disable/reload), `universe_add`, `buy_option`, `sell_option`, `risk`, `scan`, `ideas` (with `--location` for international markets), `listen`, `watch`
 - **data_service required**: history_massive, history_ib
 - **massive_api_key only** (no service needed): balance_sheet, income_statement, cash_flow, ratios, filing_section, `options_expirations`, `options_chain`, `options_snapshot`, `options_implied`, `data_download`, `ideas` (default US path), `news`, `movers`, `forex_snapshot` (massive source), `forex_movers`, `stream`
-- **No service needed**: universe_list, universe_show, universe_create, universe_delete, universe_remove, universe_import, status, market_hours, `data_summary`, `data_query`, `backtest`, `strategy_create`, `strategy_deploy`, `strategy_undeploy`, `strategy_signals`, `strategy_backtest`, `propose`, `proposals`, `reject`, `session_limits`, `session_status`, `group_list`, `group_create`, `group_delete`, `group_show`, `group_add`, `group_remove`, `group_set`, `logs`
+- **No service needed**: universe_list, universe_show, universe_create, universe_delete, universe_remove, universe_import, status, market_hours, `data_summary`, `data_query`, `backtest`, `backtest_sweep`, `backtest_batch`, `backtests_list`, `backtests_show`, `backtests_archive`, `backtests_unarchive`, `strategies_inspect`, `strategy_create`, `strategy_deploy`, `strategy_undeploy`, `strategy_signals`, `strategy_backtest`, `propose`, `proposals`, `reject`, `session_limits`, `session_status`, `group_list`, `group_create`, `group_delete`, `group_show`, `group_add`, `group_remove`, `group_set`, `logs`
 
 ## International Stocks (ASX, TSE, SEHK, etc.)
 
@@ -90,6 +90,14 @@ Trade proposals are stored locally and auto-sized based on confidence, ATR volat
 
 **Sizing pipeline**: `base_position × risk_multiplier × confidence_scale × volatility_adjustment`. With `base_position_pct=0.02` and a $1M account, base is $20K. Volatile stocks (high ATR%) get smaller positions; stable stocks get larger ones. The `sizing_result` in proposal metadata shows the full reasoning chain.
 
+**State machine (important for error handling)**: proposal status transitions are enforced: `PENDING → APPROVED | REJECTED | EXPIRED | FAILED`, then `APPROVED → EXECUTED | FAILED | REJECTED`. Terminal states (`EXECUTED`, `REJECTED`, `EXPIRED`, `FAILED`) are immutable. Practical consequences:
+
+- `approve(pid)` on a non-`PENDING` proposal returns `SuccessFail.fail` with `Proposal #<id> is <status>, not PENDING` — don't treat this as a retryable error, the proposal has already taken its terminal path.
+- `reject(pid)` on a non-`PENDING` proposal returns `False`. Check the status first if you care.
+- If `place_expressive_order` itself fails on the trader_service side (e.g. margin rejection or the risk gate denies it), the proposal moves to `FAILED`, not back to `PENDING`. Create a new proposal rather than trying to re-approve the failed one.
+
+**Bracket orders are transactional**: when a proposal has `execution.exit_type='BRACKET'`, all three legs (entry + take-profit + stop-loss) succeed together or none of them are transmitted to IB. If the TP or SL leg is rejected, the already-staged entry is cancelled and `approve()` returns `SuccessFail.fail` with a message starting `"Bracket aborted:"`. Previously a rejected TP could leave you with entry + SL only (position without a take-profit); that hole is closed.
+
 ### Position Groups
 
 Named groups with allocation budgets for organizing thematic trades. All group operations are local (no trader_service needed).
@@ -112,7 +120,19 @@ Using `group=` in `propose()` auto-adds the symbol to the group.
 |--------|----------|-------------|
 | `MMRHelpers.portfolio_risk()` | **Yes** | Concentration (HHI), group budgets, correlation clusters, warnings (JSON) |
 
-The risk report includes: `hhi` (0=diversified, 1=concentrated), `top_positions` by weight, `group_allocations` with over-budget flags, `correlation_clusters` (symbols with >0.7 correlation), `warnings` (critical >15%, warning >10% concentration, group over budget, correlated clusters >30%), and a `summary` paragraph.
+The risk report includes:
+
+- `hhi` — Herfindahl-Hirschman Index on **gross** weights (0=diversified, 1=fully concentrated)
+- `gross_exposure_pct` — total absolute market value / net liquidation
+- `net_exposure_pct` — **signed** exposure; negative = net short, ~0 on a fully hedged book
+- `long_exposure_pct` / `short_exposure_pct` — same breakdown for the long and short sides
+- `top_positions` by absolute weight; each entry has both `pct` (gross) and `signed_pct` (direction-aware), plus `is_short: bool`
+- `group_allocations` with over-budget flags
+- `correlation_clusters` (symbols with >0.7 correlation) with both `combined_weight_pct` (gross) and `net_weight_pct` (signed). Warnings fire on **net** so a correlated long+short pair doesn't false-alarm.
+- `warnings` (critical >15%, warning >10% single-position concentration, group over budget, correlated cluster with |net exposure| >30%)
+- `summary` — plain-English paragraph; explicitly says "hedged" when gross and |net| diverge
+
+If you're running a long/short book, read `net_exposure_pct` first — a $1M long + $1M short book shows `gross_exposure_pct=2.0` but `net_exposure_pct=0.0`, and the HHI-based concentration warnings are telling you about gross exposure, not real risk.
 
 ### Market Scanning & Ideas
 
@@ -125,6 +145,8 @@ The risk report includes: `hhi` (0=diversified, 1=concentrated), `top_positions`
 *Requires `massive_api_key`. **Requires trader_service when using `location=` for international markets.
 
 Presets: `momentum`, `gap-up`, `gap-down`, `mean-reversion`, `breakout`, `volatile`.
+
+**Fail-loudly behaviour**: `ideas()` with `location=` raises / returns an error instead of an empty list when the IB scanner returns nothing for that location or when every supplied ticker fails to resolve. This is intentional — those two cases used to be indistinguishable from "no matches", and the usual cause is either a missing market-data subscription (→ use `--tickers`) or a typo. The CLI returns the error in the JSON payload; check for `result.get("error")` and surface the message rather than treating an empty DataFrame as "nothing found."
 
 ### Financial Statements
 
@@ -167,11 +189,23 @@ Requires `massive_api_key` in config. No trader_service needed. `timeframe`: `"q
 | Method | Description |
 |--------|-------------|
 | `MMRHelpers.strategy_create(name)` | Create template strategy file in `strategies/` |
-| `MMRHelpers.backtest(path, class_name, conids, ...)` | Backtest a strategy against historical data |
+| `MMRHelpers.strategies_inspect()` | **Do this first** — AST-scan of `strategies/` returning each class's dispatch mode (`precompute` fast vs `on_prices` slow) and tunable params with defaults. Saves reading every file to plan a sweep. |
+| `MMRHelpers.backtest(path, class_name, conids, params={...}, summary_only=True, ...)` | Backtest a strategy. `params={"EMA_PERIOD": 15}` overrides class attributes or `self.params` entries; `summary_only=True` (default) omits the per-trade array from the return. Always use **absolute paths** — the CLI subprocess doesn't inherit cwd. |
+| `MMRHelpers.backtest_sweep(path, class_name, param_grid={...}, conids, ...)` | Cartesian-product parameter sweep. Runs one backtest per grid point, persists each, returns a composite-score leaderboard. Use this to answer "what params". |
+| `MMRHelpers.backtest_batch([jobs], concurrency=4)` | Parallel subprocess-level batch runner for heterogeneous jobs (different strategies/symbols). Each job is `{strategy_path, class_name, conids, days, params, ...}`. Use this for multi-strategy / multi-symbol fanout. |
+| `MMRHelpers.backtests_list(sort_by="score", limit=25, ...)` | List past runs from the history store, ranked by quality score (default) or any metric |
+| `MMRHelpers.backtests_show(run_id)` | Full detail for one run, including **statistical-confidence tests** (PSR, t-stat, bootstrap CIs, P&L distribution, losing-streak MC) |
+| `MMRHelpers.backtests_archive([ids])` / `backtests_unarchive([ids])` | Soft-delete / restore runs — hides from default list without losing the data. Pass `include_archived=True` or `archived_only=True` to `backtests_list` to see hidden runs. |
 | `MMRHelpers.strategy_deploy(name, conids, paper=True)` | Deploy to `strategy_runtime.yaml` |
 | `MMRHelpers.strategy_undeploy(name)` | Remove from config |
 | `MMRHelpers.strategy_signals(name, limit=20)` | View recent signals from event store |
 | `MMRHelpers.strategy_backtest(name, days=365)` | Backtest a deployed strategy by name |
+
+Three things to know when working with backtests:
+
+1. **Module path must stay under `strategies_directory`** — the loader sandboxes paths and rejects absolute paths or `../` traversal. Stick to `strategies/my_strategy.py` (which is what `strategy_create` produces); strategy YAML loaded via `yaml.safe_load` also refuses `!!python/object` tags.
+2. **Backtests fill at next-bar open by default (`fill_policy='next_open'`)** — a signal emitted on bar `t` executes at bar `t+1`'s open, not bar `t`'s close. Results from older MMR versions used the biased same-close path; if your numbers look worse than you remember, this is likely why.
+3. **`backtests_list` ranks by composite quality score by default** — weighted blend of sortino, profit_factor, expectancy_bps, return, and drawdown, gated by a reliability factor that penalises low trade counts (< 10 → ×0.2, < 30 → ×0.6). Use `sort_by="time"` for chronological order, or any individual metric (`sharpe`, `return`, `pf`, `expectancy`, `calmar`, `max_dd`, etc.). See `references/STRATEGIES.md` for the full evaluation guide including the statistical-confidence tests surfaced by `backtests_show`.
 
 ### Data Exploration (No Service Required)
 
@@ -301,6 +335,29 @@ else:
 | Multiple `resolve()` calls | Resolve one at a time, sequentially |
 | Multiple `ideas()` presets in gather | Call them sequentially — each takes ~4s |
 
+### No fire-and-forget: helpers must be awaited in the same cell
+
+The helper runtime executes each cell in a fresh top-level context with no running event loop. That means:
+
+```python
+# BAD — RuntimeError: no running event loop
+task = asyncio.create_task(MMRHelpers.data_download(symbols, days=730))
+
+# BAD — asyncio.run() nests a loop and can interfere with the helper's own async setup
+result = asyncio.run(MMRHelpers.data_download(symbols, days=730))
+```
+
+```python
+# GOOD — just await it. The helper already offloads the CLI subprocess to a
+# worker thread via asyncio.to_thread(), so the cell isn't blocking other
+# Python work — only your cell.
+result = await MMRHelpers.data_download(symbols, days=730, timeout=1800)
+```
+
+For long-running downloads (e.g. 25 symbols × 1-min × 730d), either:
+1. Pass `timeout=` to `data_download`/`history_massive`/`history_ib` so the CLI subprocess isn't killed after 5 minutes, OR
+2. Chunk the symbol list and `await` each chunk in its own cell — the helper re-uses the same DuckDB, so partial progress is persisted between cells.
+
 ### Error handling pattern
 
 Timeouts don't raise exceptions — they return error dicts/strings. Check for them:
@@ -322,6 +379,8 @@ if result.startswith("ERROR"):
 ```
 
 **Key rule**: if ANY trader_service call times out, assume the service is down and stop making more calls. Check `status()` before trying again.
+
+**RPC error types are now preserved server → client**. When the trader_service raises a specific exception (e.g. `ValueError("contract not found")`, `ConnectionError("...")`, `TraderException(...)`), the CLI surfaces the real type name in the error payload rather than a generic `Exception`. The CLI wrapper converts these into strings/dicts for the skill, so you won't see Python exceptions directly, but the error messages are now specific enough to branch on — look for phrases like `ValueError`, `TraderException`, `timed out`, `not connected`, `Bracket aborted:`, etc.
 
 ## Patterns
 
@@ -503,11 +562,30 @@ emit(result)
 ### Pattern 8: Download Historical Data
 
 ```python
-# Download daily bars from Massive.com
+# Small daily pull — 300s default timeout is plenty
 result = await MMRHelpers.data_download(["AAPL", "MSFT"], bar_size="1 day", days=365)
 emit(result)
 
-# Download for an entire universe
+# Large 1-min pull with live progress — RECOMMENDED for anything > 5 symbols.
+# `progress=True` runs one subprocess per symbol and prints a line between each
+# ("  [7/25] JPM..." → "    ✓ JPM: 1 downloaded, 0 failed"). `timeout` becomes
+# per-symbol instead of total, so 120s is plenty even for 1-min × 730d.
+big_list = ["JPM", "BAC", "GS", "WFC", "BLK", "V", "XOM", "CVX", "JNJ", "UNH",
+            "LLY", "PFE", "WMT", "HD", "MCD", "KO", "PG", "NKE", "DIS", "BA",
+            "CAT", "GE", "UPS", "ORCL", "CRM"]
+result = await MMRHelpers.data_download(
+    big_list, bar_size="1 min", days=730, progress=True, timeout=120,
+)
+emit(result)  # summary JSON: {success, completed, failed, total, per_symbol: [...]}
+
+# If you can't use progress (e.g. scripted context with no stdout), bump the
+# total timeout to accommodate the whole batch:
+result = await MMRHelpers.data_download(
+    big_list, bar_size="1 min", days=730, timeout=1800,
+)
+emit(result)
+
+# Download for an entire universe (also supports timeout kwarg)
 result = await MMRHelpers.history_massive(universe="tech_stocks", bar_size="1 day", prev_days=60)
 emit(result)
 ```
@@ -548,17 +626,81 @@ result = await MMRHelpers.strategy_create("momentum_breakout")
 result = await MMRHelpers.backtest("strategies/momentum_breakout.py", "MomentumBreakout", conids=[265598], days=365)
 emit(result)
 
-# 4. Deploy to paper trading
+# 4. Review the run in context of prior runs, and check statistical confidence
+ranked = await MMRHelpers.backtests_list(sort_by="score", limit=5)
+emit(ranked)  # composite-score ranking of the most recent runs
+
+# Pull the most recent run by run_id for the confidence block (PSR,
+# bootstrap CIs, P&L distribution, losing-streak MC). See
+# references/STRATEGIES.md for the full decision rule.
+detail = await MMRHelpers.backtests_show(run_id=42)
+emit(detail)
+
+# 5. Deploy to paper trading (only if confidence tests pass)
 result = await MMRHelpers.strategy_deploy("momentum_breakout", conids=[265598], paper=True)
 # strategy_service auto-detects the YAML change within 30s, or force immediate:
 result = await MMRHelpers.reload_strategies()
 
-# 5. Monitor
+# 6. Monitor
 signals = await MMRHelpers.strategy_signals("momentum_breakout")
 emit(signals)
 ```
 
-### Pattern 12: Market Scanning Workflow
+### Pattern 12: Parameter Sweep (which strategy AND which params)
+
+Strategy discovery + param sweep in three calls. This is the correct way to answer "which strategy works, with what parameters?" on 1-min data — the earlier "read each file, backtest one by one, edit source to try different params" pattern is a dead end.
+
+```python
+# 1. One call gets the full landscape — class names, dispatch modes,
+# tunable params with defaults, no source-file reading required.
+landscape = await MMRHelpers.strategies_inspect()
+# Shape: [{class, file, mode, tunables: {KEY: default}, docstring}]
+# mode == "precompute" → fast path (safe for 1-min × 1-year)
+# mode == "on_prices"  → O(N²) on backtest. Use days=30 or skip.
+
+# 2. Sweep params for one promising fast-path strategy.
+# 3×2 = 6 runs, each persisted with its params recorded.
+sweep = await MMRHelpers.backtest_sweep(
+    "/Users/you/dev/mmr/strategies/keltner_breakout.py", "KeltnerBreakout",
+    param_grid={"EMA_PERIOD": [10, 15, 20], "BAND_MULT": [1.5, 2.0]},
+    conids=[756733],  # SPY
+    days=180,
+)
+# Returns a composite-score leaderboard; the top entry has run_id + params.
+emit(sweep)
+
+# 3. Dig into the winner — statistical confidence section reveals whether
+# the edge is real or an overfit to the grid.
+best = await MMRHelpers.backtests_show(42)  # run_id from sweep
+emit(best)
+```
+
+### Pattern 13: Parallel Multi-Strategy Fanout
+
+When the jobs aren't a clean grid — e.g. "run 5 different strategies against the same symbol" — use `backtest_batch` for subprocess-level concurrency:
+
+```python
+jobs = [
+    {"strategy_path": "/abs/path/keltner_breakout.py", "class_name": "KeltnerBreakout",
+     "conids": [756733], "days": 180},
+    {"strategy_path": "/abs/path/vwap_reversion.py", "class_name": "VwapReversion",
+     "conids": [756733], "days": 180},
+    {"strategy_path": "/abs/path/opening_range_breakout.py", "class_name": "OpeningRangeBreakout",
+     "conids": [756733], "days": 180},
+    {"strategy_path": "/abs/path/smi_crossover.py", "class_name": "SMICrossOver",
+     "conids": [756733], "days": 180},
+]
+batch = await MMRHelpers.backtest_batch(jobs, concurrency=4)
+emit(batch)
+
+# Leaderboard is ordered by composite score; a losing strategy batch-run
+# was an antipattern that took ~16 minutes sequentially — concurrency=4
+# cuts that to ~4–5 min.
+ranked = await MMRHelpers.backtests_list(sort_by="score", limit=10)
+emit(ranked)
+```
+
+### Pattern 14: Market Scanning Workflow
 
 ```python
 # Check market hours

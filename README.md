@@ -123,18 +123,20 @@ On first run, `start_mmr.sh` auto-launches the setup wizard to configure IB Gate
 
 All inter-service communication uses ZeroMQ with msgpack serialization — no HTTP, no web frameworks. Three patterns:
 
-- **RPC** (DEALER/ROUTER) — synchronous request/reply. CLI calls `trader_service` methods via `@rpcmethod` decorated handlers. `RPCClient[T]` uses `__getattr__` chaining so calls look like `client.rpc().place_order(...)`.
+- **RPC** (DEALER/ROUTER) — synchronous request/reply. CLI calls `trader_service` methods via `@rpcmethod` decorated handlers. `RPCClient[T]` uses `__getattr__` chaining so calls look like `client.rpc().place_order(...)`. Server-side exceptions are preserved across the wire — stdlib types reconstruct as themselves, custom types go through a caller-supplied `error_table`, and unknown types surface as `RPCError` that still carries the original type name and args.
 - **PubSub** (PUB/SUB) — one-way broadcast of live ticker data. Topic filtering at the socket level, zero server-side bookkeeping. Ideal for high-frequency market data.
 - **MessageBus** (DEALER/ROUTER with subscription tracking) — targeted routing for strategy signals. The server knows who subscribes to which topics and routes accordingly.
 
+The msgpack `EXT_OBJECT` fallback uses dill, which can execute arbitrary Python on untrusted input. Set `MMR_DILL_STRICT=1` to refuse the fallback entirely, or call `set_dill_whitelist([Type1, Type2, ...])` to allow only specific classes.
+
 ### Storage (DuckDB)
 
-Short-lived connections (connect → execute → close) so multiple processes can share the same database file:
+Every query runs through a per-database lock that opens, executes, and closes the connection atomically (`execute_atomic`, or `execute(query, params, fetch='all'|'one'|'df'|'none')` for the common case). This lets multiple services share the same file without leaking connections or interleaving writes. Tables:
 
 - **tick_data** — time-series OHLCV bars
 - **object_store** — dill-serialized Python objects
 - **event_store** — trading event audit trail (signals, orders, fills, rejections)
-- **proposal_store** — trade proposals with status tracking
+- **proposal_store** — trade proposals with enforced state-machine transitions (PENDING → APPROVED → EXECUTED; terminal states immutable)
 - **position_groups** — named groups with allocation budgets
 
 ### Market Data
@@ -221,6 +223,8 @@ mmr reject 42 --reason "Group over budget"
 ```
 
 Position sizing is automatic: `base_position × risk_multiplier × confidence_scale × ATR_volatility_adjustment`. Volatile stocks (high ATR%) get smaller positions; stable stocks get larger ones. Configured in `configs/position_sizing.yaml`.
+
+Proposal statuses follow a strict state machine: `PENDING → APPROVED | REJECTED | EXPIRED | FAILED`, then `APPROVED → EXECUTED | FAILED | REJECTED`. Terminal statuses are immutable — a proposal can't be executed twice, resurrected after rejection, or approved after it's already been executed. Illegal transitions raise `InvalidProposalTransition` instead of silently clobbering the row.
 
 
 ## CLI Reference
@@ -403,12 +407,14 @@ Register in `configs/strategy_runtime.yaml`:
 ```yaml
 strategies:
   - name: my_strategy
-    module: strategies.my_strategy
+    module: strategies/my_strategy.py  # must live under strategies_directory
     class_name: MyStrategy
     bar_size: "1 min"
     conids: [265598]  # Verify with: mmr resolve AAPL
     historical_days_prior: 5
 ```
+
+The strategy loader is sandboxed: the resolved module path must live under `strategies_directory`. Absolute paths or `../` traversal are rejected, and the YAML config is parsed with `yaml.safe_load` so Python-object tags (`!!python/object/apply:...`) cannot be used to execute arbitrary code. Each strategy gets a unique `sys.modules` key derived from its `name`, so two strategies sharing a filename (e.g. `strategies/a/shared.py` and `strategies/b/shared.py`) don't clobber each other and a reload actually re-imports fresh source.
 
 ## Risk Management
 
@@ -416,9 +422,11 @@ MMR has multiple layers of risk controls:
 
 - **Risk Gate** (`risk_gate.py`) — pre-trade enforcement of max position size, daily loss limit, open order count, and signal rate limits via event store lookback
 - **Position Sizing** (`position_sizing.py`) — ATR-inverse volatility adjustment, confidence scaling, liquidity checks (max 2% of ADV, spread penalty)
-- **Portfolio Risk** (`portfolio_risk.py`) — HHI concentration index, position weight warnings (>10% warning, >15% critical), group budget compliance, return correlation cluster detection (>30% correlated exposure)
+- **Portfolio Risk** (`portfolio_risk.py`) — gross + signed exposure breakdown (`gross_exposure_pct`, `net_exposure_pct`, `long_exposure_pct`, `short_exposure_pct`), HHI concentration on gross weights, position warnings (>10% warning, >15% critical), group budget compliance, and direction-aware correlation cluster detection (a correlated long/short pair nets to zero and correctly fires no cluster warning; a stacked long/long cluster fires at >30% combined net exposure). The summary explicitly notes "hedged" when gross and |net| diverge.
 - **Trading Filter** (`trading_filter.py`) — symbol/exchange denylist and allowlist enforcement
 - **Position Groups** (`position_groups.py`) — named groups with allocation budgets (e.g. "mining" at 20% max)
+- **Proposal State Machine** — terminal states (`EXECUTED`, `REJECTED`, `EXPIRED`, `FAILED`) are immutable; re-approving an executed proposal or resurrecting a rejected one raises `InvalidProposalTransition`
+- **Bracket Order Transactionality** — `BRACKET` exits are all-or-nothing: entry is staged with `transmit=False`, TP and SL are placed before SL's `transmit=True` flushes the whole bundle. If any leg fails, earlier staged legs are cancelled before any market exposure exists.
 
 ## Configuration
 
@@ -473,7 +481,7 @@ mmr/
 ├── strategies/                    # User strategy implementations
 ├── configs/                       # Bundled defaults
 ├── CLAUDE.md                      # Claude Code context (architecture, commands, workflows)
-├── tests/                         # 483 tests (pytest, no IB required)
+├── tests/                         # 880 tests (pytest, no IB required)
 ├── docker-compose.yml             # IB Gateway + MMR containers
 ├── Dockerfile                     # Debian bookworm + Python venv
 ├── docker.sh                      # Docker/Podman build helper
@@ -483,15 +491,23 @@ mmr/
 
 ## Testing
 
-All tests are unit tests using temporary DuckDB databases — no IB connection required.
+All tests are unit tests using temporary DuckDB databases — no IB connection required. The suite runs in ~47s with zero failures:
 
 ```bash
-pytest tests/ -v                   # Run all tests
-pytest tests/test_book.py          # Single file
-pytest tests/test_idea_scanner.py  # 123 tests covering scanner presets, indicators, IB path
+pytest tests/ --timeout=30 -q --ignore=tests/test_ibrx_async.py
+# → 880 passed
 ```
 
-483 tests across 19 files covering position sizing, risk gates, portfolio risk analysis, trade proposals, idea scanning, order book, serialization, backtesting, and more.
+`test_ibrx_async.py` is excluded because it spins up long-lived asyncio tasks that flake in the full suite; it still runs cleanly on its own.
+
+Coverage highlights:
+
+- **Core logic:** `test_backtester*`, `test_position_sizing`, `test_portfolio_risk`, `test_risk_gate`, `test_idea_scanner`
+- **Stores:** `test_duckdb_store` (including concurrent-writer), `test_event_store`, `test_proposal_store` (state machine), `test_position_groups`
+- **Messaging:** `test_clientserver_rpc` (error-type preservation, dill policy, threaded round-trip)
+- **Runtime:** `test_trading_runtime` (PnL race, portfolio routing, bracket rollback), `test_executioner` (filter + gate rejection paths), `test_strategy_runtime_reconcile` (sandbox, `yaml.safe_load`, partial-write mtime recovery)
+- **Integration:** `test_propose_approve_integration` (end-to-end propose → approve → execute, plus failure paths)
+- **Correctness:** `test_backtester.py::test_no_lookahead_fill_at_next_bar_open` hand-crafts bars that prove fills come from bar `t+1`'s open, not bar `t`'s close
 
 ## Dependencies
 

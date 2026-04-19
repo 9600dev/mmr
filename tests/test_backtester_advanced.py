@@ -498,3 +498,62 @@ class TestBacktesterNormalizationIntegration:
         for cols in checker.columns_seen:
             assert "bar_size" not in cols
             assert "what_to_show" not in cols
+
+
+class TestStrategySandbox:
+    """The backtester's _load_strategy_class must refuse to execute modules
+    outside the allowed roots — matches the hardening we did in
+    ``strategy_runtime.load_strategy``. Without it, ``mmr backtest -s
+    /tmp/evil.py`` would run arbitrary code."""
+
+    def test_refuses_module_outside_allowed_roots(self, tmp_path, monkeypatch):
+        """A path outside strategies/, tests/, and the pytest tempdir
+        should raise ValueError. We simulate an "outside" location by
+        unsetting PYTEST_CURRENT_TEST so the tempdir allowance doesn't
+        fire, and point the file at a non-pytest tempdir."""
+        import tempfile
+
+        evil_dir = tempfile.mkdtemp(prefix='mmr_notallowed_')
+        evil_path = os.path.join(evil_dir, 'pwn.py')
+        with open(evil_path, 'w') as f:
+            f.write(
+                "from trader.trading.strategy import Strategy\n"
+                "class Pwn(Strategy):\n"
+                "    def on_prices(self, p): return None\n"
+            )
+
+        bt = Backtester(
+            storage=TickStorage(duckdb_path=str(tmp_path / 'x.duckdb')),
+            config=BacktestConfig(),
+        )
+
+        # Temporarily unset PYTEST_CURRENT_TEST so the tempdir allowance
+        # doesn't whitewash the evil path. Normal prod runs have no such
+        # env var so the sandbox applies.
+        monkeypatch.delenv('PYTEST_CURRENT_TEST', raising=False)
+        with pytest.raises(ValueError, match='refusing to load'):
+            bt._load_strategy_class(evil_path, 'Pwn')
+
+    def test_extra_root_env_var_allows_external_path(self, tmp_path, monkeypatch):
+        """MMR_STRATEGIES_EXTRA_ROOT opts a researcher out of the sandbox
+        for a specific path — needed for installs that keep strategies
+        elsewhere."""
+        import tempfile
+
+        outside_dir = tempfile.mkdtemp(prefix='mmr_extra_root_')
+        strategy_path = os.path.join(outside_dir, 'mine.py')
+        with open(strategy_path, 'w') as f:
+            f.write(
+                "from trader.trading.strategy import Strategy\n"
+                "class Mine(Strategy):\n"
+                "    def on_prices(self, p): return None\n"
+            )
+
+        monkeypatch.setenv('MMR_STRATEGIES_EXTRA_ROOT', outside_dir)
+        monkeypatch.delenv('PYTEST_CURRENT_TEST', raising=False)
+        bt = Backtester(
+            storage=TickStorage(duckdb_path=str(tmp_path / 'x.duckdb')),
+            config=BacktestConfig(),
+        )
+        cls = bt._load_strategy_class(strategy_path, 'Mine')
+        assert cls.__name__ == 'Mine'

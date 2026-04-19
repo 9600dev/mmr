@@ -30,9 +30,19 @@ class TestStrategy:
         assert installed_strategy.conids == [4391]
         assert installed_strategy.paper is True
 
-    def test_cannot_instantiate_abc_directly(self):
-        with pytest.raises(TypeError):
-            Strategy()
+    def test_bare_strategy_is_a_silent_noop(self):
+        """Since the precompute + on_bar hook was introduced, ``on_prices``
+        is no longer ``@abstractmethod``: strategies can implement either
+        API (or both). A bare ``Strategy()`` can therefore be instantiated
+        and simply produces no signals — it's harmless.
+
+        (If this ever regresses to "bare Strategy() raises TypeError",
+        the abstractmethod decorator was probably restored on on_prices
+        by accident — remove it and fix this test.)"""
+        s = Strategy()
+        assert s.on_prices(pd.DataFrame()) is None
+        assert s.on_bar(pd.DataFrame({'close': [1.0]}), {}, 0) is None
+        assert s.precompute(pd.DataFrame()) == {}
 
     def test_signal_dataclass(self):
         sig = Signal(

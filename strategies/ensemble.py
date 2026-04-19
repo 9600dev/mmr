@@ -28,6 +28,10 @@ def _compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
 
 
 class Ensemble(Strategy):
+    """Weighted voting across RSI, MACD, and Bollinger Bands — fires only when
+    2+ of the 3 signals agree; probability is the weighted average of the
+    agreeing signals."""
+
     def __init__(self):
         super().__init__()
 

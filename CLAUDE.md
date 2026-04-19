@@ -42,11 +42,11 @@ pycron/pycron.py ──► Process manager for all services
 
 ### Key Patterns
 
-**Dependency injection**: `Container.resolve(Type)` introspects `__init__` parameter names, matches them against env vars (uppercased) then config YAML values, and constructs the instance. Constructor param names must match config keys.
+**Dependency injection**: `Container.resolve(Type)` introspects `__init__` parameter names, matches them against env vars (uppercased) then config YAML values, and constructs the instance. Constructor param names must match config keys. Missing required params raise `ContainerResolutionError` naming the param (not a cryptic `TypeError`). Env vars are coerced to the annotated type (`int`/`float`/`bool`); malformed values raise with the offending var + value. Singleton init and the type-instance cache are thread-safe, and circular dependencies during `resolve()` are detected and raised as `ContainerResolutionError`. YAML config is loaded with `yaml.safe_load` — `!!python/object` tags are refused.
 
 **Messaging (pyzmq)**: All inter-process communication uses ZeroMQ (not HTTP). This was chosen over HTTP/REST for lower latency (important for trading), native support for pub/sub patterns, and no web framework dependency. Three socket patterns in `trader/messaging/clientserver.py`, each serving a distinct communication need:
 
-- **RPC** (ports 42001, 42003, 42005): DEALER/ROUTER sockets with msgpack serialization. Synchronous request/reply — a client calls a method name with arguments and blocks for the result. Used by the CLI to call `trader_service` methods (place trades, query portfolio, etc.) and by `strategy_service` to submit orders to `trader_service`. Methods are marked with the `@rpcmethod` decorator on the service API classes (`trader_service_api.py`, `strategy_service_api.py`). The `RPCClient[T]` generic uses `__getattr__` chaining so calls look like `client.rpc().place_order(...)` — the method name is serialized as a string and dispatched on the server side.
+- **RPC** (ports 42001, 42003, 42005): DEALER/ROUTER sockets with msgpack serialization. Synchronous request/reply — a client calls a method name with arguments and blocks for the result. Used by the CLI to call `trader_service` methods (place trades, query portfolio, etc.) and by `strategy_service` to submit orders to `trader_service`. Methods are marked with the `@rpcmethod` decorator on the service API classes (`trader_service_api.py`, `strategy_service_api.py`). The `RPCClient[T]` generic uses `__getattr__` chaining so calls look like `client.rpc().place_order(...)` — the method name is serialized as a string and dispatched on the server side. Server-side exceptions are reconstructed on the client: stdlib types (`ValueError`, `ConnectionError`, `TimeoutError`, etc.) are preserved; custom types can be registered via `RPCClient(error_table=...)`; unknown types surface as `RPCError` carrying the original `exc_type` and `exc_args` so callers can still inspect them. Timeouts include the method name in the message.
 
 - **PubSub** (port 42002): ZMQ PUB/SUB sockets for one-way broadcast of live ticker data. `trader_service` publishes; `strategy_service`, CLI, and TUI subscribe. Uses ZMQ's native topic filtering at the socket level — the publisher doesn't track subscribers and subscribers filter by topic prefix. This is the most efficient pattern for "blast market data to everyone" since there's no per-client routing overhead. Implemented as `MultithreadedTopicPubSub` which runs the PUB socket on a dedicated thread with an async queue for thread-safe writes from the main event loop.
 
@@ -54,11 +54,11 @@ pycron/pycron.py ──► Process manager for all services
 
 The reason PubSub and MessageBus are separate (despite overlap) is efficiency: ZMQ's native PUB/SUB does topic filtering in the kernel/socket layer with zero server-side bookkeeping, which is ideal for high-frequency ticker data. The MessageBus trades that efficiency for per-client routing control, which strategy signals need but tickers don't.
 
-**Serialization**: All ZMQ messages use msgpack with custom ExtType handlers for datetime, date, time, timedelta, pandas DataFrames (via PyArrow IPC), and a dill fallback for arbitrary Python objects. Defined in `clientserver.py` (`ext_pack`/`ext_unpack`).
+**Serialization**: All ZMQ messages use msgpack with custom ExtType handlers for datetime, date, time, timedelta, pandas DataFrames (via PyArrow IPC), and a dill fallback for arbitrary Python objects. Defined in `clientserver.py` (`ext_pack`/`ext_unpack`). Because `dill.loads` can execute arbitrary code, the fallback is policy-gated: set `MMR_DILL_STRICT=1` in the environment to refuse all `EXT_OBJECT` payloads, or call `set_dill_whitelist([Type1, Type2, ...])` to allow only specific classes.
 
-**Storage (DuckDB)**: `trader/data/duckdb_store.py` uses short-lived connections (connect, execute, close) to allow multiple processes to share the same database file. Two tables: `tick_data` (time-series OHLCV) and `object_store` (dill-serialized blobs).
+**Storage (DuckDB)**: `trader/data/duckdb_store.py` wraps every query in a short-lived connection held under a per-database lock (`execute_atomic` opens, runs, closes atomically; `execute(query, params, fetch='all'|'one'|'df'|'none')` is the common-case wrapper). This lets multiple services share the same database file without leaking connections or tearing rows across concurrent writers. Two tables: `tick_data` (time-series OHLCV) and `object_store` (dill-serialized blobs).
 
-**Event store**: `trader/data/event_store.py` records trading events (signals, orders, fills, rejections) in DuckDB for audit trail and risk gate lookback.
+**Event store**: `trader/data/event_store.py` records trading events (signals, orders, fills, rejections) in DuckDB for audit trail and risk gate lookback. All writes and queries use the atomic `DuckDBConnection.execute`/`execute_atomic` APIs — earlier versions leaked connections on the hot path.
 
 **Risk gate**: `trader/trading/risk_gate.py` enforces pre-trade risk limits (max position size, daily loss, open orders, signal rate) by querying the event store.
 
@@ -66,17 +66,27 @@ The reason PubSub and MessageBus are separate (despite overlap) is efficiency: Z
 
 **Position groups**: `trader/data/position_groups.py` stores named groups with allocation budgets in DuckDB (e.g. "mining" at 20% max). The `propose` command accepts `--group` to tag trades and auto-register membership. The portfolio risk analyzer checks group allocations against budgets.
 
-**Portfolio risk**: `trader/trading/portfolio_risk.py` analyzes concentration (HHI), position weights, group budget compliance, and return correlation clusters. Produces warnings (>10% single position, >15% critical, group over budget, correlated cluster >30%) and a plain-English summary for LLM consumption.
+**Portfolio risk**: `trader/trading/portfolio_risk.py` analyzes concentration (HHI), position weights, group budget compliance, and return correlation clusters. It reports both gross and signed exposure (`gross_exposure_pct`, `net_exposure_pct`, `long_exposure_pct`, `short_exposure_pct`) so hedged books aren't mis-flagged as concentrated. HHI is computed on gross weights (risk-exposure view); concentration warnings fire on gross (>10% warning, >15% critical), but correlation-cluster warnings fire on *signed* combined weight — a correlated long/short pair nets near zero and is correctly treated as hedged, not clustered. The plain-English summary explicitly notes "hedged" when gross and |net| diverge.
 
 **Trading filter**: `trader/trading/trading_filter.py` enforces symbol/exchange denylist/allowlist rules. Checked by the executioner and risk gate before any order placement.
 
 **Portfolio resizing**: `trader/sdk.py` provides `compute_resize_deltas()` (pure function) and `compute_resize_plan()`/`execute_resize_plan()` (SDK methods) for proportionally scaling all positions to fit within a target portfolio value. The resize workflow: (1) compute scale factor from max/min bounds, (2) find associated protective orders (stops, trailing stops, take-profits) for each position, (3) cancel protective orders, (4) place market orders for position deltas, (5) re-create protective orders at new quantities preserving original prices. Exposed via `resize-positions` CLI command. The `place_standalone_order()` RPC method on `trading_runtime.py` supports placing standalone STP/TRAIL/LMT orders for existing positions (used to re-create protectives after resizing).
 
-**Strategy reconciliation**: The strategy_service runs a reconciliation loop every 30 seconds (`strategy_runtime.py:_reconcile()`). It re-reads the portfolio universe from DuckDB and re-subscribes strategies to any new instruments (idempotent — `subscribe()` skips already-subscribed conIds). It also checks the YAML config file's modification time and loads any newly added strategies. This means: (1) an empty portfolio at startup automatically picks up positions as they're added via trades, (2) new strategies deployed to the YAML are loaded without restarting the service, (3) the `reload_strategies` RPC method triggers immediate reconciliation without waiting for the 30-second cycle. Note: modifying an existing strategy's config (changing conIds or bar_size) still requires a service restart.
+**Strategy reconciliation**: The strategy_service runs a reconciliation loop every 30 seconds (`strategy_runtime.py:_reconcile()`). It re-reads the portfolio universe from DuckDB and re-subscribes strategies to any new instruments (idempotent — `subscribe()` skips already-subscribed conIds). It also checks the YAML config file's modification time and loads any newly added strategies. This means: (1) an empty portfolio at startup automatically picks up positions as they're added via trades, (2) new strategies deployed to the YAML are loaded without restarting the service, (3) the `reload_strategies` RPC method triggers immediate reconciliation without waiting for the 30-second cycle. Note: modifying an existing strategy's config (changing conIds or bar_size) still requires a service restart. If the YAML is mid-write when reconcile reads it, the parse error is caught and the mtime is *not* advanced, so the reload retries on the next tick instead of silently leaving zombie strategies loaded. Strategy modules are loaded with `yaml.safe_load` (no Python-object tags) and path-sandboxed to `strategies_directory` (absolute paths or `../` traversal are rejected). Each strategy gets a unique `sys.modules` key derived from its `name` so two strategies that share a filename don't clobber each other and a reload actually re-imports the new source.
 
 **IB upstream connectivity detection**: The trader_service tracks IB Gateway's upstream connection to IBKR servers via IB error codes (1100/2103/2105/2157 = lost, 1102/2104/2106/2158 = restored). The `get_status()` RPC exposes `ib_upstream_connected` and `ib_upstream_error`. The CLI checks this before any IB-dependent command (portfolio, orders, buy/sell, snapshot, etc.) and shows a clear error with VNC/restart instructions instead of silently timing out. The `status` command also shows upstream connectivity and a warning when it's down.
 
 **Reactive streams (RxPY)**: `IBAIORx` converts IB events into RxPY Subjects/Observables. Strategies receive accumulated DataFrames via reactive pipelines.
+
+**Proposal state machine**: `trader/data/proposal_store.py` enforces valid status transitions: `PENDING → APPROVED | REJECTED | EXPIRED | FAILED`, `APPROVED → EXECUTED | FAILED | REJECTED`, and terminal states (`EXECUTED`, `REJECTED`, `EXPIRED`, `FAILED`) are immutable. Illegal transitions raise `InvalidProposalTransition`. This prevents double-approvals, re-executions, and resurrected proposals. `update_metadata` is also atomic (the read-merge-write runs under a single connection), so concurrent metadata updates can't lose each other.
+
+**Bracket order transactionality**: `trading_runtime.place_expressive_order` treats a `BRACKET` exit as all-or-nothing. Entry is staged with `transmit=False`, then TP, then SL (which transmits the whole group). If the TP leg fails, the staged entry is cancelled and `SuccessFail.fail` returned. If the SL leg fails, both entry and TP are cancelled. Because the bracket isn't transmitted to the market until the SL is placed, a failure at any earlier leg leaves no live orders behind.
+
+**Backtester fill policy**: `trader/simulation/backtester.py` defaults to `fill_policy='next_open'` — a signal emitted while observing bar `t` fills at bar `t+1`'s open. This eliminates lookahead bias: the strategy can see bar `t`'s close (public info at that moment) but can't fill at that same close. `fill_policy='same_close'` preserves the legacy (biased) behaviour and exists only for regression tests that pre-date the fix.
+
+**PnL subscription race**: `__subscribe_pnl` registers `(account, conId)` under `_pnl_subscriptions_lock` using first-claim-wins semantics. If the actual `subscribe_single_pnl` call fails, the registry entry is backed out so a retry can re-attempt. Portfolio updates fired from IB-eventkit threads are routed onto the main loop via `run_coroutine_threadsafe` (the main loop is captured in `connected_event`), so disk I/O during a universe update doesn't block the IB callback thread.
+
+**Idea scanner**: Raises `IdeaScannerError` (not an empty DataFrame) when the IB scanner returns no results or when every supplied ticker fails to resolve. This follows the "fail loudly" principle so callers can distinguish "API failure" from "zero matches".
 
 ## Project Structure
 
@@ -422,15 +432,7 @@ When explicit tickers are provided with `--location`, the `min_change_pct`/`max_
 
 ## Contract Resolution
 
-`resolve_symbol()` in `trading_runtime.py` handles symbol/conId lookups:
-
-1. First checks the local DuckDB universe database
-2. If not found:
-   - **Integer (conId)**: Returns empty — no fallback. ConIds are exact identifiers; if a conId isn't in the local DB, it's stale or wrong. Fuzzy matching would be dangerous (e.g. conId `4391` as a string matches Japanese ticker "4391" on TSEJ instead of AMD).
-   - **String (symbol)**: Falls back to IB `reqContractDetailsAsync` with the exchange hint if provided
-   - **CASH sec_type**: Constructs forex pair on IDEALPRO
-
-The `IBIdeaScanner` uses `resolve_contract` (not `resolve_symbol`) to resolve tickers for international markets. This takes a partial `Contract` object with the exchange set from the location code (e.g. `STK.AU.ASX` → `exchange=ASX`), ensuring resolution to the local listing rather than a US ADR.
+`resolve_symbol()` in `trading_runtime.py` is a **local DB lookup only** — it checks the DuckDB universe database and returns empty on miss (with a `logging.warning` naming the symbol/conId). There is deliberately no fuzzy matching or implicit IB fallback: a conId that isn't locally registered is stale or wrong, and coercing an int conId to a string (e.g. `4391`) would match a Japanese ticker on TSEJ instead of AMD. If you need IB discovery with an exchange hint, use `resolve_contract(Contract(...))` explicitly — this is how `IBIdeaScanner` resolves international tickers (e.g. `STK.AU.ASX` → `exchange=ASX`), ensuring resolution to the local listing rather than a US ADR. Forex pairs (`sec_type='CASH'`) are constructed on IDEALPRO by the caller.
 
 ## Configuration
 
@@ -468,29 +470,42 @@ Python >= 3.12. Install: `pip install -e .` or `pip install -r requirements.txt`
 
 ## Testing
 
-Tests use pytest with shared fixtures in `tests/conftest.py`. All tests are unit tests that use temporary DuckDB databases (no IB connection required).
+Tests use pytest with shared fixtures in `tests/conftest.py`. All tests are unit tests that use temporary DuckDB databases (no IB connection required). The suite currently runs **880 tests in ~47s** with zero failures:
 
 ```bash
-pytest tests/ -v             # Run all tests
-pytest tests/test_book.py    # Run a specific test file
+pytest tests/ --timeout=30 -q --ignore=tests/test_ibrx_async.py
 ```
 
-The working test suite (483 tests across 19 files):
-```bash
-pytest tests/test_idea_scanner.py tests/test_config.py tests/test_risk_gate.py \
-  tests/test_proposal.py tests/test_proposal_store.py tests/test_book.py \
-  tests/test_backtester.py tests/test_container.py tests/test_duckdb_store.py \
-  tests/test_event_store.py tests/test_portfolio.py tests/test_serialization.py \
-  tests/test_strategy.py tests/test_position_sizing.py tests/test_sdk.py \
-  tests/test_trading_filter.py tests/test_depth.py tests/test_position_groups.py \
-  tests/test_portfolio_risk.py -v
-```
+`test_ibrx_async.py` is excluded because it spins up long-lived asyncio tasks that interact with a mocked ib_async event loop; it works in isolation but flakes in the full suite.
+
+Fixtures include edge-case OHLCV shapes (`ohlcv_with_gaps`, `ohlcv_high_volatility`, `ohlcv_zero_volume`, `ohlcv_halted`) in addition to the clean `sample_ohlcv`. Use the edge-case ones when testing indicator computation, position sizing, or backtesting against realistic-ugly data.
+
+Key behaviour-focused test files:
+
+- `test_clientserver_rpc.py` — RPC error-type preservation, dill whitelist/strict-mode policy, in-process round-trip with a threaded server
+- `test_trading_runtime.py` — PnL subscription lock, off-loop portfolio routing, bracket-order rollback
+- `test_executioner.py` — trading filter + risk gate rejection paths, `skip_risk_gate` bypass, IB account mismatch
+- `test_strategy_runtime_reconcile.py` — load-strategy sandbox (absolute-path + traversal rejection, `sys.modules` collision), config-reload resilience (`yaml.safe_load`, partial-write mtime handling)
+- `test_propose_approve_integration.py` — end-to-end propose → approve → execute, failure-path transitions to `FAILED`, state-machine enforcement
+- `test_backtester.py::test_no_lookahead_fill_at_next_bar_open` — hand-crafted bars that prove `next_open` fills come from bar t+1's open
+- `test_portfolio_risk.py::TestSignedExposure` — hedged vs stacked correlation clusters, long/short exposure breakdown
+- `test_duckdb_store.py::TestConcurrentAccess` — multi-thread write serialization
+- `test_container.py::TestContainerHardening` — missing-param diagnostics, env-var coercion, YAML safety
 
 Some test files have import errors due to missing optional dependencies (`aioreactive`) — these are pre-existing and can be ignored: `test_aiorx.py`, `test_aiozmq_simple.py`, `test_disposable.py`, `test_mmr_client.py`, `test_mmr_server.py`, `test_perf2.py`, `test_performance.py`.
 
 ## Writing a Strategy
 
-Subclass `trader.trading.strategy.Strategy` and implement `on_prices()`:
+Strategies have **two dispatch APIs**; subclass `trader.trading.strategy.Strategy` and implement at least one:
+
+1. **`on_prices(prices)`** — called per bar with the accumulated window. Simple; fine for pandas `.rolling()`.
+2. **`precompute(prices) + on_bar(prices, state, index)`** — the **fast path**. `precompute` runs once on the full history; `on_bar` reads precomputed arrays by index. Essential for vectorbt/numba/scipy indicators — a 30-day × 1-min run on `SMICrossOver` went from **hanging > 4 min** (`on_prices`, O(N²)) to **~1 s** (`precompute` + `on_bar`, O(N)) with identical trades.
+
+The backtester calls `on_bar` by default; if a strategy doesn't override it, the default impl falls back to `on_prices(prices.iloc[:index+1])` — so legacy strategies keep working unchanged. The live strategy runtime still dispatches via `on_prices`, so vectorbt strategies should implement both methods (vectorbt in `on_prices` is fine live — it's only the backtest replay that makes it catastrophic).
+
+**Lookahead contract for `precompute`**: values returned must be aligned 1:1 with `prices` such that position `i` depends only on bars `[0..i]`. Rolling/EWM/vectorbt indicators satisfy this; `shift(-1)`, centered rollings, full-series normalization (`x / x.mean()`), and `fit_transform` on the complete history do not. Use `trader.simulation.lookahead_check.assert_no_lookahead(strategy, prices)` in your strategy's test file — it runs `precompute` on the full series AND on progressively-truncated copies and asserts past-index values don't shift when future bars are hidden, catching the common leak patterns before they ship. See `skills/mmr-skill/references/STRATEGIES.md` for a full fast-path example.
+
+### Legacy `on_prices`-only example:
 
 ```python
 from trader.trading.strategy import Strategy, Signal
@@ -676,7 +691,7 @@ Common conIds: AAPL=265598, MSFT=272093, NVDA=4815747. Note: conIds can become s
 - File name: `snake_case.py` (e.g. `my_strategy.py`)
 - Class name: `CamelCase` (e.g. `MyStrategy`)
 - Must subclass `trader.trading.strategy.Strategy`
-- Must implement `on_prices(self, prices: pd.DataFrame) -> Optional[Signal]`
+- Must implement at least one of `on_prices(self, prices)` or the precompute+`on_bar` pair
 - DataFrame columns: `open`, `high`, `low`, `close`, `volume`, `vwap`, `bar_count`, `bid`, `ask`, `last`, `last_size` (DatetimeIndex named `date`)
 
 ### Command Latency Reference

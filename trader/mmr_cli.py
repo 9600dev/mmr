@@ -18,6 +18,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from trader.sdk import MMR
+from typing import Any, Dict, List, Optional
 
 import argparse
 import json
@@ -449,6 +450,24 @@ def build_parser() -> argparse.ArgumentParser:
     disable_p = strat_sub.add_parser('disable', help='Disable a strategy')
     disable_p.add_argument('name', help='Strategy name')
     strat_sub.add_parser('reload', help='Reload strategies from YAML and re-subscribe')
+
+    # strategies available — scan the strategies directory for Strategy
+    # subclasses. Shows what's on disk vs what's deployed.
+    strat_avail_p = strat_sub.add_parser('available', aliases=['avail', 'list-files'],
+                                          help='Scan strategies/ folder for Strategy subclasses')
+    strat_avail_p.add_argument('--directory', default=None,
+                                help='Override strategies directory (default: strategies_directory from config)')
+
+    # strategies inspect — AST-based discovery of class attrs and dispatch mode.
+    # Designed for LLMs planning a sweep: returns tunables, dispatch mode
+    # (precompute vs on_prices-only, which is the O(N²) trap), and docstring
+    # without executing the strategy file.
+    strat_inspect_p = strat_sub.add_parser('inspect',
+                                             help='Discover tunable params + dispatch mode for every strategy (AST scan, no exec)')
+    strat_inspect_p.add_argument('--directory', default=None,
+                                   help='Override strategies directory')
+    strat_inspect_p.add_argument('--strategy', default=None,
+                                   help='Inspect a single strategy file (absolute or relative)')
 
     # strategies create
     strat_create_p = strat_sub.add_parser('create', help='Create a strategy template file')
@@ -1047,6 +1066,119 @@ def build_parser() -> argparse.ArgumentParser:
                       help='Slippage model (default: fixed)')
     bt_p.add_argument('--slippage-bps', type=float, default=1.0,
                       help='BPS for fixed model (default: 1.0)')
+    # Saved by default so `backtests show` can compute statistical-
+    # confidence tests (PSR, t-stat, bootstrap CIs, distribution stats,
+    # losing-streak MC). Opt out with --no-save-trades for disk-tight runs.
+    bt_p.add_argument('--no-save-trades', dest='save_trades',
+                      action='store_false', default=True,
+                      help='Skip persisting trade list + equity curve '
+                           '(smaller DB; disables statistical-confidence '
+                           'tests in `backtests show`)')
+    bt_p.add_argument('--note', default='',
+                      help='Free-text note attached to the saved run (for later query/compare)')
+    bt_p.add_argument('--no-save', action='store_true', default=False,
+                      help='Do not persist this run to the backtest history store')
+    # --param KEY=VALUE overrides a strategy class attribute before the run.
+    # Use --params '{"K":V,...}' for JSON input (easier for sweeps).
+    bt_p.add_argument('--param', action='append', default=[], metavar='KEY=VALUE',
+                      help='Override a strategy parameter (class attribute). '
+                           'Repeatable: --param EMA_PERIOD=15 --param BAND_MULT=1.5')
+    bt_p.add_argument('--params', default=None, metavar='JSON',
+                      help='JSON object of param overrides '
+                           '(e.g. \'{"EMA_PERIOD":15,"BAND_MULT":1.5}\'). '
+                           'Merged with --param entries; --param wins on conflict.')
+    bt_p.add_argument('--summary-only', action='store_true', default=False,
+                      help='JSON output: skip the trades and equity-curve arrays '
+                           '(keeps summary + run_id). Trades are still persisted '
+                           'to the DB for `backtests show` unless --no-save-trades.')
+
+    # bt-sweep — cartesian-product parameter sweep. One process, N backtests.
+    sw_p = sub.add_parser('bt-sweep', aliases=['sweep'],
+                           help='Run a backtest across a parameter grid (cartesian product)',
+                           epilog='Examples:\n'
+                                  '  bt-sweep -s strategies/keltner_breakout.py --class KeltnerBreakout\\\n'
+                                  '      --conids 756733 --days 180\\\n'
+                                  "      --grid '{\"EMA_PERIOD\":[10,20,30],\"BAND_MULT\":[1.5,2.0,2.5]}'\n"
+                                  '  bt-sweep -s strategies/vwap_reversion.py --class VwapReversion\\\n'
+                                  "      --conids 756733 --days 90 --grid '{\"ENTRY_STD\":[1.0,1.5,2.0]}'",
+                           formatter_class=fmt)
+    sw_p.add_argument('-s', '--strategy', required=True, help='Path to strategy .py file')
+    sw_p.add_argument('--class', dest='class_name', required=True, help='Strategy class name')
+    sw_p.add_argument('--conids', type=int, nargs='+', default=None, help='Contract IDs')
+    sw_p.add_argument('--universe', default=None, help='Universe name (alternative to --conids)')
+    sw_p.add_argument('--days', type=int, default=365, help='Days of history (default: 365)')
+    sw_p.add_argument('--capital', type=float, default=100000, help='Initial capital')
+    sw_p.add_argument('--bar-size', default='1 min', help='Bar size (default: "1 min")')
+    sw_p.add_argument('--grid', required=True, metavar='JSON',
+                       help='JSON object mapping param name → list of values. '
+                            'Cartesian product is swept.')
+    sw_p.add_argument('--top', type=int, default=10,
+                       help='Show only the top-N results in the leaderboard (default: 10)')
+    sw_p.add_argument('--note', default='', help='Note stamped on every sweep run')
+    sw_p.add_argument('--slippage-bps', type=float, default=1.0)
+    sw_p.add_argument('--no-save-trades', dest='save_trades',
+                       action='store_false', default=True,
+                       help='Skip persisting per-run trade + equity detail')
+
+    # backtests (plural) — history of past runs
+    bts_p = sub.add_parser('backtests', aliases=['bts'],
+                            help='List / show / delete past backtest runs',
+                            epilog='Examples:\n'
+                                   '  backtests                           # ranked by composite quality score (active only)\n'
+                                   '  backtests --all                     # include archived\n'
+                                   '  backtests --archived                # only archived runs\n'
+                                   '  backtests --sort-by time            # most recent first\n'
+                                   '  backtests --sort-by sharpe          # best sharpe first\n'
+                                   '  backtests --sort-by return --asc    # worst return first\n'
+                                   '  backtests --strategy RSIStrategy\n'
+                                   '  backtests show 42                   # full detail for run 42\n'
+                                   '  backtests compare 40 41 42          # side-by-side table\n'
+                                   '  backtests archive 40 41 42          # hide from default list\n'
+                                   '  backtests unarchive 40              # restore a hidden run\n'
+                                   '  backtests delete 42                 # permanently remove\n'
+                                   '  backtests help                      # metric reference',
+                            formatter_class=fmt)
+    bts_sub = bts_p.add_subparsers(dest='bts_action')
+    _sort_choices = sorted(_BTS_SORT_ALIASES.keys())
+
+    def _add_list_args(p):
+        p.add_argument('--strategy', default=None, help='Filter by strategy class name')
+        p.add_argument('--limit', type=int, default=25, help='Max rows (default 25)')
+        p.add_argument('--sort-by', default='score', choices=_sort_choices,
+                       help='Sort column (default: score — a composite quality '
+                            'ranking; use "time" for most-recent-first)')
+        p.add_argument('--asc', action='store_true', default=False,
+                       help='Ascending order (default: descending — best first)')
+        p.add_argument('--card', action='store_true', default=False,
+                       help='Card view — one panel per run with colored metrics')
+        # Archived runs are soft-deleted and hidden by default. --all lifts
+        # the filter; --archived flips it to archived-only (for review /
+        # bulk-unarchive workflows).
+        arch_grp = p.add_mutually_exclusive_group()
+        arch_grp.add_argument('--all', dest='include_archived',
+                               action='store_true', default=False,
+                               help='Include archived runs (hidden by default)')
+        arch_grp.add_argument('--archived', dest='archived_only',
+                               action='store_true', default=False,
+                               help='Show only archived runs')
+
+    _add_list_args(bts_p)  # top-level `backtests` shortcut
+    bts_list_p = bts_sub.add_parser('list', help='List past runs (default)')
+    _add_list_args(bts_list_p)
+    bts_show_p = bts_sub.add_parser('show', help='Show full detail for a run')
+    bts_show_p.add_argument('run_id', type=int)
+    bts_cmp_p = bts_sub.add_parser('compare', help='Compare two or more runs side-by-side')
+    bts_cmp_p.add_argument('run_ids', type=int, nargs='+')
+    bts_arc_p = bts_sub.add_parser('archive',
+                                     help='Archive runs — hides from default list, keeps the data')
+    bts_arc_p.add_argument('run_ids', type=int, nargs='+')
+    bts_unarc_p = bts_sub.add_parser('unarchive',
+                                       help='Restore archived runs to the default list')
+    bts_unarc_p.add_argument('run_ids', type=int, nargs='+')
+    bts_del_p = bts_sub.add_parser('delete', help='Delete a saved run')
+    bts_del_p.add_argument('run_id', type=int)
+    bts_sub.add_parser('help', aliases=['metrics'],
+                        help='Explain every metric in the backtest report')
 
     # data
     data_p = sub.add_parser('data', help='Local data exploration (no service needed)',
@@ -1069,6 +1201,12 @@ def build_parser() -> argparse.ArgumentParser:
     data_dl_p.add_argument('symbols', nargs='+', help='Symbols to download')
     data_dl_p.add_argument('--bar-size', default='1 day', help='Bar size (default: "1 day")')
     data_dl_p.add_argument('--days', type=int, default=365, help='Days of history (default: 365)')
+
+    data_sub.add_parser(
+        'migrate-symbols',
+        help='Rewrite string-keyed tick_data rows to conId-keyed '
+             '(requires trader_service)',
+    )
 
     # help
     sub.add_parser('help', aliases=['h', '?'], help='Show help')
@@ -1479,6 +1617,12 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
 
         elif cmd in ('backtest', 'bt'):
             _handle_backtest(args)
+
+        elif cmd in ('bt-sweep', 'sweep'):
+            _handle_backtest_sweep(args)
+
+        elif cmd in ('backtests', 'bts'):
+            _handle_backtests(args)
 
         elif cmd == 'data':
             _handle_data(args)
@@ -2520,9 +2664,338 @@ def _handle_strategies(mmr: MMR, args: argparse.Namespace):
         _handle_strategy_signals(args)
     elif action == 'backtest':
         _handle_strategy_backtest(args)
+    elif action in ('available', 'avail', 'list-files'):
+        _handle_strategies_available(args)
+    elif action == 'inspect':
+        _handle_strategies_inspect(args)
     else:
         # Default: list strategies. Fall back to config file if service is down.
         _handle_strategies_from_config()
+
+
+def _handle_strategies_inspect(args: argparse.Namespace):
+    """Report tunable parameters + dispatch mode for every Strategy subclass.
+
+    AST-based — does NOT execute the strategy file, so a broken import
+    won't crash the scan. Surfaces:
+
+      * ``class`` and ``file`` — identifiers needed for ``backtest --class``.
+      * ``mode`` — ``precompute`` (fast path, O(N) total), ``on_prices``
+        (legacy path, O(N²) on a backtest). The LLM should always sweep
+        ``precompute`` strategies first; ``on_prices`` ones hang on 1-min
+        1-year data.
+      * ``tunables`` — upper-case class attributes with literal values.
+        These are the ``--param KEY=VALUE`` knobs for ``bt-sweep``.
+
+    Designed to save 5+ tool calls for an LLM planning a sweep: instead
+    of reading every file, it gets one JSON payload with everything it
+    needs to construct the grid.
+    """
+    import ast
+    import pandas as pd
+
+    # 1. Resolve strategies directory or a single file target.
+    from trader.container import Container
+    try:
+        container = Container.instance()
+        cfg = container.config()
+        default_dir = cfg.get('strategies_directory', 'strategies')
+    except Exception:
+        default_dir = 'strategies'
+
+    targets: List[Path] = []
+    if args.strategy:
+        p = Path(args.strategy).expanduser()
+        if not p.is_absolute():
+            cur = Path(__file__).resolve().parent
+            while cur != cur.parent:
+                candidate = cur / p
+                if candidate.exists():
+                    p = candidate
+                    break
+                cur = cur.parent
+        if not p.exists():
+            print_status(f'File not found: {args.strategy}', success=False)
+            return
+        targets = [p]
+    else:
+        strategies_dir = Path(args.directory or default_dir).expanduser()
+        if not strategies_dir.is_absolute():
+            cur = Path(__file__).resolve().parent
+            while cur != cur.parent:
+                candidate = cur / strategies_dir
+                if candidate.exists():
+                    strategies_dir = candidate
+                    break
+                cur = cur.parent
+        if not strategies_dir.exists():
+            print_status(
+                f'Strategies directory not found: {strategies_dir}',
+                success=False,
+            )
+            return
+        targets = sorted(
+            p for p in strategies_dir.glob('*.py') if not p.name.startswith('_')
+        )
+
+    def _literal(node) -> Any:
+        """Return a literal value for an AST node or the sentinel
+        ``_NON_LITERAL`` — we skip tunables whose defaults are expressions
+        (they're typically computed at class scope, not user-tunable)."""
+        try:
+            return ast.literal_eval(node)
+        except (ValueError, SyntaxError, TypeError):
+            return _NON_LITERAL
+
+    _NON_LITERAL = object()
+
+    rows: List[Dict[str, Any]] = []
+    for py in targets:
+        try:
+            tree = ast.parse(py.read_text())
+        except SyntaxError as ex:
+            rows.append({
+                'file': py.name,
+                'class': '',
+                'mode': 'parse_error',
+                'tunables': {},
+                'docstring': f'syntax error: {ex.msg}',
+            })
+            continue
+
+        for cls in [n for n in tree.body if isinstance(n, ast.ClassDef)]:
+            # Must extend Strategy (direct or indirect — we match by name,
+            # same heuristic as _handle_strategies_available).
+            extends_strategy = any(
+                (isinstance(b, ast.Name) and b.id == 'Strategy')
+                or (isinstance(b, ast.Attribute) and b.attr == 'Strategy')
+                for b in cls.bases
+            )
+            if not extends_strategy:
+                continue
+
+            tunables: Dict[str, Any] = {}
+            methods: set = set()
+            for item in cls.body:
+                if isinstance(item, ast.Assign):
+                    for target in item.targets:
+                        if isinstance(target, ast.Name) and target.id.isupper():
+                            val = _literal(item.value)
+                            if val is _NON_LITERAL:
+                                continue
+                            tunables[target.id] = val
+                elif isinstance(item, ast.AnnAssign):
+                    # e.g. ``EMA_PERIOD: int = 20``
+                    if (isinstance(item.target, ast.Name)
+                            and item.target.id.isupper()
+                            and item.value is not None):
+                        val = _literal(item.value)
+                        if val is not _NON_LITERAL:
+                            tunables[item.target.id] = val
+                elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    methods.add(item.name)
+                    # Older strategies keep tunables in ``self.params`` and
+                    # read them via ``self.params.get('key', default)``.
+                    # Scan the method body for those calls so the LLM gets
+                    # the knob list without reading the source.
+                    for node in ast.walk(item):
+                        if not isinstance(node, ast.Call):
+                            continue
+                        func = node.func
+                        # Match self.params.get('key', default)
+                        if (isinstance(func, ast.Attribute)
+                                and func.attr == 'get'
+                                and isinstance(func.value, ast.Attribute)
+                                and func.value.attr == 'params'
+                                and isinstance(func.value.value, ast.Name)
+                                and func.value.value.id == 'self'
+                                and node.args):
+                            key_node = node.args[0]
+                            if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str):
+                                key = key_node.value
+                                default = (
+                                    _literal(node.args[1])
+                                    if len(node.args) > 1 else None
+                                )
+                                if default is _NON_LITERAL:
+                                    default = None
+                                # Preserve first-seen default if the key
+                                # appears in multiple methods.
+                                tunables.setdefault(key, default)
+
+            has_precompute = 'precompute' in methods
+            has_on_bar = 'on_bar' in methods
+            has_on_prices = 'on_prices' in methods
+            if has_precompute and has_on_bar:
+                mode = 'precompute'
+            elif has_precompute:
+                # precompute without on_bar — strategy likely falls back to
+                # the default on_bar that calls on_prices. Rare, but valid.
+                mode = 'precompute+on_prices'
+            elif has_on_prices:
+                mode = 'on_prices'
+            else:
+                mode = 'inherited'
+
+            docstring = ast.get_docstring(cls) or ''
+            first_line = docstring.split('\n', 1)[0].strip()
+
+            rows.append({
+                'file': str(py.relative_to(py.parents[1]) if len(py.parents) > 1 else py.name),
+                'class': cls.name,
+                'mode': mode,
+                'tunables': tunables,
+                'docstring': first_line,
+            })
+
+    if _json_mode:
+        print(json.dumps({'data': rows, 'title': 'Strategy Inspect'}, default=str))
+        return
+
+    from rich.table import Table
+    from rich import box as _box
+    tbl = Table(
+        title=f'Strategy Inspect — {len(rows)} strategies',
+        box=_box.ROUNDED, pad_edge=False, show_lines=True,
+    )
+    tbl.add_column('class', style='bold cyan', no_wrap=True)
+    tbl.add_column('file', style='dim')
+    tbl.add_column('mode', no_wrap=True)
+    tbl.add_column('tunables', overflow='fold')
+    tbl.add_column('summary', overflow='fold')
+
+    for r in rows:
+        if r['mode'] == 'precompute':
+            mode_cell = '[green]precompute[/green] (fast)'
+        elif r['mode'] == 'on_prices':
+            mode_cell = '[yellow]on_prices[/yellow] (slow on 1-min)'
+        elif r['mode'] == 'parse_error':
+            mode_cell = '[red]parse error[/red]'
+        else:
+            mode_cell = r['mode']
+        tuns = ', '.join(f'{k}={v}' for k, v in r['tunables'].items())
+        tbl.add_row(r['class'], r['file'], mode_cell, tuns or '—',
+                     (r['docstring'] or '')[:80])
+    console.print(tbl)
+
+
+def _handle_strategies_available(args: argparse.Namespace):
+    """Scan the strategies directory for Strategy subclasses and report each
+    one with its deployment status (deployed name, or '' if on-disk only).
+
+    Parses each .py file with the ``ast`` module to find ``class X(Strategy)``
+    definitions without executing the code — so a broken strategy file won't
+    crash the scan and we don't need to resolve imports.
+    """
+    import ast
+    import pandas as pd
+    import yaml as _yaml
+
+    # 1. Find strategies directory. Priority: --directory flag, then config,
+    # then project-root default.
+    from trader.container import Container
+    try:
+        container = Container.instance()
+        cfg = container.config()
+        default_dir = cfg.get('strategies_directory', 'strategies')
+    except Exception:
+        default_dir = 'strategies'
+
+    strategies_dir = Path(args.directory or default_dir).expanduser()
+    if not strategies_dir.is_absolute():
+        # Resolve relative to project root (walk up from this file)
+        cur = Path(__file__).resolve().parent
+        while cur != cur.parent:
+            if (cur / 'configs' / 'trader.yaml').exists():
+                strategies_dir = cur / strategies_dir
+                break
+            cur = cur.parent
+
+    if not strategies_dir.is_dir():
+        print_status(f'Strategies directory not found: {strategies_dir}', success=False)
+        return
+
+    # 2. Load deployed strategies from strategy_runtime.yaml for cross-reference
+    config_path = Path('~/.config/mmr/strategy_runtime.yaml').expanduser()
+    deployed_by_file: Dict[str, list[str]] = {}
+    if config_path.exists():
+        try:
+            with open(config_path, 'r') as f:
+                cfg_yaml = _yaml.safe_load(f) or {}
+            for s in cfg_yaml.get('strategies', []) or []:
+                mod = s.get('module', '')
+                name = s.get('name', '')
+                deployed_by_file.setdefault(mod, []).append(name)
+        except Exception as ex:
+            console.print(f'[yellow]could not read {config_path}: {ex}[/yellow]')
+
+    # 3. Walk the strategies directory, AST-parse each .py, find Strategy
+    # subclasses, and build a report.
+    rows = []
+    for py in sorted(strategies_dir.glob('*.py')):
+        if py.name.startswith('_'):
+            continue
+        try:
+            tree = ast.parse(py.read_text())
+        except SyntaxError as ex:
+            rows.append({
+                'file': py.name,
+                'class': f'<parse error: {ex.msg}>',
+                'deployed_as': '',
+                'docstring': '',
+            })
+            continue
+
+        classes_in_file = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            # Accept any class that inherits from something named Strategy —
+            # covers both `Strategy` and `trader.trading.strategy.Strategy`.
+            base_names = []
+            for b in node.bases:
+                if isinstance(b, ast.Name):
+                    base_names.append(b.id)
+                elif isinstance(b, ast.Attribute):
+                    base_names.append(b.attr)
+            if 'Strategy' in base_names:
+                classes_in_file.append(node)
+
+        # Match deploy key either as "strategies/foo.py" or absolute path
+        deploy_keys = [f'strategies/{py.name}', str(py), py.name]
+        deployed = []
+        for k in deploy_keys:
+            if k in deployed_by_file:
+                deployed.extend(deployed_by_file[k])
+
+        if not classes_in_file:
+            rows.append({
+                'file': py.name,
+                'class': '<no Strategy subclass>',
+                'deployed_as': ', '.join(deployed),
+                'docstring': '',
+            })
+            continue
+
+        for cls in classes_in_file:
+            doc = ast.get_docstring(cls) or ''
+            doc_line = doc.splitlines()[0] if doc else ''
+            rows.append({
+                'file': py.name,
+                'class': cls.name,
+                'deployed_as': ', '.join(deployed) if len(classes_in_file) == 1 else '',
+                'docstring': doc_line[:80] + ('…' if len(doc_line) > 80 else ''),
+            })
+
+    if _json_mode:
+        print(json.dumps({'data': rows, 'title': 'Available Strategies'}))
+        return
+
+    title = f'Available Strategies ({strategies_dir})'
+    if not rows:
+        print_df(pd.DataFrame(), title=title)
+        return
+    print_df(pd.DataFrame(rows), title=title)
 
 
 # ------------------------------------------------------------------
@@ -2549,7 +3022,7 @@ def _handle_strategies_from_config():
 
     rows = []
     for s in strategies:
-        rows.append({
+        row = {
             'name': s.get('name', ''),
             'module': s.get('module', ''),
             'class_name': s.get('class_name', ''),
@@ -2557,7 +3030,11 @@ def _handle_strategies_from_config():
             'conids': str(s.get('conids', s.get('universe', ''))),
             'paper': s.get('paper', True),
             'days': s.get('historical_days_prior', ''),
-        })
+        }
+        params = s.get('params', {})
+        if params:
+            row['params'] = ', '.join(f'{k}={v}' for k, v in params.items())
+        rows.append(row)
     print_df(pd.DataFrame(rows), title='Strategies (from config)')
 
 
@@ -2579,7 +3056,7 @@ def _handle_strategy_create(args: argparse.Namespace):
 
     template = f'''from trader.trading.strategy import Signal, Strategy
 from trader.objects import Action
-from typing import Optional
+from typing import Dict, Optional, Union
 
 import pandas as pd
 
@@ -2591,19 +3068,29 @@ class {class_name}(Strategy):
     Return a Signal to generate a trade, or None to do nothing.
 
     DataFrame columns: date (index), open, high, low, close, volume, average, barCount
+
+    Configure via params in strategy_runtime.yaml:
+        params:
+          fast_period: 10
+          slow_period: 50
+    Access in code: self.params.get('fast_period', 10)
     """
 
     def __init__(self):
         super().__init__()
 
     def on_prices(self, prices: pd.DataFrame) -> Optional[Signal]:
-        if len(prices) < 20:
+        fast_period = self.params.get('fast_period', 10)
+        slow_period = self.params.get('slow_period', 50)
+
+        if len(prices) < slow_period:
             return None
 
         # TODO: implement your strategy logic here
         # Example: simple moving average crossover
-        # fast_ma = prices["close"].rolling(10).mean()
-        # slow_ma = prices["close"].rolling(20).mean()
+        # close = prices["close"]
+        # fast_ma = close.rolling(fast_period).mean()
+        # slow_ma = close.rolling(slow_period).mean()
         # if fast_ma.iloc[-1] > slow_ma.iloc[-1] and fast_ma.iloc[-2] <= slow_ma.iloc[-2]:
         #     return Signal(source_name=self.name, action=Action.BUY, probability=0.7, risk=0.3)
 
@@ -2796,6 +3283,1321 @@ def _handle_strategy_backtest(args: argparse.Namespace):
 # Backtest handler (local-only, no service needed)
 # ------------------------------------------------------------------
 
+def _handle_backtests(args: argparse.Namespace):
+    """List / show / compare / delete past backtest runs from the store."""
+    import pandas as pd
+    from trader.container import Container
+    from trader.data.backtest_store import BacktestStore
+
+    container = Container.instance()
+    cfg = container.config()
+    duckdb_path = cfg.get('duckdb_path', '')
+    if not duckdb_path:
+        print_status('duckdb_path not configured', success=False)
+        return
+    store = BacktestStore(duckdb_path)
+
+    action = getattr(args, 'bts_action', None)
+
+    if action in (None, 'list'):
+        # For top-level `backtests` the filter args hang off args directly;
+        # for `backtests list <flags>` they hang off the subparser. Prefer
+        # whichever is set.
+        strategy = getattr(args, 'strategy', None)
+        limit = getattr(args, 'limit', 25)
+        # argparse stores --sort-by as sort_by on the namespace
+        sort_alias = getattr(args, 'sort_by', 'score') or 'score'
+        descending = not getattr(args, 'asc', False)
+        sort_column = _BTS_SORT_ALIASES.get(sort_alias, sort_alias)
+        include_archived = getattr(args, 'include_archived', False)
+        archived_only = getattr(args, 'archived_only', False)
+
+        try:
+            if sort_column == _BTS_SCORE_SENTINEL:
+                # Composite score is computed in Python (not a DB column).
+                # Pull a bigger pool than `limit` so the top-`limit` by
+                # quality isn't skewed by the arbitrary created_at cutoff,
+                # then truncate after ranking. Cap the pool to avoid
+                # scanning the entire history when someone asks for --limit 5.
+                pool_size = max(limit * 4, 100)
+                records = store.list(
+                    strategy_class=strategy,
+                    limit=pool_size,
+                    sort_by='created_at',
+                    descending=True,
+                    include_archived=include_archived,
+                    archived_only=archived_only,
+                )
+                records.sort(
+                    key=_bt_composite_score,
+                    reverse=descending,
+                )
+                records = records[:limit]
+            else:
+                records = store.list(
+                    strategy_class=strategy,
+                    limit=limit,
+                    sort_by=sort_column,
+                    descending=descending,
+                    include_archived=include_archived,
+                    archived_only=archived_only,
+                )
+        except ValueError as ex:
+            print_status(str(ex), success=False)
+            return
+
+        if _json_mode:
+            print(json.dumps({
+                'data': [
+                    {
+                        'id': r.id,
+                        'class_name': r.class_name,
+                        'bar_size': r.bar_size,
+                        'start_date': str(r.start_date),
+                        'end_date': str(r.end_date),
+                        'total_trades': r.total_trades,
+                        'total_return': r.total_return,
+                        'sharpe_ratio': r.sharpe_ratio,
+                        'max_drawdown': r.max_drawdown,
+                        'win_rate': r.win_rate,
+                        'final_equity': r.final_equity,
+                        'note': r.note,
+                        'archived': r.archived,
+                    }
+                    for r in records
+                ],
+                'title': 'Backtest History',
+            }, default=str))
+            return
+
+        if not records:
+            print_status('No backtest runs recorded yet — run `backtest ...` first.', success=False)
+            return
+
+        # Card view: one Panel per run with colored metric lines.
+        if getattr(args, 'card', False):
+            _print_backtest_cards(
+                records, sort_column=sort_column, descending=descending,
+                include_archived=include_archived, archived_only=archived_only,
+            )
+            return
+
+        # Rich-rendered table with per-cell coloring. Green = strong signal
+        # by industry heuristic; yellow = marginal; red = bad; default =
+        # neutral / not applicable.
+        from rich.table import Table
+        from rich.text import Text
+
+        title = _bt_history_title(
+            sort_column, descending,
+            include_archived=include_archived,
+            archived_only=archived_only,
+        )
+        # Compact view — drop period (shown in `backtests show`) and
+        # win_rate (ambiguous on its own; shown in `show` paired with pf).
+        # Explicit narrow widths so nothing gets aggressively truncated.
+        table = Table(title=title, show_lines=False, pad_edge=False)
+        table.add_column('id',      justify='right', no_wrap=True, width=4)
+        table.add_column('class',   no_wrap=True, width=16)
+        table.add_column('trades',  justify='right', no_wrap=True, width=6)
+        table.add_column('return',  justify='right', no_wrap=True, width=7)
+        table.add_column('sharpe',  justify='right', no_wrap=True, width=6)
+        table.add_column('sortino', justify='right', no_wrap=True, width=7)
+        table.add_column('calmar',  justify='right', no_wrap=True, width=6)
+        table.add_column('max_dd',  justify='right', no_wrap=True, width=7)
+        table.add_column('pf',      justify='right', no_wrap=True, width=5)
+        table.add_column('exp_bps', justify='right', no_wrap=True, width=8)
+        table.add_column('t_in_mkt', justify='right', no_wrap=True, width=5)
+        table.add_column('note',    overflow='ellipsis', width=22)
+
+        def _cell(value, classifier, formatter):
+            return Text(formatter(value), style=_bt_style(classifier, value))
+
+        for r in records:
+            pf = r.profit_factor
+            pf_display = '∞' if pf > 1e15 else f'{pf:.2f}'
+            strong = _bt_row_is_strong(r)
+            archived = getattr(r, 'archived', False)
+            id_text = Text(str(r.id), style=('bold green' if strong else ''))
+            class_display = r.class_name
+            if strong:
+                class_display = f'✓ {class_display}'
+            if archived:
+                # Archived takes visual priority over the strong checkmark —
+                # a row the user has explicitly hidden should read as
+                # suppressed, not as a candidate.
+                class_display = f'⊘ {class_display}'
+
+            class_style = 'dim' if archived else ('bold green' if strong else '')
+            table.add_row(
+                id_text,
+                Text(class_display, style=class_style),
+                _cell(r.total_trades, _bt_class_trades, lambda v: f'{v}'),
+                _cell(r.total_return, _bt_class_return, lambda v: f'{v:+.2%}'),
+                _cell(r.sharpe_ratio, _bt_class_sharpe, lambda v: f'{v:+.2f}'),
+                _cell(r.sortino_ratio, _bt_class_sortino, lambda v: f'{v:+.2f}'),
+                _cell(r.calmar_ratio, _bt_class_calmar, lambda v: f'{v:.2f}'),
+                _cell(r.max_drawdown, _bt_class_max_dd, lambda v: f'{v:.2%}'),
+                Text(pf_display, style=_bt_style(_bt_class_pf, pf)),
+                _cell(r.expectancy_bps, _bt_class_exp_bps, lambda v: f'{v:+.1f}'),
+                Text(f'{r.time_in_market_pct:.0%}',
+                     style=_bt_style(_bt_class_tim, r.time_in_market_pct)),
+                Text((r.note or '')[:20]),
+            )
+        console.print(table)
+        console.print(
+            '[dim]Colors: [bold green]green[/] = strong by practitioner '
+            'threshold, [yellow]yellow[/] = marginal, [red]red[/] = weak. '
+            'Trade count [red]red[/] when < 20 (other metrics unreliable at '
+            'that sample size). [bold green]✓ bold-green row[/] = 4+ quality '
+            'metrics strong AND ≥ 30 trades — candidate worth investigating.[/]'
+        )
+        return
+
+    if action == 'show':
+        r = store.get(args.run_id)
+        if not r:
+            print_status(f'Backtest run #{args.run_id} not found', success=False)
+            return
+
+        pf = r.profit_factor
+        pf_display = '∞' if pf > 1e15 else f'{pf:.2f}'
+        wr_display = f'{r.win_rate:.2%}' if r.total_trades > 0 else 'n/a (no trades)'
+
+        if _json_mode:
+            detail = {
+                'id':                   r.id,
+                'created_at':           str(r.created_at)[:19],
+                'class_name':           r.class_name,
+                'strategy_path':        r.strategy_path,
+                'code_hash':            (r.code_hash or '')[:16],
+                'conids':               r.conids,
+                'symbols':              _format_conids_with_symbols(r.conids),
+                'universe':             r.universe or '',
+                'bar_size':             r.bar_size,
+                'period':               f'{str(r.start_date)[:10]} → {str(r.end_date)[:10]}',
+                'initial_capital':      r.initial_capital,
+                'fill_policy':          r.fill_policy,
+                'slippage_bps':         r.slippage_bps,
+                'commission_per_share': r.commission_per_share,
+                'params':               r.params or {},
+                'total_trades':         r.total_trades,
+                'total_return':         r.total_return,
+                'sharpe_ratio':         r.sharpe_ratio,
+                'sortino_ratio':        r.sortino_ratio,
+                'calmar_ratio':         r.calmar_ratio,
+                'max_drawdown':         r.max_drawdown,
+                'profit_factor':        'inf' if pf > 1e15 else r.profit_factor,
+                'expectancy_bps':       r.expectancy_bps,
+                'win_rate':             r.win_rate if r.total_trades > 0 else None,
+                'time_in_market_pct':   r.time_in_market_pct,
+                'final_equity':         r.final_equity,
+                'trades_stored':        bool(r.trades_json),
+                'note':                 r.note or '',
+                'archived':             bool(getattr(r, 'archived', False)),
+            }
+            stats, stats_reason = _compute_bt_stats(r)
+            stats_data = {
+                'n_trades':              stats.n_trades,
+                'n_bar_returns':         stats.n_bar_returns,
+                'probabilistic_sharpe':  stats.psr,
+                't_stat':                stats.t_stat,
+                'p_value':               stats.p_value,
+                'return_ci_lo':          stats.return_ci_lo,
+                'return_ci_hi':          stats.return_ci_hi,
+                'sharpe_ci_lo':          stats.sharpe_ci_lo,
+                'sharpe_ci_hi':          stats.sharpe_ci_hi,
+                'pnl_skew':              stats.pnl_skew,
+                'pnl_excess_kurtosis':   stats.pnl_excess_kurtosis,
+                'losing_streak_actual':  stats.losing_streak_actual,
+                'losing_streak_mc_95':   stats.losing_streak_mc_95,
+                'unavailable_reason':    stats_reason,
+            }
+            print(json.dumps({'data': {
+                **detail,
+                'statistical_confidence': stats_data,
+                'trades_json': r.trades_json,
+                'equity_curve_json': r.equity_curve_json,
+            }}, default=str))
+            return
+
+        # Rich detail — colored metric values matching the list view's
+        # classifiers, plus a static "inputs" section and a "results"
+        # section with the heuristic-colored numbers.
+        from rich.table import Table
+        from rich.text import Text as _Text
+
+        strong = _bt_row_is_strong(r)
+        header_style = 'bold green' if strong else 'bold'
+        from rich import box as _box
+        tbl = Table(
+            title=_Text(f'Backtest Run #{r.id}{"  ✓" if strong else ""}',
+                        style=header_style),
+            show_header=False, box=_box.ROUNDED, pad_edge=False,
+        )
+        tbl.add_column('field', style='dim', no_wrap=True, width=22)
+        tbl.add_column('value')
+
+        def add(label, value, style=None):
+            tbl.add_row(label, _Text(str(value), style=style or ''))
+
+        def add_metric(label, value, classifier, formatter):
+            try:
+                style = _STYLE_FOR_CLASS.get(classifier(float(value)), '')
+            except (TypeError, ValueError):
+                style = ''
+            tbl.add_row(label, _Text(formatter(value), style=style))
+
+        # --- Inputs ---
+        add('id',                   r.id)
+        add('created_at',           str(r.created_at)[:19])
+        add('class_name',           r.class_name, 'bold')
+        add('strategy_path',        r.strategy_path)
+        add('code_hash',            (r.code_hash or '')[:16])
+        add('conids',               _format_conids_with_symbols(r.conids))
+        add('universe',             r.universe or '—')
+        add('bar_size',             r.bar_size)
+        add('period',               f'{str(r.start_date)[:10]} → {str(r.end_date)[:10]}')
+        add('initial_capital',      f'{r.initial_capital:,.2f}')
+        add('fill_policy',          r.fill_policy)
+        add('slippage_bps',         r.slippage_bps)
+        add('commission_per_share', r.commission_per_share)
+        # Render param overrides as "K=V, K=V" on a single line when there
+        # are any — the full dict form is visually noisy and most runs
+        # have only 2-3 overrides. Empty params stay as "—" for scanning.
+        if r.params:
+            params_line = ', '.join(f'{k}={v}' for k, v in sorted(r.params.items()))
+            add('params', params_line)
+        else:
+            add('params', '—')
+
+        # --- Separator ---
+        tbl.add_row(_Text('── results ──', style='bold cyan'), '')
+
+        # --- Results with classifier-driven color ---
+        add_metric('total_trades',    r.total_trades,     _bt_class_trades,   lambda v: f'{int(v)}')
+        add_metric('total_return',    r.total_return,     _bt_class_return,   lambda v: f'{v:+.2%}')
+        add_metric('sharpe_ratio',    r.sharpe_ratio,     _bt_class_sharpe,   lambda v: f'{v:+.2f}')
+        add_metric('sortino_ratio',   r.sortino_ratio,    _bt_class_sortino,  lambda v: f'{v:+.2f}')
+        add_metric('calmar_ratio',    r.calmar_ratio,     _bt_class_calmar,   lambda v: f'{v:.2f}')
+        add_metric('max_drawdown',    r.max_drawdown,     _bt_class_max_dd,   lambda v: f'{v:.2%}')
+        # profit_factor special-case for ∞
+        pf_style = _bt_style(_bt_class_pf, pf)
+        tbl.add_row('profit_factor', _Text(pf_display, style=pf_style))
+        add_metric('expectancy_bps', r.expectancy_bps,   _bt_class_exp_bps,  lambda v: f'{v:+.1f} bps')
+        add('win_rate',              wr_display)  # ambiguous alone — no color
+        add_metric('time_in_market', r.time_in_market_pct, _bt_class_tim,    lambda v: f'{v:.1%}')
+        add('final_equity',          f'{r.final_equity:,.2f}')
+        add('trades_stored',         bool(r.trades_json))
+        add('note',                  r.note or '—')
+        if getattr(r, 'archived', False):
+            add('status', '⊘ archived (hidden from default list)', style='dim')
+
+        # --- Statistical confidence section ---
+        _append_stat_confidence_rows(tbl, r, add)
+
+        console.print(tbl)
+        if strong:
+            console.print(
+                '[dim]✓ This run has 4+ quality metrics in the green threshold '
+                'and ≥ 30 trades — a real candidate.[/]'
+            )
+        return
+
+    if action == 'compare':
+        records = [store.get(rid) for rid in args.run_ids]
+        missing = [rid for rid, rec in zip(args.run_ids, records) if rec is None]
+        if missing:
+            print_status(f'Run(s) not found: {missing}', success=False)
+            return
+        rows = []
+        for r in records:
+            pf = r.profit_factor
+            pf_display = '∞' if pf > 1e15 else f'{pf:.2f}'
+            wr_display = f'{r.win_rate:.2%}' if r.total_trades > 0 else 'n/a'
+            rows.append({
+                'id': r.id,
+                'class': r.class_name,
+                'symbols': _format_conids_with_symbols(r.conids),
+                'period': f'{str(r.start_date)[:10]}→{str(r.end_date)[:10]}',
+                'trades': r.total_trades,
+                'return': f'{r.total_return:+.2%}',
+                'sharpe': f'{r.sharpe_ratio:.2f}',
+                'sortino': f'{r.sortino_ratio:.2f}',
+                'calmar': f'{r.calmar_ratio:.2f}',
+                'max_dd': f'{r.max_drawdown:.2%}',
+                'pf': pf_display,
+                'exp_bps': f'{r.expectancy_bps:+.1f}',
+                'win': wr_display,
+                't_in_mkt': f'{r.time_in_market_pct:.0%}',
+                'code': (r.code_hash or '')[:8],
+                'note': (r.note or '')[:20],
+            })
+        if _json_mode:
+            print(json.dumps({'data': rows, 'title': 'Backtest Comparison'}, default=str))
+            return
+        print_df(pd.DataFrame(rows), title='Backtest Comparison')
+        return
+
+    if action == 'delete':
+        ok = store.delete(args.run_id)
+        if ok:
+            print_status(f'Deleted backtest run #{args.run_id}')
+        else:
+            print_status(f'Run #{args.run_id} not found', success=False)
+        return
+
+    if action in ('archive', 'unarchive'):
+        archive = action == 'archive'
+        ids = args.run_ids
+        affected = store.set_archived(ids, archived=archive)
+        verb = 'Archived' if archive else 'Unarchived'
+        if affected == len(ids):
+            print_status(f'{verb} {affected} run(s): {ids}')
+        elif affected == 0:
+            print_status(f'No runs updated — ids {ids} either not found '
+                          f'or already in target state', success=False)
+        else:
+            # Partial success — surface which ids were already in target state.
+            print_status(
+                f'{verb} {affected} of {len(ids)} run(s); the rest were '
+                f'already {"archived" if archive else "active"}',
+            )
+        return
+
+    if action in ('help', 'metrics'):
+        _print_backtest_metrics_help()
+        return
+
+    print_status(f'Unknown backtests action: {action}', success=False)
+
+
+# --- backtests list: per-metric quality classification -----------------
+# Each classifier returns 'good' (green), 'ok' (yellow), 'bad' (red), or
+# 'neutral' (default). Thresholds come from practitioner heuristics —
+# documented in _BACKTEST_METRIC_HELP — and are conservative (a green
+# label means the number is a real positive signal, not "the best I've
+# seen today").
+
+def _bt_class_return(v):    return 'good' if v > 0.05 else ('ok' if v > 0 else 'bad')
+def _bt_class_sharpe(v):    return 'good' if v > 2.0 else ('ok' if v > 1.0 else ('bad' if v < 0 else 'neutral'))
+def _bt_class_sortino(v):   return 'good' if v > 2.5 else ('ok' if v > 1.5 else ('bad' if v < 0 else 'neutral'))
+def _bt_class_calmar(v):
+    # Calmar is 0 on zero-drawdown runs — that's neutral, not bad.
+    if v == 0: return 'neutral'
+    return 'good' if v > 1.5 else ('ok' if v > 0.5 else 'bad')
+def _bt_class_max_dd(v):
+    # More negative = worse. 0 is neutral (could mean "no drawdown" or "no trades").
+    if v == 0: return 'neutral'
+    return 'good' if v > -0.03 else ('ok' if v > -0.10 else 'bad')
+def _bt_class_pf(v):
+    # ∞ is stored as 1e18 sentinel — all-winners, but a small sample gets
+    # here too, so only label "good" if paired with other signals.
+    if v > 1e15: return 'ok'
+    if v == 0:  return 'neutral'
+    return 'good' if v > 2.0 else ('ok' if v > 1.2 else 'bad')
+def _bt_class_exp_bps(v):   return 'good' if v > 5 else ('bad' if v < -5 else 'ok')
+def _bt_class_trades(n):
+    # Statistical reliability heuristic — below ~30 round-trips most other
+    # metrics are noise. Color the trade count so users see immediately
+    # when a run is too small to trust.
+    if n >= 50: return 'good'
+    if n >= 20: return 'ok'
+    return 'bad'
+def _bt_class_tim(v):
+    # Selective 20–70% in-market is typical for good systematic strategies.
+    if 0.20 <= v <= 0.70: return 'good'
+    if 0.10 <= v <= 0.90: return 'ok'
+    return 'neutral'
+
+_STYLE_FOR_CLASS = {
+    'good':    'bold green',
+    'ok':      'yellow',
+    'bad':     'red',
+    'neutral': '',
+}
+
+
+def _bt_style(classifier, value):
+    """Return a Rich style string for the given value + classifier."""
+    try:
+        cls = classifier(float(value))
+    except (TypeError, ValueError):
+        return ''
+    return _STYLE_FOR_CLASS.get(cls, '')
+
+
+def _bt_row_is_strong(r):
+    """A backtest is 'strong' if 4+ quality metrics are green AND the
+    trade count is statistically reliable. Used to bold the row ID."""
+    trades_ok = r.total_trades >= 30
+    if not trades_ok:
+        return False
+    quality_classes = [
+        _bt_class_sharpe(r.sharpe_ratio),
+        _bt_class_sortino(r.sortino_ratio),
+        _bt_class_calmar(r.calmar_ratio),
+        _bt_class_pf(r.profit_factor),
+        _bt_class_exp_bps(r.expectancy_bps),
+        _bt_class_return(r.total_return),
+    ]
+    return sum(1 for c in quality_classes if c == 'good') >= 4
+
+
+def _bt_composite_score(r) -> float:
+    """Single-number quality ranking for a backtest, used only to order the
+    history list so the most promising runs float to the top.
+
+    Weighted blend of sortino, profit_factor, expectancy_bps, total_return,
+    and max_drawdown, each clipped to a sensible band so no single metric
+    dominates. The whole thing is then multiplied by a *reliability* factor
+    that penalises low trade counts — a 5-trade run with sharpe 10 is luck,
+    not edge, and shouldn't outrank a 300-trade run with sharpe 3.
+
+    Not a decision metric. Use the individual numbers (and `backtests show`)
+    when judging whether to paper-trade a strategy.
+    """
+    trades = r.total_trades or 0
+    if trades < 10:
+        reliability = 0.2
+    elif trades < 30:
+        reliability = 0.6
+    elif trades < 100:
+        reliability = 0.9
+    else:
+        reliability = 1.0
+
+    def _clip(x, lo, hi):
+        return max(lo, min(hi, x))
+
+    sortino = r.sortino_ratio or 0.0
+    pf = r.profit_factor or 0.0
+    # Treat infinity (no losers) as "just good, not exceptional" — often a
+    # tiny sample. Cap at 3.0 so one lucky outlier can't dominate.
+    pf_eff = 2.0 if pf > 1e15 else _clip(pf, 0.0, 3.0)
+    exp_bps = r.expectancy_bps or 0.0
+    ret = r.total_return or 0.0
+    dd = r.max_drawdown or 0.0
+
+    score = (
+        0.30 * _clip(sortino / 3.0, -2.0, 2.0)
+        + 0.20 * (pf_eff - 1.0)
+        + 0.20 * _clip(exp_bps / 30.0, -2.0, 2.0)
+        + 0.15 * _clip(ret / 0.10, -2.0, 2.0)
+        + 0.15 * _clip(1.0 - abs(dd) / 0.15, -1.0, 1.0)
+    )
+    return score * reliability
+
+
+# Sentinel returned by _BTS_SORT_ALIASES for the composite-score sort. The
+# score isn't a column in the DB — we fetch rows ordered by created_at and
+# re-sort in Python.
+_BTS_SCORE_SENTINEL = '__score__'
+
+
+def _parse_backtest_param_args(
+    params_json: Optional[str],
+    param_kv: List[str],
+) -> Dict[str, Any]:
+    """Merge ``--params '{...}'`` JSON and repeated ``--param KEY=VALUE``
+    flags into a single dict. ``--param`` entries take precedence so users
+    can override a single key without rewriting the whole JSON.
+
+    Values from KEY=VALUE are returned as strings — the backtester's
+    ``_coerce_param`` converts them to the class-attr type at apply time.
+    Raises ``ValueError`` with a clear message on malformed input so the
+    failure happens before a 3-minute backtest runs.
+    """
+    merged: Dict[str, Any] = {}
+    if params_json:
+        try:
+            decoded = json.loads(params_json)
+        except json.JSONDecodeError as ex:
+            raise ValueError(f"--params is not valid JSON: {ex}")
+        if not isinstance(decoded, dict):
+            raise ValueError(
+                f"--params must be a JSON object, got {type(decoded).__name__}"
+            )
+        merged.update(decoded)
+    for entry in param_kv:
+        if '=' not in entry:
+            raise ValueError(
+                f"--param expects KEY=VALUE, got {entry!r}"
+            )
+        key, _, value = entry.partition('=')
+        key = key.strip()
+        if not key:
+            raise ValueError(f"--param has empty key: {entry!r}")
+        merged[key] = value
+    return merged
+
+
+def _compute_bt_stats(record):
+    """Compute the statistical-confidence bundle for a stored backtest
+    run. Returns ``(stats, reason)`` where ``stats`` is the
+    :class:`BacktestStats` dataclass (may contain Nones), and ``reason``
+    is either ``None`` or a short human string explaining why key fields
+    are missing (e.g. "run without --save-trades").
+    """
+    import numpy as np
+    from trader.simulation.backtest_stats import compute_all
+    from trader.simulation.backtester import Backtester
+
+    # Parse persisted JSON blobs, tolerating empty strings.
+    trades = None
+    if record.trades_json:
+        try:
+            trades = json.loads(record.trades_json)
+        except (ValueError, TypeError):
+            trades = None
+
+    bar_returns = None
+    if record.equity_curve_json:
+        try:
+            curve = json.loads(record.equity_curve_json)
+            values = np.array([float(p['value']) for p in curve], dtype=float)
+            if len(values) >= 2:
+                bar_returns = np.diff(values) / values[:-1]
+        except (ValueError, TypeError, KeyError):
+            bar_returns = None
+
+    # Annualisation factor — mirrors Backtester._bars_per_year so the
+    # Sharpe bootstrap CI is on the same scale as the stored sharpe_ratio.
+    try:
+        from trader.objects import BarSize
+        bar_size_enum = BarSize(record.bar_size) if record.bar_size else BarSize.Days1
+        bars_per_year = Backtester._bars_per_year(bar_size_enum)
+    except Exception:
+        bars_per_year = 252.0
+
+    stats = compute_all(trades, bar_returns, bars_per_year=bars_per_year)
+
+    reason = None
+    if not record.trades_json and not record.equity_curve_json:
+        reason = 'run without --save-trades — re-run to enable statistical tests'
+    elif stats.n_trades == 0 and stats.n_bar_returns == 0:
+        reason = 'no usable trade or equity data in saved run'
+
+    return stats, reason
+
+
+def _append_stat_confidence_rows(tbl, record, add) -> None:
+    """Append the "── statistical confidence ──" section to the rich
+    detail table for ``backtests show``. Pulls stats via
+    :func:`_compute_bt_stats` and colors each row by its practitioner
+    threshold so readers can scan for green/yellow/red at a glance.
+    """
+    from rich.text import Text as _Text
+
+    stats, reason = _compute_bt_stats(record)
+    tbl.add_row(_Text('── confidence ──', style='bold cyan'), '')
+
+    if reason:
+        tbl.add_row('', _Text(reason, style='dim italic'))
+        return
+
+    # PSR — single highest-signal "is it real?" metric.
+    if stats.psr is not None:
+        if stats.psr >= 0.95:
+            style = 'bold green'
+        elif stats.psr >= 0.80:
+            style = 'green'
+        elif stats.psr >= 0.50:
+            style = 'yellow'
+        else:
+            style = 'red'
+        tbl.add_row(
+            'prob_sharpe > 0',
+            _Text(
+                f'{stats.psr:.1%}  (n={stats.n_bar_returns} bar returns)',
+                style=style,
+            ),
+        )
+    else:
+        tbl.add_row('prob_sharpe > 0', _Text('insufficient bar data', style='dim'))
+
+    # t-test
+    if stats.p_value is not None:
+        if stats.p_value < 0.01:
+            style = 'bold green'
+        elif stats.p_value < 0.05:
+            style = 'green'
+        elif stats.p_value < 0.10:
+            style = 'yellow'
+        else:
+            style = 'red'
+        t_display = f't={stats.t_stat:+.2f}   p={stats.p_value:.4f}'
+        tbl.add_row('t-test (mean pnl)', _Text(t_display, style=style))
+    else:
+        tbl.add_row('t-test (mean pnl)', _Text('insufficient trades', style='dim'))
+
+    # Bootstrap CI on mean per-trade P&L (dollar units)
+    if stats.return_ci_lo is not None:
+        if stats.return_ci_lo > 0:
+            style = 'green'
+        elif stats.return_ci_hi < 0:
+            style = 'red'
+        else:
+            style = 'yellow'  # CI straddles zero → edge not statistically distinguishable
+        tbl.add_row(
+            'return 95% CI',
+            _Text(
+                f'[${stats.return_ci_lo:+,.2f}, ${stats.return_ci_hi:+,.2f}] per trade',
+                style=style,
+            ),
+        )
+    else:
+        tbl.add_row('return 95% CI', _Text('need ≥ 10 trades', style='dim'))
+
+    # Bootstrap CI on annualised Sharpe
+    if stats.sharpe_ci_lo is not None:
+        if stats.sharpe_ci_lo > 1.0:
+            style = 'green'
+        elif stats.sharpe_ci_lo > 0.0:
+            style = 'yellow'
+        else:
+            style = 'red'
+        tbl.add_row(
+            'sharpe 95% CI',
+            _Text(
+                f'[{stats.sharpe_ci_lo:+.2f}, {stats.sharpe_ci_hi:+.2f}]',
+                style=style,
+            ),
+        )
+    else:
+        tbl.add_row('sharpe 95% CI', _Text('need ≥ 30 bar returns', style='dim'))
+
+    # Distribution shape (skew + excess kurt)
+    if stats.pnl_skew is not None:
+        # Negative skew + high kurt is the blow-up signature.
+        skew_bad = stats.pnl_skew < -0.5
+        kurt_bad = (stats.pnl_excess_kurtosis or 0) > 5.0
+        if skew_bad and kurt_bad:
+            style = 'bold red'
+            tag = '⚠ negative skew + fat tails: blow-up risk'
+        elif skew_bad:
+            style = 'red'
+            tag = 'negative skew: occasional large losers'
+        elif kurt_bad:
+            style = 'yellow'
+            tag = 'fat tails: outsized single-trade moves'
+        elif stats.pnl_skew > 0.2:
+            style = 'green'
+            tag = 'positive skew: winners run, losers cut'
+        else:
+            style = ''
+            tag = 'roughly symmetric'
+        tbl.add_row(
+            'pnl distribution',
+            _Text(
+                f'skew={stats.pnl_skew:+.2f}  excess_kurt={stats.pnl_excess_kurtosis:+.2f}  — {tag}',
+                style=style,
+            ),
+        )
+    else:
+        tbl.add_row('pnl distribution', _Text('need ≥ 3 trades', style='dim'))
+
+    # Losing streak vs MC
+    if stats.losing_streak_actual is not None:
+        actual = stats.losing_streak_actual
+        mc95 = stats.losing_streak_mc_95 or 0
+        if actual > mc95:
+            style = 'red'
+            tag = f'worse than random (MC 95th pct = {mc95:.0f})'
+        elif actual > 0.75 * mc95:
+            style = 'yellow'
+            tag = f'near the MC 95th pct ({mc95:.0f}) — losses cluster a bit'
+        else:
+            style = 'green'
+            tag = f'within random expectation (MC 95th pct = {mc95:.0f})'
+        tbl.add_row(
+            'losing streak',
+            _Text(f'{actual} trades — {tag}', style=style),
+        )
+    else:
+        tbl.add_row('losing streak', _Text('need ≥ 5 trades', style='dim'))
+
+
+def _format_conids_with_symbols(conids) -> str:
+    """Render a list of conIds as ``SYMBOL (conId)`` using the local universe
+    DB, falling back to a bare conId when the symbol isn't resolvable locally.
+
+    Used by ``backtests show`` / ``compare`` so the user sees *which
+    instruments* a run was executed on, not just opaque integers. If the
+    universe DB isn't available at all (fresh install, no data_service run
+    yet) this degrades gracefully to the raw list.
+    """
+    if not conids:
+        return '—'
+    try:
+        from trader.container import Container
+        from trader.data.universe import UniverseAccessor
+        cfg = Container.instance().config()
+        accessor = UniverseAccessor(
+            cfg.get('duckdb_path', ''),
+            cfg.get('universe_library', 'Universes'),
+        )
+    except Exception:
+        return str(list(conids))
+
+    parts = []
+    for cid in conids:
+        try:
+            matches = accessor.resolve_universe(int(cid), first_only=True)
+            if matches:
+                _, sd = matches[0]
+                parts.append(f'{sd.symbol} ({cid})')
+                continue
+        except Exception:
+            pass
+        parts.append(f'? ({cid})')
+    return ', '.join(parts)
+
+
+def _bt_history_title(
+    sort_column: str,
+    descending: bool,
+    include_archived: bool = False,
+    archived_only: bool = False,
+) -> str:
+    """Build the `backtests` list/card header line — wording matches the
+    sort mode so we don't claim "best first" when it's actually
+    chronological, and signals the archive filter so the user isn't
+    confused about missing rows."""
+    if sort_column == _BTS_SCORE_SENTINEL:
+        base = (
+            'Backtest History — ranked by quality score '
+            f'({"best first" if descending else "worst first"})'
+        )
+    elif sort_column == 'created_at':
+        base = (
+            f'Backtest History — sorted by {sort_column} '
+            f'({"newest first" if descending else "oldest first"})'
+        )
+    else:
+        base = (
+            f'Backtest History — sorted by {sort_column} '
+            f'({"high→low" if descending else "low→high"})'
+        )
+    if archived_only:
+        return f'{base}  [archived only]'
+    if include_archived:
+        return f'{base}  [incl. archived]'
+    return base
+
+# --- backtests list: sort-column aliases --------------------------------
+# User-friendly alias → actual backtest_runs column name (or the score
+# sentinel). Accepted as ``--sort-by`` choices on ``backtests list``.
+_BTS_SORT_ALIASES = {
+    'score': _BTS_SCORE_SENTINEL, 'quality': _BTS_SCORE_SENTINEL,
+    'best': _BTS_SCORE_SENTINEL,
+    'time': 'created_at', 'created': 'created_at', 'created_at': 'created_at',
+    'return': 'total_return', 'total_return': 'total_return',
+    'sharpe': 'sharpe_ratio', 'sharpe_ratio': 'sharpe_ratio',
+    'sortino': 'sortino_ratio', 'sortino_ratio': 'sortino_ratio',
+    'calmar': 'calmar_ratio', 'calmar_ratio': 'calmar_ratio',
+    'pf': 'profit_factor', 'profit_factor': 'profit_factor',
+    'expectancy': 'expectancy_bps', 'expectancy_bps': 'expectancy_bps', 'exp': 'expectancy_bps',
+    'win': 'win_rate', 'win_rate': 'win_rate',
+    'max_dd': 'max_drawdown', 'max_drawdown': 'max_drawdown', 'drawdown': 'max_drawdown',
+    'trades': 'total_trades', 'total_trades': 'total_trades',
+    'time_in_market': 'time_in_market_pct', 'tim': 'time_in_market_pct',
+}
+
+
+# --- Metric reference ---------------------------------------------------
+
+_BACKTEST_METRIC_HELP = [
+    # (name, what it measures, good threshold, when it lies)
+    (
+        'total_return',
+        'Cumulative return over the backtest period: (final_equity / initial_capital) - 1.',
+        'Positive is a necessary but nowhere-near-sufficient signal. Compare to buy-and-hold.',
+        'Dominated by one big winning day on short windows. Annualization would distort it.',
+    ),
+    (
+        'sharpe_ratio',
+        'Annualized return divided by annualized standard deviation of returns. Classic risk-adjusted metric.',
+        '> 1.0 decent, > 2.0 good, > 3.0 suspicious or exceptional.',
+        'Treats upside volatility as bad (dumb for asymmetric strategies). Meaningless on < ~30 bars. Ignores tail risk.',
+    ),
+    (
+        'sortino_ratio',
+        'Like Sharpe but the denominator is downside-only std — only losses count as "bad volatility". Better for asymmetric P&L.',
+        '> 1.5 decent, > 2.5 good. Roughly Sharpe × 1.4 on symmetric returns.',
+        'Same short-window noise problem as Sharpe. Can look great when there are few losing days even if wins are tiny.',
+    ),
+    (
+        'calmar_ratio',
+        'total_return / |max_drawdown|. "Dollars of edge per dollar of worst drawdown." Raw form — NOT annualized, so comparable across window lengths.',
+        '> 1.0 means you earned more than your worst loss. > 3.0 is notably good.',
+        'A backtest with no drawdown reports 0 or ∞. Short windows often have no meaningful drawdown yet.',
+    ),
+    (
+        'max_drawdown',
+        'Worst peak-to-trough percentage decline in equity. Always ≤ 0.',
+        'Better than −10% for long-horizon equity strategies. > −20% means you\'ll be tempted to turn it off at the wrong moment.',
+        'A short backtest may not have seen a real drawdown yet. Doesn\'t reflect recovery time.',
+    ),
+    (
+        'profit_factor',
+        'Gross wins / |gross losses|, summed across round-trip P&Ls. The single number most practitioners read first.',
+        '> 1 profitable, > 1.5 decent, > 2 robust edge, > 3 rare.',
+        'A few huge winners inflate it. Watch trade count — 10-trade samples aren\'t reliable.',
+    ),
+    (
+        'expectancy_bps',
+        'Average round-trip P&L as basis points of entry notional. What the strategy has to survive against real-world frictions.',
+        'Needs to clear your round-trip slippage + commissions with margin. +3 bps is OK, +10 bps is good, +30 bps+ is great.',
+        'Very high expectancy on low-turnover is fine; very high expectancy on high-turnover means you probably optimized against the backtester\'s fill model.',
+    ),
+    (
+        'win_rate',
+        'Fraction of closed round-trips that finished positive. Rendered "n/a" when there are no trades.',
+        'Meaningless alone. A 40% win rate is great if payoff is 3:1; a 70% win rate is terrible if payoff is 1:3.',
+        'Looks good on strategies that cut winners early and let losers run. Always pair with profit_factor.',
+    ),
+    (
+        'time_in_market_pct',
+        'Fraction of bars during which at least one position was open.',
+        'Tells you whether edge comes from being always-on (boring, probably index-like) or selective (more interesting). 20–60% is typical for systematic strategies.',
+        'Not a quality metric by itself — context only. A 100% time-in-market strategy with Sharpe 2 is basically long-only.',
+    ),
+    (
+        'total_trades',
+        'Count of BUY and SELL fills — so a full round-trip is 2 trades.',
+        'Low trade counts (< 30) mean most other metrics are statistical noise.',
+        'High turnover amplifies slippage/commission exposure — always cross-check with expectancy_bps.',
+    ),
+    (
+        'final_equity',
+        'Cash + mark-to-market positions at the end of the backtest.',
+        'Just your starting capital × (1 + total_return).',
+        'Nothing hidden here; listed for at-a-glance readability in `backtests show`.',
+    ),
+]
+
+
+def _print_backtest_cards(
+    records,
+    sort_column: str,
+    descending: bool,
+    include_archived: bool = False,
+    archived_only: bool = False,
+) -> None:
+    """Render a list of BacktestRecords as card panels — one panel per run
+    with colored metric lines, border color reflecting overall strength.
+    Mirrors the portfolio card view in spirit: dense, scannable, readable
+    in narrow terminals.
+    """
+    from rich.columns import Columns
+    from rich.console import Group
+    from rich.panel import Panel
+    from rich.text import Text
+
+    title = Text(
+        _bt_history_title(
+            sort_column, descending,
+            include_archived=include_archived,
+            archived_only=archived_only,
+        ),
+        style='bold',
+    )
+
+    def _fmt(value, classifier, fmt):
+        """Styled Text for a metric value."""
+        try:
+            style = _STYLE_FOR_CLASS.get(classifier(float(value)), '')
+        except (TypeError, ValueError):
+            style = ''
+        return Text(fmt(value), style=style)
+
+    panels = []
+    for r in records:
+        pf = r.profit_factor
+        pf_display = '∞' if pf > 1e15 else f'{pf:.2f}'
+        strong = _bt_row_is_strong(r)
+        archived = getattr(r, 'archived', False)
+
+        # Border color: archived dominates — a soft-deleted run should read
+        # as suppressed regardless of whether the metrics look good. Otherwise:
+        # green when strong, red if clearly bad, yellow for marginal.
+        if archived:
+            border = 'grey50'
+        elif strong:
+            border = 'green'
+        elif r.total_return < 0 or r.sharpe_ratio < 0:
+            border = 'red'
+        else:
+            border = 'yellow'
+
+        body = Text()
+
+        # Fixed column widths so right-hand label always starts at the same
+        # column regardless of left-hand value length. Without this, shorter
+        # values (e.g. `1.75`) pull the right label leftward while longer
+        # ones (`+1.98%`) push it right, producing a jagged card.
+        LEFT_VAL_W = 8
+
+        def _pad_to(text_obj: Text, width: int) -> Text:
+            gap = width - len(text_obj.plain)
+            if gap > 0:
+                text_obj.append(' ' * gap)
+            return text_obj
+
+        def row(label, value_text, extra_label=None, extra_value=None):
+            body.append(f'  {label:<9} ', style='dim')
+            vt = value_text if isinstance(value_text, Text) else Text(str(value_text))
+            if extra_label is not None:
+                body.append_text(_pad_to(vt.copy(), LEFT_VAL_W))
+                body.append(f'  {extra_label:<9} ', style='dim')
+                body.append_text(
+                    extra_value if isinstance(extra_value, Text)
+                    else Text(str(extra_value)))
+            else:
+                body.append_text(vt)
+            body.append('\n')
+
+        # Row 1: period (alone — 21 chars won't fit alongside a second column
+        # inside the 44-wide panel, so it gets its own line).
+        period = f'{str(r.start_date)[:10]}→{str(r.end_date)[:10]}'
+        row('period', period)
+
+        # Row 2: trades (alone — sample-size deserves prominence; a small
+        # trade count red-flags the whole row).
+        row('trades', _fmt(r.total_trades, _bt_class_trades, lambda v: f'{v}'))
+
+        # Row 3: return + time_in_market
+        row('return',
+            _fmt(r.total_return, _bt_class_return, lambda v: f'{v:+.2%}'),
+            't_in_mkt',
+            _fmt(r.time_in_market_pct, _bt_class_tim, lambda v: f'{v:.0%}'))
+
+        # Row 3: sharpe + sortino
+        row('sharpe',
+            _fmt(r.sharpe_ratio, _bt_class_sharpe, lambda v: f'{v:+.2f}'),
+            'sortino',
+            _fmt(r.sortino_ratio, _bt_class_sortino, lambda v: f'{v:+.2f}'))
+
+        # Row 4: calmar + max_dd
+        row('calmar',
+            _fmt(r.calmar_ratio, _bt_class_calmar, lambda v: f'{v:.2f}'),
+            'max_dd',
+            _fmt(r.max_drawdown, _bt_class_max_dd, lambda v: f'{v:.2%}'))
+
+        # Row 5: profit_factor + expectancy_bps
+        pf_text = Text(pf_display, style=_bt_style(_bt_class_pf, pf))
+        row('pf', pf_text,
+            'exp_bps',
+            _fmt(r.expectancy_bps, _bt_class_exp_bps, lambda v: f'{v:+.1f}'))
+
+        # Row 6: note + code_hash (dim)
+        if r.note:
+            body.append(f'  note      ', style='dim')
+            body.append(r.note[:30], style='italic')
+            body.append('\n')
+        if r.code_hash:
+            body.append(f'  code      ', style='dim')
+            body.append(r.code_hash[:10], style='dim')
+
+        if archived:
+            # Leading ⊘ means "hidden from default list" — reads consistently
+            # with the table view's marker.
+            panel_title = (
+                f'[dim]#{r.id} ⊘ {r.class_name}  {r.bar_size}[/]'
+            )
+        else:
+            strong_mark = '✓ ' if strong else ''
+            panel_title = (
+                f'[bold]#{r.id}[/] {strong_mark}[bold]{r.class_name}[/]  '
+                f'[dim]{r.bar_size}[/]'
+            )
+        panels.append(Panel(body, title=panel_title, border_style=border, width=44))
+
+    console.print(Group(
+        Text(''),
+        title,
+        Text(''),
+        Columns(panels, padding=(0, 1)),
+    ))
+
+
+def _print_backtest_metrics_help():
+    """Render the backtest metric reference as a Rich table."""
+    from rich.table import Table
+
+    if _json_mode:
+        print(json.dumps({
+            'data': [
+                {'metric': name, 'what': what, 'good': good, 'watch_out': watch}
+                for name, what, good, watch in _BACKTEST_METRIC_HELP
+            ],
+            'title': 'Backtest Metrics Reference',
+        }))
+        return
+
+    table = Table(title='Backtest Metrics Reference — what each number tells you', show_lines=True)
+    table.add_column('metric', style='bold cyan', no_wrap=True)
+    table.add_column('what it measures', style='white')
+    table.add_column('good', style='green')
+    table.add_column('where it lies', style='yellow')
+    for name, what, good, watch in _BACKTEST_METRIC_HELP:
+        table.add_row(name, what, good, watch)
+    console.print(table)
+    console.print(
+        "\n[dim]Heuristic: a strategy worth paper-trading usually has "
+        "profit_factor > 1.5, sortino > 1.5, and expectancy_bps that "
+        "comfortably clears your real-world round-trip costs. "
+        "Sharpe alone is the worst single metric to optimize — too easy to game.[/dim]"
+    )
+
+
+def _handle_backtest_sweep(args: argparse.Namespace):
+    """Cartesian-product parameter sweep — run one backtest per grid point,
+    persist each to the history store, and print a composite-score
+    leaderboard at the end.
+
+    Runs sequentially in-process so all combos share the same loaded data
+    and the BacktestStore write path. For true parallelism across sweeps,
+    use ``MMRHelpers.backtest_batch`` which spawns subprocess-level
+    concurrency.
+    """
+    import datetime as dt
+    import itertools
+    from trader.container import Container
+    from trader.data.backtest_store import (
+        BacktestStore, BacktestRecord, compute_strategy_hash,
+    )
+    from trader.data.data_access import TickStorage
+    from trader.data.universe import UniverseAccessor
+    from trader.simulation.backtester import Backtester, BacktestConfig
+    from trader.simulation.slippage import get_slippage_model
+    from trader.objects import BarSize
+
+    # 1. Parse the grid first so bad input fails fast.
+    try:
+        grid = json.loads(args.grid)
+    except json.JSONDecodeError as ex:
+        print_status(f'--grid is not valid JSON: {ex}', success=False)
+        return
+    if not isinstance(grid, dict) or not grid:
+        print_status('--grid must be a non-empty JSON object', success=False)
+        return
+    keys = list(grid.keys())
+    value_lists = []
+    for k in keys:
+        v = grid[k]
+        if not isinstance(v, list) or not v:
+            print_status(
+                f'grid key {k!r} must map to a non-empty list', success=False,
+            )
+            return
+        value_lists.append(v)
+    combos = list(itertools.product(*value_lists))
+
+    # 2. Shared infrastructure — load once, reuse across combos.
+    container = Container.instance()
+    cfg = container.config()
+    duckdb_path = cfg.get('duckdb_path', '')
+    storage = TickStorage(duckdb_path)
+    accessor = UniverseAccessor(
+        duckdb_path, cfg.get('universe_library', 'Universes'),
+    )
+    bstore = BacktestStore(duckdb_path)
+
+    conids = args.conids
+    if args.universe and not conids:
+        uni = accessor.get(args.universe)
+        if not uni:
+            print_status(f'Universe not found: {args.universe}', success=False)
+            return
+        conids = [sd.conId for sd in uni.security_definitions]
+    if not conids:
+        print_status('Provide --conids or --universe', success=False)
+        return
+
+    bar_size = BarSize.parse_str(args.bar_size)
+    config = BacktestConfig(
+        start_date=dt.datetime.now() - dt.timedelta(days=args.days),
+        end_date=dt.datetime.now(),
+        initial_capital=args.capital,
+        bar_size=bar_size,
+        slippage_model=get_slippage_model('fixed', bps=args.slippage_bps),
+    )
+    backtester = Backtester(storage, config)
+    code_hash = compute_strategy_hash(args.strategy)
+
+    # 3. Run each combo.
+    results: List[Dict[str, Any]] = []
+    for i, combo in enumerate(combos, 1):
+        params = {k: v for k, v in zip(keys, combo)}
+        if not _json_mode:
+            console.print(
+                f'[dim]({i}/{len(combos)})[/dim] {params} ...',
+                end='',
+            )
+        try:
+            result = backtester.run_from_module(
+                args.strategy, args.class_name, conids,
+                universe_accessor=accessor, params=params,
+            )
+        except Exception as ex:
+            err = f'{type(ex).__name__}: {ex}'
+            results.append({'params': params, 'error': err})
+            if not _json_mode:
+                console.print(f' [red]ERROR[/red]: {err}')
+            continue
+
+        final_equity = (
+            float(result.equity_curve.iloc[-1])
+            if len(result.equity_curve) > 0 else float(config.initial_capital)
+        )
+        trades_json = ''
+        equity_curve_json = ''
+        if getattr(args, 'save_trades', True):
+            trades_json = json.dumps([{
+                'timestamp': str(t.timestamp), 'conid': int(t.conid),
+                'action': str(t.action), 'quantity': float(t.quantity),
+                'price': float(t.price), 'commission': float(t.commission),
+                'signal_probability': float(t.signal_probability),
+                'signal_risk': float(t.signal_risk),
+            } for t in result.trades])
+            equity_curve_json = json.dumps([
+                {'timestamp': str(ts), 'value': float(v)}
+                for ts, v in result.equity_curve.items()
+            ])
+
+        record = BacktestRecord(
+            strategy_path=args.strategy,
+            class_name=args.class_name,
+            conids=list(conids),
+            universe=args.universe or '',
+            start_date=config.start_date,
+            end_date=config.end_date,
+            bar_size=str(bar_size),
+            initial_capital=config.initial_capital,
+            fill_policy=config.fill_policy,
+            slippage_bps=args.slippage_bps,
+            commission_per_share=config.commission_per_share,
+            params=dict(getattr(result, 'applied_params', {}) or {}),
+            code_hash=code_hash,
+            total_trades=result.total_trades,
+            total_return=result.total_return,
+            sharpe_ratio=result.sharpe_ratio,
+            max_drawdown=result.max_drawdown,
+            win_rate=result.win_rate,
+            final_equity=final_equity,
+            sortino_ratio=result.sortino_ratio,
+            calmar_ratio=result.calmar_ratio,
+            profit_factor=result.profit_factor,
+            expectancy_bps=result.expectancy_bps,
+            time_in_market_pct=result.time_in_market_pct,
+            trades_json=trades_json,
+            equity_curve_json=equity_curve_json,
+            note=args.note or f'sweep[{args.class_name}]',
+        )
+        rid = bstore.add(record)
+        record.id = rid
+        score = _bt_composite_score(record)
+        results.append({
+            'run_id': rid,
+            'params': params,
+            'score': score,
+            'record': record,
+        })
+        if not _json_mode:
+            console.print(f' run_id=[bold]#{rid}[/] score={score:+.3f}')
+
+    successful = [r for r in results if 'error' not in r]
+    successful.sort(key=lambda r: r['score'], reverse=True)
+    errors = [r for r in results if 'error' in r]
+
+    # 4. JSON / Rich leaderboard.
+    if _json_mode:
+        print(json.dumps({
+            'data': {
+                'total_combinations': len(combos),
+                'successful': len(successful),
+                'failed': len(errors),
+                'leaderboard': [
+                    {
+                        'rank': rank,
+                        'run_id': r['run_id'],
+                        'params': r['params'],
+                        'score': r['score'],
+                        'total_return': r['record'].total_return,
+                        'sharpe_ratio': r['record'].sharpe_ratio,
+                        'sortino_ratio': r['record'].sortino_ratio,
+                        'profit_factor': (
+                            'inf' if r['record'].profit_factor > 1e15
+                            else r['record'].profit_factor
+                        ),
+                        'expectancy_bps': r['record'].expectancy_bps,
+                        'total_trades': r['record'].total_trades,
+                        'max_drawdown': r['record'].max_drawdown,
+                    }
+                    for rank, r in enumerate(successful[:args.top], 1)
+                ],
+                'errors': [
+                    {'params': r['params'], 'error': r['error']}
+                    for r in errors
+                ],
+            },
+            'title': f'Sweep: {args.class_name}',
+        }, default=str))
+        return
+
+    from rich.table import Table
+    from rich.text import Text
+    from rich import box as _box
+
+    top_n = min(args.top, len(successful))
+    table = Table(
+        title=f'{args.class_name} sweep — top {top_n} of '
+              f'{len(combos)} combinations (ranked by composite score)',
+        box=_box.ROUNDED, pad_edge=False,
+    )
+    table.add_column('rank', justify='right', width=4)
+    table.add_column('id', justify='right', width=5)
+    table.add_column('params', overflow='ellipsis', width=36)
+    table.add_column('score', justify='right', width=7)
+    table.add_column('trades', justify='right', width=6)
+    table.add_column('return', justify='right', width=7)
+    table.add_column('sharpe', justify='right', width=7)
+    table.add_column('sortino', justify='right', width=7)
+    table.add_column('pf', justify='right', width=6)
+    table.add_column('exp_bps', justify='right', width=8)
+
+    for rank, entry in enumerate(successful[:top_n], 1):
+        r = entry['record']
+        pdisplay = ', '.join(f'{k}={v}' for k, v in sorted(entry['params'].items()))
+        pf_d = '∞' if r.profit_factor > 1e15 else f'{r.profit_factor:.2f}'
+        table.add_row(
+            str(rank),
+            str(entry['run_id']),
+            pdisplay,
+            f'{entry["score"]:+.3f}',
+            Text(str(r.total_trades),
+                 style=_bt_style(_bt_class_trades, r.total_trades)),
+            Text(f'{r.total_return:+.2%}',
+                 style=_bt_style(_bt_class_return, r.total_return)),
+            Text(f'{r.sharpe_ratio:+.2f}',
+                 style=_bt_style(_bt_class_sharpe, r.sharpe_ratio)),
+            Text(f'{r.sortino_ratio:+.2f}',
+                 style=_bt_style(_bt_class_sortino, r.sortino_ratio)),
+            Text(pf_d, style=_bt_style(_bt_class_pf, r.profit_factor)),
+            Text(f'{r.expectancy_bps:+.1f}',
+                 style=_bt_style(_bt_class_exp_bps, r.expectancy_bps)),
+        )
+    console.print(table)
+
+    if errors:
+        console.print(
+            f'[yellow]{len(errors)}/{len(combos)} combination(s) failed — '
+            f'first error: {errors[0]["error"]}[/yellow]'
+        )
+
+
 def _handle_backtest(args: argparse.Namespace):
     """Run a backtest using local data."""
     import datetime as dt
@@ -2814,7 +4616,8 @@ def _handle_backtest(args: argparse.Namespace):
         print_status('duckdb_path not configured', success=False)
         return
 
-    storage = TickStorage(duckdb_path)
+    history_path = cfg.get('history_duckdb_path', '') or duckdb_path
+    storage = TickStorage(history_path)
 
     # Resolve conids
     conids = args.conids
@@ -2848,9 +4651,25 @@ def _handle_backtest(args: argparse.Namespace):
 
     backtester = Backtester(storage, config)
 
+    # Merge --params JSON + --param KEY=VALUE into a single dict. Any
+    # malformed entry is a user error — surface the exact failure without
+    # running a 180s backtest that would be discarded anyway.
+    try:
+        param_overrides = _parse_backtest_param_args(
+            getattr(args, 'params', None),
+            getattr(args, 'param', []) or [],
+        )
+    except ValueError as e:
+        print_status(str(e), success=False)
+        return
+
     try:
         accessor = UniverseAccessor(duckdb_path, cfg.get('universe_library', 'Universes'))
-        result = backtester.run_from_module(args.strategy, args.class_name, conids, universe_accessor=accessor)
+        result = backtester.run_from_module(
+            args.strategy, args.class_name, conids,
+            universe_accessor=accessor,
+            params=param_overrides or None,
+        )
     except FileNotFoundError as e:
         print_status(str(e), success=False)
         return
@@ -2861,45 +4680,178 @@ def _handle_backtest(args: argparse.Namespace):
         print_status(f'{type(e).__name__}: {e}', success=False)
         return
 
-    # Build summary
+    # Build summary. Distinguish "strategy emitted no trades" from "strategy
+    # lost everything" — both used to render as `win_rate: 0.00%` which is
+    # misleading when scanning `backtests list`.
+    if result.total_trades == 0:
+        win_rate_display = 'n/a (no trades)'
+    else:
+        win_rate_display = f'{result.win_rate:.2%}'
+
+    # Profit factor is ∞ when a run has wins but no losses — render it as
+    # the glyph rather than a raw 1e18 so humans can tell the difference
+    # from "merely huge" values.
+    pf = result.profit_factor
+    pf_display = '∞' if pf > 1e15 else f'{pf:.2f}'
+
     summary = {
-        'total_return': f'{result.total_return:.2%}',
-        'sharpe_ratio': f'{result.sharpe_ratio:.2f}',
-        'max_drawdown': f'{result.max_drawdown:.2%}',
-        'win_rate': f'{result.win_rate:.2%}',
-        'total_trades': result.total_trades,
-        'start_date': str(result.start_date)[:10],
-        'end_date': str(result.end_date)[:10],
-        'final_equity': f'{result.equity_curve.iloc[-1]:,.2f}' if len(result.equity_curve) > 0 else str(config.initial_capital),
+        'total_return':       f'{result.total_return:.2%}',
+        'sharpe_ratio':       f'{result.sharpe_ratio:.2f}',
+        'sortino_ratio':      f'{result.sortino_ratio:.2f}',
+        'calmar_ratio':       f'{result.calmar_ratio:.2f}',
+        'max_drawdown':       f'{result.max_drawdown:.2%}',
+        'profit_factor':      pf_display,
+        'expectancy_bps':     f'{result.expectancy_bps:+.1f} bps',
+        'win_rate':           win_rate_display,
+        'time_in_market':     f'{result.time_in_market_pct:.1%}',
+        'total_trades':       result.total_trades,
+        'start_date':         str(result.start_date)[:10],
+        'end_date':           str(result.end_date)[:10],
+        'final_equity':       f'{result.equity_curve.iloc[-1]:,.2f}' if len(result.equity_curve) > 0 else str(config.initial_capital),
     }
 
+    # Sanity warning: sharpe on very short windows is statistically noise.
+    # Surface it to stderr rather than burying it — real strategies rarely
+    # have sharpe > 5.
+    span_days = (config.end_date - config.start_date).days
+    if (
+        result.total_trades > 0
+        and span_days < 14
+        and abs(result.sharpe_ratio) > 5.0
+        and not _json_mode
+    ):
+        console.print(
+            f'[yellow]⚠ Sharpe {result.sharpe_ratio:.2f} over only {span_days} days '
+            f'is almost certainly noise — extend the window before trusting this signal.[/yellow]'
+        )
+
+    # Persist the run to the backtest history store so it survives the
+    # process. `--no-save` opts out; `--save-trades` opts in to persisting
+    # the full trade + equity-curve detail alongside the summary metrics.
+    run_id: Optional[int] = None
+    if not getattr(args, 'no_save', False):
+        try:
+            from trader.data.backtest_store import (
+                BacktestStore, BacktestRecord, compute_strategy_hash,
+            )
+            bstore = BacktestStore(duckdb_path)
+
+            final_equity = (
+                float(result.equity_curve.iloc[-1])
+                if len(result.equity_curve) > 0 else float(config.initial_capital)
+            )
+
+            trades_json = ''
+            equity_curve_json = ''
+            if getattr(args, 'save_trades', False):
+                # Coerce everything to native Python types — numpy scalars
+                # (np.int64 from DataFrame groupby, np.float64 from arithmetic)
+                # break json.dumps without a default= hook.
+                trades_json = json.dumps([{
+                    'timestamp': str(t.timestamp),
+                    'conid': int(t.conid),
+                    'action': str(t.action),
+                    'quantity': float(t.quantity),
+                    'price': float(t.price),
+                    'commission': float(t.commission),
+                    'signal_probability': float(t.signal_probability),
+                    'signal_risk': float(t.signal_risk),
+                } for t in result.trades])
+                equity_curve_json = json.dumps([
+                    {'timestamp': str(ts), 'value': float(v)}
+                    for ts, v in result.equity_curve.items()
+                ])
+
+            # Capture effective --param overrides so `backtests show` can
+            # display what was varied. ``applied_params`` is populated by
+            # ``run_from_module`` after ``apply_param_overrides`` coerces
+            # each entry to its class-attr type.
+            params: Dict[str, Any] = dict(getattr(result, 'applied_params', {}) or {})
+
+            record = BacktestRecord(
+                strategy_path=args.strategy,
+                class_name=args.class_name,
+                conids=list(conids),
+                universe=getattr(args, 'universe', '') or '',
+                start_date=config.start_date,
+                end_date=config.end_date,
+                sortino_ratio=result.sortino_ratio,
+                calmar_ratio=result.calmar_ratio,
+                profit_factor=result.profit_factor,
+                expectancy_bps=result.expectancy_bps,
+                time_in_market_pct=result.time_in_market_pct,
+                bar_size=str(bar_size),
+                initial_capital=config.initial_capital,
+                fill_policy=config.fill_policy,
+                slippage_bps=slippage_bps if slippage_name == 'fixed' else 0.0,
+                commission_per_share=config.commission_per_share,
+                params=params,
+                code_hash=compute_strategy_hash(args.strategy),
+                total_trades=result.total_trades,
+                total_return=result.total_return,
+                sharpe_ratio=result.sharpe_ratio,
+                max_drawdown=result.max_drawdown,
+                win_rate=result.win_rate,
+                final_equity=final_equity,
+                trades_json=trades_json,
+                equity_curve_json=equity_curve_json,
+                note=getattr(args, 'note', '') or '',
+            )
+            run_id = bstore.add(record)
+            summary['run_id'] = run_id
+        except Exception as ex:
+            if not _json_mode:
+                console.print(f'[yellow]Could not persist backtest run: {ex}[/yellow]')
+
     if _json_mode:
-        trades_data = []
-        for t in result.trades:
-            trades_data.append({
-                'timestamp': str(t.timestamp),
-                'conid': t.conid,
-                'action': str(t.action),
-                'quantity': t.quantity,
-                'price': t.price,
-                'commission': t.commission,
-                'signal_probability': t.signal_probability,
-                'signal_risk': t.signal_risk,
-            })
-        print(json.dumps({
-            'data': {
-                'summary': {
-                    'total_return': result.total_return,
-                    'sharpe_ratio': result.sharpe_ratio,
-                    'max_drawdown': result.max_drawdown,
-                    'win_rate': result.win_rate,
-                    'total_trades': result.total_trades,
-                    'start_date': str(result.start_date)[:10],
-                    'end_date': str(result.end_date)[:10],
-                    'final_equity': float(result.equity_curve.iloc[-1]) if len(result.equity_curve) > 0 else config.initial_capital,
-                },
-                'trades': trades_data,
+        summary_only = getattr(args, 'summary_only', False)
+        trades_data: List[Dict[str, Any]] = []
+        if not summary_only:
+            for t in result.trades:
+                trades_data.append({
+                    'timestamp': str(t.timestamp),
+                    'conid': t.conid,
+                    'action': str(t.action),
+                    'quantity': t.quantity,
+                    'price': t.price,
+                    'commission': t.commission,
+                    'signal_probability': t.signal_probability,
+                    'signal_risk': t.signal_risk,
+                })
+        # JSON ∞ is non-standard; serialize it as the string "inf" so a
+        # parser can branch on it without silently turning ∞ into null.
+        def _jsonable_float(x: float):
+            if x == float('inf'): return 'inf'
+            if x == float('-inf'): return '-inf'
+            if x != x: return None  # NaN
+            return x
+
+        data = {
+            'summary': {
+                'total_return':       result.total_return,
+                'sharpe_ratio':       result.sharpe_ratio,
+                'sortino_ratio':      result.sortino_ratio,
+                'calmar_ratio':       result.calmar_ratio,
+                'max_drawdown':       result.max_drawdown,
+                'profit_factor':      _jsonable_float(result.profit_factor),
+                'expectancy_bps':     result.expectancy_bps,
+                # Mirror the Rich path: None when no trades, numeric otherwise.
+                'win_rate':           (result.win_rate if result.total_trades > 0 else None),
+                'time_in_market_pct': result.time_in_market_pct,
+                'total_trades':       result.total_trades,
+                'start_date':         str(result.start_date)[:10],
+                'end_date':           str(result.end_date)[:10],
+                'final_equity':       float(result.equity_curve.iloc[-1]) if len(result.equity_curve) > 0 else config.initial_capital,
+                # run_id is populated above if persistence succeeded; None
+                # if the user passed --no-save or persistence failed.
+                'run_id':             run_id,
+                'applied_params':     dict(getattr(result, 'applied_params', {}) or {}),
             },
+        }
+        if not summary_only:
+            data['trades'] = trades_data
+        print(json.dumps({
+            'data': data,
             'title': f'Backtest: {args.class_name}',
         }, default=str))
         return
@@ -2930,7 +4882,7 @@ def _handle_data(args: argparse.Namespace):
     """Handle data subcommands."""
     action = getattr(args, 'data_action', None)
     if not action:
-        console.print('[yellow]Usage: data summary|query|download[/yellow]')
+        console.print('[yellow]Usage: data summary|query|download|migrate-symbols[/yellow]')
         return
 
     if action == 'summary':
@@ -2939,6 +4891,8 @@ def _handle_data(args: argparse.Namespace):
         _handle_data_query(args)
     elif action == 'download':
         _handle_data_download(args)
+    elif action == 'migrate-symbols':
+        _handle_data_migrate_symbols(args)
     else:
         console.print(f'[yellow]Unknown data action: {action}[/yellow]')
 
@@ -2958,7 +4912,8 @@ def _handle_data_summary():
         print_status('duckdb_path not configured', success=False)
         return
 
-    storage = TickStorage(duckdb_path)
+    history_path = cfg.get('history_duckdb_path', '') or duckdb_path
+    storage = TickStorage(history_path)
     accessor = UniverseAccessor(duckdb_path, cfg.get('universe_library', 'Universes'))
 
     bar_sizes = storage.list_libraries()
@@ -2973,22 +4928,36 @@ def _handle_data_summary():
         tickdata = storage.get_tickdata(bs)
         symbols = tickdata.list_symbols()
         for sym in symbols:
+            # Storage keys can be either conIds (ints stored as strings) or
+            # raw ticker strings — the latter happens when `data download`
+            # runs for a symbol that isn't in the local universe yet. Try
+            # conId-first and fall back to passing the key through as-is,
+            # so tickers-only downloads still show up in the summary
+            # instead of silently disappearing.
+            name = sym
+            con_id = None
             try:
-                min_date, max_date = tickdata.date_summary(int(sym))
-            except (ValueError, Exception):
+                con_id = int(sym)
+                storage_key = con_id
+            except (TypeError, ValueError):
+                storage_key = sym
+
+            try:
+                min_date, max_date = tickdata.date_summary(storage_key)
+            except Exception:
                 continue
 
-            # Try to resolve conId to symbol name
-            name = sym
-            try:
-                results = accessor.resolve_symbol(sym, first_only=True)
-                if results:
-                    name = results[0].symbol
-            except Exception:
-                pass
+            if con_id is not None:
+                # Try to resolve conId back to a human symbol name.
+                try:
+                    results = accessor.resolve_symbol(con_id, first_only=True)
+                    if results:
+                        name = results[0].symbol
+                except Exception:
+                    pass
 
             rows.append({
-                'conId': sym,
+                'conId': sym if con_id is not None else '',
                 'symbol': name,
                 'bar_size': bs_str,
                 'start': str(min_date)[:19],
@@ -3016,21 +4985,27 @@ def _handle_data_query(args: argparse.Namespace):
         print_status('duckdb_path not configured', success=False)
         return
 
-    storage = TickStorage(duckdb_path)
+    history_path = cfg.get('history_duckdb_path', '') or duckdb_path
+    storage = TickStorage(history_path)
     accessor = UniverseAccessor(duckdb_path, cfg.get('universe_library', 'Universes'))
 
-    # Resolve symbol to conId
+    # Resolve symbol to the storage key used by `data download`:
+    # conId when the ticker is registered in the universe, otherwise the raw
+    # symbol string (which `data download` falls back to when it can't
+    # resolve). Try conId-first so normal lookups still work for registered
+    # symbols.
     symbol = args.symbol
-    conid = None
+    storage_key: Union[int, str]
     if symbol.isnumeric():
-        conid = int(symbol)
+        storage_key = int(symbol)
     else:
         results = accessor.resolve_symbol(symbol, first_only=True)
         if results:
-            conid = results[0].conId
+            storage_key = results[0].conId
         else:
-            print_status(f'Cannot resolve symbol: {symbol}. Use a conId directly.', success=False)
-            return
+            # Fall through to raw-symbol key so that data downloaded before
+            # the symbol was registered is still readable.
+            storage_key = symbol
 
     bar_size = BarSize.parse_str(getattr(args, 'bar_size', '1 day'))
     tickdata = storage.get_tickdata(bar_size)
@@ -3040,7 +5015,7 @@ def _handle_data_query(args: argparse.Namespace):
         end=dt.datetime.now()
     )
 
-    df = tickdata.read(conid, date_range=date_range)
+    df = tickdata.read(storage_key, date_range=date_range)
     if df.empty:
         print_df(pd.DataFrame(), title=f'Data: {symbol} ({bar_size})')
         return
@@ -3072,12 +5047,36 @@ def _handle_data_download(args: argparse.Namespace):
         return
 
     bar_size = BarSize.parse_str(getattr(args, 'bar_size', '1 day'))
-    storage = TickStorage(duckdb_path)
+    history_path = cfg.get('history_duckdb_path', '') or duckdb_path
+    storage = TickStorage(history_path)
     accessor = UniverseAccessor(duckdb_path, cfg.get('universe_library', 'Universes'))
 
     from trader.listeners.massive_history import MassiveHistoryWorker
 
     worker = MassiveHistoryWorker(massive_api_key=massive_api_key)
+
+    # If trader_service is reachable, fall back to it for symbols that aren't
+    # in the local universe so rows end up conId-keyed (instead of strings
+    # like "JPM"). Without this, tickers the user hasn't explicitly added to
+    # a universe get persisted under their symbol string and show up with
+    # a blank conId in `data summary`.
+    rpc_mmr = None
+    try:
+        from trader.sdk import MMR  # local import — avoids SDK cost when unused
+        candidate = MMR(
+            rpc_address=cfg.get('zmq_rpc_server_address'),
+            rpc_port=cfg.get('zmq_rpc_server_port'),
+            timeout=3,
+        )
+        candidate.connect()
+        # Soft probe — if trader_service isn't up, skip silently
+        candidate._rpc.rpc().get_status()  # type: ignore[attr-defined]
+        rpc_mmr = candidate
+    except Exception:
+        if rpc_mmr is not None:
+            try: rpc_mmr.close()
+            except Exception: pass
+            rpc_mmr = None
 
     end_date = dt.datetime.now()
     start_date = end_date - dt.timedelta(days=args.days)
@@ -3085,11 +5084,40 @@ def _handle_data_download(args: argparse.Namespace):
     failed = 0
 
     for symbol in args.symbols:
-        # Resolve to conId for storage key
+        # Resolve to conId for storage key: local universe first, then
+        # trader_service RPC if available. Registering a new resolution in
+        # the universe means subsequent downloads (and anything else that
+        # calls resolve_symbol locally) won't need to hit IB again.
         conid = None
         results = accessor.resolve_symbol(symbol, first_only=True)
         if results:
             conid = results[0].conId
+        elif rpc_mmr is not None:
+            try:
+                resolved = rpc_mmr.resolve(symbol)  # List[SecurityDefinition]
+                if resolved:
+                    sec_def = resolved[0]
+                    conid = sec_def.conId
+                    # Persist into a "downloads" universe so the resolution
+                    # sticks for future runs — matches the auto-register
+                    # behaviour of `propose --group`.
+                    universe_name = 'downloads'
+                    try:
+                        u = accessor.get(universe_name)
+                    except Exception:
+                        u = None
+                    if u is None:
+                        from trader.data.universe import Universe
+                        u = Universe(name=universe_name, security_definitions=[sec_def])
+                    else:
+                        if not any(sd.conId == sec_def.conId for sd in u.security_definitions):
+                            u.security_definitions.append(sec_def)
+                    accessor.update(u)
+                    if not _json_mode:
+                        console.print(f'[dim]  registered {symbol} → conId {conid} in universe "downloads"[/dim]')
+            except Exception as ex:
+                if not _json_mode:
+                    console.print(f'[dim]  resolve via trader_service failed for {symbol}: {ex}[/dim]')
 
         try:
             if not _json_mode:
@@ -3116,6 +5144,10 @@ def _handle_data_download(args: argparse.Namespace):
             if not _json_mode:
                 console.print(f'[red]  Error downloading {symbol}: {e}[/red]')
 
+    if rpc_mmr is not None:
+        try: rpc_mmr.close()
+        except Exception: pass
+
     if _json_mode:
         print(json.dumps({
             'success': failed == 0,
@@ -3125,6 +5157,106 @@ def _handle_data_download(args: argparse.Namespace):
         }))
     else:
         print_status(f'Download complete: {completed} succeeded, {failed} failed')
+
+
+def _handle_data_migrate_symbols(args: argparse.Namespace):
+    """Rewrite tick_data rows whose 'symbol' column is a raw ticker string
+    into conId-keyed rows, resolving via trader_service (and registering in
+    the ``downloads`` universe). Idempotent; skips symbols that can't be
+    resolved and leaves their rows untouched."""
+    from trader.container import Container
+    from trader.data.duckdb_store import DuckDBConnection
+    from trader.data.data_access import SecurityDefinition
+    from trader.data.universe import UniverseAccessor, Universe
+
+    container = Container.instance()
+    cfg = container.config()
+    duckdb_path = cfg.get('duckdb_path', '')
+    history_path = cfg.get('history_duckdb_path', '') or duckdb_path
+    accessor = UniverseAccessor(duckdb_path, cfg.get('universe_library', 'Universes'))
+
+    db = DuckDBConnection.get_instance(history_path)
+    # Find all distinct non-numeric storage keys
+    rows = db.execute(
+        "SELECT DISTINCT symbol FROM tick_data WHERE NOT regexp_matches(symbol, '^[0-9]+$')",
+        fetch='all',
+    ) or []
+    string_symbols = [r[0] for r in rows]
+
+    if not string_symbols:
+        print_status('Nothing to migrate — all rows already conId-keyed.')
+        return
+
+    if not _json_mode:
+        console.print(f'Found [bold]{len(string_symbols)}[/bold] symbol(s) with string keys: {", ".join(string_symbols)}')
+
+    # Spin up a short-lived RPC client
+    from trader.sdk import MMR as _MMR
+    mmr = _MMR(
+        rpc_address=cfg.get('zmq_rpc_server_address'),
+        rpc_port=cfg.get('zmq_rpc_server_port'),
+        timeout=5,
+    )
+    try:
+        mmr.connect()
+    except Exception as ex:
+        print_status(f'trader_service not reachable — cannot resolve: {ex}', success=False)
+        return
+
+    migrated = 0
+    skipped = 0
+    try:
+        for symbol in string_symbols:
+            try:
+                resolved = mmr.resolve(symbol)  # List[SecurityDefinition]
+                if not resolved:
+                    if not _json_mode:
+                        console.print(f'[yellow]  {symbol}: could not resolve via IB — skipping[/yellow]')
+                    skipped += 1
+                    continue
+                sec_def = resolved[0]
+                conid = str(sec_def.conId)
+
+                # Register in universe
+                try:
+                    u = accessor.get('downloads')
+                except Exception:
+                    u = None
+                if u is None:
+                    u = Universe(name='downloads', security_definitions=[sec_def])
+                else:
+                    if not any(sd.conId == sec_def.conId for sd in u.security_definitions):
+                        u.security_definitions.append(sec_def)
+                accessor.update(u)
+
+                # Atomically re-key the tick_data rows
+                def _rekey(conn, _sym=symbol, _cid=conid):
+                    conn.execute(
+                        "UPDATE tick_data SET symbol = ? WHERE symbol = ?",
+                        [_cid, _sym],
+                    )
+                db.execute_atomic(_rekey)
+
+                if not _json_mode:
+                    console.print(f'[green]  ✓ {symbol} → conId {conid}[/green]')
+                migrated += 1
+            except Exception as ex:
+                if not _json_mode:
+                    console.print(f'[red]  {symbol}: migration failed: {ex}[/red]')
+                skipped += 1
+    finally:
+        try: mmr.close()
+        except Exception: pass
+
+    if _json_mode:
+        print(json.dumps({
+            'success': skipped == 0,
+            'migrated': migrated,
+            'skipped': skipped,
+            'total': len(string_symbols),
+        }))
+    else:
+        print_status(f'Migration complete: {migrated} migrated, {skipped} skipped/failed')
 
 
 def _handle_depth(mmr: MMR, args: argparse.Namespace):

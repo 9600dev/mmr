@@ -1101,14 +1101,19 @@ class TestIBIdeaScannerScan:
         assert 'score' in df.columns
         assert 'signal' in df.columns
 
-    def test_empty_scanner_results(self, mock_rpc):
+    def test_empty_scanner_results_raises(self, mock_rpc):
+        """Empty scanner result is an API/subscription failure, not "no
+        matches" — raise so the user knows to use --tickers."""
+        from trader.tools.idea_scanner import IdeaScannerError
+
         rpc_mock = MagicMock()
         mock_rpc.rpc.return_value = rpc_mock
         rpc_mock.scanner_data.return_value = []
 
         scanner = IBIdeaScanner(mock_rpc)
-        df = scanner.scan(preset='momentum', location='STK.AU.ASX')
-        assert df.empty
+        with pytest.raises(IdeaScannerError) as exc:
+            scanner.scan(preset='momentum', location='STK.AU.ASX')
+        assert '--tickers' in str(exc.value)
 
     def test_unknown_preset_raises(self, mock_rpc):
         scanner = IBIdeaScanner(mock_rpc)
@@ -1586,18 +1591,22 @@ class TestIBIdeaScannerTickersPath:
         assert len(df) == 1
         assert df.iloc[0]['ticker'] == 'CBA'
 
-    def test_all_symbols_fail_returns_empty(self, mock_rpc):
-        """If all symbols fail to resolve, return empty DataFrame."""
+    def test_all_symbols_fail_raises(self, mock_rpc):
+        """If all tickers fail to resolve, raise so the user knows the symbol
+        list is bad (instead of silently getting zero results)."""
+        from trader.tools.idea_scanner import IdeaScannerError
+
         rpc_mock = MagicMock()
         mock_rpc.rpc.return_value = rpc_mock
         rpc_mock.resolve_contract.return_value = []
 
         scanner = IBIdeaScanner(mock_rpc)
-        df = scanner.scan(
-            preset='momentum', location='STK.AU.ASX',
-            tickers=['FAKE1', 'FAKE2'],
-        )
-        assert df.empty
+        with pytest.raises(IdeaScannerError) as exc:
+            scanner.scan(
+                preset='momentum', location='STK.AU.ASX',
+                tickers=['FAKE1', 'FAKE2'],
+            )
+        assert 'FAKE1' in str(exc.value) and 'FAKE2' in str(exc.value)
 
     def test_resolve_exception_skipped(self, mock_rpc):
         """If resolve_symbol raises, that symbol is skipped."""

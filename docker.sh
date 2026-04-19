@@ -256,7 +256,7 @@ up() {
     echo "Starting IB Gateway + MMR containers..."
     echo ""
     # Ensure bind-mount directories exist on host
-    mkdir -p "$BUILDDIR/data" "$BUILDDIR/logs"
+    mkdir -p "$HOME/.local/share/mmr/data" "$HOME/.local/share/mmr/logs" "$HOME/.local/share/mmr/tws_settings"
     # Remove stale network to avoid label mismatch errors (podman/docker-compose compat).
     # Must remove containers using the network first, then the network itself.
     for cid in $($RUNTIME ps -a -q --filter network=mmr_default 2>/dev/null); do

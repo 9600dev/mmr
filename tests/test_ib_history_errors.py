@@ -22,7 +22,7 @@ class TestErrorClassificationConstants:
     """Verify the error code sets contain the expected codes."""
 
     def test_info_codes(self):
-        assert IB_INFO_CODES == {2104, 2158, 2106}
+        assert IB_INFO_CODES == {2104, 2106, 2107, 2158}
 
     def test_connectivity_codes(self):
         assert IB_CONNECTIVITY_CODES == {1100, 1101, 1102, 504}

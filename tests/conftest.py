@@ -128,6 +128,88 @@ def sample_ohlcv():
 
 
 # ---------------------------------------------------------------------------
+# Edge-case OHLCV fixtures — for testing indicator robustness / backtesting
+# against the kinds of real-world artifacts that sample_ohlcv doesn't expose.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def ohlcv_with_gaps():
+    """OHLCV with NaN rows (simulates market halts / future-date API padding)."""
+    n = 50
+    rng = np.random.default_rng(7)
+    close = 100 + np.cumsum(rng.normal(0, 0.3, n))
+    dates = pd.date_range("2024-01-02 09:30", periods=n, freq="1min", tz="UTC")
+    df = pd.DataFrame({
+        "open": close,
+        "high": close + 0.2,
+        "low": close - 0.2,
+        "close": close,
+        "volume": rng.integers(100, 10000, n).astype(float),
+    }, index=dates)
+    # Inject gaps: rows 10-12 and 30 are NaN
+    df.iloc[10:13] = np.nan
+    df.iloc[30] = np.nan
+    df.index.name = "date"
+    return df
+
+
+@pytest.fixture
+def ohlcv_high_volatility():
+    """High-ATR synthetic OHLCV — tests position sizing / volatility adjustment."""
+    n = 60
+    rng = np.random.default_rng(13)
+    # Daily swings of ~5% — large ATR
+    close = 100 + np.cumsum(rng.normal(0, 5.0, n))
+    dates = pd.date_range("2024-01-02", periods=n, freq="1D", tz="UTC")
+    df = pd.DataFrame({
+        "open": close,
+        "high": close + np.abs(rng.normal(3, 1, n)),
+        "low": close - np.abs(rng.normal(3, 1, n)),
+        "close": close,
+        "volume": rng.integers(1_000_000, 10_000_000, n).astype(float),
+    }, index=dates)
+    df.index.name = "date"
+    return df
+
+
+@pytest.fixture
+def ohlcv_zero_volume():
+    """OHLCV with zero-volume bars — simulates pre/post-market or illiquid
+    periods that must not divide-by-zero or get flagged as opportunities."""
+    n = 40
+    rng = np.random.default_rng(23)
+    close = 100 + np.cumsum(rng.normal(0, 0.1, n))
+    dates = pd.date_range("2024-01-02 09:30", periods=n, freq="1min", tz="UTC")
+    volume = rng.integers(1000, 5000, n).astype(float)
+    # First 10 and last 5 bars have zero volume (pre/post-market)
+    volume[:10] = 0.0
+    volume[-5:] = 0.0
+    df = pd.DataFrame({
+        "open": close, "high": close + 0.05, "low": close - 0.05,
+        "close": close, "volume": volume,
+    }, index=dates)
+    df.index.name = "date"
+    return df
+
+
+@pytest.fixture
+def ohlcv_halted():
+    """ATR-zero scenario: price stuck at a halt price for many bars."""
+    n = 30
+    dates = pd.date_range("2024-01-02 09:30", periods=n, freq="1min", tz="UTC")
+    halt_price = 42.0
+    df = pd.DataFrame({
+        "open": [halt_price] * n,
+        "high": [halt_price] * n,
+        "low": [halt_price] * n,
+        "close": [halt_price] * n,
+        "volume": [0.0] * n,
+    }, index=dates)
+    df.index.name = "date"
+    return df
+
+
+# ---------------------------------------------------------------------------
 # Concrete Strategy for testing
 # ---------------------------------------------------------------------------
 

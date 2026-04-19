@@ -61,6 +61,7 @@ class StrategyRuntime():
         zmq_messagebus_server_port: int,
         strategies_directory: str,
         strategy_config_file: str,
+        history_duckdb_path: str = '',
         paper_trading: bool = False,
         simulation: bool = False
     ):
@@ -68,6 +69,7 @@ class StrategyRuntime():
         self.ib_server_port = ib_server_port
         self.strategy_runtime_ib_client_id: int = strategy_runtime_ib_client_id
         self.duckdb_path = duckdb_path
+        self.history_duckdb_path = history_duckdb_path or duckdb_path
         self.universe_library = universe_library
         self.simulation: bool = simulation
         self.paper_trading = paper_trading
@@ -120,10 +122,17 @@ class StrategyRuntime():
 
     @backoff.on_exception(backoff.expo, ConnectionRefusedError, max_tries=10, max_time=120)
     def connect(self):
+        """Synchronous setup: wire up dependencies that don't need the loop.
+
+        Anything that binds ZMQ sockets or creates asyncio tasks is deferred
+        to ``run()``, which is async. Calling ``asyncio.run(coro)`` from this
+        method used to spin up a throwaway loop and orphan the server task —
+        the socket was bound, no task ever ran, requests silently piled up.
+        """
         # avoids circular import
         from trader.messaging.trader_service_api import TraderServiceApi
         try:
-            self.storage = TickStorage(self.duckdb_path)
+            self.storage = TickStorage(self.history_duckdb_path)
             self.universe_accessor = UniverseAccessor(self.duckdb_path, self.universe_library)
             self.event_store = EventStore(self.duckdb_path)
             self.trader_client = RPCClient[TraderServiceApi](
@@ -143,9 +152,6 @@ class StrategyRuntime():
                 zmq_address=self.zmq_messagebus_server_address,
                 zmq_port=self.zmq_messagebus_server_port,
             )
-
-            asyncio.run(self.zmq_messagebus_client.connect())
-            asyncio.run(self.zmq_strategy_rpc_server.serve())
 
         except Exception as ex:
             raise self.create_strategy_exception(
@@ -264,6 +270,7 @@ class StrategyRuntime():
         description: str,
         paper: bool = False,
         auto_execute: bool = False,
+        params: Optional[Dict] = None,
     ) -> None:
 
         # Skip if strategy with this name already loaded
@@ -274,28 +281,49 @@ class StrategyRuntime():
         if not name or not class_name or not module or not bar_size_str:
             raise ValueError('invalid config. need name, bar_size, class_name and module specified')
 
+        strategies_dir = os.path.abspath(os.path.expanduser(self.strategies_directory))
+
         def load_class_from_file(filename, classname):
-            # Get the absolute path of the file
-            filepath = os.path.abspath(filename)
-
-            # Create a module name based on the filename
-            module_name = os.path.splitext(os.path.basename(filename))[0]
-
-            # Load the module using importlib
-            spec = importlib.util.spec_from_file_location(module_name, filepath)
-            if spec:
-                module = importlib.util.module_from_spec(spec)
-                sys.modules[module_name] = module
-                if spec.loader:
-                    spec.loader.exec_module(module)
-                else:
-                    return None
-
-                # Get the class object using getattr
-                class_object = getattr(module, classname)
-                return class_object
+            # Reject absolute paths and path traversal. Strategy modules must
+            # live under ``strategies_directory`` — otherwise a malicious YAML
+            # could load any .py on disk.
+            requested = os.path.expanduser(filename)
+            if os.path.isabs(requested):
+                # Allow absolute paths only if they resolve inside strategies_dir
+                filepath = os.path.abspath(requested)
             else:
+                filepath = os.path.abspath(os.path.join(strategies_dir, requested))
+                # Also accept a project-root-relative path like "strategies/foo.py"
+                if not os.path.exists(filepath):
+                    filepath = os.path.abspath(requested)
+
+            if not filepath.startswith(strategies_dir + os.sep) and filepath != strategies_dir:
+                raise ValueError(
+                    f'strategy module {filename!r} resolves outside strategies '
+                    f'directory {strategies_dir!r}; refusing to load'
+                )
+
+            if not os.path.exists(filepath):
+                raise FileNotFoundError(f'strategy module not found: {filepath}')
+
+            # Namespace the module key by the strategy NAME (unique) rather
+            # than the filename, so two strategies with the same basename
+            # (e.g. strategies/a/ma.py and strategies/b/ma.py) don't clobber
+            # each other in sys.modules and reloads evict the previous copy.
+            module_name = f'_mmr_strategy_{name}'
+            sys.modules.pop(module_name, None)
+
+            spec = importlib.util.spec_from_file_location(module_name, filepath)
+            if not spec or not spec.loader:
                 return None
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            try:
+                spec.loader.exec_module(module)
+            except Exception:
+                sys.modules.pop(module_name, None)
+                raise
+            return getattr(module, classname, None)
 
         try:
             class_object = load_class_from_file(module, class_name)
@@ -320,6 +348,7 @@ class StrategyRuntime():
                     class_name=class_name,
                     description=description,
                     auto_execute=auto_execute,
+                    params=params if params else {},
                 )
                 instance.install(context)
                 # Give the strategy a reference to the runtime for subscriptions
@@ -328,13 +357,20 @@ class StrategyRuntime():
                 self.strategy_implementations.append(cast(Strategy, instance))
 
         except Exception as ex:
-            logging.debug(ex)
+            # Load failures used to be swallowed at DEBUG; a config typo could
+            # silently disable a strategy. Log at ERROR with the cause so the
+            # operator sees it.
+            logging.error('failed to load strategy %s (%s): %s', name, class_name, ex)
 
     def config_loader(self, config_file: str):
         config_file = os.path.expanduser(config_file)
         logging.debug('loading config file {}'.format(config_file))
-        conf_file = open(config_file, 'r')
-        config = yaml.load(conf_file, Loader=yaml.FullLoader)
+        # safe_load refuses Python-object tags — YAML-injection hardening.
+        with open(config_file, 'r') as conf_file:
+            config = yaml.safe_load(conf_file)
+        if not config or 'strategies' not in config:
+            logging.warning('strategy config %s has no strategies section', config_file)
+            return
 
         for strategy_config in config['strategies']:
             self.load_strategy(
@@ -348,11 +384,14 @@ class StrategyRuntime():
                 description=strategy_config.get('description', ''),
                 paper=strategy_config.get('paper', False),
                 auto_execute=strategy_config.get('auto_execute', False),
+                params=strategy_config.get('params', {}),
             )
 
     async def _reconcile(self):
         """Re-check config and subscriptions. Safe to call repeatedly (idempotent)."""
-        # 1. Check for config file changes
+        # 1. Check for config file changes. If the YAML is mid-write when we
+        # try to parse it, keep the old mtime so we retry on the next tick
+        # rather than accepting a partial load.
         try:
             current_mtime = os.path.getmtime(self.strategy_config_file)
         except OSError:
@@ -360,11 +399,21 @@ class StrategyRuntime():
 
         if current_mtime != self._config_mtime:
             logging.info('strategy config changed, reloading')
-            self.config_loader(self.strategy_config_file)
+            try:
+                self.config_loader(self.strategy_config_file)
+            except (yaml.YAMLError, ValueError, FileNotFoundError) as ex:
+                logging.error(
+                    'failed to reload strategy config (will retry next cycle): %s', ex,
+                )
+                # Don't advance _config_mtime — re-try on next reconcile
+                return
             self._config_mtime = current_mtime
 
-        # 2. Re-subscribe all strategies (idempotent — only new conIds trigger publish_contract)
-        # Wrapped in try/except so RPC timeouts (e.g. trader_service restarting) don't block the loop
+        # 2. Re-subscribe all strategies (idempotent — only new conIds trigger publish_contract).
+        # Only swallow the well-known transient failures (trader_service bouncing,
+        # RPC timeout, socket not-yet-connected). Any other exception is a real
+        # bug and should propagate to the run() error handler so it gets logged
+        # at ERROR rather than silently masked at DEBUG.
         try:
             for strategy in self.strategy_implementations:
                 if strategy.conids:
@@ -375,7 +424,7 @@ class StrategyRuntime():
 
                 if strategy.universe:
                     self.subscribe_universe(strategy, strategy.universe)
-        except (TimeoutError, ConnectionError, Exception) as ex:
+        except (TimeoutError, ConnectionError) as ex:
             logging.debug('reconciliation RPC failed (trader_service may be restarting): %s', ex)
 
     async def _reconnect_historical_client(self):
@@ -432,6 +481,12 @@ class StrategyRuntime():
     async def run(self):
         logging.info('starting strategy_runtime')
         logging.debug('StrategyRuntime.run()')
+
+        # Async setup that used to happen inside connect() via asyncio.run():
+        # we now do it here so the tasks land on the real service loop and
+        # actually get a chance to run.
+        await self.zmq_messagebus_client.connect()
+        await self.zmq_strategy_rpc_server.serve()
 
         await self.trader_client.connect()
 

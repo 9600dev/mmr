@@ -1,11 +1,16 @@
 from pathlib import Path
 from trader.config import MMRConfig
-from typing import ClassVar, Dict, Optional, Type
+from typing import ClassVar, Dict, Optional, Set, Type
 
 import inspect
 import os
 import shutil
+import threading
 import yaml
+
+
+class ContainerResolutionError(ValueError):
+    """Raised when Container.resolve cannot satisfy a constructor parameter."""
 
 
 MMR_CONFIG_DIR = Path('~/.config/mmr').expanduser()
@@ -54,6 +59,7 @@ def default_config_path() -> str:
 
 class Container():
     _instance: ClassVar[Optional['Container']] = None
+    _instance_lock: ClassVar[threading.Lock] = threading.Lock()
 
     def __init__(self, config_file: str = ''):
         if not config_file:
@@ -68,15 +74,24 @@ class Container():
             raise ValueError('configuration_file is not found {} or TRADER_CONFIG set incorrectly'.format(self.config_file))
 
         with open(self.config_file, 'r') as conf_file:
-            self.configuration: Dict = yaml.load(conf_file, Loader=yaml.FullLoader)
+            # safe_load refuses Python-object tags — guards against YAML-based
+            # arbitrary-code-execution in trader.yaml.
+            self.configuration: Dict = yaml.safe_load(conf_file) or {}
             self.type_instance_cache: Dict[Type, object] = {}
+
+        self._resolve_lock = threading.Lock()
+        # Tracks types currently being resolved (for circular-dep detection).
+        self._resolving: Set[Type] = set()
 
         # Resolve relative paths against the project root so CLI works from any cwd
         root = mmr_root()
-        for key in ('duckdb_path', 'logfile', 'root_directory'):
+        for key in ('duckdb_path', 'history_duckdb_path', 'logfile', 'root_directory'):
             val = self.configuration.get(key)
-            if val and isinstance(val, str) and not os.path.isabs(val) and not val.startswith('~'):
-                self.configuration[key] = str(root / val)
+            if val and isinstance(val, str):
+                val = os.path.expanduser(val)
+                if not os.path.isabs(val):
+                    val = str(root / val)
+                self.configuration[key] = val
 
         self.mmr_config: MMRConfig = MMRConfig.from_yaml(self.config_file)
 
@@ -92,32 +107,92 @@ class Container():
 
     @classmethod
     def create(cls, config_file: str = '') -> 'Container':
-        cls._instance = cls(config_file)
-        return cls._instance
+        with cls._instance_lock:
+            cls._instance = cls(config_file)
+            return cls._instance
 
     @classmethod
     def instance(cls) -> 'Container':
-        if cls._instance is None:
-            # Auto-create with default config for backward compatibility
-            cls._instance = cls()
-        return cls._instance
+        with cls._instance_lock:
+            if cls._instance is None:
+                # Auto-create with default config for backward compatibility
+                cls._instance = cls()
+            return cls._instance
+
+    def _coerce_env_value(self, raw: str, param: inspect.Parameter):
+        """Best-effort coerce an env-var string into the annotated type.
+
+        Unannotated or ``str`` params pass through unchanged. For ``int``,
+        ``float``, and ``bool`` we convert; a malformed value raises
+        ContainerResolutionError with context on which parameter and what
+        value failed, instead of the cryptic TypeError you'd otherwise get
+        when the constructor runs.
+        """
+        ann = param.annotation
+        if ann is inspect.Parameter.empty or ann is str:
+            return raw
+        try:
+            if ann is int:
+                return int(raw)
+            if ann is float:
+                return float(raw)
+            if ann is bool:
+                return raw.lower() in ('1', 'true', 'yes', 'on')
+        except (TypeError, ValueError) as ex:
+            raise ContainerResolutionError(
+                f'env var {param.name.upper()}={raw!r} cannot be coerced to {ann.__name__}: {ex}'
+            ) from ex
+        return raw
 
     def resolve(self, t: Type, **extra_args):
-        args = {}
-        for param in inspect.signature(t.__init__).parameters.values():
-            if param.name == 'self':
-                continue
-            if extra_args and param.name in extra_args.keys():
-                args[param.name] = extra_args[param.name]
-            elif os.getenv(param.name.upper()) is not None:
-                args[param.name] = os.getenv(param.name.upper())
-            elif param.name in self.configuration and self.configuration[param.name] is not None:
-                args[param.name] = self.configuration[param.name]
-        # Expand ~ in string values that look like paths
-        for key, value in args.items():
-            if isinstance(value, str) and value.startswith('~'):
-                args[key] = os.path.expanduser(value)
-        return t(**args)
+        """Build an instance of ``t`` by resolving constructor parameters from
+        extra_args, env vars, and the configuration dict — in that order."""
+        with self._resolve_lock:
+            if t in self._resolving:
+                chain = ' → '.join(x.__name__ for x in self._resolving) + f' → {t.__name__}'
+                raise ContainerResolutionError(f'circular dependency while resolving {chain}')
+            self._resolving.add(t)
+
+        try:
+            args: Dict[str, object] = {}
+            missing_required: list = []
+            for param in inspect.signature(t.__init__).parameters.values():
+                if param.name == 'self':
+                    continue
+                # Skip *args and **kwargs — they're never "required" in the
+                # sense that the caller has to supply them, even though
+                # their ``default`` is Parameter.empty.
+                if param.kind in (
+                    inspect.Parameter.VAR_POSITIONAL,
+                    inspect.Parameter.VAR_KEYWORD,
+                ):
+                    continue
+                if extra_args and param.name in extra_args.keys():
+                    args[param.name] = extra_args[param.name]
+                elif os.getenv(param.name.upper()) is not None:
+                    args[param.name] = self._coerce_env_value(os.getenv(param.name.upper()), param)
+                elif param.name in self.configuration and self.configuration[param.name] is not None:
+                    args[param.name] = self.configuration[param.name]
+                elif param.default is inspect.Parameter.empty:
+                    # Required param with no source — capture it so we can
+                    # report all at once instead of erroring on the first.
+                    missing_required.append(param.name)
+
+            if missing_required:
+                raise ContainerResolutionError(
+                    f'cannot resolve {t.__name__}: missing required constructor parameter(s) '
+                    f'{missing_required!r}; provide them via extra_args, env vars '
+                    f'(UPPERCASED), or the configuration file.'
+                )
+
+            # Expand ~ in string values that look like paths
+            for key, value in args.items():
+                if isinstance(value, str) and value.startswith('~'):
+                    args[key] = os.path.expanduser(value)
+            return t(**args)
+        finally:
+            with self._resolve_lock:
+                self._resolving.discard(t)
 
     def config(self) -> Dict:
         return self.configuration
@@ -126,8 +201,11 @@ class Container():
         return self.mmr_config
 
     def resolve_cache(self, t: Type, **extra_args):
-        if t in self.type_instance_cache:
-            return self.type_instance_cache[t]
-        else:
-            self.type_instance_cache[t] = self.resolve(t, **extra_args)
+        with self._resolve_lock:
+            if t in self.type_instance_cache:
+                return self.type_instance_cache[t]
+        instance = self.resolve(t, **extra_args)
+        with self._resolve_lock:
+            # Another thread may have won the race; prefer whichever landed first.
+            self.type_instance_cache.setdefault(t, instance)
             return self.type_instance_cache[t]

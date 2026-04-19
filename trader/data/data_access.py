@@ -673,14 +673,12 @@ class TickStorage():
         else:
             db_path = _default_db_path()
         store = DuckDBDataStore(db_path)
-        try:
-            result = store._db.execute(
-                f"SELECT DISTINCT bar_size FROM {store.TABLE_NAME} WHERE bar_size IS NOT NULL ORDER BY bar_size"
-            )
-            rows = result.fetchall()
-            all_bar_sizes = [row[0] for row in rows]
-        except Exception:
-            all_bar_sizes = []
+        rows = store._db.execute(
+            f"SELECT DISTINCT bar_size FROM {store.TABLE_NAME} "
+            f"WHERE bar_size IS NOT NULL ORDER BY bar_size",
+            fetch='all',
+        ) or []
+        all_bar_sizes = [row[0] for row in rows]
         return [x for x in all_bar_sizes if x in BarSize.bar_sizes()]
 
     def list_libraries_barsize(self) -> List[BarSize]:

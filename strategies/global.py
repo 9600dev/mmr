@@ -5,6 +5,10 @@ import pandas as pd
 
 
 class Global(Strategy):
+    """No-op placeholder strategy — subscribes to the whole portfolio so
+    trader_service sees live market data on every held position, without
+    generating any trading signals itself. Useful as a universal subscriber."""
+
     def __init__(self):
         super().__init__()
 

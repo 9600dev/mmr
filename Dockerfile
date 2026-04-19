@@ -27,8 +27,8 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 EXPOSE 8081
 
 # spin up the directories required
-RUN mkdir -p /home/trader/mmr/data \
-    && mkdir -p /home/trader/mmr/logs \
+RUN mkdir -p /home/trader/.local/share/mmr/data \
+    && mkdir -p /home/trader/.local/share/mmr/logs \
     && mkdir -p /home/trader/.config /home/trader/.tmp /home/trader/.cache /home/trader/.local/bin \
     && chown -R trader:trader /home/trader
 
@@ -75,13 +75,7 @@ RUN mkdir -p /home/trader/.config/mmr \
     && cp /home/trader/mmr/configs/*.yaml /home/trader/.config/mmr/ \
     && chown -R trader:trader /home/trader/.config/mmr
 
-RUN touch /home/trader/mmr/logs/trader_service.log \
-    && touch /home/trader/mmr/logs/strategy_service.log \
-    && touch /home/trader/mmr/logs/data_service.log \
-    && touch /home/trader/mmr/logs/trader.log \
-    && touch /home/trader/mmr/logs/errors.log \
-    && chown -R trader:trader /home/trader/mmr/logs \
-    && chmod +x /home/trader/mmr/scripts/docker-entrypoint.sh
+RUN chmod +x /home/trader/mmr/scripts/docker-entrypoint.sh
 
 WORKDIR /home/trader
 ENTRYPOINT ["/home/trader/mmr/scripts/docker-entrypoint.sh"]

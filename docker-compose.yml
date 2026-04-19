@@ -28,7 +28,7 @@ services:
     volumes:
       - ./scripts/ib-gateway-run.sh:/home/ibgateway/scripts/run.sh:ro
       # Persist TWS runtime settings (auto-restart state, login sessions) across restarts
-      - ./data/tws_settings:/home/ibgateway/tws_settings
+      - ${HOME}/.local/share/mmr/tws_settings:/home/ibgateway/tws_settings
     ports:
       # IB Gateway API ports mapped to standard TWS ports (live: 7496, paper: 7497)
       - "127.0.0.1:7496:4003"
@@ -66,8 +66,7 @@ services:
       - "127.0.0.1:42005:42005"   # strategy_service RPC
       - "127.0.0.1:42006:42006"   # strategy MessageBus
     volumes:
-      # Persist DuckDB data and logs across rebuilds (bind mounts avoid
-      # podman rootless UID-mapping issues with named volumes)
-      - ./data:/home/trader/mmr/data
-      - ./logs:/home/trader/mmr/logs
+      # Persist DuckDB data and logs across rebuilds
+      # Uses ~/.local/share/mmr on the host — same location as local (non-Docker) mode
+      - ${HOME}/.local/share/mmr:/home/trader/.local/share/mmr
 

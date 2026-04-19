@@ -13,20 +13,26 @@ import pandas as pd
 
 
 class MeanReversion(Strategy):
+    """Bollinger-band mean reversion — BUY when price crosses below the lower
+    band (oversold), SELL when price crosses above the upper band (overbought).
+    Defaults: 20-period window, 2 σ bands."""
+
     def __init__(self):
         super().__init__()
 
     def on_prices(self, prices: pd.DataFrame) -> Optional[Signal]:
-        if len(prices) < 25:
+        window = self.params.get('window', 20)
+        num_std = self.params.get('num_std', 2.0)
+
+        if len(prices) < window + 5:
             return None
 
         close = prices['close']
-        window = 20
 
         sma = close.rolling(window).mean()
         std = close.rolling(window).std()
-        upper = sma + 2 * std
-        lower = sma - 2 * std
+        upper = sma + num_std * std
+        lower = sma - num_std * std
 
         last_close = close.iloc[-1]
         prev_close = close.iloc[-2]

@@ -45,6 +45,7 @@ class DataService:
         ib_server_address: str = '127.0.0.1',
         ib_server_port: int = 7497,
         duckdb_path: str = '',
+        history_duckdb_path: str = '',
         universe_library: str = 'Universes',
         zmq_data_rpc_server_address: str = 'tcp://127.0.0.1',
         zmq_data_rpc_server_port: int = 42003,
@@ -54,6 +55,7 @@ class DataService:
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
         self.duckdb_path = duckdb_path
+        self.history_duckdb_path = history_duckdb_path or duckdb_path
         self.universe_library = universe_library
         self.zmq_data_rpc_server_address = zmq_data_rpc_server_address
         self.zmq_data_rpc_server_port = zmq_data_rpc_server_port
@@ -201,7 +203,7 @@ class DataService:
                     'errors': ['no securities resolved']}
 
         bs = BarSize.parse_str(bar_size)
-        tick_data = TickStorage(self.duckdb_path).get_tickdata(bar_size=bs)
+        tick_data = TickStorage(self.history_duckdb_path).get_tickdata(bar_size=bs)
 
         start_date = dateify(dt.datetime.now() - dt.timedelta(days=prev_days + 1), make_sod=True)
         end_date = dateify(dt.datetime.now() - dt.timedelta(days=1), make_eod=True)
@@ -274,7 +276,7 @@ class DataService:
                     'errors': ['no securities resolved']}
 
         bs = BarSize.parse_str(bar_size)
-        tick_data = TickStorage(self.duckdb_path).get_tickdata(bar_size=bs)
+        tick_data = TickStorage(self.history_duckdb_path).get_tickdata(bar_size=bs)
 
         start_date = dateify(dt.datetime.now() - dt.timedelta(days=prev_days + 1), make_sod=True)
         end_date = dateify(dt.datetime.now() - dt.timedelta(days=1), make_eod=True)

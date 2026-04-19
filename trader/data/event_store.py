@@ -1,7 +1,6 @@
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from trader.data.duckdb_store import DuckDBConnection
-from trader.objects import Action
 from typing import Any, Dict, List, Optional
 
 import datetime as dt
@@ -70,10 +69,10 @@ class EventStore:
         self._ensure_table()
 
     def _ensure_table(self):
-        self.db.execute_atomic(lambda conn: (
-            conn.execute(self._CREATE_TABLE),
-            conn.execute(self._CREATE_SEQUENCE),
-        ))
+        def _init(conn):
+            conn.execute(self._CREATE_TABLE)
+            conn.execute(self._CREATE_SEQUENCE)
+        self.db.execute_atomic(_init)
 
     def append(self, event: TradingEvent) -> None:
         self.db.execute(self._INSERT, [
@@ -112,55 +111,51 @@ class EventStore:
         return events
 
     def query_by_strategy(self, strategy_name: str, limit: int = 100) -> List[TradingEvent]:
-        conn = self.db.execute(
+        rows = self.db.execute(
             "SELECT * FROM trading_events WHERE strategy_name = ? ORDER BY timestamp DESC LIMIT ?",
-            [strategy_name, limit]
+            [strategy_name, limit],
+            fetch='all',
         )
-        rows = conn.fetchall()
-        conn.close()
-        return self._rows_to_events(rows)
+        return self._rows_to_events(rows or [])
 
     def query_by_conid(self, conid: int, limit: int = 100) -> List[TradingEvent]:
-        conn = self.db.execute(
+        rows = self.db.execute(
             "SELECT * FROM trading_events WHERE conid = ? ORDER BY timestamp DESC LIMIT ?",
-            [conid, limit]
+            [conid, limit],
+            fetch='all',
         )
-        rows = conn.fetchall()
-        conn.close()
-        return self._rows_to_events(rows)
+        return self._rows_to_events(rows or [])
 
     def query_signals(self, limit: int = 100) -> List[TradingEvent]:
-        conn = self.db.execute(
+        rows = self.db.execute(
             "SELECT * FROM trading_events WHERE event_type = ? ORDER BY timestamp DESC LIMIT ?",
-            [EventType.SIGNAL.value, limit]
+            [EventType.SIGNAL.value, limit],
+            fetch='all',
         )
-        rows = conn.fetchall()
-        conn.close()
-        return self._rows_to_events(rows)
+        return self._rows_to_events(rows or [])
 
     def query_all(self, limit: int = 100) -> List[TradingEvent]:
-        conn = self.db.execute(
+        rows = self.db.execute(
             "SELECT * FROM trading_events ORDER BY timestamp DESC LIMIT ?",
-            [limit]
+            [limit],
+            fetch='all',
         )
-        rows = conn.fetchall()
-        conn.close()
-        return self._rows_to_events(rows)
+        return self._rows_to_events(rows or [])
 
     def query_since(self, since: dt.datetime, event_type: Optional[EventType] = None) -> List[TradingEvent]:
         if event_type:
-            conn = self.db.execute(
+            rows = self.db.execute(
                 "SELECT * FROM trading_events WHERE timestamp >= ? AND event_type = ? ORDER BY timestamp DESC",
-                [since, event_type.value]
+                [since, event_type.value],
+                fetch='all',
             )
         else:
-            conn = self.db.execute(
+            rows = self.db.execute(
                 "SELECT * FROM trading_events WHERE timestamp >= ? ORDER BY timestamp DESC",
-                [since]
+                [since],
+                fetch='all',
             )
-        rows = conn.fetchall()
-        conn.close()
-        return self._rows_to_events(rows)
+        return self._rows_to_events(rows or [])
 
     def count_since(self, since: dt.datetime, event_type: Optional[EventType] = None,
                     strategy_name: Optional[str] = None) -> int:
@@ -172,7 +167,5 @@ class EventStore:
         if strategy_name:
             query += " AND strategy_name = ?"
             params.append(strategy_name)
-        conn = self.db.execute(query, params)
-        count = conn.fetchone()[0]
-        conn.close()
-        return count
+        row = self.db.execute(query, params, fetch='one')
+        return row[0] if row else 0

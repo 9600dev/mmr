@@ -26,8 +26,11 @@ trading_runtime_ib_client_id: 5
 strategy_runtime_ib_client_id: 7
 
 # DuckDB storage
-# Path can be absolute or relative to project root
-duckdb_path: data/mmr.duckdb
+# All persistent data lives in ~/.local/share/mmr/ (same location for Docker and local)
+# duckdb_path: trading data (events, proposals, groups, universes)
+# history_duckdb_path: OHLCV bars (separate file avoids lock contention with trading services)
+duckdb_path: ~/.local/share/mmr/data/mmr.duckdb
+history_duckdb_path: ~/.local/share/mmr/data/mmr_history.duckdb
 universe_library: 'Universes'
 
 # Pycron process manager

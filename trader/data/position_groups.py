@@ -94,12 +94,12 @@ class PositionGroupStore:
 
     def get_group(self, name: str) -> Optional[PositionGroup]:
         """Get a group by name, including its members."""
-        conn = self.db.execute(
+        row = self.db.execute(
             "SELECT name, description, max_allocation_pct, max_positions, "
-            "created_at, updated_at FROM position_groups WHERE name = ?", [name]
+            "created_at, updated_at FROM position_groups WHERE name = ?",
+            [name],
+            fetch='one',
         )
-        row = conn.fetchone()
-        conn.close()
         if not row:
             return None
 
@@ -113,12 +113,11 @@ class PositionGroupStore:
 
     def list_groups(self) -> List[PositionGroup]:
         """List all groups with their members."""
-        conn = self.db.execute(
+        rows = self.db.execute(
             "SELECT name, description, max_allocation_pct, max_positions, "
-            "created_at, updated_at FROM position_groups ORDER BY name"
-        )
-        rows = conn.fetchall()
-        conn.close()
+            "created_at, updated_at FROM position_groups ORDER BY name",
+            fetch='all',
+        ) or []
 
         all_memberships = self.get_all_memberships()
         groups = []
@@ -151,8 +150,7 @@ class PositionGroupStore:
 
         params.append(name)
         query = f"UPDATE position_groups SET {', '.join(sets)} WHERE name = ?"
-        conn = self.db.execute(query, params)
-        conn.close()
+        self.db.execute(query, params)
 
         # Verify update happened
         group = self.get_group(name)
@@ -209,31 +207,30 @@ class PositionGroupStore:
 
     def get_members(self, group_name: str) -> List[str]:
         """Get all symbols in a group."""
-        conn = self.db.execute(
+        rows = self.db.execute(
             "SELECT symbol FROM position_group_members "
-            "WHERE group_name = ? ORDER BY symbol", [group_name]
-        )
-        rows = conn.fetchall()
-        conn.close()
+            "WHERE group_name = ? ORDER BY symbol",
+            [group_name],
+            fetch='all',
+        ) or []
         return [row[0] for row in rows]
 
     def get_groups_for_symbol(self, symbol: str) -> List[str]:
         """Get all group names that contain a symbol."""
-        conn = self.db.execute(
+        rows = self.db.execute(
             "SELECT group_name FROM position_group_members "
-            "WHERE symbol = ? ORDER BY group_name", [symbol]
-        )
-        rows = conn.fetchall()
-        conn.close()
+            "WHERE symbol = ? ORDER BY group_name",
+            [symbol],
+            fetch='all',
+        ) or []
         return [row[0] for row in rows]
 
     def get_all_memberships(self) -> Dict[str, List[str]]:
         """Get all group→members mappings."""
-        conn = self.db.execute(
-            "SELECT group_name, symbol FROM position_group_members ORDER BY group_name, symbol"
-        )
-        rows = conn.fetchall()
-        conn.close()
+        rows = self.db.execute(
+            "SELECT group_name, symbol FROM position_group_members ORDER BY group_name, symbol",
+            fetch='all',
+        ) or []
         memberships: Dict[str, List[str]] = {}
         for group_name, symbol in rows:
             memberships.setdefault(group_name, []).append(symbol)

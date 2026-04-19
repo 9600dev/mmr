@@ -220,3 +220,104 @@ class TestHistoryList:
         mmr = _make_mmr_for_history(tmp_duckdb_path)
         df = mmr.history_list()
         assert df.iloc[0]['rows'] == 25
+
+
+class TestConcurrentAccess:
+    """Verify the lock in DuckDBConnection serializes same-process writers.
+
+    Same-DB writes from multiple threads must not produce torn rows or
+    duplicates. (Cross-process concurrency is enforced by DuckDB's own file
+    lock.)
+    """
+
+    def test_concurrent_writes_no_duplicates(self, tmp_duckdb_path):
+        import threading
+
+        store = DuckDBDataStore(tmp_duckdb_path)
+        # Each thread writes non-overlapping date ranges for distinct symbols
+        # so we can verify row counts deterministically.
+        def _write(sym: str, start_offset: int):
+            dates = pd.date_range(
+                f"2024-01-0{start_offset} 09:30", periods=10, freq="1min", tz="UTC",
+            )
+            df = pd.DataFrame({
+                "open": [100.0] * 10,
+                "high": [101.0] * 10,
+                "low": [99.0] * 10,
+                "close": [100.5] * 10,
+                "volume": [1000.0] * 10,
+            }, index=dates)
+            df.index.name = "date"
+            store.write(sym, df)
+
+        threads = [
+            threading.Thread(target=_write, args=(f'SYM{i}', i + 2))
+            for i in range(5)
+        ]
+        for t in threads: t.start()
+        for t in threads: t.join()
+
+        # All 5 symbols should be present, each with 10 rows
+        for i in range(5):
+            df = store.read(f'SYM{i}')
+            assert len(df) == 10, f'SYM{i} should have 10 rows'
+
+    def test_tickstorage_list_libraries_finds_written_data(self, tmp_duckdb_path):
+        """Regression: TickStorage.list_libraries() used to call
+        store._db.execute(query).fetchall() — which broke silently after
+        execute() was refactored to be atomic (returns rows, not a
+        connection). Empty list_libraries() ⇒ data summary says "No data"
+        even with gigabytes of rows on disk. Lock it in."""
+        from trader.data.data_access import TickStorage
+        from trader.objects import BarSize
+
+        store = DuckDBDataStore(tmp_duckdb_path)
+        # Write a row with an explicit bar_size column (matches what
+        # `data download` writes after normalize_historical).
+        dates = pd.date_range("2024-01-02 09:30", periods=3, freq="1min", tz="UTC")
+        df = pd.DataFrame({
+            "open": [100.0] * 3, "high": [101.0] * 3, "low": [99.0] * 3,
+            "close": [100.5] * 3, "volume": [1000.0] * 3,
+            "bar_size": ["1 min"] * 3,
+        }, index=dates)
+        df.index.name = "date"
+        store.write("AAPL", df)
+
+        storage = TickStorage(duckdb_path=tmp_duckdb_path)
+        libs = storage.list_libraries()
+        assert "1 min" in libs, (
+            f"list_libraries returned {libs!r} — TickStorage lost the "
+            "bar_size discovery pathway, which breaks `mmr data summary`"
+        )
+
+    def test_concurrent_writes_same_symbol_same_range_idempotent(self, tmp_duckdb_path):
+        """Two threads writing the SAME symbol + same date range should not
+        double-up rows (DELETE+INSERT is atomic under execute_atomic)."""
+        import threading
+
+        store = DuckDBDataStore(tmp_duckdb_path)
+        dates = pd.date_range("2024-01-02 09:30", periods=8, freq="1min", tz="UTC")
+        df = pd.DataFrame({
+            "open": [100.0] * 8,
+            "high": [101.0] * 8,
+            "low": [99.0] * 8,
+            "close": [100.5] * 8,
+            "volume": [1000.0] * 8,
+        }, index=dates)
+        df.index.name = "date"
+
+        errors = []
+
+        def _write():
+            try:
+                store.write('AAPL', df)
+            except Exception as ex:  # noqa: BLE001 — test expects none
+                errors.append(ex)
+
+        threads = [threading.Thread(target=_write) for _ in range(4)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+
+        assert errors == []
+        # Only 8 rows regardless of how many times we wrote
+        assert len(store.read('AAPL')) == 8

@@ -211,6 +211,12 @@ class TestWinRateWeightedAvg:
             initial_capital=100_000.0,
             slippage_bps=0.0,
             commission_per_share=0.0,
+            # These WinRate tests count the BUY + SELL on specific bars and
+            # assume both execute within the tiny price sequence. Use the
+            # legacy fill policy so signals fill on the triggering bar; the
+            # realistic next_open path needs an extra bar to fill the last
+            # signal, which would skew the win-rate accounting.
+            fill_policy='same_close',
         )
         return Backtester(storage=storage, config=config), storage
 

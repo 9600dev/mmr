@@ -112,7 +112,7 @@ class IBAIORx():
     async def __handle_error(self, reqId, errorCode, errorString, contract):
         global error_code
 
-        if errorCode == 2104 or errorCode == 2158 or errorCode == 2106:
+        if errorCode in (2104, 2106, 2107, 2158):
             return
 
         if errorCode == 202:

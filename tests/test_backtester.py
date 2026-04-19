@@ -191,6 +191,64 @@ class TestBacktester:
         # With only $1, no trades should execute
         assert result.total_trades == 0
 
+    def test_no_lookahead_fill_at_next_bar_open(self, tmp_duckdb_path):
+        """Fill price must come from the NEXT bar's open, not the triggering bar's close."""
+        from trader.simulation.slippage import ZeroSlippage
+
+        # Hand-craft bars with distinct open/close so we can tell which one was used.
+        store = DuckDBDataStore(tmp_duckdb_path)
+        dates = pd.date_range("2024-01-02 09:30", periods=5, freq="1min", tz="UTC")
+        df = pd.DataFrame({
+            # close[i] and open[i+1] are intentionally different
+            "open":   [100.0, 110.0, 120.0, 130.0, 140.0],
+            "high":   [101.0, 111.0, 121.0, 131.0, 141.0],
+            "low":    [ 99.0, 109.0, 119.0, 129.0, 139.0],
+            "close":  [100.5, 110.5, 120.5, 130.5, 140.5],
+            "volume": [1000.0] * 5,
+        }, index=dates)
+        df.index.name = "date"
+        store.write("4391", df)
+
+        bt = _make_backtester(tmp_duckdb_path, slippage_model=ZeroSlippage(), fill_policy='next_open')
+        strategy = _install_strategy(AlwaysBuyStrategy(), tmp_duckdb_path)
+        result = bt.run(strategy, [4391])
+
+        # The first trade must fill at the OPEN of bar t+1 (not close of bar t).
+        # AlwaysBuy triggers on the second bar (needs len>=2). Triggering bar is
+        # dates[1] with close=110.5. Next bar is dates[2] with open=120.0. Fill
+        # must be at 120.0 to prove we're not peeking at the triggering bar.
+        assert result.total_trades >= 1
+        first = result.trades[0]
+        assert first.price == pytest.approx(120.0), (
+            f"Expected fill at next-bar open 120.0, got {first.price} "
+            "— this indicates lookahead bias (filled at triggering bar's close)."
+        )
+
+    def test_same_close_policy_reproduces_legacy_fill(self, tmp_duckdb_path):
+        """With fill_policy='same_close', fills happen at triggering bar close (legacy)."""
+        from trader.simulation.slippage import ZeroSlippage
+
+        store = DuckDBDataStore(tmp_duckdb_path)
+        dates = pd.date_range("2024-01-02 09:30", periods=5, freq="1min", tz="UTC")
+        df = pd.DataFrame({
+            "open":   [100.0, 110.0, 120.0, 130.0, 140.0],
+            "high":   [101.0, 111.0, 121.0, 131.0, 141.0],
+            "low":    [ 99.0, 109.0, 119.0, 129.0, 139.0],
+            "close":  [100.5, 110.5, 120.5, 130.5, 140.5],
+            "volume": [1000.0] * 5,
+        }, index=dates)
+        df.index.name = "date"
+        store.write("4391", df)
+
+        bt = _make_backtester(tmp_duckdb_path, slippage_model=ZeroSlippage(), fill_policy='same_close')
+        strategy = _install_strategy(AlwaysBuyStrategy(), tmp_duckdb_path)
+        result = bt.run(strategy, [4391])
+
+        assert result.total_trades >= 1
+        # Legacy lookahead: first fill at triggering bar's close (110.5).
+        first = result.trades[0]
+        assert first.price == pytest.approx(110.5)
+
     def test_sqrt_slippage_model(self, tmp_duckdb_path):
         from trader.simulation.slippage import SquareRootImpact, ZeroSlippage
 

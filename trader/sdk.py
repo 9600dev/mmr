@@ -1742,14 +1742,18 @@ class MMR:
         if result.is_success() and result.obj:
             rows = []
             for s in result.obj:
-                rows.append({
+                row = {
                     'name': s.name,
                     'state': str(s.state),
                     'paper': s.paper,
                     'bar_size': str(s.bar_size),
                     'conids': s.conids or [],
                     'hist_days_prior': s.historical_days_prior,
-                })
+                }
+                params = getattr(s, 'params', None)
+                if params:
+                    row['params'] = params
+                rows.append(row)
             return pd.DataFrame(rows)
         return pd.DataFrame()
 

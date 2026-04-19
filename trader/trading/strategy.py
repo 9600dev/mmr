@@ -48,6 +48,7 @@ class StrategyContext:
     runs_when_crontab: Optional[str] = None
     description: Optional[str] = None
     auto_execute: bool = False
+    params: Dict[str, Any] = field(default_factory=dict)
 
 
 class Strategy(ABC):
@@ -133,6 +134,10 @@ class Strategy(ABC):
             self._context.paper = value
 
     @property
+    def params(self) -> Dict[str, Any]:
+        return self._context.params if self._context else {}
+
+    @property
     def storage(self) -> Optional[TickStorage]:
         return self._context.storage if self._context else None
 
@@ -153,9 +158,81 @@ class Strategy(ABC):
         self.state = StrategyState.DISABLED
         return self.state
 
-    @abstractmethod
     def on_prices(self, prices: pd.DataFrame) -> Optional[Signal]:
-        pass
+        """Per-bar signal generation, legacy API.
+
+        Receives the accumulated OHLCV slice up through the current bar.
+        Easy to write, but recomputes indicators every bar — O(N²) total
+        over a backtest. Fine for pandas ``.rolling()``; too slow for
+        vectorbt-backed indicators. For vectorbt / numba strategies, override
+        ``precompute()`` + ``on_bar()`` instead.
+
+        Subclasses must implement at least one of ``on_prices`` (legacy) or
+        ``on_bar`` (fast path). The default here returns None so strategies
+        that only implement ``on_bar`` don't get AttributeError when the
+        backtester falls back.
+        """
+        return None
+
+    # ------------------------------------------------------------------
+    # Precompute hook — opt-in O(N) execution path for the backtester.
+    # ------------------------------------------------------------------
+    #
+    # Strategies that use vectorbt / numba indicators should override
+    # ``precompute`` and ``on_bar`` instead of ``on_prices``:
+    #
+    #     def precompute(self, prices):
+    #         macd = vbt.MACD.run(prices['close'])
+    #         return {'hist': macd.hist}
+    #
+    #     def on_bar(self, prices, state, index):
+    #         if index < 26 or pd.isna(state['hist'].iloc[index]): return None
+    #         h, h_prev = state['hist'].iloc[index], state['hist'].iloc[index-1]
+    #         if h > 0 and h_prev <= 0:
+    #             return Signal(source_name=self.name, action=Action.BUY, probability=0.6, risk=0.4)
+    #         return None
+    #
+    # The backtester calls ``precompute(full_prices)`` ONCE per conid before
+    # iterating, so indicator work is amortized over N bars instead of
+    # repeated on each of N bars. For live trading the runtime still uses
+    # ``on_prices`` — ``on_bar`` is backtest-only today, but the API is
+    # symmetric enough that a future live dispatcher can adopt it too.
+
+    def precompute(self, prices: pd.DataFrame) -> Dict[str, Any]:
+        """Optional: called once with the FULL OHLCV history before the
+        backtester begins iterating bars. Return a dict of precomputed
+        indicator arrays (or any state) that ``on_bar`` can consume.
+
+        **Lookahead contract**: every value you store must be aligned 1:1
+        with ``prices`` such that index ``i`` depends only on bars
+        ``[0..i]`` (inclusive). Rolling/EWM/vectorbt indicators satisfy
+        this by construction; ``shift(-1)`` or centered rollings do not.
+
+        Default: returns ``{}``. Strategies that don't need precompute
+        can ignore this hook.
+        """
+        return {}
+
+    def on_bar(
+        self,
+        prices: pd.DataFrame,
+        state: Dict[str, Any],
+        index: int,
+    ) -> Optional[Signal]:
+        """Per-bar hook, fast path.
+
+        ``prices`` is the FULL OHLCV DataFrame (the same object for every
+        call — the backtester passes it through by reference, no slicing).
+        ``state`` is whatever ``precompute`` returned. ``index`` is the
+        0-based position of the current bar.
+
+        Only read ``prices.iloc[:index+1]`` and ``state[key][:index+1]`` —
+        reading past ``index`` is lookahead bias.
+
+        Default implementation falls back to ``on_prices(prices.iloc[:index+1])``
+        so strategies written against the legacy API keep working.
+        """
+        return self.on_prices(prices.iloc[:index + 1])
 
     def on_error(self, error: Exception) -> None:
         self.state = StrategyState.ERROR
@@ -176,6 +253,7 @@ class StrategyConfig():
         description: Optional[str] = None,
         paper: bool = True,
         auto_execute: bool = False,
+        params: Optional[Dict[str, Any]] = None,
     ):
         self.name = name
         self.bar_size = bar_size
@@ -189,6 +267,7 @@ class StrategyConfig():
         self.state = state
         self.paper = paper
         self.auto_execute = auto_execute
+        self.params = params or {}
 
     @staticmethod
     def from_strategy(strategy: Strategy) -> 'StrategyConfig':
@@ -205,4 +284,5 @@ class StrategyConfig():
             state=strategy.state,
             paper=strategy.paper,
             auto_execute=strategy._context.auto_execute if strategy._context else False,
+            params=strategy.params,
         )

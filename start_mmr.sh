@@ -19,6 +19,31 @@ DATA_PID=""
 TRADER_PID=""
 STRATEGY_PID=""
 
+# ─── Colors ──────────────────────────────────────────────────────────────────
+# Enable colors on a TTY, or when FORCE_COLOR=1; disable when NO_COLOR is set.
+if [ -n "$NO_COLOR" ]; then
+    C_RESET="" C_BOLD="" C_DIM=""
+    C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_MAGENTA="" C_CYAN=""
+elif [ -t 1 ] || [ "${FORCE_COLOR:-0}" = "1" ]; then
+    C_RESET=$'\033[0m'    C_BOLD=$'\033[1m'    C_DIM=$'\033[2m'
+    C_RED=$'\033[31m'     C_GREEN=$'\033[32m'  C_YELLOW=$'\033[33m'
+    C_BLUE=$'\033[34m'    C_MAGENTA=$'\033[35m' C_CYAN=$'\033[36m'
+else
+    C_RESET="" C_BOLD="" C_DIM=""
+    C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_MAGENTA="" C_CYAN=""
+fi
+
+# Output helpers
+hdr()   { printf '\n%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n'   "$C_CYAN$C_BOLD" "$C_RESET"
+          printf '%s  %s%s\n' "$C_CYAN$C_BOLD" "$1" "$C_RESET"
+          printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n\n' "$C_CYAN$C_BOLD" "$C_RESET"; }
+info()  { printf '%s%s%s\n' "$C_DIM" "$1" "$C_RESET"; }
+step()  { printf '%s›%s %s\n' "$C_CYAN" "$C_RESET" "$1"; }
+ok()    { printf '  %s✓%s %s\n' "$C_GREEN" "$C_RESET" "$1"; }
+warn()  { printf '  %s!%s %s\n' "$C_YELLOW" "$C_RESET" "$1"; }
+fail()  { printf '  %s✗%s %s\n' "$C_RED" "$C_RESET" "$1" >&2; }
+kv()    { printf '  %-18s%s%s%s\n' "$1" "$C_BOLD" "$2" "$C_RESET"; }
+
 # ─── Argument Parsing ────────────────────────────────────────────────────────
 
 while [[ $# -gt 0 ]]; do
@@ -92,19 +117,15 @@ elif [ ! -f "$TRADER_CONFIG" ] && [ -d "$MMR_DIR/configs" ]; then
 fi
 
 if [ ! -f "$TRADER_CONFIG" ]; then
-    echo "Error: config file not found: $TRADER_CONFIG"
+    fail "config file not found: $TRADER_CONFIG"
     exit 1
 fi
 
 # ─── Setup Wizard ─────────────────────────────────────────────────────────────
 
 run_setup() {
-    echo ""
-    echo "============================================================"
-    echo "  MMR Setup Wizard"
-    echo "============================================================"
-    echo ""
-    echo "  Config file: $TRADER_CONFIG"
+    hdr "MMR Setup Wizard"
+    kv "Config file:" "$TRADER_CONFIG"
     echo ""
 
     # ── Trading Mode ──
@@ -188,33 +209,29 @@ run_setup() {
     echo ""
     local current_db
     current_db=$(grep '^duckdb_path:' "$TRADER_CONFIG" | awk '{print $2}')
-    read -p "DuckDB storage path [${current_db:-data/mmr.duckdb}]: " db_path
-    db_path="${db_path:-${current_db:-data/mmr.duckdb}}"
+    read -p "DuckDB storage path [${current_db:-~/.local/share/mmr/data/mmr.duckdb}]: " db_path
+    db_path="${db_path:-${current_db:-~/.local/share/mmr/data/mmr.duckdb}}"
     sed -i.bak "s|^duckdb_path:.*|duckdb_path: ${db_path}|" "$TRADER_CONFIG"
 
     # ── Cleanup sed backups ──
     rm -f "${TRADER_CONFIG}.bak"
 
-    echo ""
-    echo "============================================================"
-    echo "  Setup complete!"
-    echo "============================================================"
-    echo ""
-    echo "  Config saved to: $TRADER_CONFIG"
-    echo "  Trading mode:    $mode"
-    echo "  IB Gateway:      $ib_host (paper:$paper_port / live:$live_port)"
-    echo "  Paper account:   $paper_acct"
+    hdr "Setup complete"
+    kv "Config saved to:" "$TRADER_CONFIG"
+    kv "Trading mode:"    "$mode"
+    kv "IB Gateway:"      "$ib_host (paper:$paper_port / live:$live_port)"
+    kv "Paper account:"   "$paper_acct"
     if [ -n "$live_acct" ] && [ "$live_acct" != "''" ]; then
-        echo "  Live account:    $live_acct"
+        kv "Live account:" "$live_acct"
     fi
     if [ -n "$api_key" ] || [ -n "$current_key" ]; then
-        echo "  Massive API key: configured"
+        kv "Massive API key:" "configured"
     else
-        echo "  Massive API key: not set (US scanning/data disabled)"
+        kv "Massive API key:" "not set (US scanning/data disabled)"
     fi
-    echo "  DuckDB:          $db_path"
+    kv "DuckDB:"          "$db_path"
     echo ""
-    echo "  Run again anytime with: ./start_mmr.sh --setup"
+    info "Run again anytime with: ./start_mmr.sh --setup"
     echo ""
 }
 
@@ -284,7 +301,7 @@ check_tcp_port() {
 
 cleanup() {
     echo ""
-    echo "Shutting down services..."
+    step "Shutting down services..."
     # Send SIGINT first (services handle it gracefully)
     for pid in $STRATEGY_PID $TRADER_PID $DATA_PID; do
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -309,12 +326,12 @@ cleanup() {
     # Force kill anything still alive
     for pid in $STRATEGY_PID $TRADER_PID $DATA_PID; do
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            echo "  Force killing PID $pid..."
+            warn "force killing PID $pid"
             kill -9 "$pid" 2>/dev/null || true
         fi
     done
     wait 2>/dev/null || true
-    echo "All services stopped."
+    ok "all services stopped"
     exit 0
 }
 
@@ -323,17 +340,13 @@ trap cleanup SIGINT SIGTERM
 # ─── CLI Mode ────────────────────────────────────────────────────────────────
 
 if [ "$CLI_MODE" = true ]; then
-    echo ""
-    echo "--------------------------------------------"
-    echo "  MMR CLI Mode"
-    echo "--------------------------------------------"
-    echo ""
+    hdr "MMR CLI Mode"
 
     # Check IB Gateway container is running
     if command -v docker &>/dev/null && docker compose -f "$MMR_DIR/docker-compose.yml" ps ib-gateway 2>/dev/null | grep -q "running"; then
-        echo "  IB Gateway: running"
+        ok "IB Gateway: running"
     else
-        echo "  IB Gateway: not detected (container may not be running)"
+        warn "IB Gateway: not detected (container may not be running)"
     fi
 
     # Check services are reachable via TCP
@@ -342,22 +355,22 @@ if [ "$CLI_MODE" = true ]; then
         port="${port_info%%:*}"
         name="${port_info##*:}"
         if check_tcp_port 127.0.0.1 "$port"; then
-            echo "  $name (port $port): reachable"
+            ok "$name (port $port): reachable"
         else
-            echo "  $name (port $port): NOT reachable"
+            fail "$name (port $port): NOT reachable"
             SERVICES_OK=false
         fi
     done
 
     if [ "$SERVICES_OK" = false ]; then
         echo ""
-        echo "Error: one or more services are not running."
-        echo "Start services first with: ./start_mmr.sh"
+        fail "one or more services are not running"
+        info "Start services first with: ./start_mmr.sh"
         exit 1
     fi
 
     echo ""
-    echo "All services reachable. Starting CLI..."
+    step "all services reachable — starting CLI..."
     echo ""
     cd "$MMR_DIR"
     exec $PY -m trader.mmr_cli
@@ -365,17 +378,13 @@ fi
 
 # ─── Normal Mode ─────────────────────────────────────────────────────────────
 
-echo ""
-echo "--------------------------------------------"
-echo "  MMR — Starting Services"
-echo "--------------------------------------------"
-echo ""
-echo "  Config:       $TRADER_CONFIG"
-echo "  Trading mode: $TRADING_MODE"
-echo "  IB host:      $IB_HOST"
-echo "  IB port:      $IB_PORT"
+hdr "MMR — Starting Services"
+kv "Config:"       "$TRADER_CONFIG"
+kv "Trading mode:" "$TRADING_MODE"
+kv "IB host:"      "$IB_HOST"
+kv "IB port:"      "$IB_PORT"
 if [ "$IN_DOCKER" = true ]; then
-    echo "  Environment:  Docker container"
+    kv "Environment:" "Docker container"
 fi
 echo ""
 
@@ -384,9 +393,9 @@ cd "$MMR_DIR"
 # ─── Start IB Gateway ───────────────────────────────────────────────────────
 
 if [ "$IN_DOCKER" = true ]; then
-    echo "Running inside Docker — IB Gateway is a sibling container, skipping local start."
+    info "Running inside Docker — IB Gateway is a sibling container, skipping local start."
 else
-    echo "Starting IB Gateway container..."
+    step "Starting IB Gateway container..."
     ./docker.sh -i
 fi
 
@@ -394,100 +403,116 @@ fi
 
 # Phase 1: TCP port check
 echo ""
-echo "Waiting for IB Gateway TCP port ($IB_HOST:$IB_PORT)..."
+step "Waiting for IB Gateway TCP port (${C_BOLD}${IB_HOST}:${IB_PORT}${C_RESET})..."
 ELAPSED=0
 TIMEOUT=120
 while [ $ELAPSED -lt $TIMEOUT ]; do
     if check_tcp_port "$IB_HOST" "$IB_PORT"; then
-        echo "  $IB_HOST:$IB_PORT is accepting connections (${ELAPSED}s)"
+        ok "$IB_HOST:$IB_PORT is accepting connections (${ELAPSED}s)"
         break
     fi
     sleep 2
     ELAPSED=$((ELAPSED + 2))
     if [ $((ELAPSED % 10)) -eq 0 ]; then
-        echo "  Still waiting... (${ELAPSED}s)"
+        info "  still waiting... (${ELAPSED}s)"
     fi
 done
 
 if [ $ELAPSED -ge $TIMEOUT ]; then
-    echo "Error: IB Gateway did not open port $IB_HOST:$IB_PORT within ${TIMEOUT}s"
-    echo "Check IB Gateway logs: docker compose logs ib-gateway"
+    fail "IB Gateway did not open port $IB_HOST:$IB_PORT within ${TIMEOUT}s"
+    info "Check IB Gateway logs: docker compose logs ib-gateway"
     exit 1
 fi
 
-# Phase 2: IB API handshake check (connect + managedAccounts)
+# Phase 2: IB API handshake check (connect + managedAccounts).
+#
+# IBC takes a few seconds after the TCP port opens to accept the paper-
+# trading disclaimer and finish the API auth handshake, so the first try
+# often fails with error 10141 or "clientId X already in use" from a
+# lingering previous connection. We give IB a warm-up window, rotate the
+# clientId on every attempt, and only surface errors if we ultimately
+# time out — otherwise the expected transient failure looks alarming.
 echo ""
-echo "Verifying IB Gateway API connectivity..."
-ELAPSED=0
-TIMEOUT=120
+step "Verifying IB Gateway API connectivity..."
+info "  giving IB ${C_BOLD}8s${C_RESET}${C_DIM} to finish authentication / disclaimer handling..."
+sleep 8
+
+ELAPSED=8
+TIMEOUT=180
+LAST_ERROR=""
 while [ $ELAPSED -lt $TIMEOUT ]; do
+    # Random clientId per attempt so a lingering prior connection doesn't
+    # bounce us with "clientId X already in use".
+    CID=$(( (RANDOM % 40000) + 2000 ))
     HC_OUTPUT=$($PY -c "
 from ib_async import IB
 ib = IB()
 try:
-    ib.connect('$IB_HOST', $IB_PORT, clientId=199, timeout=5, readonly=True)
-    print('CONNECTED' if ib.isConnected() else 'FAILED')
+    ib.connect('$IB_HOST', $IB_PORT, clientId=$CID, timeout=8, readonly=True)
+    if ib.isConnected():
+        print('CONNECTED')
+    else:
+        print('NOT_CONNECTED')
     ib.disconnect()
 except Exception as e:
     print(f'FAILED: {e}')
 " 2>&1) || true
     if echo "$HC_OUTPUT" | grep -q "CONNECTED"; then
-        echo "  IB Gateway API connection verified (${ELAPSED}s)"
+        ok "IB Gateway API connection verified (${ELAPSED}s)"
         break
     fi
-    if [ $ELAPSED -eq 0 ]; then
-        echo "  First attempt: $HC_OUTPUT"
-    fi
+    LAST_ERROR="$HC_OUTPUT"
     sleep 5
     ELAPSED=$((ELAPSED + 5))
     if [ $((ELAPSED % 15)) -eq 0 ]; then
-        echo "  Still waiting... (${ELAPSED}s)"
+        info "  still waiting... (${ELAPSED}s)"
     fi
 done
 
 if [ $ELAPSED -ge $TIMEOUT ]; then
-    echo "Error: IB Gateway API not reachable after ${TIMEOUT}s"
-    echo "Port is open but IB may not be fully authenticated."
-    echo "Last output: $HC_OUTPUT"
+    fail "IB Gateway API not reachable after ${TIMEOUT}s"
+    info "Port is open but IB may not be fully authenticated."
+    info "Last output: $LAST_ERROR"
     exit 1
 fi
 
 # ─── Launch Services ─────────────────────────────────────────────────────────
 
+# Ensure data and log directories exist
+mkdir -p ~/.local/share/mmr/data ~/.local/share/mmr/logs
+
 echo ""
-echo "Launching services..."
+step "Launching services..."
 echo ""
 
 # data_service
-echo "  Starting data_service..."
+step "Starting data_service..."
 $PY -m trader.data_service &
 DATA_PID=$!
 
 sleep 3
 
 # trader_service
-echo "  Starting trader_service..."
+step "Starting trader_service..."
 $PY -m trader.trader_service &
 TRADER_PID=$!
 
 sleep 5
 
 # strategy_service
-echo "  Starting strategy_service..."
+step "Starting strategy_service..."
 $PY -m trader.strategy_service &
 STRATEGY_PID=$!
 
 echo ""
-echo "--------------------------------------------"
-echo "  All services running"
-echo "--------------------------------------------"
-echo "  data_service     PID: $DATA_PID"
-echo "  trader_service   PID: $TRADER_PID"
-echo "  strategy_service PID: $STRATEGY_PID"
+hdr "All services running"
+kv "data_service"     "PID $DATA_PID"
+kv "trader_service"   "PID $TRADER_PID"
+kv "strategy_service" "PID $STRATEGY_PID"
 echo ""
-echo "  Press Ctrl-C to stop all services"
-echo "  Run './start_mmr.sh --cli' in another terminal for the CLI"
-echo "  IB Gateway VNC: vnc://localhost:5901"
+info "Press Ctrl-C to stop all services"
+info "Run './start_mmr.sh --cli' in another terminal for the CLI"
+info "IB Gateway VNC: vnc://localhost:5901"
 echo ""
 
 # ─── Wait for Children ───────────────────────────────────────────────────────
@@ -501,7 +526,7 @@ while true; do
             wait "$pid" 2>/dev/null || true
             EXIT_CODE=$?
             echo ""
-            echo "WARNING: $name (PID $pid) exited with code $EXIT_CODE"
+            fail "$name (PID $pid) exited with code $EXIT_CODE"
             # Clear the PID so we don't report it again
             case "$name" in
                 data_service)     DATA_PID="" ;;
@@ -510,7 +535,7 @@ while true; do
             esac
             # If all services are dead, exit
             if [ -z "$DATA_PID" ] && [ -z "$TRADER_PID" ] && [ -z "$STRATEGY_PID" ]; then
-                echo "All services have exited."
+                fail "all services have exited"
                 exit 1
             fi
         fi

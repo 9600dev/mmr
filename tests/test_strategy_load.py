@@ -1,6 +1,7 @@
-"""Tests for strategy loading idempotency and reconciliation (§2).
+"""Tests for strategy loading idempotency, reconciliation (§2), and params support.
 
-Tests load_strategy duplicate detection and config_loader behavior.
+Tests load_strategy duplicate detection, config_loader behavior, and
+per-strategy params passed from YAML config.
 """
 
 import os
@@ -198,3 +199,129 @@ class TestConfigLoader:
         rt.config_loader(config_path)
         rt.config_loader(config_path)
         assert len(rt.strategy_implementations) == 1
+
+
+class TestStrategyParams:
+    """Test per-strategy params from YAML config."""
+
+    def _make_runtime(self, tmp_path, tmp_duckdb_path):
+        from trader.strategy.strategy_runtime import StrategyRuntime
+        rt = object.__new__(StrategyRuntime)
+        rt.strategy_implementations = []
+        rt.strategies = {}
+        rt.streams = {}
+        rt.strategies_directory = str(tmp_path / 'strategies')
+        rt.strategy_config_file = str(tmp_path / 'strategy_runtime.yaml')
+        rt.duckdb_path = tmp_duckdb_path
+        rt.universe_library = 'Universes'
+        rt.storage = TickStorage(duckdb_path=tmp_duckdb_path)
+        rt.universe_accessor = UniverseAccessor.__new__(UniverseAccessor)
+        rt.universe_accessor.duckdb_path = tmp_duckdb_path
+        rt.universe_accessor.universe_library = 'Universes'
+        os.makedirs(rt.strategies_directory, exist_ok=True)
+        return rt
+
+    def test_params_passed_to_strategy(self, tmp_path, tmp_duckdb_path):
+        rt = self._make_runtime(tmp_path, tmp_duckdb_path)
+        strat_path = os.path.join(rt.strategies_directory, 'param_strat.py')
+        with open(strat_path, 'w') as f:
+            f.write("from trader.trading.strategy import Strategy\nclass ParamStrat(Strategy):\n    def on_prices(self, prices): return None\n")
+
+        rt.load_strategy(
+            name='param_strat', bar_size_str='1 min', conids=[265598],
+            universe=None, historical_days_prior=5, module=strat_path,
+            class_name='ParamStrat', description='',
+            params={'fast_period': 5, 'slow_period': 20},
+        )
+        assert len(rt.strategy_implementations) == 1
+        strat = rt.strategy_implementations[0]
+        assert strat.params == {'fast_period': 5, 'slow_period': 20}
+        assert strat.params.get('fast_period') == 5
+        assert strat.params.get('slow_period') == 20
+
+    def test_params_default_empty_dict(self, tmp_path, tmp_duckdb_path):
+        rt = self._make_runtime(tmp_path, tmp_duckdb_path)
+        strat_path = os.path.join(rt.strategies_directory, 'no_param.py')
+        with open(strat_path, 'w') as f:
+            f.write("from trader.trading.strategy import Strategy\nclass NoParam(Strategy):\n    def on_prices(self, prices): return None\n")
+
+        rt.load_strategy(
+            name='no_param', bar_size_str='1 min', conids=[265598],
+            universe=None, historical_days_prior=5, module=strat_path,
+            class_name='NoParam', description='',
+        )
+        strat = rt.strategy_implementations[0]
+        assert strat.params == {}
+        assert strat.params.get('missing', 42) == 42
+
+    def test_params_from_yaml(self, tmp_path, tmp_duckdb_path):
+        rt = self._make_runtime(tmp_path, tmp_duckdb_path)
+        strat_path = os.path.join(rt.strategies_directory, 'yaml_param.py')
+        with open(strat_path, 'w') as f:
+            f.write("from trader.trading.strategy import Strategy\nclass YamlParam(Strategy):\n    def on_prices(self, prices): return None\n")
+
+        config = {
+            'strategies': [{
+                'name': 'yaml_param',
+                'bar_size': '1 day',
+                'conids': [265598],
+                'module': strat_path,
+                'class_name': 'YamlParam',
+                'params': {
+                    'rsi_period': 21,
+                    'threshold': 0.05,
+                    'use_volume': True,
+                },
+            }]
+        }
+        config_path = os.path.join(str(tmp_path), 'strategy_runtime.yaml')
+        with open(config_path, 'w') as f:
+            yaml.dump(config, f)
+
+        rt.config_loader(config_path)
+        strat = rt.strategy_implementations[0]
+        assert strat.params['rsi_period'] == 21
+        assert strat.params['threshold'] == 0.05
+        assert strat.params['use_volume'] is True
+
+    def test_params_missing_from_yaml_defaults_empty(self, tmp_path, tmp_duckdb_path):
+        """YAML entry without params key should give empty dict."""
+        rt = self._make_runtime(tmp_path, tmp_duckdb_path)
+        strat_path = os.path.join(rt.strategies_directory, 'no_yaml_param.py')
+        with open(strat_path, 'w') as f:
+            f.write("from trader.trading.strategy import Strategy\nclass NoYamlParam(Strategy):\n    def on_prices(self, prices): return None\n")
+
+        config = {
+            'strategies': [{
+                'name': 'no_yaml_param',
+                'bar_size': '1 min',
+                'conids': [265598],
+                'module': strat_path,
+                'class_name': 'NoYamlParam',
+            }]
+        }
+        config_path = os.path.join(str(tmp_path), 'strategy_runtime.yaml')
+        with open(config_path, 'w') as f:
+            yaml.dump(config, f)
+
+        rt.config_loader(config_path)
+        strat = rt.strategy_implementations[0]
+        assert strat.params == {}
+
+    def test_strategy_config_includes_params(self, tmp_path, tmp_duckdb_path):
+        """StrategyConfig.from_strategy should preserve params."""
+        from trader.trading.strategy import StrategyConfig
+        rt = self._make_runtime(tmp_path, tmp_duckdb_path)
+        strat_path = os.path.join(rt.strategies_directory, 'cfg_param.py')
+        with open(strat_path, 'w') as f:
+            f.write("from trader.trading.strategy import Strategy\nclass CfgParam(Strategy):\n    def on_prices(self, prices): return None\n")
+
+        rt.load_strategy(
+            name='cfg_param', bar_size_str='1 min', conids=[265598],
+            universe=None, historical_days_prior=5, module=strat_path,
+            class_name='CfgParam', description='',
+            params={'window': 30},
+        )
+        strat = rt.strategy_implementations[0]
+        config = StrategyConfig.from_strategy(strat)
+        assert config.params == {'window': 30}

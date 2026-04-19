@@ -17,6 +17,13 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+class IdeaScannerError(RuntimeError):
+    """Raised when the idea scanner cannot complete a scan (IB/scanner API
+    failure, no symbols resolve, every history fetch fails). Surfaces to the
+    CLI with a descriptive message instead of silently returning an empty
+    DataFrame, per the project's "fail loudly" principle."""
+
+
 # ------------------------------------------------------------------
 # Dataclasses
 # ------------------------------------------------------------------
@@ -1036,13 +1043,19 @@ class IBIdeaScanner:
             if custom_filters is None or 'max_change_pct' not in custom_filters:
                 filters.max_change_pct = None
         if symbols_to_resolve:
-            # Resolve explicit symbols via IB (bypasses scanner API)
+            # Resolve explicit symbols via IB (bypasses scanner API). Failure
+            # here is an error — the user asked for *these* symbols and got
+            # back nothing, which almost always means bad tickers or IB being
+            # unhealthy. "Fail loudly" per project policy.
             contracts, conid_map = self._resolve_symbols(
                 symbols_to_resolve, location, consume,
             )
             if not contracts:
-                logger.warning('No symbols could be resolved via IB')
-                return pd.DataFrame()
+                raise IdeaScannerError(
+                    f'No symbols resolved via IB for {symbols_to_resolve!r} '
+                    f'at location {location!r}. Check ticker spellings and '
+                    f'that trader_service can reach IB Gateway.'
+                )
         else:
             # Use IB scanner for discovery
             scan_code = PRESET_SCAN_CODES.get(preset, 'TOP_PERC_GAIN')
@@ -1054,14 +1067,15 @@ class IBIdeaScanner:
                 )
             )
             if not scanner_results:
-                logger.warning(
-                    'IB scanner returned no results for location=%s scan_code=%s. '
-                    'This usually means the scanner does not support this location, '
-                    'or your IB account lacks market data subscriptions for it. '
-                    'Try using --tickers or --universe to specify symbols explicitly.',
-                    location, scan_code,
+                # Distinguish "API failed" from "no matches". The previous
+                # return-empty-DataFrame path made these indistinguishable.
+                raise IdeaScannerError(
+                    f'IB scanner returned no results for location={location!r} '
+                    f'scan_code={scan_code!r}. This usually means the scanner '
+                    f'does not support this location, or your IB account lacks '
+                    f'market data subscriptions for it. Try --tickers or '
+                    f'--universe to specify symbols explicitly.'
                 )
-                return pd.DataFrame()
 
             # Build Contract objects from scanner results
             contracts = []
@@ -1086,9 +1100,11 @@ class IBIdeaScanner:
         )
 
         # 4. Get history for prev_close/prev_volume + local indicator computation
-        #    Limit history fetches to top candidates
+        #    Limit history fetches to top candidates. If >50% of fetches fail,
+        #    raise so we don't silently score on missing indicators.
         history_map: Dict[str, list[dict]] = {}
         history_limit = min(len(contracts), top_n * 2)
+        history_failures: list = []
         for contract in contracts[:history_limit]:
             try:
                 bars = consume(
@@ -1096,8 +1112,20 @@ class IBIdeaScanner:
                 )
                 if bars:
                     history_map[contract.symbol] = bars
-            except Exception:
-                logger.debug('History fetch failed for %s', contract.symbol)
+                else:
+                    history_failures.append((contract.symbol, 'no bars returned'))
+            except Exception as ex:
+                history_failures.append((contract.symbol, str(ex)))
+                logger.warning('history fetch failed for %s: %s', contract.symbol, ex)
+
+        # When every history fetch fails, indicators will be None and scoring
+        # becomes meaningless — better to fail than return nonsense rankings.
+        if history_limit > 0 and len(history_failures) == history_limit:
+            raise IdeaScannerError(
+                f'All {history_limit} history fetches failed — cannot compute '
+                f'indicators. First failure: {history_failures[0][0]}: '
+                f'{history_failures[0][1]}'
+            )
 
         # 5. Build candidates (same dict format as Massive path)
         candidates = self._build_candidates(snapshots, history_map)

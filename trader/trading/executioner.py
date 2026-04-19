@@ -92,7 +92,7 @@ class TradeExecutioner():
         skip_risk_gate: bool = False,
     ) -> Observable[Trade]:
         # Check trading filter (denylist/allowlist) if available
-        if not skip_risk_gate and hasattr(self.trader, 'risk_gate'):
+        if not skip_risk_gate and getattr(self.trader, 'risk_gate', None) is not None:
             instrument_result = self.trader.risk_gate.check_instrument(
                 symbol=contract_order.contract.symbol,
                 exchange=contract_order.contract.exchange or '',
@@ -110,7 +110,7 @@ class TradeExecutioner():
                 )
 
         # Run through risk gate if available
-        if not skip_risk_gate and hasattr(self.trader, 'risk_gate'):
+        if not skip_risk_gate and getattr(self.trader, 'risk_gate', None) is not None:
             from trader.trading.strategy import Signal
             # Create a pseudo-signal for risk evaluation
             signal = Signal(

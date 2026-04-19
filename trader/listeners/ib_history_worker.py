@@ -23,7 +23,7 @@ logging = setup_logging(module_name='ib_history')
 
 
 # Error codes that indicate informational messages, not real errors
-IB_INFO_CODES = {2104, 2158, 2106}
+IB_INFO_CODES = {2104, 2106, 2107, 2158}
 
 # Error codes that indicate connectivity/session issues (retryable after reconnect)
 IB_CONNECTIVITY_CODES = {1100, 1101, 1102, 504}

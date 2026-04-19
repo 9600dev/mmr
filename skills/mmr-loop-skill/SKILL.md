@@ -78,7 +78,10 @@ See [references/LOOP_CONFIG.md](references/LOOP_CONFIG.md) for full configuratio
 2. **Position limits**: Respects `max_positions` from position_sizing.yaml. Stops proposing at the limit.
 3. **Group budgets**: Checks group allocation budgets before proposing. Over-budget = warning, not block.
 4. **Risk gate**: All approved trades still pass through the risk gate (max leverage, daily loss limit, etc.).
-5. **Context management**: Aggressive compaction keeps context at ~12K tokens. Can run indefinitely.
+5. **Proposal state machine**: Terminal statuses (EXECUTED / REJECTED / FAILED / EXPIRED) are immutable. If `approve()` fails at the broker (e.g. margin rejection, bracket rollback), the proposal moves to FAILED — the loop should create a new proposal rather than try to re-approve the old one.
+6. **Scanner fails loudly**: `ideas()` with `location=` raises on "no results" rather than returning an empty list, so the loop will see a real error for misconfigured markets instead of silently making zero proposals. Log the error, skip the scan for that cycle, and continue.
+7. **Signed exposure in risk reports**: `portfolio_risk()` returns `net_exposure_pct`, `long_exposure_pct`, `short_exposure_pct` alongside `gross_exposure_pct`. For long-only loops these are effectively the same; for long/short loops, read `net_exposure_pct` first — correlation-cluster warnings now fire on net, so a correlated long/short hedge pair won't false-alarm.
+8. **Context management**: Aggressive compaction keeps context at ~12K tokens. Can run indefinitely.
 
 ## What Gets Written to Memory
 

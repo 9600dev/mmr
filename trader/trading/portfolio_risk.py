@@ -1,7 +1,7 @@
 """Portfolio risk analysis — concentration, correlation, group budgets, and warnings."""
 
 from dataclasses import asdict, dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional  # noqa: F401
 
 import math
 
@@ -11,6 +11,12 @@ class RiskReport:
     total_positions: int = 0
     net_liquidation: float = 0.0
     gross_exposure_pct: float = 0.0
+    # Signed net exposure as a fraction of net liquidation. Negative means the
+    # book is net short. For a fully hedged book |net_exposure_pct| ≈ 0 while
+    # gross_exposure_pct may be large.
+    net_exposure_pct: float = 0.0
+    long_exposure_pct: float = 0.0
+    short_exposure_pct: float = 0.0
     top_positions: List[dict] = field(default_factory=list)
     hhi: float = 0.0
     group_allocations: List[dict] = field(default_factory=list)
@@ -56,33 +62,58 @@ class PortfolioRiskAnalyzer:
             report.summary = 'No positions or account data available.'
             return report
 
-        # Normalize position data
+        # Normalize position data. We preserve the *signed* market value (shorts
+        # are negative) so hedged books are correctly identified, and track the
+        # absolute value separately for concentration/HHI (which are gross
+        # exposure measures).
         pos_data = []
         for p in positions:
             symbol = p.get('symbol', '')
-            value = abs(float(p.get('marketValue', p.get('mktValue', 0)) or 0))
-            pos_data.append({'symbol': symbol, 'value': value})
+            signed = float(p.get('marketValue', p.get('mktValue', 0)) or 0)
+            pos_data.append({
+                'symbol': symbol,
+                'value': abs(signed),
+                'signed_value': signed,
+                'is_short': signed < 0,
+            })
 
         total_value = sum(p['value'] for p in pos_data)
-        report.gross_exposure_pct = round(total_value / net_liquidation, 4) if net_liquidation > 0 else 0.0
+        long_value = sum(p['value'] for p in pos_data if not p['is_short'])
+        short_value = sum(p['value'] for p in pos_data if p['is_short'])
+        net_signed = sum(p['signed_value'] for p in pos_data)
 
-        # Compute weights and top positions
+        if net_liquidation > 0:
+            report.gross_exposure_pct = round(total_value / net_liquidation, 4)
+            report.net_exposure_pct = round(net_signed / net_liquidation, 4)
+            report.long_exposure_pct = round(long_value / net_liquidation, 4)
+            report.short_exposure_pct = round(short_value / net_liquidation, 4)
+
+        # Per-symbol weights. We report signed weights in top_positions so the
+        # direction (long/short) is visible to the LLM, but drive concentration
+        # warnings off absolute gross weight.
         weights: Dict[str, float] = {}
+        signed_weights: Dict[str, float] = {}
         for p in pos_data:
-            pct = p['value'] / net_liquidation if net_liquidation > 0 else 0.0
-            weights[p['symbol']] = pct
+            abs_pct = p['value'] / net_liquidation if net_liquidation > 0 else 0.0
+            signed_pct = p['signed_value'] / net_liquidation if net_liquidation > 0 else 0.0
+            weights[p['symbol']] = abs_pct
+            signed_weights[p['symbol']] = signed_pct
 
         sorted_positions = sorted(pos_data, key=lambda x: x['value'], reverse=True)
         report.top_positions = [
             {
                 'symbol': p['symbol'],
                 'pct': round(weights[p['symbol']], 4),
+                'signed_pct': round(signed_weights[p['symbol']], 4),
                 'value': round(p['value'], 2),
+                'is_short': p['is_short'],
             }
             for p in sorted_positions[:10]
         ]
 
-        # HHI (Herfindahl-Hirschman Index)
+        # HHI (Herfindahl-Hirschman Index) — a gross-exposure concentration
+        # metric. HHI on signed weights would understate concentration for
+        # hedged pairs, which is the wrong risk framing.
         if total_value > 0:
             portfolio_weights = [p['value'] / total_value for p in pos_data]
             report.hhi = round(sum(w ** 2 for w in portfolio_weights), 4)
@@ -148,20 +179,25 @@ class PortfolioRiskAnalyzer:
             except Exception:
                 pass
 
-        # Correlation analysis
+        # Correlation analysis.
+        # We pass signed_weights through so clusters can report combined NET
+        # exposure. A long AAPL + short MSFT pair may be highly correlated, but
+        # it hedges risk rather than concentrating it — warn only on net.
         correlation_clusters, data_coverage = self._compute_correlations(
-            [p['symbol'] for p in pos_data], weights, net_liquidation
+            [p['symbol'] for p in pos_data], weights, signed_weights, net_liquidation
         )
         report.correlation_clusters = correlation_clusters
         report.data_coverage = data_coverage
 
         for cluster in correlation_clusters:
-            if cluster.get('combined_weight_pct', 0) > 0.30:
+            # Warn on absolute net exposure: direction-correlated and large.
+            net_pct = cluster.get('net_weight_pct', cluster.get('combined_weight_pct', 0))
+            if abs(net_pct) > 0.30:
                 warnings.append({
                     'level': 'warning',
                     'message': (
                         f'Correlated cluster ({", ".join(cluster["symbols"])}) '
-                        f'is {cluster["combined_weight_pct"]:.1%} of portfolio'
+                        f'has {net_pct:+.1%} net exposure'
                     ),
                     'symbols': cluster['symbols'],
                 })
@@ -171,12 +207,19 @@ class PortfolioRiskAnalyzer:
         return report
 
     def _compute_correlations(
-        self, symbols: List[str], weights: Dict[str, float], net_liquidation: float
+        self,
+        symbols: List[str],
+        weights: Dict[str, float],
+        signed_weights: Optional[Dict[str, float]] = None,
+        net_liquidation: float = 0.0,
     ) -> tuple:
         """Compute correlation clusters from local DuckDB history data.
 
-        Returns (clusters, data_coverage_count).
+        Returns (clusters, data_coverage_count). Each cluster dict carries
+        ``combined_weight_pct`` (absolute, concentration view) and
+        ``net_weight_pct`` (signed, true exposure after hedging).
         """
+        signed_weights = signed_weights or weights
         if not self._duckdb_path or len(symbols) < 2:
             return [], 0
 
@@ -244,11 +287,13 @@ class PortfolioRiskAnalyzer:
 
                     avg_corr = sum(corr_vals) / len(corr_vals) if corr_vals else 0.0
                     combined_weight = sum(weights.get(s, 0) for s in cluster)
+                    net_weight = sum(signed_weights.get(s, weights.get(s, 0)) for s in cluster)
 
                     clusters.append({
                         'symbols': cluster,
                         'avg_corr': round(avg_corr, 3),
                         'combined_weight_pct': round(combined_weight, 4),
+                        'net_weight_pct': round(net_weight, 4),
                     })
                     clustered.update(cluster)
 
@@ -260,10 +305,23 @@ class PortfolioRiskAnalyzer:
     def _generate_summary(self, report: RiskReport) -> str:
         """Generate a plain-English summary paragraph."""
         parts = []
-        parts.append(
-            f'Portfolio has {report.total_positions} positions '
-            f'with {report.gross_exposure_pct:.0%} gross exposure.'
-        )
+        # Call out a hedged book explicitly: when gross is meaningfully above
+        # net, the portfolio has offsetting positions and concentration numbers
+        # should be read accordingly.
+        if (
+            report.gross_exposure_pct > 0
+            and abs(report.gross_exposure_pct - abs(report.net_exposure_pct)) > 0.10
+        ):
+            parts.append(
+                f'Portfolio has {report.total_positions} positions '
+                f'with {report.gross_exposure_pct:.0%} gross / '
+                f'{report.net_exposure_pct:+.0%} net exposure (hedged).'
+            )
+        else:
+            parts.append(
+                f'Portfolio has {report.total_positions} positions '
+                f'with {report.gross_exposure_pct:.0%} gross exposure.'
+            )
 
         if report.hhi > 0.15:
             parts.append(f'Concentration is high (HHI={report.hhi:.3f}).')

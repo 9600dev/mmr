@@ -1,9 +1,42 @@
 from trader.data.duckdb_store import DuckDBConnection
 from trader.trading.proposal import ExecutionSpec, ProposalStatus, TradeProposal
-from typing import List, Optional
+from typing import List, Optional, Set
 
 import datetime as dt
 import json
+
+
+# Valid state transitions. Terminal states (EXECUTED, REJECTED, EXPIRED) cannot
+# transition further except to FAILED (which is also terminal). FAILED is allowed
+# from any non-terminal-or-FAILED state so the runtime can mark broken work.
+_TERMINAL: Set[str] = {
+    ProposalStatus.EXECUTED.value,
+    ProposalStatus.REJECTED.value,
+    ProposalStatus.EXPIRED.value,
+    ProposalStatus.FAILED.value,
+}
+
+_ALLOWED_TRANSITIONS = {
+    ProposalStatus.PENDING.value: {
+        ProposalStatus.APPROVED.value,
+        ProposalStatus.REJECTED.value,
+        ProposalStatus.EXPIRED.value,
+        ProposalStatus.FAILED.value,
+    },
+    ProposalStatus.APPROVED.value: {
+        ProposalStatus.EXECUTED.value,
+        ProposalStatus.FAILED.value,
+        ProposalStatus.REJECTED.value,
+    },
+    ProposalStatus.EXECUTED.value: set(),
+    ProposalStatus.REJECTED.value: set(),
+    ProposalStatus.EXPIRED.value: set(),
+    ProposalStatus.FAILED.value: set(),
+}
+
+
+class InvalidProposalTransition(ValueError):
+    """Raised when update_status is called with an illegal state transition."""
 
 
 class ProposalStore:
@@ -47,10 +80,10 @@ class ProposalStore:
         self._ensure_table()
 
     def _ensure_table(self):
-        self.db.execute_atomic(lambda conn: (
-            conn.execute(self._CREATE_TABLE),
-            conn.execute(self._CREATE_SEQUENCE),
-        ))
+        def _init(conn):
+            conn.execute(self._CREATE_TABLE)
+            conn.execute(self._CREATE_SEQUENCE)
+        self.db.execute_atomic(_init)
 
     def add(self, proposal: TradeProposal) -> int:
         """Add a proposal and return its assigned id."""
@@ -92,62 +125,101 @@ class ProposalStore:
         return self.db.execute_atomic(_insert)
 
     def update_metadata(self, proposal_id: int, extra: dict) -> None:
-        """Merge extra keys into an existing proposal's metadata."""
-        proposal = self.get(proposal_id)
-        if not proposal:
-            return
-        merged = {**proposal.metadata, **extra}
+        """Merge extra keys into an existing proposal's metadata. Atomic under the row lock."""
         now = dt.datetime.now()
-        conn = self.db.execute(
-            "UPDATE trade_proposals SET metadata = ?, updated_at = ? WHERE id = ?",
-            [json.dumps(merged), now, proposal_id]
-        )
-        conn.close()
+
+        def _merge(conn):
+            row = conn.execute(
+                "SELECT metadata FROM trade_proposals WHERE id = ?",
+                [proposal_id],
+            ).fetchone()
+            if not row:
+                return
+            existing = json.loads(row[0]) if row[0] else {}
+            merged = {**existing, **extra}
+            conn.execute(
+                "UPDATE trade_proposals SET metadata = ?, updated_at = ? WHERE id = ?",
+                [json.dumps(merged), now, proposal_id],
+            )
+
+        self.db.execute_atomic(_merge)
 
     def update_status(self, id: int, status: str, **kwargs) -> None:
-        """Update proposal status and optional fields (order_ids, rejection_reason)."""
+        """Update proposal status and optional fields (order_ids, rejection_reason).
+
+        Validates the status transition against the proposal state machine:
+        PENDING  → APPROVED | REJECTED | EXPIRED | FAILED
+        APPROVED → EXECUTED | FAILED | REJECTED
+        EXECUTED | REJECTED | EXPIRED | FAILED → (terminal, no transitions)
+
+        Raises InvalidProposalTransition if the transition is illegal.
+        Idempotent updates to the same terminal state are rejected too — callers
+        that genuinely want to re-mark a terminal proposal must explicitly delete
+        and recreate it.
+        """
+        if status not in _ALLOWED_TRANSITIONS and status not in _TERMINAL:
+            raise InvalidProposalTransition(
+                f'unknown proposal status: {status!r}'
+            )
+
         now = dt.datetime.now()
-        sets = ["status = ?", "updated_at = ?"]
-        params: list = [status, now]
 
-        if 'order_ids' in kwargs:
-            sets.append("order_ids = ?")
-            params.append(json.dumps(kwargs['order_ids']))
+        def _update(conn):
+            row = conn.execute(
+                "SELECT status FROM trade_proposals WHERE id = ?",
+                [id],
+            ).fetchone()
+            if not row:
+                raise InvalidProposalTransition(
+                    f'proposal {id} not found'
+                )
+            current = row[0]
+            if current == status:
+                return
+            allowed = _ALLOWED_TRANSITIONS.get(current, set())
+            if status not in allowed:
+                raise InvalidProposalTransition(
+                    f'cannot transition proposal {id} from {current!r} to {status!r}'
+                )
 
-        if 'rejection_reason' in kwargs:
-            sets.append("rejection_reason = ?")
-            params.append(kwargs['rejection_reason'])
+            sets = ["status = ?", "updated_at = ?"]
+            params: list = [status, now]
 
-        params.append(id)
-        query = f"UPDATE trade_proposals SET {', '.join(sets)} WHERE id = ?"
-        conn = self.db.execute(query, params)
-        conn.close()
+            if 'order_ids' in kwargs:
+                sets.append("order_ids = ?")
+                params.append(json.dumps(kwargs['order_ids']))
+
+            if 'rejection_reason' in kwargs:
+                sets.append("rejection_reason = ?")
+                params.append(kwargs['rejection_reason'])
+
+            params.append(id)
+            query = f"UPDATE trade_proposals SET {', '.join(sets)} WHERE id = ?"
+            conn.execute(query, params)
+
+        self.db.execute_atomic(_update)
 
     def get(self, id: int) -> Optional[TradeProposal]:
-        """Get a proposal by id."""
-        conn = self.db.execute(
-            "SELECT * FROM trade_proposals WHERE id = ?", [id]
+        rows = self.db.execute(
+            "SELECT * FROM trade_proposals WHERE id = ?", [id], fetch='all',
         )
-        rows = conn.fetchall()
-        conn.close()
-        proposals = self._rows_to_proposals(rows)
+        proposals = self._rows_to_proposals(rows or [])
         return proposals[0] if proposals else None
 
     def query(self, status: Optional[str] = None, limit: int = 50) -> List[TradeProposal]:
-        """Query proposals, optionally filtered by status."""
         if status:
-            conn = self.db.execute(
+            rows = self.db.execute(
                 "SELECT * FROM trade_proposals WHERE status = ? ORDER BY created_at DESC LIMIT ?",
-                [status, limit]
+                [status, limit],
+                fetch='all',
             )
         else:
-            conn = self.db.execute(
+            rows = self.db.execute(
                 "SELECT * FROM trade_proposals ORDER BY created_at DESC LIMIT ?",
-                [limit]
+                [limit],
+                fetch='all',
             )
-        rows = conn.fetchall()
-        conn.close()
-        return self._rows_to_proposals(rows)
+        return self._rows_to_proposals(rows or [])
 
     def delete(self, id: int) -> bool:
         """Delete a proposal by id. Returns True if a row was deleted."""

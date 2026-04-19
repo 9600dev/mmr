@@ -37,6 +37,65 @@ TSub = TypeVar('TSub')
 
 
 # ---------------------------------------------------------------------------
+# Dill deserialization policy
+# ---------------------------------------------------------------------------
+
+# dill.loads() can execute arbitrary Python on untrusted input. MMR's ZMQ
+# sockets bind to 127.0.0.1 by default, so the attack surface is same-host
+# processes, but we still want the option to lock this down in hardened
+# deployments.
+#
+# DILL_STRICT_MODE=1 in the environment disables the dill fallback entirely —
+# any unknown EXT_OBJECT payload raises instead of being deserialized.
+#
+# _dill_type_whitelist is an optional registry callers can populate to restrict
+# what dill is allowed to reconstruct. If set, only objects whose type is
+# registered (by fully-qualified module:qualname) are accepted.
+import os as _os  # noqa: E402
+
+DILL_STRICT_MODE = _os.environ.get('MMR_DILL_STRICT', '').lower() in ('1', 'true', 'yes')
+_dill_type_whitelist: Optional[set] = None
+
+
+def set_dill_whitelist(types):
+    """Restrict dill deserialization to the supplied classes.
+
+    Pass ``None`` to clear and allow all types (default). Each entry may be a
+    class or a ``module.qualname`` string.
+    """
+    global _dill_type_whitelist
+    if types is None:
+        _dill_type_whitelist = None
+    else:
+        names = set()
+        for t in types:
+            if isinstance(t, str):
+                names.add(t)
+            else:
+                names.add(f'{t.__module__}.{t.__qualname__}')
+        _dill_type_whitelist = names
+
+
+class DillDeserializationError(RuntimeError):
+    """Raised when a dill payload is rejected by the active policy."""
+
+
+def _safe_dill_loads(data: bytes):
+    if DILL_STRICT_MODE:
+        raise DillDeserializationError(
+            'dill deserialization is disabled (MMR_DILL_STRICT=1)'
+        )
+    obj = dill.loads(data)
+    if _dill_type_whitelist is not None:
+        name = f'{type(obj).__module__}.{type(obj).__qualname__}'
+        if name not in _dill_type_whitelist:
+            raise DillDeserializationError(
+                f'dill type {name!r} is not in the whitelist'
+            )
+    return obj
+
+
+# ---------------------------------------------------------------------------
 # Serialization: msgpack + pyarrow IPC for DataFrames
 # ---------------------------------------------------------------------------
 
@@ -104,7 +163,7 @@ def ext_unpack(code, data):
     elif code == EXT_DATAFRAME:
         return df_loads(data)
     elif code == EXT_OBJECT:
-        return dill.loads(data)
+        return _safe_dill_loads(data)
     return msgpack.ExtType(code, data)
 
 
@@ -219,19 +278,92 @@ class _Handler(Generic[T]):
 # _SyncMethodCall  (replaces _AwaitedMethodCall)
 # ---------------------------------------------------------------------------
 
-class _SyncMethodCall:
-    __slots__ = ('_socket', '_lock', '_timeout', '_names', '_return_type')
+# Stdlib exception types we preserve across the RPC boundary. Custom exception
+# types can be registered per-RPCClient via ``error_table``.
+_STDLIB_EXCEPTIONS: Dict[str, type] = {
+    cls.__name__: cls
+    for cls in (
+        ValueError, TypeError, KeyError, IndexError, AttributeError,
+        RuntimeError, ConnectionError, TimeoutError, FileNotFoundError,
+        PermissionError, NotImplementedError, ArithmeticError,
+        ZeroDivisionError, OverflowError, LookupError, OSError,
+        AssertionError, StopIteration,
+    )
+}
 
-    def __init__(self, socket, lock, timeout=None, names=(), return_type: Optional[Type] = None):
+
+class RPCError(RuntimeError):
+    """Wrapper raised when an RPC server exception cannot be reconstructed
+    locally (type unknown to client). ``exc_type`` preserves the server-side
+    class name; ``exc_args`` preserves the args tuple for callers that want to
+    reason about the original failure."""
+
+    def __init__(self, message: str, exc_type: str = 'Exception', exc_args: Tuple = ()):
+        super().__init__(message)
+        self.exc_type = exc_type
+        self.exc_args = exc_args
+
+
+def _reconstruct_rpc_exception(
+    exc_type: str,
+    exc_args,
+    error_table: Optional[Dict[str, type]] = None,
+) -> Exception:
+    """Recreate an exception raised by the remote RPC handler.
+
+    Priority: caller-supplied error_table (both by short name and fully-
+    qualified name), then stdlib exceptions, then a generic RPCError fallback
+    that still carries the original type + args for inspection.
+    """
+    args_tuple = tuple(exc_args) if isinstance(exc_args, (list, tuple)) else (exc_args,)
+
+    if error_table:
+        cls = error_table.get(exc_type)
+        if cls is None:
+            short = exc_type.rsplit('.', 1)[-1]
+            for key, candidate in error_table.items():
+                if key.rsplit('.', 1)[-1] == short:
+                    cls = candidate
+                    break
+        if cls is not None:
+            try:
+                return cls(*args_tuple)
+            except Exception:
+                # Constructor signature mismatch — fall through to stdlib/RPCError
+                pass
+
+    cls = _STDLIB_EXCEPTIONS.get(exc_type.rsplit('.', 1)[-1])
+    if cls is not None:
+        try:
+            return cls(*args_tuple)
+        except Exception:
+            pass
+
+    message = str(args_tuple[0]) if args_tuple else ''
+    return RPCError(
+        f'RPC error ({exc_type}): {message}' if message else f'RPC error ({exc_type})',
+        exc_type=exc_type,
+        exc_args=args_tuple,
+    )
+
+
+class _SyncMethodCall:
+    __slots__ = ('_socket', '_lock', '_timeout', '_names', '_return_type', '_error_table')
+
+    def __init__(self, socket, lock, timeout=None, names=(),
+                 return_type: Optional[Type] = None,
+                 error_table: Optional[Dict[str, type]] = None):
         self._socket = socket
         self._lock = lock
         self._timeout = timeout
         self._names = names
         self._return_type = return_type
+        self._error_table = error_table
 
     def __getattr__(self, name):
         return _SyncMethodCall(self._socket, self._lock, self._timeout,
-                               self._names + (name,), self._return_type)
+                               self._names + (name,), self._return_type,
+                               self._error_table)
 
     def __call__(self, *args, **kwargs):
         if not self._names:
@@ -261,7 +393,7 @@ class _SyncMethodCall:
                     break
                 elapsed += poll_interval
             else:
-                raise TimeoutError(f'RPC call timed out after {timeout_ms}ms')
+                raise TimeoutError(f'RPC call to {".".join(self._names)} timed out after {timeout_ms}ms')
             frames = self._socket.recv_multipart(zmq.NOBLOCK)
             response_data = frames[-1]
 
@@ -270,7 +402,7 @@ class _SyncMethodCall:
         if response.get('error'):
             exc_type = response.get('exc_type', 'Exception')
             exc_args = response.get('exc_args', ())
-            raise Exception(f"RPC error ({exc_type}): {exc_args}")
+            raise _reconstruct_rpc_exception(exc_type, exc_args, self._error_table)
 
         result = response.get('result')
 
@@ -397,13 +529,21 @@ class RPCClient(Generic[T]):
 
     def rpc(self, return_type: Optional[Type] = None) -> T:
         if self.socket and self.is_setup:
-            return _SyncMethodCall(self.socket, self._lock, self.timeout, return_type=return_type)  # type: ignore
+            return _SyncMethodCall(
+                self.socket, self._lock, self.timeout,
+                return_type=return_type,
+                error_table=self.error_table,
+            )  # type: ignore
         else:
             raise ConnectionError('not connected')
 
     def arpc(self, return_type: Optional[Type] = None) -> T:
         if self.socket and self.is_setup:
-            return _SyncMethodCall(self.socket, self._lock, self.timeout, return_type=return_type)  # type: ignore
+            return _SyncMethodCall(
+                self.socket, self._lock, self.timeout,
+                return_type=return_type,
+                error_table=self.error_table,
+            )  # type: ignore
         else:
             raise ConnectionError('not connected')
 
@@ -638,7 +778,7 @@ class MessageBusClient(Generic[T]):
             return unpack(val)
         except Exception:
             # Fall back to dill for backward compatibility with in-flight messages
-            return dill.loads(val)
+            return _safe_dill_loads(val)
 
 
 # ---------------------------------------------------------------------------
@@ -696,7 +836,7 @@ class TopicPubSub(Generic[T]):
                     try:
                         obj = unpack(payload)
                     except Exception:
-                        obj = dill.loads(payload)
+                        obj = _safe_dill_loads(payload)
                     self.handler.on_message(obj)
             except zmq.ZMQError:
                 break
