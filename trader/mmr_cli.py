@@ -1270,6 +1270,13 @@ def build_parser() -> argparse.ArgumentParser:
         default='massive',
         help='Data source (default: massive)',
     )
+    data_dl_p.add_argument(
+        '--force', '-f',
+        action='store_true',
+        help=('Bypass the freshness guard and fetch the full requested window. '
+              'Useful when toggling TwelveData extended-hours coverage (prepost) — '
+              'without --force, stored regular-session bars make the full day look covered.'),
+    )
 
     data_sub.add_parser(
         'migrate-symbols',
@@ -6119,8 +6126,10 @@ def _handle_data_download(args: argparse.Namespace):
         # stored, so repeat runs are cheap (no API calls when fully covered).
         # Only possible when we have a SecurityDefinition for the exchange
         # calendar lookup — otherwise fall back to full-range download.
+        # --force bypasses the guard (needed when re-fetching existing days to
+        # add coverage, e.g. toggling TwelveData extended-hours bars on).
         missing_ranges = None
-        if sec_def is not None:
+        if not getattr(args, 'force', False) and sec_def is not None:
             calendar = _try_get_exchange_calendar_for(sec_def)
             if calendar is not None:
                 try:

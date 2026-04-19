@@ -14,13 +14,14 @@ logging = setup_logging(module_name='twelvedata_history')
 # TwelveData caps a single time_series response at 5000 bars. Requesting a
 # wider window silently truncates to the most recent 5000 bars, so we chunk
 # the date range. Values below are calendar days per chunk, chosen to stay
-# safely under the 5000-bar cap assuming a liquid US equity session.
+# safely under the 5000-bar cap assuming a liquid US equity session WITH
+# pre/post-market coverage enabled (780 bars/day rather than 390).
 _CHUNK_DAYS_FOR_BAR_SIZE = {
-    BarSize.Mins1: 7,      # ~2700 bars / 7d
-    BarSize.Mins5: 35,     # ~2700 bars / 35d
-    BarSize.Mins15: 100,   # ~2600 bars / 100d
-    BarSize.Mins30: 200,   # ~2600 bars / 200d
-    BarSize.Hours1: 400,   # ~2800 bars / 400d
+    BarSize.Mins1: 5,      # ~3900 bars / 5d (premarket+regular+postmarket)
+    BarSize.Mins5: 30,     # ~4680 bars / 30d
+    BarSize.Mins15: 80,    # ~4160 bars / 80d
+    BarSize.Mins30: 160,   # ~4160 bars / 160d
+    BarSize.Hours1: 400,   # regular-only for 1h+; ~2800 bars / 400d
     BarSize.Hours2: 400,
     BarSize.Hours4: 400,
     # Daily/weekly/monthly: no need to chunk — 5000 daily bars is ~20y.
@@ -28,6 +29,14 @@ _CHUNK_DAYS_FOR_BAR_SIZE = {
     BarSize.Weeks1: None,
     BarSize.Months1: None,
 }
+
+# TwelveData's extended-hours (pre-market + post-market) parameter is only
+# supported on these intraday intervals for US equities. Passing prepost=true
+# for daily+ bars is a no-op upstream but we gate it to keep requests clean.
+# Docs: https://support.twelvedata.com/en/articles/5195429-pre-post-market-data
+_PREPOST_SUPPORTED_BAR_SIZES = frozenset({
+    BarSize.Mins1, BarSize.Mins5, BarSize.Mins15, BarSize.Mins30,
+})
 
 # Small per-chunk pacing so paginated downloads don't burst past pro-plan
 # rate limits (typical pro plans allow ~55-610 req/min; 10 req/s is a safe
@@ -46,10 +55,20 @@ def _is_benign_no_data(ex: Exception) -> bool:
 
 
 class TwelveDataHistoryWorker:
-    def __init__(self, twelvedata_api_key: str):
+    def __init__(
+        self,
+        twelvedata_api_key: str,
+        include_extended_hours: bool = True,
+    ):
         if not twelvedata_api_key:
             raise ValueError('twelvedata_api_key is required')
         self.client = TDClient(apikey=twelvedata_api_key)
+        # When True, intraday requests (1/5/15/30min) ask TwelveData for
+        # pre-market (from 07:00 ET) and post-market (to 20:00 ET) bars in
+        # addition to the regular session. Requires a TwelveData Pro plan
+        # or higher for US equities; on lower plans the flag is ignored
+        # upstream and only regular-session bars come back.
+        self.include_extended_hours = include_extended_hours
 
     def get_history(
         self,
@@ -138,7 +157,13 @@ class TwelveDataHistoryWorker:
             from_ = start_date.strftime('%Y-%m-%d %H:%M:%S')
             to = end_date.strftime('%Y-%m-%d %H:%M:%S')
 
-        logging.info('{}fetch {} {} {} to {}'.format(log_prefix, ticker, interval, from_, to))
+        use_prepost = self.include_extended_hours and bar_size in _PREPOST_SUPPORTED_BAR_SIZES
+        prepost_arg = 'true' if use_prepost else 'false'
+
+        logging.info('{}fetch {} {} {} to {}{}'.format(
+            log_prefix, ticker, interval, from_, to,
+            '  (prepost)' if use_prepost else '',
+        ))
 
         ts = self.client.time_series(
             symbol=ticker,
@@ -147,6 +172,7 @@ class TwelveDataHistoryWorker:
             end_date=to,
             outputsize=5000,
             timezone=timezone,
+            prepost=prepost_arg,
         )
 
         try:

@@ -183,6 +183,81 @@ class TestGetHistoryMocked:
 
 
 # ---------------------------------------------------------------------------
+# Extended-hours (prepost) — 1/5/15/30min only
+# ---------------------------------------------------------------------------
+
+class TestPrepost:
+    """TwelveData's prepost=true flag is what gates pre-market + post-market
+    bars (07:00-20:00 ET). Without it, 1-min US equity requests return only
+    the regular session (~390 bars/day) and we lose half the coverage Massive
+    gives us. The flag only applies at 1/5/15/30min on US equities per
+    https://support.twelvedata.com/en/articles/5195429-pre-post-market-data."""
+
+    def _worker_with_spy(self, include_extended_hours=True):
+        worker = TwelveDataHistoryWorker(
+            twelvedata_api_key='test',
+            include_extended_hours=include_extended_hours,
+        )
+        fake_ts = MagicMock()
+        fake_ts.as_pandas.return_value = _fake_td_dataframe(3)
+        worker.client = MagicMock()
+        worker.client.time_series.return_value = fake_ts
+        return worker
+
+    def test_default_is_extended_hours_on(self):
+        """Regression guard: dropping the default back to regular-session-only
+        silently loses pre/post coverage — what the user explicitly didn't
+        want. If someone lowers this default, the test catches it."""
+        worker = TwelveDataHistoryWorker(twelvedata_api_key='test')
+        assert worker.include_extended_hours is True
+
+    def test_prepost_true_for_1min(self):
+        worker = self._worker_with_spy()
+        worker.get_history('AAPL', BarSize.Mins1,
+                           dt.datetime(2026, 4, 14), dt.datetime(2026, 4, 15))
+        kwargs = worker.client.time_series.call_args.kwargs
+        assert kwargs['prepost'] == 'true'
+
+    def test_prepost_true_for_5min(self):
+        worker = self._worker_with_spy()
+        worker.get_history('AAPL', BarSize.Mins5,
+                           dt.datetime(2026, 4, 14), dt.datetime(2026, 4, 15))
+        assert worker.client.time_series.call_args.kwargs['prepost'] == 'true'
+
+    def test_prepost_true_for_15min(self):
+        worker = self._worker_with_spy()
+        worker.get_history('AAPL', BarSize.Mins15,
+                           dt.datetime(2026, 4, 14), dt.datetime(2026, 4, 15))
+        assert worker.client.time_series.call_args.kwargs['prepost'] == 'true'
+
+    def test_prepost_true_for_30min(self):
+        worker = self._worker_with_spy()
+        worker.get_history('AAPL', BarSize.Mins30,
+                           dt.datetime(2026, 4, 14), dt.datetime(2026, 4, 15))
+        assert worker.client.time_series.call_args.kwargs['prepost'] == 'true'
+
+    def test_prepost_false_for_1hour(self):
+        """Not supported upstream at 1h — pass false to keep requests clean."""
+        worker = self._worker_with_spy()
+        worker.get_history('AAPL', BarSize.Hours1,
+                           dt.datetime(2026, 4, 14), dt.datetime(2026, 4, 16))
+        assert worker.client.time_series.call_args.kwargs['prepost'] == 'false'
+
+    def test_prepost_false_for_daily(self):
+        worker = self._worker_with_spy()
+        worker.get_history('AAPL', BarSize.Days1,
+                           dt.datetime(2026, 4, 14), dt.datetime(2026, 4, 18))
+        assert worker.client.time_series.call_args.kwargs['prepost'] == 'false'
+
+    def test_opt_out_via_constructor(self):
+        """include_extended_hours=False forces prepost=false even on intraday."""
+        worker = self._worker_with_spy(include_extended_hours=False)
+        worker.get_history('AAPL', BarSize.Mins1,
+                           dt.datetime(2026, 4, 14), dt.datetime(2026, 4, 15))
+        assert worker.client.time_series.call_args.kwargs['prepost'] == 'false'
+
+
+# ---------------------------------------------------------------------------
 # Pagination — 1-minute requests spanning multiple 7-day chunks
 # ---------------------------------------------------------------------------
 
