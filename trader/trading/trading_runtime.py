@@ -1148,6 +1148,13 @@ class Trader():
     async def scanner_data(self, **kwargs) -> list[dict]:
         return await self.client.scanner_data(**kwargs)
 
+    async def scanner_locations(self) -> list[dict]:
+        """List every scanner location this account is authorised for.
+        Diagnostic for error 162 (scanner not configured) — if your
+        chosen location isn't in this list, either the string is wrong
+        or your account/paper mode lacks the subscription."""
+        return await self.client.scanner_locations()
+
     async def get_snapshots_batch(self, contracts, delayed: bool = False) -> list[dict]:
         return await self.client.get_snapshots_batch(contracts, delayed)
 

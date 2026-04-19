@@ -229,6 +229,14 @@ class TraderServiceApi(RPCHandler):
         )
 
     @rpcmethod
+    async def scanner_locations(self) -> list[dict]:
+        """Diagnostic: list every location code this account is
+        authorised to scan. If your target (e.g. ``STK.AU.ASX``) isn't
+        in the result, the string is wrong or the subscription is
+        missing — error 162 would follow any scan against it."""
+        return await self.trader.scanner_locations()
+
+    @rpcmethod
     async def get_snapshots_batch(self, contracts: list, delayed: bool = False) -> list[dict]:
         return await self.trader.get_snapshots_batch(contracts, delayed)
 

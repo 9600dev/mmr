@@ -258,7 +258,7 @@ Universes are named collections of stock definitions stored in DuckDB.
 | `MMRHelpers.universe_show(name)` | No | Show symbols in a universe |
 | `MMRHelpers.universe_create(name)` | No | Create empty universe |
 | `MMRHelpers.universe_delete(name)` | No | Delete universe (auto-confirms) |
-| `MMRHelpers.universe_add(name, symbols)` | **Yes** | Resolve via IB and add symbols |
+| `MMRHelpers.universe_add(name, symbols, exchange="", currency="")` | **Yes** | Resolve via IB and add symbols. **Pass `exchange` + `currency` for non-US** — `exchange="ASX", currency="AUD"` for ASX, `SEHK`/`HKD`, `TSE`/`JPY`, etc. Without them resolve() defaults to SMART/USD and silently picks the US-listed ADR or fails. |
 | `MMRHelpers.universe_remove(name, symbol)` | No | Remove a symbol |
 | `MMRHelpers.universe_import(name, csv_file)` | No | Bulk import from CSV |
 

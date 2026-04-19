@@ -568,19 +568,36 @@ class MMRHelpers:
         return output
 
     @staticmethod
-    async def universe_add(name: str, symbols: List[str]) -> str:
-        """
-        Resolve symbols via IB and add them to a universe.
-        REQUIRES trader_service to be running (uses IB for symbol resolution).
-        Creates the universe if it doesn't exist.
+    async def universe_add(
+        name: str,
+        symbols: List[str],
+        exchange: str = "",
+        currency: str = "",
+        sectype: str = "STK",
+    ) -> str:
+        """Resolve symbols via IB and add them to a universe. Creates
+        the universe if missing. REQUIRES trader_service.
 
-        :param name: Universe name
-        :param symbols: List of ticker symbols to add (e.g. ["AAPL", "MSFT", "AMD"])
+        **Always pass ``exchange`` + ``currency`` for non-US listings**,
+        otherwise resolve() defaults to USD/SMART and silently picks the
+        wrong contract (e.g. a US-listed ADR instead of the ASX primary)
+        or fails outright. ASX → ``exchange="ASX", currency="AUD"``;
+        SEHK → ``HKD``; TSE → ``JPY``; CA → ``"TSE" or "VENTURE", "CAD"``.
 
         Example:
-        result = await MMRHelpers.universe_add("tech_stocks", ["AAPL", "MSFT", "NVDA", "AMD"])
+        # US (defaults OK)
+        await MMRHelpers.universe_add("tech", ["AAPL", "MSFT", "NVDA"])
+        # ASX (MUST specify exchange + currency)
+        await MMRHelpers.universe_add("asx_watch", ["BHP", "RIO", "STO", "WDS"],
+                                        exchange="ASX", currency="AUD")
         """
         args = ["universe", "add", name] + symbols
+        if exchange:
+            args.extend(["--exchange", exchange])
+        if currency:
+            args.extend(["--currency", currency])
+        if sectype and sectype != "STK":
+            args.extend(["--sectype", sectype])
         return await _run_cli(*args, timeout=120)
 
     @staticmethod

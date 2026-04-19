@@ -907,6 +907,43 @@ class IBAIORx():
             })
         return rows
 
+    async def scanner_parameters_xml(self) -> str:
+        """Fetch the XML document from IB describing every scan code,
+        instrument type, location code, and filter this account is
+        authorised to use. This is the authoritative source — if your
+        ``STK.AU.ASX`` gives error 162, that code isn't in this document
+        (either wrong name or missing subscription).
+
+        Returns the raw XML string. Use ``scanner_locations()`` for a
+        parsed summary.
+        """
+        result = await self.ib.reqScannerParametersAsync()
+        return result or ''
+
+    async def scanner_locations(self) -> list[dict]:
+        """Parsed subset of scanner_parameters_xml(): every location code
+        this account can run scans against, with its display name. Use
+        to sanity-check a location code before it returns error 162.
+
+        Each entry: ``{'code': 'STK.ASX', 'name': 'Australia (ASX)',
+        'instrument_types': ['STK']}``."""
+        from xml.etree import ElementTree as ET
+        xml = await self.scanner_parameters_xml()
+        if not xml:
+            return []
+        try:
+            root = ET.fromstring(xml)
+        except ET.ParseError:
+            return []
+        out: list[dict] = []
+        for loc in root.iter('Location'):
+            code = (loc.findtext('locationCode') or '').strip()
+            name = (loc.findtext('displayName') or '').strip()
+            inst = [e.text or '' for e in loc.findall('instruments/instrument')]
+            if code:
+                out.append({'code': code, 'name': name, 'instrument_types': inst})
+        return out
+
     def sleep(self, seconds: float):
         self.ib.sleep(seconds)
 

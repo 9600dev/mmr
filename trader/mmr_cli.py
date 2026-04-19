@@ -857,6 +857,10 @@ def build_parser() -> argparse.ArgumentParser:
                          help='Min volume filter')
     scan_p.add_argument('--market-cap-above', type=float, default=0.0,
                          help='Min market cap filter')
+    scan_p.add_argument('--list-locations', action='store_true', default=False,
+                         help='Diagnostic: list every scanner location code this '
+                              'account is authorised for, then exit. Use when '
+                              'error 162 says your location is not configured.')
 
     # ideas
     ideas_p = sub.add_parser('ideas', aliases=['scan-ideas'], help='Scan for trading ideas',
@@ -1056,9 +1060,19 @@ def build_parser() -> argparse.ArgumentParser:
     uni_create_p.add_argument('name', help='Universe name')
     uni_delete_p = uni_sub.add_parser('delete', help='Delete a universe')
     uni_delete_p.add_argument('name', help='Universe name')
-    uni_add_p = uni_sub.add_parser('add', help='Resolve via IB and add symbols')
+    uni_add_p = uni_sub.add_parser('add', help='Resolve via IB and add symbols',
+                                     epilog='Examples:\n'
+                                            '  universe add tech AAPL MSFT AMD\n'
+                                            '  universe add asx_watch BHP RIO STO WDS --exchange ASX --currency AUD\n'
+                                            '  universe add hk_watch 0700 0005 --exchange SEHK --currency HKD')
     uni_add_p.add_argument('name', help='Universe name')
     uni_add_p.add_argument('symbols', nargs='+', help='Symbols to add')
+    uni_add_p.add_argument('--exchange', default='',
+                             help='Exchange hint for non-US listings (e.g. ASX, SEHK, TSE)')
+    uni_add_p.add_argument('--currency', default='',
+                             help='Currency hint (e.g. AUD, HKD, JPY)')
+    uni_add_p.add_argument('--sectype', default='STK',
+                             help='Security type (default: STK)')
     uni_remove_p = uni_sub.add_parser('remove', help='Remove a symbol from a universe')
     uni_remove_p.add_argument('name', help='Universe name')
     uni_remove_p.add_argument('symbol', help='Symbol to remove')
@@ -7050,6 +7064,43 @@ def _handle_movers(mmr: MMR, args: argparse.Namespace):
 
 
 def _handle_scan(mmr: MMR, args: argparse.Namespace):
+    # --list-locations: diagnostic for error 162. Dump every location
+    # code this account can actually scan (by querying IB's own
+    # reqScannerParameters). Lets users sanity-check a location before
+    # guessing at the scanner subscription matrix.
+    if getattr(args, 'list_locations', False):
+        try:
+            locs = mmr.trader_client.rpc(return_type=list[dict]).scanner_locations()
+        except Exception as ex:
+            print_status(f'Failed to fetch scanner locations: {ex}', success=False)
+            return
+        if _json_mode:
+            print(json.dumps({'data': locs, 'title': 'Scanner Locations'}))
+            return
+        if not locs:
+            console.print('[yellow]IB returned no locations — is trader_service connected?[/yellow]')
+            return
+        from rich.table import Table
+        tbl = Table(title=f'Scanner locations available to this account ({len(locs)})')
+        tbl.add_column('code', style='bold cyan', no_wrap=True)
+        tbl.add_column('name')
+        tbl.add_column('instruments', style='dim')
+        for row in locs:
+            tbl.add_row(
+                row.get('code', ''), row.get('name', ''),
+                ', '.join(row.get('instrument_types', []))[:40],
+            )
+        console.print(tbl)
+        console.print(
+            '\n[dim]If the location you wanted (e.g. STK.AU.ASX) is not in '
+            'this list, error 162 is expected — either the code is wrong, '
+            'your account lacks the scanner subscription, or you\'re on '
+            'paper and the live subscription doesn\'t carry over. Use '
+            '`ideas --location X --tickers SYM1 ...` to bypass the '
+            'scanner API entirely.[/dim]'
+        )
+        return
+
     scan_code = args.scan_code
     if not scan_code:
         preset = args.preset or 'gainers'
@@ -7068,6 +7119,22 @@ def _handle_scan(mmr: MMR, args: argparse.Namespace):
         above_volume=args.above_volume,
         market_cap_above=args.market_cap_above,
     )
+
+    # IB returns an empty DataFrame when the scanner isn't configured for
+    # the caller's account × chosen location (error 162 in the underlying
+    # logs). The scan command has no ``--tickers`` fallback, so point the
+    # user at the one that does. Mirrors the hint in `mmr ideas`.
+    if (df is None or df.empty) and args.location and not args.location.startswith('STK.US'):
+        console.print(
+            '[yellow]No results.[/yellow] '
+            'IB\'s scanner is usually not configured for non-US exchanges '
+            f'([dim]{args.location}[/dim]) unless your account has explicit '
+            'market-data subscriptions for them.\n'
+            f'[dim]Try: [/dim][bold]ideas {args.preset or "gainers"} '
+            f'--location {args.location} --tickers SYM1 SYM2 SYM3[/bold]'
+        )
+        return
+
     print_df(df, title=f'IB Scanner: {scan_code}')
 
 
@@ -7385,14 +7452,37 @@ def _handle_universe(mmr: MMR, args: argparse.Namespace):
         console.print(f'[green]Deleted universe: {args.name}[/green]')
 
     elif action == 'add':
+        # Accept --exchange/--currency/--sectype so non-US symbols resolve
+        # to the right listing. Without these, resolve() defaults to USD
+        # SMART for STK, which silently picks an ADR or matches nothing
+        # for ASX/SEHK/TSE tickers (the historical bug).
+        exchange = getattr(args, 'exchange', '') or ''
+        currency = getattr(args, 'currency', '') or ''
+        sec_type = getattr(args, 'sectype', 'STK') or 'STK'
+        if exchange and not currency:
+            console.print(
+                f'[yellow]Warning: --exchange {exchange} given without --currency. '
+                f'For ASX use --currency AUD, SEHK → HKD, TSE → JPY, etc.[/yellow]'
+            )
         for symbol in args.symbols:
             try:
-                defs = mmr.resolve(symbol)
+                defs = mmr.resolve(
+                    symbol, sec_type=sec_type,
+                    exchange=exchange, currency=currency,
+                )
                 if not defs:
-                    console.print(f'[yellow]Could not resolve: {symbol}[/yellow]')
+                    hint = ''
+                    if not exchange:
+                        hint = (' (try --exchange ASX --currency AUD '
+                                'if this is an Australian listing)')
+                    console.print(f'[yellow]Could not resolve: {symbol}{hint}[/yellow]')
                     continue
                 accessor.insert(args.name, defs[0])
-                console.print(f'[green]Added {defs[0].symbol} (conId={defs[0].conId}) to {args.name}[/green]')
+                console.print(
+                    f'[green]Added {defs[0].symbol} '
+                    f'(conId={defs[0].conId}, exchange={defs[0].primaryExchange or defs[0].exchange}) '
+                    f'to {args.name}[/green]'
+                )
             except ConnectionError:
                 console.print('[red]Cannot resolve symbols: trader_service not connected[/red]')
                 return
