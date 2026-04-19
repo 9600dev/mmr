@@ -1230,9 +1230,32 @@ class Trader():
             else:
                 return float('nan')
 
-        summary: List[PortfolioSummary] = []
+        # Source of truth: always ask ib_async's ib.portfolio() directly.
+        # The old path read from self.portfolio (our Portfolio cache), which
+        # is populated by the updatePortfolioEvent observer — if that
+        # observer chain ever breaks (e.g. event handlers dropped across an
+        # IB() replacement), the cache stays empty even though ib.portfolio()
+        # returns the live data. Reading directly is O(N) in position count
+        # and already fast; no reason to route through the cache.
+        portfolio_items = []
+        try:
+            portfolio_items = self.client.ib.portfolio(
+                account=self.ib_account
+            ) if self.ib_account else self.client.ib.portfolio()
+        except Exception as ex:
+            logging.warning(
+                'ib.portfolio() failed, falling back to local cache: %s', ex,
+            )
+            portfolio_items = self.portfolio.get_portfolio_items()
 
-        for portfolio_item in self.portfolio.get_portfolio_items():
+        # If ib_async returned empty (e.g. subscription not ready) but our
+        # local cache has items from a prior event, prefer the cache —
+        # belt-and-braces for the reverse failure.
+        if not portfolio_items and self.portfolio.portfolio_items:
+            portfolio_items = self.portfolio.get_portfolio_items()
+
+        summary: List[PortfolioSummary] = []
+        for portfolio_item in portfolio_items:
             summary.append(PortfolioSummary(
                 contract=portfolio_item.contract,
                 position=portfolio_item.position,
@@ -1247,6 +1270,16 @@ class Trader():
         return summary
 
     def get_positions(self) -> List[Position]:
+        # See _get_portfolio_summary_sync for rationale — hit ib_async
+        # directly rather than relying on the event-driven local cache.
+        try:
+            positions = self.client.ib.positions(
+                account=self.ib_account
+            ) if self.ib_account else self.client.ib.positions()
+            if positions:
+                return list(positions)
+        except Exception as ex:
+            logging.warning('ib.positions() failed, using cache: %s', ex)
         return self.portfolio.get_positions()
 
     def diagnose_portfolio_feed(self) -> dict:
