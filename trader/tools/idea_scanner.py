@@ -1766,12 +1766,25 @@ class TwelveDataIdeaScanner:
         self,
         tickers: List[str],
     ) -> Dict[str, Dict[str, Optional[float]]]:
+        # TwelveData's get_statistics call is ~100 credits each. On a Grow
+        # plan (610 credits/min) that means a burst of 6-7 tickers exhausts
+        # the budget for the current minute. We:
+        #   1) Keep max_workers low (2) to spread requests out
+        #   2) Short-circuit the remaining fetches once we see a rate-limit
+        #      signal — so the scan completes with whatever fundamentals
+        #      landed rather than raising mid-flight
+        #   3) Warn once when rate-limiting happens so the user knows their
+        #      fundamentals coverage is partial
         if not tickers:
             return {}
 
+        import threading
+        rate_limit_hit = threading.Event()
         results: Dict[str, Dict[str, Optional[float]]] = {}
 
         def fetch_one(ticker: str):
+            if rate_limit_hit.is_set():
+                return ticker, {}
             try:
                 payload = self._client.get_statistics(symbol=ticker).as_json()
                 stats = (payload or {}).get('statistics') or {}
@@ -1788,10 +1801,22 @@ class TwelveDataIdeaScanner:
                         out[col] = None
                 return ticker, out
             except Exception as ex:
-                logger.debug('td fundamentals fetch failed for %s: %s', ticker, ex)
+                msg = str(ex).lower()
+                if 'api credits' in msg or 'rate limit' in msg or 'too many requests' in msg:
+                    if not rate_limit_hit.is_set():
+                        logger.warning(
+                            'td fundamentals hit rate limit on %s — remaining tickers '
+                            'in this scan will skip fundamentals. Wait ~60s and retry, '
+                            'or upgrade TwelveData plan credits/min.', ticker)
+                        rate_limit_hit.set()
+                else:
+                    logger.debug('td fundamentals fetch failed for %s: %s', ticker, ex)
                 return ticker, {}
 
-        with ThreadPoolExecutor(max_workers=5) as pool:
+        # max_workers intentionally small — each get_statistics is ~100
+        # credits; bursting 5 in parallel is 500 credits in a fraction of a
+        # second, which crowds the 610/min Grow-plan budget.
+        with ThreadPoolExecutor(max_workers=2) as pool:
             futures = {pool.submit(fetch_one, t): t for t in tickers}
             for fut in as_completed(futures):
                 ticker, data = fut.result()

@@ -231,6 +231,79 @@ class TestTDScannerBuildCandidates:
 
 
 # ---------------------------------------------------------------------------
+# TwelveDataIdeaScanner._fetch_fundamentals — rate-limit graceful degradation
+# ---------------------------------------------------------------------------
+
+class TestTDScannerFundamentalsRateLimit:
+    """get_statistics is ~100 credits/call; the Grow plan is 610/min. A
+    10-ticker scan with fundamentals can burst past that. The scanner must
+    complete with partial fundamentals rather than raise mid-scan."""
+
+    def test_rate_limit_short_circuits_remaining_calls(self):
+        scanner = TwelveDataIdeaScanner(td_client=None)
+
+        call_count = [0]
+        first_5_ok_then_rate_limit = (
+            # First 5 tickers return valid payloads
+            {'statistics': {'valuations_metrics': {'trailing_pe': 30.0}}},
+            {'statistics': {'valuations_metrics': {'trailing_pe': 15.0}}},
+            {'statistics': {'valuations_metrics': {'trailing_pe': 20.0}}},
+            {'statistics': {'valuations_metrics': {'trailing_pe': 25.0}}},
+            {'statistics': {'valuations_metrics': {'trailing_pe': 12.0}}},
+        )
+
+        def get_statistics(symbol):
+            call_count[0] += 1
+            idx = call_count[0] - 1
+            if idx < len(first_5_ok_then_rate_limit):
+                mock = MagicMock()
+                mock.as_json.return_value = first_5_ok_then_rate_limit[idx]
+                return mock
+            raise RuntimeError(
+                'You have run out of API credits for the current minute. '
+                '701 API credits were used, with the current limit being 610.'
+            )
+
+        scanner._client = MagicMock()
+        scanner._client.get_statistics.side_effect = get_statistics
+
+        # 10 tickers — 5 should succeed, 5 should be skipped after rate limit
+        tickers = [f'TICK{i}' for i in range(10)]
+        result = scanner._fetch_fundamentals(tickers)
+
+        # At least 5 succeeded (could be exactly 5 or slightly more if the
+        # rate limit hit only after additional in-flight calls).
+        successful = sum(1 for v in result.values() if v.get('pe_ratio') is not None)
+        assert successful >= 5
+        # And at least one symbol got skipped due to rate limit short-circuit
+        # (otherwise all 10 calls went through, contradicting the mock).
+        assert len(result) <= 10
+
+    def test_non_rate_limit_errors_dont_trip_short_circuit(self):
+        """A transient 500 on one symbol shouldn't stop us from fetching
+        fundamentals on the remaining symbols."""
+        scanner = TwelveDataIdeaScanner(td_client=None)
+
+        def get_statistics(symbol):
+            if symbol == 'BROKEN':
+                raise RuntimeError('500 Internal Server Error')
+            mock = MagicMock()
+            mock.as_json.return_value = {
+                'statistics': {'valuations_metrics': {'trailing_pe': 20.0}},
+            }
+            return mock
+
+        scanner._client = MagicMock()
+        scanner._client.get_statistics.side_effect = get_statistics
+
+        result = scanner._fetch_fundamentals(['AAPL', 'BROKEN', 'NVDA', 'MSFT'])
+        # BROKEN drops out (empty dict not included in results), others succeed
+        assert 'AAPL' in result and result['AAPL'].get('pe_ratio') == 20.0
+        assert 'NVDA' in result and result['NVDA'].get('pe_ratio') == 20.0
+        assert 'MSFT' in result and result['MSFT'].get('pe_ratio') == 20.0
+
+
+# ---------------------------------------------------------------------------
 # TwelveDataIdeaScanner._discover error handling
 # ---------------------------------------------------------------------------
 

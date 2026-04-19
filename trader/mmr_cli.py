@@ -6631,6 +6631,19 @@ def _handle_financials(mmr: MMR, args: argparse.Namespace):
                 console.print(f'[yellow]Unknown financials action: {action}[/yellow]')
     except ValueError as e:
         console.print(f'[red]{e}[/red]')
+    except Exception as e:
+        # TwelveDataError (unknown symbol, rate limits, bad api key) and
+        # Massive's RESTException both subclass RuntimeError / Exception
+        # — catch both here and render friendly instead of leaking a
+        # traceback. Preserve the underlying message which usually points
+        # to the exact remediation ("wait for the next minute", "invalid
+        # api key", etc.).
+        msg = str(e)
+        if 'api credits' in msg.lower() or 'rate limit' in msg.lower():
+            console.print(f'[red]TwelveData rate limit hit: {msg}[/red]')
+            console.print('[dim]Tip: wait ~60s, reduce --limit, or upgrade plan credits/min.[/dim]')
+        else:
+            console.print(f'[red]{type(e).__name__}: {msg}[/red]')
 
 
 def _parse_relative_expiration(expr: str) -> int:
