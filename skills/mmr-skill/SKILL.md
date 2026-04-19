@@ -15,7 +15,7 @@ metadata:
 - **trader_service required**: portfolio, positions, orders, trades, account, resolve, snapshot, depth, buy, sell, cancel, cancel_all, close_all_positions, resize_positions, approve, strategies (list/enable/disable/reload), `universe_add`, `buy_option`, `sell_option`, `risk`, `scan`, `ideas` (with `--location` for international markets), `listen`, `watch`
 - **data_service required**: history_massive, history_ib
 - **massive_api_key only** (no service needed): balance_sheet, income_statement, cash_flow, ratios, filing_section, `options_expirations`, `options_chain`, `options_snapshot`, `options_implied`, `data_download`, `ideas` (default US path), `news`, `movers`, `forex_snapshot` (massive source), `forex_movers`, `stream`
-- **No service needed**: universe_list, universe_show, universe_create, universe_delete, universe_remove, universe_import, status, market_hours, `data_summary`, `data_query`, `backtest`, `backtest_sweep`, `backtest_batch`, `backtests_list`, `backtests_show`, `backtests_confidence`, `backtests_archive`, `backtests_unarchive`, `strategies_inspect`, `strategy_create`, `strategy_deploy`, `strategy_undeploy`, `strategy_signals`, `strategy_backtest`, `propose`, `proposals`, `reject`, `session_limits`, `session_status`, `group_list`, `group_create`, `group_delete`, `group_show`, `group_add`, `group_remove`, `group_set`, `logs`
+- **No service needed**: universe_list, universe_show, universe_create, universe_delete, universe_remove, universe_import, status, market_hours, `data_summary`, `data_query`, `backtest`, `backtest_sweep`, `backtest_batch`, `backtests_list`, `backtests_show`, `backtests_confidence`, `backtests_archive`, `backtests_unarchive`, `sweep_run`, `sweeps_list`, `sweeps_show`, `strategies_inspect`, `strategy_create`, `strategy_deploy`, `strategy_undeploy`, `strategy_signals`, `strategy_backtest`, `propose`, `proposals`, `reject`, `session_limits`, `session_status`, `group_list`, `group_create`, `group_delete`, `group_show`, `group_add`, `group_remove`, `group_set`, `logs`
 
 ## International Stocks (ASX, TSE, SEHK, etc.)
 
@@ -36,29 +36,40 @@ Common location codes: `STK.US.MAJOR` (US), `STK.AU.ASX` (Australia), `STK.CA` (
 
 ## MMRHelpers
 
+**Return convention — read this once:** every `MMRHelpers.*` method returns a **JSON string** (not a dict), even when the table below says "JSON dict". The column refers to the *shape* of the parsed payload, not the Python type of the return value. If you're `emit(result)`ing it for display, you can pass the string straight through. If you're **iterating** or **indexing** the result (`result["data"]`, `for entry in result: ...`), always wrap in `json.loads(...)` first:
+
+```python
+raw = await MMRHelpers.backtest_batch(jobs, concurrency=6)
+parsed = json.loads(raw)          # now a dict
+for entry in parsed["data"]:      # now indexable
+    ...
+```
+
+Common field-name gotchas in the backtest summary: `total_return` (NOT `return_pct`), `sharpe_ratio` (NOT `sharpe`), `total_trades` (NOT `trades`), `max_drawdown` (negative float, e.g. `-0.08`), `profit_factor` can be the string `"inf"` on all-winners runs. See the `backtest` docstring for the full schema.
+
 ### Portfolio & Account
 
 | Method | Description |
 |--------|-------------|
-| `MMRHelpers.portfolio()` | **JSON** dict — positions with P&L (symbol, position, mktPrice, avgCost, unrealizedPNL, dailyPNL) |
-| `MMRHelpers.portfolio_snapshot()` | **JSON** dict — compact: total_value, daily_pnl, position_count, top movers by % change |
-| `MMRHelpers.portfolio_diff()` | **JSON** dict — delta since last call: changed, new, removed positions (auto-stores snapshot) |
+| `MMRHelpers.portfolio()` | positions with P&L (symbol, position, mktPrice, avgCost, unrealizedPNL, dailyPNL) |
+| `MMRHelpers.portfolio_snapshot()` | compact: total_value, daily_pnl, position_count, top movers by % change |
+| `MMRHelpers.portfolio_diff()` | delta since last call: changed, new, removed positions (auto-stores snapshot) |
 | `MMRHelpers.positions()` | Raw positions (symbol, secType, position, avgCost, currency) |
-| `MMRHelpers.orders()` | **JSON** dict — open orders (orderId, action, orderType, lmtPrice, totalQuantity) |
-| `MMRHelpers.trades()` | **JSON** dict — active trades with fill status |
+| `MMRHelpers.orders()` | open orders (orderId, action, orderType, lmtPrice, totalQuantity) |
+| `MMRHelpers.trades()` | active trades with fill status |
 | `MMRHelpers.account()` | IB account ID |
-| `MMRHelpers.status()` | **JSON** dict — service health with PnL (DailyPnL, UnrealizedPnL, RealizedPnL, TotalPnL) |
-| `MMRHelpers.market_hours()` | **JSON** dict — market open/close status for major exchanges |
+| `MMRHelpers.status()` | service health with PnL (DailyPnL, UnrealizedPnL, RealizedPnL, TotalPnL) |
+| `MMRHelpers.market_hours()` | market open/close status for major exchanges |
 
 ### Symbol Resolution & Market Data
 
 | Method | Description |
 |--------|-------------|
-| `MMRHelpers.resolve(symbol, sectype="STK", exchange="", currency="")` | **JSON** dict — resolve ticker to IB contract (conId, exchange, secType, longName) |
-| `MMRHelpers.snapshot(symbol, delayed=False, exchange="", currency="")` | **JSON** dict — price snapshot (bid, ask, last, OHLC). Access: `result["data"]["last"]` |
-| `MMRHelpers.snapshots_batch(symbols, exchange="", currency="")` | **JSON** dict — batch snapshots for multiple symbols in one call (~4s total). Much faster than calling snapshot() in a loop |
+| `MMRHelpers.resolve(symbol, sectype="STK", exchange="", currency="")` | resolve ticker to IB contract (conId, exchange, secType, longName) |
+| `MMRHelpers.snapshot(symbol, delayed=False, exchange="", currency="")` | price snapshot (bid, ask, last, OHLC). Access: `result["data"]["last"]` |
+| `MMRHelpers.snapshots_batch(symbols, exchange="", currency="")` | batch snapshots for multiple symbols in one call (~4s total). Much faster than calling snapshot() in a loop |
 | `MMRHelpers.depth(symbol, rows=5, exchange="", currency="", smart=False, no_chart=False)` | Level 2 order book table + PNG depth chart |
-| `MMRHelpers.depth_json(symbol, rows=5, exchange="", currency="", smart=False)` | **JSON** dict — order book with `chart_path` to PNG image for visual analysis |
+| `MMRHelpers.depth_json(symbol, rows=5, exchange="", currency="", smart=False)` | order book with `chart_path` to PNG image for visual analysis |
 
 ### Trading
 
@@ -138,7 +149,7 @@ If you're running a long/short book, read `net_exposure_pct` first — a $1M lon
 
 | Method | Service? | Description |
 |--------|----------|-------------|
-| `MMRHelpers.ideas(preset, tickers=, universe=, num=, location=, ...)` | No*/Yes** | **JSON** dict — scan for trading ideas with technical scoring |
+| `MMRHelpers.ideas(preset, tickers=, universe=, num=, location=, ...)` | No*/Yes** | scan for trading ideas with technical scoring |
 | `MMRHelpers.news(ticker="", limit=10, detail=False)` | No* | Market news with optional sentiment |
 | `MMRHelpers.movers(market="stocks", losers=False, num=20)` | No* | Top market movers |
 
@@ -189,13 +200,16 @@ Requires `massive_api_key` in config. No trader_service needed. `timeframe`: `"q
 | Method | Description |
 |--------|-------------|
 | `MMRHelpers.strategy_create(name)` | Create template strategy file in `strategies/` |
-| `MMRHelpers.strategies_inspect()` | **Do this first** — AST-scan of `strategies/` returning each class's dispatch mode (`precompute` fast vs `on_prices` slow) and tunable params with defaults. Saves reading every file to plan a sweep. |
-| `MMRHelpers.backtest(path, class_name, conids, params={...}, summary_only=True, ...)` | Backtest a strategy. `params={"EMA_PERIOD": 15}` overrides class attributes or `self.params` entries; `summary_only=True` (default) omits the per-trade array from the return. Always use **absolute paths** — the CLI subprocess doesn't inherit cwd. |
-| `MMRHelpers.backtest_sweep(path, class_name, param_grid={...}, conids, concurrency=N, ...)` | Cartesian-product parameter sweep. Sequential by default (small grids); pass `concurrency=4+` for anything > ~10 combos on 1-min data or it will time out. Parallel path fans out via `backtest_batch` internally. |
-| `MMRHelpers.backtest_batch([jobs], concurrency=4)` | Parallel subprocess-level batch runner for heterogeneous jobs (different strategies/symbols). Each job is `{strategy_path, class_name, conids, days, params, ...}`. **Returns a JSON string** — wrap the result in `json.loads(...)` before iterating. |
-| `MMRHelpers.backtests_list(sort_by="score", limit=25, ...)` | List past runs from the history store, ranked by quality score (default) or any metric |
-| `MMRHelpers.backtests_show(run_id, include_raw=False)` | Full detail for one run, including **statistical-confidence tests** (PSR, t-stat, bootstrap CIs, P&L distribution, losing-streak MC). Raw per-trade + equity-curve arrays are off by default (multi-MB on 1-min × 365d); pass `include_raw=True` only if you specifically need them. |
-| `MMRHelpers.backtests_confidence([ids])` | Bulk read of the statistical-confidence block across N runs. Compact payload (~500 bytes/run) — use this post-sweep to rank candidates by PSR / p-value / CI tightness instead of N × `backtests_show` which ships multi-MB per run. |
+| `MMRHelpers.strategies_inspect()` | **Call first.** AST scan returning each class's dispatch mode + tunable params. |
+| `MMRHelpers.backtest(path, class, conids, params={...}, summary_only=True, ...)` | Single backtest. Pass an **absolute** `path`; `params` overrides class attrs (e.g. `{"EMA_PERIOD":15}`). |
+| `MMRHelpers.backtest_sweep(path, class, param_grid={...}, conids, concurrency=N)` | Cartesian sweep. Use `concurrency≥4` for > ~10 combos or it will time out; fans out via `backtest_batch`. |
+| `MMRHelpers.backtest_batch([jobs], concurrency=4)` | Heterogeneous parallel batch (mixed strategies/symbols). Each job = `{strategy_path, class_name, conids, days, params, ...}`. |
+| `MMRHelpers.backtests_list(sort_by="score", limit=25, sweep_id=None)` | Past runs ranked by composite quality score. Filter by strategy, sweep, or archive state. |
+| `MMRHelpers.backtests_show(run_id, include_raw=False)` | One run's full detail + statistical-confidence block. `include_raw=False` (default) omits MB-scale arrays. |
+| `MMRHelpers.backtests_confidence([ids])` | Bulk PSR/t-stat/CI/skew/streak for N runs (~500 bytes/run). The right post-sweep ranking tool. |
+| `MMRHelpers.sweep_run(manifest_path, dry_run=False, concurrency=None)` | **Cron-able nightly sweep.** YAML manifest → expand → freshness-check → parallel run → digest in `~/.local/share/mmr/reports/`. See Pattern 14. |
+| `MMRHelpers.sweeps_list(limit=25)` | **Curated view** of what sweeps have ever run. Entry point for "what have we done?" |
+| `MMRHelpers.sweeps_show(id, top=10)` | One sweep's metadata + top-N leaderboard by composite score. |
 | `MMRHelpers.backtests_archive([ids])` / `backtests_unarchive([ids])` | Soft-delete / restore runs — hides from default list without losing the data. Pass `include_archived=True` or `archived_only=True` to `backtests_list` to see hidden runs. |
 | `MMRHelpers.strategy_deploy(name, conids, paper=True)` | Deploy to `strategy_runtime.yaml` |
 | `MMRHelpers.strategy_undeploy(name)` | Remove from config |
@@ -269,119 +283,24 @@ Must specify either `symbol` or `universe`. Requires `data_service` to be runnin
 |--------|-------------|
 | `MMRHelpers.cli(command)` | Run any CLI command directly (e.g. `MMRHelpers.cli("resolve AAPL")`) |
 
-## Concurrency & Best Practices
+## Concurrency & Error Handling
 
-### CRITICAL: Do NOT over-parallelize RPC calls
+Three rules that cover 95% of the failure modes:
 
-All trader_service calls (resolve, snapshot, buy, sell, orders, portfolio, etc.) go through a single ZMQ RPC connection. Firing many calls concurrently with `asyncio.gather()` will **queue them up and cause cascading timeouts**. Each call that times out (30s) blocks the next one.
+**1. Don't over-parallelize `trader_service` RPC calls.** Everything that goes through `trader_service` (resolve, snapshot, buy/sell, orders, portfolio, approve, etc.) shares one ZMQ connection — firing an `asyncio.gather` of 8 of them cascades into timeouts. Serialize them in a `for` loop. Use `snapshots_batch(symbols)` instead of N × `snapshot()`. You *can* parallelize across different backends (e.g. `movers` + `ideas` — both Massive.com) or across subprocess-level helpers (`backtest_batch`, `backtest_sweep(concurrency=N)`, `sweep_run`) which spawn independent CLI processes.
 
-**BAD** — will timeout and fail:
-```python
-# DON'T DO THIS — 8 concurrent RPC calls will all timeout
-results = await asyncio.gather(
-    *[MMRHelpers.resolve(t) for t in ["AAPL", "MSFT", "AMD", "NVDA", "GOOG", "META", "TSLA", "AMZN"]],
-)
-```
+**2. Always `await` in the calling cell.** The helper runtime has no running event loop for `asyncio.create_task`, and `asyncio.run()` nests badly. Just `await MMRHelpers.x(...)` — the helper already offloads the CLI subprocess to a worker thread so it doesn't block. For long downloads pass `timeout=` or chunk the work across cells.
 
-**GOOD** — sequential with early exit on failure:
-```python
-# Serialize RPC calls to trader_service
-resolved = {}
-for ticker in ["AAPL", "MSFT", "AMD", "NVDA"]:
-    try:
-        result = await MMRHelpers.resolve(ticker)
-        if result.get("data"):
-            resolved[ticker] = result["data"][0]
-    except Exception:
-        break  # Service is down, stop trying
-```
-
-**GOOD** — use batch methods when available:
-```python
-# snapshots_batch does ONE RPC call for multiple symbols (~4s total)
-result = await MMRHelpers.snapshots_batch(["AAPL", "MSFT", "AMD", "NVDA"])
-```
-
-### Safe parallelism: only across DIFFERENT services
-
-You CAN parallelize calls that hit **different backends**:
-```python
-# OK — movers/ideas use Massive.com API, not trader_service
-results = await asyncio.gather(
-    MMRHelpers.movers(num=15),           # Massive.com
-    MMRHelpers.ideas("momentum", num=10), # Massive.com
-)
-```
-
-But do NOT mix Massive.com calls with trader_service calls in a single gather — if a trader_service call hangs, the gather blocks everything.
-
-### Always check health before trading
-
-Before any trading session, verify IB Gateway is connected upstream:
-```python
-status = await MMRHelpers.status()
-if not status.get("data", {}).get("ib_upstream_connected", True) == False:
-    # Safe to proceed
-    pass
-else:
-    emit("IB Gateway is not connected to IBKR servers — cannot trade")
-    # Fall back to Massive.com-only operations (movers, ideas, news, financials)
-```
-
-### Prefer batch operations
-
-| Instead of... | Use... |
-|---------------|--------|
-| Multiple `snapshot()` calls | `snapshots_batch(symbols)` — single RPC call |
-| Multiple `resolve()` calls | Resolve one at a time, sequentially |
-| Multiple `ideas()` presets in gather | Call them sequentially — each takes ~4s |
-
-### No fire-and-forget: helpers must be awaited in the same cell
-
-The helper runtime executes each cell in a fresh top-level context with no running event loop. That means:
+**3. Timeouts return error payloads, not exceptions.** JSON helpers return `{"error": "timed out ...", "timed_out": True}`; string helpers return `"ERROR: ..."`. Check both:
 
 ```python
-# BAD — RuntimeError: no running event loop
-task = asyncio.create_task(MMRHelpers.data_download(symbols, days=730))
-
-# BAD — asyncio.run() nests a loop and can interfere with the helper's own async setup
-result = asyncio.run(MMRHelpers.data_download(symbols, days=730))
-```
-
-```python
-# GOOD — just await it. The helper already offloads the CLI subprocess to a
-# worker thread via asyncio.to_thread(), so the cell isn't blocking other
-# Python work — only your cell.
-result = await MMRHelpers.data_download(symbols, days=730, timeout=1800)
-```
-
-For long-running downloads (e.g. 25 symbols × 1-min × 730d), either:
-1. Pass `timeout=` to `data_download`/`history_massive`/`history_ib` so the CLI subprocess isn't killed after 5 minutes, OR
-2. Chunk the symbol list and `await` each chunk in its own cell — the helper re-uses the same DuckDB, so partial progress is persisted between cells.
-
-### Error handling pattern
-
-Timeouts don't raise exceptions — they return error dicts/strings. Check for them:
-
-```python
-# JSON methods return {"error": "timed out ...", "timed_out": True} on timeout
 result = await MMRHelpers.resolve("AAPL")
 if result.get("timed_out") or result.get("error"):
-    emit("trader_service is not responding — stop calling it until you verify status()")
-    # Don't retry — the service needs to recover first
-else:
-    # Safe to proceed
-    conId = result["data"][0]["conId"]
-
-# String methods return "ERROR: Command timed out..." on timeout
-result = await MMRHelpers.buy("AAPL", market=True, quantity=10)
-if result.startswith("ERROR"):
-    emit("Buy failed — " + result)
+    # trader_service is unresponsive — stop calling it until status() recovers
+    return
 ```
 
-**Key rule**: if ANY trader_service call times out, assume the service is down and stop making more calls. Check `status()` before trying again.
-
-**RPC error types are now preserved server → client**. When the trader_service raises a specific exception (e.g. `ValueError("contract not found")`, `ConnectionError("...")`, `TraderException(...)`), the CLI surfaces the real type name in the error payload rather than a generic `Exception`. The CLI wrapper converts these into strings/dicts for the skill, so you won't see Python exceptions directly, but the error messages are now specific enough to branch on — look for phrases like `ValueError`, `TraderException`, `timed out`, `not connected`, `Bracket aborted:`, etc.
+If ANY trader_service call times out, call `status()` before retrying. Specific error types (`ValueError`, `ConnectionError`, `TraderException`, `"Bracket aborted: ..."`) are preserved in the message — branch on the phrase if you need to.
 
 ## Patterns
 
@@ -715,7 +634,81 @@ ranked = await MMRHelpers.backtests_list(sort_by="score", limit=10)
 emit(ranked)
 ```
 
-### Pattern 14: Market Scanning Workflow
+### Pattern 14: Nightly Sweep (cron-able, morning review)
+
+**Use this when you want to peg CPU overnight and have a digest waiting in the morning.** The manifest is reproducible (lives in git), cron-compatible, and every run is tagged with a parent `sweep_id` so you can always reconstruct what was tried.
+
+**Step 1: Declare the sweep in YAML** (commit this to your repo):
+
+```yaml
+# ~/mmr-sweeps/nightly.yaml
+sweeps:
+  - name: orb_cross_sectional
+    strategy: /Users/you/dev/mmr/strategies/opening_range_breakout.py
+    class: OpeningRangeBreakout
+    symbols: [SPY, QQQ, NVDA, GOOGL, AMD, AAPL, MSFT, META]
+    param_grid:
+      RANGE_MINUTES: [15, 30, 45]
+      VOLUME_MULT: [1.2, 1.3, 1.5]
+    days: 365
+    bar_size: "1 min"
+    concurrency: 8  # or omit for auto (cpu_count - 1)
+    note: "nightly"
+
+  - name: keltner_param_tune
+    strategy: /Users/you/dev/mmr/strategies/keltner_breakout.py
+    class: KeltnerBreakout
+    symbols: [SPY, QQQ, NVDA]
+    param_grid:
+      EMA_PERIOD: [10, 20, 30]
+      BAND_MULT: [1.5, 2.0, 2.5]
+    days: 365
+    bar_size: "1 min"
+```
+
+**Step 2: cron it** (macOS/Linux):
+
+```bash
+# Runs at 02:00 nightly; log to a file so you can check health in the morning.
+0 2 * * * cd /Users/you/dev/mmr && /usr/local/bin/mmr sweep run ~/mmr-sweeps/nightly.yaml >> ~/mmr-sweeps/cron.log 2>&1
+```
+
+Or from an LLM/script in-session:
+
+```python
+result = await MMRHelpers.sweep_run("/Users/you/mmr-sweeps/nightly.yaml")
+emit(result)
+```
+
+**Step 3: morning review** — curated, then drill down:
+
+```python
+# What has ever been run?
+history = await MMRHelpers.sweeps_list(limit=10)
+emit(history)
+# → each row: {id, name, status, n_runs_successful, digest_path, ...}
+
+# What did last night produce?
+last = await MMRHelpers.sweeps_show(sweep_id=17, top=10)
+emit(last)
+# → leaderboard of last night's runs by composite score, with run_ids.
+
+# Open the markdown digest for the full story (strong candidates, failures, risk flags):
+# Or: check statistical confidence on the top 5 in one call.
+parsed = json.loads(last)
+top_ids = [r["run_id"] for r in parsed["data"]["leaderboard"][:5]]
+confidence = await MMRHelpers.backtests_confidence(top_ids)
+emit(confidence)
+```
+
+**Why this is better than ad-hoc sweeps:**
+- Before any run, `sweeps_list` tells you what's already been done so you don't duplicate work.
+- Markdown digest at `~/.local/share/mmr/reports/sweep_<id>_<name>_<timestamp>.md` is readable by humans and by the LLM via `read_file`.
+- `sweep run --dry-run` expands the grid and estimates wall time before you commit compute.
+- Freshness guard refuses to run on stale data (catches "IB Gateway was down, we sweept yesterday's numbers").
+- `--skip-freshness` when you know better.
+
+### Pattern 15: Market Scanning Workflow
 
 ```python
 # Check market hours

@@ -1091,10 +1091,46 @@ def build_parser() -> argparse.ArgumentParser:
                       help='JSON output: skip the trades and equity-curve arrays '
                            '(keeps summary + run_id). Trades are still persisted '
                            'to the DB for `backtests show` unless --no-save-trades.')
+    bt_p.add_argument('--sweep-id', type=int, default=None,
+                      help='Internal: parent sweep id when invoked by '
+                           '`mmr sweep run`. Persisted on the backtest row so '
+                           '`backtests list --sweep <id>` can reconstruct the '
+                           'leaderboard.')
+
+    # sweep — declarative, cron-able nightly sweep from a YAML manifest.
+    # Unlike bt-sweep (single strategy, one-shot CLI) this handles many
+    # strategies + symbol/param grids, persists a parent `sweeps` row,
+    # runs with real subprocess concurrency, and drops a morning digest.
+    swp_p = sub.add_parser('sweep', help='Run / list / show declarative sweeps (cron-ready)',
+                            epilog='Examples:\n'
+                                   '  sweep run nightly.yaml          # execute a manifest\n'
+                                   '  sweep run nightly.yaml --dry-run  # expand + estimate, no execute\n'
+                                   '  sweep list                      # history of past sweeps\n'
+                                   '  sweep show 7                    # leaderboard of sweep #7\n',
+                            formatter_class=fmt)
+    swp_sub = swp_p.add_subparsers(dest='sweep_action')
+
+    swp_run_p = swp_sub.add_parser('run', help='Execute a sweep manifest')
+    swp_run_p.add_argument('manifest', help='Path to sweep manifest YAML')
+    swp_run_p.add_argument('--dry-run', action='store_true', default=False,
+                            help='Expand grid + estimate wall time, do not execute')
+    swp_run_p.add_argument('--concurrency', type=int, default=None,
+                            help='Override concurrency across all sweeps in the manifest. '
+                                 'Default: each sweep uses its own or auto-tune to cpu_count-1.')
+    swp_run_p.add_argument('--skip-freshness', action='store_true', default=False,
+                            help='Bypass the stale-data guard (default refuses if any '
+                                 'conid lacks a bar from the last 3 trading days)')
+
+    swp_list_p = swp_sub.add_parser('list', help='List past sweeps')
+    swp_list_p.add_argument('--limit', type=int, default=25)
+
+    swp_show_p = swp_sub.add_parser('show', help='Show sweep detail + leaderboard')
+    swp_show_p.add_argument('sweep_id', type=int)
+    swp_show_p.add_argument('--top', type=int, default=10)
 
     # bt-sweep — cartesian-product parameter sweep. One process, N backtests.
-    sw_p = sub.add_parser('bt-sweep', aliases=['sweep'],
-                           help='Run a backtest across a parameter grid (cartesian product)',
+    sw_p = sub.add_parser('bt-sweep',
+                           help='Single-strategy parameter sweep (sequential, in-process). For cron-ready multi-strategy runs use `mmr sweep run`.',
                            epilog='Examples:\n'
                                   '  bt-sweep -s strategies/keltner_breakout.py --class KeltnerBreakout\\\n'
                                   '      --conids 756733 --days 180\\\n'
@@ -1143,6 +1179,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     def _add_list_args(p):
         p.add_argument('--strategy', default=None, help='Filter by strategy class name')
+        p.add_argument('--sweep', type=int, default=None, dest='sweep_id',
+                       help='Filter to runs from a specific sweep (see `mmr sweep list`)')
         p.add_argument('--limit', type=int, default=25, help='Max rows (default 25)')
         p.add_argument('--sort-by', default='score', choices=_sort_choices,
                        help='Sort column (default: score — a composite quality '
@@ -1633,8 +1671,11 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
         elif cmd in ('backtest', 'bt'):
             _handle_backtest(args)
 
-        elif cmd in ('bt-sweep', 'sweep'):
+        elif cmd == 'bt-sweep':
             _handle_backtest_sweep(args)
+
+        elif cmd == 'sweep':
+            _handle_sweep(args)
 
         elif cmd in ('backtests', 'bts'):
             _handle_backtests(args)
@@ -3326,6 +3367,7 @@ def _handle_backtests(args: argparse.Namespace):
         sort_column = _BTS_SORT_ALIASES.get(sort_alias, sort_alias)
         include_archived = getattr(args, 'include_archived', False)
         archived_only = getattr(args, 'archived_only', False)
+        sweep_id = getattr(args, 'sweep_id', None)
 
         try:
             if sort_column == _BTS_SCORE_SENTINEL:
@@ -3342,6 +3384,7 @@ def _handle_backtests(args: argparse.Namespace):
                     descending=True,
                     include_archived=include_archived,
                     archived_only=archived_only,
+                    sweep_id=sweep_id,
                 )
                 records.sort(
                     key=_bt_composite_score,
@@ -3356,6 +3399,7 @@ def _handle_backtests(args: argparse.Namespace):
                     descending=descending,
                     include_archived=include_archived,
                     archived_only=archived_only,
+                    sweep_id=sweep_id,
                 )
         except ValueError as ex:
             print_status(str(ex), success=False)
@@ -3378,6 +3422,7 @@ def _handle_backtests(args: argparse.Namespace):
                         'final_equity': r.final_equity,
                         'note': r.note,
                         'archived': r.archived,
+                        'sweep_id': r.sweep_id,
                     }
                     for r in records
                 ],
@@ -3510,6 +3555,7 @@ def _handle_backtests(args: argparse.Namespace):
                 'trades_stored':        bool(r.trades_json),
                 'note':                 r.note or '',
                 'archived':             bool(getattr(r, 'archived', False)),
+                'sweep_id':             getattr(r, 'sweep_id', None),
             }
             stats, stats_reason = _compute_bt_stats(r)
             stats_data = {
@@ -3641,6 +3687,7 @@ def _handle_backtests(args: argparse.Namespace):
             pf = rec.profit_factor
             rows.append({
                 'run_id': rec.id,
+                'sweep_id': rec.sweep_id,
                 'class_name': rec.class_name,
                 'symbols': _format_conids_with_symbols(rec.conids),
                 'params': rec.params or {},
@@ -4485,6 +4532,765 @@ def _print_backtest_metrics_help():
     )
 
 
+def _handle_sweep(args: argparse.Namespace):
+    """Top-level dispatcher for `mmr sweep {run,list,show}`."""
+    action = getattr(args, 'sweep_action', None)
+    if action == 'run':
+        _handle_sweep_run(args)
+    elif action == 'list':
+        _handle_sweep_list(args)
+    elif action == 'show':
+        _handle_sweep_show(args)
+    else:
+        print_status(
+            'Usage: sweep run <manifest.yaml> | sweep list | sweep show <id>',
+            success=False,
+        )
+
+
+def _resolve_sym_to_conid(accessor, symbol: str) -> Optional[int]:
+    """Resolve a ticker to its local-DB conId via UniverseAccessor.
+    Returns None if unresolvable — caller decides whether that's fatal."""
+    try:
+        matches = accessor.resolve_universe(symbol, first_only=True)
+    except Exception:
+        return None
+    if not matches:
+        return None
+    _universe, sd = matches[0]
+    return int(sd.conId)
+
+
+def _freshness_check(
+    conids: List[int], max_staleness_days: int = 3,
+) -> List[Dict[str, Any]]:
+    """Return a list of ``{conid, last_bar}`` entries for conids whose
+    most-recent bar in the local DuckDB is older than ``max_staleness_days``.
+
+    Empty list means "everything is fresh enough". We check the `1 day`
+    bar series only — even for 1-min sweeps, having yesterday's daily
+    bar means the 1-min feed is probably also caught up.
+    """
+    import datetime as dt
+    from trader.container import Container
+    from trader.data.data_access import TickStorage
+    from trader.objects import BarSize
+
+    cfg = Container.instance().config()
+    storage = TickStorage(cfg.get('duckdb_path', ''))
+    tick = storage.get_tickdata(BarSize.Days1)
+
+    stale = []
+    cutoff = dt.datetime.now() - dt.timedelta(days=max_staleness_days)
+    for cid in conids:
+        try:
+            df = tick.read(int(cid))
+        except Exception as ex:
+            stale.append({'conid': int(cid), 'last_bar': None,
+                           'reason': f'read error: {ex}'})
+            continue
+        if df is None or len(df) == 0:
+            stale.append({'conid': int(cid), 'last_bar': None,
+                           'reason': 'no data'})
+            continue
+        last_ts = df.index.max()
+        # DataFrame index may be tz-aware; compare as naive.
+        last_naive = last_ts.to_pydatetime().replace(tzinfo=None) if hasattr(
+            last_ts, 'to_pydatetime'
+        ) else last_ts
+        if last_naive < cutoff:
+            stale.append({
+                'conid': int(cid),
+                'last_bar': str(last_naive)[:10],
+                'reason': f'stale ({last_naive} < cutoff {cutoff})',
+            })
+    return stale
+
+
+def _sweep_manifest_validate(manifest: Any) -> List[Dict[str, Any]]:
+    """Validate + canonicalise a parsed sweep-manifest YAML.
+
+    Expected shape::
+
+        sweeps:
+          - name: <str>
+            strategy: <path>
+            class: <ClassName>
+            # exactly one of symbols/conids/universe:
+            symbols: [SPY, QQQ, ...]   |  conids: [1, 2, ...]  |  universe: portfolio
+            param_grid: {KEY: [v1, v2, ...], ...}   # optional; empty = single run w/ defaults
+            days: 365                                 # default 365
+            bar_size: "1 min"                         # default "1 min"
+            concurrency: 8                            # default auto (cpu-1)
+            note: "..."                               # optional
+
+    Returns the list of *validated* sweep dicts. Raises ValueError with
+    the offending sweep + field on any problem."""
+    if not isinstance(manifest, dict) or 'sweeps' not in manifest:
+        raise ValueError("manifest must be a YAML dict with top-level 'sweeps' list")
+    sweeps = manifest['sweeps']
+    if not isinstance(sweeps, list) or not sweeps:
+        raise ValueError("'sweeps' must be a non-empty list")
+
+    cleaned: List[Dict[str, Any]] = []
+    for i, raw in enumerate(sweeps):
+        if not isinstance(raw, dict):
+            raise ValueError(f"sweeps[{i}] must be a dict, got {type(raw).__name__}")
+        for required in ('name', 'strategy', 'class'):
+            if not raw.get(required):
+                raise ValueError(f"sweeps[{i}] missing required field {required!r}")
+        # Exactly one symbol source.
+        sources = sum(1 for k in ('symbols', 'conids', 'universe') if raw.get(k))
+        if sources != 1:
+            raise ValueError(
+                f"sweeps[{i}] must have exactly one of "
+                f"'symbols', 'conids', or 'universe' "
+                f"(got {sources})"
+            )
+        pg = raw.get('param_grid') or {}
+        if pg and not isinstance(pg, dict):
+            raise ValueError(f"sweeps[{i}].param_grid must be a dict")
+        for k, v in pg.items():
+            if not isinstance(v, list) or not v:
+                raise ValueError(
+                    f"sweeps[{i}].param_grid[{k}] must be a non-empty list"
+                )
+        cleaned.append({
+            'name': raw['name'],
+            'strategy': raw['strategy'],
+            'class': raw['class'],
+            'symbols': raw.get('symbols'),
+            'conids': raw.get('conids'),
+            'universe': raw.get('universe'),
+            'param_grid': pg,
+            'days': int(raw.get('days', 365)),
+            'bar_size': raw.get('bar_size', '1 min'),
+            'concurrency': raw.get('concurrency'),  # None = auto-tune
+            'note': raw.get('note', ''),
+        })
+    return cleaned
+
+
+def _expand_sweep_jobs(
+    sweep: Dict[str, Any], accessor,
+) -> List[Dict[str, Any]]:
+    """Expand a single validated sweep into concrete per-(symbol, param)
+    job dicts. Resolves symbols → conids via the local universe DB; raises
+    ValueError on unresolvable symbols."""
+    import itertools
+
+    if sweep.get('universe'):
+        uni = accessor.get(sweep['universe'])
+        if not uni:
+            raise ValueError(f"universe {sweep['universe']!r} not found")
+        symbol_conids = [(sd.symbol, int(sd.conId)) for sd in uni.security_definitions]
+    elif sweep.get('conids'):
+        symbol_conids = [(str(c), int(c)) for c in sweep['conids']]
+    else:  # symbols
+        resolved = []
+        unresolved = []
+        for sym in sweep['symbols']:
+            cid = _resolve_sym_to_conid(accessor, sym)
+            if cid is None:
+                unresolved.append(sym)
+            else:
+                resolved.append((sym, cid))
+        if unresolved:
+            raise ValueError(
+                f"sweep {sweep['name']!r}: could not resolve symbols "
+                f"{unresolved} — add to a universe or pass conids directly"
+            )
+        symbol_conids = resolved
+
+    grid = sweep.get('param_grid') or {}
+    if grid:
+        keys = list(grid.keys())
+        value_lists = [grid[k] for k in keys]
+        param_combos = [dict(zip(keys, combo))
+                         for combo in itertools.product(*value_lists)]
+    else:
+        param_combos = [{}]  # single "run with defaults" job
+
+    jobs = []
+    for symbol, cid in symbol_conids:
+        for params in param_combos:
+            jobs.append({
+                'sweep_name': sweep['name'],
+                'symbol': symbol,
+                'strategy': sweep['strategy'],
+                'class_name': sweep['class'],
+                'conids': [cid],
+                'days': sweep['days'],
+                'bar_size': sweep['bar_size'],
+                'params': params,
+                'note': sweep['note'],
+            })
+    return jobs
+
+
+def _handle_sweep_run(args: argparse.Namespace):
+    import datetime as dt
+    import hashlib
+    import os
+    import pathlib
+    from trader.container import Container
+    from trader.data.backtest_store import BacktestStore, SweepRecord
+    from trader.data.universe import UniverseAccessor
+
+    manifest_path = pathlib.Path(args.manifest).expanduser()
+    if not manifest_path.exists():
+        print_status(f'manifest not found: {manifest_path}', success=False)
+        return
+    try:
+        import yaml as _yaml
+        manifest_yaml = manifest_path.read_text()
+        manifest = _yaml.safe_load(manifest_yaml)
+        sweep_specs = _sweep_manifest_validate(manifest)
+    except ValueError as ex:
+        print_status(f'manifest invalid: {ex}', success=False)
+        return
+    except Exception as ex:
+        print_status(f'manifest load failed: {ex}', success=False)
+        return
+
+    # Share a single universe accessor across all sweeps in the manifest.
+    cfg = Container.instance().config()
+    duckdb_path = cfg.get('duckdb_path', '')
+    accessor = UniverseAccessor(duckdb_path, cfg.get('universe_library', 'Universes'))
+    bstore = BacktestStore(duckdb_path)
+
+    # Expand everything up front so `--dry-run` has the full plan.
+    per_sweep_plans: List[Dict[str, Any]] = []
+    try:
+        for spec in sweep_specs:
+            jobs = _expand_sweep_jobs(spec, accessor)
+            per_sweep_plans.append({'spec': spec, 'jobs': jobs})
+    except ValueError as ex:
+        print_status(str(ex), success=False)
+        return
+
+    # Auto-tune concurrency: cpu_count - 1 to leave room for other processes
+    # (e.g. a running trader_service). Cap at 16 to avoid DuckDB write thrash.
+    def _auto_concurrency(requested) -> int:
+        if args.concurrency is not None:
+            return max(1, int(args.concurrency))
+        if requested is not None:
+            return max(1, int(requested))
+        cpu = os.cpu_count() or 4
+        return max(1, min(16, cpu - 1))
+
+    # Dry-run: expand + estimate, exit.
+    if args.dry_run:
+        total_jobs = sum(len(p['jobs']) for p in per_sweep_plans)
+        # Rough estimate: 90s/job per core at 1-min/365d on a precompute
+        # strategy. This is deliberately conservative for the UI.
+        est_per_job_seconds = 90
+        total_cpu_seconds = total_jobs * est_per_job_seconds
+        # Effective wall time if you ran each sweep at its own concurrency.
+        wall_seconds = sum(
+            max(1, len(p['jobs'])) * est_per_job_seconds
+            / _auto_concurrency(p['spec']['concurrency'])
+            for p in per_sweep_plans
+        )
+        plan: Dict[str, Any] = {
+            'manifest': str(manifest_path),
+            'total_jobs': total_jobs,
+            'est_cpu_seconds': total_cpu_seconds,
+            'est_wall_seconds': int(wall_seconds),
+            'sweeps': [
+                {
+                    'name': p['spec']['name'],
+                    'jobs': len(p['jobs']),
+                    'concurrency': _auto_concurrency(p['spec']['concurrency']),
+                }
+                for p in per_sweep_plans
+            ],
+        }
+        if _json_mode:
+            print(json.dumps({'data': plan, 'title': 'Sweep Dry-run'}))
+            return
+        console.print(f'[bold]Dry-run: {manifest_path.name}[/]')
+        console.print(f'  total jobs: {total_jobs}')
+        console.print(f'  est CPU-time: {total_cpu_seconds / 60:.1f} min '
+                       f'(~{est_per_job_seconds}s/job ×{total_jobs})')
+        console.print(f'  est wall time: {wall_seconds / 60:.1f} min')
+        for s in plan['sweeps']:
+            console.print(
+                f'  • {s["name"]:<30} {s["jobs"]:>4} jobs  '
+                f'concurrency={s["concurrency"]}'
+            )
+        return
+
+    # Freshness guard — check every conid touched by every sweep.
+    if not args.skip_freshness:
+        all_conids = sorted({
+            c for p in per_sweep_plans for j in p['jobs'] for c in j['conids']
+        })
+        stale = _freshness_check(all_conids)
+        if stale:
+            summary = ', '.join(
+                f'conid={s["conid"]} last={s["last_bar"]}'
+                for s in stale[:5]
+            )
+            more = '' if len(stale) <= 5 else f' (+{len(stale)-5} more)'
+            print_status(
+                f'{len(stale)} conid(s) have stale data: {summary}{more}. '
+                f'Refusing to run — rerun with --skip-freshness to override '
+                f'or pull fresh data first.', success=False,
+            )
+            return
+
+    # Execute each sweep sequentially (sweeps themselves are typically
+    # small N; jobs within a sweep are what parallelize).
+    import asyncio
+    asyncio.run(_run_sweeps_async(
+        manifest_yaml, per_sweep_plans,
+        bstore=bstore, auto_concurrency=_auto_concurrency,
+    ))
+
+
+async def _run_sweeps_async(
+    manifest_yaml: str,
+    plans: List[Dict[str, Any]],
+    *,
+    bstore,
+    auto_concurrency,
+) -> None:
+    """Run every sweep in the manifest, writing a digest when done."""
+    import asyncio
+    import hashlib
+    import os
+    import signal
+    import datetime as dt
+    from trader.data.backtest_store import SweepRecord
+
+    # SIGINT: let in-flight subprocess jobs finish and write what they can.
+    cancel_requested = {'flag': False}
+
+    def _on_sigint(*_a):
+        cancel_requested['flag'] = True
+        if not _json_mode:
+            console.print(
+                '\n[yellow]SIGINT received — waiting for in-flight jobs '
+                'to finish, then exiting gracefully...[/]'
+            )
+
+    try:
+        signal.signal(signal.SIGINT, _on_sigint)
+    except (ValueError, AttributeError):
+        # Not in the main thread — skip handler installation.
+        pass
+
+    for plan in plans:
+        spec = plan['spec']
+        jobs = plan['jobs']
+        concurrency = auto_concurrency(spec['concurrency'])
+        config_hash = hashlib.sha256(
+            json.dumps(jobs, sort_keys=True, default=str).encode()
+        ).hexdigest()[:16]
+
+        # Record the sweep up-front so partial runs are still discoverable.
+        sweep_id = bstore.create_sweep(SweepRecord(
+            name=spec['name'],
+            manifest_yaml=manifest_yaml,
+            config_hash=config_hash,
+            n_runs_planned=len(jobs),
+            concurrency=concurrency,
+            note=spec.get('note', ''),
+        ))
+
+        if not _json_mode:
+            console.print(
+                f'[bold]Sweep #{sweep_id}: {spec["name"]}[/] '
+                f'— {len(jobs)} jobs at concurrency={concurrency}'
+            )
+
+        t0 = dt.datetime.now()
+        results = await _execute_jobs_parallel(
+            jobs, concurrency=concurrency, sweep_id=sweep_id,
+            cancel_flag=cancel_requested,
+        )
+        elapsed = (dt.datetime.now() - t0).total_seconds()
+
+        ok = sum(1 for r in results if r.get('status') == 'ok')
+        fail = len(results) - ok
+        status = (
+            'cancelled' if cancel_requested['flag']
+            else 'completed' if fail == 0
+            else 'failed' if ok == 0
+            else 'completed'  # partial success still counts as completed
+        )
+        digest_path = _write_sweep_digest(
+            sweep_id=sweep_id, spec=spec, results=results,
+            elapsed_s=elapsed, status=status,
+        )
+        bstore.finalize_sweep(
+            sweep_id, status=status,
+            n_runs_successful=ok, n_runs_failed=fail,
+            digest_path=digest_path,
+        )
+        if not _json_mode:
+            console.print(
+                f'  → sweep #{sweep_id} {status}: {ok}/{len(jobs)} ok '
+                f'in {elapsed/60:.1f}m  |  digest: {digest_path}'
+            )
+
+        if cancel_requested['flag']:
+            break
+
+    if _json_mode:
+        # Emit a compact summary list of the sweep ids we just ran.
+        ran = []
+        for plan in plans:
+            ran.append({'name': plan['spec']['name'],
+                         'jobs': len(plan['jobs'])})
+        print(json.dumps(
+            {'data': {'sweeps_run': ran, 'cancelled': cancel_requested['flag']},
+             'title': 'Sweep Batch'}, default=str,
+        ))
+
+
+async def _execute_jobs_parallel(
+    jobs: List[Dict[str, Any]],
+    *,
+    concurrency: int,
+    sweep_id: int,
+    cancel_flag: Dict[str, bool],
+) -> List[Dict[str, Any]]:
+    """Run ``jobs`` as parallel ``mmr backtest`` subprocesses, capped at
+    ``concurrency``. Each child writes its own BacktestRecord with the
+    parent ``sweep_id`` stamped on it.
+
+    Skips any pending launches after ``cancel_flag['flag']`` is set, but
+    does NOT kill subprocesses already running — a sweep that's 90% done
+    and gets interrupted still persists the 90%.
+    """
+    import asyncio
+    import sys
+
+    sem = asyncio.Semaphore(concurrency)
+    mmr_py = sys.executable
+
+    async def _one(job: Dict[str, Any]) -> Dict[str, Any]:
+        if cancel_flag.get('flag'):
+            return {'status': 'cancelled', 'job': job}
+        async with sem:
+            if cancel_flag.get('flag'):
+                return {'status': 'cancelled', 'job': job}
+            cmd = [
+                mmr_py, '-m', 'trader.mmr_cli', '--json', 'backtest',
+                '-s', job['strategy'],
+                '--class', job['class_name'],
+                '--conids', *[str(c) for c in job['conids']],
+                '--days', str(job['days']),
+                '--bar-size', job['bar_size'],
+                '--summary-only',
+                '--sweep-id', str(sweep_id),
+            ]
+            if job.get('params'):
+                cmd.extend(['--params', json.dumps(job['params'])])
+            if job.get('note'):
+                cmd.extend(['--note', job['note']])
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=900,
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return {'status': 'timeout', 'job': job}
+            if proc.returncode != 0:
+                return {
+                    'status': 'error', 'job': job,
+                    'error': (stderr.decode() or stdout.decode())[:500],
+                }
+            try:
+                parsed = json.loads(stdout.decode().strip())
+                summary = parsed.get('data', {}).get('summary', {})
+                return {'status': 'ok', 'job': job, 'summary': summary}
+            except json.JSONDecodeError:
+                return {
+                    'status': 'error', 'job': job,
+                    'error': f'non-json stdout: {stdout.decode()[:200]}',
+                }
+
+    return await asyncio.gather(*(_one(j) for j in jobs))
+
+
+def _write_sweep_digest(
+    *, sweep_id: int, spec: Dict[str, Any], results: List[Dict[str, Any]],
+    elapsed_s: float, status: str,
+) -> str:
+    """Write a markdown summary of a sweep to ``~/.local/share/mmr/reports/``.
+    Returns the absolute path written (empty string on failure — digest
+    writing never takes down a sweep)."""
+    import datetime as dt
+    import pathlib
+    try:
+        reports_dir = pathlib.Path.home() / '.local' / 'share' / 'mmr' / 'reports'
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        ts = dt.datetime.now().strftime('%Y-%m-%d_%H%M%S')
+        safe_name = ''.join(
+            c if c.isalnum() or c in ('-', '_') else '_'
+            for c in spec['name']
+        )[:40]
+        path = reports_dir / f'sweep_{sweep_id:04d}_{safe_name}_{ts}.md'
+
+        ok = [r for r in results if r['status'] == 'ok']
+        # Rank by sortino + pf − 10×|dd|, matching the rough ranking used
+        # in the parallel sweep_helper. Full composite score would require
+        # reloading each record; this is close enough for the digest.
+        def _rough_score(r):
+            s = r.get('summary', {})
+            sortino = s.get('sortino_ratio') or 0.0
+            pf = s.get('profit_factor')
+            if pf == 'inf' or (isinstance(pf, (int, float)) and pf > 1e15):
+                pf = 3.0
+            elif not isinstance(pf, (int, float)):
+                pf = 0.0
+            dd = abs(s.get('max_drawdown') or 0.0)
+            return sortino + min(pf, 3.0) - 10 * dd
+
+        ok_sorted = sorted(ok, key=_rough_score, reverse=True)
+        strong = [
+            r for r in ok_sorted
+            if (r['summary'].get('sharpe_ratio') or 0) > 2.0
+            and (r['summary'].get('profit_factor') in ('inf',)
+                  or (isinstance(r['summary'].get('profit_factor'), (int, float))
+                       and r['summary'].get('profit_factor', 0) > 1.5))
+        ]
+        fails = [r for r in results if r['status'] != 'ok']
+
+        lines: List[str] = []
+        lines.append(f'# Sweep #{sweep_id}: {spec["name"]}')
+        lines.append('')
+        lines.append(f'- **Status**: {status}')
+        lines.append(f'- **Duration**: {elapsed_s/60:.1f} min')
+        lines.append(f'- **Results**: {len(ok)}/{len(results)} ok, {len(fails)} failed')
+        lines.append(f'- **Strategy**: `{spec["class"]}` ({spec["strategy"]})')
+        lines.append(f'- **Bar size**: `{spec["bar_size"]}` × {spec["days"]} days')
+        if spec.get('param_grid'):
+            lines.append(f'- **Param grid**: `{json.dumps(spec["param_grid"])}`')
+        lines.append('')
+
+        def _leader_table(rows: List[Dict[str, Any]], header: str) -> None:
+            if not rows:
+                return
+            lines.append(f'## {header} ({len(rows)})')
+            lines.append('')
+            lines.append(
+                '| rank | run_id | symbol | params | return | sharpe | sortino | pf | trades | max_dd |'
+            )
+            lines.append(
+                '|------|--------|--------|--------|--------|--------|---------|----|---|--------|'
+            )
+            for rank, r in enumerate(rows[:20], 1):
+                s = r['summary']
+                p = json.dumps(r['job'].get('params', {}), separators=(',', '='))
+                pf = s.get('profit_factor', 0)
+                pf_d = '∞' if pf == 'inf' or (
+                    isinstance(pf, (int, float)) and pf > 1e15
+                ) else (f'{pf:.2f}' if isinstance(pf, (int, float)) else str(pf))
+                lines.append(
+                    f'| {rank} | {s.get("run_id", "")} | {r["job"]["symbol"]} | '
+                    f'`{p}` | {(s.get("total_return") or 0):+.2%} | '
+                    f'{(s.get("sharpe_ratio") or 0):+.2f} | '
+                    f'{(s.get("sortino_ratio") or 0):+.2f} | {pf_d} | '
+                    f'{s.get("total_trades", 0)} | '
+                    f'{(s.get("max_drawdown") or 0):+.2%} |'
+                )
+            lines.append('')
+
+        _leader_table(strong, 'Strong candidates')
+        _leader_table(ok_sorted, 'All successful runs (ranked)')
+
+        if fails:
+            lines.append(f'## Failures ({len(fails)})')
+            lines.append('')
+            for r in fails[:20]:
+                err = r.get('error') or r['status']
+                sym = r['job'].get('symbol', '?')
+                lines.append(
+                    f'- {sym} params={r["job"].get("params", {})} — '
+                    f'`{r["status"]}`: {err[:200]}'
+                )
+            lines.append('')
+
+        lines.append('---')
+        lines.append(f'Full run details: `mmr backtests list --sweep {sweep_id}`')
+        lines.append(
+            f'Per-run confidence: `mmr backtests confidence <run_ids>`  '
+            f'(see `mmr sweep show {sweep_id}` for top run ids)'
+        )
+
+        path.write_text('\n'.join(lines))
+        return str(path)
+    except Exception as ex:
+        if not _json_mode:
+            console.print(f'[yellow]digest write failed: {ex}[/yellow]')
+        return ''
+
+
+def _handle_sweep_list(args: argparse.Namespace):
+    from trader.container import Container
+    from trader.data.backtest_store import BacktestStore
+    cfg = Container.instance().config()
+    bstore = BacktestStore(cfg.get('duckdb_path', ''))
+    sweeps = bstore.list_sweeps(limit=args.limit)
+
+    if _json_mode:
+        data = []
+        for s in sweeps:
+            data.append({
+                'id': s.id, 'name': s.name, 'status': s.status,
+                'started_at': str(s.started_at)[:19] if s.started_at else None,
+                'finished_at': str(s.finished_at)[:19] if s.finished_at else None,
+                'n_runs_planned': s.n_runs_planned,
+                'n_runs_successful': s.n_runs_successful,
+                'n_runs_failed': s.n_runs_failed,
+                'concurrency': s.concurrency,
+                'digest_path': s.digest_path,
+                'note': s.note,
+            })
+        print(json.dumps({'data': data, 'title': 'Sweep History'}, default=str))
+        return
+
+    if not sweeps:
+        print_status('No sweeps recorded yet — run `mmr sweep run <manifest.yaml>`', success=False)
+        return
+    from rich.table import Table
+    from rich import box as _box
+    tbl = Table(title=f'Sweep History — {len(sweeps)} sweeps',
+                  box=_box.ROUNDED, pad_edge=False)
+    tbl.add_column('id', justify='right', width=4)
+    tbl.add_column('name', no_wrap=True, width=30)
+    tbl.add_column('status', width=10)
+    tbl.add_column('runs', justify='right', width=10)
+    tbl.add_column('started', width=16)
+    tbl.add_column('duration', justify='right', width=10)
+    tbl.add_column('digest', overflow='ellipsis', width=40)
+    for s in sweeps:
+        dur = (
+            f'{(s.finished_at - s.started_at).total_seconds()/60:.0f}m'
+            if s.finished_at and s.started_at else '—'
+        )
+        status_style = {
+            'completed': 'green', 'failed': 'red',
+            'cancelled': 'yellow', 'running': 'cyan',
+        }.get(s.status, '')
+        runs = f'{s.n_runs_successful}/{s.n_runs_planned}'
+        if s.n_runs_failed:
+            runs += f' (-{s.n_runs_failed})'
+        tbl.add_row(
+            str(s.id), s.name,
+            f'[{status_style}]{s.status}[/]' if status_style else s.status,
+            runs,
+            str(s.started_at)[:16] if s.started_at else '—',
+            dur,
+            s.digest_path or '—',
+        )
+    console.print(tbl)
+
+
+def _handle_sweep_show(args: argparse.Namespace):
+    from trader.container import Container
+    from trader.data.backtest_store import BacktestStore
+    cfg = Container.instance().config()
+    bstore = BacktestStore(cfg.get('duckdb_path', ''))
+    swp = bstore.get_sweep(args.sweep_id)
+    if not swp:
+        print_status(f'sweep #{args.sweep_id} not found', success=False)
+        return
+    # Pull the child runs, ranked by composite score.
+    records = bstore.list(
+        sweep_id=args.sweep_id, limit=10_000,
+        sort_by='created_at', descending=True, include_archived=True,
+    )
+    records.sort(key=_bt_composite_score, reverse=True)
+
+    if _json_mode:
+        print(json.dumps({
+            'data': {
+                'sweep': {
+                    'id': swp.id, 'name': swp.name, 'status': swp.status,
+                    'n_runs_planned': swp.n_runs_planned,
+                    'n_runs_successful': swp.n_runs_successful,
+                    'n_runs_failed': swp.n_runs_failed,
+                    'digest_path': swp.digest_path,
+                    'started_at': str(swp.started_at)[:19] if swp.started_at else None,
+                    'finished_at': str(swp.finished_at)[:19] if swp.finished_at else None,
+                },
+                'leaderboard': [
+                    {
+                        'rank': rank,
+                        'run_id': r.id,
+                        'class_name': r.class_name,
+                        'symbols': _format_conids_with_symbols(r.conids),
+                        'params': r.params,
+                        'score': _bt_composite_score(r),
+                        'total_return': r.total_return,
+                        'sharpe_ratio': r.sharpe_ratio,
+                        'sortino_ratio': r.sortino_ratio,
+                        'profit_factor': (
+                            'inf' if r.profit_factor > 1e15 else r.profit_factor
+                        ),
+                        'total_trades': r.total_trades,
+                        'max_drawdown': r.max_drawdown,
+                    }
+                    for rank, r in enumerate(records[:args.top], 1)
+                ],
+            },
+            'title': f'Sweep #{swp.id}: {swp.name}',
+        }, default=str))
+        return
+
+    from rich.table import Table
+    from rich.text import Text as _Text
+    from rich import box as _box
+
+    console.print(
+        f'[bold]Sweep #{swp.id}: {swp.name}[/]  '
+        f'[dim]({swp.status}, {swp.n_runs_successful}/{swp.n_runs_planned} ok)[/]'
+    )
+    if swp.digest_path:
+        console.print(f'[dim]digest: {swp.digest_path}[/]')
+    console.print('')
+
+    tbl = Table(title=f'Top {min(args.top, len(records))} of {len(records)} runs',
+                  box=_box.ROUNDED, pad_edge=False)
+    tbl.add_column('rank', justify='right', width=4)
+    tbl.add_column('id', justify='right', width=5)
+    tbl.add_column('symbols', no_wrap=True, width=20)
+    tbl.add_column('params', overflow='ellipsis', width=30)
+    tbl.add_column('score', justify='right', width=7)
+    tbl.add_column('return', justify='right', width=8)
+    tbl.add_column('sharpe', justify='right', width=7)
+    tbl.add_column('pf', justify='right', width=6)
+    tbl.add_column('trades', justify='right', width=6)
+    for rank, r in enumerate(records[:args.top], 1):
+        pf = r.profit_factor
+        pf_d = '∞' if pf > 1e15 else f'{pf:.2f}'
+        p_str = ', '.join(f'{k}={v}' for k, v in sorted((r.params or {}).items()))
+        tbl.add_row(
+            str(rank), str(r.id),
+            _format_conids_with_symbols(r.conids),
+            p_str,
+            f'{_bt_composite_score(r):+.3f}',
+            _Text(f'{r.total_return:+.2%}',
+                   style=_bt_style(_bt_class_return, r.total_return)),
+            _Text(f'{r.sharpe_ratio:+.2f}',
+                   style=_bt_style(_bt_class_sharpe, r.sharpe_ratio)),
+            _Text(pf_d, style=_bt_style(_bt_class_pf, pf)),
+            str(r.total_trades),
+        )
+    console.print(tbl)
+
+
 def _handle_backtest_sweep(args: argparse.Namespace):
     """Cartesian-product parameter sweep — run one backtest per grid point,
     persist each to the history store, and print a composite-score
@@ -4929,6 +5735,7 @@ def _handle_backtest(args: argparse.Namespace):
                 trades_json=trades_json,
                 equity_curve_json=equity_curve_json,
                 note=getattr(args, 'note', '') or '',
+                sweep_id=getattr(args, 'sweep_id', None),
             )
             run_id = bstore.add(record)
             summary['run_id'] = run_id

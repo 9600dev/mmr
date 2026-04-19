@@ -1,7 +1,7 @@
 """
 NewsHelpers — thin llmvm-style async wrappers around the local news-service HTTP API.
 
-The service is expected to be running at http://127.0.0.1:8080 (see
+The service is expected to be running at http://127.0.0.1:8089 (see
 ``reference/operations.md``). Every method returns a dict so the caller can inspect
 ``fetcher_source``/``attempts`` in line with mmr's fail-loudly principle.
 
@@ -27,7 +27,7 @@ from typing import Any
 
 # Override via NEWS_SERVICE_URL env var (e.g. when running the service on a
 # different port during development).
-_NEWS_URL = os.environ.get("NEWS_SERVICE_URL", "http://127.0.0.1:8080").rstrip("/")
+_NEWS_URL = os.environ.get("NEWS_SERVICE_URL", "http://127.0.0.1:8089").rstrip("/")
 _DEFAULT_TIMEOUT = 60.0  # seconds — generous because playwright + archive can be slow
 
 
@@ -238,7 +238,7 @@ def _download_image_sync(
 # ----------------------------------------------------------------------
 
 class NewsHelpers:
-    """Async helpers for mmr's local news-service (http://127.0.0.1:8080).
+    """Async helpers for mmr's local news-service (http://127.0.0.1:8089).
 
     **Always** inspect ``article.fetcher_source`` on a scrape result before
     trusting the content — ``archive:*`` means the article is a snapshot and

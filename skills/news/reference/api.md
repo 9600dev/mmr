@@ -1,6 +1,6 @@
 # News Service — HTTP API reference
 
-Base URL: `http://127.0.0.1:8080` (override via `NEWS_HTTP_ADDRESS` / `NEWS_HTTP_PORT`).
+Base URL: `http://127.0.0.1:8089` (override via `NEWS_HTTP_ADDRESS` / `NEWS_HTTP_PORT`).
 
 **Endpoints:** `/v1/health` (liveness), `/v1/search` (DDG query),
 `/v1/scrape` (three modes: heuristic, LLM extraction, LLM extraction +

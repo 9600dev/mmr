@@ -8,103 +8,83 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 
-# Resolve paths once at import time
 _MMR_ROOT = str(Path(__file__).resolve().parent.parent.parent)
-
-# Use uv run --project to resolve dependencies automatically.
-# This avoids maintaining a .venv and matches the shell function pattern.
+# uv run --project handles dep resolution without a local .venv.
 _UV_PREFIX = ["uv", "run", "--project", _MMR_ROOT]
 
-# Serialize all CLI calls to avoid DuckDB single-writer lock contention.
-# Bounded-parallel subprocess launch. Replaces the old asyncio.Lock() that
-# forced strict serialization — making `backtest_batch(concurrency=6)` a
-# no-op. The MMR-side DuckDB layer now retries on lock contention, so
-# concurrent subprocess launches are safe. The Semaphore caps total
-# concurrency at a sane upper bound (16) to prevent a 100-job batch from
-# fork-bombing the host while still letting explicitly-requested
-# concurrency (e.g. concurrency=6) actually execute in parallel.
+# Bounded-parallel slots for concurrent subprocess launches. DuckDB retries
+# lock contention at the storage layer, so N parallel `mmr backtest` calls
+# are safe; the cap just prevents fork-bombing on big batches.
 _CLI_SLOTS = asyncio.Semaphore(16)
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+_ENV = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1"}
+
+
+def _invoke(cmd: List[str], timeout: int) -> subprocess.CompletedProcess:
+    """Run a subprocess; caller handles TimeoutExpired."""
+    return subprocess.run(
+        cmd, capture_output=True, text=True,
+        cwd=_MMR_ROOT, timeout=timeout, env=_ENV,
+    )
 
 
 def _run_cli_sync(*args: str, timeout: int = 30) -> str:
-    """Run an mmr CLI command and return combined stdout+stderr as a string."""
+    """Run an mmr CLI command and return combined stdout+stderr."""
     cmd = _UV_PREFIX + ["python", "-m", "trader.mmr_cli"] + list(args)
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=_MMR_ROOT,
-            timeout=timeout,
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1"},
-        )
+        result = _invoke(cmd, timeout)
     except subprocess.TimeoutExpired:
-        return f"ERROR: Command timed out after {timeout}s — trader_service may be unresponsive (check IB Gateway connectivity)"
-    output = (result.stdout + result.stderr).strip()
-    # Strip any remaining ANSI escape sequences (covers all CSI sequences)
-    output = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', output)
-    return output
+        return (f"ERROR: Command timed out after {timeout}s — trader_service "
+                f"may be unresponsive (check IB Gateway connectivity)")
+    return _ANSI_RE.sub('', (result.stdout + result.stderr).strip())
 
 
 def _run_cli_json_sync(*args: str, timeout: int = 30) -> dict:
-    """Run mmr CLI with --json and return parsed JSON.
-
-    Uses only stdout for JSON parsing (stderr may contain uv warnings,
-    Python logging, etc. that would break json.loads).
-    """
+    """Run mmr CLI with --json; parse stdout only (stderr carries uv / logging
+    noise that would break json.loads)."""
     cmd = _UV_PREFIX + ["python", "-m", "trader.mmr_cli", "--json"] + list(args)
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=_MMR_ROOT,
-            timeout=timeout,
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1"},
-        )
+        result = _invoke(cmd, timeout)
     except subprocess.TimeoutExpired:
         return {"data": None, "error": f"timed out after {timeout}s", "timed_out": True}
-    stdout = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', result.stdout.strip())
+    stdout = _ANSI_RE.sub('', result.stdout.strip())
     try:
         return json.loads(stdout)
     except json.JSONDecodeError:
-        stderr = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', result.stderr.strip())
+        stderr = _ANSI_RE.sub('', result.stderr.strip())
         return {"data": stdout or stderr, "title": None, "error": "Failed to parse JSON"}
 
 
 def _run_sdk_script_sync(script: str, timeout: int = 30) -> str:
-    """Run a Python script in the mmr venv and return output."""
+    """Run a Python script in the mmr venv and return cleaned output."""
     cmd = _UV_PREFIX + ["python", "-c", script]
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=_MMR_ROOT,
-            timeout=timeout,
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1"},
-        )
+        result = _invoke(cmd, timeout)
     except subprocess.TimeoutExpired:
         return f"ERROR: Script timed out after {timeout}s — trader_service may be unresponsive"
-    output = (result.stdout + result.stderr).strip()
-    output = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', output)
-    return output
+    return _ANSI_RE.sub('', (result.stdout + result.stderr).strip())
 
 
 async def _run_cli(*args: str, timeout: int = 30) -> str:
-    """Async wrapper: acquires lock, runs CLI in a thread."""
     async with _CLI_SLOTS:
         return await asyncio.to_thread(_run_cli_sync, *args, timeout=timeout)
 
 
 async def _run_cli_json(*args: str, timeout: int = 30) -> dict:
-    """Async wrapper: acquires lock, runs CLI JSON in a thread."""
     async with _CLI_SLOTS:
         return await asyncio.to_thread(_run_cli_json_sync, *args, timeout=timeout)
 
 
+async def _run_cli_json_str(*args: str, timeout: int = 30) -> str:
+    """Thin convenience: 22+ helpers call ``_run_cli_json(...)`` then
+    ``json.dumps(result, indent=2)`` verbatim. Collapse to one call so
+    the pattern lives in one place."""
+    result = await _run_cli_json(*args, timeout=timeout)
+    return json.dumps(result, indent=2)
+
+
 async def _run_sdk_script(script: str, timeout: int = 30) -> str:
-    """Async wrapper: acquires lock, runs SDK script in a thread."""
     async with _CLI_SLOTS:
         return await asyncio.to_thread(_run_sdk_script_sync, script, timeout=timeout)
 
@@ -972,8 +952,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.data_summary()
         """
-        result = await _run_cli_json("data", "summary")
-        return json.dumps(result, indent=2)
+        return await _run_cli_json_str("data", "summary")
 
     @staticmethod
     async def data_query(
@@ -997,8 +976,7 @@ class MMRHelpers:
         args = ["data", "query", symbol, "--bar-size", bar_size, "--days", str(days)]
         if tail is not None:
             args.extend(["--tail", str(tail)])
-        result = await _run_cli_json(*args)
-        return json.dumps(result, indent=2)
+        return await _run_cli_json_str(*args)
 
     @staticmethod
     async def data_download(
@@ -1008,42 +986,18 @@ class MMRHelpers:
         timeout: int = 300,
         progress: bool = False,
     ) -> str:
-        """
-        Download data from Massive.com to local DuckDB.
-        Does NOT require trader_service. Requires massive_api_key in config.
+        """Download data from Massive.com to local DuckDB. Requires
+        ``massive_api_key`` in config. ``timeout`` is total (batch) by
+        default; per-symbol with ``progress=True``, which also prints a
+        live status line and makes partial progress on failure easy to
+        reason about (prior symbols are already persisted).
 
-        :param symbols: List of tickers to download (e.g. ["AAPL", "MSFT"])
-        :param bar_size: Bar size (default "1 day")
-        :param days: Days of history to download (default 365)
-        :param timeout: Seconds before the CLI subprocess is killed. In the
-            default (batch) mode this is the total budget for all symbols.
-            With progress=True it's the per-symbol budget.
-        :param progress: If True, download one symbol per subprocess and
-            print a live status line to stdout between each. Trades a little
-            subprocess overhead (~1s per symbol) for visible progress on
-            long pulls. Also makes partial progress easy to reason about
-            if a symbol fails midway — prior symbols are already persisted.
-
-        NOTE: Do NOT try to run this with ``asyncio.create_task()`` or
-        ``asyncio.run_coroutine_threadsafe()`` — the helper cell has no
-        running event loop to schedule a background task against. Just
-        ``await`` this directly; the real work already runs in a worker
-        thread via ``asyncio.to_thread``, so long-running pulls don't block
-        the helper runtime.
-
-        Example:
-        # Fast single-subprocess batch download
-        result = await MMRHelpers.data_download(["AAPL", "MSFT"], bar_size="1 day", days=365)
-
-        # Big 1-min pull with a live per-symbol progress line
-        result = await MMRHelpers.data_download(
-            big_list, bar_size="1 min", days=730, progress=True, timeout=120,
-        )
+        Just ``await`` this directly — no create_task/run_coroutine_threadsafe
+        (the helper cell has no running loop to attach to).
         """
         if not progress:
             args = ["data", "download"] + symbols + ["--bar-size", bar_size, "--days", str(days)]
-            result = await _run_cli_json(*args, timeout=timeout)
-            return json.dumps(result, indent=2)
+            return await _run_cli_json_str(*args, timeout=timeout)
 
         # progress=True: one subprocess per symbol so we can stream progress.
         import sys as _sys
@@ -1107,46 +1061,24 @@ class MMRHelpers:
         summary_only: bool = True,
         timeout: int = 300,
     ) -> str:
-        """
-        Backtest a strategy against historical data.
-        Does NOT require any service. Uses local DuckDB data.
+        """Backtest a strategy (local DuckDB, no service needed).
 
-        Path gotcha: the CLI is spawned from the skill directory, not your
-        project root — so a relative path like ``strategies/foo.py`` will
-        resolve wrong. Pass an **absolute path** (or just the filename, if
-        the strategy is under the project's configured strategies_directory).
+        Gotchas:
+          - ``strategy_path`` must be **absolute** — CLI subprocess does not inherit cwd.
+          - ``on_prices``-only strategies are O(N²); call ``strategies_inspect()`` first
+            and prefer ``mode == "precompute"`` or drop ``days=30`` to calibrate.
+          - ``params``: upper-case keys override class attrs, lower-case go to
+            ``self.params``; typos raise ``ValueError``.
+          - ``summary_only=True`` (default) omits the per-trade array; trades still
+            persist to the DB for ``backtests_show``.
 
-        Timeout gotcha: strategies that only override ``on_prices`` are
-        O(N²) on a backtest — a 1-year × 1-min run hangs past the 300s
-        default. Call ``strategies_inspect()`` first and filter by
-        ``mode == "precompute"``, or drop to ``days=30`` for a calibration
-        run on slow strategies before committing to the full window.
-
-        :param strategy_path: **Absolute** path to strategy .py file
-            (e.g. ``"/Users/you/dev/mmr/strategies/my_strategy.py"``)
-        :param class_name: Strategy class name (e.g. "MyStrategy")
-        :param conids: List of contract IDs to backtest
-        :param universe: Universe name (alternative to conids)
-        :param days: Days of history (default 365). Use 30 for O(N²)
-            strategies to avoid timeout.
-        :param capital: Initial capital (default 100000)
-        :param bar_size: Bar size (default "1 min")
-        :param params: Optional parameter overrides, e.g.
-            ``{"EMA_PERIOD": 15, "BAND_MULT": 1.5}``. Upper-case keys are
-            applied to class attributes; lower-case to ``self.params``.
-            Typos raise ``ValueError`` rather than silently no-op.
-        :param summary_only: Default True — omit the per-trade array from
-            the JSON response (trades still persist to the history store
-            for ``backtests_show`` unless ``--no-save-trades`` is passed).
-            Pass False only when you actually need the fills client-side.
-        :param timeout: Seconds before the CLI subprocess is killed.
-            Default 300s matches the CLI's internal cap.
-
-        Example:
-        result = await MMRHelpers.backtest(
-            "/Users/you/dev/mmr/strategies/keltner_breakout.py",
-            "KeltnerBreakout", conids=[265598],
-            params={"EMA_PERIOD": 15, "BAND_MULT": 1.5})
+        Returns JSON with ``data.summary`` containing: ``run_id``, ``applied_params``,
+        ``total_return`` (NOT return_pct), ``sharpe_ratio`` (NOT sharpe),
+        ``sortino_ratio``, ``calmar_ratio``, ``profit_factor`` (can be ``"inf"``),
+        ``expectancy_bps``, ``max_drawdown`` (negative float), ``total_trades``
+        (NOT trades), ``win_rate`` (null when no trades), ``time_in_market_pct``,
+        ``final_equity``, ``start_date``, ``end_date``. See STRATEGIES.md for
+        the full field glossary.
         """
         args = ["backtest", "-s", strategy_path, "--class", class_name,
                 "--days", str(days), "--capital", str(capital), "--bar-size", bar_size]
@@ -1158,8 +1090,7 @@ class MMRHelpers:
             args.extend(["--params", json.dumps(params)])
         if summary_only:
             args.append("--summary-only")
-        result = await _run_cli_json(*args, timeout=timeout)
-        return json.dumps(result, indent=2)
+        return await _run_cli_json_str(*args, timeout=timeout)
 
     @staticmethod
     async def backtest_sweep(
@@ -1177,53 +1108,17 @@ class MMRHelpers:
         concurrency: int = 1,
         per_job_timeout: int = 600,
     ) -> str:
-        """
-        Cartesian-product parameter sweep — runs one backtest per grid
-        combination, persists each to the history store, and returns a
-        composite-score leaderboard.
+        """Cartesian-product parameter sweep over ``param_grid``. Persists
+        one backtest_runs row per combo and returns a composite-score
+        leaderboard.
 
-        By default runs in-process sequentially so data loads once and is
-        reused across combos — ideal when grid is small (≤ ~10 combos
-        on 1-min × 365d). **Pass ``concurrency=N`` for larger grids** and
-        the sweep transparently fans out through subprocess-level batch
-        execution (each combo is a `mmr backtest --params '{...}'` call).
-        That converts a 30-combo × 90s sequential run (~45 min, will hit
-        the default 1800s timeout) into an N-way parallel ~5-10 min run.
+        Sequential by default (data loads once, reused). **Pass
+        ``concurrency=N`` for anything > ~10 combos on 1-min data** — the
+        helper fans out through ``backtest_batch`` internally, turning a
+        30-combo × 90s job (~45 min) into an N-way parallel ~5-10 min run.
 
-        Does NOT require any service.
-
-        :param strategy_path: Absolute path to the strategy .py file
-        :param class_name: Strategy class name
-        :param param_grid: ``{"EMA_PERIOD": [10, 20, 30], "BAND_MULT": [1.5, 2.0]}``
-            — cartesian product expands to 6 runs.
-        :param conids: Contract IDs (or use universe)
-        :param universe: Universe name (alternative to conids)
-        :param days: Backtest window (default 180)
-        :param capital: Initial capital
-        :param bar_size: Bar size (default "1 min")
-        :param top: Show top-N in the leaderboard (default 10)
-        :param note: Free-text note stamped on every sweep run
-        :param timeout: Overall subprocess timeout for the sequential
-            (``concurrency=1``) path. Ignored when ``concurrency > 1``.
-        :param concurrency: >1 to parallelise via ``backtest_batch``.
-            Recommended for grids that would otherwise exceed ~15 min
-            of sequential compute. Default 1 (sequential, in-process).
-        :param per_job_timeout: Per-combo subprocess timeout for the
-            parallel path. Default 600s per combo.
-
-        Example (sequential, small grid):
-        result = await MMRHelpers.backtest_sweep(
-            "/path/to/keltner_breakout.py", "KeltnerBreakout",
-            param_grid={"EMA_PERIOD": [10, 20], "BAND_MULT": [1.5, 2.0]},
-            conids=[756733], days=180)
-
-        Example (parallel, large grid — use this for anything > ~10 combos
-        on 1-min data):
-        result = await MMRHelpers.backtest_sweep(
-            "/path/to/opening_range_breakout.py", "OpeningRangeBreakout",
-            param_grid={"RANGE_MINUTES":[10,15,20,30,45,60],
-                        "VOLUME_MULT":[1.0,1.2,1.3,1.5,1.8]},
-            conids=[756733], days=365, concurrency=4)
+        ``param_grid`` = ``{KEY: [v1, v2, ...]}``. Cartesian product.
+        See ``backtest`` for path/params gotchas.
         """
         # Parallel path — decompose into batch jobs. This sidesteps the
         # `bt-sweep` CLI entirely; we re-rank the batch results locally
@@ -1324,8 +1219,7 @@ class MMRHelpers:
             args.extend(["--universe", universe])
         if note:
             args.extend(["--note", note])
-        result = await _run_cli_json(*args, timeout=timeout)
-        return json.dumps(result, indent=2)
+        return await _run_cli_json_str(*args, timeout=timeout)
 
     @staticmethod
     async def backtest_batch(
@@ -1334,43 +1228,19 @@ class MMRHelpers:
         summary_only: bool = True,
         per_job_timeout: int = 300,
     ) -> str:
-        """
-        Run several backtests in parallel via subprocess concurrency.
+        """Run many heterogeneous backtests in parallel subprocesses.
+        Use for mixed strategies/symbols; use ``backtest_sweep`` for
+        single-strategy cartesian grids.
 
-        Use this when you have heterogeneous jobs (different strategies,
-        different symbols) that don't fit ``backtest_sweep``'s single-
-        strategy / cartesian-grid shape. Each job spawns its own CLI
-        subprocess, so the GIL doesn't serialise them.
+        Each ``job`` is a dict: ``strategy_path`` (absolute, required),
+        ``class_name`` (required), ``conids`` OR ``universe`` (required),
+        plus optional ``days``, ``capital``, ``bar_size``, ``params``,
+        ``note``.
 
-        **Return type:** like every other helper, this returns a **JSON
-        string** (not a dict) — wrap the result in ``json.loads(...)``
-        before iterating. Shape:
-        ``{"data": [{status, input, result?, error?}, ...]}``
-        ``status`` is ``"ok"`` (summary attached in ``result``),
-        ``"timeout"``, or ``"error"`` (details in ``error``). Entries come
-        back in the same order as ``jobs`` — safe to zip against the
-        input list.
-
-        Does NOT require any service.
-
-        :param jobs: List of dicts, each with keys:
-            ``strategy_path`` (required, absolute),
-            ``class_name`` (required),
-            ``conids`` or ``universe`` (required),
-            plus any of ``days``, ``capital``, ``bar_size``, ``params``,
-            ``note``.
-        :param concurrency: Max concurrent subprocesses (default 4)
-        :param summary_only: Omit per-trade arrays from each response
-            (recommended — saves context)
-        :param per_job_timeout: Seconds before a single job is killed
-
-        Example:
-        result = await MMRHelpers.backtest_batch([
-            {"strategy_path": "/abs/path/keltner.py", "class_name": "KeltnerBreakout",
-             "conids": [756733], "days": 180},
-            {"strategy_path": "/abs/path/vwap.py", "class_name": "VwapReversion",
-             "conids": [756733], "days": 180},
-        ], concurrency=4)
+        Returns ``{"data": [{status, input, result?, error?}, ...]}`` in
+        input order — ``status`` is ``"ok"`` | ``"timeout"`` | ``"error"``.
+        JSON string per the module convention; wrap in ``json.loads``
+        to iterate.
         """
         async def _one(job: Dict[str, Any]) -> Dict[str, Any]:
             try:
@@ -1411,41 +1281,21 @@ class MMRHelpers:
         directory: Optional[str] = None,
         strategy: Optional[str] = None,
     ) -> str:
-        """
-        Discover tunable params + dispatch mode for every Strategy subclass
-        in ``strategies/``. AST-based — does NOT execute the strategy file.
+        """AST scan of ``strategies/`` — returns ``[{file, class, mode,
+        tunables, docstring}]``. ``mode`` is ``"precompute"`` (fast, O(N))
+        or ``"on_prices"`` (O(N²) on backtest — avoid or drop days=30).
+        ``tunables`` merges class-level constants and
+        ``self.params.get()`` lookups with their defaults.
 
-        Returns ``[{file, class, mode, tunables, docstring}]`` where:
-          * ``mode`` is ``"precompute"`` (fast, O(N)), ``"on_prices"``
-            (slow, O(N²) on a backtest — use days=30 or skip),
-            ``"precompute+on_prices"``, or ``"inherited"``.
-          * ``tunables`` is ``{KEY: default_value}`` combining class-level
-            constants (``EMA_PERIOD = 20``) and ``self.params.get('key', default)``
-            lookups.
-
-        Use this **before** planning a sweep so you know:
-          (a) which strategies are fast enough to run on 1-min 1-year data,
-          (b) what knobs exist to sweep, and
-          (c) their default values (so your grid brackets them sensibly).
-
-        Does NOT require any service.
-
-        :param directory: Override strategies directory
-        :param strategy: Inspect a single file (path relative to
-            project root or absolute)
-
-        Example:
-        result = await MMRHelpers.strategies_inspect()
-        # → [{"class": "KeltnerBreakout", "mode": "precompute",
-        #     "tunables": {"EMA_PERIOD": 20, "BAND_MULT": 2.0, ...}}, ...]
+        **Call before planning a sweep** to know which strategies are
+        fast enough and what knobs each exposes.
         """
         args = ["strategies", "inspect"]
         if directory:
             args.extend(["--directory", directory])
         if strategy:
             args.extend(["--strategy", strategy])
-        result = await _run_cli_json(*args)
-        return json.dumps(result, indent=2)
+        return await _run_cli_json_str(*args)
 
     # ------------------------------------------------------------------
     # Strategy Lifecycle (no service needed)
@@ -1464,8 +1314,7 @@ class MMRHelpers:
         result = await MMRHelpers.strategy_create("momentum_breakout")
         """
         args = ["strategies", "create", name, "--directory", directory]
-        result = await _run_cli_json(*args)
-        return json.dumps(result, indent=2)
+        return await _run_cli_json_str(*args)
 
     @staticmethod
     async def strategy_deploy(
@@ -1497,8 +1346,7 @@ class MMRHelpers:
             args.extend(["--universe", universe])
         if paper:
             args.append("--paper")
-        result = await _run_cli_json(*args)
-        return json.dumps(result, indent=2)
+        return await _run_cli_json_str(*args)
 
     @staticmethod
     async def strategy_undeploy(name: str) -> str:
@@ -1511,8 +1359,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.strategy_undeploy("my_strategy")
         """
-        result = await _run_cli_json("strategies", "undeploy", name)
-        return json.dumps(result, indent=2)
+        return await _run_cli_json_str("strategies", "undeploy", name)
 
     @staticmethod
     async def strategy_signals(name: str, limit: int = 20) -> str:
@@ -1526,9 +1373,7 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.strategy_signals("my_strategy")
         """
-        result = await _run_cli_json("strategies", "signals", name,
-                                         "--limit", str(limit))
-        return json.dumps(result, indent=2)
+        return await _run_cli_json_str("strategies", "signals", name, "--limit", str(limit))
 
     @staticmethod
     async def strategy_backtest(
@@ -1548,8 +1393,7 @@ class MMRHelpers:
         result = await MMRHelpers.strategy_backtest("smi_crossover_amd", days=365)
         """
         args = ["strategies", "backtest", name, "--days", str(days), "--capital", str(capital)]
-        result = await _run_cli_json(*args, timeout=300)
-        return json.dumps(result, indent=2)
+        return await _run_cli_json_str(*args, timeout=300)
 
     @staticmethod
     async def backtests_list(
@@ -1559,6 +1403,7 @@ class MMRHelpers:
         descending: bool = True,
         include_archived: bool = False,
         archived_only: bool = False,
+        sweep_id: Optional[int] = None,
     ) -> str:
         """
         List past backtest runs from the local history store.
@@ -1591,12 +1436,13 @@ class MMRHelpers:
             args.append("--asc")
         if strategy:
             args.extend(["--strategy", strategy])
+        if sweep_id is not None:
+            args.extend(["--sweep", str(sweep_id)])
         if archived_only:
             args.append("--archived")
         elif include_archived:
             args.append("--all")
-        result = await _run_cli_json(*args)
-        return json.dumps(result, indent=2)
+        return await _run_cli_json_str(*args)
 
     @staticmethod
     async def backtests_archive(run_ids: List[int]) -> str:
@@ -1615,8 +1461,7 @@ class MMRHelpers:
         result = await MMRHelpers.backtests_archive([72, 73, 74])
         """
         args = ["backtests", "archive"] + [str(i) for i in run_ids]
-        result = await _run_cli_json(*args)
-        return json.dumps(result, indent=2)
+        return await _run_cli_json_str(*args)
 
     @staticmethod
     async def backtests_unarchive(run_ids: List[int]) -> str:
@@ -1631,79 +1476,103 @@ class MMRHelpers:
         result = await MMRHelpers.backtests_unarchive([72])
         """
         args = ["backtests", "unarchive"] + [str(i) for i in run_ids]
-        result = await _run_cli_json(*args)
-        return json.dumps(result, indent=2)
+        return await _run_cli_json_str(*args)
 
     @staticmethod
     async def backtests_show(run_id: int, include_raw: bool = False) -> str:
-        """
-        Show full detail for a past backtest run, including statistical-
-        confidence tests (PSR, t-stat, bootstrap CIs, P&L distribution,
-        losing-streak MC) when the run was saved with trade/equity data.
+        """Full detail for one run, including the ``statistical_confidence``
+        block (PSR, t-stat, bootstrap CIs, skew/kurt, losing-streak MC).
 
-        Does NOT require any service.
+        ``include_raw=False`` (default) omits the per-trade + equity-curve
+        arrays (multi-MB on 1-min × 365d). Turn on only when you need the
+        raw series. For bulk PSR/CI reads across many runs, prefer
+        ``backtests_confidence([ids])``.
 
-        The ``statistical_confidence`` block in the response tells you
-        whether the run's edge is statistically distinguishable from noise.
-        Key fields:
-          - ``probabilistic_sharpe``: P(true Sharpe > 0) in [0, 1]; > 0.95
-            is strong evidence of a real edge.
-          - ``p_value``: two-sided t-test of mean per-trade P&L == 0.
-            < 0.05 is the conventional significance threshold.
-          - ``return_ci_lo/hi``: bootstrap 95% CI on mean per-trade $ P&L.
-            If it straddles zero, the edge isn't statistically reliable.
-          - ``sharpe_ci_lo/hi``: bootstrap 95% CI on annualised Sharpe.
-          - ``pnl_skew`` + ``pnl_excess_kurtosis``: negative skew + high
-            kurtosis (> 5) is the "blow-up risk" signature Sharpe misses.
-          - ``losing_streak_actual`` vs ``losing_streak_mc_95``: if actual
-            exceeds MC 95th pct, losses cluster (auto-correlated risk).
-
-        For bulk confidence-only reads across many runs, prefer
-        ``backtests_confidence([ids])`` — it returns only the small
-        decision-quality fields and avoids shipping megabytes of raw
-        trades per run.
-
-        :param run_id: Backtest run ID (from backtests_list)
-        :param include_raw: Include the per-trade array and full equity
-            curve in the response. **Off by default** — these can be
-            multi-MB on 1-min × 365d runs and are already on disk in the
-            history DB. Turn on only when you specifically need them.
-
-        Example:
-        result = await MMRHelpers.backtests_show(42)
+        Confidence-block fields documented in STRATEGIES.md → "Statistical
+        confidence tests".
         """
         args = ["backtests", "show", str(run_id)]
         if include_raw:
             args.append("--include-raw")
-        result = await _run_cli_json(*args)
-        return json.dumps(result, indent=2)
+        return await _run_cli_json_str(*args)
 
     @staticmethod
-    async def backtests_confidence(run_ids: List[int]) -> str:
+    async def sweep_run(
+        manifest_path: str,
+        dry_run: bool = False,
+        concurrency: Optional[int] = None,
+        skip_freshness: bool = False,
+        timeout: int = 14400,
+    ) -> str:
+        """Execute a declarative sweep manifest end-to-end — cron-able
+        nightly runs. Expands symbol × param grids, freshness-checks,
+        runs in parallel, persists a ``sweeps`` row + one
+        ``backtest_runs`` row per job, drops a markdown digest to
+        ``~/.local/share/mmr/reports/``.
+
+        ``dry_run`` — expand + estimate wall time, skip execution.
+        ``concurrency`` — override every sweep's concurrency (None = use
+        the sweep's own or auto-tune to ``cpu_count-1``).
+        ``skip_freshness`` — bypass the stale-data guard (refuses if any
+        conid lacks a bar from the last 3 trading days).
+
+        Manifest schema lives in STRATEGIES.md → "Sweep manifests".
         """
-        Bulk read of the statistical-confidence block across N runs.
+        args = ["sweep", "run", manifest_path]
+        if dry_run:
+            args.append("--dry-run")
+        if concurrency is not None:
+            args.extend(["--concurrency", str(concurrency)])
+        if skip_freshness:
+            args.append("--skip-freshness")
+        return await _run_cli_json_str(*args, timeout=timeout)
 
-        Returns one row per run with ``{run_id, class_name, symbols,
-        params, period, summary, statistical_confidence}`` — the compact
-        decision-quality payload only. Does **not** include the raw
-        trades or equity curve (use ``backtests_show(id, include_raw=True)``
-        if you need a single run's full detail).
+    @staticmethod
+    async def sweeps_list(limit: int = 25) -> str:
+        """
+        List past sweeps with their status and summary counts.
 
-        This is the right tool post-sweep when you want to rank the top-N
-        runs by PSR / p-value / CI tightness without paging through
-        megabytes per run.
+        Returns per-sweep metadata including ``digest_path`` so you can
+        go read the morning markdown report directly. Use this as the
+        entry point on "what backtesting has been done?" questions —
+        it's the curated view; ``backtests_list`` is the flat per-run
+        view.
 
         Does NOT require any service.
+        """
+        args = ["sweep", "list", "--limit", str(limit)]
+        return await _run_cli_json_str(*args)
 
-        :param run_ids: List of run ids (from backtests_list)
+    @staticmethod
+    async def sweeps_show(sweep_id: int, top: int = 10) -> str:
+        """
+        Show a sweep's metadata + the top-N runs by composite score.
 
-        Example:
-        result = await MMRHelpers.backtests_confidence([42, 43, 44])
-        # → [{run_id, class_name, params, summary, statistical_confidence}, ...]
+        Drill-down from ``sweeps_list`` → ``sweeps_show`` → (optionally)
+        ``backtests_confidence`` on the top run ids for full statistical
+        validation.
+
+        Does NOT require any service.
+        """
+        args = ["sweep", "show", str(sweep_id), "--top", str(top)]
+        return await _run_cli_json_str(*args)
+
+    @staticmethod
+    async def backtests_confidence(
+        run_ids: List[int],
+        timeout: int = 180,
+    ) -> str:
+        """Bulk PSR/CI/skew/streak read across N runs. Compact
+        (~500 bytes/run) — the right post-sweep tool for ranking
+        candidates without paging through MB-scale per-run blobs.
+
+        Returns one row per id: ``{run_id, class_name, symbols, params,
+        period, summary, statistical_confidence}``. Budget ~2-3s per run
+        on 1-min data; default 180s timeout covers ~60 runs. Chunk
+        larger batches or raise ``timeout``.
         """
         args = ["backtests", "confidence"] + [str(i) for i in run_ids]
-        result = await _run_cli_json(*args)
-        return json.dumps(result, indent=2)
+        return await _run_cli_json_str(*args, timeout=timeout)
 
     # ------------------------------------------------------------------
     # Position Management
@@ -1776,28 +1645,14 @@ class MMRHelpers:
         exchange: str = "",
         currency: str = "",
     ) -> dict:
-        """
-        Create a trade proposal. Stored locally — not executed until approved.
-        Auto-sizes position based on confidence, ATR volatility, and position_sizing.yaml
-        config when neither quantity nor amount is specified.
-        Does NOT require trader_service to create (but ATR/snapshot enrichment needs it).
+        """Create a trade proposal (stored locally; not executed until
+        ``approve()``). When neither ``quantity`` nor ``amount`` is
+        given, auto-sizes via: base × risk × confidence × ATR-volatility
+        (volatile = smaller, stable = larger). ATR/snapshot enrichment
+        needs trader_service; creation itself does not.
 
-        Position sizing pipeline: base_position * risk_multiplier * confidence_scale * volatility_adjustment.
-        Volatile stocks (high ATR%) get smaller positions; stable stocks get larger ones.
-
-        :param symbol: Stock ticker
-        :param action: "BUY" or "SELL"
-        :param quantity: Number of shares (optional — auto-sized if omitted)
-        :param amount: Dollar amount (optional — auto-sized if omitted)
-        :param market: Market order (default True)
-        :param limit_price: Limit price
-        :param confidence: Confidence 0.0-1.0 (affects position sizing)
-        :param reasoning: Trade reasoning text
-        :param thesis: Short thesis label
-        :param source: Source label (manual, llm, scanner)
-        :param group: Position group name (e.g. "mining", "tech") — auto-adds symbol to group
-        :param exchange: Exchange hint (e.g. "ASX")
-        :param currency: Currency hint (e.g. "AUD")
+        ``action``: "BUY" | "SELL". ``group`` auto-registers the symbol
+        into the named group. ``exchange``/``currency`` for international.
 
         Example:
         result = await MMRHelpers.propose("AAPL", "BUY", confidence=0.7, reasoning="Breakout above resistance")

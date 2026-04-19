@@ -84,6 +84,16 @@ The reason PubSub and MessageBus are separate (despite overlap) is efficiency: Z
 
 **Backtester fill policy**: `trader/simulation/backtester.py` defaults to `fill_policy='next_open'` — a signal emitted while observing bar `t` fills at bar `t+1`'s open. This eliminates lookahead bias: the strategy can see bar `t`'s close (public info at that moment) but can't fill at that same close. `fill_policy='same_close'` preserves the legacy (biased) behaviour and exists only for regression tests that pre-date the fix.
 
+**Backtest parameter overrides**: `Backtester.apply_param_overrides(instance, params)` is called after `install(context)` and supports both tunable idioms — upper-case class attributes (`EMA_PERIOD = 20`, read as `self.EMA_PERIOD`) get shadowed via `setattr` on the instance so parallel sweeps don't collide on each other. Lower-case keys land in `instance._context.params` to serve the legacy `self.params.get('key', default)` pattern. Typos on upper-case keys raise `ValueError` listing known tunables; lower-case keys are free-form because `self.params.get(...)` is. `_coerce_param` converts CLI strings (e.g. `"15"`) to the class attr's current type; `_coerce_loose` best-effort-coerces dict-bound values. Effective overrides round-trip to `BacktestResult.applied_params` and on to `BacktestRecord.params` for later reproducibility via `backtests show`.
+
+**Statistical-confidence tests** (`trader/simulation/backtest_stats.py`): On-demand computation from persisted `trades_json` + `equity_curve_json` (persisted by default; opt out with `--no-save-trades`). Five tests answer "is this edge real?" beyond what Sharpe/PF can: (1) **Probabilistic Sharpe Ratio** (López de Prado 2012) — probability that the true Sharpe > 0 given sample size, skew, kurtosis; (2) **t-test** on mean per-trade P&L == 0; (3) **Bootstrap 95% CI** on mean P&L and annualised Sharpe; (4) **P&L skew + excess kurtosis** catching the "negative skew + fat tails = blow-up risk" signature Sharpe misses; (5) **Longest losing streak vs Monte Carlo** — compares actual to 95th-percentile random-reorder streaks, detects loss clustering. All five fail gracefully to `None` below their minimum sample (PSR needs n ≥ 3, bootstrap needs n ≥ 10, MC streak needs n ≥ 5). Surfaced via `backtests show` and `backtests confidence` — the latter is a bulk helper that strips raw trades/equity JSON (multi-MB per run) and returns just the confidence block.
+
+**Nightly sweep pipeline** (`trader/mmr_cli.py` + `trader/data/backtest_store.py`): Declarative YAML manifests (`sweeps: [{name, strategy, class, symbols|conids|universe, param_grid, days, bar_size, concurrency, note}]`) become concrete per-(symbol, param) jobs via `_expand_sweep_jobs`. A parent `sweeps` table row is created up front with `status='running'`, every child `backtest_runs` row is stamped with `sweep_id`, and the sweep is finalised to `completed`/`failed`/`cancelled` with a markdown digest path. Concurrency auto-tunes to `cpu_count - 1` (cap 16) unless overridden; children are launched via `asyncio.create_subprocess_exec` with a per-semaphore gate so the same machine-level parallelism that `backtest_batch` uses applies here too. The SIGINT handler lets in-flight subprocesses finish rather than killing them, so a 90%-complete sweep still persists 90% of its runs. Freshness guard (`_freshness_check`) refuses to run if any conid lacks a daily bar from the last 3 trading days; `--skip-freshness` overrides. `_write_sweep_digest` produces `~/.local/share/mmr/reports/sweep_<id>_<name>_<ts>.md` with strong-candidates / all-runs / failures tables plus pointers into `backtests list --sweep <id>` and `backtests confidence`. Digest-write failures never take down a sweep — they return an empty path and log a warning.
+
+**Composite quality score** (`_bt_composite_score` in `mmr_cli.py`): Ranks backtest runs by a weighted blend of sortino, profit_factor, expectancy_bps, return, and drawdown, each clipped to a sensible band, multiplied by a reliability factor that penalises low trade counts (< 10 → ×0.2, < 30 → ×0.6, < 100 → ×0.9). Used as the default sort for `backtests list` and the leaderboard sort in `sweep show`. Not a decision metric — use the statistical-confidence block for deploy/reject — just an ordering heuristic so strong runs float to the top.
+
+**Subprocess concurrency + DuckDB**: The `mmr-skill` helper's `_CLI_SLOTS = asyncio.Semaphore(16)` caps concurrent CLI subprocess launches without serialising them (the previous `_CLI_LOCK` made `backtest_batch(concurrency=6)` a no-op). DuckDB has file-level locking across processes; `DuckDBConnection.execute_atomic` retries on `IOException` with exponential backoff + jitter up to 8 attempts so brief collisions during concurrent subprocess startup don't fail the run. This is what makes `sweep run` and `backtest_batch` actually peg CPU instead of bottlenecking at 10%.
+
 **PnL subscription race**: `__subscribe_pnl` registers `(account, conId)` under `_pnl_subscriptions_lock` using first-claim-wins semantics. If the actual `subscribe_single_pnl` call fails, the registry entry is backed out so a retry can re-attempt. Portfolio updates fired from IB-eventkit threads are routed onto the main loop via `run_coroutine_threadsafe` (the main loop is captured in `connected_event`), so disk I/O during a universe update doesn't block the IB callback thread.
 
 **Idea scanner**: Raises `IdeaScannerError` (not an empty DataFrame) when the IB scanner returns no results or when every supplied ticker fails to resolve. This follows the "fail loudly" principle so callers can distinguish "API failure" from "zero matches".
@@ -127,6 +137,7 @@ mmr/
 │   │   ├── duckdb_store.py    # DuckDB implementations (DuckDBDataStore, DuckDBObjectStore)
 │   │   ├── data_access.py     # TickData, DictData, TickStorage, SecurityDefinition
 │   │   ├── event_store.py     # EventStore — trading event audit trail (DuckDB)
+│   │   ├── backtest_store.py  # BacktestStore + SweepStore — run history + parent sweep metadata
 │   │   ├── proposal_store.py  # ProposalStore — trade proposal storage (DuckDB)
 │   │   ├── position_groups.py # PositionGroupStore — named groups with allocation budgets (DuckDB)
 │   │   ├── universe.py        # Universe, UniverseAccessor
@@ -157,7 +168,9 @@ mmr/
 │   │   └── strategy_runtime.py # StrategyRuntime (loads/runs strategies)
 │   ├── simulation/
 │   │   ├── historical_simulator.py
-│   │   └── backtester.py      # Backtester — replay historical data through strategies
+│   │   ├── backtester.py      # Backtester — replay historical data through strategies
+│   │   ├── backtest_stats.py  # PSR, t-test, bootstrap CI, skew/kurt, MC streak — "is this real?"
+│   │   └── lookahead_check.py # assert_no_lookahead walk-forward consistency check
 │   └── tools/                 # Importable scripts (moved from scripts/)
 │       ├── idea_scanner.py    # IdeaScanner (Massive) + IBIdeaScanner (IB international)
 │       ├── depth_chart.py     # Market depth chart (PNG) + Rich table rendering
@@ -275,6 +288,32 @@ close 1                      # Close position by row number
 strategies                   # List strategies
 strategies enable my_strat   # Enable a strategy
 strategies reload            # Reload strategies from YAML + re-subscribe (immediate reconciliation)
+strategies inspect           # AST scan: class name, mode (precompute/on_prices), tunable params with defaults
+backtest -s strategies/keltner_breakout.py --class KeltnerBreakout --conids 756733
+backtest -s ... --params '{"EMA_PERIOD": 15, "BAND_MULT": 2.5}'   # JSON param overrides
+backtest -s ... --param EMA_PERIOD=15 --param BAND_MULT=2.5       # repeatable KEY=VALUE form
+backtest -s ... --summary-only --no-save-trades                    # skip trades blob + persist
+bt-sweep -s strategies/orb.py --class OpeningRangeBreakout --conids 756733 \
+     --grid '{"RANGE_MINUTES":[15,30,45],"VOLUME_MULT":[1.2,1.3,1.5]}' --days 365
+sweep run nightly.yaml                      # declarative multi-strategy sweep (cron-able)
+sweep run nightly.yaml --dry-run            # expand grid + estimate wall time
+sweep run nightly.yaml --skip-freshness     # bypass stale-data guard
+sweep list                                  # curated history of past sweeps
+sweep show 7                                # leaderboard of sweep #7
+backtests                                   # history of runs, ranked by composite quality score
+backtests --sort-by time                    # chronological (newest first)
+backtests --sort-by sharpe --limit 10       # best Sharpe
+backtests --sweep 7                         # filter to runs from sweep #7
+backtests --all                             # include archived
+backtests --card                            # card view instead of table
+backtests show 42                           # full detail (summary + statistical confidence)
+backtests show 42 --include-raw             # also ship trades_json + equity_curve_json (multi-MB)
+backtests confidence 42 43 44               # compact PSR/t-test/CI batch read across runs
+backtests compare 40 41 42                  # side-by-side table
+backtests archive 42 43                     # hide from default list (reversible)
+backtests unarchive 42                      # restore
+backtests delete 42                         # permanent
+backtests help                              # metric reference
 snapshot AMD                 # Price snapshot
 depth AAPL                   # Level 2 order book (bids/asks + PNG chart)
 depth AAPL --rows 10         # More price levels (max depends on subscription)
@@ -470,7 +509,7 @@ Python >= 3.12. Install: `pip install -e .` or `pip install -r requirements.txt`
 
 ## Testing
 
-Tests use pytest with shared fixtures in `tests/conftest.py`. All tests are unit tests that use temporary DuckDB databases (no IB connection required). The suite currently runs **880 tests in ~47s** with zero failures:
+Tests use pytest with shared fixtures in `tests/conftest.py`. All tests are unit tests that use temporary DuckDB databases (no IB connection required). The suite currently runs **1059 tests in ~48s** with zero failures:
 
 ```bash
 pytest tests/ --timeout=30 -q --ignore=tests/test_ibrx_async.py
@@ -488,6 +527,10 @@ Key behaviour-focused test files:
 - `test_strategy_runtime_reconcile.py` — load-strategy sandbox (absolute-path + traversal rejection, `sys.modules` collision), config-reload resilience (`yaml.safe_load`, partial-write mtime handling)
 - `test_propose_approve_integration.py` — end-to-end propose → approve → execute, failure-path transitions to `FAILED`, state-machine enforcement
 - `test_backtester.py::test_no_lookahead_fill_at_next_bar_open` — hand-crafted bars that prove `next_open` fills come from bar t+1's open
+- `test_backtest_stats.py` — PSR monotonicity, bootstrap CI tightness with sample size, MC streak expectations, graceful degradation below minimum samples
+- `test_backtest_params.py` — type coercion across int/float/bool, class-attr shadowing vs class mutation, upper-case typo rejection, lower-case params-dict idiom
+- `test_backtest_highlighting.py` — composite-score ranking + per-metric classifier thresholds
+- `test_sweep.py` — sweep lifecycle (create / finalize / get / list), manifest validation (missing fields, scalar-instead-of-list, mutually-exclusive symbol sources), digest-markdown shape, crash-safe digest writing
 - `test_portfolio_risk.py::TestSignedExposure` — hedged vs stacked correlation clusters, long/short exposure breakdown
 - `test_duckdb_store.py::TestConcurrentAccess` — multi-thread write serialization
 - `test_container.py::TestContainerHardening` — missing-param diagnostics, env-var coercion, YAML safety
@@ -504,6 +547,8 @@ Strategies have **two dispatch APIs**; subclass `trader.trading.strategy.Strateg
 The backtester calls `on_bar` by default; if a strategy doesn't override it, the default impl falls back to `on_prices(prices.iloc[:index+1])` — so legacy strategies keep working unchanged. The live strategy runtime still dispatches via `on_prices`, so vectorbt strategies should implement both methods (vectorbt in `on_prices` is fine live — it's only the backtest replay that makes it catastrophic).
 
 **Lookahead contract for `precompute`**: values returned must be aligned 1:1 with `prices` such that position `i` depends only on bars `[0..i]`. Rolling/EWM/vectorbt indicators satisfy this; `shift(-1)`, centered rollings, full-series normalization (`x / x.mean()`), and `fit_transform` on the complete history do not. Use `trader.simulation.lookahead_check.assert_no_lookahead(strategy, prices)` in your strategy's test file — it runs `precompute` on the full series AND on progressively-truncated copies and asserts past-index values don't shift when future bars are hidden, catching the common leak patterns before they ship. See `skills/mmr-skill/references/STRATEGIES.md` for a full fast-path example.
+
+**Tunable parameters**: declare them as upper-case class attributes (`EMA_PERIOD = 20`, `BAND_MULT = 2.0`) so `mmr strategies inspect` can surface them and `mmr backtest --param EMA_PERIOD=15` / `mmr bt-sweep --grid '{"EMA_PERIOD":[10,20,30]}'` can override them without touching the class. `Backtester.apply_param_overrides` uses `setattr` on the instance (not the class), so parallel subprocess-level sweeps don't stomp on each other. Lower-case `self.params.get('key', default)` access still works — those keys land in `StrategyContext.params` instead of as instance attributes, and `strategies inspect` surfaces them too by scanning `self.params.get()` AST calls. Prefer the upper-case class-attr style for new strategies; the type is inferred from the default value and enforced on overrides (typos raise `ValueError` listing known tunables).
 
 ### Legacy `on_prices`-only example:
 
@@ -569,7 +614,26 @@ mmr strategies create my_strategy                          # Creates strategies/
 
 **Step 4: Backtest** (no service needed)
 ```bash
+# Single run
 mmr --json backtest -s strategies/my_strategy.py --class MyStrategy --conids 265598 --days 365
+
+# Parameter sweep (cartesian product) — persists one backtest_runs row per combo
+mmr bt-sweep -s strategies/my_strategy.py --class MyStrategy --conids 265598 --days 180 \
+     --grid '{"FAST":[10,20,30],"SLOW":[40,50,60]}'
+
+# Overnight multi-strategy sweep driven by a YAML manifest — cron-able
+mmr sweep run ~/mmr-sweeps/nightly.yaml --dry-run   # expand + estimate
+mmr sweep run ~/mmr-sweeps/nightly.yaml             # actually run
+```
+
+**Step 4b: Review results** (no service needed)
+```bash
+mmr sweep list                              # curated: what sweeps have ever run
+mmr sweep show 7                            # leaderboard of sweep #7
+mmr backtests                               # flat list, ranked by composite quality score
+mmr backtests confidence 42 43 44           # PSR / t-test / bootstrap CI / skew / streak MC for N runs
+mmr backtests show 42                       # full detail (summary + statistical confidence block)
+cat ~/.local/share/mmr/reports/sweep_*.md   # morning digest
 ```
 
 **Step 5: Deploy to paper trading** (no service needed — writes to config)
@@ -645,8 +709,9 @@ mmr reject 42 --reason "Group over budget"  # Reject with reason
 
 **No service needed** (fully local):
 - `data summary`, `data query`, `data download`
-- `backtest` / `bt`
-- `strategies create`, `strategies deploy`, `strategies undeploy`
+- `backtest` / `bt`, `bt-sweep`, `sweep run/list/show`
+- `backtests list/show/compare/confidence/archive/unarchive/delete`
+- `strategies create`, `strategies deploy`, `strategies undeploy`, `strategies inspect`
 - `strategies signals`, `strategies backtest`
 - `universe list`, `universe show`, `universe create`, `universe delete`, `universe remove`, `universe import`
 - `propose`, `proposals`, `reject`

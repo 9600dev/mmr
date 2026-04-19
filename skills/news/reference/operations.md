@@ -30,7 +30,7 @@ dependencies. Subsequent `-b` runs reuse:
 ## Health check from outside the container
 
 ```bash
-curl -fsS http://127.0.0.1:8080/v1/health
+curl -fsS http://127.0.0.1:8089/v1/health
 ```
 
 Expected: `{"status":"ok","version":"0.1.0","llm_enabled":false}`.
@@ -40,7 +40,7 @@ Expected: `{"status":"ok","version":"0.1.0","llm_enabled":false}`.
 ```bash
 ./docker.sh -e
 # now inside:
-curl -fsS http://localhost:8080/v1/health
+curl -fsS http://localhost:8089/v1/health
 ```
 
 ## Logs
@@ -118,7 +118,7 @@ actually made it in.
 
 ## Common failures and fixes
 
-### `Connection refused` on port 8080
+### `Connection refused` on port 8089
 
 Service isn't running. `./docker.sh -l` will show if the container crashed.
 If no container, `./docker.sh -g` to start fresh.

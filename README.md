@@ -372,7 +372,8 @@ universe delete my_universe
 ### Strategies
 
 ```bash
-strategies                   # List all strategies
+strategies                   # List deployed strategies
+strategies inspect           # AST scan of strategies/: classes, dispatch mode, tunable params
 strategies enable my_strat
 strategies disable my_strat
 strategies reload            # Reload YAML config + re-subscribe instruments
@@ -385,6 +386,39 @@ resize-positions --max-bound 500000          # Trim to $500K
 resize-positions --min-bound 300000          # Grow to $300K
 resize-positions --max-bound 500000 --dry-run
 ```
+
+### Backtesting & Sweeps
+
+```bash
+# Discover what's backtest-able and what knobs exist (AST scan, no execution)
+strategies inspect
+
+# Single run — summary-only is the default (no multi-MB trade arrays in the response)
+backtest -s strategies/keltner_breakout.py --class KeltnerBreakout --conids 756733 --days 365
+backtest -s ... --param EMA_PERIOD=15 --param BAND_MULT=2.5   # override class attrs
+backtest -s ... --params '{"EMA_PERIOD": 15, "BAND_MULT": 2.5}'  # JSON form
+
+# Single-strategy parameter sweep — cartesian product, composite-score leaderboard
+bt-sweep -s strategies/orb.py --class OpeningRangeBreakout --conids 756733 --days 365 \
+     --grid '{"RANGE_MINUTES":[15,30,45],"VOLUME_MULT":[1.2,1.3,1.5]}'
+
+# Declarative, cron-able nightly sweep (multi-strategy)
+sweep run ~/mmr-sweeps/nightly.yaml --dry-run   # expand + estimate wall time
+sweep run ~/mmr-sweeps/nightly.yaml             # kick off
+sweep list                                      # history of past sweeps
+sweep show 7                                    # leaderboard of sweep #7 + digest path
+
+# Review results
+backtests                                       # ranked by composite quality score
+backtests --sweep 7                             # runs from a specific sweep
+backtests confidence 42 43 44                   # compact PSR/t-test/CI for N runs
+backtests show 42                               # full detail + statistical-confidence block
+backtests archive 42 43                         # soft-delete; reversible via `unarchive`
+```
+
+Every run is persisted with its strategy source hash, params, conids, date range, 12+ summary metrics (return, Sharpe, Sortino, Calmar, profit factor, expectancy bps, max drawdown, time-in-market, etc.), the full trade list + equity curve, and — on `backtests show` / `confidence` — statistical-confidence tests (Probabilistic Sharpe Ratio, t-test, bootstrap CIs, P&L skew/kurtosis, Monte-Carlo losing-streak test) that answer *"is this edge real or noise?"* beyond what the headline metrics tell you.
+
+Nightly sweeps drop a markdown digest to `~/.local/share/mmr/reports/sweep_<id>_<name>_<ts>.md` with strong-candidate leaderboards, risk flags (negative skew + fat tails), and pointers back into the CLI. Cron-compatible — `0 2 * * * mmr sweep run ~/mmr-sweeps/nightly.yaml` runs at 2am and you wake up to a verdict.
 
 ## Writing a Strategy
 
@@ -476,12 +510,13 @@ mmr/
 │   ├── messaging/                 # ZMQ RPC, PubSub, MessageBus
 │   ├── trading/                   # Runtime, executioner, risk, sizing, proposals
 │   ├── strategy/                  # Strategy runtime
-│   ├── simulation/                # Backtester
+│   ├── simulation/                # Backtester + statistical-confidence tests + lookahead checker
 │   └── tools/                     # Idea scanner, depth chart, options chain
 ├── strategies/                    # User strategy implementations
 ├── configs/                       # Bundled defaults
+├── skills/                        # Claude skills (mmr, mmr-loop, news)
 ├── CLAUDE.md                      # Claude Code context (architecture, commands, workflows)
-├── tests/                         # 880 tests (pytest, no IB required)
+├── tests/                         # 1000+ tests (pytest, no IB required)
 ├── docker-compose.yml             # IB Gateway + MMR containers
 ├── Dockerfile                     # Debian bookworm + Python venv
 ├── docker.sh                      # Docker/Podman build helper
@@ -502,7 +537,7 @@ pytest tests/ --timeout=30 -q --ignore=tests/test_ibrx_async.py
 
 Coverage highlights:
 
-- **Core logic:** `test_backtester*`, `test_position_sizing`, `test_portfolio_risk`, `test_risk_gate`, `test_idea_scanner`
+- **Core logic:** `test_backtester*`, `test_backtest_stats`, `test_backtest_params`, `test_backtest_store`, `test_sweep`, `test_position_sizing`, `test_portfolio_risk`, `test_risk_gate`, `test_idea_scanner`
 - **Stores:** `test_duckdb_store` (including concurrent-writer), `test_event_store`, `test_proposal_store` (state machine), `test_position_groups`
 - **Messaging:** `test_clientserver_rpc` (error-type preservation, dill policy, threaded round-trip)
 - **Runtime:** `test_trading_runtime` (PnL race, portfolio routing, bracket rollback), `test_executioner` (filter + gate rejection paths), `test_strategy_runtime_reconcile` (sandbox, `yaml.safe_load`, partial-write mtime recovery)

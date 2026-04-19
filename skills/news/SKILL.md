@@ -1,6 +1,6 @@
 ---
 name: news
-description: Fetch, search, and summarize financial news articles via the local news-service at http://127.0.0.1:8080. Handles Cloudflare, paywalls (FT/WSJ/Bloomberg/NYT via archive.ph fallback), and HTML→Markdown extraction. Purpose-built for mmr — includes ticker_news() and portfolio_news() helpers that compose search+scrape for an mmr portfolio or idea scan.
+description: Fetch, search, and summarize financial news articles via the local news-service at http://127.0.0.1:8089. Handles Cloudflare, paywalls (FT/WSJ/Bloomberg/NYT via archive.ph fallback), and HTML→Markdown extraction. Purpose-built for mmr — includes ticker_news() and portfolio_news() helpers that compose search+scrape for an mmr portfolio or idea scan.
 metadata:
   author: mmr
   version: "0.1"
@@ -417,7 +417,7 @@ Top-level failures (connection refused, timeout) appear as `{"ok": false, "error
 
 ## Configuration
 
-Environment variable `NEWS_SERVICE_URL` overrides the default endpoint (defaults to `http://127.0.0.1:8080`). Useful when running the service on a non-default port during dev.
+Environment variable `NEWS_SERVICE_URL` overrides the default endpoint (defaults to `http://127.0.0.1:8089`). Useful when running the service on a non-default port during dev.
 
 ## Deeper reference
 

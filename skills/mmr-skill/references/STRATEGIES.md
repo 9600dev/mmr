@@ -61,6 +61,34 @@ class FastMacdBB(Strategy):
         ...
 ```
 
+## Declaring tunable parameters (for sweeps)
+
+Declare tunable parameters as **upper-case class attributes** at the class body. That makes them discoverable by `strategies inspect` and overrideable by `mmr backtest --param KEY=VALUE`, `mmr bt-sweep --grid '{"KEY":[...]}'`, and `mmr sweep run nightly.yaml` — all without touching the class.
+
+```python
+class OpeningRangeBreakout(Strategy):
+    RANGE_MINUTES = 30       # int; coerced from CLI string "15" → 15
+    VOLUME_MULT = 1.3        # float
+    RTH_OPEN_MIN = 570       # 09:30 ET in minutes since midnight
+    MIN_BARS = 40
+
+    def precompute(self, prices):
+        # Read as self.RANGE_MINUTES — Python MRO means overrides at the
+        # instance level (set by the backtester's apply_param_overrides)
+        # shadow the class attribute transparently.
+        ...
+```
+
+Overrides via:
+- **CLI**: `mmr backtest --param RANGE_MINUTES=15 --param VOLUME_MULT=1.5`
+- **JSON**: `mmr backtest --params '{"RANGE_MINUTES":15,"VOLUME_MULT":1.5}'`
+- **Sweep grid**: `mmr bt-sweep --grid '{"RANGE_MINUTES":[15,30,45],"VOLUME_MULT":[1.2,1.3,1.5]}'`
+- **YAML manifest**: `param_grid: {RANGE_MINUTES: [15, 30, 45]}` inside a `mmr sweep run` manifest.
+
+Type coercion is automatic based on the class attribute's current type (ints become ints, floats become floats, booleans handle `"true"`/`"false"` correctly rather than `bool("False") == True`). Typos on upper-case keys raise `ValueError` listing every valid tunable — they don't silently no-op.
+
+Legacy `self.params.get('key', default)` still works — lower-case dict keys land in `StrategyContext.params` and can be swept with the same flags. But prefer class attributes for new strategies: `strategies inspect` surfaces them with their declared defaults, the type is inferred from the value, and parallel sweeps don't collide (each backtest subprocess has its own instance, `setattr`'d with its own overrides).
+
 ## The lookahead contract of `precompute`
 
 `precompute` sees the FULL OHLCV history — this is convenient but dangerous. Your returned state must be aligned 1:1 with `prices` such that position `i` depends only on bars `[0..i]`. Pandas `.rolling()`, `.ewm()`, and all standard vectorbt indicators satisfy this by construction. **What you must NOT do**:
