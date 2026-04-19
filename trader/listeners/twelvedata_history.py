@@ -5,9 +5,34 @@ from twelvedata import TDClient
 import datetime as dt
 import pandas as pd
 import pytz
+import time
 
 
 logging = setup_logging(module_name='twelvedata_history')
+
+
+# TwelveData caps a single time_series response at 5000 bars. Requesting a
+# wider window silently truncates to the most recent 5000 bars, so we chunk
+# the date range. Values below are calendar days per chunk, chosen to stay
+# safely under the 5000-bar cap assuming a liquid US equity session.
+_CHUNK_DAYS_FOR_BAR_SIZE = {
+    BarSize.Mins1: 7,      # ~2700 bars / 7d
+    BarSize.Mins5: 35,     # ~2700 bars / 35d
+    BarSize.Mins15: 100,   # ~2600 bars / 100d
+    BarSize.Mins30: 200,   # ~2600 bars / 200d
+    BarSize.Hours1: 400,   # ~2800 bars / 400d
+    BarSize.Hours2: 400,
+    BarSize.Hours4: 400,
+    # Daily/weekly/monthly: no need to chunk — 5000 daily bars is ~20y.
+    BarSize.Days1: None,
+    BarSize.Weeks1: None,
+    BarSize.Months1: None,
+}
+
+# Small per-chunk pacing so paginated downloads don't burst past pro-plan
+# rate limits (typical pro plans allow ~55-610 req/min; 10 req/s is a safe
+# middle ground).
+_CHUNK_PACING_SECS = 0.1
 
 
 class TwelveDataHistoryWorker:
@@ -25,7 +50,56 @@ class TwelveDataHistoryWorker:
         timezone: str = 'US/Eastern',
     ) -> pd.DataFrame:
         interval = BarSize.to_twelvedata_interval(bar_size)
+        chunk_days = _CHUNK_DAYS_FOR_BAR_SIZE.get(bar_size)
 
+        if chunk_days is None:
+            # Daily or coarser — single call is always enough.
+            return self._fetch_one(ticker, bar_size, interval, start_date, end_date, timezone)
+
+        logging.info('get_history {} {} {} {} to {} (chunked @ {}d)'.format(
+            ticker, bar_size, interval,
+            start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'),
+            chunk_days,
+        ))
+
+        frames = []
+        chunk_start = start_date
+        chunk_idx = 0
+        while chunk_start < end_date:
+            chunk_end = min(chunk_start + dt.timedelta(days=chunk_days), end_date)
+            df_chunk = self._fetch_one(
+                ticker, bar_size, interval, chunk_start, chunk_end, timezone,
+                log_prefix='  chunk {}: '.format(chunk_idx),
+            )
+            if df_chunk is not None and not df_chunk.empty:
+                frames.append(df_chunk)
+            chunk_start = chunk_end
+            chunk_idx += 1
+            if chunk_start < end_date:
+                time.sleep(_CHUNK_PACING_SECS)
+
+        if not frames:
+            logging.info('no data returned for {} over full window'.format(ticker))
+            return pd.DataFrame()
+
+        df = pd.concat(frames)
+        df = df[~df.index.duplicated(keep='first')]
+        df.sort_index(ascending=True, inplace=True)
+        logging.info('get_history returned {} total rows for {} across {} chunks'.format(
+            len(df), ticker, chunk_idx
+        ))
+        return df
+
+    def _fetch_one(
+        self,
+        ticker: str,
+        bar_size: BarSize,
+        interval: str,
+        start_date: dt.datetime,
+        end_date: dt.datetime,
+        timezone: str,
+        log_prefix: str = '',
+    ) -> pd.DataFrame:
         if bar_size in (BarSize.Days1, BarSize.Weeks1, BarSize.Months1):
             from_ = start_date.strftime('%Y-%m-%d')
             to = end_date.strftime('%Y-%m-%d')
@@ -33,9 +107,7 @@ class TwelveDataHistoryWorker:
             from_ = start_date.strftime('%Y-%m-%d %H:%M:%S')
             to = end_date.strftime('%Y-%m-%d %H:%M:%S')
 
-        logging.info('get_history {} {} {} {} to {}'.format(
-            ticker, bar_size, interval, from_, to
-        ))
+        logging.info('{}fetch {} {} {} to {}'.format(log_prefix, ticker, interval, from_, to))
 
         ts = self.client.time_series(
             symbol=ticker,
@@ -49,11 +121,12 @@ class TwelveDataHistoryWorker:
         try:
             df = ts.as_pandas()
         except Exception as ex:
-            logging.error('twelvedata time_series failed for {}: {}'.format(ticker, ex))
+            logging.error('twelvedata time_series failed for {} [{} to {}]: {}'.format(
+                ticker, from_, to, ex))
             raise
 
         if df is None or len(df) == 0:
-            logging.info('no data returned for {} from {} to {}'.format(ticker, from_, to))
+            logging.info('{}no data returned for {}'.format(log_prefix, ticker))
             return pd.DataFrame()
 
         df = df.copy()
@@ -79,6 +152,5 @@ class TwelveDataHistoryWorker:
         df = df[[c for c in keep if c in df.columns]]
 
         df.sort_index(ascending=True, inplace=True)
-
-        logging.info('get_history returned {} rows for {}'.format(len(df), ticker))
+        logging.info('{}returned {} rows for {}'.format(log_prefix, len(df), ticker))
         return df

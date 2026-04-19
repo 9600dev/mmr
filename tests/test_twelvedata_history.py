@@ -183,6 +183,102 @@ class TestGetHistoryMocked:
 
 
 # ---------------------------------------------------------------------------
+# Pagination — 1-minute requests spanning multiple 7-day chunks
+# ---------------------------------------------------------------------------
+
+class TestPagination:
+
+    def _build_paginating_worker(self, chunks_per_call=2):
+        """Return (worker, call_tracker). Each successive chunk returns
+        distinct bars so we can verify concat + dedupe."""
+        worker = TwelveDataHistoryWorker(twelvedata_api_key='test')
+        calls = []
+
+        def fake_time_series(**kwargs):
+            calls.append(kwargs)
+            # Build a chunk of 5 bars spanning the requested window
+            from_dt = pd.to_datetime(kwargs['start_date'])
+            idx = pd.DatetimeIndex(
+                [from_dt + dt.timedelta(minutes=i) for i in range(5)],
+                name='datetime',
+            ).tz_localize(pytz.timezone(kwargs.get('timezone', 'US/Eastern')))
+            df = pd.DataFrame(
+                {
+                    'open': [100.0 + i for i in range(5)],
+                    'high': [101.0 + i for i in range(5)],
+                    'low': [99.0 + i for i in range(5)],
+                    'close': [100.5 + i for i in range(5)],
+                    'volume': [1000 + i * 10 for i in range(5)],
+                },
+                index=idx,
+            )
+            mock_ts = MagicMock()
+            mock_ts.as_pandas.return_value = df
+            return mock_ts
+
+        worker.client = MagicMock()
+        worker.client.time_series.side_effect = fake_time_series
+        return worker, calls
+
+    def test_1min_over_30_days_paginates(self):
+        """A 30-day window at 1-min must issue multiple time_series calls
+        (chunk size = 7 days → expect ≥4 chunks)."""
+        worker, calls = self._build_paginating_worker()
+        df = worker.get_history(
+            ticker='AAPL',
+            bar_size=BarSize.Mins1,
+            start_date=dt.datetime(2026, 1, 1),
+            end_date=dt.datetime(2026, 1, 31),
+        )
+        # 30 days / 7-day chunks = 5 chunks (ceil)
+        assert len(calls) >= 4, f'expected ≥4 chunk calls, got {len(calls)}'
+        # Every chunk produced 5 bars; across 5 distinct windows = 25 unique bars
+        assert len(df) > 0
+        assert df.index.is_monotonic_increasing
+
+    def test_daily_over_1_year_does_not_paginate(self):
+        """Daily bars fit in a single call even for a year — no chunking."""
+        worker, calls = self._build_paginating_worker()
+        worker.get_history(
+            ticker='AAPL',
+            bar_size=BarSize.Days1,
+            start_date=dt.datetime(2025, 1, 1),
+            end_date=dt.datetime(2026, 1, 1),
+        )
+        assert len(calls) == 1
+
+    def test_dedupes_overlapping_chunks(self):
+        """If consecutive chunks happen to return overlapping timestamps
+        (e.g. boundary bar), the final df must dedupe by index."""
+        worker = TwelveDataHistoryWorker(twelvedata_api_key='test')
+
+        call_count = [0]
+        shared_ts = pd.Timestamp('2026-01-15 09:30:00', tz='US/Eastern')
+
+        def fake_time_series(**kwargs):
+            call_count[0] += 1
+            # Every call returns the *same* single bar — dedupe must collapse
+            idx = pd.DatetimeIndex([shared_ts], name='datetime')
+            df = pd.DataFrame(
+                {'open': [100.0], 'high': [101.0], 'low': [99.0], 'close': [100.5], 'volume': [1000]},
+                index=idx,
+            )
+            mock_ts = MagicMock()
+            mock_ts.as_pandas.return_value = df
+            return mock_ts
+
+        worker.client = MagicMock()
+        worker.client.time_series.side_effect = fake_time_series
+
+        df = worker.get_history(
+            'AAPL', BarSize.Mins1,
+            dt.datetime(2026, 1, 1), dt.datetime(2026, 1, 22),
+        )
+        assert call_count[0] >= 3
+        assert len(df) == 1
+
+
+# ---------------------------------------------------------------------------
 # Live smoke test — gated on TWELVEDATA_API_KEY being set.
 # Skipped in CI without a real key. Run locally with:
 #   TWELVEDATA_API_KEY=... pytest tests/test_twelvedata_history.py -k live
