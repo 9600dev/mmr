@@ -172,26 +172,17 @@ class IBAIORx():
 
         net_client.conn.disconnected -= __handle_client_id_error
 
-        # Explicitly subscribe to per-contract portfolio updates. ib_async
-        # auto-subscribes on the `managedAccounts` message, but that race
-        # with post-connect work has been observed to leave `ib.portfolio()`
-        # empty while `accountSummary` is populated — symptom: `mmr status`
-        # shows $1M NetLiq, `mmr positions` returns 0. A second call to
-        # reqAccountUpdates is idempotent in IB, so doing it explicitly is
-        # safe and guarantees the subscription regardless of message order.
-        try:
-            managed = self.ib.managedAccounts()
-            target = self.ib_account or (managed[0] if managed else '')
-            if target:
-                # ib_async.IB.reqAccountUpdates(account) — wrapper always
-                # subscribes (no `subscribe` kwarg; raw-API's second arg is
-                # absorbed by the wrapper). Idempotent on IB's side.
-                self.ib.reqAccountUpdates(account=target)
-        except Exception as ex:
-            logging.warning(
-                'explicit reqAccountUpdates failed (portfolio subscription '
-                'may not fire): %s', ex,
-            )
+        # NOTE: ib_async's ``connectAsync`` (which the sync ``connect``
+        # calls through) already fires ``reqPositionsAsync`` and
+        # ``reqAccountUpdatesAsync`` with a 4s timeout each. An earlier
+        # attempt to "force" a second explicit ``reqAccountUpdates(account)``
+        # here deadlocked because that method is synchronous-blocking
+        # (``_run(reqAccountUpdatesAsync(...))`` re-enters the loop). Do
+        # NOT add an explicit call here — if positions are empty after
+        # connect, the initial request timed out on a busy Gateway; fix
+        # is to restart trader_service so the next connect retries
+        # cleanly. ``session_summary`` emits a loud warning when the feed
+        # is in the "accountSummary populated / portfolio empty" state.
 
         # todo: check to see if we need to pass through 'ib_account' here.
         self.history_worker = IBHistoryWorker(
@@ -240,21 +231,10 @@ class IBAIORx():
             account=self.ib_account,
         )
 
-        # Explicit subscription — see note in sync connect(). Covers the
-        # race where post-reconnect queries hit `ib.portfolio()` before
-        # the implicit auto-subscribe has fired.
-        try:
-            managed = self.ib.managedAccounts()
-            target = self.ib_account or (managed[0] if managed else '')
-            if target:
-                # ib_async.IB.reqAccountUpdates(account) — wrapper always
-                # subscribes (no `subscribe` kwarg; raw-API's second arg is
-                # absorbed by the wrapper). Idempotent on IB's side.
-                self.ib.reqAccountUpdates(account=target)
-        except Exception as ex:
-            logging.warning(
-                'explicit reqAccountUpdates failed on async reconnect: %s', ex,
-            )
+        # See long note in sync connect() — do NOT add an explicit
+        # reqAccountUpdates here. It's synchronous-blocking and deadlocks
+        # post-connect. connectAsync already fires reqPositionsAsync +
+        # reqAccountUpdatesAsync with a timeout.
 
         if not self.history_worker:
             self.history_worker = IBHistoryWorker(
