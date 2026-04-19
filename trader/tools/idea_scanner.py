@@ -1559,8 +1559,13 @@ class TwelveDataIdeaScanner:
 
         # Default: movers. TwelveData's get_market_movers returns a compact
         # record that matches a quote for scanner purposes — we normalize it
-        # into the same shape.
+        # into the same shape. Per MMR's "fail loudly" principle, we tolerate
+        # *one* direction failing (unlikely but plausible — rate-limit on the
+        # exact moment of one of two calls) but raise if BOTH fail so the
+        # caller sees an auth/rate-limit/outage issue rather than an empty
+        # result that looks like "no movers today."
         combined: List[Dict[str, Any]] = []
+        errors: List[Exception] = []
         for direction in ('gainers', 'losers'):
             try:
                 payload = self._client.get_market_movers(
@@ -1568,6 +1573,7 @@ class TwelveDataIdeaScanner:
                 ).as_json()
             except Exception as ex:
                 logger.warning('td movers %s fetch failed: %s', direction, ex)
+                errors.append(ex)
                 continue
             entries = payload if isinstance(payload, list) else (payload or {}).get('values', [])
             for e in entries:
@@ -1584,6 +1590,11 @@ class TwelveDataIdeaScanner:
                     'change': e.get('change'),
                     'percent_change': e.get('percent_change'),
                 })
+        if errors and not combined:
+            raise IdeaScannerError(
+                f'TwelveData movers discovery failed for all directions: '
+                f'{errors[0]}'
+            ) from errors[0]
         return combined
 
     def _batch_quote(self, symbols: List[str]) -> List[Dict[str, Any]]:
@@ -1634,7 +1645,14 @@ class TwelveDataIdeaScanner:
             ticker = q.get('symbol', '') or ''
             if not ticker or ticker in seen:
                 continue
+            # Skip warrants, units, rights, preferred stocks — mirror the
+            # Massive/IB scanners so a `--source` switch doesn't change
+            # which tickers get surfaced (e.g. KKRpD is preferred stock;
+            # 'p' lowercase inside an otherwise-uppercase ticker is the
+            # convention across data providers).
             if any(ticker.endswith(s) for s in ('W', 'WS', '.U', '.R')):
+                continue
+            if 'p' in ticker and ticker != ticker.upper():
                 continue
             seen.add(ticker)
 
@@ -1711,12 +1729,13 @@ class TwelveDataIdeaScanner:
                 df = ts.as_pandas()
                 if df is None or df.empty:
                     return ticker, {}
+                # TwelveData returns newest-first by default. RSI/EMA/SMA
+                # are position-sensitive — they assume chronological order,
+                # so sort by index (timestamp) ascending before extracting
+                # closes. Sorting closes by value would silently produce
+                # wrong indicator values.
+                df = df.sort_index(ascending=True)
                 closes = list(pd.to_numeric(df['close'], errors='coerce').dropna())
-                closes.sort(key=lambda x: x)  # monotonic doesn't matter; we need chronological
-                # TD returns newest-first by default — re-sort by index ascending
-                df2 = df.copy()
-                df2 = df2.sort_index(ascending=True)
-                closes = list(pd.to_numeric(df2['close'], errors='coerce').dropna())
                 vals: Dict[str, Optional[float]] = {}
                 for indicator in needed:
                     if indicator == 'rsi':

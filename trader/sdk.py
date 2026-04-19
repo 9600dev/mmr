@@ -2084,15 +2084,21 @@ class MMR:
 
     @property
     def _twelvedata_client(self):
-        """Lazy-init TwelveData REST client."""
+        """Lazy-init TwelveData REST client.
+
+        Reads the api key from the Container config. The Container already
+        applies the TWELVEDATA_API_KEY env-var fallback when it loads the
+        config — we deliberately don't re-read the env var here, so the DI
+        contract stays one-way (all config flows through Container).
+        """
         if self._twelvedata_rest_client is None:
             from twelvedata import TDClient
             cfg = self._container.config()
-            api_key = cfg.get('twelvedata_api_key', '') or os.getenv('TWELVEDATA_API_KEY', '')
+            api_key = cfg.get('twelvedata_api_key', '')
             if not api_key:
                 raise ValueError(
-                    "twelvedata_api_key not configured (set in trader.yaml or "
-                    "TWELVEDATA_API_KEY env var)"
+                    "twelvedata_api_key not configured (set in trader.yaml "
+                    "or the TWELVEDATA_API_KEY env var)"
                 )
             self._twelvedata_rest_client = TDClient(apikey=api_key)
         return self._twelvedata_rest_client
