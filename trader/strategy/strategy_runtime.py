@@ -388,7 +388,20 @@ class StrategyRuntime():
             )
 
     async def _reconcile(self):
-        """Re-check config and subscriptions. Safe to call repeatedly (idempotent)."""
+        """Re-check config and subscriptions. Safe to call repeatedly (idempotent).
+
+        The body is synchronous (blocking RPC to trader_service for config
+        reload + per-conId resolve + per-contract publish). We offload the
+        whole thing to a thread so the event loop stays responsive — a
+        portfolio universe with ~10 conIds used to stall the loop for
+        ~1s every 30s, which surfaced as an asyncio "slow callback"
+        warning and stalled live ticker dispatch.
+        """
+        await asyncio.to_thread(self._reconcile_sync)
+
+    def _reconcile_sync(self):
+        """Synchronous reconcile body. Called from ``_reconcile`` via
+        ``asyncio.to_thread``; safe to call directly from non-async contexts."""
         # 1. Check for config file changes. If the YAML is mid-write when we
         # try to parse it, keep the old mtime so we retry on the next tick
         # rather than accepting a partial load.

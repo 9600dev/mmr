@@ -245,3 +245,68 @@ class TestReconcileResilience:
         rt._config_mtime = os.path.getmtime(str(config_file))
         with pytest.raises(KeyError):
             await rt._reconcile()
+
+    @pytest.mark.asyncio
+    async def test_reconcile_does_not_block_event_loop(self, tmp_path):
+        """Regression: the async ``_reconcile`` body used to run sync RPC
+        calls on the loop thread, causing asyncio "slow callback" warnings
+        and stalling live ticker dispatch for ~1s every 30s on a
+        portfolio universe with 10+ conIds. The fix offloads the body
+        to a thread via ``asyncio.to_thread`` — verify the loop stays
+        responsive during a deliberately-slow reconcile."""
+        import time
+        strategies = tmp_path / 'strategies'
+        strategies.mkdir()
+        config_file = tmp_path / 'strategy_runtime.yaml'
+        config_file.write_text('strategies: []\n')
+        rt = _make_runtime(tmp_path, strategies, config_file)
+
+        class _Strategy:
+            name = 'x'
+            conids = [1, 2, 3]
+            universe = None
+
+        rt.strategy_implementations = [_Strategy()]  # type: ignore
+
+        # Simulate a slow trader_service — each RPC call sleeps 200ms.
+        # On the old code this would block the event loop for 600ms+.
+        class _SlowClient:
+            def rpc(self, return_type=None):
+                return self
+            def resolve_symbol(self, conId):
+                time.sleep(0.2)
+                return []
+
+        rt.trader_client = _SlowClient()  # type: ignore
+        rt._config_mtime = os.path.getmtime(str(config_file))
+
+        # Run reconcile concurrently with a ticker task that ticks every 10ms.
+        # If the loop is blocked we'd see long gaps between ticks.
+        tick_gaps = []
+
+        async def ticker():
+            prev = time.monotonic()
+            while True:
+                await asyncio.sleep(0.01)
+                now = time.monotonic()
+                tick_gaps.append(now - prev)
+                prev = now
+
+        ticker_task = asyncio.create_task(ticker())
+        try:
+            await rt._reconcile()
+        finally:
+            ticker_task.cancel()
+            try:
+                await ticker_task
+            except asyncio.CancelledError:
+                pass
+
+        # If the loop stayed responsive, every tick gap should be near 10ms.
+        # Allow a generous ceiling — we just need to prove the reconcile body
+        # didn't hold the loop for ~600ms (what the old sync-on-loop code did).
+        max_gap = max(tick_gaps) if tick_gaps else 0.0
+        assert max_gap < 0.1, (
+            f'event loop was blocked for {max_gap*1000:.0f}ms during '
+            f'reconcile; sync RPC must run in a thread'
+        )
