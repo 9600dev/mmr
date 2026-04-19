@@ -50,6 +50,90 @@ class IBAIORxError():
         )
 
 
+# Every eventkit Event name on ib_async.IB that trader_runtime may have
+# registered handlers for before reconnect. We snapshot+restore across
+# ``IB()`` replacement in connect() so a reconnect doesn't silently drop
+# the portfolio-update pipeline. If new IB events get used by callers,
+# add them here.
+_PRESERVED_IB_EVENTS = (
+    'connectedEvent', 'disconnectedEvent',
+    'updateEvent', 'pendingTickersEvent', 'barUpdateEvent',
+    'newOrderEvent', 'orderModifyEvent', 'cancelOrderEvent', 'openOrderEvent',
+    'orderStatusEvent', 'execDetailsEvent', 'commissionReportEvent',
+    'updatePortfolioEvent', 'positionEvent', 'accountValueEvent',
+    'accountSummaryEvent', 'pnlEvent', 'pnlSingleEvent',
+    'tickNewsEvent', 'newsBulletinEvent',
+    'scannerDataEvent', 'wshMetaEvent', 'wshEvent',
+    'errorEvent',
+)
+
+
+def _snapshot_event_handlers(ib):
+    """Return a dict[event_name -> list[(obj_or_None, func)]] snapshot of
+    every handler currently attached to ``ib``'s known events.
+
+    eventkit's ``Event`` stores connections in ``_slots.slots`` as
+    ``Slot(obj, weakref, func)`` triples. We preserve both ``obj`` and
+    ``func`` so bound methods re-attach correctly (the ``+=`` operator
+    handles both plain functions and bound methods — we just hand it
+    back what we captured)."""
+    snapshot = {}
+    for name in _PRESERVED_IB_EVENTS:
+        event = getattr(ib, name, None)
+        if event is None:
+            continue
+        captured = []
+        try:
+            for slot in event._slots.slots:
+                obj = getattr(slot, 'obj', None)
+                func = getattr(slot, 'func', None)
+                if func is None:
+                    continue
+                # Reconstruct what was originally registered: a bound method
+                # if obj was present, otherwise the bare function.
+                if obj is not None:
+                    try:
+                        handler = getattr(obj, func.__name__)
+                    except Exception:
+                        handler = func
+                else:
+                    handler = func
+                captured.append(handler)
+        except Exception:
+            pass
+        snapshot[name] = captured
+    return snapshot
+
+
+def _restore_event_handlers(ib, snapshot):
+    """Re-attach handlers captured by ``_snapshot_event_handlers`` to a
+    fresh IB instance, de-duping against what the IB() constructor already
+    wired up (errorEvent, updateEvent, etc. have internal listeners)."""
+    for name, handlers in snapshot.items():
+        event = getattr(ib, name, None)
+        if event is None:
+            continue
+        existing_funcs = set()
+        try:
+            for slot in event._slots.slots:
+                f = getattr(slot, 'func', None)
+                if f is not None:
+                    existing_funcs.add(f)
+        except Exception:
+            pass
+        for handler in handlers:
+            try:
+                # For bound methods, `__func__` is the unbound function
+                # that ends up in the Slot. Dedupe on that.
+                fn = getattr(handler, '__func__', handler)
+                if fn in existing_funcs:
+                    continue
+                event += handler
+                existing_funcs.add(fn)
+            except Exception:
+                pass
+
+
 class IBAIORx():
     def __init__(
         self,
@@ -146,8 +230,19 @@ class IBAIORx():
         except Exception:
             pass
 
+        # Preserve externally-registered event handlers across the IB()
+        # replacement below. Callers (trader_runtime) subscribe to
+        # ``connectedEvent`` / ``disconnectedEvent`` / ``updatePortfolioEvent``
+        # etc. **before** calling connect(). If we drop them on the floor by
+        # creating a fresh IB(), the whole portfolio subscription chain
+        # silently dies (symptom: ``ib.portfolio()`` returns 49 items but
+        # MMR's Portfolio cache stays at 0 because updatePortfolio events
+        # fire on the new instance with no listeners).
+        preserved = _snapshot_event_handlers(self.ib)
+
         # Create a fresh IB instance to avoid stale socket state
         self.ib = IB()
+        _restore_event_handlers(self.ib, preserved)
 
         self._shutdown = False
 
@@ -203,12 +298,17 @@ class IBAIORx():
         if self.ib.isConnected():
             return self
 
-        # Force-disconnect stale connection and create fresh IB instance
+        # Force-disconnect stale connection and create fresh IB instance.
+        # Preserve externally-registered event handlers — see long note in
+        # sync connect() above. Dropping them here gave the "ib.portfolio()
+        # has items but MMR cache is empty" bug.
         try:
             self.ib.disconnect()
         except Exception:
             pass
+        preserved = _snapshot_event_handlers(self.ib)
         self.ib = IB()
+        _restore_event_handlers(self.ib, preserved)
 
         self._shutdown = False
 
