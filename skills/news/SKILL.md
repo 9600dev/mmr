@@ -54,7 +54,7 @@ cd ~/dev/news && ./docker.sh -g
 | `NewsHelpers.search_and_scrape(query, max_results=5, concurrency=3, engine="google_news")` | Composite: search + parallel scrape of top N results. Preserves search metadata (source, published_at) per article |
 | `NewsHelpers.ticker_news(ticker, max_results=5, extract=None, exchange_hint=None)` | **mmr-native**: google_news search `"{TICKER} stock [exchange_hint] news"` + parallel scrape |
 | `NewsHelpers.portfolio_news(tickers, max_results_per_ticker=3, exchange_hint=None)` | **mmr-native**: fan out `ticker_news()` across a list of tickers |
-| `NewsHelpers.get_images(url, max_images=5, min_bytes=5000)` | Extract inline images from an article as llmvm `ImageContent` (LLM-visible). Filters logos/icons/tracking pixels |
+| `NewsHelpers.get_images(url, max_images=5, min_bytes=5000, max_bytes=1_500_000)` | Extract inline images from an article as llmvm `ImageContent` (LLM-visible). Filters logos/icons/tracking pixels. `og:image` / `twitter:image` are ranked first so the hero photo wins over sidebar promos |
 
 ## Core patterns
 
@@ -409,9 +409,13 @@ Top-level failures (connection refused, timeout) appear as `{"ok": false, "error
 ## Gotchas
 
 - **Stateless service** — no caching. Each call is a fresh fetch.
-- **Playwright adds latency** — clean `httpx` is ~1s, Cloudflare-challenged Playwright can be 10–30s. The helper defaults to a 60s timeout to accommodate.
+- **Playwright adds latency** — clean `httpx` is ~1s, Cloudflare-challenged Playwright can be 10–30s, archive tier can stack another 20–60s per provider. The helper defaults to a **120s** timeout so the full fallback chain can finish before the client drops — shorter deadlines were clipping the archive tier mid-submission and returning an empty `attempts` trace.
 - **LLM extraction is opt-in** — `extract=` requires `llm_enabled: true` on the service (`~/.config/news/news.yaml`). Returns HTTP 422 otherwise.
+- **LLM extraction failures don't discard the article.** If the extraction prompt fails (auth, rate-limit, provider 5xx), the response still has `article.markdown` populated — the failure is surfaced on `extraction.error`. Check that field before treating the response as a total failure.
+- **`follow_links>0` requires `extract=`.** The LLM uses the extract prompt to decide which links are relevant; without one there's nothing to route on. Server rejects the combination with HTTP 422.
+- **`follow_links` is server-capped at 5.** Deeper chains are a scan-multiple-seeds problem, not a deeper-follow problem — the return on extra hops drops fast and the cost climbs.
 - **`allow_archive_fallback=False`** for live-only content. Default is `True` because paywall bypass is usually what you want.
+- **Per-article isolation** — `ticker_news()` / `portfolio_news()` / `search_and_scrape()` never fail the whole batch when one URL fails. Each article comes back with its own `ok` / `status` / `attempts`, so a blocked Bloomberg URL doesn't poison the rest of the bundle.
 - **`include_html=True` is heavy** — raw HTML is 10–30× the size of markdown. Only set when you need to run your own extractor.
 - **Max 50 results per search** — server rejects `max_results > 50` with 422. `search_and_scrape` already clamps effective scrapes to `max_results`.
 

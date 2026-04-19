@@ -28,7 +28,12 @@ from typing import Any
 # Override via NEWS_SERVICE_URL env var (e.g. when running the service on a
 # different port during development).
 _NEWS_URL = os.environ.get("NEWS_SERVICE_URL", "http://127.0.0.1:8089").rstrip("/")
-_DEFAULT_TIMEOUT = 60.0  # seconds — generous because playwright + archive can be slow
+# Default per-request timeout. 120s covers the worst-case fallback chain —
+# httpx (2s) → playwright with CF-challenge wait (up to 45s) → archive.ph
+# → archive.today → web.archive.org (each up to ~20s). 60s clipped the
+# archive tier mid-submission and left callers with an empty attempts
+# trace; 120s lets the chain finish and return a structured result.
+_DEFAULT_TIMEOUT = 120.0
 
 
 # ----------------------------------------------------------------------
@@ -129,12 +134,44 @@ _IMG_EXT_BLOCKLIST = (".svg", ".gif")
 _DATA_URI_PREFIX = "data:"
 
 
+def _extract_og_image_urls(html: str, base_url: str) -> list[str]:
+    '''Pull og:image / twitter:image meta URLs, in order.
+
+    These are the publisher's own "headline image" claim — strong signal
+    for hero photo ranking. Used to pre-seed candidates so the top-of-list
+    isn't a sidebar promo that happens to appear first in the DOM.
+    '''
+    import re as _re
+    from urllib.parse import urljoin
+
+    meta_re = _re.compile(
+        r'<meta\b[^>]*(?:property|name)\s*=\s*["\'](?:og:image(?::url)?|twitter:image)["\']'
+        r'[^>]*content\s*=\s*["\']([^"\']+)["\']',
+        _re.IGNORECASE,
+    )
+    urls: list[str] = []
+    seen: set[str] = set()
+    for m in meta_re.finditer(html):
+        raw = m.group(1).strip()
+        if not raw:
+            continue
+        resolved = urljoin(base_url, raw)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        urls.append(resolved)
+    return urls
+
+
 def _extract_img_candidates(html: str, base_url: str) -> list[dict[str, str]]:
-    '''Parse <img> tags out of HTML. Returns list of {src, alt} dicts.
+    '''Parse <img> tags out of HTML. Returns list of {src, alt} dicts
+    biased so og:image / twitter:image URLs rank first.
 
     Uses regex rather than bs4 to keep the helper dependency-free. Picks up
-    src, data-src, and data-lazy-src (common lazy-load patterns).
+    src, data-src, and data-lazy-src (common lazy-load patterns). alt text
+    is HTML-unescaped — otherwise things like `S&amp;P 500` leak through.
     '''
+    import html as _html
     import re as _re
     from urllib.parse import urljoin, urlparse
 
@@ -145,8 +182,19 @@ def _extract_img_candidates(html: str, base_url: str) -> list[dict[str, str]]:
     )
     alt_re = _re.compile(r"alt\s*=\s*[\"']([^\"']*)[\"']", _re.IGNORECASE)
 
+    # Hero-bias: publisher-claimed hero images first, in meta-tag order.
+    og_urls = _extract_og_image_urls(html, base_url)
     seen: set[str] = set()
     records: list[dict[str, str]] = []
+    for og_url in og_urls:
+        parsed = urlparse(og_url)
+        host = parsed.netloc.lower()
+        if any(blocked in host for blocked in _IMG_BLOCKLIST_HOSTS):
+            continue
+        if parsed.path.lower().endswith(_IMG_EXT_BLOCKLIST):
+            continue
+        seen.add(og_url)
+        records.append({"src": og_url, "alt": "", "_source": "og:image"})
 
     for match in tag_re.finditer(html):
         attrs = match.group(1)
@@ -171,9 +219,10 @@ def _extract_img_candidates(html: str, base_url: str) -> list[dict[str, str]]:
             continue
 
         alt_match = alt_re.search(attrs)
-        alt = alt_match.group(1).strip() if alt_match else ""
+        alt_raw = alt_match.group(1).strip() if alt_match else ""
+        alt = _html.unescape(alt_raw)
 
-        records.append({"src": resolved, "alt": alt})
+        records.append({"src": resolved, "alt": alt, "_source": "img"})
 
     return records
 
@@ -181,11 +230,16 @@ def _extract_img_candidates(html: str, base_url: str) -> list[dict[str, str]]:
 def _download_image_sync(
     record: dict[str, str],
     min_bytes: int,
+    max_bytes: int,
     timeout: float,
 ) -> dict[str, Any]:
     '''Download a single image synchronously. Call via asyncio.to_thread.
 
     Returns {ok, bytes, src, alt, content_type, reason?}.
+
+    Size filters are symmetric: below ``min_bytes`` → likely favicon/
+    tracking pixel, above ``max_bytes`` → too large for an LLM visual
+    budget (a single 1.8MB photo burns ~6k vision tokens).
     '''
     import httpx
 
@@ -222,6 +276,12 @@ def _download_image_sync(
             "ok": False,
             "src": src,
             "reason": f"too small ({len(data)} < {min_bytes} bytes)",
+        }
+    if max_bytes and len(data) > max_bytes:
+        return {
+            "ok": False,
+            "src": src,
+            "reason": f"too large ({len(data)} > {max_bytes} bytes; caller's max_bytes cap)",
         }
 
     return {
@@ -372,9 +432,11 @@ class NewsHelpers:
     async def markdown(url: str, allow_archive_fallback: bool = True) -> str:
         """Convenience wrapper: return just the article markdown body.
 
-        On failure returns an error string prefixed with ``ERROR:`` — callers
-        that pipe this into downstream LLM calls should inspect for that
-        prefix.
+        On failure returns an error string prefixed with ``ERROR:`` that
+        carries both the terminal status and the per-fetcher attempts
+        trace (``[httpx:blocked, playwright:paywalled, archive:not_found]``).
+        That's usually enough to tell paywall-with-no-snapshot apart from
+        CF-blocked apart from genuine 404 without dropping to ``scrape()``.
 
         Example:
             md = await NewsHelpers.markdown("https://www.reuters.com/...")
@@ -383,7 +445,13 @@ class NewsHelpers:
         """
         res = await NewsHelpers.scrape(url, allow_archive_fallback=allow_archive_fallback)
         if not res.get("ok"):
-            return f"ERROR: {res.get('error') or res.get('status') or 'unknown failure'}"
+            status = res.get("status") or "unknown"
+            attempts = res.get("attempts") or []
+            trace = ", ".join(
+                f"{a.get('fetcher', '?')}:{a.get('status', '?')}" for a in attempts
+            )
+            suffix = f" [{trace}]" if trace else ""
+            return f"ERROR: status={status}{suffix} — {res.get('error') or ''}".rstrip(" —")
         article = res.get("article") or {}
         md = article.get("markdown") or ""
         if not md:
@@ -595,6 +663,7 @@ class NewsHelpers:
         url: str,
         max_images: int = 5,
         min_bytes: int = 5000,
+        max_bytes: int = 1_500_000,
         include_markdown: bool = False,
         allow_archive_fallback: bool = True,
         timeout: float = _DEFAULT_TIMEOUT,
@@ -622,6 +691,11 @@ class NewsHelpers:
             min_bytes: Minimum file size to keep. Defaults to 5000 bytes,
                 which filters out most logos, favicons, tracking pixels,
                 and author avatars while retaining real article images.
+            max_bytes: Maximum file size to keep. Defaults to 1.5 MB.
+                Anything larger is skipped with reason ``too large`` — a
+                single 1.8 MB photo burns ~6k vision tokens, and most
+                editorial photos land well under 1 MB anyway. Set to 0
+                to disable the cap.
             include_markdown: If True, also return the article markdown in
                 the response (useful when handing text + images to the LLM
                 together).
@@ -701,7 +775,7 @@ class NewsHelpers:
         async def _fetch(rec: dict[str, str]) -> dict[str, Any]:
             async with sem:
                 return await asyncio.to_thread(
-                    _download_image_sync, rec, min_bytes, 15.0,
+                    _download_image_sync, rec, min_bytes, max_bytes, 15.0,
                 )
 
         results = await asyncio.gather(*[_fetch(r) for r in candidates])

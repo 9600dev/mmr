@@ -129,7 +129,7 @@ modes, selected by request fields:
 | `url` | string (HttpUrl) | yes | — | Validated by pydantic; malformed → 422 |
 | `allow_archive_fallback` | bool | no | `true` | Disable to skip archive.ph/wayback tier |
 | `extract` | string \| null | no | `null` | Natural-language extraction prompt. Requires `llm_enabled=true` |
-| `follow_links` | int | no | `0` | 0–5 (server cap). Only meaningful with `extract`; LLM picks the URLs |
+| `follow_links` | int | no | `0` | 0–5 (server cap). **Requires `extract`** — sending `follow_links>0` without it returns HTTP 422 |
 | `include_html` | bool | no | `false` | Return raw upstream HTML + post-preclean HTML on the response. Each capped at 2 MB (truncated with a marker). Off by default because HTML payloads are 10–30× the markdown size |
 
 **Response 200 (shared envelope for success and domain failure):**
@@ -209,7 +209,8 @@ When the request used `extract`, the response has two additional top-level field
     "text": "The CEO is Jane Smith.",
     "model": "claude-opus-4-7",
     "input_chars": 4812,
-    "elapsed_ms": 1432
+    "elapsed_ms": 1432,
+    "error": null
   },
   "follow_pages": [
     {
@@ -226,6 +227,10 @@ When the request used `extract`, the response has two additional top-level field
 
 - `extraction`: null unless `extract` was set. `text` is whatever the LLM
   produced; callers who want structure can prompt for JSON in `extract`.
+- `extraction.error`: populated (e.g. `"AuthenticationError: ..."`) when
+  the LLM call itself failed. The rest of the response is still valid —
+  `ok: true`, `article.markdown` present — so callers can fall back to
+  the markdown body instead of treating the scrape as a total loss.
 - `follow_pages`: empty unless `follow_links > 0`. One entry per URL the
   LLM selected. `markdown_length: 0` + `ok: false` means the follow-up
   fetch failed (blocked, not found, etc.); the extraction still runs over
@@ -283,6 +288,7 @@ envelope as success — no special shape for validation errors.
 | HTTP | When | Envelope `status` | `error` |
 |---|---|---|---|
 | 422 | Invalid request body (e.g. `url` not a valid HttpUrl) | `bad_request` | `{code, detail, field, errors}` — `field` points at the offending path (e.g. `"body.url"`) |
+| 422 | `follow_links>0` sent without `extract` | `bad_request` | Pydantic `value_error` on `body` — reshape the request with both fields set |
 | 422 | `extract` set with `llm_enabled: false` on the service | `bad_request` | `{code: "llm_disabled", detail, field: "body.extract"}` |
 | 503 | Pipeline not ready (startup in progress, or fatal init error) | — | `{"detail": "pipeline not ready"}` (FastAPI's default shape — not a domain error) |
 
