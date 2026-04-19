@@ -1169,17 +1169,21 @@ class MMRHelpers:
         top: int = 10,
         note: str = "",
         timeout: int = 1800,
+        concurrency: int = 1,
+        per_job_timeout: int = 600,
     ) -> str:
         """
         Cartesian-product parameter sweep — runs one backtest per grid
         combination, persists each to the history store, and returns a
         composite-score leaderboard.
 
-        Runs in-process (data is loaded once, reused across combos) so
-        this is the right path when the grid is small-to-medium
-        (≤ a few dozen combos). For many-combo or multi-strategy sweeps
-        prefer ``backtest_batch`` which parallelises at the subprocess
-        level.
+        By default runs in-process sequentially so data loads once and is
+        reused across combos — ideal when grid is small (≤ ~10 combos
+        on 1-min × 365d). **Pass ``concurrency=N`` for larger grids** and
+        the sweep transparently fans out through subprocess-level batch
+        execution (each combo is a `mmr backtest --params '{...}'` call).
+        That converts a 30-combo × 90s sequential run (~45 min, will hit
+        the default 1800s timeout) into an N-way parallel ~5-10 min run.
 
         Does NOT require any service.
 
@@ -1189,21 +1193,122 @@ class MMRHelpers:
             — cartesian product expands to 6 runs.
         :param conids: Contract IDs (or use universe)
         :param universe: Universe name (alternative to conids)
-        :param days: Backtest window (default 180 — shorter than single
-            backtest default because you're running many of them)
+        :param days: Backtest window (default 180)
         :param capital: Initial capital
         :param bar_size: Bar size (default "1 min")
         :param top: Show top-N in the leaderboard (default 10)
         :param note: Free-text note stamped on every sweep run
-        :param timeout: Overall subprocess timeout. Default 30 minutes
-            covers most sweeps; bump it for 100+ combos.
+        :param timeout: Overall subprocess timeout for the sequential
+            (``concurrency=1``) path. Ignored when ``concurrency > 1``.
+        :param concurrency: >1 to parallelise via ``backtest_batch``.
+            Recommended for grids that would otherwise exceed ~15 min
+            of sequential compute. Default 1 (sequential, in-process).
+        :param per_job_timeout: Per-combo subprocess timeout for the
+            parallel path. Default 600s per combo.
 
-        Example:
+        Example (sequential, small grid):
         result = await MMRHelpers.backtest_sweep(
-            "/path/to/strategies/keltner_breakout.py", "KeltnerBreakout",
-            param_grid={"EMA_PERIOD": [10, 15, 20], "BAND_MULT": [1.5, 2.0]},
+            "/path/to/keltner_breakout.py", "KeltnerBreakout",
+            param_grid={"EMA_PERIOD": [10, 20], "BAND_MULT": [1.5, 2.0]},
             conids=[756733], days=180)
+
+        Example (parallel, large grid — use this for anything > ~10 combos
+        on 1-min data):
+        result = await MMRHelpers.backtest_sweep(
+            "/path/to/opening_range_breakout.py", "OpeningRangeBreakout",
+            param_grid={"RANGE_MINUTES":[10,15,20,30,45,60],
+                        "VOLUME_MULT":[1.0,1.2,1.3,1.5,1.8]},
+            conids=[756733], days=365, concurrency=4)
         """
+        # Parallel path — decompose into batch jobs. This sidesteps the
+        # `bt-sweep` CLI entirely; we re-rank the batch results locally
+        # by composite score so the caller gets the same leaderboard
+        # shape as the sequential path.
+        if concurrency > 1:
+            import itertools
+            keys = list(param_grid.keys())
+            value_lists = [
+                v if isinstance(v, list) else [v]
+                for v in param_grid.values()
+            ]
+            combos = list(itertools.product(*value_lists))
+            jobs = [
+                {
+                    "strategy_path": strategy_path,
+                    "class_name": class_name,
+                    "conids": conids,
+                    "universe": universe,
+                    "days": days,
+                    "capital": capital,
+                    "bar_size": bar_size,
+                    "params": dict(zip(keys, combo)),
+                    "note": note or f"sweep[{class_name}]",
+                }
+                for combo in combos
+            ]
+            batch_raw = await MMRHelpers.backtest_batch(
+                jobs, concurrency=concurrency, summary_only=True,
+                per_job_timeout=per_job_timeout,
+            )
+            batch = json.loads(batch_raw)
+            entries = batch.get("data", []) if isinstance(batch, dict) else []
+
+            # Build a light leaderboard shape matching the sequential path.
+            leaderboard = []
+            errors = []
+            for entry in entries:
+                if entry.get("status") == "ok":
+                    summary = (
+                        entry.get("result", {})
+                             .get("data", {})
+                             .get("summary", {})
+                    )
+                    leaderboard.append({
+                        "run_id": summary.get("run_id"),
+                        "params": summary.get("applied_params", {})
+                                   or entry["input"].get("params", {}),
+                        "total_return": summary.get("total_return"),
+                        "sharpe_ratio": summary.get("sharpe_ratio"),
+                        "sortino_ratio": summary.get("sortino_ratio"),
+                        "profit_factor": summary.get("profit_factor"),
+                        "expectancy_bps": summary.get("expectancy_bps"),
+                        "total_trades": summary.get("total_trades"),
+                        "max_drawdown": summary.get("max_drawdown"),
+                    })
+                else:
+                    errors.append({
+                        "params": entry["input"].get("params", {}),
+                        "error": entry.get("error") or entry.get("status"),
+                    })
+
+            # Rank by a simple score (sortino + pf - dd penalty) since the
+            # full _bt_composite_score lives server-side. Callers wanting
+            # the canonical score can pull `backtests_list(sort_by="score")`
+            # next; this ranking is a reasonable in-report ordering.
+            def _rough_score(r: Dict[str, Any]) -> float:
+                sortino = r.get("sortino_ratio") or 0.0
+                pf = r.get("profit_factor")
+                if pf == "inf" or (isinstance(pf, (int, float)) and pf > 1e15):
+                    pf = 3.0
+                elif not isinstance(pf, (int, float)):
+                    pf = 0.0
+                dd = abs(r.get("max_drawdown") or 0.0)
+                return sortino + min(pf, 3.0) - 10 * dd
+
+            leaderboard.sort(key=_rough_score, reverse=True)
+            return json.dumps({
+                "data": {
+                    "total_combinations": len(combos),
+                    "successful": len(leaderboard),
+                    "failed": len(errors),
+                    "leaderboard": leaderboard[:top],
+                    "errors": errors,
+                    "concurrency": concurrency,
+                },
+                "title": f"Sweep: {class_name} (parallel, concurrency={concurrency})",
+            }, indent=2)
+
+        # Sequential path — the original bt-sweep CLI.
         args = ["bt-sweep", "-s", strategy_path, "--class", class_name,
                 "--days", str(days), "--capital", str(capital),
                 "--bar-size", bar_size, "--grid", json.dumps(param_grid),
@@ -1232,9 +1337,14 @@ class MMRHelpers:
         strategy / cartesian-grid shape. Each job spawns its own CLI
         subprocess, so the GIL doesn't serialise them.
 
-        Returns a list in the same order as ``jobs``, with a ``status``
-        field per entry: ``"ok"`` (summary attached), ``"timeout"``,
-        or ``"error"`` (details in ``error``).
+        **Return type:** like every other helper, this returns a **JSON
+        string** (not a dict) — wrap the result in ``json.loads(...)``
+        before iterating. Shape:
+        ``{"data": [{status, input, result?, error?}, ...]}``
+        ``status`` is ``"ok"`` (summary attached in ``result``),
+        ``"timeout"``, or ``"error"`` (details in ``error``). Entries come
+        back in the same order as ``jobs`` — safe to zip against the
+        input list.
 
         Does NOT require any service.
 
@@ -1520,7 +1630,7 @@ class MMRHelpers:
         return json.dumps(result, indent=2)
 
     @staticmethod
-    async def backtests_show(run_id: int) -> str:
+    async def backtests_show(run_id: int, include_raw: bool = False) -> str:
         """
         Show full detail for a past backtest run, including statistical-
         confidence tests (PSR, t-stat, bootstrap CIs, P&L distribution,
@@ -1543,12 +1653,51 @@ class MMRHelpers:
           - ``losing_streak_actual`` vs ``losing_streak_mc_95``: if actual
             exceeds MC 95th pct, losses cluster (auto-correlated risk).
 
+        For bulk confidence-only reads across many runs, prefer
+        ``backtests_confidence([ids])`` — it returns only the small
+        decision-quality fields and avoids shipping megabytes of raw
+        trades per run.
+
         :param run_id: Backtest run ID (from backtests_list)
+        :param include_raw: Include the per-trade array and full equity
+            curve in the response. **Off by default** — these can be
+            multi-MB on 1-min × 365d runs and are already on disk in the
+            history DB. Turn on only when you specifically need them.
 
         Example:
         result = await MMRHelpers.backtests_show(42)
         """
-        result = await _run_cli_json("backtests", "show", str(run_id))
+        args = ["backtests", "show", str(run_id)]
+        if include_raw:
+            args.append("--include-raw")
+        result = await _run_cli_json(*args)
+        return json.dumps(result, indent=2)
+
+    @staticmethod
+    async def backtests_confidence(run_ids: List[int]) -> str:
+        """
+        Bulk read of the statistical-confidence block across N runs.
+
+        Returns one row per run with ``{run_id, class_name, symbols,
+        params, period, summary, statistical_confidence}`` — the compact
+        decision-quality payload only. Does **not** include the raw
+        trades or equity curve (use ``backtests_show(id, include_raw=True)``
+        if you need a single run's full detail).
+
+        This is the right tool post-sweep when you want to rank the top-N
+        runs by PSR / p-value / CI tightness without paging through
+        megabytes per run.
+
+        Does NOT require any service.
+
+        :param run_ids: List of run ids (from backtests_list)
+
+        Example:
+        result = await MMRHelpers.backtests_confidence([42, 43, 44])
+        # → [{run_id, class_name, params, summary, statistical_confidence}, ...]
+        """
+        args = ["backtests", "confidence"] + [str(i) for i in run_ids]
+        result = await _run_cli_json(*args)
         return json.dumps(result, indent=2)
 
     # ------------------------------------------------------------------

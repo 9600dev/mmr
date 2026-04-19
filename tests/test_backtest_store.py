@@ -374,6 +374,21 @@ class TestArchive:
         # Active list unchanged
         assert len(store.list()) == 1
 
+    def test_get_returns_raw_json_fields_intact(self, tmp_duckdb_path):
+        """Regression: `backtests show` with `--include-raw` must still
+        return the persisted trades_json/equity_curve_json verbatim.
+        The CLI's default response excludes them (multi-MB on 1-min
+        1-year runs), so make sure the store-level round-trip still
+        carries them end-to-end for when callers ask."""
+        store = BacktestStore(tmp_duckdb_path)
+        rec = _make_record()
+        rec.trades_json = '[{"ts":"2026-01-01","a":"BUY"}]'
+        rec.equity_curve_json = '[{"ts":"2026-01-01","v":100000.0}]'
+        rid = store.add(rec)
+        got = store.get(rid)
+        assert got.trades_json == '[{"ts":"2026-01-01","a":"BUY"}]'
+        assert got.equity_curve_json == '[{"ts":"2026-01-01","v":100000.0}]'
+
     def test_filter_by_strategy_respects_archive(self, tmp_duckdb_path):
         """strategy_class filter + archive filter combine via AND, not
         either-or — archived runs of the same class still hide."""

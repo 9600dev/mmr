@@ -1167,6 +1167,21 @@ def build_parser() -> argparse.ArgumentParser:
     _add_list_args(bts_list_p)
     bts_show_p = bts_sub.add_parser('show', help='Show full detail for a run')
     bts_show_p.add_argument('run_id', type=int)
+    # The raw trades + equity-curve arrays are multi-megabyte on a 1-min
+    # 1-year run — they're already on disk in the DB, there's no reason
+    # to ship them back on every `show`. Off by default; opt in with
+    # --include-raw when you actually need the full series.
+    bts_show_p.add_argument('--include-raw', action='store_true', default=False,
+                             help='Include trades_json + equity_curve_json in --json output '
+                                  '(multi-MB on 1-min × 365d runs; off by default)')
+
+    # backtests confidence — batch read of just the stat-confidence block for N runs.
+    # Designed for LLMs post-sweep: one call returns the small decision-
+    # quality payload for every run without the trade/equity blobs.
+    bts_conf_p = bts_sub.add_parser('confidence',
+                                      help='Show statistical-confidence block for one or more runs (compact)')
+    bts_conf_p.add_argument('run_ids', type=int, nargs='+',
+                             help='One or more run ids')
     bts_cmp_p = bts_sub.add_parser('compare', help='Compare two or more runs side-by-side')
     bts_cmp_p.add_argument('run_ids', type=int, nargs='+')
     bts_arc_p = bts_sub.add_parser('archive',
@@ -3513,12 +3528,17 @@ def _handle_backtests(args: argparse.Namespace):
                 'losing_streak_mc_95':   stats.losing_streak_mc_95,
                 'unavailable_reason':    stats_reason,
             }
-            print(json.dumps({'data': {
+            payload = {
                 **detail,
                 'statistical_confidence': stats_data,
-                'trades_json': r.trades_json,
-                'equity_curve_json': r.equity_curve_json,
-            }}, default=str))
+            }
+            # Raw arrays can be MB-scale on 1-min × 365d runs. Most
+            # callers never need them (the persisted DB row is the
+            # source of truth); include only on explicit --include-raw.
+            if getattr(args, 'include_raw', False):
+                payload['trades_json'] = r.trades_json
+                payload['equity_curve_json'] = r.equity_curve_json
+            print(json.dumps({'data': payload}, default=str))
             return
 
         # Rich detail — colored metric values matching the list view's
@@ -3602,6 +3622,119 @@ def _handle_backtests(args: argparse.Namespace):
                 '[dim]✓ This run has 4+ quality metrics in the green threshold '
                 'and ≥ 30 trades — a real candidate.[/]'
             )
+        return
+
+    if action == 'confidence':
+        # Compact bulk read of the stat-confidence block across N runs.
+        # Designed for LLMs post-sweep: full `show` payloads include the
+        # multi-MB trades_json blob per run — a 10-run batch of `show`
+        # is ~170 MB of text that the caller only uses the 500-byte
+        # confidence block from. This endpoint delivers just that block
+        # (plus minimal identifying fields) for bulk decision-making.
+        rows: List[Dict[str, Any]] = []
+        for rid in args.run_ids:
+            rec = store.get(rid)
+            if rec is None:
+                rows.append({'run_id': rid, 'error': 'not found'})
+                continue
+            stats, reason = _compute_bt_stats(rec)
+            pf = rec.profit_factor
+            rows.append({
+                'run_id': rec.id,
+                'class_name': rec.class_name,
+                'symbols': _format_conids_with_symbols(rec.conids),
+                'params': rec.params or {},
+                'period': f'{str(rec.start_date)[:10]} → {str(rec.end_date)[:10]}',
+                'summary': {
+                    'total_trades': rec.total_trades,
+                    'total_return': rec.total_return,
+                    'sharpe_ratio': rec.sharpe_ratio,
+                    'sortino_ratio': rec.sortino_ratio,
+                    'profit_factor': (
+                        'inf' if pf > 1e15 else rec.profit_factor
+                    ),
+                    'expectancy_bps': rec.expectancy_bps,
+                    'max_drawdown': rec.max_drawdown,
+                },
+                'statistical_confidence': {
+                    'n_trades': stats.n_trades,
+                    'n_bar_returns': stats.n_bar_returns,
+                    'probabilistic_sharpe': stats.psr,
+                    't_stat': stats.t_stat,
+                    'p_value': stats.p_value,
+                    'return_ci_lo': stats.return_ci_lo,
+                    'return_ci_hi': stats.return_ci_hi,
+                    'sharpe_ci_lo': stats.sharpe_ci_lo,
+                    'sharpe_ci_hi': stats.sharpe_ci_hi,
+                    'pnl_skew': stats.pnl_skew,
+                    'pnl_excess_kurtosis': stats.pnl_excess_kurtosis,
+                    'losing_streak_actual': stats.losing_streak_actual,
+                    'losing_streak_mc_95': stats.losing_streak_mc_95,
+                    'unavailable_reason': reason,
+                },
+            })
+        if _json_mode:
+            print(json.dumps(
+                {'data': rows, 'title': 'Backtest Confidence Batch'},
+                default=str,
+            ))
+            return
+        # Rich output for humans: one row per run, colored by PSR band.
+        from rich.table import Table
+        from rich.text import Text as _Text
+        from rich import box as _box
+        tbl = Table(
+            title=f'Confidence — {len(rows)} run(s)',
+            box=_box.ROUNDED, pad_edge=False, show_lines=False,
+        )
+        tbl.add_column('id', justify='right', width=5)
+        tbl.add_column('class', no_wrap=True, width=20)
+        tbl.add_column('params', overflow='ellipsis', width=28)
+        tbl.add_column('PSR', justify='right', width=7)
+        tbl.add_column('p_val', justify='right', width=7)
+        tbl.add_column('return CI', justify='right', width=18)
+        tbl.add_column('skew', justify='right', width=6)
+        tbl.add_column('kurt', justify='right', width=6)
+        for row in rows:
+            if 'error' in row:
+                tbl.add_row(str(row['run_id']), _Text('not found', style='red'),
+                             '', '', '', '', '', '')
+                continue
+            sc = row['statistical_confidence']
+            p_str = ', '.join(f'{k}={v}' for k, v in sorted((row['params'] or {}).items()))
+            psr = sc['probabilistic_sharpe']
+            if psr is None:
+                psr_cell = _Text('—', style='dim')
+            else:
+                style = (
+                    'bold green' if psr >= 0.95
+                    else 'green' if psr >= 0.80
+                    else 'yellow' if psr >= 0.50
+                    else 'red'
+                )
+                psr_cell = _Text(f'{psr:.1%}', style=style)
+            p_val = sc['p_value']
+            p_cell = _Text('—' if p_val is None else f'{p_val:.4f}',
+                            style=('green' if p_val is not None and p_val < 0.05 else 'yellow' if p_val is not None and p_val < 0.10 else 'red') if p_val is not None else 'dim')
+            ci_lo, ci_hi = sc['return_ci_lo'], sc['return_ci_hi']
+            if ci_lo is None:
+                ci_cell = _Text('—', style='dim')
+            else:
+                ci_style = (
+                    'green' if ci_lo > 0
+                    else 'red' if ci_hi < 0
+                    else 'yellow'
+                )
+                ci_cell = _Text(f'[{ci_lo:+.2f}, {ci_hi:+.2f}]', style=ci_style)
+            skew = sc['pnl_skew']
+            kurt = sc['pnl_excess_kurtosis']
+            tbl.add_row(
+                str(row['run_id']), row['class_name'], p_str,
+                psr_cell, p_cell, ci_cell,
+                f'{skew:+.2f}' if skew is not None else '—',
+                f'{kurt:+.2f}' if kurt is not None else '—',
+            )
+        console.print(tbl)
         return
 
     if action == 'compare':

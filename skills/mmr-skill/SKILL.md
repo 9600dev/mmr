@@ -15,7 +15,7 @@ metadata:
 - **trader_service required**: portfolio, positions, orders, trades, account, resolve, snapshot, depth, buy, sell, cancel, cancel_all, close_all_positions, resize_positions, approve, strategies (list/enable/disable/reload), `universe_add`, `buy_option`, `sell_option`, `risk`, `scan`, `ideas` (with `--location` for international markets), `listen`, `watch`
 - **data_service required**: history_massive, history_ib
 - **massive_api_key only** (no service needed): balance_sheet, income_statement, cash_flow, ratios, filing_section, `options_expirations`, `options_chain`, `options_snapshot`, `options_implied`, `data_download`, `ideas` (default US path), `news`, `movers`, `forex_snapshot` (massive source), `forex_movers`, `stream`
-- **No service needed**: universe_list, universe_show, universe_create, universe_delete, universe_remove, universe_import, status, market_hours, `data_summary`, `data_query`, `backtest`, `backtest_sweep`, `backtest_batch`, `backtests_list`, `backtests_show`, `backtests_archive`, `backtests_unarchive`, `strategies_inspect`, `strategy_create`, `strategy_deploy`, `strategy_undeploy`, `strategy_signals`, `strategy_backtest`, `propose`, `proposals`, `reject`, `session_limits`, `session_status`, `group_list`, `group_create`, `group_delete`, `group_show`, `group_add`, `group_remove`, `group_set`, `logs`
+- **No service needed**: universe_list, universe_show, universe_create, universe_delete, universe_remove, universe_import, status, market_hours, `data_summary`, `data_query`, `backtest`, `backtest_sweep`, `backtest_batch`, `backtests_list`, `backtests_show`, `backtests_confidence`, `backtests_archive`, `backtests_unarchive`, `strategies_inspect`, `strategy_create`, `strategy_deploy`, `strategy_undeploy`, `strategy_signals`, `strategy_backtest`, `propose`, `proposals`, `reject`, `session_limits`, `session_status`, `group_list`, `group_create`, `group_delete`, `group_show`, `group_add`, `group_remove`, `group_set`, `logs`
 
 ## International Stocks (ASX, TSE, SEHK, etc.)
 
@@ -191,10 +191,11 @@ Requires `massive_api_key` in config. No trader_service needed. `timeframe`: `"q
 | `MMRHelpers.strategy_create(name)` | Create template strategy file in `strategies/` |
 | `MMRHelpers.strategies_inspect()` | **Do this first** — AST-scan of `strategies/` returning each class's dispatch mode (`precompute` fast vs `on_prices` slow) and tunable params with defaults. Saves reading every file to plan a sweep. |
 | `MMRHelpers.backtest(path, class_name, conids, params={...}, summary_only=True, ...)` | Backtest a strategy. `params={"EMA_PERIOD": 15}` overrides class attributes or `self.params` entries; `summary_only=True` (default) omits the per-trade array from the return. Always use **absolute paths** — the CLI subprocess doesn't inherit cwd. |
-| `MMRHelpers.backtest_sweep(path, class_name, param_grid={...}, conids, ...)` | Cartesian-product parameter sweep. Runs one backtest per grid point, persists each, returns a composite-score leaderboard. Use this to answer "what params". |
-| `MMRHelpers.backtest_batch([jobs], concurrency=4)` | Parallel subprocess-level batch runner for heterogeneous jobs (different strategies/symbols). Each job is `{strategy_path, class_name, conids, days, params, ...}`. Use this for multi-strategy / multi-symbol fanout. |
+| `MMRHelpers.backtest_sweep(path, class_name, param_grid={...}, conids, concurrency=N, ...)` | Cartesian-product parameter sweep. Sequential by default (small grids); pass `concurrency=4+` for anything > ~10 combos on 1-min data or it will time out. Parallel path fans out via `backtest_batch` internally. |
+| `MMRHelpers.backtest_batch([jobs], concurrency=4)` | Parallel subprocess-level batch runner for heterogeneous jobs (different strategies/symbols). Each job is `{strategy_path, class_name, conids, days, params, ...}`. **Returns a JSON string** — wrap the result in `json.loads(...)` before iterating. |
 | `MMRHelpers.backtests_list(sort_by="score", limit=25, ...)` | List past runs from the history store, ranked by quality score (default) or any metric |
-| `MMRHelpers.backtests_show(run_id)` | Full detail for one run, including **statistical-confidence tests** (PSR, t-stat, bootstrap CIs, P&L distribution, losing-streak MC) |
+| `MMRHelpers.backtests_show(run_id, include_raw=False)` | Full detail for one run, including **statistical-confidence tests** (PSR, t-stat, bootstrap CIs, P&L distribution, losing-streak MC). Raw per-trade + equity-curve arrays are off by default (multi-MB on 1-min × 365d); pass `include_raw=True` only if you specifically need them. |
+| `MMRHelpers.backtests_confidence([ids])` | Bulk read of the statistical-confidence block across N runs. Compact payload (~500 bytes/run) — use this post-sweep to rank candidates by PSR / p-value / CI tightness instead of N × `backtests_show` which ships multi-MB per run. |
 | `MMRHelpers.backtests_archive([ids])` / `backtests_unarchive([ids])` | Soft-delete / restore runs — hides from default list without losing the data. Pass `include_archived=True` or `archived_only=True` to `backtests_list` to see hidden runs. |
 | `MMRHelpers.strategy_deploy(name, conids, paper=True)` | Deploy to `strategy_runtime.yaml` |
 | `MMRHelpers.strategy_undeploy(name)` | Remove from config |
@@ -659,19 +660,33 @@ landscape = await MMRHelpers.strategies_inspect()
 # mode == "on_prices"  → O(N²) on backtest. Use days=30 or skip.
 
 # 2. Sweep params for one promising fast-path strategy.
-# 3×2 = 6 runs, each persisted with its params recorded.
+# Small grid (<~10 combos) → sequential is fine.
+# Larger grid on 1-min data → pass concurrency=4 or it will time out.
 sweep = await MMRHelpers.backtest_sweep(
-    "/Users/you/dev/mmr/strategies/keltner_breakout.py", "KeltnerBreakout",
-    param_grid={"EMA_PERIOD": [10, 15, 20], "BAND_MULT": [1.5, 2.0]},
+    "/Users/you/dev/mmr/strategies/opening_range_breakout.py", "OpeningRangeBreakout",
+    param_grid={
+        "RANGE_MINUTES": [10, 15, 20, 30, 45, 60],
+        "VOLUME_MULT": [1.0, 1.2, 1.3, 1.5, 1.8],
+    },  # 30 combos
     conids=[756733],  # SPY
-    days=180,
+    days=365,
+    concurrency=4,
 )
-# Returns a composite-score leaderboard; the top entry has run_id + params.
+# Returns a leaderboard with run_ids + params. Every run is persisted.
 emit(sweep)
 
-# 3. Dig into the winner — statistical confidence section reveals whether
-# the edge is real or an overfit to the grid.
-best = await MMRHelpers.backtests_show(42)  # run_id from sweep
+# 3. Rank the top candidates by statistical confidence in a single call.
+# `backtests_confidence` is the right tool here — `backtests_show` would
+# ship megabytes per run; this returns ~500 bytes per run.
+parsed = json.loads(sweep)
+top_ids = [e["run_id"] for e in parsed["data"]["leaderboard"][:5] if e["run_id"]]
+confidence = await MMRHelpers.backtests_confidence(top_ids)
+emit(confidence)
+
+# 4. Pull a single full report only if you want the raw trades/equity curve.
+# Default is summary + confidence only (no multi-MB blobs).
+best_id = top_ids[0]
+best = await MMRHelpers.backtests_show(best_id)
 emit(best)
 ```
 
