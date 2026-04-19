@@ -436,6 +436,29 @@ class PositionSizer:
         # Collect all warnings
         all_warnings = list(set(high.warnings + medium.warnings + low.warnings))
 
+        # Cross-check: gross_position_value comes from IB's accountSummary
+        # (one RPC), position_count comes from ib.portfolio() (a different
+        # subscription). If the account summary says there's meaningful
+        # position value but enumeration returns zero positions, the
+        # portfolio subscription didn't fire — typically a stale clientId
+        # from a prior crash, or a race with ib_async's auto-subscribe.
+        # Flag it loudly so the user doesn't chase ghost "Exposure 99%"
+        # warnings when the real problem is a disconnected feed.
+        if (
+            state.gross_position_value > 1000.0
+            and state.position_count == 0
+            and state.net_liquidation > 0
+        ):
+            all_warnings.append(
+                f"Portfolio feed inconsistency: IB reports "
+                f"${state.gross_position_value:,.0f} in positions but MMR sees 0 "
+                f"(ib.portfolio() returned empty). This is almost always a "
+                f"stale-clientId / subscription race on trader_service startup. "
+                f"Fix: restart trader_service, wait ~90s for IB Gateway to "
+                f"release the clientId, then retry. Exposure % below is not "
+                f"trustworthy until resolved."
+            )
+
         # Effective base: pct-derived if active, otherwise fixed
         if cfg.base_position_pct > 0 and state.net_liquidation > 0:
             effective_base = state.net_liquidation * cfg.base_position_pct

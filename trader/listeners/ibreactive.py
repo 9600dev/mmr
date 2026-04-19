@@ -172,6 +172,24 @@ class IBAIORx():
 
         net_client.conn.disconnected -= __handle_client_id_error
 
+        # Explicitly subscribe to per-contract portfolio updates. ib_async
+        # auto-subscribes on the `managedAccounts` message, but that race
+        # with post-connect work has been observed to leave `ib.portfolio()`
+        # empty while `accountSummary` is populated — symptom: `mmr status`
+        # shows $1M NetLiq, `mmr positions` returns 0. A second call to
+        # reqAccountUpdates is idempotent in IB, so doing it explicitly is
+        # safe and guarantees the subscription regardless of message order.
+        try:
+            managed = self.ib.managedAccounts()
+            target = self.ib_account or (managed[0] if managed else '')
+            if target:
+                self.ib.reqAccountUpdates(subscribe=True, account=target)
+        except Exception as ex:
+            logging.warning(
+                'explicit reqAccountUpdates failed (portfolio subscription '
+                'may not fire): %s', ex,
+            )
+
         # todo: check to see if we need to pass through 'ib_account' here.
         self.history_worker = IBHistoryWorker(
             self.ib_server_address,
@@ -218,6 +236,19 @@ class IBAIORx():
             readonly=self.read_only,
             account=self.ib_account,
         )
+
+        # Explicit subscription — see note in sync connect(). Covers the
+        # race where post-reconnect queries hit `ib.portfolio()` before
+        # the implicit auto-subscribe has fired.
+        try:
+            managed = self.ib.managedAccounts()
+            target = self.ib_account or (managed[0] if managed else '')
+            if target:
+                self.ib.reqAccountUpdates(subscribe=True, account=target)
+        except Exception as ex:
+            logging.warning(
+                'explicit reqAccountUpdates failed on async reconnect: %s', ex,
+            )
 
         if not self.history_worker:
             self.history_worker = IBHistoryWorker(
