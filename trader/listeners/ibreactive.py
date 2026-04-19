@@ -183,7 +183,10 @@ class IBAIORx():
             managed = self.ib.managedAccounts()
             target = self.ib_account or (managed[0] if managed else '')
             if target:
-                self.ib.reqAccountUpdates(subscribe=True, account=target)
+                # ib_async.IB.reqAccountUpdates(account) — wrapper always
+                # subscribes (no `subscribe` kwarg; raw-API's second arg is
+                # absorbed by the wrapper). Idempotent on IB's side.
+                self.ib.reqAccountUpdates(account=target)
         except Exception as ex:
             logging.warning(
                 'explicit reqAccountUpdates failed (portfolio subscription '
@@ -244,7 +247,10 @@ class IBAIORx():
             managed = self.ib.managedAccounts()
             target = self.ib_account or (managed[0] if managed else '')
             if target:
-                self.ib.reqAccountUpdates(subscribe=True, account=target)
+                # ib_async.IB.reqAccountUpdates(account) — wrapper always
+                # subscribes (no `subscribe` kwarg; raw-API's second arg is
+                # absorbed by the wrapper). Idempotent on IB's side.
+                self.ib.reqAccountUpdates(account=target)
         except Exception as ex:
             logging.warning(
                 'explicit reqAccountUpdates failed on async reconnect: %s', ex,
