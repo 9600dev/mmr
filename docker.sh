@@ -68,6 +68,42 @@ fi
 
 echo "Using container runtime: $RUNTIME"
 
+# Where the host keeps DuckDBs, logs, TWS session state. Bind-mounted into
+# the containers per docker-compose.yml — clobbering this dir wipes every
+# sweep, backtest run, downloaded history bar, and IB session.
+MMR_DATA_DIR="${HOME}/.local/share/mmr"
+
+_human_size() {
+    # Cross-platform (macOS/Linux) human-readable size for one path.
+    # macOS's `du -h` doesn't have a `-d` flag with the same semantics as GNU,
+    # so we just shell out to -sh which works identically on both.
+    if [ -e "$1" ]; then
+        du -sh "$1" 2>/dev/null | awk '{print $1}'
+    else
+        echo "-"
+    fi
+}
+
+print_data_sizes() {
+    # Show what's on disk right up front so anyone running a destructive
+    # action knows the scope of what they could lose.
+    local data_db="$MMR_DATA_DIR/data/mmr.duckdb"
+    local hist_db="$MMR_DATA_DIR/data/mmr_history.duckdb"
+    local logs_dir="$MMR_DATA_DIR/logs"
+    local tws_dir="$MMR_DATA_DIR/tws_settings"
+    echo "Host data at $MMR_DATA_DIR:"
+    [ -e "$data_db" ] && echo "  mmr.duckdb:          $(_human_size "$data_db")  (sweeps, backtests, proposals, universes)"
+    [ -e "$hist_db" ] && echo "  mmr_history.duckdb:  $(_human_size "$hist_db")  (1-min / 1-day OHLCV)"
+    [ -e "$logs_dir" ] && echo "  logs/:               $(_human_size "$logs_dir")"
+    [ -e "$tws_dir" ] && echo "  tws_settings/:       $(_human_size "$tws_dir")  (IB session state)"
+    if [ ! -d "$MMR_DATA_DIR" ]; then
+        echo "  (no data dir yet — first run will create it)"
+    fi
+    echo ""
+}
+
+print_data_sizes
+
 print_vnc_url() {
     # Print a clickable vnc:// URL for the IB Gateway desktop.
     # macOS Terminal and iTerm2 auto-link the vnc:// scheme (⌘-click opens
@@ -102,7 +138,9 @@ echo_usage() {
     echo "  -i (ib-only: start only IB Gateway for local development)"
     echo "  -d (down: stop and remove all containers)"
     echo "  -c (clean: remove all images and containers)"
-    echo "  -f (force clean: also remove build cache)"
+    echo "  -f (force clean: images + containers + build cache + HOST DATA"
+    echo "      — prompts for confirmation before wiping sweeps/backtests/history;"
+    echo "      set MMR_FORCE_CLEAN_KEEP_DATA=1 to skip the data wipe)"
     echo "  -s (sync code to running MMR container)"
     echo "  -a (sync all files to running MMR container)"
     echo "  -g (go: build, then start all containers and exec in)"
@@ -353,6 +391,40 @@ force_clean() {
         docker builder prune --force
     else
         podman system prune --force
+    fi
+
+    # Host data is bind-mounted, so docker-level cleanup NEVER touches it —
+    # if the user asked for force-clean they probably want a true reset, so
+    # confirm the scope and wipe. Skipping when MMR_FORCE_CLEAN_KEEP_DATA=1
+    # lets CI/automation keep the "build-cache-only" behaviour if needed.
+    if [ "${MMR_FORCE_CLEAN_KEEP_DATA:-0}" = "1" ]; then
+        echo "MMR_FORCE_CLEAN_KEEP_DATA=1 — keeping host data at $MMR_DATA_DIR"
+        return
+    fi
+    if [ ! -d "$MMR_DATA_DIR" ]; then
+        return
+    fi
+    echo ""
+    echo "=============================================================="
+    echo "  WIPE HOST DATA?"
+    echo "=============================================================="
+    echo "  This will DELETE all sweeps, backtest runs, proposals,"
+    echo "  universes, downloaded OHLCV history, IB session state, and"
+    echo "  logs at:"
+    echo ""
+    echo "    $MMR_DATA_DIR  ($(_human_size "$MMR_DATA_DIR"))"
+    echo ""
+    echo "  This is NOT recoverable. Container images + build cache are"
+    echo "  already gone at this point; skipping now leaves only the"
+    echo "  data behind for a fresh rebuild on next start."
+    echo ""
+    read -p "Type 'DELETE' to confirm (anything else aborts): " confirm
+    if [ "$confirm" = "DELETE" ]; then
+        echo "Removing $MMR_DATA_DIR..."
+        rm -rf "$MMR_DATA_DIR"
+        echo "Host data wiped."
+    else
+        echo "Keeping host data. (Tip: MMR_FORCE_CLEAN_KEEP_DATA=1 skips this prompt.)"
     fi
 }
 
