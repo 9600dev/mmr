@@ -159,6 +159,7 @@ class MMR:
         self._client: Optional[RPCClient[TraderServiceApi]] = None
         self._data_client: Optional[RPCClient[DataServiceApi]] = None
         self._massive_rest_client = None
+        self._twelvedata_rest_client = None
         self._subscriptions: List[Subscription] = []
 
         # position_map: row_number -> symbol string (set by portfolio/positions)
@@ -2081,6 +2082,60 @@ class MMR:
             self._massive_rest_client = RESTClient(api_key=api_key)
         return self._massive_rest_client
 
+    @property
+    def _twelvedata_client(self):
+        """Lazy-init TwelveData REST client."""
+        if self._twelvedata_rest_client is None:
+            from twelvedata import TDClient
+            cfg = self._container.config()
+            api_key = cfg.get('twelvedata_api_key', '') or os.getenv('TWELVEDATA_API_KEY', '')
+            if not api_key:
+                raise ValueError(
+                    "twelvedata_api_key not configured (set in trader.yaml or "
+                    "TWELVEDATA_API_KEY env var)"
+                )
+            self._twelvedata_rest_client = TDClient(apikey=api_key)
+        return self._twelvedata_rest_client
+
+    @staticmethod
+    def _flatten_td_dict(d: Any, prefix: str = '', sep: str = '.') -> Dict[str, Any]:
+        """Flatten a TwelveData nested dict response to single-level columns.
+
+        TwelveData fundamentals (balance_sheet / income_statement / cash_flow
+        / statistics) return deeply-nested structures like
+        ``{"operating_activities": {"net_income": ..., "depreciation": ...}}``.
+        To render them as a clean one-row-per-period DataFrame, we dot-join
+        nested keys: ``operating_activities.net_income``. The passthrough
+        preserves all fields without inventing a cross-provider schema.
+        """
+        flat: Dict[str, Any] = {}
+        for k, v in d.items():
+            full_key = f'{prefix}{sep}{k}' if prefix else k
+            if isinstance(v, dict):
+                flat.update(MMR._flatten_td_dict(v, full_key, sep))
+            else:
+                flat[full_key] = v
+        return flat
+
+    def _td_fundamentals_to_df(self, payload: Dict[str, Any], list_key: str) -> pd.DataFrame:
+        """Convert a TwelveData fundamentals payload into a DataFrame.
+
+        Each entry in the ``<list_key>`` array (e.g. "balance_sheet") becomes
+        one row; nested group dicts are flattened with dot-notation column
+        names. Newest period first.
+        """
+        if not payload or list_key not in payload:
+            return pd.DataFrame()
+        entries = payload.get(list_key) or []
+        rows = [self._flatten_td_dict(entry) for entry in entries if isinstance(entry, dict)]
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        df = df.dropna(axis=1, how='all')
+        if 'fiscal_date' in df.columns:
+            df = df.sort_values('fiscal_date', ascending=False).reset_index(drop=True)
+        return df
+
     def _financials_to_df(self, results, limit: int = 0) -> pd.DataFrame:
         """Convert an iterator of financial dataclass objects to a DataFrame."""
         rows = []
@@ -2099,8 +2154,18 @@ class MMR:
             df = df.sort_values('period_end', ascending=False).reset_index(drop=True)
         return df
 
-    def balance_sheet(self, symbol: str, limit: int = 4, timeframe: str = 'quarterly') -> pd.DataFrame:
-        """Get balance sheet data from Massive.com.
+    # Shape note: Massive and TwelveData return fundamentally different JSON
+    # shapes. We pass through each source's native schema rather than merging
+    # into a synthetic common schema — over-normalising always loses fields
+    # at the margins. Callers inspect df.columns to see what's available.
+    def balance_sheet(
+        self,
+        symbol: str,
+        limit: int = 4,
+        timeframe: str = 'quarterly',
+        source: str = 'massive',
+    ) -> pd.DataFrame:
+        """Get balance sheet data.
 
         Parameters
         ----------
@@ -2110,54 +2175,80 @@ class MMR:
             Number of periods to return (default 4).
         timeframe : str
             "quarterly" or "annual" (default "quarterly").
+        source : str
+            "massive" (default) or "twelvedata". TwelveData requires a
+            Pro-tier or above api key for fundamentals.
         """
+        if source == 'twelvedata':
+            period = 'annual' if timeframe == 'annual' else 'quarterly'
+            payload = self._twelvedata_client.get_balance_sheet(
+                symbol=symbol, period=period,
+            ).as_json()
+            df = self._td_fundamentals_to_df(payload, 'balance_sheet')
+            return df.head(limit) if limit and not df.empty else df
         results = self._massive_client.list_financials_balance_sheets(
             tickers=symbol, timeframe=timeframe, limit=limit,
         )
         return self._financials_to_df(results, limit=limit)
 
-    def income_statement(self, symbol: str, limit: int = 4, timeframe: str = 'quarterly') -> pd.DataFrame:
-        """Get income statement data from Massive.com.
-
-        Parameters
-        ----------
-        symbol : str
-            Stock ticker (e.g. "AAPL").
-        limit : int
-            Number of periods to return (default 4).
-        timeframe : str
-            "quarterly" or "annual" (default "quarterly").
-        """
+    def income_statement(
+        self,
+        symbol: str,
+        limit: int = 4,
+        timeframe: str = 'quarterly',
+        source: str = 'massive',
+    ) -> pd.DataFrame:
+        """Get income statement data. See balance_sheet for args."""
+        if source == 'twelvedata':
+            period = 'annual' if timeframe == 'annual' else 'quarterly'
+            payload = self._twelvedata_client.get_income_statement(
+                symbol=symbol, period=period,
+            ).as_json()
+            df = self._td_fundamentals_to_df(payload, 'income_statement')
+            return df.head(limit) if limit and not df.empty else df
         results = self._massive_client.list_financials_income_statements(
             tickers=symbol, timeframe=timeframe, limit=limit,
         )
         return self._financials_to_df(results, limit=limit)
 
-    def cash_flow(self, symbol: str, limit: int = 4, timeframe: str = 'quarterly') -> pd.DataFrame:
-        """Get cash flow statement data from Massive.com.
-
-        Parameters
-        ----------
-        symbol : str
-            Stock ticker (e.g. "AAPL").
-        limit : int
-            Number of periods to return (default 4).
-        timeframe : str
-            "quarterly" or "annual" (default "quarterly").
-        """
+    def cash_flow(
+        self,
+        symbol: str,
+        limit: int = 4,
+        timeframe: str = 'quarterly',
+        source: str = 'massive',
+    ) -> pd.DataFrame:
+        """Get cash flow statement data. See balance_sheet for args."""
+        if source == 'twelvedata':
+            period = 'annual' if timeframe == 'annual' else 'quarterly'
+            payload = self._twelvedata_client.get_cash_flow(
+                symbol=symbol, period=period,
+            ).as_json()
+            df = self._td_fundamentals_to_df(payload, 'cash_flow')
+            return df.head(limit) if limit and not df.empty else df
         results = self._massive_client.list_financials_cash_flow_statements(
             tickers=symbol, timeframe=timeframe, limit=limit,
         )
         return self._financials_to_df(results, limit=limit)
 
-    def ratios(self, symbol: str) -> pd.DataFrame:
-        """Get financial ratios (TTM) from Massive.com.
+    def ratios(self, symbol: str, source: str = 'massive') -> pd.DataFrame:
+        """Get financial ratios / key statistics.
 
-        Parameters
-        ----------
-        symbol : str
-            Stock ticker (e.g. "AAPL").
+        Massive returns Polygon-style ratios (PE, D/E, ROE, ...). TwelveData
+        returns a wider set (valuation_metrics + financials.income_statement
+        + financials.balance_sheet + technicals) flattened to a single row.
         """
+        if source == 'twelvedata':
+            payload = self._twelvedata_client.get_statistics(symbol=symbol).as_json()
+            stats = (payload or {}).get('statistics')
+            if not stats:
+                return pd.DataFrame()
+            flat = self._flatten_td_dict(stats)
+            # Carry through top-level meta if present so the row identifies itself.
+            for meta_key in ('symbol', 'name', 'exchange', 'currency'):
+                if meta_key in (payload or {}):
+                    flat.setdefault(meta_key, payload[meta_key])
+            return pd.DataFrame([flat])
         results = self._massive_client.list_financials_ratios(
             ticker=symbol, limit=1,
         )
@@ -2793,12 +2884,52 @@ class MMR:
             rows.append(row)
         return pd.DataFrame(rows)
 
-    def movers(self, market: str = 'stocks', direction: str = 'gainers') -> pd.DataFrame:
-        """Get top movers from Massive.com.
+    def movers(
+        self,
+        market: str = 'stocks',
+        direction: str = 'gainers',
+        source: str = 'massive',
+    ) -> pd.DataFrame:
+        """Get top movers.
 
-        market: stocks, crypto, indices, options, futures (forex already has its own command)
-        direction: gainers or losers
+        Parameters
+        ----------
+        market : str
+            'stocks', 'crypto', 'indices', 'options', 'futures'. Forex has
+            its own command (see ``forex_movers``).
+        direction : str
+            'gainers' or 'losers'.
+        source : str
+            'massive' (default) or 'twelvedata'. TwelveData only provides
+            gainers/losers for a restricted set of markets (stocks).
         """
+        if source == 'twelvedata':
+            payload = self._twelvedata_client.get_market_movers(
+                market=market, direction=direction,
+            ).as_json()
+            # TD returns a list of {symbol, name, exchange, last, high, low,
+            # volume, change, percent_change, ...}. Re-map to our schema so
+            # downstream callers don't have to branch.
+            entries = payload if isinstance(payload, list) else payload.get('values', [])
+            rows = []
+            for e in entries:
+                rows.append({
+                    'ticker': e.get('symbol', ''),
+                    'name': e.get('name', ''),
+                    'exchange': e.get('exchange', ''),
+                    'close': e.get('last'),
+                    'volume': e.get('volume'),
+                    'change': e.get('change'),
+                    'change_pct': e.get('percent_change'),
+                })
+            df = pd.DataFrame(rows)
+            if not df.empty and 'change_pct' in df.columns:
+                df = df.sort_values(
+                    'change_pct',
+                    ascending=(direction == 'losers'),
+                ).reset_index(drop=True)
+            return df
+
         snaps = self._massive_client.get_snapshot_direction(
             market_type=market, direction=direction,
         )
@@ -2937,6 +3068,7 @@ class MMR:
         news: bool = False,
         names: bool = False,
         location: Optional[str] = None,
+        data_source: str = 'massive',
     ) -> pd.DataFrame:
         """Scan for trading ideas using preset-based scoring.
 
@@ -3006,10 +3138,7 @@ class MMR:
                 universe_symbols=ib_universe_symbols,
             )
 
-        # Massive path (default): US markets
-        from trader.tools.idea_scanner import IdeaScanner
-
-        # Resolve universe to symbol list
+        # Resolve universe to symbol list (shared by both US data sources)
         universe_symbols = None
         if source == 'universe' and universe:
             from trader.data.universe import UniverseAccessor
@@ -3024,6 +3153,24 @@ class MMR:
             else:
                 return pd.DataFrame()
 
+        # TwelveData path: US markets via TwelveData
+        if data_source == 'twelvedata':
+            from trader.tools.idea_scanner import TwelveDataIdeaScanner
+            scanner = TwelveDataIdeaScanner(self._twelvedata_client)
+            return scanner.scan(
+                preset=preset,
+                source=source,
+                tickers=tickers,
+                universe_symbols=universe_symbols,
+                top_n=top_n,
+                custom_filters=custom_filters or None,
+                fundamentals=fundamentals,
+                news=news,  # silently a no-op — TD client has no news endpoint
+                names=names,
+            )
+
+        # Massive path (default): US markets
+        from trader.tools.idea_scanner import IdeaScanner
         scanner = IdeaScanner(self._massive_client)
         return scanner.scan(
             preset=preset,

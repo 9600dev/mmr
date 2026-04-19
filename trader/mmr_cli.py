@@ -678,21 +678,29 @@ def build_parser() -> argparse.ArgumentParser:
     fin_balance_p.add_argument('--limit', type=int, default=4, help='Number of periods (default: 4)')
     fin_balance_p.add_argument('--timeframe', default='quarterly', choices=['quarterly', 'annual'],
                                help='Timeframe (default: quarterly)')
+    fin_balance_p.add_argument('--source', choices=['massive', 'twelvedata'], default='massive',
+                               help='Data source (default: massive)')
 
     fin_income_p = fin_sub.add_parser('income', help='Income statement')
     fin_income_p.add_argument('symbol', help='Stock ticker (e.g. AAPL)')
     fin_income_p.add_argument('--limit', type=int, default=4, help='Number of periods (default: 4)')
     fin_income_p.add_argument('--timeframe', default='quarterly', choices=['quarterly', 'annual'],
                               help='Timeframe (default: quarterly)')
+    fin_income_p.add_argument('--source', choices=['massive', 'twelvedata'], default='massive',
+                              help='Data source (default: massive)')
 
     fin_cashflow_p = fin_sub.add_parser('cashflow', help='Cash flow statement')
     fin_cashflow_p.add_argument('symbol', help='Stock ticker (e.g. AAPL)')
     fin_cashflow_p.add_argument('--limit', type=int, default=4, help='Number of periods (default: 4)')
     fin_cashflow_p.add_argument('--timeframe', default='quarterly', choices=['quarterly', 'annual'],
                                 help='Timeframe (default: quarterly)')
+    fin_cashflow_p.add_argument('--source', choices=['massive', 'twelvedata'], default='massive',
+                                help='Data source (default: massive)')
 
     fin_ratios_p = fin_sub.add_parser('ratios', help='Financial ratios (TTM)')
     fin_ratios_p.add_argument('symbol', help='Stock ticker (e.g. AAPL)')
+    fin_ratios_p.add_argument('--source', choices=['massive', 'twelvedata'], default='massive',
+                              help='Data source (default: massive)')
 
     fin_filing_p = fin_sub.add_parser('filing', help='10-K filing sections (business, risk_factors)')
     fin_filing_p.add_argument('symbol', help='Stock ticker (e.g. AAPL)')
@@ -809,16 +817,18 @@ def build_parser() -> argparse.ArgumentParser:
     fx_convert_p.add_argument('amount', type=float, help='Amount to convert')
 
     # movers
-    movers_p = sub.add_parser('movers', help='Top market movers (Massive.com)')
+    movers_p = sub.add_parser('movers', help='Top market movers (Massive.com or TwelveData)')
     movers_p.add_argument('--market', '-m', default='stocks',
                            choices=['stocks', 'crypto', 'indices', 'options', 'futures'],
                            help='Market type (default: stocks)')
     movers_p.add_argument('--losers', action='store_true', default=False,
                            help='Show losers instead of gainers')
     movers_p.add_argument('--detail', action='store_true', default=False,
-                           help='Enrich with company name, ratios, and news (card view)')
+                           help='Enrich with company name, ratios, and news (card view; Massive only)')
     movers_p.add_argument('--num', '-n', type=int, default=20,
                            help='Number of results (default: 20)')
+    movers_p.add_argument('--source', choices=['massive', 'twelvedata'], default='massive',
+                           help='Data source (default: massive)')
 
     # scan
     scan_p = sub.add_parser('scan', help='IB market scanner',
@@ -890,6 +900,9 @@ def build_parser() -> argparse.ArgumentParser:
                           help='Enrich results with latest news headline and sentiment')
     ideas_p.add_argument('--location', '-l', default=None,
                           help='IB market location (e.g. STK.AU.ASX, STK.CA, STK.HK.SEHK)')
+    ideas_p.add_argument('--source', choices=['massive', 'twelvedata'], default='massive',
+                          help='Data source for US equities (default: massive). '
+                               'Ignored when --location is set (IB path).')
 
     # propose
     propose_p = sub.add_parser('propose', help='Create a trade proposal',
@@ -6560,22 +6573,28 @@ def _handle_financials(mmr: MMR, args: argparse.Namespace):
         return
 
     symbol = args.symbol.upper()
+    source = getattr(args, 'source', 'massive')
 
     try:
         if action == 'ratios':
-            df = mmr.ratios(symbol)
+            df = mmr.ratios(symbol, source=source)
             if df is None or df.empty:
                 console.print('[dim]No data[/dim]')
                 return
             # Display as key-value pairs (single row of ratios)
             row = df.iloc[0]
-            skip = {'cik', 'ticker'}
+            skip = {'cik', 'ticker', 'symbol', 'name', 'exchange', 'currency'}
             data = {
                 k.replace('_', ' ').title(): _fmt_financial_value(row[k])
                 for k in df.columns if k not in skip
             }
-            print_dict(data, title=f'Financial Ratios: {symbol} (TTM)')
+            title_suffix = ' (TTM)' if source == 'massive' else ' — TwelveData'
+            print_dict(data, title=f'Financial Ratios: {symbol}{title_suffix}')
         elif action == 'filing':
+            if source == 'twelvedata':
+                console.print('[red]`financials filing` is Massive.com-only — '
+                              'TwelveData does not expose filing sections.[/red]')
+                return
             section = args.section
             limit = args.limit
             results = mmr.filing_sections(symbol, section=section, limit=limit)
@@ -6598,15 +6617,16 @@ def _handle_financials(mmr: MMR, args: argparse.Namespace):
         else:
             limit = args.limit
             timeframe = args.timeframe
+            title_src = ' — TwelveData' if source == 'twelvedata' else ''
             if action == 'balance':
-                df = mmr.balance_sheet(symbol, limit=limit, timeframe=timeframe)
-                _print_financial_df(df, title=f'Balance Sheet: {symbol} ({timeframe})')
+                df = mmr.balance_sheet(symbol, limit=limit, timeframe=timeframe, source=source)
+                _print_financial_df(df, title=f'Balance Sheet: {symbol} ({timeframe}){title_src}')
             elif action == 'income':
-                df = mmr.income_statement(symbol, limit=limit, timeframe=timeframe)
-                _print_financial_df(df, title=f'Income Statement: {symbol} ({timeframe})')
+                df = mmr.income_statement(symbol, limit=limit, timeframe=timeframe, source=source)
+                _print_financial_df(df, title=f'Income Statement: {symbol} ({timeframe}){title_src}')
             elif action == 'cashflow':
-                df = mmr.cash_flow(symbol, limit=limit, timeframe=timeframe)
-                _print_financial_df(df, title=f'Cash Flow: {symbol} ({timeframe})')
+                df = mmr.cash_flow(symbol, limit=limit, timeframe=timeframe, source=source)
+                _print_financial_df(df, title=f'Cash Flow: {symbol} ({timeframe}){title_src}')
             else:
                 console.print(f'[yellow]Unknown financials action: {action}[/yellow]')
     except ValueError as e:
@@ -6923,15 +6943,25 @@ def _handle_movers(mmr: MMR, args: argparse.Namespace):
 
     direction = 'losers' if args.losers else 'gainers'
     market = args.market
+    source = getattr(args, 'source', 'massive')
 
     if not args.detail:
-        df = mmr.movers(market=market, direction=direction)
+        df = mmr.movers(market=market, direction=direction, source=source)
         if args.num and len(df) > args.num:
             df = df.head(args.num)
-        print_df(df, title=f'{market.title()} Movers ({direction})')
+        title_suffix = ' — TwelveData' if source == 'twelvedata' else ''
+        print_df(df, title=f'{market.title()} Movers ({direction}){title_suffix}')
         return
 
-    # Detail card view
+    # Detail card view — Massive-only (needs ratios + news enrichment that
+    # TwelveData's Python client doesn't provide for this view).
+    if source == 'twelvedata':
+        console.print('[yellow]--detail is Massive-only. Dropping to table view for TwelveData.[/yellow]')
+        df = mmr.movers(market=market, direction=direction, source='twelvedata')
+        if args.num and len(df) > args.num:
+            df = df.head(args.num)
+        print_df(df, title=f'{market.title()} Movers ({direction}) — TwelveData')
+        return
     movers = mmr.movers_detail(market=market, direction=direction, num=args.num)
     if not movers:
         console.print('[dim]No data[/dim]')
@@ -7052,6 +7082,12 @@ def _handle_ideas(mmr: MMR, args: argparse.Namespace):
     use_news = args.news or args.detail
     use_names = args.detail
 
+    data_source = getattr(args, 'source', 'massive')
+    # News isn't available on the TwelveData path — tell the user once up-front
+    # so an empty `headline` column doesn't look like a silent bug.
+    if data_source == 'twelvedata' and use_news and not args.location:
+        console.print('[yellow]Note: TwelveData has no news endpoint — news columns will be empty.[/yellow]')
+
     df = mmr.scan_ideas(
         preset=args.preset,
         source=source,
@@ -7067,10 +7103,12 @@ def _handle_ideas(mmr: MMR, args: argparse.Namespace):
         news=use_news,
         names=use_names,
         location=args.location,
+        data_source=data_source,
     )
 
     location_label = f' [{args.location}]' if args.location else ''
-    title = f'Ideas: {args.preset}{location_label}'
+    source_label = ' — TwelveData' if data_source == 'twelvedata' and not args.location else ''
+    title = f'Ideas: {args.preset}{location_label}{source_label}'
 
     if _json_mode:
         print_df(df, title=title)

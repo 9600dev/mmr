@@ -1412,3 +1412,384 @@ class IBIdeaScanner:
                 logger.debug('News fetch failed for %s', symbol)
 
         return results
+
+
+class TwelveDataIdeaScanner:
+    """TwelveData-backed idea scanner for US equities.
+
+    Pipeline mirrors :class:`IdeaScanner` but uses TwelveData endpoints:
+
+    - Discovery: ``get_market_movers`` (movers preset) or batch ``quote``
+      (explicit tickers / universe).
+    - Snapshot: each ``quote`` dict carries open/high/low/close/volume,
+      previous_close for gap, and average_volume for relative volume.
+    - Indicators: ``time_series`` (50 daily bars) with local RSI/EMA/SMA
+      computation via the shared :func:`compute_rsi` / :func:`compute_ema`
+      / :func:`compute_sma` helpers. One API call per survivor ticker
+      regardless of how many indicators are needed.
+    - Fundamentals: ``get_statistics`` flattened and remapped to the
+      scanner's canonical field names (pe_ratio, pb_ratio, ... matching the
+      Massive path output).
+    - News: not supported by TwelveData's Python client — columns stay empty
+      and the ``news=True`` flag is accepted but has no effect. The CLI
+      prints a one-line notice so callers know.
+
+    Full-market scans ("use_market_scan" presets) require tickers or a
+    universe here — TwelveData doesn't expose a bulk snapshot endpoint.
+    """
+
+    # TwelveData statistics → scanner canonical field-name map.
+    # Source path (flattened from get_statistics) → destination column.
+    # NOTE: TwelveData's top-level group is "valuations_metrics" (with the
+    # 's'). Getting this wrong silently nulls every valuation column — we
+    # caught that in testing and it's worth calling out here so a refactor
+    # doesn't re-break it.
+    _TD_FUNDAMENTAL_FIELDS: List[tuple] = [
+        ('valuations_metrics.trailing_pe', 'pe_ratio'),
+        ('valuations_metrics.price_to_book_mrq', 'pb_ratio'),
+        ('valuations_metrics.price_to_sales_ttm', 'ps_ratio'),
+        ('valuations_metrics.enterprise_to_ebitda', 'ev_ebitda'),
+        ('valuations_metrics.market_capitalization', 'mkt_cap'),
+        ('financials.return_on_equity_ttm', 'roe'),
+        ('financials.return_on_assets_ttm', 'roa'),
+        ('financials.income_statement.diluted_eps_ttm', 'eps'),
+        ('financials.cash_flow.levered_free_cash_flow_ttm', 'fcf'),
+        ('financials.balance_sheet.total_debt_to_equity_mrq', 'debt_equity'),
+        ('dividends_and_splits.forward_annual_dividend_yield', 'div_yield'),
+    ]
+
+    def __init__(self, td_client):
+        self._client = td_client
+
+    def scan(
+        self,
+        preset: str = 'momentum',
+        source: str = 'movers',
+        tickers: Optional[List[str]] = None,
+        universe_symbols: Optional[List[str]] = None,
+        top_n: int = 15,
+        custom_filters: Optional[Dict[str, Any]] = None,
+        fundamentals: bool = False,
+        news: bool = False,
+        names: bool = False,
+    ) -> pd.DataFrame:
+        scan_preset = PRESETS.get(preset)
+        if not scan_preset:
+            raise ValueError(f'Unknown preset: {preset}. Available: {", ".join(PRESETS.keys())}')
+        filters = merge_filters(scan_preset, custom_filters)
+
+        # 1. Discover.
+        quotes = self._discover(source, tickers, universe_symbols, scan_preset)
+        if not quotes:
+            return pd.DataFrame()
+
+        # 2. Build candidates from TD quote payloads.
+        candidates = self._build_candidates(quotes)
+        if not candidates:
+            return pd.DataFrame()
+
+        # 3. Filter.
+        from trader.trading.trading_filter import TradingFilter
+        tf = TradingFilter.load()
+        candidates = apply_filters(
+            candidates, filters,
+            trading_filter=tf if not tf.is_empty() else None,
+        )
+        if not candidates:
+            return pd.DataFrame()
+
+        # 4. Pre-score to cap the indicator fetch.
+        score_fn = _SCORE_FUNCTIONS[scan_preset.score_fn]
+        for c in candidates:
+            pre_score, _ = score_fn(c)
+            c['_pre_score'] = pre_score
+        indicator_cap = max(top_n * 3, 30)
+        if len(candidates) > indicator_cap:
+            candidates.sort(key=lambda c: c['_pre_score'], reverse=True)
+            candidates = candidates[:indicator_cap]
+
+        # 5. Fetch indicators for survivors.
+        ticker_list = [c['ticker'] for c in candidates]
+        indicators = self._fetch_indicators(ticker_list, scan_preset.indicators)
+        for c in candidates:
+            if c['ticker'] in indicators:
+                c.update(indicators[c['ticker']])
+
+        # 6. Re-score.
+        for c in candidates:
+            score, signal = score_fn(c)
+            c['score'] = round(score, 1)
+            c['signal'] = signal
+            c.pop('_pre_score', None)
+
+        # 7. Sort + truncate.
+        candidates.sort(key=lambda c: c['score'], reverse=True)
+        candidates = candidates[:top_n]
+
+        # 8. Names already carried through from quote response — nothing extra.
+
+        # 9. Fundamentals.
+        if fundamentals and candidates:
+            fund_data = self._fetch_fundamentals([c['ticker'] for c in candidates])
+            for c in candidates:
+                if c['ticker'] in fund_data:
+                    c.update(fund_data[c['ticker']])
+
+        # 10. News is a known gap on TwelveData — silently skip even if
+        # requested. The caller's --news flag still controls column output.
+        return to_dataframe(candidates, fundamentals=fundamentals, news=news)
+
+    # ------------------------------------------------------------------
+    # Discovery
+    # ------------------------------------------------------------------
+
+    def _discover(
+        self,
+        source: str,
+        tickers: Optional[List[str]],
+        universe_symbols: Optional[List[str]],
+        scan_preset: 'ScanPreset',
+    ) -> List[Dict[str, Any]]:
+        """Return a list of TwelveData quote dicts for candidate discovery."""
+        if source in ('tickers', 'universe'):
+            syms = tickers if source == 'tickers' else universe_symbols
+            if not syms:
+                return []
+            return self._batch_quote(syms)
+
+        # Default: movers. TwelveData's get_market_movers returns a compact
+        # record that matches a quote for scanner purposes — we normalize it
+        # into the same shape.
+        combined: List[Dict[str, Any]] = []
+        for direction in ('gainers', 'losers'):
+            try:
+                payload = self._client.get_market_movers(
+                    market='stocks', direction=direction,
+                ).as_json()
+            except Exception as ex:
+                logger.warning('td movers %s fetch failed: %s', direction, ex)
+                continue
+            entries = payload if isinstance(payload, list) else (payload or {}).get('values', [])
+            for e in entries:
+                combined.append({
+                    'symbol': e.get('symbol'),
+                    'name': e.get('name'),
+                    'close': e.get('last'),
+                    'high': e.get('high'),
+                    'low': e.get('low'),
+                    'open': e.get('open'),
+                    'previous_close': e.get('previous_close'),
+                    'volume': e.get('volume'),
+                    'average_volume': e.get('average_volume'),
+                    'change': e.get('change'),
+                    'percent_change': e.get('percent_change'),
+                })
+        return combined
+
+    def _batch_quote(self, symbols: List[str]) -> List[Dict[str, Any]]:
+        """Fetch a batch of quotes. TwelveData supports comma-joined symbols
+        on /quote and returns a dict keyed by symbol. We re-shape to a list."""
+        # Dedupe while preserving order
+        seen = set()
+        unique = []
+        for s in symbols:
+            if s and s not in seen:
+                unique.append(s); seen.add(s)
+        if not unique:
+            return []
+
+        # TwelveData /quote accepts up to 120 symbols per call on most plans.
+        # Chunk to be safe.
+        out: List[Dict[str, Any]] = []
+        CHUNK = 100
+        for i in range(0, len(unique), CHUNK):
+            batch = unique[i:i + CHUNK]
+            try:
+                payload = self._client.quote(symbol=','.join(batch)).as_json()
+            except Exception as ex:
+                logger.warning('td batch quote failed (%s...): %s', batch[:3], ex)
+                continue
+            if isinstance(payload, dict) and 'symbol' in payload:
+                # Single-symbol response
+                out.append(payload)
+            elif isinstance(payload, dict):
+                for sym, item in payload.items():
+                    if isinstance(item, dict):
+                        # Some plans return {"code":..., "message":...} on error for a single
+                        # symbol — skip those so the rest of the batch still lands.
+                        if 'symbol' in item or 'close' in item:
+                            out.append(item)
+            elif isinstance(payload, list):
+                out.extend(payload)
+        return out
+
+    # ------------------------------------------------------------------
+    # Candidate building
+    # ------------------------------------------------------------------
+
+    def _build_candidates(self, quotes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        candidates = []
+        seen = set()
+        for q in quotes:
+            ticker = q.get('symbol', '') or ''
+            if not ticker or ticker in seen:
+                continue
+            if any(ticker.endswith(s) for s in ('W', 'WS', '.U', '.R')):
+                continue
+            seen.add(ticker)
+
+            def _f(key, default=0.0):
+                v = q.get(key)
+                try:
+                    return float(v) if v not in (None, '') else default
+                except (TypeError, ValueError):
+                    return default
+
+            def _i(key, default=0):
+                v = q.get(key)
+                try:
+                    return int(float(v)) if v not in (None, '') else default
+                except (TypeError, ValueError):
+                    return default
+
+            price = _f('close')
+            if price <= 0:
+                continue
+            volume = _i('volume')
+            day_open = _f('open')
+            day_high = _f('high')
+            day_low = _f('low')
+            prev_close = _f('previous_close')
+            avg_volume = _i('average_volume')
+
+            change_pct = _f('percent_change')
+            gap_pct = 0.0
+            if prev_close > 0 and day_open > 0:
+                gap_pct = ((day_open - prev_close) / prev_close) * 100.0
+            rel_vol = 0.0
+            if avg_volume > 0 and volume > 0:
+                rel_vol = volume / avg_volume
+            range_pct = 0.0
+            if day_low > 0 and day_high > day_low:
+                range_pct = ((day_high - day_low) / day_low) * 100.0
+
+            candidates.append({
+                'ticker': ticker,
+                'name': q.get('name', '') or '',
+                'price': round(price, 2),
+                'change_pct': round(change_pct, 2),
+                'volume': volume,
+                'gap_pct': round(gap_pct, 2),
+                'rel_vol': round(rel_vol, 2),
+                'range_pct': round(range_pct, 2),
+                'spread_pct': 0.0,  # not in TD quote
+                'vwap': 0.0,
+            })
+        return candidates
+
+    # ------------------------------------------------------------------
+    # Indicators — local compute from one time_series call per ticker
+    # ------------------------------------------------------------------
+
+    def _fetch_indicators(
+        self,
+        tickers: List[str],
+        needed: List[str],
+    ) -> Dict[str, Dict[str, Optional[float]]]:
+        """Fetch 50 daily bars per ticker in parallel and compute indicators
+        locally. Cheaper than one call per (ticker, indicator)."""
+        if not needed or not tickers:
+            return {}
+
+        results: Dict[str, Dict[str, Optional[float]]] = {t: {} for t in tickers}
+
+        def fetch_one(ticker: str):
+            try:
+                ts = self._client.time_series(
+                    symbol=ticker, interval='1day', outputsize=60,
+                )
+                df = ts.as_pandas()
+                if df is None or df.empty:
+                    return ticker, {}
+                closes = list(pd.to_numeric(df['close'], errors='coerce').dropna())
+                closes.sort(key=lambda x: x)  # monotonic doesn't matter; we need chronological
+                # TD returns newest-first by default — re-sort by index ascending
+                df2 = df.copy()
+                df2 = df2.sort_index(ascending=True)
+                closes = list(pd.to_numeric(df2['close'], errors='coerce').dropna())
+                vals: Dict[str, Optional[float]] = {}
+                for indicator in needed:
+                    if indicator == 'rsi':
+                        vals['rsi'] = compute_rsi(closes, period=14)
+                    elif indicator == 'ema_9':
+                        vals['ema_9'] = compute_ema(closes, window=9)
+                    elif indicator == 'sma_20':
+                        vals['sma_20'] = compute_sma(closes, window=20)
+                    elif indicator == 'sma_50':
+                        vals['sma_50'] = compute_sma(closes, window=50)
+                return ticker, vals
+            except Exception as ex:
+                logger.debug('td indicator fetch failed for %s: %s', ticker, ex)
+                return ticker, {}
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {pool.submit(fetch_one, t): t for t in tickers}
+            for fut in as_completed(futures):
+                ticker, vals = fut.result()
+                results[ticker].update(vals)
+        return results
+
+    # ------------------------------------------------------------------
+    # Fundamentals — get_statistics → canonical fields
+    # ------------------------------------------------------------------
+
+    def _fetch_fundamentals(
+        self,
+        tickers: List[str],
+    ) -> Dict[str, Dict[str, Optional[float]]]:
+        if not tickers:
+            return {}
+
+        results: Dict[str, Dict[str, Optional[float]]] = {}
+
+        def fetch_one(ticker: str):
+            try:
+                payload = self._client.get_statistics(symbol=ticker).as_json()
+                stats = (payload or {}).get('statistics') or {}
+                flat = _flatten(stats)
+                out: Dict[str, Optional[float]] = {}
+                for td_path, col in TwelveDataIdeaScanner._TD_FUNDAMENTAL_FIELDS:
+                    v = flat.get(td_path)
+                    if v is None:
+                        out[col] = None
+                        continue
+                    try:
+                        out[col] = round(float(v), 4) if col not in ('mkt_cap', 'fcf') else float(v)
+                    except (TypeError, ValueError):
+                        out[col] = None
+                return ticker, out
+            except Exception as ex:
+                logger.debug('td fundamentals fetch failed for %s: %s', ticker, ex)
+                return ticker, {}
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {pool.submit(fetch_one, t): t for t in tickers}
+            for fut in as_completed(futures):
+                ticker, data = fut.result()
+                if data:
+                    results[ticker] = data
+        return results
+
+
+def _flatten(d: Dict[str, Any], prefix: str = '', sep: str = '.') -> Dict[str, Any]:
+    """Module-private flatten helper — keeps ``TwelveDataIdeaScanner``
+    self-contained without an SDK import. Same semantics as
+    :meth:`trader.sdk.MMR._flatten_td_dict`."""
+    out: Dict[str, Any] = {}
+    for k, v in d.items():
+        full = f'{prefix}{sep}{k}' if prefix else k
+        if isinstance(v, dict):
+            out.update(_flatten(v, full, sep))
+        else:
+            out[full] = v
+    return out
