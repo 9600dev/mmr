@@ -229,6 +229,12 @@ class TraderServiceApi(RPCHandler):
         )
 
     @rpcmethod
+    def diagnose_portfolio_feed(self) -> dict:
+        """Dump raw IB portfolio/positions per managed account. Used to
+        diagnose "status shows margin used but positions=0"."""
+        return self.trader.diagnose_portfolio_feed()
+
+    @rpcmethod
     async def scanner_locations(self) -> list[dict]:
         """Diagnostic: list every location code this account is
         authorised to scan. If your target (e.g. ``STK.AU.ASX``) isn't

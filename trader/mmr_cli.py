@@ -529,6 +529,18 @@ def build_parser() -> argparse.ArgumentParser:
                           '  status',
                    formatter_class=fmt)
 
+    # diagnose — low-level diagnostics for bugs that are hard to see
+    # from the normal commands (e.g. "positions=0 but margin used").
+    diag_p = sub.add_parser('diagnose',
+                              help='Low-level diagnostics (portfolio-feed, etc.)',
+                              epilog='Examples:\n'
+                                     '  diagnose portfolio      # dump raw IB portfolio per account\n',
+                              formatter_class=fmt)
+    diag_sub = diag_p.add_subparsers(dest='diag_action')
+    diag_sub.add_parser('portfolio',
+                          help='Dump raw ib.portfolio() + ib.positions() for every managed account. '
+                               'Diagnoses the "MarginUsed non-zero but positions=0" bug.')
+
     # market-hours
     sub.add_parser('market-hours', aliases=['mh'], help='Show market open/close status',
                    epilog='Examples:\n'
@@ -1669,6 +1681,9 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
                     f'Check VNC: [cyan]vnc://localhost:5901[/cyan]  |  '
                     f'Restart: [cyan]docker compose restart ib-gateway[/cyan]'
                 )
+
+        elif cmd == 'diagnose':
+            _handle_diagnose(mmr, args)
 
         elif cmd in ('market-hours', 'mh'):
             rows = mmr.market_hours()
@@ -7099,6 +7114,73 @@ def _handle_movers(mmr: MMR, args: argparse.Namespace):
             console.print(f'[dim italic]{headline}[/dim italic]{sent_str}')
 
         console.print()
+
+
+def _handle_diagnose(mmr: MMR, args: argparse.Namespace):
+    """Low-level diagnostics that need direct IB state, not through the
+    normal MMR caches."""
+    action = getattr(args, 'diag_action', None)
+    if action != 'portfolio':
+        print_status(
+            'Usage: diagnose portfolio', success=False,
+        )
+        return
+    try:
+        result = mmr.trader_client.rpc(return_type=dict).diagnose_portfolio_feed()
+    except Exception as ex:
+        print_status(f'diagnose failed: {ex}', success=False)
+        return
+
+    if _json_mode:
+        print(json.dumps({'data': result, 'title': 'Portfolio Feed Diagnostic'}, default=str))
+        return
+
+    console.print(f'[bold]Portfolio Feed Diagnostic[/bold]')
+    console.print(
+        f'  configured ib_account:     [cyan]{result.get("configured_ib_account") or "(none)"}[/cyan]'
+    )
+    console.print(
+        f'  managedAccounts():         {result.get("managed_accounts") or "[]"}'
+    )
+    console.print(
+        f'  client.getAccounts():      {result.get("accounts_from_client") or "[]"}'
+    )
+    console.print(
+        f'  MMR cache portfolio items: [bold]{result.get("cache_portfolio_count", 0)}[/bold]'
+    )
+    console.print(
+        f'  MMR cache positions:       [bold]{result.get("cache_position_count", 0)}[/bold]'
+    )
+    console.print('')
+    console.print('[bold]Per-account (raw IB):[/bold]')
+    for acct, info in result.get('per_account', {}).items():
+        pc = info.get('portfolio_count', '—')
+        poc = info.get('positions_count', '—')
+        errs = []
+        if 'portfolio_error' in info:
+            errs.append(f"portfolio: {info['portfolio_error']}")
+        if 'positions_error' in info:
+            errs.append(f"positions: {info['positions_error']}")
+        console.print(
+            f'  account=[cyan]{acct}[/cyan]  '
+            f'portfolio={pc}  positions={poc}'
+            + (f'  [red]errors: {"; ".join(errs)}[/red]' if errs else '')
+        )
+        for sample in info.get('portfolio_sample', []):
+            console.print(
+                f'     - {sample["symbol"]:<8} {sample["secType"]:<5} '
+                f'qty={sample["position"]:>8.0f}  mv=${sample["marketValue"]:>12,.2f}  '
+                f'acct=[dim]{sample["account"]}[/dim]'
+            )
+    console.print('')
+    console.print(
+        '[dim]If MMR cache count is 0 but an account shows non-zero '
+        'portfolio/positions, the subscription event pipeline is broken '
+        '(restart trader_service). If all accounts show 0 but `status` '
+        'reports MarginUsed, the subscription succeeded but something is '
+        'filtering — check configured ib_account matches the one IB is '
+        'using.[/dim]'
+    )
 
 
 def _handle_scan(mmr: MMR, args: argparse.Namespace):

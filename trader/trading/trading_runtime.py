@@ -1249,6 +1249,66 @@ class Trader():
     def get_positions(self) -> List[Position]:
         return self.portfolio.get_positions()
 
+    def diagnose_portfolio_feed(self) -> dict:
+        """Dump raw IB portfolio/positions from every managed account.
+
+        Bypasses MMR's ``Portfolio`` cache (which is populated by event
+        callbacks) and hits ``ib.portfolio(account)`` / ``ib.positions(account)``
+        directly. Used to diagnose the "status shows $1M in margin,
+        positions=0" class of bug — usually means MMR is filtering by
+        the wrong account string (FA paper accounts have sub-accounts),
+        or the init subscriptions timed out and the event cache never
+        populated."""
+        result = {
+            'configured_ib_account': self.ib_account,
+            'managed_accounts': [],
+            'accounts_from_client': [],
+            'cache_portfolio_count': len(self.portfolio.portfolio_items),
+            'cache_position_count': len(self.portfolio.positions),
+            'per_account': {},
+        }
+        try:
+            result['managed_accounts'] = list(self.client.ib.managedAccounts() or [])
+        except Exception as ex:
+            result['managed_accounts_error'] = str(ex)
+        try:
+            result['accounts_from_client'] = list(self.client.ib.client.getAccounts() or [])
+        except Exception as ex:
+            result['accounts_from_client_error'] = str(ex)
+
+        # Try every account we know about, plus the empty-string "default"
+        # query and the configured ib_account. Dedup.
+        targets = set(result['managed_accounts'])
+        targets.update(result['accounts_from_client'])
+        if self.ib_account:
+            targets.add(self.ib_account)
+        targets.add('')  # empty = IB's default (= single managed account)
+
+        for acct in sorted(targets):
+            info: dict = {}
+            try:
+                items = self.client.ib.portfolio(account=acct) if acct else self.client.ib.portfolio()
+                info['portfolio_count'] = len(items)
+                info['portfolio_sample'] = [
+                    {
+                        'symbol': it.contract.symbol,
+                        'secType': it.contract.secType,
+                        'position': it.position,
+                        'marketValue': it.marketValue,
+                        'account': it.account,
+                    }
+                    for it in items[:5]
+                ]
+            except Exception as ex:
+                info['portfolio_error'] = str(ex)
+            try:
+                positions = self.client.ib.positions(account=acct) if acct else self.client.ib.positions()
+                info['positions_count'] = len(positions)
+            except Exception as ex:
+                info['positions_error'] = str(ex)
+            result['per_account'][acct or '(default)'] = info
+        return result
+
     @log_method
     async def get_shortable_shares(self, contract: Contract) -> float:
         return await self.client.get_shortable_shares(contract)
