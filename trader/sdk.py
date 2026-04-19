@@ -236,10 +236,25 @@ class MMR:
     ) -> List[SecurityDefinition]:
         """Resolve a symbol string or conId to SecurityDefinition(s) via trader_service.
 
-        First checks the local universe DB.  If not found and the symbol is a
-        string, falls back to explicit IB discovery via ``resolve_contract``
-        with a fully-specified Contract (currency='USD' for STK, IDEALPRO for
-        CASH).  Integer conIds never fall back — they must exist locally.
+        Lookup order:
+          1. Local universe DB (``Trader.resolve_symbol``). If the caller passed
+             ``exchange``/``universe``, they filter the DB query.
+          2. For integer conIds: return empty if step 1 missed — no IB fallback,
+             conIds must be exact.
+          3. For string symbols: IB discovery via ``resolve_contract``. We ship
+             a Contract populated with whatever hints the caller gave (empty
+             exchange/currency included) and let IB's ``reqContractDetails``
+             return every matching listing. Previous behaviour defaulted empty
+             hints to ``exchange='SMART', currency='USD'`` — that silently
+             picked wrong ADRs for ASX/SEHK/TSE primary listings, which is the
+             "close enough lookup" CLAUDE.md explicitly forbids.
+
+        Returns every surviving candidate after collapsing venue duplicates
+        (same conId, same currency — IB reports each stock on every venue it
+        trades, e.g. AAPL on NASDAQ/BATS/ARCA/ISLAND, which all share one
+        conId). Cross-exchange dual-listings (BHP on ASX vs NYSE) have
+        *different* conIds so they survive and come back as real ambiguity
+        the caller has to resolve.
         """
         result = consume(
             self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_symbol(
@@ -253,23 +268,60 @@ class MMR:
         if type(symbol) is int:
             return []
 
-        # Explicit IB discovery with a fully-specified Contract.
         if sec_type == 'CASH':
+            # Forex is always IDEALPRO; parse EURUSD-style into base + quote.
             pair = str(symbol).replace('/', '').replace('C:', '').upper()
             base = pair[:3] if len(pair) == 6 else pair
             quote_ccy = pair[3:] if len(pair) == 6 else 'USD'
             contract = Contract(symbol=base, secType='CASH', exchange='IDEALPRO', currency=quote_ccy)
         else:
+            # Ship whatever hints the caller gave — empty strings included.
+            # reqContractDetails interprets an unset exchange as "any" and
+            # returns the full candidate list.
             contract = Contract(
                 symbol=str(symbol),
-                exchange=exchange or 'SMART',
+                exchange=exchange,
                 secType=sec_type or 'STK',
-                currency=currency or 'USD',
+                currency=currency,
             )
 
-        return consume(
+        candidates = consume(
             self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_contract(contract)
         )
+        return self._dedupe_venue_duplicates(candidates)
+
+    @staticmethod
+    def _dedupe_venue_duplicates(
+        candidates: List[SecurityDefinition],
+    ) -> List[SecurityDefinition]:
+        """Collapse venue duplicates while preserving dual-listings.
+
+        IB's ``reqContractDetails`` returns one row per exchange the
+        instrument trades on — so a US stock comes back as NASDAQ + BATS +
+        ARCA + ISLAND + …, all with the same ``conId``. We want one row
+        per *listing*, not per venue. Keying on ``(conId, currency)`` does
+        the right thing: venue duplicates share a conId so they collapse;
+        the ADR on a different currency has a different conId anyway so it
+        survives as real ambiguity.
+
+        Preference within a duplicate group: keep the row whose
+        ``exchange`` matches its own ``primaryExchange`` (i.e. the "home"
+        listing rather than a venue-routed copy). Falls back to first-seen
+        order when no row has that match (rare).
+        """
+        if not candidates:
+            return candidates
+        by_key: Dict[tuple, SecurityDefinition] = {}
+        for c in candidates:
+            key = (c.conId, c.currency)
+            existing = by_key.get(key)
+            if existing is None:
+                by_key[key] = c
+                continue
+            # Prefer the one where exchange == primaryExchange
+            if c.exchange == c.primaryExchange and existing.exchange != existing.primaryExchange:
+                by_key[key] = c
+        return list(by_key.values())
 
     def _resolve_contract(self, symbol: Union[str, int], sec_type: str = 'STK',
                           exchange: str = '', currency: str = '') -> Contract:

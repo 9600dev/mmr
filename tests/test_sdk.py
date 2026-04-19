@@ -577,6 +577,141 @@ class TestResolve:
             mmr._resolve_contract('NOTREAL')
 
 
+class TestResolveIBDiscovery:
+    """The v2 resolve() ships partial Contracts (no SMART/USD defaults) so
+    IB's reqContractDetails does the discovery. Previously we forced
+    exchange='SMART' currency='USD' when the caller didn't pass hints,
+    which silently picked wrong ADRs for non-US primary listings. The
+    dedupe layer collapses venue duplicates (same conId) while preserving
+    real cross-exchange ambiguity (different conIds)."""
+
+    def test_no_hints_passes_empty_exchange_currency_to_ib(self):
+        """Regression guard for the "close enough" bug. With no exchange
+        or currency hints, we must NOT pre-fill the Contract with
+        SMART/USD — IB does the discovery and we rank what comes back."""
+        mock_client = _make_mock_rpc()
+        mock_client.rpc.return_value.resolve_symbol.return_value = []
+        asx_def = FakeSecurityDefinition(
+            symbol='STO', conId=9999, exchange='ASX',
+            primaryExchange='ASX', currency='AUD',
+        )
+        mock_client.rpc.return_value.resolve_contract.return_value = [asx_def]
+
+        mmr = _make_mmr_with_mock(mock_client)
+        result = mmr.resolve('STO')
+
+        # The call to resolve_contract must have sent exchange='', currency=''
+        # (not 'SMART' / 'USD').
+        call_args = mock_client.rpc.return_value.resolve_contract.call_args
+        sent_contract = call_args.args[0]
+        assert sent_contract.exchange == '', f'expected empty exchange, got {sent_contract.exchange!r}'
+        assert sent_contract.currency == '', f'expected empty currency, got {sent_contract.currency!r}'
+        assert sent_contract.symbol == 'STO'
+        assert len(result) == 1
+        assert result[0].exchange == 'ASX'
+
+    def test_hints_flow_through(self):
+        """When hints ARE passed, use them — no defaulting."""
+        mock_client = _make_mock_rpc()
+        mock_client.rpc.return_value.resolve_symbol.return_value = []
+        mock_client.rpc.return_value.resolve_contract.return_value = []
+
+        mmr = _make_mmr_with_mock(mock_client)
+        mmr.resolve('BHP', exchange='ASX', currency='AUD')
+        sent = mock_client.rpc.return_value.resolve_contract.call_args.args[0]
+        assert sent.exchange == 'ASX'
+        assert sent.currency == 'AUD'
+
+    def test_integer_conid_does_not_hit_ib(self):
+        """Integer conIds must be exact — no IB discovery fallback even
+        when the local DB misses."""
+        mock_client = _make_mock_rpc()
+        mock_client.rpc.return_value.resolve_symbol.return_value = []
+
+        mmr = _make_mmr_with_mock(mock_client)
+        result = mmr.resolve(4391)
+        assert result == []
+        mock_client.rpc.return_value.resolve_contract.assert_not_called()
+
+
+class TestResolveDedupe:
+    """Venue-duplicate collapsing: IB reports a stock on every venue it
+    trades (NASDAQ, BATS, ARCA, ISLAND, …) all sharing one conId. One
+    row per *listing* is what the caller wants."""
+
+    def test_venue_duplicates_collapse_by_conid_and_currency(self):
+        mock_client = _make_mock_rpc()
+        mock_client.rpc.return_value.resolve_symbol.return_value = []
+        # All 4 "copies" of AAPL share conId 265598, currency USD — just
+        # different exchanges.
+        venues = [
+            FakeSecurityDefinition(symbol='AAPL', conId=265598, exchange='NASDAQ',
+                                   primaryExchange='NASDAQ', currency='USD'),
+            FakeSecurityDefinition(symbol='AAPL', conId=265598, exchange='BATS',
+                                   primaryExchange='NASDAQ', currency='USD'),
+            FakeSecurityDefinition(symbol='AAPL', conId=265598, exchange='ARCA',
+                                   primaryExchange='NASDAQ', currency='USD'),
+            FakeSecurityDefinition(symbol='AAPL', conId=265598, exchange='ISLAND',
+                                   primaryExchange='NASDAQ', currency='USD'),
+        ]
+        mock_client.rpc.return_value.resolve_contract.return_value = venues
+
+        mmr = _make_mmr_with_mock(mock_client)
+        result = mmr.resolve('AAPL')
+        assert len(result) == 1, f'expected 1 after dedupe, got {len(result)}'
+        # The row we kept should be the primary-exchange one
+        assert result[0].exchange == 'NASDAQ'
+        assert result[0].primaryExchange == 'NASDAQ'
+
+    def test_dual_listing_survives_dedupe(self):
+        """Dual-listed tickers (BHP on ASX + NYSE) have *different* conIds,
+        so dedupe keeps both and surfaces real ambiguity to the caller."""
+        mock_client = _make_mock_rpc()
+        mock_client.rpc.return_value.resolve_symbol.return_value = []
+        mock_client.rpc.return_value.resolve_contract.return_value = [
+            FakeSecurityDefinition(symbol='BHP', conId=1001, exchange='ASX',
+                                   primaryExchange='ASX', currency='AUD'),
+            FakeSecurityDefinition(symbol='BHP', conId=2002, exchange='NYSE',
+                                   primaryExchange='NYSE', currency='USD'),
+        ]
+        mmr = _make_mmr_with_mock(mock_client)
+        result = mmr.resolve('BHP')
+        assert len(result) == 2
+        currencies = {r.currency for r in result}
+        assert currencies == {'AUD', 'USD'}
+
+    def test_dedupe_prefers_primary_exchange_match(self):
+        """Within a conId group, keep the row where exchange ==
+        primaryExchange (the "home" listing, not a routed venue copy).
+        Previous row gets dropped even when seen first."""
+        mock_client = _make_mock_rpc()
+        mock_client.rpc.return_value.resolve_symbol.return_value = []
+        mock_client.rpc.return_value.resolve_contract.return_value = [
+            # Routed venue copy comes first
+            FakeSecurityDefinition(symbol='AAPL', conId=265598, exchange='BATS',
+                                   primaryExchange='NASDAQ', currency='USD'),
+            # Primary listing comes second — should win
+            FakeSecurityDefinition(symbol='AAPL', conId=265598, exchange='NASDAQ',
+                                   primaryExchange='NASDAQ', currency='USD'),
+        ]
+        mmr = _make_mmr_with_mock(mock_client)
+        result = mmr.resolve('AAPL')
+        assert len(result) == 1
+        assert result[0].exchange == 'NASDAQ'
+
+    def test_dedupe_empty_input_returns_empty(self):
+        mmr = _make_mmr_with_mock(_make_mock_rpc())
+        assert mmr._dedupe_venue_duplicates([]) == []
+
+    def test_unknown_symbol_returns_empty(self):
+        """IB has no listing → empty list, no error raised."""
+        mock_client = _make_mock_rpc()
+        mock_client.rpc.return_value.resolve_symbol.return_value = []
+        mock_client.rpc.return_value.resolve_contract.return_value = []
+        mmr = _make_mmr_with_mock(mock_client)
+        assert mmr.resolve('ZZZZZZ') == []
+
+
 class TestResolveContractExchangeCurrency:
     """Test that _resolve_contract respects exchange/currency hints."""
 

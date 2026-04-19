@@ -1532,7 +1532,37 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
         elif cmd == 'resolve':
             defs = mmr.resolve(args.symbol, sec_type=args.sectype,
                                exchange=args.exchange, currency=args.currency)
-            if defs:
+            if not defs:
+                # No match at all — empty local DB, empty IB discovery.
+                if _json_mode:
+                    print(json.dumps({'success': False, 'data': [],
+                                      'message': f'Could not resolve: {args.symbol}'}))
+                else:
+                    console.print(f'[yellow]Could not resolve: {args.symbol}[/yellow]')
+                    if not args.exchange and not args.currency:
+                        console.print(
+                            '[dim]IB has no listing for this symbol across any exchange. '
+                            'If you know the specific listing, try '
+                            f'`mmr resolve {args.symbol} --exchange X --currency Y`.[/dim]'
+                        )
+            elif len(defs) == 1:
+                # Unambiguous — emit as single row so downstream JSON consumers
+                # can index [0] and get the answer without branching.
+                import pandas as pd
+                d = defs[0]
+                rows = [{
+                    'conId': d.conId,
+                    'symbol': d.symbol,
+                    'secType': d.secType,
+                    'exchange': d.exchange,
+                    'primaryExchange': d.primaryExchange,
+                    'currency': d.currency,
+                    'longName': d.longName,
+                }]
+                print_df(pd.DataFrame(rows), title=f'Resolve: {args.symbol}')
+            else:
+                # Multiple listings (dual-listed ticker, ADR + primary, etc.).
+                # Surface *all* of them and tell the user how to pick.
                 import pandas as pd
                 rows = [{
                     'conId': d.conId,
@@ -1543,9 +1573,17 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
                     'currency': d.currency,
                     'longName': d.longName,
                 } for d in defs]
-                print_df(pd.DataFrame(rows), title=f'Resolve: {args.symbol}')
-            else:
-                console.print(f'[yellow]Could not resolve: {args.symbol}[/yellow]')
+                print_df(pd.DataFrame(rows),
+                         title=f'Resolve: {args.symbol} — {len(defs)} listings (ambiguous)')
+                if not _json_mode and not args.exchange:
+                    # Suggest the obvious disambiguators — most common cases are
+                    # picking the primary exchange or adding the currency.
+                    hints = sorted({(d.primaryExchange or d.exchange, d.currency) for d in defs})
+                    hint_lines = ', '.join(f'--exchange {e} --currency {c}' for e, c in hints if e and c)
+                    console.print(
+                        f'[dim]{args.symbol} is listed on multiple exchanges. '
+                        f'Pick one: {hint_lines}[/dim]'
+                    )
 
         elif cmd == 'buy':
             result = mmr.buy(
