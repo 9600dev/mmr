@@ -306,7 +306,7 @@ Three rules that cover 95% of the failure modes:
 
 **1. Don't over-parallelize `trader_service` RPC calls.** Everything that goes through `trader_service` (resolve, snapshot, buy/sell, orders, portfolio, approve, etc.) shares one ZMQ connection — firing an `asyncio.gather` of 8 of them cascades into timeouts. Serialize them in a `for` loop. Use `snapshots_batch(symbols)` instead of N × `snapshot()`. You *can* parallelize across different backends (e.g. `movers` + `ideas` — both Massive.com) or across subprocess-level helpers (`backtest_batch`, `backtest_sweep(concurrency=N)`, `sweep_run`) which spawn independent CLI processes.
 
-**2. Always `await` in the calling cell.** The helper runtime has no running event loop for `asyncio.create_task`, and `asyncio.run()` nests badly. Just `await MMRHelpers.x(...)` — the helper already offloads the CLI subprocess to a worker thread so it doesn't block. For long downloads pass `timeout=` or chunk the work across cells.
+**2. Always `await` in the calling cell.** The helper runtime has no running event loop for `asyncio.create_task`, and `asyncio.run()` nests badly. Just `await MMRHelpers.x(...)` — the helper already offloads the CLI subprocess to a worker thread so it doesn't block. For long downloads pass `timeout=` or chunk the work across cells. **Exception:** for genuinely long-running work (sweeps > ~20 min, multi-hour nightly batches) `await` is the wrong tool — it freezes the conversation the whole time. Use the **detached-subprocess + poll** pattern in Pattern 14b instead; the underlying work persists its own state so the LLM can check progress from any later cell.
 
 **3. Timeouts return error payloads, not exceptions.** JSON helpers return `{"error": "timed out ...", "timed_out": True}`; string helpers return `"ERROR: ..."`. Check both:
 
@@ -724,6 +724,76 @@ emit(confidence)
 - `sweep run --dry-run` expands the grid and estimates wall time before you commit compute.
 - Freshness guard refuses to run on stale data (catches "IB Gateway was down, we sweept yesterday's numbers").
 - `--skip-freshness` when you know better.
+
+### Pattern 14b: Interactive detached sweep (launch, keep working, poll)
+
+**Use this when you want to kick off a long-running sweep *now* and keep
+working in the same conversation.** `await MMRHelpers.sweep_run(...)` blocks
+the cell for the full wall time — fine for a 5-minute sweep, wrong for a
+60-minute sweep. You'd freeze the LLM's conversation window the whole time,
+and if the cell hits its own timeout the subprocess may get killed
+mid-flight.
+
+The trick is that `mmr sweep run` already persists a `sweeps` row to DuckDB
+the instant it starts, and stamps every completed job with the parent
+`sweep_id`. So a fire-and-forget subprocess with polling works cleanly:
+
+```python
+import subprocess
+
+# Launch detached — start_new_session=True puts the process in its own
+# session group so the LLM cell's lifecycle doesn't take it down.
+log_path = "/tmp/phase1_sweep.log"
+proc = subprocess.Popen(
+    ["mmr", "sweep", "run", manifest_path, "--skip-freshness"],
+    stdout=open(log_path, "w"),
+    stderr=subprocess.STDOUT,
+    start_new_session=True,
+)
+print(f"Sweep PID {proc.pid}, log {log_path}")
+```
+
+**Poll from any later cell** — `sweeps_list` is cheap and gives you the
+newest sweep's status, and `sweeps_show` gives a running leaderboard:
+
+```python
+# What's the newest sweep doing?
+history = await MMRHelpers.sweeps_list(limit=3)
+emit(history)
+# → each row has: id, name, status ("running"/"completed"/"failed"),
+#   n_runs_successful, started_at, digest_path (null until done)
+
+# Drill into the newest sweep's partial leaderboard
+import json
+parsed = json.loads(history)
+latest_id = parsed["data"][0]["id"]
+leaderboard = await MMRHelpers.sweeps_show(sweep_id=latest_id, top=10)
+emit(leaderboard)
+```
+
+**When the sweep is done,** `status` will flip to `"completed"` (or
+`"failed"` / `"cancelled"`) and `digest_path` will be populated. At that
+point pull the confidence block for the top picks (same as Pattern 14):
+
+```python
+parsed = json.loads(await MMRHelpers.sweeps_show(latest_id, top=5))
+top_ids = [r["run_id"] for r in parsed["data"]["leaderboard"][:5]]
+confidence = await MMRHelpers.backtests_confidence(top_ids)
+emit(confidence)
+```
+
+**Recovering from a stuck sweep:** if `status` stays `"running"` long after
+the estimated wall time, the subprocess is either still grinding or has
+died without updating the row. Check the log file first (`cat /tmp/phase1_sweep.log`);
+if the process is gone you can mark the row cancelled via
+`sweeps_cancel(latest_id)` (if exposed) or just let it sit — the digest
+won't write, but the successful child rows in `backtest_runs` are still
+valid and visible through `backtests_list(sweep_id=latest_id)`.
+
+**Don't try to background with `asyncio.create_task`** — the helper runtime
+has no running event loop to attach to, and the subprocess tree collapses
+when the cell exits. The `subprocess.Popen(..., start_new_session=True)`
+pattern above is the only one that survives the cell.
 
 ### Pattern 15: Market Scanning Workflow
 
