@@ -5982,11 +5982,34 @@ def _handle_data_query(args: argparse.Namespace):
     print_df(df, title=f'Data: {symbol} ({bar_size})')
 
 
+def _try_get_exchange_calendar_for(security):
+    """Best-effort exchange calendar lookup for a SecurityDefinition — mirrors
+    DataService._try_get_exchange_calendar. Returns None if neither
+    primaryExchange nor exchange resolves."""
+    import exchange_calendars
+    for attr in ('primaryExchange', 'exchange'):
+        name = getattr(security, attr, None)
+        if not name:
+            continue
+        try:
+            return exchange_calendars.get_calendar(name)
+        except Exception:
+            continue
+    return None
+
+
 def _handle_data_download(args: argparse.Namespace):
-    """Download data from the selected source directly to local DuckDB."""
+    """Download data from the selected source directly to local DuckDB.
+
+    Incremental by default: uses TickData.missing() to skip date ranges
+    already present in storage. If the symbol can't be resolved to a
+    SecurityDefinition (no local universe entry and trader_service down),
+    falls back to a full-range download keyed by the ticker string.
+    """
     import datetime as dt
     from trader.container import Container
     from trader.data.data_access import TickStorage
+    from trader.data.store import DateRange
     from trader.data.universe import UniverseAccessor
     from trader.objects import BarSize
 
@@ -6026,14 +6049,15 @@ def _handle_data_download(args: argparse.Namespace):
     # in the local universe so rows end up conId-keyed (instead of strings
     # like "JPM"). Without this, tickers the user hasn't explicitly added to
     # a universe get persisted under their symbol string and show up with
-    # a blank conId in `data summary`.
+    # a blank conId in `data summary`. Timeout is kept tight (1s) so a
+    # misconfigured or down trader_service doesn't make the CLI look hung.
     rpc_mmr = None
     try:
         from trader.sdk import MMR  # local import — avoids SDK cost when unused
         candidate = MMR(
             rpc_address=cfg.get('zmq_rpc_server_address'),
             rpc_port=cfg.get('zmq_rpc_server_port'),
-            timeout=3,
+            timeout=1,
         )
         candidate.connect()
         # Soft probe — if trader_service isn't up, skip silently
@@ -6049,6 +6073,9 @@ def _handle_data_download(args: argparse.Namespace):
     start_date = end_date - dt.timedelta(days=args.days)
     completed = 0
     failed = 0
+    skipped_up_to_date = 0
+    total_rows_written = 0
+    tickdata = storage.get_tickdata(bar_size)
 
     for symbol in args.symbols:
         # Resolve to conId for storage key: local universe first, then
@@ -6056,9 +6083,11 @@ def _handle_data_download(args: argparse.Namespace):
         # the universe means subsequent downloads (and anything else that
         # calls resolve_symbol locally) won't need to hit IB again.
         conid = None
+        sec_def = None
         results = accessor.resolve_symbol(symbol, first_only=True)
         if results:
-            conid = results[0].conId
+            sec_def = results[0]
+            conid = sec_def.conId
         elif rpc_mmr is not None:
             try:
                 resolved = rpc_mmr.resolve(symbol)  # List[SecurityDefinition]
@@ -6086,30 +6115,69 @@ def _handle_data_download(args: argparse.Namespace):
                 if not _json_mode:
                     console.print(f'[dim]  resolve via trader_service failed for {symbol}: {ex}[/dim]')
 
-        try:
+        # Freshness guard: use tick_data.missing() to skip date ranges already
+        # stored, so repeat runs are cheap (no API calls when fully covered).
+        # Only possible when we have a SecurityDefinition for the exchange
+        # calendar lookup — otherwise fall back to full-range download.
+        missing_ranges = None
+        if sec_def is not None:
+            calendar = _try_get_exchange_calendar_for(sec_def)
+            if calendar is not None:
+                try:
+                    missing_ranges = tickdata.missing(
+                        conid,
+                        calendar,
+                        date_range=DateRange(start=start_date, end=end_date),
+                    )
+                except Exception as ex:
+                    if not _json_mode:
+                        console.print(f'[dim]  missing() failed for {symbol}: {ex} — full-range fetch[/dim]')
+                    missing_ranges = None
+
+        if missing_ranges is not None and len(missing_ranges) == 0:
+            skipped_up_to_date += 1
             if not _json_mode:
-                console.print(f'[dim]Downloading {symbol} ({bar_size})...[/dim]')
-            df = worker.get_history(
-                ticker=symbol,
-                bar_size=bar_size,
-                start_date=start_date,
-                end_date=end_date,
-            )
-            if not df.empty:
-                tickdata = storage.get_tickdata(bar_size)
-                storage_key = conid if conid else symbol
-                tickdata.write_resolve_overlap(storage_key, df)
-                completed += 1
+                console.print(f'[dim]{symbol}: already up to date[/dim]')
+            continue
+
+        fetch_ranges = missing_ranges if missing_ranges else [DateRange(start=start_date, end=end_date)]
+
+        symbol_rows = 0
+        symbol_failed = False
+        for dr in fetch_ranges:
+            try:
                 if not _json_mode:
-                    console.print(f'[dim]  Wrote {len(df)} rows for {symbol}[/dim]')
-            else:
+                    console.print(
+                        f'[dim]Downloading {symbol} ({bar_size}) '
+                        f'{dr.start.strftime("%Y-%m-%d")} → {dr.end.strftime("%Y-%m-%d")}...[/dim]'
+                    )
+                df = worker.get_history(
+                    ticker=symbol,
+                    bar_size=bar_size,
+                    start_date=dr.start,
+                    end_date=dr.end,
+                )
+                if not df.empty:
+                    storage_key = conid if conid else symbol
+                    tickdata.write_resolve_overlap(storage_key, df)
+                    symbol_rows += len(df)
+            except Exception as e:
+                symbol_failed = True
                 if not _json_mode:
-                    console.print(f'[yellow]  No data returned for {symbol}[/yellow]')
-                failed += 1
-        except Exception as e:
+                    console.print(f'[red]  Error downloading {symbol} {dr.start.strftime("%Y-%m-%d")}-{dr.end.strftime("%Y-%m-%d")}: {e}[/red]')
+
+        if symbol_rows > 0:
+            completed += 1
+            total_rows_written += symbol_rows
+            if not _json_mode:
+                console.print(f'[dim]  Wrote {symbol_rows:,} rows for {symbol}[/dim]')
+        elif symbol_failed:
             failed += 1
+        else:
+            # No rows and no failure: upstream returned empty for every range.
+            # That's legitimate (e.g. weekend-only window) — don't mark failed.
             if not _json_mode:
-                console.print(f'[red]  Error downloading {symbol}: {e}[/red]')
+                console.print(f'[yellow]  No data returned for {symbol}[/yellow]')
 
     if rpc_mmr is not None:
         try: rpc_mmr.close()
@@ -6118,12 +6186,19 @@ def _handle_data_download(args: argparse.Namespace):
     if _json_mode:
         print(json.dumps({
             'success': failed == 0,
-            'message': f'{completed} downloaded, {failed} failed',
+            'message': (f'{completed} downloaded, {skipped_up_to_date} already current, '
+                        f'{failed} failed, {total_rows_written} rows written'),
             'completed': completed,
+            'skipped_up_to_date': skipped_up_to_date,
             'failed': failed,
+            'rows_written': total_rows_written,
         }))
     else:
-        print_status(f'Download complete: {completed} succeeded, {failed} failed')
+        print_status(
+            f'Download complete: {completed} downloaded, '
+            f'{skipped_up_to_date} already current, {failed} failed, '
+            f'{total_rows_written:,} rows written'
+        )
 
 
 def _handle_data_migrate_symbols(args: argparse.Namespace):
