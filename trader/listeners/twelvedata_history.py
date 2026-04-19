@@ -35,6 +35,16 @@ _CHUNK_DAYS_FOR_BAR_SIZE = {
 _CHUNK_PACING_SECS = 0.1
 
 
+def _is_benign_no_data(ex: Exception) -> bool:
+    """Classify a time_series exception as a known "chunk has no bars" signal
+    vs. a real failure. TwelveData surfaces empty spans as
+    "No data is available on the specified dates" — those are expected for
+    holiday-only weeks or very recent intraday edge cases, not a plan-limit
+    or outage."""
+    msg = str(ex).lower()
+    return 'no data is available' in msg or 'not found in our database' in msg
+
+
 class TwelveDataHistoryWorker:
     def __init__(self, twelvedata_api_key: str):
         if not twelvedata_api_key:
@@ -65,28 +75,49 @@ class TwelveDataHistoryWorker:
         frames = []
         chunk_start = start_date
         chunk_idx = 0
+        skipped = 0
         while chunk_start < end_date:
             chunk_end = min(chunk_start + dt.timedelta(days=chunk_days), end_date)
-            df_chunk = self._fetch_one(
-                ticker, bar_size, interval, chunk_start, chunk_end, timezone,
-                log_prefix='  chunk {}: '.format(chunk_idx),
-            )
-            if df_chunk is not None and not df_chunk.empty:
-                frames.append(df_chunk)
+            try:
+                df_chunk = self._fetch_one(
+                    ticker, bar_size, interval, chunk_start, chunk_end, timezone,
+                    log_prefix='  chunk {}: '.format(chunk_idx),
+                )
+                if df_chunk is not None and not df_chunk.empty:
+                    frames.append(df_chunk)
+            except Exception as ex:
+                # A single bad chunk (weekend-only span, TwelveData "no data"
+                # for a holiday week, transient 429) must NOT abort the whole
+                # symbol — log and keep going. The caller sees partial
+                # coverage, not empty output.
+                skipped += 1
+                if _is_benign_no_data(ex):
+                    logging.warning('  chunk {}: no data ({} {} to {}): {}'.format(
+                        chunk_idx, ticker,
+                        chunk_start.strftime('%Y-%m-%d'), chunk_end.strftime('%Y-%m-%d'),
+                        ex,
+                    ))
+                else:
+                    logging.error('  chunk {}: {} {} to {} failed: {}'.format(
+                        chunk_idx, ticker,
+                        chunk_start.strftime('%Y-%m-%d'), chunk_end.strftime('%Y-%m-%d'),
+                        ex,
+                    ))
             chunk_start = chunk_end
             chunk_idx += 1
             if chunk_start < end_date:
                 time.sleep(_CHUNK_PACING_SECS)
 
         if not frames:
-            logging.info('no data returned for {} over full window'.format(ticker))
+            logging.info('no data returned for {} over full window ({} chunks, {} skipped)'.format(
+                ticker, chunk_idx, skipped))
             return pd.DataFrame()
 
         df = pd.concat(frames)
         df = df[~df.index.duplicated(keep='first')]
         df.sort_index(ascending=True, inplace=True)
-        logging.info('get_history returned {} total rows for {} across {} chunks'.format(
-            len(df), ticker, chunk_idx
+        logging.info('get_history returned {} total rows for {} ({} chunks, {} skipped)'.format(
+            len(df), ticker, chunk_idx, skipped
         ))
         return df
 

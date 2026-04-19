@@ -247,6 +247,46 @@ class TestPagination:
         )
         assert len(calls) == 1
 
+    def test_single_bad_chunk_does_not_abort_symbol(self):
+        """A TwelveData "No data is available" response on chunk N must not
+        lose bars from chunks N-1 or N+1 — regression guard for the
+        production bug where one bad chunk emptied the whole symbol."""
+        worker = TwelveDataHistoryWorker(twelvedata_api_key='test')
+
+        call_idx = [0]
+
+        def fake_time_series(**kwargs):
+            i = call_idx[0]
+            call_idx[0] += 1
+            if i == 2:
+                # Simulate TwelveData's "no bars in this window" error mid-run
+                raise RuntimeError('No data is available on the specified dates.')
+            from_dt = pd.to_datetime(kwargs['start_date'])
+            idx = pd.DatetimeIndex(
+                [from_dt + dt.timedelta(minutes=m) for m in range(3)],
+                name='datetime',
+            ).tz_localize(pytz.timezone(kwargs.get('timezone', 'US/Eastern')))
+            df = pd.DataFrame(
+                {'open': [100.0] * 3, 'high': [101.0] * 3, 'low': [99.0] * 3,
+                 'close': [100.5] * 3, 'volume': [1000] * 3},
+                index=idx,
+            )
+            mock_ts = MagicMock()
+            mock_ts.as_pandas.return_value = df
+            return mock_ts
+
+        worker.client = MagicMock()
+        worker.client.time_series.side_effect = fake_time_series
+
+        df = worker.get_history(
+            'AAPL', BarSize.Mins1,
+            dt.datetime(2026, 1, 1), dt.datetime(2026, 1, 31),
+        )
+        # 5 chunks scheduled, chunk index 2 errors out → 4 successful chunks × 3 bars = 12 bars
+        assert call_idx[0] >= 4
+        assert len(df) > 0, 'empty df means one failed chunk killed the whole symbol'
+        assert len(df) == (call_idx[0] - 1) * 3
+
     def test_dedupes_overlapping_chunks(self):
         """If consecutive chunks happen to return overlapping timestamps
         (e.g. boundary bar), the final df must dedupe by index."""
