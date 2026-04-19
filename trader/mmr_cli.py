@@ -7126,7 +7126,7 @@ def _handle_diagnose(mmr: MMR, args: argparse.Namespace):
         )
         return
     try:
-        result = mmr.trader_client.rpc(return_type=dict).diagnose_portfolio_feed()
+        result = mmr._rpc.rpc(return_type=dict).diagnose_portfolio_feed()
     except Exception as ex:
         print_status(f'diagnose failed: {ex}', success=False)
         return
@@ -7190,7 +7190,7 @@ def _handle_scan(mmr: MMR, args: argparse.Namespace):
     # guessing at the scanner subscription matrix.
     if getattr(args, 'list_locations', False):
         try:
-            locs = mmr.trader_client.rpc(return_type=list[dict]).scanner_locations()
+            locs = mmr._rpc.rpc(return_type=list[dict]).scanner_locations()
         except Exception as ex:
             print_status(f'Failed to fetch scanner locations: {ex}', success=False)
             return
