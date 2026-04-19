@@ -38,8 +38,8 @@ class TraderServiceApi(RPCHandler):
         return self.trader.client.ib.portfolio()
 
     @rpcmethod
-    def get_portfolio_summary(self) -> list[PortfolioSummary]:
-        return self.trader.get_portfolio_summary()
+    async def get_portfolio_summary(self) -> list[PortfolioSummary]:
+        return await self.trader.get_portfolio_summary()
 
     @rpcmethod
     def get_universes(self) -> dict[str, int]:

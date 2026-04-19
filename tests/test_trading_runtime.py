@@ -217,3 +217,92 @@ async def test_bracket_rolls_back_when_tp_fails(monkeypatch):
     assert 1001 in cancelled_orders, (
         f'staged entry (orderId 1001) should have been cancelled, saw {cancelled_orders}'
     )
+
+
+# ---------------------------------------------------------------------------
+# status() TTL cache — hot RPC path, polled several times/second by
+# strategy_service + risk_gate + CLI. Repeated walks of IB state starve
+# the event loop; the 1-second cache makes the status() RPC effectively
+# free.
+# ---------------------------------------------------------------------------
+
+class TestStatusCache:
+    def _trader_with_connected_ib(self, trader):
+        ib = MagicMock()
+        ib.isConnected = MagicMock(return_value=True)
+        trader.client = MagicMock()
+        trader.client.ib = ib
+        trader._ib_upstream_connected = True
+        trader._ib_upstream_error = None
+        trader.data = object()  # storage_connected truthy
+        return ib
+
+    def test_repeat_calls_inside_ttl_hit_cache(self):
+        trader = _minimal_trader()
+        ib = self._trader_with_connected_ib(trader)
+
+        r1 = trader.status()
+        r2 = trader.status()
+        r3 = trader.status()
+
+        assert r1 == r2 == r3
+        # isConnected should only have been walked once (first call)
+        assert ib.isConnected.call_count == 1, (
+            f'expected 1 IB state read within TTL, got {ib.isConnected.call_count}'
+        )
+
+    def test_returns_fresh_data_after_ttl_expires(self, monkeypatch):
+        trader = _minimal_trader()
+        ib = self._trader_with_connected_ib(trader)
+
+        # First call populates cache at t=0
+        trader.status()
+
+        # Advance time past the 1.0s TTL by monkeypatching time.monotonic
+        import trader.trading.trading_runtime as runtime
+        t = [time.monotonic() + 1.5]
+        monkeypatch.setattr(runtime.time, 'monotonic', lambda: t[0])
+
+        # Flip the underlying IB state and call again — we must observe
+        # the change, not the stale cached value.
+        ib.isConnected.return_value = False
+        trader._ib_upstream_connected = False
+        trader._ib_upstream_error = 'disconnected'
+        fresh = trader.status()
+
+        assert fresh['ib_connected'] is False
+        assert fresh['ib_upstream_connected'] is False
+        assert fresh['ib_upstream_error'] == 'disconnected'
+        assert ib.isConnected.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# get_portfolio_summary offloaded to a worker thread — keeps the RPC
+# event loop responsive while the summary is built.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_portfolio_summary_runs_off_loop():
+    """Calling get_portfolio_summary must await asyncio.to_thread, not run
+    sync on the loop. If someone reverts to sync, the event loop would
+    block for the duration of the summary build — exactly what was
+    causing the ~1s slow-callback warnings."""
+    trader = _minimal_trader()
+
+    # Capture the thread id where the sync body executes
+    thread_ids = []
+    trader.portfolio = MagicMock()
+    trader.portfolio.get_portfolio_items = MagicMock(return_value=[])
+
+    def sync_body():
+        thread_ids.append(threading.get_ident())
+        return []
+    trader._get_portfolio_summary_sync = sync_body
+
+    await trader.get_portfolio_summary()
+
+    assert len(thread_ids) == 1
+    assert thread_ids[0] != threading.get_ident(), (
+        'get_portfolio_summary ran on the caller thread — it must offload '
+        'via asyncio.to_thread so the event loop stays responsive'
+    )

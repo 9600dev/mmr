@@ -36,6 +36,7 @@ import datetime as dt
 import reactivex as rx
 import reactivex.operators as ops
 import threading
+import time
 import trader.messaging.strategy_service_api as strategy_bus
 import trader.messaging.trader_service_api as bus
 
@@ -1178,8 +1179,19 @@ class Trader():
     def red_button(self):
         self.client.ib.reqGlobalCancel()
 
-    @log_method
+    # status() is polled heavily by strategy_service, the CLI, and the
+    # risk-gate. A 1-second TTL cache is invisible to every caller (these
+    # are idempotent-diagnostic reads, not trade decisions) and avoids
+    # re-walking IB state on every RPC. No @log_method — the decorator's
+    # inspect.signature + repr for every call adds measurable overhead on a
+    # hot path, and the RPC server already DEBUG-logs each dispatch.
     def status(self) -> dict:
+        now = time.monotonic()
+        cached_ts = getattr(self, '_status_cache_ts', 0.0)
+        if now - cached_ts < 1.0:
+            cached = getattr(self, '_status_cache', None)
+            if cached is not None:
+                return cached
         status = {
             'ib_connected': self.client.ib.isConnected(),
             'ib_upstream_connected': self._ib_upstream_connected,
@@ -1187,21 +1199,31 @@ class Trader():
         }
         if not self._ib_upstream_connected:
             status['ib_upstream_error'] = self._ib_upstream_error
+        self._status_cache = status
+        self._status_cache_ts = now
         return status
 
-    @log_method
     def get_unique_client_id(self) -> int:
         new_client_id = max(self.tws_client_ids) + 1
         self.tws_client_ids.append(new_client_id)
         self.tws_client_ids.append(new_client_id + 1)
         return new_client_id
 
-    @log_method
     def get_pnl(self) -> List[PnLSingle]:
         return self.pnl.get_all()
 
-    @log_method
-    def get_portfolio_summary(self) -> List[PortfolioSummary]:
+    # Async + thread-offloaded. This is the method strategy_service calls
+    # every reconcile (30s) plus what the CLI's `portfolio` command hits,
+    # so it's on a hot path. Iterating the portfolio dict is cheap, but
+    # building PortfolioSummary dataclasses and doing the PnL-cache lookup
+    # per item was one of the callsites starving the trader_service event
+    # loop (RPC handler slow-callback warnings at ~1s). Running the body
+    # in a worker thread keeps the loop responsive for ticker dispatch
+    # and other RPC requests.
+    async def get_portfolio_summary(self) -> List[PortfolioSummary]:
+        return await asyncio.to_thread(self._get_portfolio_summary_sync)
+
+    def _get_portfolio_summary_sync(self) -> List[PortfolioSummary]:
         def find_pnl_or_nan(account: str, contract: Contract) -> float:
             if str((account, contract.conId)) in self.pnl.cache:
                 return self.pnl.cache[str((account, contract.conId))].dailyPnL
@@ -1224,7 +1246,6 @@ class Trader():
             ))
         return summary
 
-    @log_method
     def get_positions(self) -> List[Position]:
         return self.portfolio.get_positions()
 
