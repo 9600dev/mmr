@@ -104,6 +104,7 @@ class Container():
         self.configuration['massive_api_key'] = self.mmr_config.massive.api_key
         self.configuration['massive_feed'] = self.mmr_config.massive.feed
         self.configuration['massive_delayed'] = self.mmr_config.massive.delayed
+        self.configuration['twelvedata_api_key'] = self.mmr_config.twelvedata.api_key
 
     @classmethod
     def create(cls, config_file: str = '') -> 'Container':

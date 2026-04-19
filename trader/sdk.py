@@ -1797,6 +1797,20 @@ class MMR:
             )
         )
 
+    def pull_twelvedata(
+        self,
+        symbols: Optional[List[str]] = None,
+        universe: Optional[str] = None,
+        bar_size: str = '1 day',
+        prev_days: int = 30,
+    ) -> dict:
+        """Download historical data from TwelveData via the data_service."""
+        return consume(
+            self._data_rpc.rpc(return_type=dict).pull_twelvedata(
+                symbols=symbols, universe=universe, bar_size=bar_size, prev_days=prev_days,
+            )
+        )
+
     def pull_ib(
         self,
         symbols: Optional[List[str]] = None,

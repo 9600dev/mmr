@@ -108,6 +108,31 @@ class BarSize(IntEnum):
             raise ValueError(f'unsupported BarSize for Massive API: {bar_size}')
         return mapping[bar_size]
 
+    @staticmethod
+    def to_twelvedata_interval(bar_size: 'BarSize') -> str:
+        # TwelveData interval strings:
+        # https://twelvedata.com/docs#time-series
+        # Supported: 1min, 5min, 15min, 30min, 45min, 1h, 2h, 4h, 1day, 1week, 1month
+        mapping = {
+            BarSize.Mins1: '1min',
+            BarSize.Mins5: '5min',
+            BarSize.Mins15: '15min',
+            BarSize.Mins30: '30min',
+            BarSize.Hours1: '1h',
+            BarSize.Hours2: '2h',
+            BarSize.Hours4: '4h',
+            BarSize.Days1: '1day',
+            BarSize.Weeks1: '1week',
+            BarSize.Months1: '1month',
+        }
+        if bar_size not in mapping:
+            raise ValueError(
+                f'unsupported BarSize for TwelveData API: {bar_size}. '
+                f'Supported: 1 min, 5 mins, 15 mins, 30 mins, 1 hour, 2 hours, 4 hours, '
+                f'1 day, 1 week, 1 month.'
+            )
+        return mapping[bar_size]
+
 
 # https://interactivebrokers.github.io/tws-api/classIBApi_1_1EClient.html#a7a19258a3a2087c07c1c57b93f659b63
 class TickList(IntEnum):

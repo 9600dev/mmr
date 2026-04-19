@@ -60,6 +60,11 @@ class MassiveConfig:
 
 
 @dataclass
+class TwelveDataConfig:
+    api_key: str = ''
+
+
+@dataclass
 class StrategyRuntimeConfig:
     strategies_directory: str = 'strategies'
     config_file: str = '~/.config/mmr/strategy_runtime.yaml'
@@ -73,6 +78,7 @@ class MMRConfig:
     pycron: PycronConfig = field(default_factory=PycronConfig)
     strategy: StrategyRuntimeConfig = field(default_factory=StrategyRuntimeConfig)
     massive: MassiveConfig = field(default_factory=MassiveConfig)
+    twelvedata: TwelveDataConfig = field(default_factory=TwelveDataConfig)
     root_directory: str = '.'
     config_file: str = '~/.config/mmr/trader.yaml'
     logfile: str = '~/.local/share/mmr/logs/trader.log'
@@ -119,6 +125,8 @@ class MMRConfig:
             'massive_api_key': ('massive', 'api_key'),
             'massive_feed': ('massive', 'feed'),
             'massive_delayed': ('massive', 'delayed'),
+            # TwelveData
+            'twelvedata_api_key': ('twelvedata', 'api_key'),
             # Top-level
             'root_directory': ('root_directory',),
             'config_file': ('config_file',),
@@ -165,6 +173,12 @@ class MMRConfig:
             env_key = os.getenv('MASSIVE_API_KEY', '')
             if env_key:
                 config.massive.api_key = env_key
+
+        # Fall back to native TWELVEDATA_API_KEY env var if not set via config
+        if not config.twelvedata.api_key:
+            env_key = os.getenv('TWELVEDATA_API_KEY', '')
+            if env_key:
+                config.twelvedata.api_key = env_key
 
         # Derive paper_trading flag from trading_mode
         config.paper_trading = config.trading_mode == 'paper'

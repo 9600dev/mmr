@@ -53,3 +53,6 @@ zmq_data_rpc_server_port: 42003
 massive_api_key: ''
 massive_feed: stocks
 massive_delayed: false
+
+# TwelveData (parallel history backend; set TWELVEDATA_API_KEY env var as alternative)
+twelvedata_api_key: ''

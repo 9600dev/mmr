@@ -648,6 +648,12 @@ def build_parser() -> argparse.ArgumentParser:
     hist_massive_p.add_argument('--bar_size', default='1 day', help='Bar size (default: "1 day")')
     hist_massive_p.add_argument('--prev_days', type=int, default=30, help='Days of history (default: 30)')
 
+    hist_td_p = hist_sub.add_parser('twelvedata', aliases=['td'], help='Download history from TwelveData')
+    hist_td_p.add_argument('--symbol', default=None, help='Single symbol to download')
+    hist_td_p.add_argument('--universe', default=None, help='Universe name to download')
+    hist_td_p.add_argument('--bar_size', default='1 day', help='Bar size (default: "1 day")')
+    hist_td_p.add_argument('--prev_days', type=int, default=30, help='Days of history (default: 30)')
+
     hist_ib_p = hist_sub.add_parser('ib', help='Download history from Interactive Brokers')
     hist_ib_p.add_argument('--symbol', default=None, help='Single symbol to download')
     hist_ib_p.add_argument('--universe', default=None, help='Universe name to download')
@@ -1238,7 +1244,8 @@ def build_parser() -> argparse.ArgumentParser:
                             epilog='Examples:\n'
                                    '  data summary\n'
                                    '  data query AAPL --bar-size "1 day" --days 30\n'
-                                   '  data download AAPL MSFT --bar-size "1 day" --days 365',
+                                   '  data download AAPL MSFT --bar-size "1 day" --days 365\n'
+                                   '  data download AAPL --source twelvedata --days 30',
                             formatter_class=fmt)
     data_sub = data_p.add_subparsers(dest='data_action')
 
@@ -1250,10 +1257,19 @@ def build_parser() -> argparse.ArgumentParser:
     data_query_p.add_argument('--days', type=int, default=30, help='Days of history (default: 30)')
     data_query_p.add_argument('--tail', type=int, default=None, help='Show only last N rows')
 
-    data_dl_p = data_sub.add_parser('download', help='Download data from Massive.com to local DuckDB')
+    data_dl_p = data_sub.add_parser(
+        'download',
+        help='Download data from Massive.com or TwelveData to local DuckDB'
+    )
     data_dl_p.add_argument('symbols', nargs='+', help='Symbols to download')
     data_dl_p.add_argument('--bar-size', default='1 day', help='Bar size (default: "1 day")')
     data_dl_p.add_argument('--days', type=int, default=365, help='Days of history (default: 365)')
+    data_dl_p.add_argument(
+        '--source',
+        choices=['massive', 'twelvedata'],
+        default='massive',
+        help='Data source (default: massive)',
+    )
 
     data_sub.add_parser(
         'migrate-symbols',
@@ -5967,7 +5983,7 @@ def _handle_data_query(args: argparse.Namespace):
 
 
 def _handle_data_download(args: argparse.Namespace):
-    """Download data from Massive.com directly to local DuckDB."""
+    """Download data from the selected source directly to local DuckDB."""
     import datetime as dt
     from trader.container import Container
     from trader.data.data_access import TickStorage
@@ -5977,11 +5993,19 @@ def _handle_data_download(args: argparse.Namespace):
     container = Container.instance()
     cfg = container.config()
     duckdb_path = cfg.get('duckdb_path', '')
-    massive_api_key = cfg.get('massive_api_key', '')
+    source = getattr(args, 'source', 'massive')
 
-    if not massive_api_key:
-        print_status('massive_api_key not configured in trader.yaml', success=False)
-        return
+    if source == 'twelvedata':
+        api_key = cfg.get('twelvedata_api_key', '')
+        if not api_key:
+            print_status('twelvedata_api_key not configured (set TWELVEDATA_API_KEY env var)', success=False)
+            return
+    else:
+        api_key = cfg.get('massive_api_key', '')
+        if not api_key:
+            print_status('massive_api_key not configured in trader.yaml', success=False)
+            return
+
     if not duckdb_path:
         print_status('duckdb_path not configured', success=False)
         return
@@ -5991,9 +6015,12 @@ def _handle_data_download(args: argparse.Namespace):
     storage = TickStorage(history_path)
     accessor = UniverseAccessor(duckdb_path, cfg.get('universe_library', 'Universes'))
 
-    from trader.listeners.massive_history import MassiveHistoryWorker
-
-    worker = MassiveHistoryWorker(massive_api_key=massive_api_key)
+    if source == 'twelvedata':
+        from trader.listeners.twelvedata_history import TwelveDataHistoryWorker
+        worker = TwelveDataHistoryWorker(twelvedata_api_key=api_key)
+    else:
+        from trader.listeners.massive_history import MassiveHistoryWorker
+        worker = MassiveHistoryWorker(massive_api_key=api_key)
 
     # If trader_service is reachable, fall back to it for symbols that aren't
     # in the local universe so rows end up conId-keyed (instead of strings
@@ -6297,7 +6324,7 @@ def _handle_history(mmr: MMR, args: argparse.Namespace):
     """Download or list historical data."""
     action = getattr(args, 'hist_action', None)
     if not action:
-        console.print('[yellow]Usage: history list|massive|ib [options][/yellow]')
+        console.print('[yellow]Usage: history list|massive|twelvedata|ib [options][/yellow]')
         return
 
     if action in ('list', 'ls'):
@@ -6349,6 +6376,14 @@ def _handle_history(mmr: MMR, args: argparse.Namespace):
     if action == 'massive':
         console.print('[dim]Pulling Massive history via data_service...[/dim]')
         result = mmr.pull_massive(
+            symbols=symbols,
+            universe=universe,
+            bar_size=args.bar_size,
+            prev_days=args.prev_days,
+        )
+    elif action in ('twelvedata', 'td'):
+        console.print('[dim]Pulling TwelveData history via data_service...[/dim]')
+        result = mmr.pull_twelvedata(
             symbols=symbols,
             universe=universe,
             bar_size=args.bar_size,

@@ -18,6 +18,17 @@ class DataServiceApi(RPCHandler):
         return await self.service.pull_massive(symbols, universe, bar_size, prev_days, max_concurrent)
 
     @rpcmethod
+    async def pull_twelvedata(
+        self,
+        symbols: Optional[list[str]] = None,
+        universe: Optional[str] = None,
+        bar_size: str = '1 day',
+        prev_days: int = 30,
+        max_concurrent: int = 5,
+    ) -> dict:
+        return await self.service.pull_twelvedata(symbols, universe, bar_size, prev_days, max_concurrent)
+
+    @rpcmethod
     async def pull_ib(
         self,
         symbols: Optional[list[str]] = None,
