@@ -1413,20 +1413,45 @@ class MMRHelpers:
         bar_size: str = "1 min",
         days: int = 90,
         paper: bool = True,
+        module: Optional[str] = None,
+        class_name: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """
-        Deploy a strategy to strategy_runtime.yaml.
+        """Deploy a strategy to ``~/.config/mmr/strategy_runtime.yaml``.
         Does NOT require any service.
 
-        :param name: Strategy name
-        :param conids: Contract IDs
-        :param universe: Universe name (alternative to conids)
-        :param bar_size: Bar size (default "1 min")
-        :param days: Historical days prior (default 90)
-        :param paper: Paper trading mode (default True)
+        **Do NOT hand-edit ``configs/strategy_runtime.yaml``** in the
+        project tree — that's the bundled default template, only copied
+        to the real runtime path at first container startup. Always use
+        this helper (or the CLI `strategies deploy`) so writes land in
+        the path the trader actually reads.
 
-        Example:
-        result = await MMRHelpers.strategy_deploy("my_strategy", conids=[265598], paper=True)
+        ``name``   : deployed entry name (must be unique per config)
+        ``module`` : override the inferred ``strategies/<name>.py`` path.
+                     Required when deploying the same strategy class under
+                     multiple names (``orb_gld`` + ``orb_googl`` both
+                     pointing at ``strategies/opening_range_breakout.py``).
+        ``class_name`` : override the CamelCase-of-name default
+        ``params`` : dict of param overrides written to the YAML's
+                     ``params:`` field — same semantics as
+                     ``backtest(params=...)`` and ``bt-sweep --grid``.
+                     Upper-case keys shadow class attributes, lower-case
+                     keys land in ``StrategyContext.params``.
+
+        Sweep-winner deployment is the canonical use case:
+
+        ```python
+        await MMRHelpers.strategy_deploy(
+            "orb_gld",
+            conids=[51529211], paper=True,
+            module="strategies/opening_range_breakout.py",
+            class_name="OpeningRangeBreakout",
+            params={"RANGE_MINUTES": 45, "VOLUME_MULT": 1.3},
+        )
+        ```
+
+        After deploy, call ``reload_strategies()`` so trader_service
+        picks it up without a 30-second wait.
         """
         args = ["strategies", "deploy", name, "--bar-size", bar_size, "--days", str(days)]
         if conids:
@@ -1435,6 +1460,12 @@ class MMRHelpers:
             args.extend(["--universe", universe])
         if paper:
             args.append("--paper")
+        if module:
+            args.extend(["--module", module])
+        if class_name:
+            args.extend(["--class", class_name])
+        if params:
+            args.extend(["--params", json.dumps(params)])
         return await _run_cli_json_str(*args)
 
     @staticmethod

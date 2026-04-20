@@ -209,3 +209,138 @@ class TestStrategiesRoundtrip:
                 assert result is not None, f"{filename} backtest returned None"
                 assert len(result.equity_curve) > 0, f"{filename} produced empty equity curve"
                 assert not pd.isna(result.total_return), f"{filename} has NaN return"
+
+
+# ---------------------------------------------------------------------------
+# `strategies deploy` CLI args — regression against the llmvm session that
+# hand-edited YAML because the helper didn't support --params / --module.
+# ---------------------------------------------------------------------------
+
+import argparse
+import json
+import yaml
+from pathlib import Path
+
+from trader.mmr_cli import _handle_strategy_deploy
+
+
+def _deploy_ns(**kw) -> argparse.Namespace:
+    defaults = dict(
+        name='test_strat',
+        conids=[12345],
+        universe=None,
+        bar_size='1 min',
+        days=90,
+        paper=True,
+        module=None,
+        class_name=None,
+        params=None,
+    )
+    defaults.update(kw)
+    return argparse.Namespace(**defaults)
+
+
+def _read_deployed(home: Path) -> dict:
+    p = home / '.config' / 'mmr' / 'strategy_runtime.yaml'
+    if not p.exists():
+        return {'strategies': []}
+    return yaml.safe_load(p.read_text()) or {'strategies': []}
+
+
+@pytest.fixture
+def tmp_home(tmp_path, monkeypatch):
+    """Redirect ``Path('~/...').expanduser()`` to tmp_path. The handler
+    uses ``expanduser()`` which reads the HOME env var — monkeypatching
+    ``Path.home`` is not enough. Also redirect the user-config dir
+    explicitly so nothing leaks to the developer's real
+    ``~/.config/mmr/strategy_runtime.yaml``."""
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    return tmp_path
+
+
+class TestDeployParamsFlag:
+    """The observed failure mode: helper had no --params, so the LLM
+    hand-wrote YAML and missed the config path. Lock in the fix."""
+
+    def test_params_json_written_to_yaml_params_field(self, tmp_home):
+        args = _deploy_ns(
+            name='orb_gld',
+            params=json.dumps({'RANGE_MINUTES': 45, 'VOLUME_MULT': 1.3}),
+        )
+        _handle_strategy_deploy(args)
+        cfg = _read_deployed(tmp_home)
+        e = [s for s in cfg['strategies'] if s['name'] == 'orb_gld']
+        assert len(e) == 1
+        # strategy_runtime.py:387 reads params=strategy_config.get('params', {})
+        assert e[0]['params'] == {'RANGE_MINUTES': 45, 'VOLUME_MULT': 1.3}
+
+    def test_no_params_omits_field(self, tmp_home):
+        _handle_strategy_deploy(_deploy_ns(name='plain', params=None))
+        cfg = _read_deployed(tmp_home)
+        e = [s for s in cfg['strategies'] if s['name'] == 'plain'][0]
+        assert 'params' not in e
+
+    def test_malformed_params_refuses(self, tmp_home):
+        """Bad JSON must error, not write junk into YAML."""
+        _handle_strategy_deploy(_deploy_ns(name='bad', params='{not valid}'))
+        cfg = _read_deployed(tmp_home)
+        assert [s for s in cfg['strategies'] if s['name'] == 'bad'] == []
+
+    def test_params_non_object_refuses(self, tmp_home):
+        """--params must be a JSON object, not a list/scalar."""
+        _handle_strategy_deploy(_deploy_ns(name='list', params='[1,2,3]'))
+        cfg = _read_deployed(tmp_home)
+        assert [s for s in cfg['strategies'] if s['name'] == 'list'] == []
+
+
+class TestDeployModuleOverride:
+    """--module + --class let one strategy class back multiple deployment
+    names (orb_gld / orb_googl / orb_xlk all → opening_range_breakout.py)."""
+
+    def test_module_override_persists(self, tmp_home):
+        _handle_strategy_deploy(_deploy_ns(
+            name='orb_gld',
+            module='strategies/opening_range_breakout.py',
+            class_name='OpeningRangeBreakout',
+        ))
+        cfg = _read_deployed(tmp_home)
+        e = [s for s in cfg['strategies'] if s['name'] == 'orb_gld'][0]
+        assert e['module'] == 'strategies/opening_range_breakout.py'
+        assert e['class_name'] == 'OpeningRangeBreakout'
+
+    def test_multiple_deployments_same_module(self, tmp_home):
+        """Three names, one strategy class. This is the ORB sweep-winner
+        pattern the LLM was trying (and failing) to set up."""
+        for sym, cid in (('gld', 51529211), ('googl', 208813719), ('xlk', 4215230)):
+            _handle_strategy_deploy(_deploy_ns(
+                name=f'orb_{sym}',
+                conids=[cid],
+                module='strategies/opening_range_breakout.py',
+                class_name='OpeningRangeBreakout',
+                params=json.dumps({'RANGE_MINUTES': 45, 'VOLUME_MULT': 1.3}),
+            ))
+        cfg = _read_deployed(tmp_home)
+        names = [s['name'] for s in cfg['strategies']]
+        assert 'orb_gld' in names and 'orb_googl' in names and 'orb_xlk' in names
+        modules = {s['name']: s['module'] for s in cfg['strategies']}
+        assert all(
+            modules[n] == 'strategies/opening_range_breakout.py'
+            for n in ('orb_gld', 'orb_googl', 'orb_xlk')
+        )
+
+
+class TestDeployPath:
+    """Writes must land in the path the runtime actually reads —
+    ``~/.config/mmr/strategy_runtime.yaml`` — not the project's
+    bundled ``configs/`` template."""
+
+    def test_default_path_is_user_config(self, tmp_home):
+        _handle_strategy_deploy(_deploy_ns(name='pathcheck'))
+        assert (tmp_home / '.config' / 'mmr' / 'strategy_runtime.yaml').exists()
+
+    def test_duplicate_name_refused(self, tmp_home):
+        _handle_strategy_deploy(_deploy_ns(name='x'))
+        _handle_strategy_deploy(_deploy_ns(name='x'))
+        cfg = _read_deployed(tmp_home)
+        assert len([s for s in cfg['strategies'] if s['name'] == 'x']) == 1

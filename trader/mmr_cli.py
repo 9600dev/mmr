@@ -476,12 +476,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     # strategies deploy
     strat_deploy_p = strat_sub.add_parser('deploy', help='Deploy strategy to config')
-    strat_deploy_p.add_argument('name', help='Strategy name')
+    strat_deploy_p.add_argument('name', help='Deployed strategy name (unique per config)')
     strat_deploy_p.add_argument('--conids', type=int, nargs='+', default=None, help='Contract IDs')
     strat_deploy_p.add_argument('--universe', default=None, help='Universe name')
     strat_deploy_p.add_argument('--bar-size', default='1 min', help='Bar size (default: "1 min")')
     strat_deploy_p.add_argument('--days', type=int, default=90, help='Historical days prior (default: 90)')
     strat_deploy_p.add_argument('--paper', action='store_true', default=True, help='Paper trading mode')
+    strat_deploy_p.add_argument('--module', default=None,
+                                  help='Strategy module path (default: strategies/<name>.py). Set this '
+                                       'when deploying the same strategy class under multiple names — '
+                                       'e.g. orb_gld and orb_googl both pointing at '
+                                       'strategies/opening_range_breakout.py.')
+    strat_deploy_p.add_argument('--class', dest='class_name', default=None,
+                                  help='Strategy class name (default: CamelCase of --name). Required '
+                                       'whenever --module is given and the class name differs from '
+                                       'the deployment name.')
+    strat_deploy_p.add_argument('--params', default=None, metavar='JSON',
+                                  help='JSON object of param overrides applied at strategy load time, '
+                                       'e.g. \'{"RANGE_MINUTES":45,"VOLUME_MULT":1.3}\'. Matches what '
+                                       '`bt-sweep --grid` / `backtest --params` use. The strategy '
+                                       'runtime reads the same params via StrategyContext.params and '
+                                       'upper-case keys shadow class attrs.')
 
     # strategies undeploy
     strat_undeploy_p = strat_sub.add_parser('undeploy', help='Remove strategy from config')
@@ -3299,7 +3314,13 @@ class {class_name}(Strategy):
 
 
 def _handle_strategy_deploy(args: argparse.Namespace):
-    """Deploy a strategy to strategy_runtime.yaml."""
+    """Deploy a strategy to strategy_runtime.yaml.
+
+    Writes to ``~/.config/mmr/strategy_runtime.yaml`` (the runtime's actual
+    config path inside the container). Writing to ``configs/strategy_runtime.yaml``
+    in the project tree is a no-op — that's only the bundled default
+    template, copied to the real config dir once at first run.
+    """
     import yaml
 
     name = args.name
@@ -3320,33 +3341,62 @@ def _handle_strategy_deploy(args: argparse.Namespace):
             print_status(f'Strategy "{name}" already deployed. Undeploy first.', success=False)
             return
 
-    # Infer module path and class name from name
-    module_path = f'strategies/{name}.py'
+    # Module path: override via --module, or infer from name.
+    # Override is essential for sweep winners — e.g. deploying the same
+    # OpeningRangeBreakout under 3 names (orb_gld / orb_googl / orb_xlk),
+    # all pointing at the single source file.
+    module_path = getattr(args, 'module', None) or f'strategies/{name}.py'
 
-    # Try to find the actual Strategy subclass in the file
-    class_name = None
-    strategy_file = Path(module_path)
-    if strategy_file.exists():
-        import ast
-        try:
-            tree = ast.parse(strategy_file.read_text())
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ClassDef):
-                    for base in node.bases:
-                        base_name = base.id if isinstance(base, ast.Name) else (
-                            base.attr if isinstance(base, ast.Attribute) else ''
-                        )
-                        if base_name == 'Strategy':
-                            class_name = node.name
+    # Class name: use --class if given, else parse the module for the
+    # first Strategy subclass, else CamelCase the name as last resort.
+    class_name = getattr(args, 'class_name', None)
+    if not class_name:
+        # Try common locations for the module file (project root and its
+        # parent, so invocations from subdirs resolve).
+        strategy_file = Path(module_path)
+        if not strategy_file.is_absolute() and not strategy_file.exists():
+            # Walk up from this file looking for the project root
+            cur = Path(__file__).resolve().parent
+            while cur != cur.parent:
+                candidate = cur / module_path
+                if candidate.exists():
+                    strategy_file = candidate
+                    break
+                cur = cur.parent
+        if strategy_file.exists():
+            import ast
+            try:
+                tree = ast.parse(strategy_file.read_text())
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.ClassDef):
+                        for base in node.bases:
+                            base_name = base.id if isinstance(base, ast.Name) else (
+                                base.attr if isinstance(base, ast.Attribute) else ''
+                            )
+                            if base_name == 'Strategy':
+                                class_name = node.name
+                                break
+                        if class_name:
                             break
-                    if class_name:
-                        break
-        except Exception:
-            pass
-
-    # Fallback: infer from name
+            except Exception:
+                pass
     if not class_name:
         class_name = ''.join(word.capitalize() for word in name.split('_'))
+
+    # Params override: parse JSON, land in the YAML ``params:`` field.
+    # strategy_runtime.py:387 already reads ``params=strategy_config.get('params', {})``
+    # — this field's been supported since day one, just not exposed by the CLI.
+    params_raw = getattr(args, 'params', None)
+    params_dict = None
+    if params_raw:
+        try:
+            params_dict = json.loads(params_raw)
+        except json.JSONDecodeError as ex:
+            print_status(f'--params is not valid JSON: {ex}', success=False)
+            return
+        if not isinstance(params_dict, dict):
+            print_status('--params must be a JSON object', success=False)
+            return
 
     entry = {
         'name': name,
@@ -3361,14 +3411,19 @@ def _handle_strategy_deploy(args: argparse.Namespace):
         entry['conids'] = args.conids
     if args.universe:
         entry['universe'] = args.universe
+    if params_dict:
+        entry['params'] = params_dict
 
     strategies.append(entry)
     config['strategies'] = strategies
 
     with open(config_path, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False)
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
-    print_status(f'Deployed strategy: {name}')
+    param_note = f' with params={params_dict}' if params_dict else ''
+    print_status(
+        f'Deployed strategy: {name} -> {module_path}::{class_name}{param_note}'
+    )
 
 
 def _handle_strategy_undeploy(args: argparse.Namespace):
