@@ -442,7 +442,12 @@ class RPCServer(Generic[T]):
                 frames = await self.socket.recv_multipart()
                 # frames: [client_id, empty, request_data]
                 client_id = frames[0]
-                request = unpack(frames[-1])
+                # msgpack.unpackb + the dill fallback on ExtType=OBJECT can
+                # take tens of ms for payloads carrying DataFrames or
+                # pickled args. Offload to a thread so the serve loop
+                # immediately goes back to recv_multipart — other inbound
+                # requests aren't blocked behind one slow deserialization.
+                request = await asyncio.to_thread(unpack, frames[-1])
                 # request = {'method': 'dotted.name', 'args': [...], 'kwargs': {...}, 'req_id': uuid}
                 asyncio.create_task(self._handle_request(client_id, request))
             except zmq.ZMQError as e:

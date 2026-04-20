@@ -108,6 +108,14 @@ class Trader():
         self.book: BookSubject = BookSubject()
         # portfolio (current and past positions)
         self.portfolio: Portfolio = Portfolio()
+        # In-memory set of conIds already present in the 'portfolio' universe.
+        # Populated lazily on the first update_portfolio_universe() call
+        # per session. Lets a burst of N positionEvent emissions (49 on
+        # initial connect) short-circuit without 49× DuckDB reads when
+        # nothing's actually changing. Huge win: the old path did one
+        # `universe_accessor.get + dill.dumps + DuckDB write` per event
+        # on the main loop.
+        self._known_portfolio_conids: set = set()
         # pnl for current portfolio
         self.pnl: DataClassCache = DataClassCache[PnLSingle](lambda pnl: str((pnl.account, pnl.conId)))
         self.pnl_subscriptions: Dict[Tuple[str, int], bool] = {}
@@ -660,27 +668,64 @@ class Trader():
         return error_observable
 
     async def update_portfolio_universe(self, portfolio_item: PortfolioItem):
-        """
-        Grabs the current portfolio from IB Gateway and adds a new version to the 'portfolio' table.
-        """
-        universe = self.universe_accessor.get('portfolio')
-        if not ListHelper.isin(
-            universe.security_definitions,
-            lambda definition: definition.conId == portfolio_item.contract.conId
-        ):
-            contract = portfolio_item.contract
-            try:
-                contract_details = await self.client.get_contract_details_async(contract)
-            except Exception as ex:
-                logging.warning(f'Failed to get contract details for {contract}: {ex}')
-                return
-            if contract_details and len(contract_details) >= 1:
-                universe.security_definitions.append(
-                    SecurityDefinition.from_contract_details(contract_details[0])
-                )
+        """Add new positions to the 'portfolio' universe so history downloads
+        + strategy subscriptions auto-cover them.
 
-            logging.debug('updating portfolio universe with {}'.format(portfolio_item))
-            self.universe_accessor.update(universe)
+        Called once per ``updatePortfolioEvent`` — which on a 49-position
+        account produces a 49× burst at connect. We coalesce this via
+        ``_known_portfolio_conids`` so repeated events for already-known
+        conIds skip all DB work immediately. All ``universe_accessor``
+        reads/writes run in a worker thread via ``asyncio.to_thread`` so
+        the main event loop stays free for ticker dispatch / ZMQ traffic.
+        """
+        conid = portfolio_item.contract.conId
+
+        # Fast path: conId already known from this session. Main-loop-
+        # blocking reasons this is worth inlining:
+        #   - The old path did 49 sync DuckDB reads + dill.loads + writes
+        #     on the loop when 48 of them turned out to be no-ops.
+        #   - `updatePortfolioEvent` fires on every position *update* too
+        #     (price-mark refreshes), so this cache prevents a long-running
+        #     session from paying the DB cost on every mark.
+        if conid in self._known_portfolio_conids:
+            return
+
+        # First time we've seen this conId — reconcile with the persisted
+        # universe. Thread the read so dill.loads on a multi-position
+        # universe doesn't stall the loop.
+        universe = await asyncio.to_thread(
+            self.universe_accessor.get, 'portfolio',
+        )
+
+        # Seed / re-seed the in-memory set from the freshly read universe.
+        # Any concurrent update_portfolio_universe calls that raced past
+        # the fast-path check will all see the same set after this point.
+        self._known_portfolio_conids = {
+            d.conId for d in universe.security_definitions
+        }
+        if conid in self._known_portfolio_conids:
+            # Another task added it while we were reading, or it's been
+            # persisted across sessions. Either way, nothing to do.
+            return
+
+        # Genuinely new — go fetch contract details and persist.
+        contract = portfolio_item.contract
+        try:
+            contract_details = await self.client.get_contract_details_async(contract)
+        except Exception as ex:
+            logging.warning(f'Failed to get contract details for {contract}: {ex}')
+            return
+        if not contract_details:
+            return
+        universe.security_definitions.append(
+            SecurityDefinition.from_contract_details(contract_details[0])
+        )
+        self._known_portfolio_conids.add(conid)
+        logging.debug('updating portfolio universe with %s', portfolio_item)
+
+        # Thread the write — dill.dumps on the universe + DuckDB INSERT
+        # can be tens of ms; no reason to run on the loop.
+        await asyncio.to_thread(self.universe_accessor.update, universe)
 
     def _update_portfolio_universe_sync(self, portfolio_item: PortfolioItem):
         """Sync fallback when no event loop is running."""
