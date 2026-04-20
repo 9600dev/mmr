@@ -834,7 +834,8 @@ emit(ideas)
 ## References
 
 For detailed documentation on specific topics, see:
-- **`references/STRATEGIES.md`**: Strategy ABC, Signal fields, on_prices() contract, common patterns (MA crossover, RSI, Bollinger, EMA)
+- **`references/STRATEGIES.md`**: Strategy ABC, Signal fields (incl. `max_hold_bars` / `close_by_time` for day-trading EOD exits), on_prices() contract, tunable-param declaration, vectorization rules for `precompute`, common patterns (MA crossover, RSI, Bollinger, EMA)
+- **`references/SWEEPS.md`**: sweep-manifest YAML schema, cron-able overnight pattern, detached launch, CPU/wall-time math, post-sweep review flow (`sweep show`, `backtests confidence`)
 - **`references/DATA.md`**: DuckDB schema, BarSize values, data source details, TickStorage patterns, common conIds
 
 ## Python SDK Reference

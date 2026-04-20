@@ -89,6 +89,36 @@ Type coercion is automatic based on the class attribute's current type (ints bec
 
 Legacy `self.params.get('key', default)` still works — lower-case dict keys land in `StrategyContext.params` and can be swept with the same flags. But prefer class attributes for new strategies: `strategies inspect` surfaces them with their declared defaults, the type is inferred from the value, and parallel sweeps don't collide (each backtest subprocess has its own instance, `setattr`'d with its own overrides).
 
+## ⚠️ `precompute` MUST be vectorized
+
+**A Python `for` loop over 150,000+ bars will time out your backtest.** The whole point of `precompute` is that it runs ONCE over the full series and returns arrays/Series that `on_bar` indexes in O(1). If you iterate bar-by-bar inside `precompute`, you turn an O(N) strategy into O(N²) and hit the 180-second subprocess timeout on a 1-year × 1-min run.
+
+Stay inside pandas/numpy/vectorbt primitives:
+
+```python
+# ✓ GOOD — vectorized, runs in ms on 100K+ bars
+def precompute(self, prices):
+    close = prices['close']
+    vwap = (close * prices['volume']).groupby(
+        prices.index.normalize()
+    ).cumsum() / prices['volume'].groupby(
+        prices.index.normalize()
+    ).cumsum()
+    return {'vwap': vwap.to_numpy()}
+
+# ✗ BAD — Python loop, quadratic in bar count, times out
+def precompute(self, prices):
+    vwap = []
+    for i in range(len(prices)):
+        day = prices.index[i].normalize()
+        mask = prices.index.normalize() == day
+        day_bars = prices[mask & (prices.index <= prices.index[i])]
+        vwap.append((day_bars['close'] * day_bars['volume']).sum() / day_bars['volume'].sum())
+    return {'vwap': np.array(vwap)}
+```
+
+If you need a per-day reset, use `groupby(index.normalize()).cumsum()`. If you need a rolling something, use `.rolling()` or `.ewm()`. If you need a custom function, vectorize it with numpy or vectorbt's `@njit` primitives — do NOT reach for a Python `for i in range(len(prices))`.
+
 ## The lookahead contract of `precompute`
 
 `precompute` sees the FULL OHLCV history — this is convenient but dangerous. Your returned state must be aligned 1:1 with `prices` such that position `i` depends only on bars `[0..i]`. Pandas `.rolling()`, `.ewm()`, and all standard vectorbt indicators satisfy this by construction. **What you must NOT do**:
@@ -229,6 +259,40 @@ def on_prices(self, prices: pd.DataFrame) -> Optional[Signal]:
 ```
 
 ## Common Patterns
+
+### ⏰ Day-Trading: EOD-flat + stale-trade timeout
+
+**Don't hand-roll "if bar.time >= time(15, 45): sell" in your strategy.**
+The backtester has native support — attach `close_by_time` / `max_hold_bars`
+to the ENTRY signal, and the backtester synthesizes the exit SELL
+automatically when either condition triggers (whichever first).
+
+```python
+from datetime import time
+
+class OpeningRangeBreakout(Strategy):
+    RANGE_MINUTES = 30
+    VOLUME_MULT = 1.3
+
+    def on_bar(self, prices, state, index):
+        if not self._breakout_confirmed(prices, state, index):
+            return None
+        return Signal(
+            source_name=self.name, action=Action.BUY,
+            probability=0.7, risk=0.3,
+            close_by_time=time(15, 45),   # flatten before market close (ET)
+            max_hold_bars=60,              # or bail after 60 minutes if stagnant
+        )
+```
+
+**Why you want this, not a hand-rolled check:**
+- Correct, reusable across every day-trading strategy
+- One place for the backtester to record the entry bar_index so "60 bars from now" means what you think
+- `source_name` on the synthesized exit is `__time_exit__[reason]` — audit logs can tell strategy-driven vs time-driven exits apart
+- Live runtime ignores these fields (IB handles order scheduling natively); backtester uses them to fire synthetic SELLs
+- Tests cover the semantics in `tests/test_backtest_time_exits.py`
+
+Don't pair these with a manual check in `on_bar` — you'd fire two SELLs on the same position.
 
 ### Moving Average Crossover
 

@@ -306,6 +306,53 @@ class TestDigestWriting:
         assert 'boom' in text
         assert 'timeout' in text
 
+    def test_failure_digest_preserves_full_traceback(self, tmp_path, monkeypatch):
+        """Regression: earlier versions truncated the error message at
+        200 chars in the markdown renderer, which silently ate Python
+        tracebacks longer than that. The digest must now keep enough
+        of the stderr tail to show ``Traceback ... NameError: ...`` —
+        otherwise a sweep with a bug in one strategy gives you a
+        line-number-less hint and no way to diagnose without re-running."""
+        monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+
+        spec = {
+            'name': 'traceback_preserved', 'class': 'X', 'strategy': '/x.py',
+            'bar_size': '1 min', 'days': 30, 'param_grid': {},
+        }
+        # A realistic Python traceback — ~400 chars — would have been
+        # truncated under the old 200-char digest limit.
+        traceback = (
+            'Traceback (most recent call last):\n'
+            '  File "strategy.py", line 42, in precompute\n'
+            '    vwap = compute_session_vwap(prices)\n'
+            '  File "strategy.py", line 18, in compute_session_vwap\n'
+            '    return pd.groupby(closes * volumes).cumsum() / volumes.cumsum()\n'
+            'NameError: name \'closes\' is not defined. Did you mean: \'close\'?\n'
+        )
+        results = [{
+            'status': 'error',
+            'job': {'symbol': 'SPY', 'params': {'EMA_PERIOD': 20}},
+            'error': traceback,
+            'returncode': 1,
+        }]
+        path = _write_sweep_digest(
+            sweep_id=7, spec=spec, results=results,
+            elapsed_s=1.0, status='failed',
+        )
+        text = Path(path).read_text()
+        # Key assertions: the last-line "NameError" (most diagnostic info
+        # in a Python traceback) and the offending file/line must appear.
+        assert "NameError: name 'closes' is not defined" in text, (
+            f'NameError line dropped from digest:\n{text}'
+        )
+        assert 'line 42, in precompute' in text
+        # Digest should include a <details> block so the scanner view
+        # stays readable while the detail is one-click away.
+        assert '<details>' in text
+        # Params and exit-code should both land in the header.
+        assert 'EMA_PERIOD' in text
+        assert 'exit 1' in text
+
     def test_digest_write_failure_returns_empty_string(self, monkeypatch, tmp_path):
         """A write error (e.g. read-only dir) should not blow up a
         sweep — ``_write_sweep_digest`` swallows exceptions and returns

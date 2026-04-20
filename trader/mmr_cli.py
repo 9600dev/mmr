@@ -3227,7 +3227,8 @@ def _handle_strategy_create(args: argparse.Namespace):
         print_status(f'File already exists: {file_path}', success=False)
         return
 
-    template = f'''from trader.trading.strategy import Signal, Strategy
+    template = f'''from datetime import time
+from trader.trading.strategy import Signal, Strategy
 from trader.objects import Action
 from typing import Dict, Optional, Union
 
@@ -3242,30 +3243,40 @@ class {class_name}(Strategy):
 
     DataFrame columns: date (index), open, high, low, close, volume, average, barCount
 
-    Configure via params in strategy_runtime.yaml:
-        params:
-          fast_period: 10
-          slow_period: 50
-    Access in code: self.params.get('fast_period', 10)
+    Configure tunables as class attributes — `mmr strategies inspect` will
+    discover them and `mmr backtest --param KEY=VALUE` / `bt-sweep --grid`
+    can override them without touching this file.
     """
+
+    # Tunable params (class attributes so `strategies inspect` finds them,
+    # and `--param KEY=VALUE` / `--grid` can sweep them).
+    FAST_PERIOD = 10
+    SLOW_PERIOD = 50
 
     def __init__(self):
         super().__init__()
 
     def on_prices(self, prices: pd.DataFrame) -> Optional[Signal]:
-        fast_period = self.params.get('fast_period', 10)
-        slow_period = self.params.get('slow_period', 50)
-
-        if len(prices) < slow_period:
+        if len(prices) < self.SLOW_PERIOD:
             return None
 
         # TODO: implement your strategy logic here
         # Example: simple moving average crossover
         # close = prices["close"]
-        # fast_ma = close.rolling(fast_period).mean()
-        # slow_ma = close.rolling(slow_period).mean()
+        # fast_ma = close.rolling(self.FAST_PERIOD).mean()
+        # slow_ma = close.rolling(self.SLOW_PERIOD).mean()
         # if fast_ma.iloc[-1] > slow_ma.iloc[-1] and fast_ma.iloc[-2] <= slow_ma.iloc[-2]:
-        #     return Signal(source_name=self.name, action=Action.BUY, probability=0.7, risk=0.3)
+        #
+        #     # For day-trading strategies, attach time-based exit rules
+        #     # to the entry signal — the backtester synthesizes the SELL
+        #     # once max_hold_bars elapses OR close_by_time is reached
+        #     # (whichever first). Don't hand-roll EOD flat checks.
+        #     return Signal(
+        #         source_name=self.name, action=Action.BUY,
+        #         probability=0.7, risk=0.3,
+        #         # close_by_time=time(15, 45),  # flatten before 15:45 ET
+        #         # max_hold_bars=60,            # or bail after 60 bars
+        #     )
 
         return None
 '''
@@ -5130,9 +5141,15 @@ async def _execute_jobs_parallel(
                 await proc.wait()
                 return {'status': 'timeout', 'job': job}
             if proc.returncode != 0:
+                # Keep enough stderr to surface a Python traceback — the
+                # digest previously truncated at 500 chars + again at 200
+                # in the markdown renderer, leaving the actual exception
+                # lost. 4000 chars covers even nested tracebacks.
+                err_text = stderr.decode() or stdout.decode()
                 return {
                     'status': 'error', 'job': job,
-                    'error': (stderr.decode() or stdout.decode())[:500],
+                    'error': err_text[-4000:],  # tail — the useful part of a traceback
+                    'returncode': proc.returncode,
                 }
             try:
                 parsed = json.loads(stdout.decode().strip())
@@ -5141,7 +5158,7 @@ async def _execute_jobs_parallel(
             except json.JSONDecodeError:
                 return {
                     'status': 'error', 'job': job,
-                    'error': f'non-json stdout: {stdout.decode()[:200]}',
+                    'error': f'non-json stdout (tail):\n{stdout.decode()[-2000:]}',
                 }
 
     return await asyncio.gather(*(_one(j) for j in jobs))
@@ -5237,14 +5254,33 @@ def _write_sweep_digest(
         if fails:
             lines.append(f'## Failures ({len(fails)})')
             lines.append('')
+            # Render full tracebacks. A one-line summary per failure is
+            # useless for debugging — you need the last stack frames to
+            # know what actually went wrong. Keep each traceback inside
+            # a collapsible ``<details>`` block so the digest stays
+            # scannable but the detail is one click away.
             for r in fails[:20]:
                 err = r.get('error') or r['status']
+                rc = r.get('returncode')
                 sym = r['job'].get('symbol', '?')
-                lines.append(
-                    f'- {sym} params={r["job"].get("params", {})} — '
-                    f'`{r["status"]}`: {err[:200]}'
+                params = r['job'].get('params', {})
+                header = (
+                    f'### {sym}  `{r["status"]}`'
+                    + (f' (exit {rc})' if rc is not None else '')
                 )
-            lines.append('')
+                lines.append(header)
+                if params:
+                    lines.append(f'params: `{params}`')
+                lines.append('')
+                lines.append('<details><summary>traceback / stderr</summary>')
+                lines.append('')
+                lines.append('```')
+                # Keep last ~3000 chars of the captured error so a nested
+                # Python traceback fits.
+                lines.append(err[-3000:] if err else '(no output captured)')
+                lines.append('```')
+                lines.append('</details>')
+                lines.append('')
 
         lines.append('---')
         lines.append(f'Full run details: `mmr backtests list --sweep {sweep_id}`')
@@ -5323,6 +5359,7 @@ def _handle_sweep_list(args: argparse.Namespace):
 
 
 def _handle_sweep_show(args: argparse.Namespace):
+    import datetime as dt
     from trader.container import Container
     from trader.data.backtest_store import BacktestStore
     cfg = Container.instance().config()
@@ -5338,6 +5375,22 @@ def _handle_sweep_show(args: argparse.Namespace):
     )
     records.sort(key=_bt_composite_score, reverse=True)
 
+    # Live progress: backtest_runs are inserted as each subprocess
+    # finishes, so counting them mid-sweep gives a real-time completion
+    # figure without depending on the ``sweeps`` row being updated at
+    # end-of-run. Only meaningful while status == 'running'.
+    completed_now = len(records)
+    planned = swp.n_runs_planned or 0
+    pct_complete = (completed_now / planned) if planned > 0 else 0.0
+    elapsed_s = None
+    if swp.started_at:
+        end_ref = swp.finished_at or dt.datetime.now()
+        elapsed_s = (end_ref - swp.started_at).total_seconds()
+    eta_s = None
+    if (swp.status == 'running' and elapsed_s and pct_complete > 0):
+        # Naive linear projection — fine for a first-order estimate.
+        eta_s = int(elapsed_s / pct_complete - elapsed_s)
+
     if _json_mode:
         print(json.dumps({
             'data': {
@@ -5346,6 +5399,10 @@ def _handle_sweep_show(args: argparse.Namespace):
                     'n_runs_planned': swp.n_runs_planned,
                     'n_runs_successful': swp.n_runs_successful,
                     'n_runs_failed': swp.n_runs_failed,
+                    'n_runs_completed_live': completed_now,
+                    'pct_complete': round(pct_complete, 4),
+                    'elapsed_seconds': int(elapsed_s) if elapsed_s else None,
+                    'eta_seconds': eta_s,
                     'digest_path': swp.digest_path,
                     'started_at': str(swp.started_at)[:19] if swp.started_at else None,
                     'finished_at': str(swp.finished_at)[:19] if swp.finished_at else None,
@@ -5378,10 +5435,28 @@ def _handle_sweep_show(args: argparse.Namespace):
     from rich.text import Text as _Text
     from rich import box as _box
 
-    console.print(
-        f'[bold]Sweep #{swp.id}: {swp.name}[/]  '
-        f'[dim]({swp.status}, {swp.n_runs_successful}/{swp.n_runs_planned} ok)[/]'
-    )
+    header_bits = [f'[bold]Sweep #{swp.id}: {swp.name}[/]']
+    status_style = {
+        'running': 'cyan', 'completed': 'green',
+        'failed': 'red', 'cancelled': 'yellow',
+    }.get(swp.status, '')
+    if swp.status == 'running' and planned > 0:
+        # Show live progress — n_runs_successful in the sweeps row is only
+        # updated at finalize_sweep, but child rows land as each job finishes,
+        # so len(records) is the truth while the sweep is still running.
+        eta_str = f', ETA {eta_s // 60}m' if eta_s else ''
+        header_bits.append(
+            f'[{status_style}]running  {completed_now}/{planned} '
+            f'({pct_complete:.0%}{eta_str})[/]'
+        )
+    else:
+        header_bits.append(
+            f'[{status_style}]({swp.status}, '
+            f'{swp.n_runs_successful}/{swp.n_runs_planned} ok)[/]'
+        )
+    console.print('  '.join(header_bits))
+    if elapsed_s:
+        console.print(f'[dim]elapsed: {elapsed_s/60:.1f}m[/]')
     if swp.digest_path:
         console.print(f'[dim]digest: {swp.digest_path}[/]')
     console.print('')
