@@ -13,6 +13,14 @@ strategies_directory: strategies
 # This selects which account and port are used.
 trading_mode: paper
 
+# Hard gate: when true, trader_service refuses direct buy/sell RPCs
+# (mmr buy / mmr sell / MMRHelpers.sell/buy / cli("buy ...")). Every
+# actionable new trade must go through propose → approve. Liquidation
+# paths (close-all, resize-positions) bypass via skip_risk_gate=True.
+# Strongly recommended for live trading with any autonomous agent in
+# the loop. Off by default so paper / manual workflows aren't disturbed.
+require_proposal_approval: false
+
 # Interactive Brokers connection
 # Set both accounts — trading_mode picks the active one.
 # IB_ACCOUNT env var overrides the auto-selected account.

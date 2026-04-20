@@ -66,7 +66,8 @@ class Trader():
                  zmq_messagebus_server_port: int,
                  history_duckdb_path: str = '',
                  paper_trading: bool = False,
-                 simulation: bool = False):
+                 simulation: bool = False,
+                 require_proposal_approval: bool = False):
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
         self.trading_runtime_ib_client_id = trading_runtime_ib_client_id
@@ -76,6 +77,13 @@ class Trader():
         self.universe_library = universe_library
         self.simulation: bool = simulation
         self.paper_trading = paper_trading
+        # When True, `place_order_simple` (the direct buy/sell RPC path) is
+        # rejected unless the caller explicitly sets `skip_risk_gate=True`
+        # (close-all / liquidation). All actionable new trades must come
+        # in through `place_expressive_order`, which the approve() CLI /
+        # helper use after a proposal is reviewed. Defensive gate against
+        # LLM loops drifting off-plan and firing direct orders.
+        self.require_proposal_approval: bool = require_proposal_approval
         self.zmq_pubsub_server_address = zmq_pubsub_server_address
         self.zmq_pubsub_server_port = zmq_pubsub_server_port
         self.zmq_rpc_server_address = zmq_rpc_server_address

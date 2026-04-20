@@ -10,6 +10,22 @@ metadata:
 
 **LLMVM**: Use `<helpers>...</helpers>` blocks to call MMRHelpers methods. All methods are `async`. Most return JSON dicts (access data via `result["data"]`). Trading actions (`buy`, `sell`, `cancel`) return strings.
 
+## ⚠️ TRADING POLICY — READ THIS FIRST ⚠️
+
+**NEVER BYPASS `propose → approve` FOR ACTIONABLE TRADES.** Every new position (entry, add, rotation, cover) goes through this pipeline:
+
+1. `MMRHelpers.propose(symbol, action, ...)` — creates a reviewable plan
+2. Inspect `sizing_result`, `portfolio_risk`, related proposals
+3. `MMRHelpers.approve(proposal_id)` — executes after review
+
+**Do NOT use `MMRHelpers.buy()` / `MMRHelpers.sell()` / `MMRHelpers.cli("buy ...")` to open or modify positions based on your own judgment.** Those exist for two narrow cases only:
+- Manual human-driven single-trade CLI usage (you're not human)
+- Liquidation paths (`close_all_positions`, `resize_positions`) — these set `skip_risk_gate=True` explicitly
+
+The trader_service can be configured to **refuse direct buy/sell RPCs entirely** (`require_proposal_approval: true` in `trader.yaml`). If you see `"Direct order rejected: require_proposal_approval is true"`, stop — that's the kill switch telling you to route through `propose → approve`.
+
+**If a written plan (trade_notes.md, user message) says "4 fresh longs via propose/approve", do EXACTLY that — do not invent a rotation on existing positions, do not decide to trim/cover/cut based on current portfolio state unless the user explicitly authorised that action in the same instruction.** Drift from written plans is the failure mode this policy exists to prevent.
+
 ## Service Requirements
 
 - **trader_service required**: portfolio, positions, orders, trades, account, resolve, snapshot, depth, buy, sell, cancel, cancel_all, close_all_positions, resize_positions, approve, strategies (list/enable/disable/reload), `universe_add`, `buy_option`, `sell_option`, `risk`, `scan`, `ideas` (with `--location` for international markets), `listen`, `watch`

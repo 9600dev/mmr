@@ -74,6 +74,22 @@ class TraderServiceApi(RPCHandler):
         debug: bool = False,
         skip_risk_gate: bool = False,
     ) -> SuccessFail[Trade]:
+        # Proposal-approval gate: when require_proposal_approval is on in
+        # trader.yaml, reject direct buy/sell unless the caller explicitly
+        # flagged this as a liquidation (skip_risk_gate=True). All actionable
+        # *new* trades have to come in via place_expressive_order, which the
+        # approve() path uses after a proposal has been reviewed. Defensive
+        # against LLM loops / scripts firing direct orders that weren't in
+        # a reviewed plan.
+        if getattr(self.trader, 'require_proposal_approval', False) and not skip_risk_gate:
+            return SuccessFail.fail(
+                error=(
+                    'Direct order rejected: require_proposal_approval is true. '
+                    'New trades must go through propose → approve (see `mmr propose` '
+                    'and `mmr approve`). Set skip_risk_gate=True only for '
+                    'liquidation paths (close-all, resize-positions).'
+                ),
+            )
         # todo: we'll have to make the cli async so we can subscribe to the trade
         # changes as orders get hit etc
         logging.warn('place_order_simple() is not complete, your mileage may vary')
