@@ -94,11 +94,17 @@ subprocess.Popen(
 ## Progress + review
 
 ```bash
-# Live progress while the sweep is running
+# Live progress while the sweep is running — single snapshot
 mmr sweep show <id>
 # → "Sweep #17: orb_cross_sectional   running  42/324 (13%, ETA 78m)"
 #   elapsed: 12.1m
 #   digest: (empty until finalized)
+
+# Continuous refresh — polls every 5s, re-renders until terminal state
+# or Ctrl-C. Shows header, top-N leaderboard, AND most-recent completions
+# so a stalled sweep is visible (no new rows = nothing happening).
+mmr sweep watch <id>
+mmr sweep watch <id> --interval 2 --top 20
 
 mmr sweep list                     # every sweep ever run, newest first
 mmr sweep show <id>                # leaderboard of one sweep by composite score

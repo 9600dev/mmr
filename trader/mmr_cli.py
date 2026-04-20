@@ -1174,6 +1174,19 @@ def build_parser() -> argparse.ArgumentParser:
     swp_show_p.add_argument('sweep_id', type=int)
     swp_show_p.add_argument('--top', type=int, default=10)
 
+    # sweep watch — live-refresh view for a running sweep. Polls the DB
+    # every --interval seconds, re-rendering progress + leaderboard via
+    # Rich Live. Exits cleanly when the sweep reaches a terminal state
+    # or the user hits Ctrl-C.
+    swp_watch_p = swp_sub.add_parser('watch',
+                                        help='Live-refresh view of a running sweep '
+                                             '(poll until terminal state or Ctrl-C)')
+    swp_watch_p.add_argument('sweep_id', type=int)
+    swp_watch_p.add_argument('--interval', type=float, default=5.0,
+                              help='Refresh interval in seconds (default: 5.0)')
+    swp_watch_p.add_argument('--top', type=int, default=10,
+                              help='Leaderboard rows to show (default: 10)')
+
     # bt-sweep — cartesian-product parameter sweep. One process, N backtests.
     sw_p = sub.add_parser('bt-sweep',
                            help='Single-strategy parameter sweep (sequential, in-process). For cron-ready multi-strategy runs use `mmr sweep run`.',
@@ -4669,7 +4682,7 @@ def _print_backtest_metrics_help():
 
 
 def _handle_sweep(args: argparse.Namespace):
-    """Top-level dispatcher for `mmr sweep {run,list,show}`."""
+    """Top-level dispatcher for `mmr sweep {run,list,show,watch}`."""
     action = getattr(args, 'sweep_action', None)
     if action == 'run':
         _handle_sweep_run(args)
@@ -4677,9 +4690,11 @@ def _handle_sweep(args: argparse.Namespace):
         _handle_sweep_list(args)
     elif action == 'show':
         _handle_sweep_show(args)
+    elif action == 'watch':
+        _handle_sweep_watch(args)
     else:
         print_status(
-            'Usage: sweep run <manifest.yaml> | sweep list | sweep show <id>',
+            'Usage: sweep run <manifest.yaml> | sweep list | sweep show <id> | sweep watch <id>',
             success=False,
         )
 
@@ -5489,6 +5504,189 @@ def _handle_sweep_show(args: argparse.Namespace):
             str(r.total_trades),
         )
     console.print(tbl)
+
+
+def _handle_sweep_watch(args: argparse.Namespace):
+    """Live-refresh view of a running sweep. Polls the DB every
+    ``--interval`` seconds, re-renders progress + leaderboard via Rich
+    Live. Exits when status reaches a terminal state (completed / failed
+    / cancelled) or the user hits Ctrl-C.
+
+    Not useful in --json mode (which reads the whole payload once and
+    exits). If called under --json, falls through to a single ``sweep show``
+    payload so LLMs don't accidentally hang a session."""
+    import datetime as dt
+    import time as _time
+    from trader.container import Container
+    from trader.data.backtest_store import BacktestStore
+    from rich.live import Live
+    from rich.table import Table
+    from rich.console import Group
+    from rich.text import Text as _Text
+    from rich import box as _box
+
+    # JSON mode: one-shot dump, no live loop — exporting to a file /
+    # capturing with an LLM helper shouldn't sit spinning.
+    if _json_mode:
+        _handle_sweep_show(args)
+        return
+
+    cfg = Container.instance().config()
+    bstore = BacktestStore(cfg.get('duckdb_path', ''))
+    initial = bstore.get_sweep(args.sweep_id)
+    if not initial:
+        print_status(f'sweep #{args.sweep_id} not found', success=False)
+        return
+
+    interval = max(1.0, float(args.interval))
+    top = max(1, int(args.top))
+
+    def _build_renderable() -> Group:
+        swp = bstore.get_sweep(args.sweep_id)
+        if swp is None:
+            return Group(_Text(f'sweep #{args.sweep_id} disappeared', style='red'))
+
+        records = bstore.list(
+            sweep_id=args.sweep_id, limit=10_000,
+            sort_by='created_at', descending=True, include_archived=True,
+        )
+        records.sort(key=_bt_composite_score, reverse=True)
+
+        completed_now = len(records)
+        planned = swp.n_runs_planned or 0
+        pct = (completed_now / planned) if planned > 0 else 0.0
+        elapsed_s = None
+        eta_s = None
+        if swp.started_at:
+            end_ref = swp.finished_at or dt.datetime.now()
+            elapsed_s = (end_ref - swp.started_at).total_seconds()
+            if swp.status == 'running' and pct > 0:
+                eta_s = int(elapsed_s / pct - elapsed_s)
+
+        # Header panel
+        status_style = {
+            'running': 'cyan', 'completed': 'green',
+            'failed': 'red', 'cancelled': 'yellow',
+        }.get(swp.status, '')
+        header_lines = [
+            _Text(f'Sweep #{swp.id}: {swp.name}', style='bold'),
+        ]
+        if swp.status == 'running':
+            eta_str = f', ETA {eta_s // 60}m{eta_s % 60:02d}s' if eta_s else ''
+            header_lines.append(
+                _Text(
+                    f'  status: running  {completed_now}/{planned} '
+                    f'({pct:.0%}{eta_str})',
+                    style=status_style,
+                )
+            )
+        else:
+            header_lines.append(
+                _Text(
+                    f'  status: {swp.status}  '
+                    f'{swp.n_runs_successful}/{swp.n_runs_planned} ok '
+                    f'({swp.n_runs_failed} failed)',
+                    style=status_style,
+                )
+            )
+        if elapsed_s is not None:
+            header_lines.append(
+                _Text(f'  elapsed: {elapsed_s/60:.1f}m', style='dim')
+            )
+        if swp.digest_path:
+            header_lines.append(_Text(f'  digest: {swp.digest_path}', style='dim'))
+        header_lines.append(_Text(f'  poll every {interval:.0f}s — Ctrl-C to stop watching', style='dim'))
+
+        # Leaderboard
+        tbl = Table(
+            title=f'Top {min(top, len(records))} of {len(records)} runs '
+                  f'(ranked by composite score)',
+            box=_box.ROUNDED, pad_edge=False,
+        )
+        tbl.add_column('rank', justify='right', width=4)
+        tbl.add_column('id', justify='right', width=5)
+        tbl.add_column('symbols', no_wrap=True, width=18)
+        tbl.add_column('params', overflow='ellipsis', width=28)
+        tbl.add_column('score', justify='right', width=7)
+        tbl.add_column('return', justify='right', width=8)
+        tbl.add_column('sharpe', justify='right', width=7)
+        tbl.add_column('pf', justify='right', width=6)
+        tbl.add_column('trades', justify='right', width=6)
+        for rank, r in enumerate(records[:top], 1):
+            pf = r.profit_factor
+            pf_d = '∞' if pf > 1e15 else f'{pf:.2f}'
+            p_str = ', '.join(
+                f'{k}={v}' for k, v in sorted((r.params or {}).items())
+            )
+            tbl.add_row(
+                str(rank), str(r.id),
+                _format_conids_with_symbols(r.conids),
+                p_str,
+                f'{_bt_composite_score(r):+.3f}',
+                _Text(f'{r.total_return:+.2%}',
+                      style=_bt_style(_bt_class_return, r.total_return)),
+                _Text(f'{r.sharpe_ratio:+.2f}',
+                      style=_bt_style(_bt_class_sharpe, r.sharpe_ratio)),
+                _Text(pf_d, style=_bt_style(_bt_class_pf, pf)),
+                str(r.total_trades),
+            )
+
+        # Recent activity — most recently-created 5 runs regardless of rank,
+        # so a stalled sweep is visible (no new rows = nothing happening).
+        recent = sorted(records, key=lambda r: r.created_at or dt.datetime.min,
+                         reverse=True)[:5]
+        recent_tbl = Table(
+            title='Most recent completions', box=_box.SIMPLE, pad_edge=False,
+            show_header=True,
+        )
+        recent_tbl.add_column('id', justify='right', width=5)
+        recent_tbl.add_column('when', no_wrap=True, width=19)
+        recent_tbl.add_column('symbols', no_wrap=True, width=18)
+        recent_tbl.add_column('params', overflow='ellipsis', width=28)
+        recent_tbl.add_column('score', justify='right', width=7)
+        for r in recent:
+            p_str = ', '.join(
+                f'{k}={v}' for k, v in sorted((r.params or {}).items())
+            )
+            recent_tbl.add_row(
+                str(r.id),
+                str(r.created_at)[:19] if r.created_at else '—',
+                _format_conids_with_symbols(r.conids),
+                p_str,
+                f'{_bt_composite_score(r):+.3f}',
+            )
+
+        return Group(
+            *header_lines,
+            _Text(''),
+            tbl,
+            _Text(''),
+            recent_tbl,
+        )
+
+    try:
+        with Live(_build_renderable(), console=console,
+                   refresh_per_second=4, screen=False) as live:
+            while True:
+                swp = bstore.get_sweep(args.sweep_id)
+                live.update(_build_renderable())
+                if swp is None or swp.status != 'running':
+                    break
+                _time.sleep(interval)
+        # Final frame persists after Live exits — the Group above already
+        # shows the terminal state + digest path.
+        final = bstore.get_sweep(args.sweep_id)
+        if final and final.status != 'running':
+            console.print(
+                f'\n[dim]sweep reached terminal state: '
+                f'[bold]{final.status}[/bold]. Full review: '
+                f'[cyan]mmr sweep show {args.sweep_id}[/cyan][/dim]'
+            )
+    except KeyboardInterrupt:
+        console.print(
+            f'\n[yellow]stopped watching sweep #{args.sweep_id} '
+            f'(still running in the background)[/yellow]'
+        )
 
 
 def _handle_backtest_sweep(args: argparse.Namespace):
