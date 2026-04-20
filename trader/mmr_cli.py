@@ -1796,7 +1796,19 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
     except ValueError as e:
         print_status(f'Error: {e}', success=False)
     except Exception as e:
-        print_status(f'{type(e).__name__}: {e}', success=False)
+        msg = str(e)
+        # IB error 10197: another session (TWS, another API client) holds
+        # the market-data subscription. Surface a useful hint instead of
+        # the raw reqId/errorCode blob.
+        if 'errorCode: 10197' in msg or 'competing live session' in msg:
+            print_status(
+                'Market data is locked by another IB session (TWS or another API '
+                'client is logged into the same account). Close the other session, '
+                'or pass --delayed to use 15-min delayed data.',
+                success=False,
+            )
+        else:
+            print_status(f'{type(e).__name__}: {e}', success=False)
 
     return True
 

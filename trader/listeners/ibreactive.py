@@ -942,7 +942,18 @@ class IBAIORx():
                     'close': ticker.close, 'volume': ticker.volume,
                 })
             except Exception as ex:
-                logging.warning(f'Snapshot failed for {contract.symbol}: {ex}')
+                # 10197 is a user-environment issue (TWS also logged in),
+                # not a code bug — keep it to one line and don't spam the
+                # full Contract repr every time it hits.
+                msg = str(ex)
+                if 'errorCode: 10197' in msg or 'competing live session' in msg:
+                    logging.warning(
+                        'Snapshot %s blocked — market data locked by another '
+                        'IB session (TWS / another API client). Close it or '
+                        'use delayed data.', contract.symbol,
+                    )
+                else:
+                    logging.warning(f'Snapshot failed for {contract.symbol}: {ex}')
         return results
 
     async def get_history_bars(self, contract: Contract, duration: str = '60 D', bar_size: str = '1 day') -> list[dict]:
