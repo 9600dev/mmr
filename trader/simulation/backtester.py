@@ -276,6 +276,19 @@ class Backtester:
         cash = self.config.initial_capital
         positions: Dict[int, float] = {}  # conid -> quantity (positive=long, negative=short)
         position_entry_prices: Dict[int, float] = {}
+        # Time-based exit conditions per open position. Recorded when a
+        # BUY carrying ``max_hold_bars`` / ``close_by_time`` fills; checked
+        # at the top of each subsequent bar; cleared when the position
+        # closes (organically or via the synthesized SELL).
+        #   conid -> {
+        #     'entry_bar_index': int,
+        #     'max_hold_bars': Optional[int],
+        #     'close_by_time': Optional[dt.time],
+        #     'pending_exit': bool,  # True once the synthetic SELL has been
+        #                            # queued, so we don't re-trigger before
+        #                            # the fill lands at next bar's open.
+        #   }
+        exit_conditions: Dict[int, Dict[str, Any]] = {}
 
         date_range = DateRange(start=self.config.start_date, end=self.config.end_date)
 
@@ -378,6 +391,25 @@ class Backtester:
                 cash -= cost
                 positions[conid] = positions.get(conid, 0) + quantity
                 position_entry_prices[conid] = fill_price
+                # Record time-based exit conditions if the signal carries
+                # them. Latest-BUY-wins: if the strategy adds to a position
+                # with a different max_hold_bars, the new rule applies from
+                # this bar onward (intuitive: "my new thesis is for this
+                # bar's entry"). Clears any prior pending_exit flag since
+                # adding to a position supersedes the queued close.
+                if (getattr(signal, 'max_hold_bars', None) is not None
+                        or getattr(signal, 'close_by_time', None) is not None):
+                    exit_conditions[conid] = {
+                        'entry_bar_index': bar_index.get(conid, 0),
+                        'max_hold_bars': signal.max_hold_bars,
+                        'close_by_time': signal.close_by_time,
+                        'pending_exit': False,
+                    }
+                elif conid in exit_conditions:
+                    # Adding to a position that previously had exit rules,
+                    # via a new BUY without them. Drop the old rules — the
+                    # strategy clearly changed its mind about the timer.
+                    exit_conditions.pop(conid, None)
             elif signal.action == Action.SELL:
                 held = positions.get(conid, 0)
                 if held <= 0:
@@ -391,6 +423,7 @@ class Backtester:
                 if positions[conid] == 0:
                     positions.pop(conid, None)
                     position_entry_prices.pop(conid, None)
+                    exit_conditions.pop(conid, None)
 
             trades.append(BacktestTrade(
                 timestamp=bar_ts if isinstance(bar_ts, dt.datetime) else dt.datetime.now(),
@@ -430,6 +463,58 @@ class Backtester:
                     accumulated[conid] = pd.concat([accumulated[conid], bar], axis=0)
                 last_prices[conid] = float(bar['close'].iloc[-1])
                 bar_index[conid] = bar_index.get(conid, -1) + 1
+
+            # 2b. Check time-based exit conditions for every open position.
+            # Fires synthetic SELL signals when ``max_hold_bars`` elapses
+            # or ``close_by_time`` is reached. Queued under the same
+            # fill policy as strategy-emitted signals (next_open by
+            # default) so fills are consistent.
+            for conid in list(exit_conditions.keys()):
+                if positions.get(conid, 0) <= 0:
+                    exit_conditions.pop(conid, None)
+                    continue
+                cond = exit_conditions[conid]
+                if cond.get('pending_exit'):
+                    continue  # synthesized SELL already queued
+                idx = bar_index.get(conid, -1)
+                bar_for_conid = bars_this_ts.get(conid)
+                if bar_for_conid is None or bar_for_conid.empty:
+                    continue
+                bar_ts_here = bar_for_conid.index[-1]
+                triggered = False
+                reason = ''
+                if cond.get('max_hold_bars') is not None:
+                    bars_held = idx - cond['entry_bar_index']
+                    if bars_held >= cond['max_hold_bars']:
+                        triggered = True
+                        reason = f'max_hold_bars={cond["max_hold_bars"]}'
+                if not triggered and cond.get('close_by_time') is not None:
+                    t_of_day = (
+                        bar_ts_here.time() if hasattr(bar_ts_here, 'time')
+                        else None
+                    )
+                    if t_of_day is not None and t_of_day >= cond['close_by_time']:
+                        triggered = True
+                        reason = f'close_by_time={cond["close_by_time"]}'
+                if not triggered:
+                    continue
+
+                synthetic = Signal(
+                    source_name=f'__time_exit__[{reason}]',
+                    action=Action.SELL,
+                    probability=1.0,
+                    risk=0.0,
+                    quantity=positions[conid],
+                )
+                cond['pending_exit'] = True  # suppress re-trigger
+                if self.config.fill_policy == 'same_close':
+                    _execute_signal(
+                        synthetic, conid, timestamp, timestamp,
+                        accumulated[conid].iloc[-1],
+                        last_prices.get(conid, 0.0),
+                    )
+                else:
+                    pending_signals.append((synthetic, conid, timestamp))
 
             # 3. Run the strategy on each conid at its current bar.
             #    on_bar is the fast path (reads precomputed state by index);

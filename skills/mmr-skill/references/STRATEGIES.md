@@ -148,7 +148,42 @@ class Signal:
     quantity: float = 0.0   # Shares (0 = auto-size by backtester/runtime)
     date_time: datetime     # Auto-set to now()
     metadata: Dict = {}     # Arbitrary key-value data
+    # Time-based exit conditions (backtester-only today; live runtime
+    # ignores them — it uses IB's own order-scheduling for these rules).
+    max_hold_bars: Optional[int] = None       # auto-SELL after N bars
+    close_by_time: Optional[datetime.time] = None  # auto-SELL when bar time-of-day ≥ this
 ```
+
+### Time-based exits (for day-trading strategies)
+
+Day-traders frequently want "flatten before market close" or "bail if
+stagnant after N minutes". Rather than re-implementing this check on
+every bar in every strategy, attach it to the entry signal:
+
+```python
+from datetime import time
+
+class OpeningRangeBreakout(Strategy):
+    def on_bar(self, prices, state, index):
+        if self._breakout_triggered(prices, state, index):
+            return Signal(
+                source_name=self.name, action=Action.BUY,
+                probability=0.7, risk=0.3,
+                close_by_time=time(15, 45),  # flatten before the close
+                max_hold_bars=60,            # or bail after 60 minutes
+            )
+        return None
+```
+
+The backtester tracks the entry's ``bar_index`` and the bars'
+``time-of-day``, and synthesizes a SELL once **either** condition
+triggers — whichever fires first wins. The synthesized SELL respects
+the configured ``fill_policy`` (default ``next_open`` = fills at the
+next bar's open), same as strategy-emitted SELLs.
+
+Don't mix time-based exits with a manual "if bar.time >= close_by: emit
+SELL" check in the same strategy — the synthesized exit already handles
+it, and doubling up just fires two SELL signals on the same position.
 
 ## StrategyContext
 

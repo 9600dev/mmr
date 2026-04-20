@@ -21,6 +21,17 @@ class Signal():
     quantity: float = 0.0
     date_time: dt.datetime = field(default_factory=dt.datetime.now)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Time-based exit conditions — only honored in the backtester today
+    # (live-runtime treats them as None). A BUY signal with either field
+    # set causes the backtester to synthesize a SELL once the condition
+    # triggers: N bars elapsed since entry, or the current bar's time-
+    # of-day reaches ``close_by_time``. Both are optional; passing both
+    # means "whichever triggers first wins." Enables day-trading
+    # strategies (open-range breakout, VWAP reversion) to express their
+    # "flatten by 15:45 ET" / "bail if stagnant after 20 minutes" rules
+    # without every strategy re-implementing the same time-check logic.
+    max_hold_bars: Optional[int] = None
+    close_by_time: Optional[dt.time] = None
 
 
 class StrategyState(IntEnum):
