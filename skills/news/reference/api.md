@@ -280,6 +280,41 @@ Free-text description of the failure. Null when `ok` is `true`.
 
 ---
 
+## `POST /v1/pdf`
+
+Convert a PDF at the given URL to Markdown via Mathpix.
+
+```json
+{
+  "url": "https://www.sec.gov/Archives/edgar/.../aapl-10-k.pdf",
+  "use_cache": true
+}
+```
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `url` | string | yes | — | URL of the PDF. Mathpix downloads it server-side. |
+| `use_cache` | bool | no | `true` | Return cached markdown if a prior conversion exists for this URL. Set `false` to force re-conversion (PDF content changed). |
+
+Returns the **same `ScrapeResponse` envelope** as `/v1/scrape`, so callers can share response parsing. Notable response fields on a successful PDF convert:
+
+- `article.fetcher_source`: `"mathpix"` (fresh convert) or `"mathpix:cache"` (disk-cache hit on the service).
+- `article.markdown`: the converted body. Format determined by `mathpix_output_format` on the service (`mmd` = Mathpix Markdown with `$math$` + tables; `md` = plain CommonMark).
+- `article.metadata.pdf_pages` / `pdf_id` / `pdf_output_format` / `pdf_cached`: PDF-specific diagnostics.
+- `article.title`: `null` (Mathpix doesn't return a separate title field; title is typically the first heading in `markdown`).
+- `attempts`: one entry, `{fetcher: "mathpix"|"mathpix:cache", status: "ok", http_status: 200, notes: "pdf_id=... pages=... format=..."}`.
+
+PDF URLs sent to `/v1/scrape` (URL path ending in `.pdf`) transparently route to this endpoint — `/v1/pdf` is primarily useful when you know it's a PDF ahead of time, or when `use_cache=false` is wanted.
+
+### Error responses (PDF-specific)
+
+| HTTP | When | Envelope `status` | `error` |
+|---|---|---|---|
+| 422 | `mathpix_enabled: false` or `MATHPIX_API_KEY` empty | `bad_request` | `{code: "mathpix_disabled", detail, field: "body.url"}` |
+| 200 | Mathpix conversion failure (auth, quota, corrupted PDF, timeout) | `error` | `error` string carries the Mathpix reason; `attempts[0].notes` has the detail |
+
+---
+
 ## Error responses
 
 All error responses use the same `{ok, status, article, attempts, error}`

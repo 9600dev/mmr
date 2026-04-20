@@ -55,6 +55,7 @@ cd ~/dev/news && ./docker.sh -g
 | `NewsHelpers.ticker_news(ticker, max_results=5, extract=None, exchange_hint=None)` | **mmr-native**: google_news search `"{TICKER} stock [exchange_hint] news"` + parallel scrape |
 | `NewsHelpers.portfolio_news(tickers, max_results_per_ticker=3, exchange_hint=None)` | **mmr-native**: fan out `ticker_news()` across a list of tickers |
 | `NewsHelpers.get_images(url, max_images=5, min_bytes=5000, max_bytes=1_500_000)` | Extract inline images from an article as llmvm `ImageContent` (LLM-visible). Filters logos/icons/tracking pixels. `og:image` / `twitter:image` are ranked first so the hero photo wins over sidebar promos |
+| `NewsHelpers.pdf(url, use_cache=True, timeout=300)` | Convert a PDF to Markdown via Mathpix. Returns the same `ScrapeResponse` shape — `article.markdown` is the body, `article.metadata.pdf_pages` / `pdf_id` / `pdf_cached` carry diagnostics. `/v1/scrape` on a `.pdf` URL transparently delegates here, so most callers won't need to invoke this directly |
 
 ## Core patterns
 
@@ -416,6 +417,7 @@ Top-level failures (connection refused, timeout) appear as `{"ok": false, "error
 - **`follow_links` is server-capped at 5.** Deeper chains are a scan-multiple-seeds problem, not a deeper-follow problem — the return on extra hops drops fast and the cost climbs.
 - **`allow_archive_fallback=False`** for live-only content. Default is `True` because paywall bypass is usually what you want.
 - **Per-article isolation** — `ticker_news()` / `portfolio_news()` / `search_and_scrape()` never fail the whole batch when one URL fails. Each article comes back with its own `ok` / `status` / `attempts`, so a blocked Bloomberg URL doesn't poison the rest of the bundle.
+- **PDF conversion** — `.pdf` URLs on `/v1/scrape` auto-delegate to Mathpix via `/v1/pdf`. Covers SEC EDGAR 10-K / 10-Q / 8-K, Federal Reserve speeches, earnings-deck PDFs, IR press releases. Results are cached on the service keyed by URL hash — repeat calls for the same PDF don't rebill Mathpix. `health.mathpix_enabled` tells you if the capability is live; `article.metadata.pdf_cached` tells you if a specific response came from cache. Tables and equations survive — `mathpix_output_format: mmd` in news.yaml (default) keeps `$math$` + Mathpix Markdown tables; switch to `md` for plain CommonMark.
 - **`include_html=True` is heavy** — raw HTML is 10–30× the size of markdown. Only set when you need to run your own extractor.
 - **Max 50 results per search** — server rejects `max_results > 50` with 422. `search_and_scrape` already clamps effective scrapes to `max_results`.
 

@@ -133,6 +133,37 @@ _IMG_BLOCKLIST_HOSTS = (
 _IMG_EXT_BLOCKLIST = (".svg", ".gif")
 _DATA_URI_PREFIX = "data:"
 
+# URL path fragments that almost always indicate non-editorial images:
+# author headshots, promo buttons, theme/layout decorations, sponsored
+# stubs, show-logos. Matched case-insensitively as substrings of the
+# URL path. Being on this list hard-filters the image.
+_IMG_PATH_BLOCKLIST_FRAGMENTS = (
+    "/avatar",
+    "/author",
+    "/headshot",
+    "/callout",
+    "/sponsor",
+    "/theme/",
+    "/layout/",
+    "/advert",
+    "/banner",
+    "/logos",
+    "/logo/",
+    "/branding/",
+    "/icons/",
+    "/icon-",
+    "-author-",
+    "-avatar",
+    "-headshot",
+    "-callout-",
+    "-sponsor",
+    "-banner",
+    "-logo",
+    "-icon",
+    "-show-logo",
+    "-showlogo",
+)
+
 
 def _extract_og_image_urls(html: str, base_url: str) -> list[str]:
     '''Pull og:image / twitter:image meta URLs, in order.
@@ -163,6 +194,25 @@ def _extract_og_image_urls(html: str, base_url: str) -> list[str]:
     return urls
 
 
+def _canonical_image_key(url: str) -> str:
+    '''Collapse WordPress-style responsive variants to one key for dedupe.
+
+    `foo-640x427.jpg` and `foo-1152x648.jpg` both canonicalize to `foo.jpg` —
+    the two are the same image in different sizes. Ars Technica / Stockhead
+    / many WordPress sites ship every <img> with multiple size variants in
+    the same article, and without dedupe we waste `max_images` slots on
+    duplicates of the same photo.
+    '''
+    import re as _re
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    path = parsed.path
+    # Strip "-WxH" right before the file extension.
+    path = _re.sub(r'-\d+x\d+(?=\.[a-z0-9]+$)', '', path, flags=_re.IGNORECASE)
+    return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+
 def _extract_img_candidates(html: str, base_url: str) -> list[dict[str, str]]:
     '''Parse <img> tags out of HTML. Returns list of {src, alt} dicts
     biased so og:image / twitter:image URLs rank first.
@@ -170,6 +220,14 @@ def _extract_img_candidates(html: str, base_url: str) -> list[dict[str, str]]:
     Uses regex rather than bs4 to keep the helper dependency-free. Picks up
     src, data-src, and data-lazy-src (common lazy-load patterns). alt text
     is HTML-unescaped — otherwise things like `S&amp;P 500` leak through.
+
+    Filters applied:
+      - blocklist hosts (trackers, ad servers, social widgets)
+      - blocklist extensions (.svg, .gif)
+      - blocklist path fragments (author headshots, theme/layout assets,
+        callout promos, sponsored banners)
+      - canonical dedupe: responsive-variant URLs (`foo-640x427.jpg` and
+        `foo-1152x648.jpg`) collapse to one entry
     '''
     import html as _html
     import re as _re
@@ -182,18 +240,29 @@ def _extract_img_candidates(html: str, base_url: str) -> list[dict[str, str]]:
     )
     alt_re = _re.compile(r"alt\s*=\s*[\"']([^\"']*)[\"']", _re.IGNORECASE)
 
-    # Hero-bias: publisher-claimed hero images first, in meta-tag order.
-    og_urls = _extract_og_image_urls(html, base_url)
-    seen: set[str] = set()
-    records: list[dict[str, str]] = []
-    for og_url in og_urls:
-        parsed = urlparse(og_url)
+    def _skip(resolved: str) -> bool:
+        parsed = urlparse(resolved)
         host = parsed.netloc.lower()
         if any(blocked in host for blocked in _IMG_BLOCKLIST_HOSTS):
+            return True
+        path_lower = parsed.path.lower()
+        if path_lower.endswith(_IMG_EXT_BLOCKLIST):
+            return True
+        if any(frag in path_lower for frag in _IMG_PATH_BLOCKLIST_FRAGMENTS):
+            return True
+        return False
+
+    # Hero-bias: publisher-claimed hero images first, in meta-tag order.
+    og_urls = _extract_og_image_urls(html, base_url)
+    seen_keys: set[str] = set()
+    records: list[dict[str, str]] = []
+    for og_url in og_urls:
+        if _skip(og_url):
             continue
-        if parsed.path.lower().endswith(_IMG_EXT_BLOCKLIST):
+        key = _canonical_image_key(og_url)
+        if key in seen_keys:
             continue
-        seen.add(og_url)
+        seen_keys.add(key)
         records.append({"src": og_url, "alt": "", "_source": "og:image"})
 
     for match in tag_re.finditer(html):
@@ -206,17 +275,12 @@ def _extract_img_candidates(html: str, base_url: str) -> list[dict[str, str]]:
             continue
 
         resolved = urljoin(base_url, src_raw)
-        if resolved in seen:
+        if _skip(resolved):
             continue
-        seen.add(resolved)
-
-        parsed = urlparse(resolved)
-        host = parsed.netloc.lower()
-        if any(blocked in host for blocked in _IMG_BLOCKLIST_HOSTS):
+        key = _canonical_image_key(resolved)
+        if key in seen_keys:
             continue
-        path_lower = parsed.path.lower()
-        if path_lower.endswith(_IMG_EXT_BLOCKLIST):
-            continue
+        seen_keys.add(key)
 
         alt_match = alt_re.search(attrs)
         alt_raw = alt_match.group(1).strip() if alt_match else ""
@@ -388,6 +452,14 @@ class NewsHelpers:
         The response always contains ``article.markdown`` on success plus an
         ``attempts`` trace showing which fetchers ran.
 
+        **PDF auto-detection**: URLs ending in ``.pdf`` transparently
+        route through Mathpix instead of the HTML pipeline (fetcher
+        source becomes ``mathpix`` or ``mathpix:cache``). No caller
+        changes needed — SEC EDGAR filings, research-note PDFs, press
+        release PDFs all Just Work. Requires ``mathpix_enabled: true``
+        on the service; otherwise a PDF URL fails with
+        ``error.code: "mathpix_disabled"``.
+
         Args:
             url: Target article URL.
             extract: Optional LLM extraction prompt (mode 2). Requires
@@ -427,6 +499,55 @@ class NewsHelpers:
         if include_html:
             payload["include_html"] = True
         return await _post("/v1/scrape", payload, timeout=timeout)
+
+    # ------------------------------------------------------------------
+    # PDF (Mathpix)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def pdf(
+        url: str,
+        use_cache: bool = True,
+        timeout: float = 300.0,
+    ) -> dict[str, Any]:
+        """Convert a PDF at ``url`` to Markdown via Mathpix.
+
+        Hits ``POST /v1/pdf`` on the news-service, which talks to Mathpix
+        (``https://api.mathpix.com/v3/pdf``), polls the async job, and
+        returns the same ``ScrapeResponse`` envelope that ``scrape()``
+        uses. ``article.markdown`` is the converted body (Mathpix
+        Markdown with inline ``$math$`` by default — set
+        ``mathpix_output_format: md`` in news.yaml for plain CommonMark).
+
+        ``use_cache=True`` (default) returns the result of a prior
+        conversion for the same URL without rebilling Mathpix. Flip to
+        False when the PDF content changed at the same URL.
+
+        The underlying Mathpix job can run tens of seconds for long
+        reports — default timeout is generous (5 minutes).
+
+        Args:
+            url: Direct URL to a PDF file. Works on SEC EDGAR filings,
+                research notes, IR press-release PDFs, Federal Reserve
+                speeches, etc.
+            use_cache: Return a cached conversion if one exists on the
+                service. Default True; set False to force re-conversion.
+            timeout: Per-request timeout. Matches the service-side
+                Mathpix polling cap (``mathpix_poll_max_seconds``).
+
+        Returns a dict with the ``ScrapeResponse`` shape. Additional
+        PDF-specific fields live under ``article.metadata``:
+            pdf_pages (int), pdf_id (Mathpix job id),
+            pdf_output_format ("mmd"/"md"), pdf_cached (bool).
+
+        Example:
+            res = await NewsHelpers.pdf("https://www.sec.gov/.../aapl-10-k.pdf")
+            if res.get("ok"):
+                md = res["article"]["markdown"]
+                pages = res["article"]["metadata"].get("pdf_pages")
+        """
+        payload: dict[str, Any] = {"url": url, "use_cache": bool(use_cache)}
+        return await _post("/v1/pdf", payload, timeout=timeout)
 
     @staticmethod
     async def markdown(url: str, allow_archive_fallback: bool = True) -> str:
@@ -536,6 +657,18 @@ class NewsHelpers:
             "articles": list(articles),
         }
 
+    # Hosts that routinely appear in google_news results for finance
+    # queries but whose content is either heavily paywalled, thin analyst
+    # syndication, or both — and which the skill docs have historically
+    # promised to avoid. Applied as a default `exclude_regex` on
+    # ticker_news; callers can override by passing their own list.
+    _TICKER_NEWS_DEFAULT_EXCLUDES = (
+        r"finance\.yahoo\.com",
+        r"uk\.finance\.yahoo\.com",
+        # SimplyWall.St syndicated evergreen pieces.
+        r"simplywall\.st",
+    )
+
     @staticmethod
     async def ticker_news(
         ticker: str,
@@ -543,6 +676,8 @@ class NewsHelpers:
         extract: str | None = None,
         concurrency: int = 3,
         exchange_hint: str | None = None,
+        freshness_days: int | None = 30,
+        exclude_regex: list[str] | None = None,
     ) -> dict[str, Any]:
         """Fetch and scrape recent news for a ticker — the mmr portfolio/idea use case.
 
@@ -561,6 +696,15 @@ class NewsHelpers:
             exchange_hint: Optional market hint for disambiguating foreign
                 tickers. Pass e.g. ``"ASX"``, ``"LSE"``, ``"TSE"``. The
                 query becomes ``"{TICKER} stock {hint} news"``.
+            freshness_days: When set (default 30), the query is anchored
+                with the current month/year so google_news prefers recent
+                coverage over evergreen "is it too late to buy..." filler.
+                Pass ``None`` to skip the anchor (useful for historical
+                batch runs).
+            exclude_regex: URL regex patterns to drop from results.
+                Default excludes Yahoo Finance + SimplyWall.St syndication
+                (thin/evergreen content that tends to dominate on light
+                tickers). Pass ``[]`` to see everything.
 
         Returns a dict: ``ticker``, ``query``, ``count``, ``articles`` (list).
 
@@ -570,13 +714,28 @@ class NewsHelpers:
                 if a.get("ok"):
                     print(a["article"]["title"])
         """
-        q = f"{ticker} stock"
+        q_parts = [ticker, "stock"]
         if exchange_hint:
-            q += f" {exchange_hint}"
-        q += " news"
+            q_parts.append(exchange_hint)
+        q_parts.append("news")
+        if freshness_days is not None and freshness_days > 0:
+            # Add a month/year anchor — cheap hint that pushes google_news
+            # toward recent coverage. Trajectory regression: default
+            # template on BHP returned Feb/March filler on an April query.
+            import datetime as _dt
+            now = _dt.date.today()
+            q_parts.append(now.strftime("%B %Y"))
+        q = " ".join(q_parts)
+
+        effective_excludes = (
+            list(exclude_regex)
+            if exclude_regex is not None
+            else list(NewsHelpers._TICKER_NEWS_DEFAULT_EXCLUDES)
+        )
 
         bundle = await NewsHelpers.search_and_scrape(
-            q, max_results=max_results, concurrency=concurrency, engine="google_news",
+            q, max_results=max_results, concurrency=concurrency,
+            engine="google_news", exclude_regex=effective_excludes or None,
         )
 
         if extract and bundle.get("articles"):
@@ -780,14 +939,33 @@ class NewsHelpers:
 
         results = await asyncio.gather(*[_fetch(r) for r in candidates])
 
-        # 4. Build ImageContent objects for surviving images
+        # 4. Rank surviving downloads by (og:image first, then bytes desc)
+        # so the publisher-claimed hero wins when present, and on pages
+        # without og:image (or where og:image itself is filtered), the
+        # largest surviving image — almost always the real photo — wins
+        # over small icons/logos that squeaked past min_bytes. Trajectory
+        # regression: on a CNBC Mad Money page a 7.2KB show-logo was
+        # outranking the real hero because insertion order put it first.
+        og_srcs = {c["src"] for c in candidates if c.get("_source") == "og:image"}
+
+        def _rank_key(res: dict[str, Any]) -> tuple:
+            if not res["ok"]:
+                return (2, 0)   # failures sink to the bottom
+            is_og = 0 if res["src"] in og_srcs else 1
+            # Negate size so larger sorts first.
+            size = -len(res.get("bytes") or b"")
+            return (is_og, size)
+
+        ranked = sorted(results, key=_rank_key)
+
+        # 5. Build ImageContent objects for the top max_images survivors.
         from llmvm_lite.llm_types import ImageContent  # imported lazily
 
         images: list[Any] = []
         image_meta: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
 
-        for res in results:
+        for res in ranked:
             if res["ok"]:
                 if len(images) >= max_images:
                     skipped.append({"src": res["src"], "reason": "max_images cap reached"})
