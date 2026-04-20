@@ -2870,8 +2870,42 @@ def _handle_strategies(mmr: MMR, args: argparse.Namespace):
     elif action == 'inspect':
         _handle_strategies_inspect(args)
     else:
-        # Default: list strategies. Fall back to config file if service is down.
+        # Default: ask the running strategy_service what's actually loaded —
+        # the local YAML is only the client's copy and can drift from the
+        # service's config (e.g. when the service runs on a remote host).
+        # Fall back to the YAML only when the service is unreachable.
+        _handle_strategies_list(mmr)
+
+
+def _handle_strategies_list(mmr: MMR):
+    """List the strategies strategy_service has actually loaded, with a
+    YAML-only fallback when the service isn't reachable.
+
+    The fallback is visibly labelled so the caller can tell stale local
+    config from live truth — a silent fallback is exactly what caused an
+    earlier LLM session to assume only `global` was deployed while the
+    remote service was happily running four sweep winners."""
+    try:
+        df = mmr.strategies()
+    except (ConnectionError, TimeoutError) as e:
+        print_status(
+            f'strategy_service unreachable ({e}); showing local config '
+            f'(may be stale if service runs on another host)',
+            success=False,
+        )
         _handle_strategies_from_config()
+        return
+
+    if df is None or df.empty:
+        print_status(
+            'strategy_service returned no strategies; showing local config '
+            'for comparison',
+            success=False,
+        )
+        _handle_strategies_from_config()
+        return
+
+    print_df(df, title='Strategies (live from strategy_service)')
 
 
 def _handle_strategies_inspect(args: argparse.Namespace):

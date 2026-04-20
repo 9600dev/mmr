@@ -344,3 +344,64 @@ class TestDeployPath:
         _handle_strategy_deploy(_deploy_ns(name='x'))
         cfg = _read_deployed(tmp_home)
         assert len([s for s in cfg['strategies'] if s['name'] == 'x']) == 1
+
+
+# ---------------------------------------------------------------------------
+# `mmr strategies` (no subcommand) — regression against the trader-on-
+# remote-host case where the CLI silently showed only the stale local
+# YAML instead of querying the live strategy_service.
+# ---------------------------------------------------------------------------
+
+from unittest.mock import MagicMock
+
+from trader.mmr_cli import _handle_strategies
+
+
+def _strategies_ns() -> argparse.Namespace:
+    return argparse.Namespace(strat_action=None)
+
+
+class TestStrategiesDefaultQueriesService:
+    """``mmr strategies`` with no subcommand must hit strategy_service
+    first — not read the local YAML. Local config is a client-side copy
+    that drifts whenever trader_service runs on a different host."""
+
+    def test_calls_mmr_strategies(self, tmp_home, capsys):
+        mmr = MagicMock()
+        mmr.strategies.return_value = pd.DataFrame([
+            {'name': 'orb_gld', 'state': 'enabled', 'conids': [51529211]},
+            {'name': 'global', 'state': 'enabled', 'conids': []},
+        ])
+        _handle_strategies(mmr, _strategies_ns())
+        mmr.strategies.assert_called_once()
+        out = capsys.readouterr().out
+        assert 'live from strategy_service' in out
+        assert 'orb_gld' in out
+
+    def test_falls_back_on_connection_error(self, tmp_home, capsys):
+        # Put a single strategy in the local YAML so the fallback has
+        # something to print — proving it kicked in.
+        (tmp_home / '.config' / 'mmr').mkdir(parents=True)
+        (tmp_home / '.config' / 'mmr' / 'strategy_runtime.yaml').write_text(
+            yaml.safe_dump({'strategies': [{'name': 'localonly', 'module': 'strategies/x.py'}]})
+        )
+        mmr = MagicMock()
+        mmr.strategies.side_effect = ConnectionError('refused')
+        _handle_strategies(mmr, _strategies_ns())
+        out = capsys.readouterr().out
+        assert 'unreachable' in out
+        assert 'localonly' in out
+        # Fallback must be visibly labelled, not silent
+        assert 'from config' in out
+
+    def test_falls_back_on_empty_service_response(self, tmp_home, capsys):
+        (tmp_home / '.config' / 'mmr').mkdir(parents=True)
+        (tmp_home / '.config' / 'mmr' / 'strategy_runtime.yaml').write_text(
+            yaml.safe_dump({'strategies': [{'name': 'localonly', 'module': 'strategies/x.py'}]})
+        )
+        mmr = MagicMock()
+        mmr.strategies.return_value = pd.DataFrame()
+        _handle_strategies(mmr, _strategies_ns())
+        out = capsys.readouterr().out
+        assert 'no strategies' in out
+        assert 'localonly' in out
