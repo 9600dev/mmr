@@ -306,3 +306,84 @@ async def test_get_portfolio_summary_runs_off_loop():
         'get_portfolio_summary ran on the caller thread — it must offload '
         'via asyncio.to_thread so the event loop stays responsive'
     )
+
+
+# ---------------------------------------------------------------------------
+# IB upstream connectivity tracking — 1100 is the only hard-disconnect
+# signal; 2103 / 2105 / 2157 are per-farm informational warnings and must
+# NOT flip `ib_upstream_connected` (regression: the old code did, producing
+# false "Gateway broken" warnings in the CLI while trading was fine).
+# ---------------------------------------------------------------------------
+
+class _FakeIBError:
+    def __init__(self, code, msg=''):
+        self.errorCode = code
+        self.errorString = msg
+
+
+class TestIBUpstreamDetection:
+
+    def _trader(self):
+        t = _minimal_trader()
+        t._ib_upstream_connected = True
+        t._ib_upstream_error = ''
+        return t
+
+    def test_1100_flips_to_disconnected(self):
+        """The only error that should flip the hard-disconnect flag."""
+        t = self._trader()
+        t._on_ib_error(_FakeIBError(1100, 'Connectivity between IB and TWS lost'))
+        assert t._ib_upstream_connected is False
+        assert 'Connectivity' in t._ib_upstream_error
+
+    def test_1102_flips_back_to_connected(self):
+        t = self._trader()
+        t._ib_upstream_connected = False
+        t._ib_upstream_error = 'some prior error'
+        t._on_ib_error(_FakeIBError(1102, 'Connectivity restored'))
+        assert t._ib_upstream_connected is True
+        assert t._ib_upstream_error == ''
+
+    def test_2103_does_not_trip_hard_flag(self):
+        """Per-farm hiccup — other farms are fine, trading OK. The CLI
+        was showing "IB Gateway not connected" with `VNC all green` because
+        the old code treated this as a full disconnect. Must NOT flip
+        ``_ib_upstream_connected``."""
+        t = self._trader()
+        t._on_ib_error(_FakeIBError(2103, 'Market data farm connection is broken:usfarm'))
+        assert t._ib_upstream_connected is True, (
+            '2103 (per-farm warning) must not trigger hard disconnect — '
+            'other farms may be fine and trading continues'
+        )
+        assert t._ib_upstream_error == '', (
+            'error message should not be populated from an informational warning'
+        )
+        # But we DO track it separately for callers that want farm-level detail
+        assert hasattr(t, '_ib_farms_down')
+        assert 2103 in t._ib_farms_down
+
+    def test_2104_clears_farm_from_tracking(self):
+        """The 2104 restore pairs with 2103. Check the pairing logic
+        clears the right entry."""
+        t = self._trader()
+        t._on_ib_error(_FakeIBError(2103, 'usfarm broken'))
+        t._on_ib_error(_FakeIBError(2104, 'usfarm restored'))
+        assert 2103 not in getattr(t, '_ib_farms_down', {})
+        assert t._ib_upstream_connected is True  # never flipped in the first place
+
+    def test_other_farm_warnings_2105_2157_also_informational(self):
+        t = self._trader()
+        t._on_ib_error(_FakeIBError(2105, 'HMDS farm borked'))
+        t._on_ib_error(_FakeIBError(2157, 'sec-def farm borked'))
+        assert t._ib_upstream_connected is True
+        assert 2105 in t._ib_farms_down
+        assert 2157 in t._ib_farms_down
+
+    def test_1100_during_farm_hiccup_wins(self):
+        """If 2103 fires then 1100 fires, the hard disconnect wins —
+        1100 is the authoritative "you can't trade" signal."""
+        t = self._trader()
+        t._on_ib_error(_FakeIBError(2103, 'usfarm'))
+        assert t._ib_upstream_connected is True  # 2103 alone doesn't trip
+        t._on_ib_error(_FakeIBError(1100, 'Full disconnect'))
+        assert t._ib_upstream_connected is False

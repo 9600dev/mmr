@@ -421,24 +421,51 @@ class Trader():
         self.disposables.append(scheduled_disposable)
 
     def _on_ib_error(self, error: IBAIORxError):
-        """Track IB upstream connectivity from error codes."""
-        # 1100: connectivity lost between IB and TWS/Gateway
-        # 2103: market data farm connection broken
-        # 2105: HMDS data farm connection broken
-        # 2157: sec-def data farm connection broken
-        if error.errorCode in (1100, 2103, 2105, 2157):
-            self._ib_upstream_connected = False
-            self._ib_upstream_error = error.errorString
-            logging.warning('IB upstream connection lost: %s', error.errorString)
+        """Track IB upstream connectivity from error codes.
 
-        # 1102: connectivity restored (with possible data loss)
-        # 2104: market data farm connection OK
-        # 2106: HMDS data farm connection OK
-        # 2158: sec-def data farm connection OK
-        elif error.errorCode in (1102, 2104, 2106, 2158):
+        IB distinguishes two severities we care about:
+
+        1. **1100 / 1102**: full gateway↔IBKR connectivity. 1100 means
+           trading is actually disabled. This is the ONLY signal that
+           should flip ``ib_upstream_connected`` to False.
+
+        2. **2103 / 2105 / 2157**: per-data-farm status messages. IB
+           Gateway has multiple farms (``usfarm``, ``euhmds``,
+           ``cashfarm``, ``usfuture``, ...) and sends these warnings
+           any time one farm briefly hiccups. Other farms stay up,
+           trading keeps working, the Gateway UI stays green. Treating
+           these as a hard disconnect produced false-positive "Gateway
+           broken" warnings in the CLI while the user could see real-
+           time P&L updating normally.
+
+        We now track per-farm state as an informational dict so callers
+        can surface "warning: usfarm hiccuped" without falsely reporting
+        a full disconnect."""
+        code = error.errorCode
+        msg = error.errorString
+
+        if code == 1100:
+            # Real disconnect — trading disabled until 1102 arrives.
+            self._ib_upstream_connected = False
+            self._ib_upstream_error = msg
+            logging.warning('IB upstream connection lost (code 1100): %s', msg)
+        elif code == 1102:
             self._ib_upstream_connected = True
             self._ib_upstream_error = ''
-            logging.info('IB upstream connection restored: %s', error.errorString)
+            logging.info('IB upstream connection restored (code 1102): %s', msg)
+        elif code in (2103, 2105, 2157):
+            # Informational farm hiccup. Track so callers can query
+            # ``_ib_farms_down`` if they really want farm-level detail,
+            # but leave ``_ib_upstream_connected`` alone.
+            if not hasattr(self, '_ib_farms_down'):
+                self._ib_farms_down = {}
+            self._ib_farms_down[code] = msg
+            logging.info('IB farm warning (code %d, informational): %s', code, msg)
+        elif code in (2104, 2106, 2158):
+            if hasattr(self, '_ib_farms_down'):
+                # 2104 ↔ 2103, 2106 ↔ 2105, 2158 ↔ 2157
+                self._ib_farms_down.pop(code - 1, None)
+            logging.info('IB farm restored (code %d): %s', code, msg)
 
     @log_method
     async def connected_event(self):
