@@ -104,6 +104,82 @@ print_data_sizes() {
 
 print_data_sizes
 
+# Required RAM (bytes) for the full MMR stack. Set by the mem_limit values
+# in docker-compose.yml (4 GB mmr + 1.5 GB ib-gateway = 5.5 GB minimum;
+# leave 2 GB headroom for the VM/kernel, so ~8 GB is the target).
+MIN_VM_RAM_MB=6144
+RECOMMENDED_VM_RAM_MB=8192
+
+check_vm_ram() {
+    # On macOS, Docker Desktop + Podman both run a Linux VM with its own
+    # RAM budget — the Mac has plenty but the VM cap is what the
+    # containers actually see. A 2 GB default (Podman applehv's out-of-box
+    # setting) has OOM-killed trader_service + strategy_service mid-order;
+    # warn loudly when we find it. On Linux, check host RAM directly.
+    local ram_mb=0
+    local source=""
+    if [[ "$(uname)" == "Darwin" ]]; then
+        if [[ "$RUNTIME" == "podman" ]]; then
+            ram_mb=$(podman machine inspect 2>/dev/null \
+                | awk -F'[:,]' '/"Memory"/ { gsub(/[^0-9]/,"",$2); print $2; exit }')
+            source="podman machine"
+        elif [[ "$RUNTIME" == "docker" ]]; then
+            local mem_bytes
+            mem_bytes=$(docker info --format '{{.MemTotal}}' 2>/dev/null || echo 0)
+            if [ -n "$mem_bytes" ] && [ "$mem_bytes" -gt 0 ]; then
+                ram_mb=$((mem_bytes / 1024 / 1024))
+            fi
+            source="Docker Desktop VM"
+        fi
+    else
+        if command -v free &> /dev/null; then
+            ram_mb=$(free -m | awk '/^Mem:/ {print $2}')
+            source="host"
+        fi
+    fi
+
+    if [ -z "$ram_mb" ] || [ "$ram_mb" -le 0 ]; then
+        echo "Warning: couldn't determine ${source:-VM} RAM — skipping sizing check."
+        echo ""
+        return 0
+    fi
+
+    if [ "$ram_mb" -lt "$MIN_VM_RAM_MB" ]; then
+        echo "=============================================================="
+        echo "  RAM WARNING: $source has ${ram_mb} MB (minimum ${MIN_VM_RAM_MB} MB)"
+        echo "=============================================================="
+        echo "  trader_service + strategy_service have been OOM-killed in"
+        echo "  production at 2 GB. Recommended: ${RECOMMENDED_VM_RAM_MB} MB."
+        if [[ "$(uname)" == "Darwin" && "$RUNTIME" == "podman" ]]; then
+            echo ""
+            echo "  To resize the Podman VM (requires restart):"
+            echo "    podman machine stop"
+            echo "    podman machine set --memory ${RECOMMENDED_VM_RAM_MB}"
+            echo "    podman machine start"
+        elif [[ "$(uname)" == "Darwin" && "$RUNTIME" == "docker" ]]; then
+            echo ""
+            echo "  Open Docker Desktop → Settings → Resources → Memory,"
+            echo "  bump to ${RECOMMENDED_VM_RAM_MB} MB or more."
+        fi
+        echo ""
+        if [ -t 0 ] && [ -t 1 ]; then
+            read -p "Continue anyway? [y/N]: " answer
+            case "${answer:-n}" in
+                y|Y|yes) ;;
+                *) echo "Aborting. Resize and re-run."; exit 1 ;;
+            esac
+        else
+            echo "(non-interactive, continuing — rebuild is up to you)"
+        fi
+        echo ""
+    else
+        echo "$source RAM: ${ram_mb} MB (>= ${MIN_VM_RAM_MB} MB required) ✓"
+        echo ""
+    fi
+}
+
+check_vm_ram
+
 print_vnc_url() {
     # Print a clickable vnc:// URL for the IB Gateway desktop.
     # macOS Terminal and iTerm2 auto-link the vnc:// scheme (⌘-click opens

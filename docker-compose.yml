@@ -3,7 +3,15 @@ name: mmr
 services:
   ib-gateway:
     image: ghcr.io/gnzsnz/ib-gateway:latest
-    restart: always
+    # `on-failure` (not `always`) so that when the cgroup OOM-killer reaps
+    # a process inside we see `State.OOMKilled=true` in `podman/docker
+    # inspect` — an `always` restart mask silently hides the signal.
+    restart: on-failure
+    # IB Gateway itself (Java + XVfb + VNC) sits around 600–800 MB steady
+    # state. Capping at 1.5G gives headroom for the JVM to GC without
+    # letting it run away and starve the rest of the VM.
+    mem_limit: 1536m
+    memswap_limit: 1536m
     env_file: .env
     environment:
       TWS_USERID: ${TWS_USERID}
@@ -40,7 +48,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    restart: always
+    # on-failure so OOM kills surface as State.OOMKilled=true on the
+    # container (pre-2026-04-20 those kills were invisible from the
+    # outside — start_mmr.sh caught the child PID death but the OOM flag
+    # never propagated to the container state).
+    restart: on-failure
+    # trader_service + strategy_service + data_service + pycron together
+    # run around 1.6–2.2 GB RSS with a full universe loaded. 4 GB leaves
+    # clear headroom and still protects the Podman/Docker VM from being
+    # starved by a single runaway.
+    mem_limit: 4g
+    memswap_limit: 4g
     depends_on:
       - ib-gateway
     environment:
