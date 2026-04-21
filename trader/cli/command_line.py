@@ -175,8 +175,8 @@ def default_config_provider(file_path, cmd_name):
     if os.getenv('TRADER_CONFIG'):
         config_file = str(os.getenv('TRADER_CONFIG'))  # type: ignore
 
-    if not os.path.exists(config_file) and os.path.exists('configs/trader.yaml'):
-        config_file = 'configs/trader.yaml'
+    if not os.path.exists(config_file) and os.path.exists('config_defaults/trader.yaml'):
+        config_file = 'config_defaults/trader.yaml'
 
     if os.path.exists(config_file):  # type: ignore
         conf_file = open(config_file, 'r')

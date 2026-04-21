@@ -19,7 +19,7 @@ from trader.strategy.strategy_runtime import StrategyRuntime
 from trader.trading.strategy import Strategy
 
 
-def _make_runtime(tmp_path, strategies_dir, config_file=None) -> StrategyRuntime:
+def _make_runtime(tmp_path, strategies_dir, config_file=None, paper_trading=True) -> StrategyRuntime:
     """Build a StrategyRuntime with just enough wiring for load_strategy /
     config_loader / _reconcile to work. No ZMQ, no IB, no storage."""
     config_path = str(config_file or tmp_path / 'strategy_runtime.yaml')
@@ -33,6 +33,7 @@ def _make_runtime(tmp_path, strategies_dir, config_file=None) -> StrategyRuntime
     rt.universe_accessor = None  # type: ignore
     rt._config_mtime = 0.0
     rt.trader_client = None  # type: ignore
+    rt.paper_trading = paper_trading
     return rt
 
 
@@ -73,7 +74,7 @@ class TestLoadStrategySandbox:
             name='test_v1', bar_size_str='1 min', conids=[1],
             universe=None, historical_days_prior=0,
             module=str(strategies / 'mystrat.py'), class_name='V1',
-            description='', paper=True,
+            description='',
         )
         assert any(s.name == 'test_v1' for s in rt.strategy_implementations), (
             'strategy should have been loaded and appended'
@@ -92,7 +93,7 @@ class TestLoadStrategySandbox:
             name='evil_strat', bar_size_str='1 min', conids=[1],
             universe=None, historical_days_prior=0,
             module=str(evil), class_name='V1',
-            description='', paper=True,
+            description='',
         )
         assert rt.strategy_implementations == []
 
@@ -108,7 +109,7 @@ class TestLoadStrategySandbox:
             name='traversal', bar_size_str='1 min', conids=[1],
             universe=None, historical_days_prior=0,
             module='../outside.py', class_name='V1',
-            description='', paper=True,
+            description='',
         )
         assert rt.strategy_implementations == []
 
@@ -128,18 +129,64 @@ class TestLoadStrategySandbox:
         rt.load_strategy(
             name='first', bar_size_str='1 min', conids=[1], universe=None,
             historical_days_prior=0, module=str(a / 'shared.py'),
-            class_name='V1', description='', paper=True,
+            class_name='V1', description='',
         )
         rt.load_strategy(
             name='second', bar_size_str='1 min', conids=[1], universe=None,
             historical_days_prior=0, module=str(b / 'shared.py'),
-            class_name='V2', description='', paper=True,
+            class_name='V2', description='',
         )
         names = {s.name for s in rt.strategy_implementations}
         assert names == {'first', 'second'}, names
         # And both classes should have been instantiated from the correct files
         classes = {type(s).__name__ for s in rt.strategy_implementations}
         assert classes == {'V1', 'V2'}
+
+
+class TestPaperOnlyGate:
+    def test_paper_only_loads_on_paper_service(self, tmp_path):
+        strategies = tmp_path / 'strategies'
+        _write_strategy(strategies, 'mystrat', _VALID_STRATEGY_BODY)
+        rt = _make_runtime(tmp_path, strategies, paper_trading=True)
+
+        rt.load_strategy(
+            name='cautious', bar_size_str='1 min', conids=[1],
+            universe=None, historical_days_prior=0,
+            module=str(strategies / 'mystrat.py'), class_name='V1',
+            description='', paper_only=True,
+        )
+        assert any(s.name == 'cautious' for s in rt.strategy_implementations)
+
+    def test_paper_only_refuses_live_service(self, tmp_path, caplog):
+        """A strategy marked paper_only must not load on a live-mode runtime."""
+        import logging as stdlib_logging
+        strategies = tmp_path / 'strategies'
+        _write_strategy(strategies, 'mystrat', _VALID_STRATEGY_BODY)
+        rt = _make_runtime(tmp_path, strategies, paper_trading=False)
+
+        with caplog.at_level(stdlib_logging.ERROR):
+            rt.load_strategy(
+                name='cautious', bar_size_str='1 min', conids=[1],
+                universe=None, historical_days_prior=0,
+                module=str(strategies / 'mystrat.py'), class_name='V1',
+                description='', paper_only=True,
+            )
+        assert rt.strategy_implementations == []
+        assert any('paper_only' in rec.message for rec in caplog.records)
+
+    def test_default_loads_on_live_service(self, tmp_path):
+        """paper_only defaults to False — an un-flagged strategy loads on live."""
+        strategies = tmp_path / 'strategies'
+        _write_strategy(strategies, 'mystrat', _VALID_STRATEGY_BODY)
+        rt = _make_runtime(tmp_path, strategies, paper_trading=False)
+
+        rt.load_strategy(
+            name='normal', bar_size_str='1 min', conids=[1],
+            universe=None, historical_days_prior=0,
+            module=str(strategies / 'mystrat.py'), class_name='V1',
+            description='',
+        )
+        assert any(s.name == 'normal' for s in rt.strategy_implementations)
 
 
 class TestConfigLoader:

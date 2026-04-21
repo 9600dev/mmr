@@ -156,7 +156,7 @@ class TestSharpeAnnualization:
         strategy = AlwaysBuy()
         ctx = StrategyContext(
             name="test", bar_size=BarSize.Days1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=TickStorage(tmp_duckdb_path),
             universe_accessor=UniverseAccessor.__new__(UniverseAccessor),
             logger=__import__('logging').getLogger('test'),
@@ -237,7 +237,7 @@ class TestWinRateWeightedAvg:
         strategy = BuySell()
         ctx = StrategyContext(
             name="test", bar_size=BarSize.Days1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=UniverseAccessor.__new__(UniverseAccessor),
             logger=__import__('logging').getLogger('test'),
         )
@@ -264,7 +264,7 @@ class TestWinRateWeightedAvg:
         strategy = BuySell()
         ctx = StrategyContext(
             name="test", bar_size=BarSize.Days1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=UniverseAccessor.__new__(UniverseAccessor),
             logger=__import__('logging').getLogger('test'),
         )
@@ -300,7 +300,7 @@ class TestWinRateWeightedAvg:
         strategy = MultiTrade()
         ctx = StrategyContext(
             name="test", bar_size=BarSize.Days1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=UniverseAccessor.__new__(UniverseAccessor),
             logger=__import__('logging').getLogger('test'),
         )
@@ -331,7 +331,7 @@ class TestWinRateWeightedAvg:
         strategy = AvgEntryTest()
         ctx = StrategyContext(
             name="test", bar_size=BarSize.Days1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=UniverseAccessor.__new__(UniverseAccessor),
             logger=__import__('logging').getLogger('test'),
         )
@@ -357,7 +357,7 @@ class TestWinRateWeightedAvg:
         strategy = OnlyBuy()
         ctx = StrategyContext(
             name="test", bar_size=BarSize.Days1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=UniverseAccessor.__new__(UniverseAccessor),
             logger=__import__('logging').getLogger('test'),
         )
@@ -387,7 +387,7 @@ class TestWinRateWeightedAvg:
         strategy = PartialSell()
         ctx = StrategyContext(
             name="test", bar_size=BarSize.Days1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=UniverseAccessor.__new__(UniverseAccessor),
             logger=__import__('logging').getLogger('test'),
         )
@@ -437,7 +437,7 @@ class TestMaxDrawdown:
         strategy = NoOp()
         ctx = StrategyContext(
             name="test", bar_size=BarSize.Days1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=UniverseAccessor.__new__(UniverseAccessor),
             logger=__import__('logging').getLogger('test'),
         )
@@ -483,7 +483,7 @@ class TestMaxDrawdown:
         strategy = BuyOnce()
         ctx = StrategyContext(
             name="test", bar_size=BarSize.Days1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=UniverseAccessor.__new__(UniverseAccessor),
             logger=__import__('logging').getLogger('test'),
         )
@@ -539,7 +539,7 @@ class TestCommissionSlippage:
         strategy = BuyThenSell()
         ctx = StrategyContext(
             name="test", bar_size=BarSize.Days1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=UniverseAccessor.__new__(UniverseAccessor),
             logger=__import__('logging').getLogger('test'),
         )
@@ -587,7 +587,7 @@ class TestCommissionSlippage:
         s1 = BuyThenSell()
         ctx = StrategyContext(
             name="test", bar_size=BarSize.Days1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=UniverseAccessor.__new__(UniverseAccessor),
             logger=__import__('logging').getLogger('test'),
         )

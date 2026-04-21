@@ -177,7 +177,7 @@ class TestBarSizeFiltering:
         strategy = CountingStrategy()
         ctx = StrategyContext(
             name="test", bar_size=BarSize.Days1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=UniverseAccessor.__new__(UniverseAccessor),
             logger=__import__('logging').getLogger('test'),
         )
@@ -234,7 +234,7 @@ class TestNaNDataHandling:
         strategy = NoOp()
         ctx = StrategyContext(
             name="test", bar_size=BarSize.Days1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=UniverseAccessor.__new__(UniverseAccessor),
             logger=__import__('logging').getLogger('test'),
         )
@@ -272,7 +272,7 @@ class TestNaNDataHandling:
         strategy = NoOp()
         ctx = StrategyContext(
             name="test", bar_size=BarSize.Days1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=UniverseAccessor.__new__(UniverseAccessor),
             logger=__import__('logging').getLogger('test'),
         )
@@ -313,7 +313,7 @@ class TestNaNDataHandling:
         strategy = CountBars()
         ctx = StrategyContext(
             name="test", bar_size=BarSize.Days1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=UniverseAccessor.__new__(UniverseAccessor),
             logger=__import__('logging').getLogger('test'),
         )

@@ -160,10 +160,16 @@ class StrategyRuntime():
             )
 
     @log_method
-    def enable_strategy(self, name: str, paper: bool) -> StrategyState:
+    def enable_strategy(self, name: str, paper_only: bool = False) -> StrategyState:
+        """Enable a strategy.
+
+        ``paper_only`` is a load-time safety gate (see ``load_strategy``); it's
+        ignored here. The param is retained for wire compatibility but has no
+        effect — routing is determined by the trader_service's account, not
+        per-strategy flags.
+        """
         for implementation in self.strategy_implementations:
             if name == implementation.name:
-                implementation.paper = paper
                 return implementation.enable()
         return StrategyState.ERROR
 
@@ -268,7 +274,7 @@ class StrategyRuntime():
         module: str,
         class_name: str,
         description: str,
-        paper: bool = False,
+        paper_only: bool = False,
         auto_execute: bool = False,
         params: Optional[Dict] = None,
     ) -> None:
@@ -280,6 +286,17 @@ class StrategyRuntime():
 
         if not name or not class_name or not module or not bar_size_str:
             raise ValueError('invalid config. need name, bar_size, class_name and module specified')
+
+        # paper_only gate: refuse to load strategies marked paper_only when the
+        # trader_service is bound to a live account. Routing is service-level
+        # (one trader_service → one IB account), so this is the only place it
+        # makes sense to enforce the flag.
+        if paper_only and not self.paper_trading:
+            logging.error(
+                'refusing to load strategy %s: paper_only=True but trader_service '
+                'is running in LIVE mode', name,
+            )
+            return
 
         strategies_dir = os.path.abspath(os.path.expanduser(self.strategies_directory))
 
@@ -340,7 +357,7 @@ class StrategyRuntime():
                     conids=conids if conids else [],
                     universe=universe,
                     historical_days_prior=historical_days_prior if historical_days_prior else 0,
-                    paper=paper,
+                    paper_only=paper_only,
                     storage=self.storage,
                     universe_accessor=self.universe_accessor,
                     logger=logging,
@@ -382,7 +399,7 @@ class StrategyRuntime():
                 module=strategy_config.get('module', ''),
                 class_name=strategy_config.get('class_name', ''),
                 description=strategy_config.get('description', ''),
-                paper=strategy_config.get('paper', False),
+                paper_only=strategy_config.get('paper_only', False),
                 auto_execute=strategy_config.get('auto_execute', False),
                 params=strategy_config.get('params', {}),
             )

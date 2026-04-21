@@ -50,7 +50,7 @@ class StrategyContext:
     conids: List[int]
     universe: Optional[str]
     historical_days_prior: int
-    paper: bool
+    paper_only: bool
     storage: TickStorage
     universe_accessor: UniverseAccessor
     logger: Logger
@@ -136,13 +136,8 @@ class Strategy(ABC):
         return self._context.description if self._context else None
 
     @property
-    def paper(self) -> bool:
-        return self._context.paper if self._context else True
-
-    @paper.setter
-    def paper(self, value):
-        if self._context:
-            self._context.paper = value
+    def paper_only(self) -> bool:
+        return self._context.paper_only if self._context else False
 
     @property
     def params(self) -> Dict[str, Any]:
@@ -262,7 +257,7 @@ class StrategyConfig():
         historical_days_prior: Optional[int] = None,
         runs_when_crontab: Optional[str] = None,
         description: Optional[str] = None,
-        paper: bool = True,
+        paper_only: bool = False,
         auto_execute: bool = False,
         params: Optional[Dict[str, Any]] = None,
     ):
@@ -276,7 +271,7 @@ class StrategyConfig():
         self.runs_when_crontab = runs_when_crontab
         self.description = description
         self.state = state
-        self.paper = paper
+        self.paper_only = paper_only
         self.auto_execute = auto_execute
         self.params = params or {}
 
@@ -293,7 +288,7 @@ class StrategyConfig():
             runs_when_crontab=strategy.runs_when_crontab,
             description=strategy.description,
             state=strategy.state,
-            paper=strategy.paper,
+            paper_only=strategy.paper_only,
             auto_execute=strategy._context.auto_execute if strategy._context else False,
             params=strategy.params,
         )

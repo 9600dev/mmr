@@ -28,7 +28,7 @@ class TestStrategy:
         assert installed_strategy.bar_size == BarSize.Mins1
         assert installed_strategy.storage is not None
         assert installed_strategy.conids == [4391]
-        assert installed_strategy.paper is True
+        assert installed_strategy.paper_only is False
 
     def test_bare_strategy_is_a_silent_noop(self):
         """Since the precompute + on_bar hook was introduced, ``on_prices``
@@ -64,4 +64,4 @@ class TestStrategy:
         assert config.bar_size == BarSize.Mins1
         assert config.state == StrategyState.RUNNING
         assert config.conids == [4391]
-        assert config.paper is True
+        assert config.paper_only is False

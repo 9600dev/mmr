@@ -226,7 +226,7 @@ After `install()`, access via `self.ctx`:
 | `self.conids` | List[int] | Contract IDs assigned |
 | `self.universe` | str | Universe name (if used instead of conids) |
 | `self.historical_days_prior` | int | Days of history to preload |
-| `self.paper` | bool | Paper trading mode |
+| `self.paper_only` | bool | If True, strategy refuses to load on a live trader_service (safety gate for untested strategies). Routing itself is always determined by the trader_service's account. |
 | `self.storage` | TickStorage | Access to DuckDB historical data |
 | `self.logging` | Logger | Per-strategy logger |
 

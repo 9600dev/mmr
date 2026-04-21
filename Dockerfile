@@ -72,7 +72,7 @@ RUN printf '%s\n' \
 
 # Pre-populate user config from bundled defaults so TRADER_CONFIG resolves
 RUN mkdir -p /home/trader/.config/mmr \
-    && cp /home/trader/mmr/configs/*.yaml /home/trader/.config/mmr/ \
+    && cp /home/trader/mmr/config_defaults/*.yaml /home/trader/.config/mmr/ \
     && chown -R trader:trader /home/trader/.config/mmr
 
 RUN chmod +x /home/trader/mmr/scripts/docker-entrypoint.sh

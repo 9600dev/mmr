@@ -643,7 +643,6 @@ def strategy_helper() -> pd.DataFrame:
             result.append({
                 'name': s.name,
                 'conids': s.conids if s.conids else '[]',
-                'paper': s.paper,
                 'state': str(s.state),
                 'bar_size': str(s.bar_size),
                 'hist_days_prior': s.historical_days_prior,
@@ -1119,12 +1118,10 @@ def strategy_list():
 
 @strategy.command('enable')
 @cloup.option('--name', required=True, help='name of strategy')
-@cloup.option('--paper', required=False, is_flag=True, default=True, help='dont trade, just paper trade it')
 def strategy_enable(
     name: str,
-    paper: bool,
 ):
-    success_fail = consume(remoted_client.rpc().enable_strategy(name, paper))
+    success_fail = consume(remoted_client.rpc().enable_strategy(name))
     if success_fail.is_success():
         renderer.rich_dict({'state': success_fail.obj})
     else:

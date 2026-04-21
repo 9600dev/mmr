@@ -33,7 +33,7 @@ chown trader:trader /home/trader/.mmr_env
 
 # Ensure config dir exists with defaults
 mkdir -p /home/trader/.config/mmr
-cp -n /home/trader/mmr/configs/*.yaml /home/trader/.config/mmr/ 2>/dev/null || true
+cp -n /home/trader/mmr/config_defaults/*.yaml /home/trader/.config/mmr/ 2>/dev/null || true
 chown -R trader:trader /home/trader/.config/mmr
 
 # Ensure data and log directories exist (bind-mounted from host ~/.local/share/mmr/)

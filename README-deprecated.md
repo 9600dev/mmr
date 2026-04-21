@@ -78,7 +78,7 @@ $ ssh trader@localhost -p 2222
 
 After this has completed, it will call `start_mmr.sh` in the MMR root directory, which starts a [tmux](https://github.com/tmux/tmux/wiki) session with:
 
-* `pycron` — process scheduler that manages the trading runtime services. Manually: `python3 pycron/pycron.py --config ./configs/pycron.yaml`
+* `pycron` — process scheduler that manages the trading runtime services. Manually: `python3 pycron/pycron.py --config ./config_defaults/pycron.yaml`
 * `cli` — command line interface to interact with the trading system (check portfolio, check systems, manually create orders etc). Manually: `python3 -m trader.mmr_cli`
 * `trader_service_log` — displays the trader service log in real time.
 * `strategy_service_log` — displays the strategy service log in real time.

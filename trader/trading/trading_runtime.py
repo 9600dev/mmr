@@ -539,9 +539,9 @@ class Trader():
             self._reconnecting = False
 
     @log_method
-    async def enable_strategy(self, name: str, paper: bool) -> SuccessFail[StrategyState]:
+    async def enable_strategy(self, name: str) -> SuccessFail[StrategyState]:
         try:
-            return self.zmq_strategy_client.rpc().enable_strategy(name, paper)
+            return self.zmq_strategy_client.rpc().enable_strategy(name)
         except Exception as ex:
             logging.error('enable_strategy: {}'.format(ex))
             return SuccessFail.fail(exception=ex)

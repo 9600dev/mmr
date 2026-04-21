@@ -884,7 +884,7 @@ class TestStrategies:
             def __init__(self):
                 self.name = 'smi_crossover'
                 self.state = 'RUNNING'
-                self.paper = True
+                self.paper_only = False
                 self.bar_size = '1 min'
                 self.conids = [4391]
                 self.historical_days_prior = 5

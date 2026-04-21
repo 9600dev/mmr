@@ -41,7 +41,7 @@ def _make_installed(cls):
     inst = cls()
     ctx = StrategyContext(
         name='test', bar_size=BarSize.Mins1, conids=[], universe=None,
-        historical_days_prior=0, paper=True,
+        historical_days_prior=0, paper_only=False,
         storage=None,
         universe_accessor=UniverseAccessor.__new__(UniverseAccessor),
         logger=_logging.getLogger('test'),

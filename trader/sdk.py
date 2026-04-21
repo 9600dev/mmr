@@ -1798,7 +1798,6 @@ class MMR:
                 row = {
                     'name': s.name,
                     'state': str(s.state),
-                    'paper': s.paper,
                     'bar_size': str(s.bar_size),
                     'conids': s.conids or [],
                     'hist_days_prior': s.historical_days_prior,
@@ -1810,9 +1809,9 @@ class MMR:
             return pd.DataFrame(rows)
         return pd.DataFrame()
 
-    def enable_strategy(self, name: str, paper: bool = True) -> SuccessFail:
+    def enable_strategy(self, name: str) -> SuccessFail:
         """Enable a strategy by name."""
-        return consume(self._rpc.rpc().enable_strategy(name, paper))
+        return consume(self._rpc.rpc().enable_strategy(name))
 
     def disable_strategy(self, name: str) -> SuccessFail:
         """Disable a strategy by name."""

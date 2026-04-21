@@ -70,7 +70,7 @@ zmq_strategy_rpc_server_port: 42005
 zmq_messagebus_server_address: tcp://127.0.0.1
 zmq_messagebus_server_port: 42006
 strategies_directory: strategies
-strategy_config_file: configs/strategy_runtime.yaml
+strategy_config_file: config_defaults/strategy_runtime.yaml
 trading_mode: paper
 """
     config_path = tmp_path / "trader.yaml"
@@ -256,7 +256,7 @@ def make_strategy_context(tmp_duckdb_path):
             conids=conids or [4391],
             universe=None,
             historical_days_prior=5,
-            paper=True,
+            paper_only=False,
             storage=storage,
             universe_accessor=universe_accessor,
             logger=logging.getLogger("test"),

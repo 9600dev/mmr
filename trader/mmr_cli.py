@@ -446,7 +446,6 @@ def build_parser() -> argparse.ArgumentParser:
     strat_sub = strat_p.add_subparsers(dest='strat_action')
     enable_p = strat_sub.add_parser('enable', help='Enable a strategy')
     enable_p.add_argument('name', help='Strategy name')
-    enable_p.add_argument('--paper', action='store_true', default=True)
     disable_p = strat_sub.add_parser('disable', help='Disable a strategy')
     disable_p.add_argument('name', help='Strategy name')
     strat_sub.add_parser('reload', help='Reload strategies from YAML and re-subscribe')
@@ -481,7 +480,9 @@ def build_parser() -> argparse.ArgumentParser:
     strat_deploy_p.add_argument('--universe', default=None, help='Universe name')
     strat_deploy_p.add_argument('--bar-size', default='1 min', help='Bar size (default: "1 min")')
     strat_deploy_p.add_argument('--days', type=int, default=90, help='Historical days prior (default: 90)')
-    strat_deploy_p.add_argument('--paper', action='store_true', default=True, help='Paper trading mode')
+    strat_deploy_p.add_argument('--paper-only', action='store_true', default=False,
+                                  help='Gate: refuse to load this strategy on a live trader_service. '
+                                       'Use for untested/first-deploy strategies.')
     strat_deploy_p.add_argument('--module', default=None,
                                   help='Strategy module path (default: strategies/<name>.py). Set this '
                                        'when deploying the same strategy class under multiple names — '
@@ -2838,7 +2839,7 @@ def _handle_session(mmr: MMR, args: argparse.Namespace):
 def _handle_strategies(mmr: MMR, args: argparse.Namespace):
     action = getattr(args, 'strat_action', None)
     if action == 'enable':
-        result = mmr.enable_strategy(args.name, paper=args.paper)
+        result = mmr.enable_strategy(args.name)
         if result.is_success():
             print_status(f'Enabled: {args.name}')
         else:
@@ -3263,7 +3264,6 @@ def _handle_strategies_from_config():
             'class_name': s.get('class_name', ''),
             'bar_size': s.get('bar_size', ''),
             'conids': str(s.get('conids', s.get('universe', ''))),
-            'paper': s.get('paper', True),
             'days': s.get('historical_days_prior', ''),
         }
         params = s.get('params', {})
@@ -3351,7 +3351,7 @@ def _handle_strategy_deploy(args: argparse.Namespace):
     """Deploy a strategy to strategy_runtime.yaml.
 
     Writes to ``~/.config/mmr/strategy_runtime.yaml`` (the runtime's actual
-    config path inside the container). Writing to ``configs/strategy_runtime.yaml``
+    config path inside the container). Writing to ``config_defaults/strategy_runtime.yaml``
     in the project tree is a no-op — that's only the bundled default
     template, copied to the real config dir once at first run.
     """
@@ -3438,8 +3438,9 @@ def _handle_strategy_deploy(args: argparse.Namespace):
         'class_name': class_name,
         'bar_size': getattr(args, 'bar_size', '1 min'),
         'historical_days_prior': args.days,
-        'paper': args.paper,
     }
+    if getattr(args, 'paper_only', False):
+        entry['paper_only'] = True
 
     if args.conids:
         entry['conids'] = args.conids

@@ -1,3 +1,8 @@
+# TEMPLATE — copied to ~/.config/mmr/ on first run (container.ensure_config_dir,
+# start_mmr.sh, docker-entrypoint.sh). Edits here do NOT affect a running
+# system. The live config lives in ~/.config/mmr/ (bind-mounted into the
+# container at /home/trader/.config/mmr/). Use this file to update defaults
+# that ship with the repo for fresh installs only.
 root_directory: .
 port: 8081
 env: TRADER_CHECK=False

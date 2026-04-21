@@ -24,12 +24,12 @@ class StrategyServiceApi(RPCHandler):
         self.strategy: runtime.StrategyRuntime = strategy_runtime
 
     @rpcmethod
-    def enable_strategy(self, name: str, paper: bool) -> SuccessFail[StrategyState]:
+    def enable_strategy(self, name: str) -> SuccessFail[StrategyState]:
         try:
             # find the strategy
             strategy = self.strategy.get_strategy(name)
             if strategy:
-                state = self.strategy.enable_strategy(name, paper)
+                state = self.strategy.enable_strategy(name)
                 return SuccessFail.success(state)
             else:
                 return SuccessFail.fail(error='Strategy not found or error')

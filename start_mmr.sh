@@ -108,12 +108,12 @@ FIRST_RUN=false
 if [ ! -d "$HOME/.config/mmr" ]; then
     mkdir -p "$HOME/.config/mmr"
     FIRST_RUN=true
-    if [ -d "$MMR_DIR/configs" ]; then
-        cp -n "$MMR_DIR"/configs/*.yaml "$HOME/.config/mmr/" 2>/dev/null || true
+    if [ -d "$MMR_DIR/config_defaults" ]; then
+        cp -n "$MMR_DIR"/config_defaults/*.yaml "$HOME/.config/mmr/" 2>/dev/null || true
         echo "Copied default configs to ~/.config/mmr/"
     fi
-elif [ ! -f "$TRADER_CONFIG" ] && [ -d "$MMR_DIR/configs" ]; then
-    cp -n "$MMR_DIR"/configs/*.yaml "$HOME/.config/mmr/" 2>/dev/null || true
+elif [ ! -f "$TRADER_CONFIG" ] && [ -d "$MMR_DIR/config_defaults" ]; then
+    cp -n "$MMR_DIR"/config_defaults/*.yaml "$HOME/.config/mmr/" 2>/dev/null || true
 fi
 
 if [ ! -f "$TRADER_CONFIG" ]; then

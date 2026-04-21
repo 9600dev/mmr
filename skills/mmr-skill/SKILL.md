@@ -243,7 +243,7 @@ Shapes deliberately differ between sources — we pass through what each provide
 | `MMRHelpers.sweeps_list(limit=25)` | **Curated view** of what sweeps have ever run. Entry point for "what have we done?" |
 | `MMRHelpers.sweeps_show(id, top=10)` | One sweep's metadata + top-N leaderboard by composite score. |
 | `MMRHelpers.backtests_archive([ids])` / `backtests_unarchive([ids])` | Soft-delete / restore runs — hides from default list without losing the data. Pass `include_archived=True` or `archived_only=True` to `backtests_list` to see hidden runs. |
-| `MMRHelpers.strategy_deploy(name, conids, paper=True)` | Deploy to `strategy_runtime.yaml` |
+| `MMRHelpers.strategy_deploy(name, conids)` | Deploy to `strategy_runtime.yaml`. Pass `paper_only=True` to gate the entry off live trader_service (safety flag for new/untested strategies). |
 | `MMRHelpers.strategy_undeploy(name)` | Remove from config |
 | `MMRHelpers.strategy_signals(name, limit=20)` | View recent signals from event store |
 | `MMRHelpers.strategy_backtest(name, days=365)` | Backtest a deployed strategy by name |
@@ -590,7 +590,7 @@ detail = await MMRHelpers.backtests_show(run_id=42)
 emit(detail)
 
 # 5. Deploy to paper trading (only if confidence tests pass)
-result = await MMRHelpers.strategy_deploy("momentum_breakout", conids=[265598], paper=True)
+result = await MMRHelpers.strategy_deploy("momentum_breakout", conids=[265598])
 # strategy_service auto-detects the YAML change within 30s, or force immediate:
 result = await MMRHelpers.reload_strategies()
 

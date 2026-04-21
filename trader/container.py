@@ -21,10 +21,10 @@ def mmr_root() -> Path:
     # Check env var first
     if os.getenv('MMR_ROOT'):
         return Path(os.getenv('MMR_ROOT'))
-    # Walk up from this file to find the project root (contains configs/)
+    # Walk up from this file to find the project root (contains config_defaults/)
     current = Path(__file__).resolve().parent
     while current != current.parent:
-        if (current / 'configs' / 'trader.yaml').exists():
+        if (current / 'config_defaults' / 'trader.yaml').exists():
             return current
         current = current.parent
     # Fallback to CWD
@@ -32,12 +32,19 @@ def mmr_root() -> Path:
 
 
 def _bundled_configs_dir() -> Path:
-    """Return the path to the bundled configs/ directory in the project."""
-    return mmr_root() / 'configs'
+    """Return the path to the bundled config_defaults/ directory in the project."""
+    return mmr_root() / 'config_defaults'
 
 
 def ensure_config_dir() -> Path:
-    """Ensure ~/.config/mmr exists, copying bundled configs if needed.
+    """Ensure ~/.config/mmr exists, copying bundled defaults if needed.
+
+    On first run, YAMLs from the repo's ``config_defaults/`` directory
+    (templates — see the header comment at the top of each file) are
+    copied into ``~/.config/mmr/``. Existing files are never overwritten,
+    so edits to the templates only affect fresh installs. The live
+    config lives in ``~/.config/mmr/`` and is the sole source of truth
+    for running services (bind-mounted into the container).
 
     Returns the path to ~/.config/mmr.
     """

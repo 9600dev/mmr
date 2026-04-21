@@ -62,7 +62,7 @@ The reason PubSub and MessageBus are separate (despite overlap) is efficiency: Z
 
 **Risk gate**: `trader/trading/risk_gate.py` enforces pre-trade risk limits (max position size, daily loss, open orders, signal rate) by querying the event store.
 
-**Position sizing**: `trader/trading/position_sizing.py` computes position sizes based on confidence, risk level, ATR volatility, portfolio state, and liquidity (ADV, spread). The sizing pipeline is: `base_position × risk_multiplier × confidence_scale × volatility_adjustment`. Volatile stocks (high ATR%) automatically get smaller positions; stable stocks get larger ones. Configured via `configs/position_sizing.yaml`. Used automatically by `propose` when no quantity/amount is specified.
+**Position sizing**: `trader/trading/position_sizing.py` computes position sizes based on confidence, risk level, ATR volatility, portfolio state, and liquidity (ADV, spread). The sizing pipeline is: `base_position × risk_multiplier × confidence_scale × volatility_adjustment`. Volatile stocks (high ATR%) automatically get smaller positions; stable stocks get larger ones. Configured via `config_defaults/position_sizing.yaml`. Used automatically by `propose` when no quantity/amount is specified.
 
 **Position groups**: `trader/data/position_groups.py` stores named groups with allocation budgets in DuckDB (e.g. "mining" at 20% max). The `propose` command accepts `--group` to tag trades and auto-register membership. The portfolio risk analyzer checks group allocations against budgets.
 
@@ -104,7 +104,7 @@ The reason PubSub and MessageBus are separate (despite overlap) is efficiency: Z
 mmr/
 ├── pycron/pycron.py           # Process manager / scheduler
 │
-├── configs/                       # Bundled defaults (copied to ~/.config/mmr/ on first run)
+├── config_defaults/           # Template defaults (copied to ~/.config/mmr/ on first run only; edits here don't affect a running system)
 │   ├── trader.yaml            # IB connection, ZMQ ports, DuckDB path
 │   ├── pycron.yaml            # Service job definitions (Docker mode)
 │   ├── no_docker_pycron.yaml  # Service job definitions (non-Docker)
@@ -475,7 +475,7 @@ When explicit tickers are provided with `--location`, the `min_change_pct`/`max_
 
 ## Configuration
 
-User configs live in `~/.config/mmr/`. On first run, bundled defaults from `configs/` are copied there automatically (`container.ensure_config_dir()`). The `TRADER_CONFIG` env var overrides the config file path.
+User configs live in `~/.config/mmr/`. On first run, bundled defaults from `config_defaults/` are copied there automatically (`container.ensure_config_dir()`). The `TRADER_CONFIG` env var overrides the config file path.
 
 **`~/.config/mmr/trader.yaml`**: IB connection (address, port, client IDs, account), DuckDB path, ZMQ port assignments. Env vars override config values (uppercased param name).
 
@@ -564,7 +564,7 @@ class MyStrategy(Strategy):
         return None
 ```
 
-Register in `configs/strategy_runtime.yaml`:
+Register in `config_defaults/strategy_runtime.yaml`:
 
 ```yaml
 strategies:

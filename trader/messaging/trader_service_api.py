@@ -208,8 +208,8 @@ class TraderServiceApi(RPCHandler):
         return await self.trader.get_strategies()
 
     @rpcmethod
-    async def enable_strategy(self, name: str, paper: bool) -> SuccessFail[StrategyState]:
-        return await self.trader.enable_strategy(name, paper)
+    async def enable_strategy(self, name: str) -> SuccessFail[StrategyState]:
+        return await self.trader.enable_strategy(name)
 
     @rpcmethod
     async def disable_strategy(self, name: str) -> SuccessFail[StrategyState]:

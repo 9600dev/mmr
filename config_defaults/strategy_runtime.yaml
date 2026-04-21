@@ -1,0 +1,71 @@
+# TEMPLATE — copied to ~/.config/mmr/ on first run (container.ensure_config_dir,
+# start_mmr.sh, docker-entrypoint.sh). Edits here do NOT affect a running
+# system. The live config lives in ~/.config/mmr/ (bind-mounted into the
+# container at /home/trader/.config/mmr/). Use this file to update defaults
+# that ship with the repo for fresh installs only.
+env: TRADER_CHECK=False
+strategies:
+  - name: global
+    description: strategy wide configuration
+    universe: portfolio
+    bar_size: '1 min'
+    historical_days_prior: 90
+    module: strategies/global.py
+    class_name: Global
+
+  # ---- Overnight sweep winners (2026-04-20) — paper ----
+  # All 4 cleared the strict filter: PSR >= 0.95, sharpe-CI lower bound >= 0,
+  # DD < 5%, PF >= 1.5, positive pnl skew. See LLMVM-PROGRESS.md for the
+  # confidence block on each run_id.
+
+  - name: orb_gld
+    description: >-
+      ORB 45/1.3 on GLD — overnight sweep run 305: +17.4%, sharpe 1.79,
+      PSR 0.99, DD -3.0%, PF 3.6, 329 trades/yr.
+    conids: [51529211]
+    bar_size: '1 min'
+    historical_days_prior: 90
+    module: strategies/opening_range_breakout.py
+    class_name: OpeningRangeBreakout
+    params:
+      RANGE_MINUTES: 45
+      VOLUME_MULT: 1.3
+
+  - name: orb_googl
+    description: >-
+      ORB 45/1.3 on GOOGL — overnight sweep run 309: +19.0%, sharpe 1.52,
+      PSR 0.98, DD -4.0%, PF 3.5, +2.01 skew, 252 trades/yr.
+    conids: [208813719]
+    bar_size: '1 min'
+    historical_days_prior: 90
+    module: strategies/opening_range_breakout.py
+    class_name: OpeningRangeBreakout
+    params:
+      RANGE_MINUTES: 45
+      VOLUME_MULT: 1.3
+
+  - name: orb_xlk
+    description: >-
+      ORB 45/1.0 on XLK — overnight sweep run 474: +13.9%, sharpe 1.73,
+      PSR 0.97, DD -4.0%, PF 2.1, 411 trades/yr.
+    conids: [4215230]
+    bar_size: '1 min'
+    historical_days_prior: 90
+    module: strategies/opening_range_breakout.py
+    class_name: OpeningRangeBreakout
+    params:
+      RANGE_MINUTES: 45
+      VOLUME_MULT: 1.0
+
+  - name: vwap_reclaim_cat
+    description: >-
+      VwapReclaim 0.3 on CAT — overnight sweep run 1489: +6.1%, sharpe 2.32
+      (best in batch), PSR 0.99, DD -2.3%, PF 1.7, 395 trades/yr.
+      New day-trading strategy, first live deployment.
+    conids: [5437]
+    bar_size: '1 min'
+    historical_days_prior: 90
+    module: strategies/vwap_reclaim.py
+    class_name: VwapReclaim
+    params:
+      MIN_DIP_PCT: 0.3

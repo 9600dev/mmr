@@ -87,4 +87,8 @@ services:
       # Persist DuckDB data and logs across rebuilds
       # Uses ~/.local/share/mmr on the host — same location as local (non-Docker) mode
       - ${HOME}/.local/share/mmr:/home/trader/.local/share/mmr
+      # Strategy/runtime config lives on the host — single source of truth so
+      # `mmr strategies deploy` (from the host) affects the running service and
+      # the strategy_service's 30s mtime-reload picks up edits without a rebuild.
+      - ${HOME}/.config/mmr:/home/trader/.config/mmr
 

@@ -1412,7 +1412,7 @@ class MMRHelpers:
         universe: Optional[str] = None,
         bar_size: str = "1 min",
         days: int = 90,
-        paper: bool = True,
+        paper_only: bool = False,
         module: Optional[str] = None,
         class_name: Optional[str] = None,
         params: Optional[Dict[str, Any]] = None,
@@ -1420,11 +1420,12 @@ class MMRHelpers:
         """Deploy a strategy to ``~/.config/mmr/strategy_runtime.yaml``.
         Does NOT require any service.
 
-        **Do NOT hand-edit ``configs/strategy_runtime.yaml``** in the
+        **Do NOT hand-edit ``config_defaults/strategy_runtime.yaml``** in the
         project tree — that's the bundled default template, only copied
         to the real runtime path at first container startup. Always use
         this helper (or the CLI `strategies deploy`) so writes land in
-        the path the trader actually reads.
+        the path the trader actually reads (``~/.config/mmr/``, which is
+        now bind-mounted into the container).
 
         ``name``   : deployed entry name (must be unique per config)
         ``module`` : override the inferred ``strategies/<name>.py`` path.
@@ -1440,10 +1441,15 @@ class MMRHelpers:
 
         Sweep-winner deployment is the canonical use case:
 
+        ``paper_only``: if True, emits ``--paper-only`` so the strategy
+        refuses to load against a live trader_service. Routing itself is
+        always determined by the trader_service's account — this flag is
+        a safety gate for untested strategies, not a routing directive.
+
         ```python
         await MMRHelpers.strategy_deploy(
             "orb_gld",
-            conids=[51529211], paper=True,
+            conids=[51529211],
             module="strategies/opening_range_breakout.py",
             class_name="OpeningRangeBreakout",
             params={"RANGE_MINUTES": 45, "VOLUME_MULT": 1.3},
@@ -1458,8 +1464,8 @@ class MMRHelpers:
             args.extend(["--conids"] + [str(c) for c in conids])
         if universe:
             args.extend(["--universe", universe])
-        if paper:
-            args.append("--paper")
+        if paper_only:
+            args.append("--paper-only")
         if module:
             args.extend(["--module", module])
         if class_name:

@@ -431,7 +431,7 @@ class TestBacktesterNormalization:
         ua.universe_library = "Universes"
         ctx = StrategyContext(
             name="column_capture", bar_size=BarSize.Mins1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=ua,
             logger=logging.getLogger("test"),
         )
@@ -482,7 +482,7 @@ class TestBacktesterNormalization:
         ua.universe_library = "Universes"
         ctx = StrategyContext(
             name="last_price", bar_size=BarSize.Mins1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=ua,
             logger=logging.getLogger("test"),
         )
@@ -524,7 +524,7 @@ class TestBacktesterNormalization:
         ua.universe_library = "Universes"
         ctx = StrategyContext(
             name="vwap_reader", bar_size=BarSize.Mins1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=ua,
             logger=logging.getLogger("test"),
         )
@@ -572,7 +572,7 @@ class TestBacktesterNormalization:
         ua.universe_library = "Universes"
         ctx = StrategyContext(
             name="bid_ask_checker", bar_size=BarSize.Mins1, conids=[4391],
-            universe=None, historical_days_prior=0, paper=True,
+            universe=None, historical_days_prior=0, paper_only=False,
             storage=storage, universe_accessor=ua,
             logger=logging.getLogger("test"),
         )
@@ -670,7 +670,7 @@ class TestSMICrossoverFix:
         ua.universe_library = "Universes"
         ctx = StrategyContext(
             name="smi_crossover", bar_size=BarSize.Mins1, conids=[4391],
-            universe=None, historical_days_prior=5, paper=True,
+            universe=None, historical_days_prior=5, paper_only=False,
             storage=storage, universe_accessor=ua,
             logger=logging.getLogger("test"),
         )
@@ -703,7 +703,7 @@ class TestSMICrossoverFix:
         ua.universe_library = "Universes"
         ctx = StrategyContext(
             name="smi_crossover", bar_size=BarSize.Mins1, conids=[4391],
-            universe=None, historical_days_prior=5, paper=True,
+            universe=None, historical_days_prior=5, paper_only=False,
             storage=storage, universe_accessor=ua,
             logger=logging.getLogger("test"),
         )
@@ -733,7 +733,7 @@ class TestSMICrossoverFix:
         ua.universe_library = "Universes"
         ctx = StrategyContext(
             name="smi_crossover", bar_size=BarSize.Mins1, conids=[4391],
-            universe=None, historical_days_prior=5, paper=True,
+            universe=None, historical_days_prior=5, paper_only=False,
             storage=storage, universe_accessor=ua,
             logger=logging.getLogger("test"),
         )

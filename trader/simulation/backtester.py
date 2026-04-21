@@ -170,9 +170,9 @@ class Backtester:
         allowed_roots = []
         try:
             cur = os.path.abspath(os.path.dirname(__file__))
-            # Walk up to the project root (contains ``configs/trader.yaml``)
+            # Walk up to the project root (contains ``config_defaults/trader.yaml``)
             while cur != os.path.dirname(cur):
-                if os.path.exists(os.path.join(cur, 'configs', 'trader.yaml')):
+                if os.path.exists(os.path.join(cur, 'config_defaults', 'trader.yaml')):
                     allowed_roots.append(os.path.join(cur, 'strategies'))
                     allowed_roots.append(os.path.join(cur, 'tests'))
                     break
@@ -781,7 +781,7 @@ class Backtester:
             conids=conids,
             universe=None,
             historical_days_prior=0,
-            paper=True,
+            paper_only=False,
             storage=self.storage,
             universe_accessor=universe_accessor or UniverseAccessor.__new__(UniverseAccessor),
             logger=logging,

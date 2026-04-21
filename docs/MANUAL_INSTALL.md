@@ -17,5 +17,5 @@ If you want to YOLO the install, and you're on Ubuntu or a derivative, you can t
 * Install Redis via ```sudo apt install redis-server```
 * Start pycron:
  	* ```cd /home/trader/mmr/pycron```
- 	* ```python3 pycron.py ../configs/pycron.yaml```
+ 	* ```python3 pycron.py ../config_defaults/pycron.yaml```
 

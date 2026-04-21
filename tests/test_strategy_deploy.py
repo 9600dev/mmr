@@ -231,7 +231,7 @@ def _deploy_ns(**kw) -> argparse.Namespace:
         universe=None,
         bar_size='1 min',
         days=90,
-        paper=True,
+        paper_only=False,
         module=None,
         class_name=None,
         params=None,
@@ -333,7 +333,7 @@ class TestDeployModuleOverride:
 class TestDeployPath:
     """Writes must land in the path the runtime actually reads —
     ``~/.config/mmr/strategy_runtime.yaml`` — not the project's
-    bundled ``configs/`` template."""
+    bundled ``config_defaults/`` template."""
 
     def test_default_path_is_user_config(self, tmp_home):
         _handle_strategy_deploy(_deploy_ns(name='pathcheck'))

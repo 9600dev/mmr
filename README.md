@@ -222,7 +222,7 @@ mmr approve 42
 mmr reject 42 --reason "Group over budget"
 ```
 
-Position sizing is automatic: `base_position × risk_multiplier × confidence_scale × ATR_volatility_adjustment`. Volatile stocks (high ATR%) get smaller positions; stable stocks get larger ones. Configured in `configs/position_sizing.yaml`.
+Position sizing is automatic: `base_position × risk_multiplier × confidence_scale × ATR_volatility_adjustment`. Volatile stocks (high ATR%) get smaller positions; stable stocks get larger ones. Configured in `config_defaults/position_sizing.yaml`.
 
 Proposal statuses follow a strict state machine: `PENDING → APPROVED | REJECTED | EXPIRED | FAILED`, then `APPROVED → EXECUTED | FAILED | REJECTED`. Terminal statuses are immutable — a proposal can't be executed twice, resurrected after rejection, or approved after it's already been executed. Illegal transitions raise `InvalidProposalTransition` instead of silently clobbering the row.
 
@@ -436,7 +436,7 @@ class MyStrategy(Strategy):
         return None
 ```
 
-Register in `configs/strategy_runtime.yaml`:
+Register in `config_defaults/strategy_runtime.yaml`:
 
 ```yaml
 strategies:
@@ -464,7 +464,7 @@ MMR has multiple layers of risk controls:
 
 ## Configuration
 
-User configs live in `~/.config/mmr/` (auto-copied from `configs/` on first run):
+User configs live in `~/.config/mmr/` (auto-copied from `config_defaults/` on first run):
 
 | File | Purpose |
 |------|---------|
@@ -513,7 +513,7 @@ mmr/
 │   ├── simulation/                # Backtester + statistical-confidence tests + lookahead checker
 │   └── tools/                     # Idea scanner, depth chart, options chain
 ├── strategies/                    # User strategy implementations
-├── configs/                       # Bundled defaults
+├── config_defaults/                       # Bundled defaults
 ├── skills/                        # Claude skills (mmr, mmr-loop, news)
 ├── CLAUDE.md                      # Claude Code context (architecture, commands, workflows)
 ├── tests/                         # 1000+ tests (pytest, no IB required)

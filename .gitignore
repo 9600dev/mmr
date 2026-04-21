@@ -24,6 +24,6 @@ scratch/
 *.duckdb.wal
 
 # Local config overrides
-configs/local_*
+config_defaults/local_*
 
 notebooks/
