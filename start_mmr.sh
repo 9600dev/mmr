@@ -171,7 +171,8 @@ run_setup() {
     # ── IB Ports ──
     echo ""
     echo "IB Gateway API ports. Defaults: 7497 (paper), 7496 (live)."
-    echo "Docker maps 4003→7497 and 4004→7496 — use the host-side ports."
+    echo "Docker maps container 4003→host 7496 (live) and 4004→host 7497 (paper)."
+    echo "Use the host-side ports (7496 / 7497) here."
     echo ""
 
     local current_paper_port current_live_port

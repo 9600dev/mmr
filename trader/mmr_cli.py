@@ -1710,6 +1710,11 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
                     f'Check VNC: [cyan]vnc://localhost:5901[/cyan]  |  '
                     f'Restart: [cyan]docker compose restart ib-gateway[/cyan]'
                 )
+            if not _json_mode and result.get('account_values_warning'):
+                console.print(
+                    f'\n[bold yellow]Account values not available[/bold yellow]\n'
+                    f'[dim]{result.get("account_values_warning", "")}[/dim]'
+                )
 
         elif cmd == 'diagnose':
             _handle_diagnose(mmr, args)

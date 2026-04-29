@@ -27,9 +27,12 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import asyncio
 import dataclasses
 import datetime as dt
+import logging
 import pandas as pd
 import threading
 import zmq
+
+logger = logging.getLogger(__name__)
 
 
 class Subscription:
@@ -822,7 +825,12 @@ class MMR:
         return self._prop_store
 
     def _get_portfolio_state(self):
-        """Build a PortfolioState snapshot. Gracefully degrades if trader_service unavailable."""
+        """Build a PortfolioState snapshot. Gracefully degrades if trader_service unavailable.
+
+        Per-source failures are recorded on ``state.rpc_errors`` and logged rather
+        than silently swallowed — callers (e.g. ``session_status``) surface them so
+        consumers can distinguish "account is empty" from "the RPC call failed".
+        """
         from trader.trading.position_sizing import PortfolioState
         state = PortfolioState()
         try:
@@ -831,8 +839,9 @@ class MMR:
                 state.net_liquidation = float(acct_vals.get('NetLiquidation', {}).get('value', 0))
                 state.gross_position_value = float(acct_vals.get('GrossPositionValue', {}).get('value', 0))
                 state.available_funds = float(acct_vals.get('AvailableFunds', {}).get('value', 0))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning('get_account_values RPC failed: %s', e)
+            state.rpc_errors.append(f'account_values: {type(e).__name__}: {e}')
 
         try:
             portfolio_df = self.portfolio()
@@ -840,8 +849,9 @@ class MMR:
                 state.position_count = len(portfolio_df)
                 if 'dailyPNL' in portfolio_df.columns:
                     state.daily_pnl = portfolio_df['dailyPNL'].sum()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning('portfolio() RPC failed: %s', e)
+            state.rpc_errors.append(f'portfolio: {type(e).__name__}: {e}')
 
         try:
             store = self._proposal_store()
@@ -850,8 +860,9 @@ class MMR:
                 state.pending_proposal_value = sum(
                     p.amount for p in pending if p.amount is not None and p.amount == p.amount
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning('proposal_store query failed: %s', e)
+            state.rpc_errors.append(f'proposal_store: {type(e).__name__}: {e}')
 
         return state
 
@@ -871,13 +882,10 @@ class MMR:
         portfolio_df = self.portfolio()
         positions = portfolio_df.to_dict('records') if portfolio_df is not None and not portfolio_df.empty else []
 
-        net_liq = 0.0
-        try:
-            acct_vals = consume(self._rpc.rpc(return_type=dict).get_account_values())
-            if acct_vals:
-                net_liq = float(acct_vals.get('NetLiquidation', {}).get('value', 0))
-        except Exception:
-            pass
+        # Let RPC failures propagate — silently defaulting net_liq to 0 makes
+        # every exposure %/HHI/group-budget number wrong without signaling why.
+        acct_vals = consume(self._rpc.rpc(return_type=dict).get_account_values())
+        net_liq = float(acct_vals.get('NetLiquidation', {}).get('value', 0)) if acct_vals else 0.0
 
         analyzer = PortfolioRiskAnalyzer(duckdb_path)
         try:
@@ -902,13 +910,8 @@ class MMR:
             return {'total_value': 0, 'daily_pnl': 0, 'position_count': 0,
                     'exposure_pct': 0, 'movers': [], 'timestamp': str(dt.datetime.now())}
 
-        net_liq = 0.0
-        try:
-            acct_vals = consume(self._rpc.rpc(return_type=dict).get_account_values())
-            if acct_vals:
-                net_liq = float(acct_vals.get('NetLiquidation', {}).get('value', 0))
-        except Exception:
-            pass
+        acct_vals = consume(self._rpc.rpc(return_type=dict).get_account_values())
+        net_liq = float(acct_vals.get('NetLiquidation', {}).get('value', 0)) if acct_vals else 0.0
 
         total_value = 0.0
         daily_pnl = 0.0
@@ -2031,7 +2034,7 @@ class MMR:
             acct_vals = consume(
                 self._rpc.rpc(return_type=dict).get_account_values()
             )
-            if acct_vals:
+            if acct_vals and 'NetLiquidation' in acct_vals:
                 for key in ('NetLiquidation', 'TotalCashValue', 'AvailableFunds', 'BuyingPower'):
                     entry = acct_vals.get(key)
                     if entry:
@@ -2056,8 +2059,29 @@ class MMR:
 
                 if cushion_entry:
                     result['Cushion'] = cushion_entry['value']
-        except Exception:
-            pass
+            else:
+                # acct_vals is empty / missing NetLiquidation. This is the
+                # classic IB-Gateway-demo-account symptom (DUM* accounts don't
+                # stream account values), or the gateway hasn't authenticated
+                # yet. Surface it instead of silently producing a status with
+                # no balance fields.
+                hint = (
+                    f"No account values streaming for {acct} "
+                    "(IB Gateway demo account / not yet authenticated / "
+                    "real account login required). "
+                    "VNC into ib-gateway at vnc://localhost:5901 and re-enter "
+                    "your real IBKR paper or live credentials, then update "
+                    "ib_paper_account in trader.yaml."
+                )
+                result['account_values_warning'] = hint
+                logger.warning(hint)
+        except Exception as exc:
+            # Don't swallow silently — emit at debug so production logs aren't
+            # spammed but devs can `--debug` to see the underlying failure.
+            logger.debug("status(): get_account_values RPC failed", exc_info=exc)
+            result['account_values_warning'] = (
+                f"Failed to fetch account values: {type(exc).__name__}: {exc}"
+            )
 
         try:
             summaries = consume(

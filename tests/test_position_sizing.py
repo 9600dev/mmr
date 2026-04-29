@@ -376,6 +376,33 @@ class TestSessionSummary:
         assert summary['capacity']['remaining_usd'] == 0.0
         assert summary['capacity']['remaining_positions'] == 20
 
+    def test_rpc_errors_surface_as_warning_and_field(self):
+        # When _get_portfolio_state populates rpc_errors, the summary must
+        # loudly distinguish "account empty" from "RPC failed".
+        cfg = PositionSizingConfig()
+        sizer = PositionSizer(cfg)
+        state = PortfolioState(
+            rpc_errors=['account_values: TimeoutError: deadline exceeded'],
+        )
+        summary = sizer.session_summary(state)
+
+        assert summary['portfolio']['rpc_errors'] == [
+            'account_values: TimeoutError: deadline exceeded',
+        ]
+        # A warning must be present and name the failed source
+        assert any(
+            'RPC' in w and 'account_values' in w for w in summary['warnings']
+        ), f'expected RPC-failure warning, got {summary["warnings"]!r}'
+
+    def test_no_rpc_errors_field_stays_empty(self):
+        cfg = PositionSizingConfig()
+        sizer = PositionSizer(cfg)
+        state = PortfolioState(net_liquidation=100_000.0, position_count=2)
+        summary = sizer.session_summary(state)
+        assert summary['portfolio']['rpc_errors'] == []
+        # No RPC-failure warning when there were no errors
+        assert not any('RPC' in w for w in summary['warnings'])
+
 
 class TestSizingResult:
     def test_defaults(self):

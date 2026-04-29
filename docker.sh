@@ -401,10 +401,27 @@ up() {
         $RUNTIME rm -f "$cid" 2>/dev/null || true
     done
     $RUNTIME network rm mmr_default 2>/dev/null || true
+    # Belt-and-suspenders: also sweep any mmr-mmr / mmr_mmr containers that
+    # somehow aren't attached to mmr_default (e.g. left over from a previous
+    # run on a different network name). Without this, `./docker.sh -g`
+    # can't recover from the stuck-dependent state described in
+    # `_remove_mmr_dependents`.
+    _remove_mmr_dependents
     $COMPOSE -f "$BUILDDIR/docker-compose.yml" up -d
     echo ""
     echo "Containers started. Use './docker.sh -e' to exec in, or './docker.sh -l' for logs."
     print_vnc_url
+}
+
+# Force-recreate fails when other compose services (e.g. mmr_mmr_1 from a
+# previous `./docker.sh -u`) still exist with `depends_on: ib-gateway` —
+# podman/docker refuse to remove ib-gateway while a dependent is around,
+# leaving the old ib-gateway stopped and nothing listening on 7497/7496.
+# Sweep dependents before recreating.
+_remove_mmr_dependents() {
+    for cid in $($RUNTIME ps -aq --filter "name=mmr[-_]mmr" 2>/dev/null); do
+        $RUNTIME rm -f "$cid" 2>/dev/null || true
+    done
 }
 
 ib_only() {
@@ -414,15 +431,21 @@ ib_only() {
     echo ""
     echo "Starting IB Gateway only (for local development)..."
     echo ""
+    _remove_mmr_dependents
     # Force recreate so .env changes are always picked up
     $COMPOSE -f "$BUILDDIR/docker-compose.yml" up -d --force-recreate ib-gateway
     echo ""
     source "$BUILDDIR/.env"
+    # Host-side port the user connects to. docker-compose.yml maps
+    # 7496->container:4003 (live) and 7497->container:4004 (paper).
+    # IB Gateway itself listens on 4001/4002 internally; gnzsnz's socat
+    # forwards 4003/4004 -> 4001/4002. Don't echo the internal ports —
+    # nothing on the host can reach them.
     local ib_port
     if [ "${TRADING_MODE:-paper}" = "paper" ]; then
-        ib_port=4002
+        ib_port=7497
     else
-        ib_port=4001
+        ib_port=7496
     fi
     echo "IB Gateway running."
     echo "  API:  localhost:$ib_port (${TRADING_MODE:-paper})"
@@ -440,6 +463,10 @@ ib_only() {
 
 restart_ib() {
     echo "Restarting IB Gateway container..."
+    # Same dependent-container guard as ib_only(): podman/docker won't
+    # recreate ib-gateway while a container with `depends_on: ib-gateway`
+    # exists, even if it's stopped.
+    _remove_mmr_dependents
     $COMPOSE -f "$BUILDDIR/docker-compose.yml" up -d --force-recreate ib-gateway
     echo ""
     echo "IB Gateway restarted."

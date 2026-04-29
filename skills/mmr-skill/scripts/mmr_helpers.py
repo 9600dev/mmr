@@ -89,6 +89,111 @@ async def _run_sdk_script(script: str, timeout: int = 30) -> str:
         return await asyncio.to_thread(_run_sdk_script_sync, script, timeout=timeout)
 
 
+# ---------------------------------------------------------------------------
+# Internal helpers used by implied_move() / capability probes.
+# ---------------------------------------------------------------------------
+
+def _mid(row: dict) -> Optional[float]:
+    """Return mid-price from an options-chain row, falling back to last/mid."""
+    bid = row.get("bid")
+    ask = row.get("ask")
+    if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) \
+            and bid > 0 and ask > 0:
+        return (bid + ask) / 2
+    if isinstance(row.get("mid"), (int, float)):
+        return row["mid"]
+    if isinstance(row.get("last"), (int, float)):
+        return row["last"]
+    return None
+
+
+async def _last_close_local_or_massive(symbol: str) -> Optional[float]:
+    """Get the most recent daily close for a symbol — try local DuckDB first
+    (free, instant), then fall back to a single Massive ``list_aggs`` call."""
+    try:
+        q = await _run_cli_json(
+            "data", "query", symbol,
+            "--bar-size", "1 day", "--days", "30", "--tail", "1",
+            timeout=15,
+        )
+        d = q.get("data") if isinstance(q, dict) else None
+        if isinstance(d, list) and d:
+            c = d[-1].get("close")
+            if isinstance(c, (int, float)):
+                return float(c)
+    except Exception:
+        pass
+    # Massive fallback (one bar)
+    try:
+        closes, _ = await _massive_daily_closes(symbol, days=10, limit=5)
+        if closes:
+            return float(closes[-1])
+    except Exception:
+        pass
+    return None
+
+
+async def _daily_closes(symbol: str, history_days: int) -> tuple[list[float], str]:
+    """Return (closes_list, source_label) for ``history_days`` of daily bars.
+
+    Tries local DuckDB first; if it returns < 20 rows tops up via Massive
+    list_aggs (which works whenever ``MASSIVE_API_KEY`` / ``POLYGON_API_KEY``
+    is set in the env, regardless of whether data_service has the key).
+    """
+    closes: list[float] = []
+    src = "local"
+    try:
+        q = await _run_cli_json(
+            "data", "query", symbol,
+            "--bar-size", "1 day", "--days", str(history_days),
+            timeout=20,
+        )
+        d = q.get("data") if isinstance(q, dict) else None
+        if isinstance(d, list):
+            closes = [float(b["close"]) for b in d
+                      if isinstance(b.get("close"), (int, float))]
+    except Exception:
+        pass
+    if len(closes) < 20:
+        try:
+            massive_closes, src2 = await _massive_daily_closes(symbol, days=history_days)
+            if len(massive_closes) > len(closes):
+                closes, src = massive_closes, src2
+        except Exception:
+            pass
+    return closes, src
+
+
+async def _massive_daily_closes(
+    symbol: str, days: int = 90, limit: int = 250,
+) -> tuple[list[float], str]:
+    """Pull daily closes directly from Massive (Polygon) using the env-var
+    API key. Bypasses ``data_service`` (which doesn't always inherit the
+    key from the user's shell)."""
+    script = (
+        "import os, json, datetime as dt\n"
+        "from massive import RESTClient\n"
+        "key = os.environ.get('MASSIVE_API_KEY') or os.environ.get('POLYGON_API_KEY')\n"
+        "if not key: raise SystemExit('NO_KEY')\n"
+        "client = RESTClient(api_key=key)\n"
+        f"end = dt.date.today()\nstart = end - dt.timedelta(days={days})\n"
+        f"aggs = list(client.list_aggs('{symbol}', 1, 'day', start.isoformat(),"
+        f" end.isoformat(), limit={limit}))\n"
+        "out = [a.close for a in aggs]\n"
+        "print(json.dumps(out))\n"
+    )
+    raw = await _run_sdk_script(script, timeout=30)
+    # Pull the first JSON list out of stdout (uv may emit progress lines first)
+    m = re.search(r"\[[\d,.\s\-eE]*\]", raw)
+    if not m:
+        return [], "massive (parse failed)"
+    try:
+        closes = json.loads(m.group(0))
+        return [float(x) for x in closes], "massive"
+    except (ValueError, json.JSONDecodeError):
+        return [], "massive (parse failed)"
+
+
 class MMRHelpers:
     """MMR trading platform helpers. All methods are async and return strings or dicts."""
 
@@ -177,6 +282,203 @@ class MMRHelpers:
         """
         return await _run_cli_json("status")
 
+    @staticmethod
+    async def preflight(canary_symbol: str = "QQQ") -> dict:
+        """
+        One-shot capability probe — call this FIRST in any new MMR session.
+
+        Reports which data sources actually work right now. Most LLM trajectories
+        burn dozens of tool calls discovering that:
+
+          * IB is "connected" but the paper account has no live market-data
+            subscription (every ``snapshot()`` times out at 30s).
+          * The Polygon plan tier doesn't include options chains
+            (``options_chain()`` returns ``NOT_AUTHORIZED``).
+          * Local DuckDB has the symbol registered but only minute bars,
+            not daily — so ``data_query("...", bar_size="1 day")`` returns
+            empty.
+
+        Preflight probes all three in ~10–20 s and gives the LLM a capability
+        matrix it can branch on without firing 7 sequential timeouts.
+
+        :param canary_symbol: Liquid US symbol used for probes. Default "QQQ".
+        :return: Dict with shape::
+
+            {
+              "trader_service": {"connected": bool, "ib_upstream": bool, "account": str},
+              "ib_market_data": {"works": bool, "reason": str | None,
+                                 "last_price": float | None},
+              "polygon_options": {"expirations_endpoint": bool,
+                                  "chain_endpoint": bool, "tier": "free|paid|none"},
+              "local_data": {"symbols": int, "bar_sizes": list[str],
+                             "has_daily": bool, "has_minute": bool,
+                             "canary_daily_rows": int},
+              "recommendations": list[str],   # human-readable next steps
+            }
+
+        Example:
+            pf = await MMRHelpers.preflight()
+            if not pf["ib_market_data"]["works"]:
+                # Skip snapshot() loops; route through implied_move() / history_massive()
+                ...
+            if not pf["polygon_options"]["chain_endpoint"]:
+                # Don't try options_chain — use implied_move() with realized-vol fallback
+                ...
+        """
+        report: dict = {
+            "trader_service": {"connected": False, "ib_upstream": False, "account": None},
+            "ib_market_data": {"works": False, "reason": None, "last_price": None},
+            "polygon_options": {"expirations_endpoint": False, "chain_endpoint": False,
+                                "tier": "none"},
+            "local_data": {"symbols": 0, "bar_sizes": [], "has_daily": False,
+                           "has_minute": False, "canary_daily_rows": 0},
+            "recommendations": [],
+        }
+
+        # --- 1. trader_service / IB upstream ---
+        try:
+            s = await asyncio.wait_for(_run_cli_json("status"), timeout=20)
+            d = s.get("data") or {}
+            report["trader_service"]["connected"] = bool(d.get("connected"))
+            report["trader_service"]["ib_upstream"] = bool(d.get("ib_upstream_connected"))
+            report["trader_service"]["account"] = d.get("account")
+        except (asyncio.TimeoutError, Exception) as e:
+            report["trader_service"]["error"] = f"{type(e).__name__}: {e}"
+
+        # --- 2. IB market data canary ---
+        # Only worth probing if trader_service + ib_upstream are up. Use a tight
+        # 10s budget so the canary itself doesn't blow the preflight time.
+        if (report["trader_service"]["connected"]
+                and report["trader_service"]["ib_upstream"]):
+            try:
+                snap = await _run_cli_json("snapshot", canary_symbol, timeout=10)
+                data = snap.get("data") if isinstance(snap, dict) else None
+                if snap.get("timed_out"):
+                    report["ib_market_data"]["reason"] = (
+                        "snapshot timed out — paper account likely has no live "
+                        "market-data subscription (or another IB session holds the lock)"
+                    )
+                elif isinstance(data, dict) and data.get("last") is not None:
+                    report["ib_market_data"]["works"] = True
+                    report["ib_market_data"]["last_price"] = data.get("last")
+                else:
+                    msg = (snap.get("message") or snap.get("error")
+                           or "snapshot returned no usable price")
+                    report["ib_market_data"]["reason"] = str(msg)
+            except Exception as e:
+                report["ib_market_data"]["reason"] = f"{type(e).__name__}: {e}"
+        else:
+            report["ib_market_data"]["reason"] = (
+                "trader_service or IB upstream not connected"
+            )
+
+        # --- 3. Polygon options tier probes ---
+        # options expirations is a free endpoint on Polygon's cheapest tier;
+        # options chain requires the paid tier. Probing both lets us label
+        # the plan as "free" / "paid" / "none".
+        try:
+            exps = await _run_cli_json("options", "expirations", canary_symbol, timeout=20)
+            data = exps.get("data") if isinstance(exps, dict) else None
+            if isinstance(data, list) and len(data) > 0:
+                report["polygon_options"]["expirations_endpoint"] = True
+        except Exception:
+            pass
+        try:
+            chain = await _run_cli_json(
+                "options", "chain", canary_symbol, "--strike-min", "10000",
+                "--strike-max", "10001", timeout=20,
+            )
+            msg = (chain.get("message") or "") if isinstance(chain, dict) else str(chain)
+            if "NOT_AUTHORIZED" in msg:
+                report["polygon_options"]["chain_endpoint"] = False
+            elif chain.get("success") is not False:
+                # Either a successful empty result (no strikes in 10000–10001 range)
+                # or actual data — the endpoint is reachable either way.
+                report["polygon_options"]["chain_endpoint"] = True
+        except Exception:
+            pass
+        if report["polygon_options"]["chain_endpoint"]:
+            report["polygon_options"]["tier"] = "paid"
+        elif report["polygon_options"]["expirations_endpoint"]:
+            report["polygon_options"]["tier"] = "free"
+        else:
+            report["polygon_options"]["tier"] = "none"
+
+        # --- 4. Local DuckDB inventory ---
+        try:
+            summ = await _run_cli_json("data", "summary", timeout=15)
+            entries = summ.get("data") or []
+            symbols = {e.get("symbol") for e in entries if isinstance(e, dict)}
+            bar_sizes = {e.get("bar_size") for e in entries if isinstance(e, dict)}
+            report["local_data"]["symbols"] = len(symbols)
+            report["local_data"]["bar_sizes"] = sorted(b for b in bar_sizes if b)
+            report["local_data"]["has_daily"] = "1 day" in bar_sizes
+            report["local_data"]["has_minute"] = "1 min" in bar_sizes
+        except Exception:
+            pass
+
+        # Probe the canary's actual stored daily-bar count (data summary lists
+        # symbol×bar_size start/end but the start date often reflects contract
+        # registration, not actual stored bars — so do a real read).
+        try:
+            q = await _run_cli_json(
+                "data", "query", canary_symbol,
+                "--bar-size", "1 day", "--days", "365", timeout=15,
+            )
+            qd = q.get("data") if isinstance(q, dict) else None
+            if isinstance(qd, list):
+                report["local_data"]["canary_daily_rows"] = len(qd)
+        except Exception:
+            pass
+
+        # --- 5. Recommendations ---
+        recs: list[str] = []
+        ts = report["trader_service"]
+        if not ts["connected"]:
+            recs.append(
+                "trader_service is unreachable — start it with "
+                "`./start_mmr.sh` and re-run preflight."
+            )
+        elif not ts["ib_upstream"]:
+            recs.append(
+                "IB Gateway is not connected to IBKR — resolve/snapshot/buy/sell "
+                "will all fail. Check Gateway login / 2FA."
+            )
+        elif not report["ib_market_data"]["works"]:
+            recs.append(
+                "IB live market data is unavailable. Avoid snapshot() / "
+                "snapshots_batch() loops. Use history_massive() or "
+                "data_query() for prices, and implied_move() for vol/move estimates."
+            )
+
+        if report["polygon_options"]["tier"] == "none":
+            recs.append(
+                "Polygon API key is missing or invalid. options_* helpers will "
+                "fail; implied_move() will fall back to realized-vol from local "
+                "OHLCV (lower confidence)."
+            )
+        elif report["polygon_options"]["tier"] == "free":
+            recs.append(
+                "Polygon plan covers options_expirations only. options_chain "
+                "and options_snapshot return NOT_AUTHORIZED — implied_move() "
+                "will fall back to realized-vol."
+            )
+
+        if not report["local_data"]["has_daily"]:
+            recs.append(
+                "No 1-day local OHLCV. Run "
+                "`data_download(symbols=[...], bar_size='1 day', days=365)` "
+                "before any vol/move analysis."
+            )
+        elif report["local_data"]["canary_daily_rows"] < 30:
+            recs.append(
+                f"Only {report['local_data']['canary_daily_rows']} daily bars "
+                f"locally for {canary_symbol}. Realized-vol estimates need ≥20. "
+                f"Top up via history_massive(symbol='...', prev_days=90)."
+            )
+
+        report["recommendations"] = recs
+        return report
     # ------------------------------------------------------------------
     # Symbol Resolution & Market Data
     # ------------------------------------------------------------------
@@ -208,15 +510,26 @@ class MMRHelpers:
 
     @staticmethod
     async def snapshot(symbol: str, delayed: bool = False,
-                       exchange: str = "", currency: str = "") -> dict:
+                       exchange: str = "", currency: str = "",
+                       timeout: int = 12) -> dict:
         """
         Get a price snapshot for a symbol (bid, ask, last, OHLC, volume).
         Returns JSON dict with price data. Requires trader_service to be running.
+
+        IMPORTANT: many IB paper accounts lack live market-data subscriptions —
+        in that case ``snapshot()`` times out (default 12s) and returns
+        ``{"data": None, "error": "...", "timed_out": True}``. Run
+        ``MMRHelpers.preflight()`` once at session start to find out before
+        firing 7 sequential snapshot calls.
 
         :param symbol: Stock ticker (e.g. "AMD")
         :param delayed: Use delayed market data (default False)
         :param exchange: Exchange hint for international stocks (e.g. "ASX")
         :param currency: Currency hint (e.g. "AUD")
+        :param timeout: Max seconds to wait. Default 12 (the trader_service RPC
+            itself caps at 30s; setting timeout < 30 lets us bail out early
+            when IB market data is gated, which is a common paper-account
+            failure mode).
         :return: Dict with bid, ask, last, open, high, low, close, volume, etc.
 
         Example:
@@ -232,13 +545,14 @@ class MMRHelpers:
             args.extend(["--exchange", exchange])
         if currency:
             args.extend(["--currency", currency])
-        return await _run_cli_json(*args)
+        return await _run_cli_json(*args, timeout=timeout)
 
     @staticmethod
     async def snapshots_batch(
         symbols: List[str],
         exchange: str = "",
         currency: str = "",
+        timeout: int = 60,
     ) -> dict:
         """
         Get price snapshots for multiple symbols in one call.
@@ -249,6 +563,9 @@ class MMRHelpers:
         :param symbols: List of ticker strings (e.g. ["BHP", "CBA", "NAB"])
         :param exchange: Exchange hint for all symbols (e.g. "ASX")
         :param currency: Currency hint for all symbols (e.g. "AUD")
+        :param timeout: Max seconds to wait. Default 60. As with ``snapshot()``,
+            paper accounts without IB market-data subs will time out — call
+            ``preflight()`` first to detect this.
         :return: Dict with list of snapshots, each containing bid, ask, last, open, high, low, close
 
         Example:
@@ -260,7 +577,7 @@ class MMRHelpers:
             args.extend(["--exchange", exchange])
         if currency:
             args.extend(["--currency", currency])
-        return await _run_cli_json(*args, timeout=120)
+        return await _run_cli_json(*args, timeout=timeout)
 
     @staticmethod
     async def depth(symbol: str, rows: int = 5,
@@ -945,6 +1262,232 @@ class MMRHelpers:
         return await _run_cli(*args)
 
     @staticmethod
+    async def implied_move(
+        symbol: str,
+        expiration: Optional[str] = None,
+        dte: Optional[int] = None,
+        history_days: int = 90,
+        prefer: str = "auto",
+    ) -> dict:
+        """
+        Estimate the expected price move (1 sigma) over a horizon for a symbol.
+
+        Canonical "earnings implied move" / hedging-window helper. Tries data
+        sources in order of confidence and returns the first that works:
+
+          1. ``polygon_atm_straddle`` — pulls ATM call+put from
+             ``options_chain``, computes ``(call_mid + put_mid) / spot``.
+             Highest confidence (market-implied). Requires the paid Polygon
+             options tier.
+          2. ``realized_vol`` — pulls ``history_days`` of daily closes
+             (local DuckDB → Massive list_aggs top-up if local is thin),
+             computes annualised log-return stdev, scales by
+             ``sqrt(DTE/252)``. Lower confidence but always available as long
+             as the Massive key is set or local OHLCV exists.
+
+        :param symbol: Underlying ticker (e.g. "GOOGL")
+        :param expiration: YYYY-MM-DD. If both ``expiration`` and ``dte`` are
+            None, defaults to the nearest weekly expiration via
+            ``options_expirations``.
+        :param dte: Days-to-expiry shortcut. If set, ``expiration`` is
+            computed as today + DTE calendar days (next trading day if it
+            falls on a weekend).
+        :param history_days: Lookback window for realized-vol fallback
+            (default 90 calendar days). 30+ is reasonable; 60–90 smooths
+            out single-event noise.
+        :param prefer: ``"auto"`` (default — try Polygon first then
+            realized vol), ``"polygon"`` (only Polygon, fail if not
+            authorized), or ``"realized"`` (skip Polygon entirely — useful
+            if you already know the plan tier from preflight()).
+
+        :return: Dict with shape::
+
+            {
+              "symbol": "GOOGL",
+              "expiration": "2026-05-01",
+              "dte_calendar": 2,
+              "dte_trading": 2,
+              "method": "realized_vol" | "polygon_atm_straddle",
+              "confidence": "high" | "medium" | "low",
+              "spot": 167.45,
+              "implied_move_pct": 1.92,            # 1-sigma % move
+              "implied_move_dollar": 3.21,
+              "expected_low": 164.24,              # spot * (1 - move)
+              "expected_high": 170.66,             # spot * (1 + move)
+              "annualized_vol_pct": 21.3,          # only set for realized_vol
+              "atm_strike": null,                  # only set for polygon
+              "call_mid": null, "put_mid": null,   # only set for polygon
+              "source_rows": 63,                   # bars used (realized_vol)
+              "notes": "...",
+            }
+
+        Example:
+            # Quickly: implied move through Friday for GOOGL (earnings tonight)
+            mv = await MMRHelpers.implied_move("GOOGL", expiration="2026-05-01")
+            # mv["implied_move_pct"] → 5.4
+
+            # Or by DTE
+            mv = await MMRHelpers.implied_move("AAPL", dte=2)
+        """
+        import datetime as _dt
+        import math as _math
+
+        # --- Resolve expiration / DTE ---
+        today = _dt.date.today()
+        if expiration is None and dte is None:
+            # Nearest weekly: ask options_expirations (free Polygon endpoint)
+            try:
+                exps = await _run_cli_json("options", "expirations", symbol, timeout=20)
+                data = exps.get("data") or []
+                if data:
+                    expiration = data[0].get("expiration")
+            except Exception:
+                pass
+        if expiration is None and dte is not None:
+            target = today + _dt.timedelta(days=dte)
+            # If weekend, push to Monday
+            while target.weekday() >= 5:
+                target += _dt.timedelta(days=1)
+            expiration = target.isoformat()
+        if expiration is None:
+            return {
+                "symbol": symbol,
+                "error": "Could not determine expiration and no DTE provided",
+                "method": None,
+            }
+
+        try:
+            exp_date = _dt.date.fromisoformat(expiration)
+        except ValueError:
+            return {"symbol": symbol, "error": f"Invalid expiration: {expiration}",
+                    "method": None}
+        dte_cal = max((exp_date - today).days, 0)
+
+        # Trading-day approximation: 5/7 of calendar days, floor at 0.5 to
+        # avoid sqrt(0) for same-day expirations.
+        dte_trading = max(dte_cal * 5.0 / 7.0, 0.5)
+
+        result: dict = {
+            "symbol": symbol,
+            "expiration": expiration,
+            "dte_calendar": dte_cal,
+            "dte_trading": round(dte_trading, 2),
+            "method": None,
+            "confidence": None,
+            "spot": None,
+            "implied_move_pct": None,
+            "implied_move_dollar": None,
+            "expected_low": None,
+            "expected_high": None,
+            "annualized_vol_pct": None,
+            "atm_strike": None,
+            "call_mid": None,
+            "put_mid": None,
+            "source_rows": 0,
+            "notes": "",
+        }
+
+        # --- Tier 1: Polygon ATM straddle ---
+        if prefer in ("auto", "polygon"):
+            try:
+                # We need spot first to pick ATM. Pull narrow strike window
+                # around the most recent close from local OHLCV (free).
+                spot = await _last_close_local_or_massive(symbol)
+                if spot is not None:
+                    win = max(spot * 0.05, 5.0)
+                    chain_json = await _run_cli_json(
+                        "options", "chain", symbol,
+                        "-e", expiration,
+                        "--strike-min", str(round(spot - win, 2)),
+                        "--strike-max", str(round(spot + win, 2)),
+                        timeout=30,
+                    )
+                    msg = (chain_json.get("message") or "") if isinstance(chain_json, dict) else ""
+                    if "NOT_AUTHORIZED" in msg:
+                        if prefer == "polygon":
+                            result["method"] = "polygon_atm_straddle"
+                            result["error"] = (
+                                "Polygon plan does not include options chain. "
+                                "Re-run with prefer='realized' or use 'auto'."
+                            )
+                            return result
+                        # else fall through to realized vol
+                    else:
+                        rows = chain_json.get("data") or []
+                        # Build call/put strike→mid maps
+                        calls = {r["strike"]: _mid(r) for r in rows
+                                 if r.get("type") == "call" and _mid(r) is not None}
+                        puts = {r["strike"]: _mid(r) for r in rows
+                                if r.get("type") == "put" and _mid(r) is not None}
+                        common = sorted(set(calls) & set(puts),
+                                        key=lambda k: abs(k - spot))
+                        if common:
+                            atm = common[0]
+                            cm, pm = calls[atm], puts[atm]
+                            move_pct = (cm + pm) / spot * 100
+                            result.update({
+                                "method": "polygon_atm_straddle",
+                                "confidence": "high",
+                                "spot": spot,
+                                "implied_move_pct": round(move_pct, 3),
+                                "implied_move_dollar": round(cm + pm, 4),
+                                "expected_low": round(spot - (cm + pm), 4),
+                                "expected_high": round(spot + (cm + pm), 4),
+                                "atm_strike": atm,
+                                "call_mid": cm,
+                                "put_mid": pm,
+                                "source_rows": len(rows),
+                                "notes": "ATM straddle from Polygon chain.",
+                            })
+                            return result
+            except Exception as e:
+                if prefer == "polygon":
+                    result["method"] = "polygon_atm_straddle"
+                    result["error"] = f"{type(e).__name__}: {e}"
+                    return result
+                # else fall through
+
+        # --- Tier 2: Realized vol fallback ---
+        try:
+            closes, src = await _daily_closes(symbol, history_days)
+            if len(closes) < 5:
+                result["error"] = (
+                    f"Insufficient history for realized-vol estimate "
+                    f"(have {len(closes)} bars, need ≥5)."
+                )
+                return result
+            spot = closes[-1]
+            rets = [_math.log(closes[i] / closes[i-1])
+                    for i in range(1, len(closes))]
+            n = len(rets)
+            mean = sum(rets) / n
+            var = sum((r - mean) ** 2 for r in rets) / max(n - 1, 1)
+            sigma_d = _math.sqrt(var)
+            sigma_ann = sigma_d * _math.sqrt(252)
+            move_frac = sigma_ann * _math.sqrt(dte_trading / 252)
+            confidence = "medium" if n >= 30 else "low"
+            result.update({
+                "method": "realized_vol",
+                "confidence": confidence,
+                "spot": round(spot, 4),
+                "implied_move_pct": round(move_frac * 100, 3),
+                "implied_move_dollar": round(spot * move_frac, 4),
+                "expected_low": round(spot * (1 - move_frac), 4),
+                "expected_high": round(spot * (1 + move_frac), 4),
+                "annualized_vol_pct": round(sigma_ann * 100, 2),
+                "source_rows": n + 1,
+                "notes": (
+                    f"Realized vol from {src} ({n+1} closes). "
+                    f"Earnings/event-driven moves often exceed this; treat "
+                    f"as a baseline, not a market-implied number."
+                ),
+            })
+            return result
+        except Exception as e:
+            result["error"] = f"realized-vol fallback failed: {type(e).__name__}: {e}"
+            return result
+
+    @staticmethod
     async def buy_option(
         symbol: str,
         expiration: str,
@@ -1039,6 +1582,13 @@ class MMRHelpers:
         Read OHLCV data from local DuckDB.
         Does NOT require any service.
 
+        Empty results are common when the requested ``bar_size`` doesn't exist
+        for the symbol (e.g. you asked for "1 day" but only "1 min" was
+        downloaded). When ``data`` comes back empty this helper enriches the
+        JSON with a ``hint`` field listing the bar sizes that DO exist locally
+        for the symbol — so the LLM doesn't have to call ``data_summary``
+        and grep for itself.
+
         :param symbol: Stock ticker or conId (e.g. "AAPL", "265598")
         :param bar_size: Bar size (default "1 day")
         :param days: Days of history to query (default 30)
@@ -1050,7 +1600,36 @@ class MMRHelpers:
         args = ["data", "query", symbol, "--bar-size", bar_size, "--days", str(days)]
         if tail is not None:
             args.extend(["--tail", str(tail)])
-        return await _run_cli_json_str(*args)
+        result = await _run_cli_json(*args)
+        # Enrich empty results with a diagnostic about what IS available.
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, list) and len(data) == 0:
+                try:
+                    summ = await _run_cli_json("data", "summary", timeout=15)
+                    entries = summ.get("data") or []
+                    sizes = sorted({
+                        e.get("bar_size") for e in entries
+                        if isinstance(e, dict) and e.get("symbol") == symbol
+                        and e.get("bar_size")
+                    })
+                    if sizes:
+                        result["hint"] = (
+                            f"No '{bar_size}' bars locally for {symbol}, but "
+                            f"these bar sizes ARE available: {sizes}. "
+                            f"Either retry with a stored bar_size or run "
+                            f"data_download(symbols=['{symbol}'], "
+                            f"bar_size='{bar_size}', days={days})."
+                        )
+                    else:
+                        result["hint"] = (
+                            f"No local OHLCV for {symbol} at any bar size. "
+                            f"Run data_download(symbols=['{symbol}'], "
+                            f"bar_size='{bar_size}', days={days}) first."
+                        )
+                except Exception:
+                    pass
+        return json.dumps(result, indent=2)
 
     @staticmethod
     async def data_download(

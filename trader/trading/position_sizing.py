@@ -145,6 +145,7 @@ class PortfolioState:
     daily_pnl: float = 0.0
     position_count: int = 0
     pending_proposal_value: float = 0.0   # sum of PENDING proposal amounts
+    rpc_errors: List[str] = field(default_factory=list)
 
     @property
     def current_exposure_pct(self) -> float:
@@ -436,6 +437,18 @@ class PositionSizer:
         # Collect all warnings
         all_warnings = list(set(high.warnings + medium.warnings + low.warnings))
 
+        # Surface RPC fetch failures loudly. When get_account_values or
+        # ib.portfolio() raise, _get_portfolio_state returns zeros — without
+        # this warning the output would look identical to a genuinely empty
+        # account, which silently mis-sizes every downstream proposal.
+        if state.rpc_errors:
+            all_warnings.append(
+                "Portfolio snapshot is incomplete — one or more RPC calls "
+                "to trader_service failed. The zeros below are NOT a real "
+                "account state; they reflect missing data. Failed sources: "
+                + "; ".join(state.rpc_errors)
+            )
+
         # Cross-check: gross_position_value comes from IB's accountSummary
         # (one RPC), position_count comes from ib.portfolio() (a different
         # subscription). If the account summary says there's meaningful
@@ -494,6 +507,7 @@ class PositionSizer:
                 'position_count': state.position_count,
                 'pending_proposal_value': state.pending_proposal_value,
                 'exposure_pct': round(state.current_exposure_pct, 4),
+                'rpc_errors': list(state.rpc_errors),
             },
             'capacity': {
                 'remaining_usd': round(remaining_usd, 2),

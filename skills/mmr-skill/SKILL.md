@@ -34,6 +34,85 @@ The trader_service can be configured to **refuse direct buy/sell RPCs entirely**
 - **massive_api_key only** (no service needed): filing_section, `options_expirations`, `options_chain`, `options_snapshot`, `options_implied`, `news`, `forex_snapshot` (massive source), `forex_movers`, `stream`
 - **No service needed**: universe_list, universe_show, universe_create, universe_delete, universe_remove, universe_import, status, market_hours, `data_summary`, `data_query`, `backtest`, `backtest_sweep`, `backtest_batch`, `backtests_list`, `backtests_show`, `backtests_confidence`, `backtests_archive`, `backtests_unarchive`, `sweep_run`, `sweeps_list`, `sweeps_show`, `strategies_inspect`, `strategy_create`, `strategy_deploy`, `strategy_undeploy`, `strategy_signals`, `strategy_backtest`, `propose`, `proposals`, `reject`, `session_limits`, `session_status`, `group_list`, `group_create`, `group_delete`, `group_show`, `group_add`, `group_remove`, `group_set`, `logs`
 
+## Reality check first — `preflight()` before anything else
+
+Every MMR session, **call `MMRHelpers.preflight()` once** before doing serious work. It probes the four capability boundaries that silently break trajectories:
+
+```python
+pf = await MMRHelpers.preflight()
+emit(pf)
+```
+
+Returns a dict like:
+
+```json
+{
+  "trader_service": {"connected": true, "ib_upstream": true, "account": "DUM422056"},
+  "ib_market_data": {"works": false, "reason": "snapshot timed out — paper account likely has no live market-data subscription"},
+  "polygon_options": {"expirations_endpoint": true, "chain_endpoint": false, "tier": "free"},
+  "local_data": {"symbols": 43, "bar_sizes": ["1 day", "1 min"], "has_daily": true, "canary_daily_rows": 8},
+  "recommendations": [
+    "IB live market data is unavailable. Avoid snapshot() / snapshots_batch() loops...",
+    "Polygon plan covers options_expirations only. options_chain returns NOT_AUTHORIZED — implied_move() will fall back to realized-vol.",
+    "Only 8 daily bars locally for QQQ. Top up via history_massive(...)."
+  ]
+}
+```
+
+**Branch on the capability matrix instead of firing seven sequential timeouts.** The four most common gotchas:
+
+| Symptom in trajectory | Real cause | Branch on |
+|---|---|---|
+| `snapshot()` returns `{"data": null, "timed_out": true}` for every symbol | IB Gateway connected but paper account has no live market-data subscription. `status()` says "connected" — that's misleading. | `pf["ib_market_data"]["works"]` |
+| `options_chain()` returns `BadResponse: NOT_AUTHORIZED` | Polygon plan tier doesn't include options. `options_expirations` works (free endpoint) but chain/snapshot don't. | `pf["polygon_options"]["chain_endpoint"]` |
+| `data_query("...", bar_size="1 day")` returns `[]` despite `data_summary` listing the symbol | Symbol is registered in the universe (so `data summary` shows it), but the actual stored bars are at a different `bar_size` (often 1 min only). | `pf["local_data"]["bar_sizes"]`, or just look at `data_query()`'s new `hint` field on empty results |
+| Local DuckDB has the symbol but only ~10 bars | Contract registered far back but data was never backfilled. Realized-vol estimates need ≥20–30 bars. | `pf["local_data"]["canary_daily_rows"]`; top up via `history_massive()` or `data_download()` |
+
+When `ib_market_data.works` is False — the most common failure mode on paper accounts — every price/quote question routes through:
+- **prices**: `data_query()` → fall back to `history_massive()` (downloads then queries)
+- **expected move / vol**: `implied_move()` (handles fallback chain internally)
+- **options chains**: only available on paid Polygon tier; otherwise pivot to `implied_move()` for vol estimates
+
+## Earnings / event-driven moves — `implied_move()`
+
+Single helper that wraps the canonical "what's the implied move through this expiration?" calc with a three-tier fallback. Use this instead of hand-rolling ATM straddles.
+
+```python
+# Implied move for GOOGL through Friday (e.g. earnings tonight)
+mv = await MMRHelpers.implied_move("GOOGL", expiration="2026-05-01")
+emit(mv)
+```
+
+Returns:
+
+```json
+{
+  "symbol": "GOOGL",
+  "expiration": "2026-05-01",
+  "dte_calendar": 2,
+  "method": "polygon_atm_straddle",   // or "realized_vol" on free tier
+  "confidence": "high",                // "high" for ATM straddle, "medium"/"low" for realized
+  "spot": 167.45,
+  "implied_move_pct": 5.42,            // 1-sigma % move
+  "implied_move_dollar": 9.07,
+  "expected_low": 158.38,
+  "expected_high": 176.52,
+  "atm_strike": 167.5, "call_mid": 4.7, "put_mid": 4.4,
+  "annualized_vol_pct": null,
+  "notes": "ATM straddle from Polygon chain."
+}
+```
+
+**Method selection:** `prefer="auto"` (default) tries Polygon ATM straddle first; falls back to realized-vol from local OHLCV (with Massive `list_aggs` top-up if local is thin) when Polygon options aren't available. Pass `prefer="realized"` to skip the Polygon attempt entirely (saves ~3s) when you already know from `preflight()` that the chain endpoint is gated.
+
+**Earnings caveat:** realized vol is a baseline, not a market-implied number. Earnings/event-driven moves often **double or triple** the realized-vol estimate. Treat it as a floor, not a forecast. The result's `notes` field flags this.
+
+**By DTE shortcut:** when you don't know the exact expiration, pass `dte=2` and the helper picks today + 2 calendar days (rolled to the next trading day if it lands on a weekend).
+
+```python
+mv = await MMRHelpers.implied_move("AAPL", dte=2)   # default-pick expiry
+```
+
 ## Picking a data source
 
 Most data-fetching helpers accept `source="massive"|"twelvedata"`. Quick rules:
@@ -207,14 +286,17 @@ Shapes deliberately differ between sources — we pass through what each provide
 
 | Method | Service? | Description |
 |--------|----------|-------------|
-| `MMRHelpers.options_expirations(symbol)` | No* | List expiration dates with DTE |
-| `MMRHelpers.options_chain(symbol, expiration=, contract_type=, strike_min=, strike_max=)` | No* | Full chain snapshot (strike, bid/ask, greeks, IV, OI) |
-| `MMRHelpers.options_snapshot(option_ticker)` | No* | Single contract detail |
-| `MMRHelpers.options_implied(symbol, expiration, risk_free_rate=0.05)` | No* | Market-implied vs constant-vol probability distribution |
+| `MMRHelpers.options_expirations(symbol)` | No* | List expiration dates with DTE (free Polygon tier) |
+| `MMRHelpers.options_chain(symbol, expiration=, contract_type=, strike_min=, strike_max=)` | No** | Full chain snapshot (strike, bid/ask, greeks, IV, OI) |
+| `MMRHelpers.options_snapshot(option_ticker)` | No** | Single contract detail |
+| `MMRHelpers.options_implied(symbol, expiration, risk_free_rate=0.05)` | No** | Market-implied vs constant-vol probability distribution |
+| `MMRHelpers.implied_move(symbol, expiration=, dte=, prefer="auto")` | No*** | **Expected 1-sigma move through expiration. Tries Polygon ATM straddle, falls back to realized-vol from local OHLCV. Use this for earnings analysis.** |
 | `MMRHelpers.buy_option(symbol, expiration, strike, right, quantity, limit_price=, market=)` | **Yes** | Buy option contracts |
 | `MMRHelpers.sell_option(symbol, expiration, strike, right, quantity, limit_price=, market=)` | **Yes** | Sell option contracts |
 
-*Requires `massive_api_key` in config.
+\* Requires `massive_api_key` (free Polygon tier is enough).
+\** Requires the **paid Polygon options tier**. Free tier returns `NOT_AUTHORIZED`. Use `preflight()` to check `pf["polygon_options"]["chain_endpoint"]`.
+\*** Requires `massive_api_key` for ATM-straddle method, OR local OHLCV (any tier) for realized-vol fallback. Always returns *something* — handle the `method` field to know how confident the answer is.
 
 `right`: `"C"` for call, `"P"` for put. `option_ticker` format: `O:AAPL260320C00250000` (symbol + YYMMDD + C/P + strike*1000 zero-padded to 8 digits).
 
@@ -563,6 +645,38 @@ implied = await MMRHelpers.options_implied("AAPL", "2026-03-20")
 result = await MMRHelpers.buy_option("AAPL", "2026-03-20", 250.0, "C", 5, market=True)
 emit(exps + chain + implied + result)
 ```
+
+### Pattern 10b: Earnings implied moves and hedge sizing
+
+When several names report tonight (or this week) and you want to size a QQQ
+hedge, use `implied_move()` directly. It does the right thing across all
+plan tiers without you having to bounce between Polygon errors and IB
+timeouts.
+
+```python
+# 1. Reality check (only needed once per session)
+pf = await MMRHelpers.preflight()
+emit(pf["recommendations"])
+
+# 2. Implied moves through Friday for tonight's earnings names
+import asyncio
+syms = ["GOOGL", "AMZN", "MSFT", "AAPL"]
+moves = await asyncio.gather(*[
+    MMRHelpers.implied_move(s, expiration="2026-05-01") for s in syms
+])
+for s, m in zip(syms, moves):
+    emit(f"{s}: {m['implied_move_pct']}% via {m['method']} "
+         f"({m['confidence']}) — range ${m['expected_low']}-${m['expected_high']}")
+
+# 3. Same for the index hedge candidate
+qqq = await MMRHelpers.implied_move("QQQ", expiration="2026-05-01")
+emit(qqq)
+```
+
+`implied_move()` is safe to fan out via `asyncio.gather` — each call only
+touches Massive's REST API and local DuckDB, no shared trader_service
+connection. (Don't gather `snapshot()` calls — those serialize through
+one ZMQ connection.)
 
 ### Pattern 11: Build and Test a Strategy (Full Loop)
 

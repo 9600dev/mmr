@@ -974,3 +974,146 @@ class TestMarketHours:
         assert 'NASDAQ' in exchange_names
         assert 'ASX' in exchange_names
         assert 'TSE' in exchange_names
+
+
+def _stub_proposal_store(mmr, pending=None):
+    """Pre-seed _prop_store so _proposal_store() returns a controlled stub."""
+    store = MagicMock()
+    store.query.return_value = pending or []
+    mmr._prop_store = store
+
+
+class TestGetPortfolioStateErrorSurfacing:
+    """A silent RPC failure in _get_portfolio_state used to be indistinguishable
+    from a genuinely empty account — session_status returned zeros either way.
+    These tests pin the new contract: failures are recorded on rpc_errors and
+    (via session_summary) surfaced as warnings."""
+
+    def test_account_values_failure_recorded(self):
+        mock_client = _make_mock_rpc()
+        mock_client.rpc.return_value.get_account_values.side_effect = TimeoutError('deadline')
+        # portfolio() must still succeed so we isolate the account_values path
+        mock_client.rpc.return_value.get_portfolio_summary.return_value = []
+
+        mmr = _make_mmr_with_mock(mock_client)
+        _stub_proposal_store(mmr)
+
+        state = mmr._get_portfolio_state()
+
+        assert state.net_liquidation == 0.0
+        assert any('account_values' in e and 'TimeoutError' in e for e in state.rpc_errors), (
+            f'expected account_values error in rpc_errors, got {state.rpc_errors!r}'
+        )
+
+    def test_portfolio_failure_recorded(self):
+        mock_client = _make_mock_rpc()
+        mock_client.rpc.return_value.get_account_values.return_value = {
+            'NetLiquidation': {'value': 97248.18},
+            'GrossPositionValue': {'value': 22382.0},
+            'AvailableFunds': {'value': 50000.0},
+        }
+        mock_client.rpc.return_value.get_portfolio_summary.side_effect = ConnectionError('lost')
+
+        mmr = _make_mmr_with_mock(mock_client)
+        _stub_proposal_store(mmr)
+
+        state = mmr._get_portfolio_state()
+
+        # account_values succeeded so net_liq is correct
+        assert state.net_liquidation == 97248.18
+        # position_count stays at 0 but the failure is *flagged*
+        assert state.position_count == 0
+        assert any('portfolio' in e and 'ConnectionError' in e for e in state.rpc_errors), (
+            f'expected portfolio error in rpc_errors, got {state.rpc_errors!r}'
+        )
+
+    def test_both_failures_recorded_simultaneously(self):
+        # This is the exact scenario observed in the LLMVM trajectory:
+        # portfolio_risk worked, then session_status returned all zeros.
+        mock_client = _make_mock_rpc()
+        mock_client.rpc.return_value.get_account_values.side_effect = TimeoutError('a')
+        mock_client.rpc.return_value.get_portfolio_summary.side_effect = TimeoutError('b')
+
+        mmr = _make_mmr_with_mock(mock_client)
+        _stub_proposal_store(mmr)
+
+        state = mmr._get_portfolio_state()
+
+        assert state.net_liquidation == 0.0
+        assert state.position_count == 0
+        assert any('account_values' in e for e in state.rpc_errors)
+        assert any('portfolio' in e for e in state.rpc_errors)
+
+    def test_clean_success_leaves_rpc_errors_empty(self):
+        mock_client = _make_mock_rpc()
+        mock_client.rpc.return_value.get_account_values.return_value = {
+            'NetLiquidation': {'value': 50000.0},
+            'GrossPositionValue': {'value': 0.0},
+            'AvailableFunds': {'value': 50000.0},
+        }
+        mock_client.rpc.return_value.get_portfolio_summary.return_value = []
+
+        mmr = _make_mmr_with_mock(mock_client)
+        _stub_proposal_store(mmr)
+
+        state = mmr._get_portfolio_state()
+
+        assert state.rpc_errors == []
+        assert state.net_liquidation == 50000.0
+
+
+class TestSessionStatusSurfacesErrors:
+    def test_session_status_flags_rpc_failure(self):
+        # session_status should loudly signal when its data is incomplete —
+        # otherwise an LLM can't tell "account empty" from "RPC failed".
+        mock_client = _make_mock_rpc()
+        mock_client.rpc.return_value.get_account_values.side_effect = TimeoutError('x')
+        mock_client.rpc.return_value.get_portfolio_summary.return_value = []
+
+        mmr = _make_mmr_with_mock(mock_client)
+        _stub_proposal_store(mmr)
+
+        summary = mmr.session_status()
+
+        assert summary['portfolio']['rpc_errors'], 'rpc_errors must be populated'
+        assert any('account_values' in e for e in summary['portfolio']['rpc_errors'])
+        assert any(
+            'RPC' in w and 'account_values' in w for w in summary['warnings']
+        ), f'expected RPC-failure warning, got {summary["warnings"]!r}'
+
+
+class TestRiskReportPropagatesFailures:
+    """risk_report is explicitly documented as requiring trader_service — a
+    silent failure yielding net_liq=0 silently corrupts every exposure %,
+    HHI and group-budget number it produces. Better to raise."""
+
+    def test_account_values_failure_propagates(self):
+        mock_client = _make_mock_rpc()
+        mock_client.rpc.return_value.get_portfolio_summary.return_value = []
+        mock_client.rpc.return_value.get_account_values.side_effect = TimeoutError('boom')
+
+        mmr = _make_mmr_with_mock(mock_client)
+        # avoid PortfolioRiskAnalyzer needing a real duckdb path
+        mmr._container.config.return_value = {'duckdb_path': ''}
+
+        with pytest.raises(TimeoutError):
+            mmr.risk_report()
+
+
+class TestPortfolioSnapshotPropagatesFailures:
+    def test_account_values_failure_propagates(self):
+        mock_client = _make_mock_rpc()
+        # Must return a non-empty portfolio so we get past the early-return
+        contract = FakeContract(conId=4391, symbol='AMD', localSymbol='AMD')
+        summary = FakePortfolioSummary(
+            contract=contract, position=100, marketPrice=150.0, marketValue=15000.0,
+            averageCost=140.0, unrealizedPNL=1000.0, realizedPNL=0.0,
+            account='DU123', dailyPNL=50.0,
+        )
+        mock_client.rpc.return_value.get_portfolio_summary.return_value = [summary]
+        mock_client.rpc.return_value.get_account_values.side_effect = TimeoutError('boom')
+
+        mmr = _make_mmr_with_mock(mock_client)
+
+        with pytest.raises(TimeoutError):
+            mmr.portfolio_snapshot()
