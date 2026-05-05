@@ -2906,7 +2906,75 @@ def _handle_strategies_list(mmr: MMR):
         _handle_strategies_from_config()
         return
 
-    print_df(df, title='Strategies (live from strategy_service)')
+    if _json_mode:
+        print_df(df, title='Strategies (live from strategy_service)')
+        return
+
+    # Custom renderer: the default print_df hands every column equal weight,
+    # which means a long `conids` list (30 symbols' worth of integers) crushes
+    # the name/state/bar_size columns to zero width. Build a focused table
+    # with conids summarised as "N: first,second,third..." and params shown
+    # as a compact key=val string.
+    from rich.table import Table as _RTable
+    table = _RTable(title='Strategies (live from strategy_service)', show_lines=False, expand=True)
+    table.add_column('name', style='bold cyan', no_wrap=True)
+    table.add_column('state', justify='center', no_wrap=True)
+    table.add_column('bar', no_wrap=True)
+    table.add_column('hist', justify='right', no_wrap=True)
+    table.add_column('symbols', no_wrap=False, ratio=2)
+    table.add_column('params', no_wrap=False, ratio=2)
+
+    # Try to map conIds back to symbols using local universes for a friendlier
+    # display. Falls back to raw ids on any error.
+    sym_lookup = {}
+    try:
+        from trader.container import Container as _Container
+        from trader.data.universe import UniverseAccessor as _UA
+        cfg = _Container.instance().config()
+        accessor = _UA(cfg['duckdb_path'], cfg.get('universe_library', 'Universes'))
+        for uname in accessor.list_universes_count().keys():
+            for d in accessor.get(uname).security_definitions:
+                sym_lookup[d.conId] = d.symbol
+    except Exception:
+        pass
+
+    for _, row in df.iterrows():
+        state_raw = str(row.get('state', '?'))
+        # state comes back as enum-like: '1' / 'StrategyEnabled.ENABLED' etc.
+        if state_raw in ('1', 'StrategyEnabled.ENABLED'):
+            state_disp = '[green]ON[/green]'
+        elif state_raw in ('0', 'StrategyEnabled.DISABLED'):
+            state_disp = '[red]off[/red]'
+        else:
+            state_disp = state_raw
+
+        conids = row.get('conids') or []
+        if not conids:
+            symbols_disp = '[dim]-[/dim]'
+        else:
+            mapped = [sym_lookup.get(c, str(c)) for c in conids]
+            if len(mapped) <= 6:
+                symbols_disp = f'{len(mapped)}: ' + ', '.join(mapped)
+            else:
+                preview = ', '.join(mapped[:6])
+                symbols_disp = f'{len(mapped)}: {preview}, +{len(mapped) - 6} more'
+
+        params = row.get('params')
+        if params and isinstance(params, dict):
+            params_disp = ', '.join(f'{k}={v}' for k, v in params.items())
+        else:
+            params_disp = '[dim]-[/dim]'
+
+        table.add_row(
+            str(row.get('name', '?')),
+            state_disp,
+            str(row.get('bar_size', '?')),
+            str(row.get('hist_days_prior', '?')),
+            symbols_disp,
+            params_disp,
+        )
+
+    console.print(table)
 
 
 def _handle_strategies_inspect(args: argparse.Namespace):
