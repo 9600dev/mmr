@@ -5,6 +5,10 @@ set -o errexit -o pipefail -o noclobber -o nounset
 # usually /home/trader/mmr
 BUILDDIR=$(cd $(dirname "$0"); pwd)
 
+# Sibling news scraper repo. Default to ~/dev/news so the standard checkout
+# layout works out of the box; override with NEWS_DIR=/path/to/news.
+NEWS_DIR="${NEWS_DIR:-$HOME/dev/news}"
+
 # Detect container runtime.
 # 1. Use whichever is already running.
 # 2. If neither is running, try to start whichever is installed.
@@ -49,10 +53,67 @@ _try_start_runtime() {
     return 1
 }
 
-# Check what's already running first
-if command -v docker &> /dev/null && docker info &> /dev/null; then
+# Optional explicit runtime pin. Set MMR_CONTAINER_RUNTIME=docker or
+# MMR_CONTAINER_RUNTIME=podman to bypass auto-detection. Useful when both
+# are installed simultaneously (e.g. you just installed Docker Desktop on
+# top of an existing podman setup) — without a pin, the auto-detect picks
+# whichever answers `info` first, which can flip between invocations and
+# leaves you with a half-podman / half-docker stack where containers from
+# one runtime hold ports the other tries to bind. The same env var is
+# honoured by news/docker.sh so the entire stack can be pinned in one
+# place via your shell rc.
+if [[ -n "${MMR_CONTAINER_RUNTIME:-}" ]]; then
+    case "$MMR_CONTAINER_RUNTIME" in
+        docker)
+            if ! command -v docker &> /dev/null; then
+                echo "Error: MMR_CONTAINER_RUNTIME=docker but docker is not installed."
+                exit 1
+            fi
+            if ! docker info &> /dev/null; then
+                echo "Error: MMR_CONTAINER_RUNTIME=docker but docker is not running."
+                echo "  Start Docker Desktop and re-run."
+                exit 1
+            fi
+            RUNTIME=docker
+            COMPOSE="docker compose"
+            ;;
+        podman)
+            if ! command -v podman &> /dev/null; then
+                echo "Error: MMR_CONTAINER_RUNTIME=podman but podman is not installed."
+                exit 1
+            fi
+            if ! podman info &> /dev/null; then
+                echo "Error: MMR_CONTAINER_RUNTIME=podman but the podman machine is not running."
+                echo "  Run: podman machine start"
+                exit 1
+            fi
+            RUNTIME=podman
+            _setup_podman_compose
+            ;;
+        *)
+            echo "Error: MMR_CONTAINER_RUNTIME='$MMR_CONTAINER_RUNTIME' (must be 'docker' or 'podman')"
+            exit 1
+            ;;
+    esac
+    _RUNTIME_PINNED=1
+# Auto-detect — prefer docker when both are running. Cross-runtime collisions
+# (docker container vs podman container with the same compose name / port)
+# do NOT cross-cancel: docker's port-bind will fail with "address already
+# in use" and you'll see this script error out at compose-up. If that
+# happens, either tear down the other runtime's containers or pin via
+# MMR_CONTAINER_RUNTIME above.
+elif command -v docker &> /dev/null && docker info &> /dev/null; then
     RUNTIME=docker
     COMPOSE="docker compose"
+    if command -v podman &> /dev/null && podman info &> /dev/null 2>&1; then
+        # Both runtimes are running. Surface this — auto-detect picked
+        # docker, but the user might be sitting on podman state from a
+        # previous setup. Soft warning, not an error: lots of users have
+        # both installed and only ever use one at a time.
+        echo "Note: both docker and podman are running; using docker."
+        echo "      Set MMR_CONTAINER_RUNTIME=podman to override, or run"
+        echo "      \`podman ps\` to see if you have leftover podman containers."
+    fi
 elif command -v podman &> /dev/null && podman info &> /dev/null; then
     RUNTIME=podman
     _setup_podman_compose
@@ -66,7 +127,11 @@ elif ! _try_start_runtime; then
     exit 1
 fi
 
-echo "Using container runtime: $RUNTIME"
+if [[ "${_RUNTIME_PINNED:-0}" == "1" ]]; then
+    echo "Using container runtime: $RUNTIME (pinned via \$MMR_CONTAINER_RUNTIME)"
+else
+    echo "Using container runtime: $RUNTIME"
+fi
 
 # Where the host keeps DuckDBs, logs, TWS session state. Bind-mounted into
 # the containers per docker-compose.yml — clobbering this dir wipes every
@@ -180,6 +245,62 @@ check_vm_ram() {
 
 check_vm_ram
 
+# ─── Colors ──────────────────────────────────────────────────────────────────
+if [ -n "${NO_COLOR:-}" ]; then
+    DC_RESET="" DC_GREEN="" DC_RED="" DC_DIM=""
+elif [ -t 1 ] || [ "${FORCE_COLOR:-0}" = "1" ]; then
+    DC_RESET=$'\033[0m' DC_GREEN=$'\033[32m' DC_RED=$'\033[31m' DC_DIM=$'\033[2m'
+else
+    DC_RESET="" DC_GREEN="" DC_RED="" DC_DIM=""
+fi
+
+_api_key_status_d() {
+    local label="$1" yaml_key="$2" env_var="$3" yaml_file="$4"
+    local env_val="${!env_var:-}"
+    local yaml_val=""
+    if [ -f "$yaml_file" ]; then
+        yaml_val=$(
+            grep -E "^[[:space:]]*${yaml_key}[[:space:]]*:" "$yaml_file" 2>/dev/null \
+                | head -n1 \
+                | sed -E "s/^[[:space:]]*${yaml_key}[[:space:]]*:[[:space:]]*//" \
+                | sed -E 's/^"//;  s/"$//'                                          \
+                | sed -E "s/^'//;  s/'$//"                                          \
+                | sed -E 's/[[:space:]]+$//'
+        )
+    fi
+    if [ -n "$env_val" ]; then
+        printf "  %-18s${DC_GREEN}✓ set via \$%s (...%s)${DC_RESET}\n" "$label" "$env_var" "${env_val: -4}"
+    elif [ -n "$yaml_val" ]; then
+        if [ ${#yaml_val} -gt 4 ]; then
+            printf "  %-18s${DC_GREEN}✓ set (...%s)${DC_RESET}\n" "$label" "${yaml_val: -4}"
+        else
+            printf "  %-18s${DC_GREEN}✓ set${DC_RESET}\n" "$label"
+        fi
+    else
+        printf "  %-18s${DC_RED}✗ not set (export \$%s or set %s in trader.yaml)${DC_RESET}\n" \
+            "$label" "$env_var" "$yaml_key"
+    fi
+}
+
+# Show whether data-feed API keys are configured. Reads from
+# $HOME/.config/mmr/secrets.env (if present, sourced for KEY=VALUE
+# lines), then env vars, then $HOME/.config/mmr/trader.yaml — first
+# non-empty wins. Same priority order as start_mmr.sh.
+print_api_keys() {
+    local secrets_file="$HOME/.config/mmr/secrets.env"
+    if [ -f "$secrets_file" ]; then
+        set -a
+        # shellcheck disable=SC1090
+        source "$secrets_file"
+        set +a
+    fi
+    local yaml_file="${HOME}/.config/mmr/trader.yaml"
+    echo "${DC_DIM}Data feed API keys${DC_RESET}"
+    _api_key_status_d "Massive/Polygon" "massive_api_key"    "MASSIVE_API_KEY"    "$yaml_file"
+    _api_key_status_d "TwelveData"      "twelvedata_api_key" "TWELVEDATA_API_KEY" "$yaml_file"
+    echo ""
+}
+
 print_vnc_url() {
     # Print a clickable vnc:// URL for the IB Gateway desktop.
     # macOS Terminal and iTerm2 auto-link the vnc:// scheme (⌘-click opens
@@ -223,10 +344,12 @@ echo_usage() {
     echo "  -l (logs: tail logs from all containers)"
     echo "  -r (restart-ib: restart the IB Gateway container)"
     echo "  -e (exec: shell into running MMR container)"
+    echo "  -n (news: bring up the news scraper stack at \$NEWS_DIR"
+    echo "      — default ~/dev/news; idempotent. Used by the news skill.)"
     echo ""
 }
 
-b=n c=n f=n u=n d=n s=n a=n g=n l=n e=n i=n r=n
+b=n c=n f=n u=n d=n s=n a=n g=n l=n e=n i=n r=n n=n
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -278,6 +401,10 @@ while [[ $# -gt 0 ]]; do
       r=y
       shift
       ;;
+    -n|--news)
+      n=y
+      shift
+      ;;
     -*|--*)
       echo "Unknown option $1"
       echo_usage
@@ -290,7 +417,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # show usage if no action flags were set
-if [[ $b == "n" && $c == "n" && $f == "n" && $u == "n" && $d == "n" && $s == "n" && $a == "n" && $g == "n" && $l == "n" && $e == "n" && $i == "n" && $r == "n" ]]; then
+if [[ $b == "n" && $c == "n" && $f == "n" && $u == "n" && $d == "n" && $s == "n" && $a == "n" && $g == "n" && $l == "n" && $e == "n" && $i == "n" && $r == "n" && $n == "n" ]]; then
     echo_usage
     exit 0
 fi
@@ -388,6 +515,7 @@ build() {
 
 up() {
     check_env
+    print_api_keys
     echo "Pulling latest IB Gateway image..."
     $COMPOSE -f "$BUILDDIR/docker-compose.yml" pull ib-gateway
     echo ""
@@ -426,6 +554,7 @@ _remove_mmr_dependents() {
 
 ib_only() {
     check_env
+    print_api_keys
     echo "Pulling latest IB Gateway image..."
     $COMPOSE -f "$BUILDDIR/docker-compose.yml" pull ib-gateway
     echo ""
@@ -470,6 +599,43 @@ restart_ib() {
     $COMPOSE -f "$BUILDDIR/docker-compose.yml" up -d --force-recreate ib-gateway
     echo ""
     echo "IB Gateway restarted."
+}
+
+# Bring up the sibling news scraper docker stack at $NEWS_DIR (default
+# ~/dev/news). Used by the `news` skill (skills/news/) which talks to
+# the news service over http://127.0.0.1:8089. Idempotent — leans on
+# news/docker.sh -u, which itself reuses any already-running container.
+#
+# Why we don't call news/docker.sh -g here: that command tails compose
+# logs (`compose logs -f`) at the end and never returns, which would
+# block this script. If the user wants a clean rebuild they can run
+# `cd $NEWS_DIR && ./docker.sh -g` directly.
+news_up() {
+    if [[ ! -d "$NEWS_DIR" ]]; then
+        echo "Error: NEWS_DIR=$NEWS_DIR not found."
+        echo "  Clone the news repo to ~/dev/news, or set NEWS_DIR=/path/to/news."
+        exit 1
+    fi
+    if [[ ! -x "$NEWS_DIR/docker.sh" ]]; then
+        echo "Error: $NEWS_DIR/docker.sh not found or not executable."
+        exit 1
+    fi
+    echo ""
+    echo "Bringing up news scraper stack at $NEWS_DIR..."
+    ( cd "$NEWS_DIR" && ./docker.sh -u )
+    local rc=$?
+    if [[ $rc -ne 0 ]]; then
+        echo "news startup failed (rc=$rc) — try: cd $NEWS_DIR && ./docker.sh -g"
+        exit $rc
+    fi
+    echo ""
+    echo "News service is up. Health check:"
+    echo "  curl http://127.0.0.1:8089/v1/health"
+    echo ""
+    echo "Manage from $NEWS_DIR:"
+    echo "  ./docker.sh -l   # logs"
+    echo "  ./docker.sh -e   # shell"
+    echo "  ./docker.sh -d   # stop"
 }
 
 down() {
@@ -545,7 +711,17 @@ exec_in() {
         exit 1
     fi
     echo "Exec'ing into MMR container ($CONTID)..."
-    $RUNTIME exec -it -u trader -w /home/trader/mmr "$CONTID" bash -l
+    # `exec` replaces the docker.sh process with the runtime exec, so when
+    # the user types `exit` inside the container shell, the (now-replaced)
+    # script process simply ends — no chance for a stale stdin byte from
+    # the `-it` TTY teardown to be re-parsed by bash as a command. This
+    # was the root cause of the post-exit `ader: command not found`
+    # error on line 688: any byte the TTY layer dropped (e.g. losing the
+    # `tr` of `trader@...$` from the container's last prompt) was being
+    # fed back into bash's script parser, which dutifully tried to run
+    # "ader" as a command on whatever line happened to be next in the
+    # dispatch. Replacing the process eliminates the entire window.
+    exec $RUNTIME exec -it -u trader -w /home/trader/mmr "$CONTID" bash -l
 }
 
 sync() {
@@ -583,7 +759,7 @@ sync_all() {
     rsync -e "$RSYNC_RSH" -av --delete $BUILDDIR/ $CONTID:/home/trader/mmr/ --exclude='.git'
 }
 
-echo "action: build=$b clean=$c force=$f up=$u down=$d sync=$s sync_all=$a go=$g logs=$l exec=$e ib-only=$i restart-ib=$r | runtime: $RUNTIME"
+echo "action: build=$b clean=$c force=$f up=$u down=$d sync=$s sync_all=$a go=$g logs=$l exec=$e ib-only=$i restart-ib=$r news=$n | runtime: $RUNTIME"
 
 if [[ $b == "y" ]]; then
     build
@@ -605,6 +781,9 @@ if [[ $i == "y" ]]; then
 fi
 if [[ $r == "y" ]]; then
     restart_ib
+fi
+if [[ $n == "y" ]]; then
+    news_up
 fi
 if [[ $s == "y" ]]; then
     sync

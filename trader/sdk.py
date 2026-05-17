@@ -1683,8 +1683,53 @@ class MMR:
     # ------------------------------------------------------------------
 
     def snapshot(self, symbol: Union[str, int], delayed: bool = False,
-                 exchange: str = '', currency: str = '') -> dict:
-        """Get a price snapshot for *symbol*."""
+                 exchange: str = '', currency: str = '',
+                 source: str = 'ib') -> dict:
+        """Get a price snapshot for *symbol*.
+
+        Parameters
+        ----------
+        source : str
+            'ib' (default) routes via trader_service / IB. 'twelvedata'
+            uses TD's REST ``/quote`` endpoint — fast and IB-free, but
+            ``bid``/``ask`` come back as ``NaN`` (TD's REST quote doesn't
+            expose level-1 quote sides; subscribe to the WebSocket via
+            ``watch --source twelvedata`` for streaming bid/ask).
+        """
+        if source == 'twelvedata':
+            td_symbol = str(symbol).upper()
+            payload = self._twelvedata_client.quote(symbol=td_symbol).as_json()
+            def _f(k):
+                v = payload.get(k)
+                if v in (None, ''):
+                    return float('nan')
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return float('nan')
+            return {
+                'symbol': payload.get('symbol', td_symbol),
+                'conId': '',
+                'time': payload.get('datetime'),
+                'bid': float('nan'),
+                'bidSize': float('nan'),
+                'ask': float('nan'),
+                'askSize': float('nan'),
+                'last': _f('close'),
+                'lastSize': float('nan'),
+                'open': _f('open'),
+                'high': _f('high'),
+                'low': _f('low'),
+                'close': _f('close'),
+                'volume': _f('volume'),
+                'previous_close': _f('previous_close'),
+                'change': _f('change'),
+                'change_pct': _f('percent_change'),
+                'halted': float('nan'),
+                'exchange': payload.get('exchange', ''),
+                'currency': payload.get('currency', ''),
+                'name': payload.get('name', ''),
+            }
         contract = self._resolve_contract(symbol, exchange=exchange, currency=currency)
         ticker = consume(
             self._rpc.rpc(return_type=Ticker).get_snapshot(contract, delayed)
@@ -1720,8 +1765,63 @@ class MMR:
         }
 
     def snapshot_batch(self, symbols: list[str], exchange: str = '',
-                       currency: str = '') -> list[dict]:
-        """Get price snapshots for multiple *symbols* in one batch RPC call."""
+                       currency: str = '', source: str = 'ib') -> list[dict]:
+        """Get price snapshots for multiple *symbols* in one batch.
+
+        Parameters
+        ----------
+        source : str
+            'ib' (default) routes via trader_service. 'twelvedata' uses
+            TD's ``/quote`` endpoint with comma-joined symbols (chunked at
+            120/call, the upper bound on most TD plans). Same bid/ask
+            limitation as :meth:`snapshot` — REST quote doesn't expose
+            level-1 sides.
+        """
+        if source == 'twelvedata':
+            results: list[dict] = []
+            chunk_size = 120
+            for i in range(0, len(symbols), chunk_size):
+                chunk = symbols[i:i + chunk_size]
+                joined = ','.join(s.upper() for s in chunk)
+                raw = self._twelvedata_client.quote(symbol=joined).as_json()
+                # TD returns either a single dict (one symbol) or
+                # {SYMBOL: {...}} keyed by uppercase ticker (multiple).
+                if isinstance(raw, dict) and 'symbol' in raw and len(chunk) == 1:
+                    payload_map = {raw.get('symbol', chunk[0].upper()): raw}
+                else:
+                    payload_map = raw if isinstance(raw, dict) else {}
+                for sym in chunk:
+                    payload = payload_map.get(sym.upper()) or payload_map.get(sym) or {}
+                    if not payload:
+                        results.append({'symbol': sym.upper(), 'last': float('nan')})
+                        continue
+                    def _f(k, p=payload):
+                        v = p.get(k)
+                        if v in (None, ''):
+                            return float('nan')
+                        try:
+                            return float(v)
+                        except (TypeError, ValueError):
+                            return float('nan')
+                    results.append({
+                        'symbol': payload.get('symbol', sym.upper()),
+                        'time': payload.get('datetime'),
+                        'bid': float('nan'),
+                        'ask': float('nan'),
+                        'last': _f('close'),
+                        'open': _f('open'),
+                        'high': _f('high'),
+                        'low': _f('low'),
+                        'close': _f('close'),
+                        'volume': _f('volume'),
+                        'previous_close': _f('previous_close'),
+                        'change': _f('change'),
+                        'change_pct': _f('percent_change'),
+                        'exchange': payload.get('exchange', ''),
+                        'currency': payload.get('currency', ''),
+                    })
+            return results
+
         contracts = []
         for sym in symbols:
             contract = self._resolve_contract(sym, exchange=exchange, currency=currency)
@@ -2014,13 +2114,39 @@ class MMR:
         return tf.to_dict()
 
     def status(self) -> dict:
-        """Check connectivity to trader_service via ZMQ RPC with diagnostics."""
+        """Check connectivity to trader_service via ZMQ RPC with diagnostics.
+
+        Returns raw structured values — no Rich markup, no pre-formatted
+        currency strings. The CLI's status command formats these for
+        human display; programmatic consumers (and `--json` output)
+        get clean numbers.
+
+        Schema:
+            connected: bool
+            account: str (account number) — only when connected
+            ib_upstream_connected: bool
+            ib_upstream_error: str (only when ib_upstream_connected is False)
+            account_values: dict[str, dict] — for each of NetLiquidation,
+                TotalCashValue, AvailableFunds, BuyingPower:
+                    {value: float, currency: str}
+                (omitted when account values aren\'t streaming)
+            account_values_warning: str (only when values can\'t be fetched)
+            leverage: float (gross_position / net_liquidation), nullable
+            margin_used: dict {init_margin: float, net_liq: float, currency: str}, nullable
+            cushion: float, nullable
+            positions: int (count of non-zero positions)
+            pnl: dict {daily, unrealized, realized, total} as floats
+                (in account base currency; same as NetLiquidation\'s)
+            open_orders: int
+            streaming: int (count of contracts being streamed)
+            pending_proposals: int
+        """
         try:
             acct = consume(self._rpc.rpc(return_type=str).get_ib_account())
         except Exception:
             return {'connected': False}
 
-        result = {'connected': True, 'account': acct}
+        result: dict = {'connected': True, 'account': acct}
 
         try:
             svc_status = consume(self._rpc.rpc(return_type=dict).get_status())
@@ -2035,10 +2161,18 @@ class MMR:
                 self._rpc.rpc(return_type=dict).get_account_values()
             )
             if acct_vals and 'NetLiquidation' in acct_vals:
+                # Raw structured account values (value + currency separated).
+                # Lets consumers do math; CLI formats for display.
+                account_values: dict[str, dict] = {}
                 for key in ('NetLiquidation', 'TotalCashValue', 'AvailableFunds', 'BuyingPower'):
                     entry = acct_vals.get(key)
                     if entry:
-                        result[key] = f"${float(entry['value']):,.2f} {entry['currency']}"
+                        account_values[key] = {
+                            'value': float(entry['value']),
+                            'currency': entry['currency'],
+                        }
+                if account_values:
+                    result['account_values'] = account_values
 
                 # Leverage / margin info
                 net_liq_entry = acct_vals.get('NetLiquidation')
@@ -2050,15 +2184,22 @@ class MMR:
                     net_liq = float(net_liq_entry['value'])
                     gross_pos = float(gross_pos_entry['value'])
                     if net_liq > 0:
-                        result['Leverage'] = f'{gross_pos / net_liq:.2f}x'
+                        result['leverage'] = round(gross_pos / net_liq, 4)
 
                 if init_margin_entry and net_liq_entry:
                     init_margin = float(init_margin_entry['value'])
                     net_liq = float(net_liq_entry['value'])
-                    result['MarginUsed'] = f'${init_margin:,.2f} / ${net_liq:,.2f}'
+                    result['margin_used'] = {
+                        'init_margin': init_margin,
+                        'net_liq': net_liq,
+                        'currency': init_margin_entry.get('currency', net_liq_entry.get('currency', '')),
+                    }
 
                 if cushion_entry:
-                    result['Cushion'] = cushion_entry['value']
+                    try:
+                        result['cushion'] = float(cushion_entry['value'])
+                    except (TypeError, ValueError):
+                        result['cushion'] = None
             else:
                 # acct_vals is empty / missing NetLiquidation. This is the
                 # classic IB-Gateway-demo-account symptom (DUM* accounts don't
@@ -2100,21 +2241,28 @@ class MMR:
 
             result['positions'] = len(positions)
 
-            unrealized = sum(u for u, _, _ in positions)
-            realized = sum(r for _, r, _ in positions)
-            daily = sum(d for _, _, d in positions)
+            # Raw P&L floats. NaN-guard so json serializers don\'t emit
+            # non-conformant `NaN` (which the agent saw as "[red]-$nan[/red]"
+            # bleed-through under the old Rich-formatted path).
+            def _safe(val):
+                try:
+                    val = float(val)
+                except (TypeError, ValueError):
+                    return None
+                return None if val != val else val  # NaN check
 
-            def _pnl_str(val):
-                color = 'green' if val >= 0 else 'red'
-                sign = '+' if val >= 0 else '-'
-                return f'[{color}]{sign}${abs(val):,.2f}[/{color}]'
+            unrealized = sum(_safe(u) or 0.0 for u, _, _ in positions)
+            realized = sum(_safe(r) or 0.0 for _, r, _ in positions)
+            daily = sum(_safe(d) or 0.0 for _, _, d in positions)
 
-            result['DailyPnL'] = _pnl_str(daily)
-            result['UnrealizedPnL'] = _pnl_str(unrealized)
-            result['RealizedPnL'] = _pnl_str(realized)
-            result['TotalPnL'] = _pnl_str(unrealized + realized)
+            result['pnl'] = {
+                'daily': daily,
+                'unrealized': unrealized,
+                'realized': realized,
+                'total': unrealized + realized,
+            }
         except Exception:
-            result['positions'] = '?'
+            result['positions'] = None
 
         try:
             orders = consume(
@@ -2122,7 +2270,7 @@ class MMR:
             )
             result['open_orders'] = sum(len(v) for v in (orders or {}).values())
         except Exception:
-            result['open_orders'] = '?'
+            result['open_orders'] = None
 
         try:
             pubs = consume(
@@ -2844,7 +2992,37 @@ class MMR:
         source : str
             'ib' (default) uses Interactive Brokers via trader_service.
             'massive' uses Massive.com REST API (requires forex plan).
+            'twelvedata' uses TwelveData REST /quote (no bid/ask — TD's
+            quote endpoint reports OHLC + last + change only; bid/ask are
+            on the WebSocket feed, not REST).
         """
+        if source == 'twelvedata':
+            base, quote_ccy = self._parse_forex_pair(pair)
+            td_symbol = f'{base}/{quote_ccy}'
+            payload = self._twelvedata_client.quote(symbol=td_symbol).as_json()
+            def _f(k):
+                v = payload.get(k)
+                if v in (None, ''):
+                    return None
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return None
+            return {
+                'pair': td_symbol,
+                'open': _f('open'),
+                'high': _f('high'),
+                'low': _f('low'),
+                'close': _f('close'),
+                'last': _f('close'),
+                'volume': _f('volume'),
+                'previous_close': _f('previous_close'),
+                'change': _f('change'),
+                'change_pct': _f('percent_change'),
+                'timestamp': payload.get('timestamp'),
+                'datetime': payload.get('datetime'),
+                'is_market_open': payload.get('is_market_open'),
+            }
         if source == 'massive':
             ticker = pair.upper()
             if not ticker.startswith('C:'):
@@ -2897,8 +3075,23 @@ class MMR:
         to_currency : str
             Quote currency (e.g. 'USD').
         source : str
-            'ib' (default) or 'massive'.
+            'ib' (default), 'massive', or 'twelvedata'. The TD path uses
+            the ``/exchange_rate`` endpoint and returns ``{pair, last,
+            timestamp}`` — bid/ask are not exposed on this REST endpoint.
         """
+        if source == 'twelvedata':
+            td_symbol = f'{from_currency.upper()}/{to_currency.upper()}'
+            payload = self._twelvedata_client.exchange_rate(symbol=td_symbol).as_json()
+            rate = payload.get('rate')
+            try:
+                rate = float(rate) if rate is not None else None
+            except (TypeError, ValueError):
+                rate = None
+            return {
+                'pair': td_symbol,
+                'last': rate,
+                'timestamp': payload.get('timestamp'),
+            }
         if source == 'massive':
             result = self._massive_client.get_last_forex_quote(from_currency, to_currency)
             out = {'symbol': result.symbol}
@@ -3032,9 +3225,82 @@ class MMR:
         market: str = 'stocks',
         direction: str = 'gainers',
         num: int = 20,
+        source: str = 'massive',
     ) -> list[dict]:
-        """Get movers enriched with company name, ratios, and news."""
+        """Get movers enriched with company name, ratios, and (Massive only) news.
+
+        Parameters
+        ----------
+        source : str
+            'massive' (default) — full enrichment via Massive snapshots,
+            ticker details, ratios, and news.
+            'twelvedata' — composes :meth:`movers` (TD) + :meth:`ratios`
+            (TD) per ticker. Skips news (TD has no news endpoint) and
+            description (not exposed on the TD movers payload). Each
+            ratios call costs ~100 TD credits, so this scales linearly
+            in your plan's credit budget.
+        """
         from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        if source == 'twelvedata':
+            df = self.movers(market=market, direction=direction, source='twelvedata')
+            if df.empty:
+                return []
+            rows = df.head(num).to_dict('records')
+
+            def fetch_td_ratios(t):
+                try:
+                    rdf = self.ratios(symbol=t, source='twelvedata')
+                    if rdf.empty:
+                        return (t, {})
+                    r = rdf.iloc[0]
+                    out: dict = {}
+                    field_map = [
+                        ('valuations_metrics.trailing_pe', 'pe'),
+                        ('valuations_metrics.forward_pe', 'fwd_pe'),
+                        ('financials.income_statement.diluted_eps_ttm', 'eps'),
+                        ('dividends_and_splits.forward_dividend_yield', 'div_yield'),
+                        ('valuations_metrics.market_capitalization', 'market_cap'),
+                    ]
+                    for col, label in field_map:
+                        if col in r.index:
+                            v = r[col]
+                            if v is not None and v == v:  # not NaN
+                                try:
+                                    out[label] = round(float(v), 4)
+                                except (TypeError, ValueError):
+                                    pass
+                    return (t, out)
+                except Exception:
+                    return (t, {})
+
+            ratios_map: dict = {}
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futures = {pool.submit(fetch_td_ratios, m['ticker']): m['ticker']
+                           for m in rows if m.get('ticker')}
+                for fut in as_completed(futures):
+                    t, data = fut.result()
+                    ratios_map[t] = data
+
+            results: list[dict] = []
+            for m in rows:
+                t = m.get('ticker', '')
+                results.append({
+                    'ticker': t,
+                    'open': None,  # TD movers payload has last/high/low but not open
+                    'close': m.get('close'),
+                    'volume': m.get('volume'),
+                    'change': m.get('change'),
+                    'change_pct': m.get('change_pct'),
+                    'details': {
+                        'name': m.get('name', ''),
+                        'exchange': m.get('exchange', ''),
+                        'description': '',
+                    },
+                    'ratios': ratios_map.get(t, {}),
+                    'news': {},  # TD has no news endpoint
+                })
+            return results
 
         snaps = self._massive_client.get_snapshot_direction(
             market_type=market, direction=direction,
@@ -3296,8 +3562,45 @@ class MMR:
         )
         return pd.DataFrame(results) if results else pd.DataFrame()
 
-    def forex_convert(self, from_currency: str, to_currency: str, amount: float) -> dict:
-        """Convert an amount between currencies (Massive.com only)."""
+    def forex_convert(
+        self,
+        from_currency: str,
+        to_currency: str,
+        amount: float,
+        source: str = 'massive',
+    ) -> dict:
+        """Convert an amount between currencies.
+
+        Parameters
+        ----------
+        source : str
+            'massive' (default) uses Massive.com's real-time conversion
+            (returns bid/ask alongside the converted amount).
+            'twelvedata' uses TD's ``/currency_conversion`` endpoint
+            (returns rate + converted amount; no bid/ask).
+        """
+        if source == 'twelvedata':
+            td_symbol = f'{from_currency.upper()}/{to_currency.upper()}'
+            payload = self._twelvedata_client.currency_conversion(
+                symbol=td_symbol, amount=amount,
+            ).as_json()
+            try:
+                rate = float(payload['rate']) if payload.get('rate') is not None else None
+            except (TypeError, ValueError):
+                rate = None
+            try:
+                converted = float(payload['amount']) if payload.get('amount') is not None else None
+            except (TypeError, ValueError):
+                converted = None
+            return {
+                'from': from_currency.upper(),
+                'to': to_currency.upper(),
+                'amount': float(amount),
+                'converted': converted,
+                'rate': rate,
+                'timestamp': payload.get('timestamp'),
+            }
+
         result = self._massive_client.get_real_time_currency_conversion(
             from_currency, to_currency, amount=amount,
         )

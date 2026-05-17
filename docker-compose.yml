@@ -22,7 +22,7 @@ services:
       VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD:-trader}
       TWOFA_TIMEOUT_ACTION: ${TWOFA_TIMEOUT_ACTION:-restart}
       RELOGIN_AFTER_TWOFA_TIMEOUT: ${RELOGIN_AFTER_TWOFA_TIMEOUT:-yes}
-      EXISTING_SESSION_DETECTED_ACTION: ${EXISTING_SESSION_DETECTED_ACTION:-primaryoverride}
+      EXISTING_SESSION_DETECTED_ACTION: ${EXISTING_SESSION_DETECTED_ACTION:-primary}
       AUTO_RESTART_TIME: "${AUTO_RESTART_TIME:-11:59 PM}"
       ALLOW_BLIND_TRADING: ${ALLOW_BLIND_TRADING:-no}
       BYPASS_WARNING: ${BYPASS_WARNING:-yes}
@@ -74,6 +74,17 @@ services:
       ZMQ_STRATEGY_RPC_SERVER_ADDRESS: tcp://0.0.0.0
       ZMQ_MESSAGEBUS_SERVER_ADDRESS: tcp://0.0.0.0
       ZMQ_DATA_RPC_SERVER_ADDRESS: tcp://0.0.0.0
+      # Data-feed API keys. Forwarded from the host shell (or from
+      # ~/.config/mmr/secrets.env, sourced by docker.sh / start_mmr.sh
+      # before compose runs). Compose only crosses the host→container
+      # boundary for vars it explicitly references — without these
+      # lines the keys are silently invisible inside the container even
+      # when they are exported on the host. trader/config.py falls back
+      # to os.getenv('MASSIVE_API_KEY' / 'TWELVEDATA_API_KEY') when the
+      # corresponding trader.yaml entry is empty, so the env path is
+      # the canonical one.
+      MASSIVE_API_KEY: ${MASSIVE_API_KEY:-}
+      TWELVEDATA_API_KEY: ${TWELVEDATA_API_KEY:-}
     ports:
       # pycron web
       - "127.0.0.1:8081:8081"

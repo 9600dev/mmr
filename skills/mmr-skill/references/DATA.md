@@ -107,6 +107,23 @@ CREATE TABLE object_store (
 | Tight credit budget, bursty usage | **Massive** (no per-minute cap) |
 | International equities | **IB** (`location=STK.XX.YYY`) |
 | Full-market bulk snapshot scan | **Massive** (`get_snapshot_all`); TwelveData has no equivalent |
+| Live ticker dashboard with bid/ask | **Either** (`watch SYM --source twelvedata` needs TD Pro+) |
+| Single-symbol REST snapshot, no IB | **Either** (`snapshot --source twelvedata` skips IB; no bid/ask on REST) |
+| Batch snapshots without trader_service | **TwelveData** (`snapshot-batch --source twelvedata`, 120 syms/call) |
+| Forex spot rate / FX conversion | **Either** (`forex quote/convert --source twelvedata` is REST-only) |
+| Forex movers list / `forex_snapshot_all` | **Massive** (TwelveData has no equivalent endpoint) |
+| Movers with name+ratios enrichment | **Either** (`movers --detail --source twelvedata` skips news) |
+
+### What TwelveData still doesn't cover
+
+These are genuine gaps in TD's API surface — no parity is possible without
+TD shipping new endpoints. Use Massive (or IB) instead:
+
+- News articles + sentiment (`news`, `ideas --news`, `movers_detail` news column)
+- 10-K SEC filing sections (`filing_section`)
+- Full-market forex snapshots (`forex_snapshot_all`)
+- Forex movers (`forex_movers`)
+- L2 / order-book depth
 
 ## TickStorage Read Patterns
 

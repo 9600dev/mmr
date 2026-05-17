@@ -336,3 +336,210 @@ class TestTDScannerDiscoveryErrors:
         result = scanner._discover('movers', tickers=None, universe_symbols=None, scan_preset=None)
         assert len(result) == 1
         assert result[0]['symbol'] == 'AAPL'
+
+
+# ---------------------------------------------------------------------------
+# TwelveData source= branches added to existing SDK methods
+# ---------------------------------------------------------------------------
+
+class _StubTDPayload:
+    """Tiny stand-in for ``TDClient.<method>(...).as_json()`` responses."""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def as_json(self):
+        return self._payload
+
+
+def _bind_only_mmr() -> MMR:
+    """Bypass __init__ so we don't need Container/RPC plumbing for shape tests."""
+    return object.__new__(MMR)
+
+
+class TestForexSnapshotTwelveData:
+    def test_returns_normalized_dict(self):
+        m = _bind_only_mmr()
+        m._twelvedata_rest_client = MagicMock()
+        m._twelvedata_rest_client.quote.return_value = _StubTDPayload({
+            'symbol': 'EUR/USD',
+            'open': '1.08200', 'high': '1.08500', 'low': '1.08000',
+            'close': '1.08300', 'volume': '0',
+            'previous_close': '1.08100', 'change': '0.00200',
+            'percent_change': '0.18500',
+            'datetime': '2026-04-29',
+            'timestamp': 1777000000,
+            'is_market_open': True,
+        })
+        out = m.forex_snapshot('EURUSD', source='twelvedata')
+        assert out['pair'] == 'EUR/USD'
+        assert out['close'] == pytest.approx(1.083)
+        assert out['previous_close'] == pytest.approx(1.081)
+        assert out['change_pct'] == pytest.approx(0.185)
+        assert out['is_market_open'] is True
+        m._twelvedata_rest_client.quote.assert_called_once_with(symbol='EUR/USD')
+
+
+class TestForexQuoteTwelveData:
+    def test_returns_pair_last_timestamp(self):
+        m = _bind_only_mmr()
+        m._twelvedata_rest_client = MagicMock()
+        m._twelvedata_rest_client.exchange_rate.return_value = _StubTDPayload({
+            'symbol': 'EUR/USD', 'rate': 1.0876, 'timestamp': 1777000000,
+        })
+        out = m.forex_quote('EUR', 'USD', source='twelvedata')
+        assert out == {'pair': 'EUR/USD', 'last': 1.0876, 'timestamp': 1777000000}
+
+
+class TestForexConvertTwelveData:
+    def test_returns_converted_with_rate(self):
+        m = _bind_only_mmr()
+        m._twelvedata_rest_client = MagicMock()
+        m._twelvedata_rest_client.currency_conversion.return_value = _StubTDPayload({
+            'symbol': 'EUR/USD', 'rate': 1.1678,
+            'amount': 116.78, 'timestamp': 1777000000,
+        })
+        out = m.forex_convert('EUR', 'USD', 100.0, source='twelvedata')
+        assert out['from'] == 'EUR'
+        assert out['to'] == 'USD'
+        assert out['amount'] == 100.0
+        assert out['converted'] == pytest.approx(116.78)
+        assert out['rate'] == pytest.approx(1.1678)
+
+
+class TestSnapshotTwelveData:
+    def test_basic_quote_payload(self):
+        m = _bind_only_mmr()
+        m._twelvedata_rest_client = MagicMock()
+        m._twelvedata_rest_client.quote.return_value = _StubTDPayload({
+            'symbol': 'AAPL', 'name': 'Apple Inc.', 'exchange': 'NASDAQ',
+            'currency': 'USD',
+            'open': '267.55', 'high': '271.04', 'low': '267.04',
+            'close': '270.19', 'volume': '19708544',
+            'previous_close': '270.71',
+            'change': '-0.51999', 'percent_change': '-0.19208',
+            'datetime': '2026-04-29',
+        })
+        out = m.snapshot('AAPL', source='twelvedata')
+        assert out['symbol'] == 'AAPL'
+        assert out['last'] == pytest.approx(270.19)
+        assert out['previous_close'] == pytest.approx(270.71)
+        assert out['change'] == pytest.approx(-0.51999)
+        # bid/ask not on /quote — must be NaN
+        assert out['bid'] != out['bid']
+        assert out['ask'] != out['ask']
+        assert out['exchange'] == 'NASDAQ'
+
+    def test_missing_field_yields_nan(self):
+        m = _bind_only_mmr()
+        m._twelvedata_rest_client = MagicMock()
+        m._twelvedata_rest_client.quote.return_value = _StubTDPayload({
+            'symbol': 'AAPL',
+        })
+        out = m.snapshot('AAPL', source='twelvedata')
+        # NaN propagation — float('nan') != itself
+        assert out['last'] != out['last']
+        assert out['volume'] != out['volume']
+
+
+class TestSnapshotBatchTwelveData:
+    def test_batch_uses_comma_join(self):
+        m = _bind_only_mmr()
+        m._twelvedata_rest_client = MagicMock()
+        # Multi-symbol /quote returns dict keyed by upper symbol
+        m._twelvedata_rest_client.quote.return_value = _StubTDPayload({
+            'AAPL': {'symbol': 'AAPL', 'close': '270.19', 'volume': '100'},
+            'MSFT': {'symbol': 'MSFT', 'close': '420.10', 'volume': '200'},
+        })
+        out = m.snapshot_batch(['AAPL', 'MSFT'], source='twelvedata')
+        assert len(out) == 2
+        assert out[0]['symbol'] == 'AAPL'
+        assert out[0]['last'] == pytest.approx(270.19)
+        assert out[1]['symbol'] == 'MSFT'
+        assert out[1]['last'] == pytest.approx(420.10)
+        # Single comma-joined call (chunk size <= 120)
+        m._twelvedata_rest_client.quote.assert_called_once()
+        kwargs = m._twelvedata_rest_client.quote.call_args.kwargs
+        assert kwargs['symbol'] == 'AAPL,MSFT'
+
+    def test_single_symbol_returns_flat_dict(self):
+        """When batching one symbol, TD returns a flat dict (not a map)."""
+        m = _bind_only_mmr()
+        m._twelvedata_rest_client = MagicMock()
+        m._twelvedata_rest_client.quote.return_value = _StubTDPayload({
+            'symbol': 'AAPL', 'close': '270.19', 'volume': '100',
+            'open': '267.5', 'high': '271.0', 'low': '267.0',
+        })
+        out = m.snapshot_batch(['AAPL'], source='twelvedata')
+        assert len(out) == 1
+        assert out[0]['symbol'] == 'AAPL'
+        assert out[0]['last'] == pytest.approx(270.19)
+
+    def test_chunks_above_120_symbols(self):
+        m = _bind_only_mmr()
+        m._twelvedata_rest_client = MagicMock()
+        # Return a single empty payload; we only care about call count + chunk sizes.
+        m._twelvedata_rest_client.quote.return_value = _StubTDPayload({})
+
+        symbols = [f'SYM{i:03d}' for i in range(150)]
+        m.snapshot_batch(symbols, source='twelvedata')
+
+        assert m._twelvedata_rest_client.quote.call_count == 2
+        first_call_syms = m._twelvedata_rest_client.quote.call_args_list[0].kwargs['symbol'].split(',')
+        second_call_syms = m._twelvedata_rest_client.quote.call_args_list[1].kwargs['symbol'].split(',')
+        assert len(first_call_syms) == 120
+        assert len(second_call_syms) == 30
+
+    def test_missing_symbol_returns_nan_row(self):
+        m = _bind_only_mmr()
+        m._twelvedata_rest_client = MagicMock()
+        m._twelvedata_rest_client.quote.return_value = _StubTDPayload({
+            'AAPL': {'symbol': 'AAPL', 'close': '270.19'},
+        })
+        out = m.snapshot_batch(['AAPL', 'MISSING'], source='twelvedata')
+        assert len(out) == 2
+        assert out[1]['symbol'] == 'MISSING'
+        assert out[1]['last'] != out[1]['last']  # NaN
+
+
+class TestMoversDetailTwelveData:
+    def test_composes_movers_and_ratios(self):
+        m = _bind_only_mmr()
+        # Stub movers() to return a dataframe with two tickers
+        movers_df = pd.DataFrame([
+            {'ticker': 'AAA', 'name': 'Alpha Inc', 'exchange': 'NYSE',
+             'close': 10.5, 'volume': 1000, 'change': 0.5, 'change_pct': 5.0},
+            {'ticker': 'BBB', 'name': 'Beta Corp', 'exchange': 'NASDAQ',
+             'close': 20.1, 'volume': 2000, 'change': 1.1, 'change_pct': 5.8},
+        ])
+        m.movers = MagicMock(return_value=movers_df)
+
+        # Stub ratios() to return a one-row DataFrame per ticker
+        def fake_ratios(symbol, source):
+            assert source == 'twelvedata'
+            return pd.DataFrame([{
+                'valuations_metrics.trailing_pe': 25.0,
+                'valuations_metrics.market_capitalization': 1e10,
+                'financials.income_statement.diluted_eps_ttm': 2.5,
+            }])
+        m.ratios = MagicMock(side_effect=fake_ratios)
+
+        results = m.movers_detail(market='stocks', direction='gainers',
+                                  num=5, source='twelvedata')
+        assert len(results) == 2
+        for row in results:
+            assert row['details']['name']  # name carried through
+            assert row['ratios']['pe'] == 25.0
+            assert row['news'] == {}  # TD has no news
+        m.movers.assert_called_once_with(
+            market='stocks', direction='gainers', source='twelvedata',
+        )
+        assert m.ratios.call_count == 2
+
+    def test_empty_movers_returns_empty(self):
+        m = _bind_only_mmr()
+        m.movers = MagicMock(return_value=pd.DataFrame())
+        m.ratios = MagicMock()
+        results = m.movers_detail(source='twelvedata')
+        assert results == []
+        m.ratios.assert_not_called()

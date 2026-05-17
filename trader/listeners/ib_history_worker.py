@@ -192,7 +192,12 @@ class IBHistoryWorker():
         # 16 hours, 4am to 8pm
         # duration_step_size = '57600 S'
 
-        # 24 hours
+        # IB historical-data chunk sizes per bar size. Bigger chunks =
+        # fewer round-trips before hitting IB's pacing limit.
+        # Limits per IB docs:
+        #   1 sec  -> 1800 S, 5 sec -> 7200 S
+        #   1 min  -> 1 W, 5 min -> 1 M
+        #   1 hour -> 1 Y, 1 day -> no practical cap
         duration_step_size = '86400 S'
 
         if str(bar_size) == '1 day':
@@ -201,6 +206,12 @@ class IBHistoryWorker():
             duration_step_size = '4 Y'
         if str(bar_size) == '2 hours':
             duration_step_size = '1 Y'
+        if str(bar_size) == '1 min':
+            duration_step_size = '1 W'
+        if str(bar_size) == '5 mins' or str(bar_size) == '5 min':
+            duration_step_size = '1 M'
+        if str(bar_size) == '15 mins' or str(bar_size) == '15 min':
+            duration_step_size = '1 M'
 
         # we say that the 'end date' is the start of the day after
         # start_date = dateify(start_date, timezone=tz_info)

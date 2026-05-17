@@ -30,7 +30,7 @@ The trader_service can be configured to **refuse direct buy/sell RPCs entirely**
 
 - **trader_service required**: portfolio, positions, orders, trades, account, resolve, snapshot, depth, buy, sell, cancel, cancel_all, close_all_positions, resize_positions, approve, strategies (list/enable/disable/reload), `universe_add`, `buy_option`, `sell_option`, `risk`, `scan`, `ideas` (with `--location` for international markets), `listen`, `watch`
 - **data_service required**: history_massive, history_twelvedata, history_ib
-- **massive_api_key or twelvedata_api_key** (no service needed): balance_sheet, income_statement, cash_flow, ratios, `data_download`, `ideas` (default US path), `movers` — all accept `source="massive"|"twelvedata"`
+- **massive_api_key or twelvedata_api_key** (no service needed): balance_sheet, income_statement, cash_flow, ratios, `data_download`, `ideas` (default US path), `movers`, `movers_detail`, `snapshot`, `snapshot_batch`, `forex_snapshot`, `forex_quote`, `forex_convert`, and the live ticker dashboard (`watch SYM... --source twelvedata`) — all accept `source="massive"|"twelvedata"` (`forex_*` also takes `"ib"` for trader_service routing)
 - **massive_api_key only** (no service needed): filing_section, `options_expirations`, `options_chain`, `options_snapshot`, `options_implied`, `news`, `forex_snapshot` (massive source), `forex_movers`, `stream`
 - **No service needed**: universe_list, universe_show, universe_create, universe_delete, universe_remove, universe_import, status, market_hours, `data_summary`, `data_query`, `backtest`, `backtest_sweep`, `backtest_batch`, `backtests_list`, `backtests_show`, `backtests_confidence`, `backtests_archive`, `backtests_unarchive`, `sweep_run`, `sweeps_list`, `sweeps_show`, `strategies_inspect`, `strategy_create`, `strategy_deploy`, `strategy_undeploy`, `strategy_signals`, `strategy_backtest`, `propose`, `proposals`, `reject`, `session_limits`, `session_status`, `group_list`, `group_create`, `group_delete`, `group_show`, `group_add`, `group_remove`, `group_set`, `logs`
 
@@ -48,6 +48,14 @@ Returns a dict like:
 ```json
 {
   "trader_service": {"connected": true, "ib_upstream": true, "account": "DUM422056"},
+  "ib_data_farms": {
+    "ok": true,
+    "farms": {"usfarm": "ok", "ushmds": "ok", "secdefil": "ok"},
+    "session_conflict": false,
+    "subscription_gate": false,
+    "upstream_broken": false,
+    "diagnosis": ["All probed farms healthy..."]
+  },
   "ib_market_data": {"works": false, "reason": "snapshot timed out — paper account likely has no live market-data subscription"},
   "polygon_options": {"expirations_endpoint": true, "chain_endpoint": false, "tier": "free"},
   "local_data": {"symbols": 43, "bar_sizes": ["1 day", "1 min"], "has_daily": true, "canary_daily_rows": 8},
@@ -59,10 +67,11 @@ Returns a dict like:
 }
 ```
 
-**Branch on the capability matrix instead of firing seven sequential timeouts.** The four most common gotchas:
+**Branch on the capability matrix instead of firing seven sequential timeouts.** The five most common gotchas:
 
 | Symptom in trajectory | Real cause | Branch on |
 |---|---|---|
+| `snapshot()` / `history_*` time out on *every* symbol, including liquid US ones (AAPL, SPY) | IB Gateway logged in but data farms aren't connected (codes 2103/2105 broken). Almost always downstream of a session conflict — IBKR Mobile / TWS desktop / web logged in elsewhere as the same user is bumping the Gateway off. | `pf["ib_data_farms"]["ok"]` is false; check `session_conflict`, `farms` map for `"broken"` entries. Drill in with `MMRHelpers.ib_data_farms()` for fresh details. |
 | `snapshot()` returns `{"data": null, "timed_out": true}` for every symbol | IB Gateway connected but paper account has no live market-data subscription. `status()` says "connected" — that's misleading. | `pf["ib_market_data"]["works"]` |
 | `options_chain()` returns `BadResponse: NOT_AUTHORIZED` | Polygon plan tier doesn't include options. `options_expirations` works (free endpoint) but chain/snapshot don't. | `pf["polygon_options"]["chain_endpoint"]` |
 | `data_query("...", bar_size="1 day")` returns `[]` despite `data_summary` listing the symbol | Symbol is registered in the universe (so `data summary` shows it), but the actual stored bars are at a different `bar_size` (often 1 min only). | `pf["local_data"]["bar_sizes"]`, or just look at `data_query()`'s new `hint` field on empty results |
@@ -119,7 +128,8 @@ Most data-fetching helpers accept `source="massive"|"twelvedata"`. Quick rules:
 
 - **Default is `"massive"`** for every method that takes `source`. Keep it unless you have a reason to switch.
 - **TwelveData for fundamentals depth** — `ratios(..., source="twelvedata")` returns ~60 flat-keyed fields (valuations, margins, MRQ balance sheet, TTM cash flow, share stats, dividend history) vs Massive's ~11 TTM ratios.
-- **Massive for news** — TwelveData's Python client has no news endpoint. `ideas(..., news=True, source="twelvedata")` silently returns empty news columns; `filing_section` explicitly refuses TwelveData.
+- **Massive for news + filings + bulk forex** — TwelveData has no news endpoint, no SEC filing sections, no full-market `forex_snapshot_all`, no `forex_movers`, and no L2 depth. Everything else (`snapshot`, `snapshot_batch`, `forex_snapshot`, `forex_quote`, `forex_convert`, `movers`, `movers_detail`, `ratios`, balance sheet/income/cash flow, history, ideas, live `watch` streaming) now has a TwelveData branch.
+- **REST snapshots have no bid/ask on TwelveData** — `snapshot(..., source="twelvedata")` returns OHLC + last + change_pct via `/quote`; `bid` and `ask` come back as `NaN`. To get streaming bid/ask from TwelveData, use `watch SYM... --source twelvedata` (WebSocket), which requires a TD Pro plan or higher.
 - **TwelveData for 1-min data with pre/post-market** — intraday (1/5/15/30-min) defaults to `prepost=true` returning ~960 bars/day (04:00-19:59 ET). Massive returns 24h. If you care about overnight prints, stay on Massive; if you want regular+extended session and nothing else, TwelveData is fine.
 - **Watch rate limits on TwelveData.** A Grow plan is 610 credits/min and `get_statistics` costs ~100 credits per call. Scanner's `_fetch_fundamentals` now handles this gracefully — it short-circuits remaining tickers when it sees a rate-limit error and returns partial fundamentals rather than raising. Single-shot `ratios(source="twelvedata")` in tight loops will hit the wall after ~6 calls.
 - **Known data-quality gotcha on TwelveData**: specific session dates show ~95% volume under-reporting across multiple symbols (2025-04-28, 2025-07-03, 2026-04-15 observed in the batch we downloaded). Prices on those days are correct; bar counts are correct; only volume is off. If a strategy leans on absolute volume, cross-check against Massive for those days before trusting it.
@@ -143,7 +153,18 @@ Common location codes: `STK.US.MAJOR` (US), `STK.AU.ASX` (Australia), `STK.CA` (
 
 ## MMRHelpers
 
-**Return convention — read this once:** every `MMRHelpers.*` method returns a **JSON string** (not a dict), even when the table below says "JSON dict". The column refers to the *shape* of the parsed payload, not the Python type of the return value. If you're `emit(result)`ing it for display, you can pass the string straight through. If you're **iterating** or **indexing** the result (`result["data"]`, `for entry in result: ...`), always wrap in `json.loads(...)` first:
+**Return convention — read this once:** every `MMRHelpers.*` method returns a **JSON string** (not a dict), even when the table below says "JSON dict". As of v2.1 most query helpers (``data_summary``, ``backtests_list``,
+``backtests_show``, ``backtests_confidence``, ``sweeps_list``,
+``sweeps_show``, ``proposals``, ``proposal_show``, ``strategies``,
+``status``, ``data_freshness``, ``strategy_provenance``) return a
+**dict directly** — no ``json.loads`` wrapper needed. Iterate them
+with ``result["data"]`` / ``for entry in result["data"]: ...`` straight
+out of the box.
+
+A handful of long-tail helpers (mostly write/action commands like
+``backtest``, ``backtest_batch``, ``backtest_sweep``) still return a
+JSON-encoded string for back-compat. Wrap those in ``json.loads(...)``
+before indexing:
 
 ```python
 raw = await MMRHelpers.backtest_batch(jobs, concurrency=6)
@@ -166,6 +187,7 @@ Common field-name gotchas in the backtest summary: `total_return` (NOT `return_p
 | `MMRHelpers.trades()` | active trades with fill status |
 | `MMRHelpers.account()` | IB account ID |
 | `MMRHelpers.status()` | service health with PnL (DailyPnL, UnrealizedPnL, RealizedPnL, TotalPnL) |
+| `MMRHelpers.ib_data_farms(timeout=10)` | Direct IB Gateway data-farm health probe — distinguishes "broken farm" / "session conflict" / "subscription gate" / "upstream outage". Use when snapshots / history time out, before assuming a subscription issue. |
 | `MMRHelpers.market_hours()` | market open/close status for major exchanges |
 
 ### Symbol Resolution & Market Data
@@ -416,6 +438,69 @@ if result.get("timed_out") or result.get("error"):
 ```
 
 If ANY trader_service call times out, call `status()` before retrying. Specific error types (`ValueError`, `ConnectionError`, `TraderException`, `"Bracket aborted: ..."`) are preserved in the message — branch on the phrase if you need to.
+
+## New helpers (v2.1)
+
+These helpers were added to close gaps surfaced in real LLM exploration sessions. Use them whenever the question is "why is this thing in this state?" — they collapse multi-step investigations into one call.
+
+### `proposal_show(id)` — full diagnostic on a single proposal
+
+`proposals()` gives you the list view (id, status, symbol, side). To see *why* a `FAILED` proposal failed, or get the full execution + leverage detail on a `PENDING` one, call `proposal_show(id)`. Returns the complete record including ``rejection_reason`` and metadata.
+
+```python
+listed = await MMRHelpers.proposals(all_statuses=True)
+failed = [p for p in listed["data"] if p["status"] == "FAILED"]
+for p in failed[:3]:
+    detail = await MMRHelpers.proposal_show(p["id"])
+    print(p["id"], "→", detail.get("rejection_reason"))
+```
+
+### `strategy_provenance(name)` — link deployed strategy to source backtest
+
+Closes the "is this strategy actually using the winning params?" loop in one call. Reads ``~/.config/mmr/strategy_runtime.yaml``, extracts the source ``run_id`` (from a structured ``source_run_id:`` field if present, else from the ``description`` text via regex), looks up the matching backtest record, and diffs deployed params against source params.
+
+```python
+prov = await MMRHelpers.strategy_provenance("orb_xlk")
+print("Source run:", prov["source_run_id"], "from sweep", prov["source_sweep_id"])
+print("Score:", prov["source_score"])
+if prov.get("params_match") is False:
+    print("DRIFT:", prov["params_diff"])
+```
+
+### `data_freshness(stale_days, min_history_days)` — auto-detect data anomalies
+
+Replaces eyeballing `data_summary()` for stale dates, missing conIds, or one-symbol-with-much-shorter-history outliers. Returns categorized issues:
+
+  * `stale` — last bar > `stale_days` ago
+  * `short_history` — span < `min_history_days`
+  * `unresolved_conid` — conId is empty or zero
+  * `range_gap` — symbol starts > 30d after peers on the same `bar_size`
+
+```python
+fresh = await MMRHelpers.data_freshness(stale_days=7, min_history_days=60)
+print(fresh["summary"])
+for issue in fresh["issues"][:10]:
+    print(f"{issue['symbol']:6} {issue['kind']:18} {issue['detail']}")
+```
+
+### Filter args on `backtests_list()`
+
+Now supports `symbol="XLK"` (case-insensitive ticker filter) on top of the existing `strategy=`, `sweep_id=`, `archived_only=` filters. Output also gained `conids`, `symbols`, and `params` fields so you don\'t need a separate lookup.
+
+```python
+xlk_runs = await MMRHelpers.backtests_list(symbol="XLK", sort_by="sharpe", limit=10)
+for r in xlk_runs["data"]:
+    print(r["id"], r["params"], "sharpe", r["sharpe_ratio"])
+```
+
+### Self-describing units in `backtests_confidence()`
+
+The confidence block now exposes:
+
+  * `mean_trade_pnl_ci_lo_dollars` / `_hi_dollars` — bootstrap 95% CI on mean per-trade P&L (in account currency)
+  * `sharpe_ratio_ci_lo_annualized` / `_hi_annualized` — bootstrap 95% CI on **annualized** Sharpe; should bracket `summary.sharpe_ratio`. If it doesn\'t, the run has either (a) too few `n_bar_returns` (< 30) for a meaningful CI, or (b) a degenerate equity curve (rare-trade strategy where most bar returns are zero).
+
+The bare `return_ci_lo` / `sharpe_ci_lo` field names are kept as deprecated aliases.
 
 ## Patterns
 
@@ -744,8 +829,7 @@ emit(sweep)
 # 3. Rank the top candidates by statistical confidence in a single call.
 # `backtests_confidence` is the right tool here — `backtests_show` would
 # ship megabytes per run; this returns ~500 bytes per run.
-parsed = json.loads(sweep)
-top_ids = [e["run_id"] for e in parsed["data"]["leaderboard"][:5] if e["run_id"]]
+top_ids = [e["run_id"] for e in sweep["data"]["leaderboard"][:5] if e["run_id"]]
 confidence = await MMRHelpers.backtests_confidence(top_ids)
 emit(confidence)
 
@@ -842,8 +926,7 @@ emit(last)
 
 # Open the markdown digest for the full story (strong candidates, failures, risk flags):
 # Or: check statistical confidence on the top 5 in one call.
-parsed = json.loads(last)
-top_ids = [r["run_id"] for r in parsed["data"]["leaderboard"][:5]]
+top_ids = [r["run_id"] for r in last["data"]["leaderboard"][:5]]
 confidence = await MMRHelpers.backtests_confidence(top_ids)
 emit(confidence)
 ```
@@ -894,9 +977,7 @@ emit(history)
 #   n_runs_successful, started_at, digest_path (null until done)
 
 # Drill into the newest sweep's partial leaderboard
-import json
-parsed = json.loads(history)
-latest_id = parsed["data"][0]["id"]
+latest_id = history["data"][0]["id"]
 leaderboard = await MMRHelpers.sweeps_show(sweep_id=latest_id, top=10)
 emit(leaderboard)
 ```
@@ -906,8 +987,8 @@ emit(leaderboard)
 point pull the confidence block for the top picks (same as Pattern 14):
 
 ```python
-parsed = json.loads(await MMRHelpers.sweeps_show(latest_id, top=5))
-top_ids = [r["run_id"] for r in parsed["data"]["leaderboard"][:5]]
+show = await MMRHelpers.sweeps_show(latest_id, top=5)
+top_ids = [r["run_id"] for r in show["data"]["leaderboard"][:5]]
 confidence = await MMRHelpers.backtests_confidence(top_ids)
 emit(confidence)
 ```

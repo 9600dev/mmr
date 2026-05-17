@@ -107,9 +107,15 @@ def _mid(row: dict) -> Optional[float]:
     return None
 
 
-async def _last_close_local_or_massive(symbol: str) -> Optional[float]:
-    """Get the most recent daily close for a symbol — try local DuckDB first
-    (free, instant), then fall back to a single Massive ``list_aggs`` call."""
+async def _last_close_local_or_remote(symbol: str) -> Optional[float]:
+    """Get the most recent daily close for a symbol.
+
+    Resolution order:
+    1. Local DuckDB (free, instant).
+    2. Massive ``list_aggs`` if ``MASSIVE_API_KEY`` / ``POLYGON_API_KEY`` is set.
+    3. TwelveData ``/quote`` (returns ``previous_close``) if
+       ``TWELVEDATA_API_KEY`` is set.
+    """
     try:
         q = await _run_cli_json(
             "data", "query", symbol,
@@ -124,12 +130,48 @@ async def _last_close_local_or_massive(symbol: str) -> Optional[float]:
     except Exception:
         pass
     # Massive fallback (one bar)
-    try:
-        closes, _ = await _massive_daily_closes(symbol, days=10, limit=5)
-        if closes:
-            return float(closes[-1])
-    except Exception:
-        pass
+    if os.environ.get("MASSIVE_API_KEY") or os.environ.get("POLYGON_API_KEY"):
+        try:
+            closes, _ = await _massive_daily_closes(symbol, days=10, limit=5)
+            if closes:
+                return float(closes[-1])
+        except Exception:
+            pass
+    # TwelveData fallback (single REST quote — ~1 credit)
+    if os.environ.get("TWELVEDATA_API_KEY"):
+        try:
+            close = await _twelvedata_last_close(symbol)
+            if close is not None:
+                return float(close)
+        except Exception:
+            pass
+    return None
+
+
+# Back-compat alias for any external callers that imported the old name.
+_last_close_local_or_massive = _last_close_local_or_remote
+
+
+async def _twelvedata_last_close(symbol: str) -> Optional[float]:
+    """Single ``/quote`` call to TwelveData; returns ``previous_close`` (the
+    most recently completed session's close). Costs ~1 TD credit."""
+    script = (
+        "import os, json\n"
+        "from twelvedata import TDClient\n"
+        "key = os.environ.get('TWELVEDATA_API_KEY')\n"
+        "if not key: raise SystemExit('NO_KEY')\n"
+        "c = TDClient(apikey=key)\n"
+        f"q = c.quote(symbol='{symbol}').as_json()\n"
+        "v = q.get('previous_close') or q.get('close')\n"
+        "print(json.dumps(float(v)) if v not in (None,'') else 'null')\n"
+    )
+    raw = await _run_sdk_script(script, timeout=20)
+    m = re.search(r"-?\d+\.\d+", raw or "")
+    if m:
+        try:
+            return float(m.group(0))
+        except ValueError:
+            return None
     return None
 
 
@@ -283,6 +325,110 @@ class MMRHelpers:
         return await _run_cli_json("status")
 
     @staticmethod
+    async def ib_data_farms(port: int = 7497, timeout: float = 10.0,
+                            host: str = "127.0.0.1") -> dict:
+        """
+        Probe IB Gateway data-farm health directly.
+
+        Connects briefly to IB Gateway, hooks the error stream, and listens
+        for farm-status events (codes 2103/2104/2105/2106/2119, plus the
+        session-conflict signal 162). Use this when ``snapshot()`` or
+        ``history_*`` calls time out — it tells you *why* (broken farm,
+        session conflict, subscription gate, upstream outage) instead of
+        forcing you to guess from a 30s timeout.
+
+        :param port: 7497 (paper, default) or 7496 (live)
+        :param timeout: Listen window in seconds (default 10)
+        :param host: Gateway host (default 127.0.0.1)
+
+        :returns: Dict with keys::
+
+            connected            bool — could we reach the API at all?
+            ok                   bool — overall health ok? (no broken farms,
+                                         no session conflict, ≥1 healthy farm)
+            duration_sec         float
+            farms                {farm_name: status} where status is one of
+                                 'ok', 'lazy', 'connecting', 'broken'
+            session_conflict     bool — error 162 seen (another login
+                                         elsewhere is bumping this Gateway)
+            subscription_gate    bool — 354/10168/10186 seen (probed contract
+                                         needs a sub you don't have)
+            upstream_broken      bool — error 2110 (Gateway lost connectivity
+                                         to IB entirely)
+            connect_error        str | None
+            diagnosis            list[str] — human-readable next steps
+            events               list of raw error events (debug)
+
+        Example:
+            r = await MMRHelpers.ib_data_farms()
+            if not r["ok"]:
+                # Print diagnosis lines verbatim — they're already
+                # written for human consumption.
+                for line in r["diagnosis"]:
+                    print(line)
+                # Don't bother trying snapshot() or history calls until
+                # the Gateway recovers. Restart it via:
+                #     ./docker.sh -r
+        """
+        # Run as subprocess so this stays consistent with other helpers
+        # and doesn't drag ib_async into the skill's import surface.
+        cmd = _UV_PREFIX + [
+            "python", "-m", "trader.tools.ib_health",
+            "--host", str(host),
+            "--port", str(port),
+            "--timeout", str(timeout),
+            "--json",
+        ]
+        # Total budget = listen window + connect overhead + JSON dump.
+        budget = int(timeout) + 15
+        loop = asyncio.get_event_loop()
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: _invoke(cmd, timeout=budget),
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "connected": False,
+                "ok": False,
+                "connect_error": f"probe timed out after {budget}s",
+                "diagnosis": [f"ib_health probe wedged after {budget}s — the "
+                              f"Gateway may be unreachable or the probe is "
+                              f"stuck. Try `./docker.sh -r`."],
+                "farms": {}, "events": [],
+                "session_conflict": False,
+                "subscription_gate": False,
+                "upstream_broken": False,
+            }
+        out = (result.stdout or "").strip()
+        if not out:
+            return {
+                "connected": False,
+                "ok": False,
+                "connect_error": (result.stderr or "no output").strip()[:500],
+                "diagnosis": ["ib_health probe produced no output — see "
+                              "stderr in the connect_error field."],
+                "farms": {}, "events": [],
+                "session_conflict": False,
+                "subscription_gate": False,
+                "upstream_broken": False,
+            }
+        try:
+            return json.loads(out)
+        except json.JSONDecodeError as e:
+            return {
+                "connected": False,
+                "ok": False,
+                "connect_error": f"non-JSON probe output: {e}",
+                "diagnosis": [f"ib_health probe returned malformed JSON: "
+                              f"{out[:200]}"],
+                "farms": {}, "events": [],
+                "session_conflict": False,
+                "subscription_gate": False,
+                "upstream_broken": False,
+            }
+
+    @staticmethod
     async def preflight(canary_symbol: str = "QQQ") -> dict:
         """
         One-shot capability probe — call this FIRST in any new MMR session.
@@ -327,6 +473,9 @@ class MMRHelpers:
         """
         report: dict = {
             "trader_service": {"connected": False, "ib_upstream": False, "account": None},
+            "ib_data_farms": {"ok": False, "farms": {}, "session_conflict": False,
+                              "subscription_gate": False, "upstream_broken": False,
+                              "diagnosis": []},
             "ib_market_data": {"works": False, "reason": None, "last_price": None},
             "polygon_options": {"expirations_endpoint": False, "chain_endpoint": False,
                                 "tier": "none"},
@@ -344,6 +493,35 @@ class MMRHelpers:
             report["trader_service"]["account"] = d.get("account")
         except (asyncio.TimeoutError, Exception) as e:
             report["trader_service"]["error"] = f"{type(e).__name__}: {e}"
+
+        # --- 1b. IB data-farm health ---
+        # Direct probe of the Gateway's market-data subsystem. This is the
+        # "why" behind any future snapshot timeout — broken farm vs session
+        # conflict vs subscription gate vs upstream outage. Skipped when
+        # the API isn't even reachable, since the probe would also fail
+        # and we already have that info from #1.
+        if report["trader_service"]["connected"]:
+            try:
+                farms = await asyncio.wait_for(
+                    MMRHelpers.ib_data_farms(timeout=8),
+                    timeout=25,
+                )
+                report["ib_data_farms"]["ok"] = bool(farms.get("ok"))
+                report["ib_data_farms"]["farms"] = dict(farms.get("farms") or {})
+                report["ib_data_farms"]["session_conflict"] = bool(
+                    farms.get("session_conflict")
+                )
+                report["ib_data_farms"]["subscription_gate"] = bool(
+                    farms.get("subscription_gate")
+                )
+                report["ib_data_farms"]["upstream_broken"] = bool(
+                    farms.get("upstream_broken")
+                )
+                report["ib_data_farms"]["diagnosis"] = list(
+                    farms.get("diagnosis") or []
+                )
+            except (asyncio.TimeoutError, Exception) as e:
+                report["ib_data_farms"]["error"] = f"{type(e).__name__}: {e}"
 
         # --- 2. IB market data canary ---
         # Only worth probing if trader_service + ib_upstream are up. Use a tight
@@ -464,6 +642,12 @@ class MMRHelpers:
                 "will fall back to realized-vol."
             )
 
+        # If the farm probe surfaced a hard fail, lift its diagnosis lines
+        # to the top of recommendations — they're the most actionable.
+        if not report["ib_data_farms"]["ok"] and report["ib_data_farms"]["diagnosis"]:
+            for d in report["ib_data_farms"]["diagnosis"]:
+                recs.append(d)
+
         if not report["local_data"]["has_daily"]:
             recs.append(
                 "No 1-day local OHLCV. Run "
@@ -511,6 +695,7 @@ class MMRHelpers:
     @staticmethod
     async def snapshot(symbol: str, delayed: bool = False,
                        exchange: str = "", currency: str = "",
+                       source: str = "ib",
                        timeout: int = 12) -> dict:
         """
         Get a price snapshot for a symbol (bid, ask, last, OHLC, volume).
@@ -545,6 +730,8 @@ class MMRHelpers:
             args.extend(["--exchange", exchange])
         if currency:
             args.extend(["--currency", currency])
+        if source and source != "ib":
+            args.extend(["--source", source])
         return await _run_cli_json(*args, timeout=timeout)
 
     @staticmethod
@@ -552,6 +739,7 @@ class MMRHelpers:
         symbols: List[str],
         exchange: str = "",
         currency: str = "",
+        source: str = "ib",
         timeout: int = 60,
     ) -> dict:
         """
@@ -577,6 +765,8 @@ class MMRHelpers:
             args.extend(["--exchange", exchange])
         if currency:
             args.extend(["--currency", currency])
+        if source and source != "ib":
+            args.extend(["--source", source])
         return await _run_cli_json(*args, timeout=timeout)
 
     @staticmethod
@@ -769,15 +959,158 @@ class MMRHelpers:
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def strategies() -> str:
+    async def strategies() -> dict:
         """
         List all configured strategies with their state, bar_size, conids.
         Requires trader_service to be running.
 
+        Returns a dict ``{"data": [{...}, ...], "title": "Strategies (...)"}``
+        with one record per strategy. Records carry the same columns the
+        CLI's pretty-printed table shows: name, state, bar_size, conids,
+        class_name, etc.
+
         Example:
         result = await MMRHelpers.strategies()
+        for row in result.get("data", []):
+            print(row["name"], row["state"])
         """
-        return await _run_cli("strategies")
+        return await _run_cli_json("strategies")
+
+    @staticmethod
+    async def strategy_provenance(name: str) -> dict:
+        """
+        Trace a deployed strategy back to its source backtest run + sweep,
+        and surface the diff between deployed params and the source run\'s
+        params. Closes the "is this strategy actually using the winning
+        params?" loop in one call.
+
+        Lookup order:
+          1. Read ``~/.config/mmr/strategy_runtime.yaml`` (or the active
+             config) for a strategy whose ``name`` matches.
+          2. Prefer a structured ``source_run_id:`` field on the strategy
+             definition. Fall back to regex-extracting "run NNN" from the
+             ``description`` (the historical convention).
+          3. Look up that run in the local backtest store; pull params,
+             metrics, and ``sweep_id``.
+          4. Diff deployed ``params`` against source ``params`` and
+             include a ``params_match`` flag.
+
+        Does NOT require any service.
+
+        Returns:
+            {
+                "strategy_name": str,
+                "found": bool,                          # found in YAML
+                "deployed_params": dict | None,
+                "deployed_class_name": str | None,
+                "source_run_id": int | None,
+                "source_lookup_method": "yaml_field" | "description_regex" | None,
+                "source_class_name": str | None,
+                "source_params": dict | None,
+                "source_sweep_id": int | None,
+                "source_score": dict | None,            # {sharpe, return, drawdown, ...}
+                "params_match": bool | None,            # True/False/None (None if source not found)
+                "params_diff": list[dict] | None,       # [{key, deployed, source}]
+            }
+
+        Example:
+            r = await MMRHelpers.strategy_provenance("orb_xlk")
+            if r.get("params_match") is False:
+                print("DRIFT:", r["params_diff"])
+        """
+        script = (
+            "import json, os, re, sys\n"
+            "import yaml\n"
+            "from pathlib import Path\n"
+            "from trader.data.backtest_store import BacktestStore\n"
+            "from trader.container import Container\n"
+            "\n"
+            "name = " + repr(name) + "\n"
+            "out = {'strategy_name': name, 'found': False,\n"
+            "       'deployed_params': None, 'deployed_class_name': None,\n"
+            "       'source_run_id': None, 'source_lookup_method': None,\n"
+            "       'source_class_name': None, 'source_params': None,\n"
+            "       'source_sweep_id': None, 'source_score': None,\n"
+            "       'params_match': None, 'params_diff': None}\n"
+            "\n"
+            "# Locate strategy_runtime.yaml — try $HOME/.config/mmr first,\n"
+            "# then the repo's config_defaults as a fallback.\n"
+            "candidates = [\n"
+            "    Path.home() / '.config' / 'mmr' / 'strategy_runtime.yaml',\n"
+            "    Path(__file__).resolve().parent / 'config_defaults' / 'strategy_runtime.yaml'\n"
+            "    if False else None,\n"
+            "]\n"
+            "candidates = [c for c in candidates if c]\n"
+            "for c in (Path.home() / '.config' / 'mmr' / 'strategy_runtime.yaml',):\n"
+            "    if c.exists():\n"
+            "        candidates = [c]; break\n"
+            "if not candidates:\n"
+            "    print(json.dumps(out)); sys.exit(0)\n"
+            "\n"
+            "with open(candidates[0]) as fh:\n"
+            "    cfg = yaml.safe_load(fh) or {}\n"
+            "strat = next((s for s in (cfg.get('strategies') or []) if s.get('name') == name), None)\n"
+            "if not strat:\n"
+            "    print(json.dumps(out)); sys.exit(0)\n"
+            "\n"
+            "out['found'] = True\n"
+            "out['deployed_params'] = strat.get('params') or {}\n"
+            "out['deployed_class_name'] = strat.get('class_name')\n"
+            "\n"
+            "# Resolve source_run_id\n"
+            "rid = strat.get('source_run_id')\n"
+            "if isinstance(rid, int):\n"
+            "    out['source_run_id'] = rid\n"
+            "    out['source_lookup_method'] = 'yaml_field'\n"
+            "else:\n"
+            "    desc = strat.get('description') or ''\n"
+            "    m = re.search(r'\\brun\\s+(\\d+)\\b', desc, re.IGNORECASE)\n"
+            "    if m:\n"
+            "        out['source_run_id'] = int(m.group(1))\n"
+            "        out['source_lookup_method'] = 'description_regex'\n"
+            "\n"
+            "# Look up the backtest record\n"
+            "if out['source_run_id'] is not None:\n"
+            "    container = Container.instance()\n"
+            "    cfg2 = container.config()\n"
+            "    bt_path = cfg2.get('duckdb_path') or os.path.expanduser('~/.local/share/mmr/data/mmr.duckdb')\n"
+            "    store = BacktestStore(bt_path)\n"
+            "    rec = store.get(out['source_run_id'])\n"
+            "    if rec is not None:\n"
+            "        out['source_class_name'] = rec.class_name\n"
+            "        out['source_params'] = rec.params or {}\n"
+            "        out['source_sweep_id'] = rec.sweep_id\n"
+            "        out['source_score'] = {\n"
+            "            'total_return': rec.total_return,\n"
+            "            'sharpe_ratio': rec.sharpe_ratio,\n"
+            "            'sortino_ratio': rec.sortino_ratio,\n"
+            "            'max_drawdown': rec.max_drawdown,\n"
+            "            'profit_factor': rec.profit_factor,\n"
+            "            'win_rate': rec.win_rate,\n"
+            "            'total_trades': rec.total_trades,\n"
+            "        }\n"
+            "        # Diff\n"
+            "        dep = out['deployed_params'] or {}\n"
+            "        src = out['source_params'] or {}\n"
+            "        keys = sorted(set(dep) | set(src))\n"
+            "        diff = [{'key': k, 'deployed': dep.get(k), 'source': src.get(k)}\n"
+            "                for k in keys if dep.get(k) != src.get(k)]\n"
+            "        out['params_diff'] = diff\n"
+            "        out['params_match'] = (len(diff) == 0)\n"
+            "\n"
+            "print(json.dumps(out, default=str))\n"
+        )
+        raw = await _run_sdk_script(script, timeout=30)
+        try:
+            # The script prints exactly one JSON line on success; logs may
+            # also be present, so take the last well-formed json object.
+            for line in reversed((raw or '').splitlines()):
+                line = line.strip()
+                if line.startswith('{') and line.endswith('}'):
+                    return json.loads(line)
+            return {"error": "no JSON output", "raw": (raw or "")[:500]}
+        except Exception as ex:
+            return {"error": f"{type(ex).__name__}: {ex}", "raw": (raw or "")[:500]}
 
     @staticmethod
     async def enable_strategy(name: str) -> str:
@@ -1392,7 +1725,7 @@ class MMRHelpers:
             try:
                 # We need spot first to pick ATM. Pull narrow strike window
                 # around the most recent close from local OHLCV (free).
-                spot = await _last_close_local_or_massive(symbol)
+                spot = await _last_close_local_or_remote(symbol)
                 if spot is not None:
                     win = max(spot * 0.05, 5.0)
                     chain_json = await _run_cli_json(
@@ -1560,16 +1893,204 @@ class MMRHelpers:
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def data_summary() -> str:
+    async def data_summary() -> dict:
         """
         Show summary of all local historical data in DuckDB.
-        Returns JSON with conId, symbol, bar_size, start/end dates.
+
+        Returns a dict ``{"data": [{...}, ...], "title": "Data Summary"}``.
+        Each record has ``conId``, ``symbol``, ``bar_size``, ``start``,
+        ``end``, ``rows`` etc. Symbols whose ``conId`` is empty have a
+        non-empty ``warnings`` list (e.g. "conId not resolved") so you
+        can filter problem rows directly.
+
         Does NOT require any service.
 
         Example:
         result = await MMRHelpers.data_summary()
+        unresolved = [r for r in result["data"] if not r.get("conId")]
         """
-        return await _run_cli_json_str("data", "summary")
+        return await _run_cli_json("data", "summary")
+
+    @staticmethod
+    async def data_freshness(
+        stale_days: int = 7,
+        min_history_days: int = 60,
+    ) -> dict:
+        """
+        Audit the local DuckDB data store and surface anomalies in one
+        call. Catches the classes of issue an exploring agent would
+        otherwise have to spot by eye:
+
+          * **stale**          — last bar is more than ``stale_days``
+                                 (calendar) days ago.
+          * **short_history**  — total span < ``min_history_days``
+                                 calendar days.
+          * **unresolved_conid** — symbol present but ``conId`` is empty
+                                   or zero (resolution never completed).
+          * **range_gap**      — start is after a near-identical sibling\'s
+                                 start by > 30 days (e.g. GLD has 3 months
+                                 while everything else has 2 years).
+
+        Does NOT require any service.
+
+        Returns:
+            {
+                "as_of": "2026-05-03T...",
+                "stale_days_threshold": 7,
+                "min_history_days_threshold": 60,
+                "summary": {
+                    "total_symbols": int,
+                    "ok": int,
+                    "stale": int,
+                    "short_history": int,
+                    "unresolved_conid": int,
+                    "range_gap": int,
+                },
+                "issues": [
+                    {"symbol": "GLD", "bar_size": "1 min", "kind": "short_history",
+                     "detail": "spans 91 days (< 60d threshold)",
+                     "start": "...", "end": "...", "rows": 12345, "conId": 51529211},
+                    ...
+                ],
+            }
+
+        Example:
+            r = await MMRHelpers.data_freshness(stale_days=7)
+            for issue in r["issues"]:
+                print(issue["symbol"], issue["kind"], issue["detail"])
+        """
+        # Reuse data_summary() — it already returns a dict per (symbol, bar_size).
+        summary = await MMRHelpers.data_summary()
+        rows = summary.get("data") or []
+        if isinstance(rows, dict):
+            # Some CLI dispatch paths wrap the list under data.{records|rows}
+            rows = rows.get("records") or rows.get("rows") or []
+
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc)
+        threshold_stale = _dt.timedelta(days=stale_days)
+
+        # Group by symbol so we can detect range_gap (one symbol much
+        # shorter than its siblings on the same bar_size).
+        by_bar: Dict[str, List[dict]] = {}
+        for r in rows:
+            bar = (r.get("bar_size") or "").strip()
+            by_bar.setdefault(bar, []).append(r)
+
+        # Median start per bar_size, used for range_gap detection.
+        from statistics import median
+        median_starts: Dict[str, _dt.datetime] = {}
+        for bar, group in by_bar.items():
+            starts = []
+            for r in group:
+                s = r.get("start")
+                if not s:
+                    continue
+                try:
+                    starts.append(_dt.datetime.fromisoformat(str(s).replace("Z", "+00:00")))
+                except Exception:
+                    continue
+            if starts:
+                # Use the smallest 25th-percentile-ish (median is fine for >= 4 symbols)
+                if len(starts) >= 4:
+                    median_starts[bar] = sorted(starts)[len(starts) // 2]
+                else:
+                    median_starts[bar] = min(starts)
+
+        issues: List[dict] = []
+        ok = stale = short = unresolved = gap = 0
+
+        for r in rows:
+            symbol = r.get("symbol") or "?"
+            bar = (r.get("bar_size") or "").strip()
+            con_id = r.get("conId") or r.get("con_id") or 0
+            start_raw = r.get("start")
+            end_raw = r.get("end")
+            row_count = r.get("rows") or 0
+
+            problems = []
+
+            # 1. unresolved_conid
+            try:
+                cid_int = int(con_id) if con_id not in (None, "", 0, "0") else 0
+            except (TypeError, ValueError):
+                cid_int = 0
+            if cid_int <= 0:
+                unresolved += 1
+                problems.append(("unresolved_conid", "conId is empty or zero"))
+
+            # 2/3/4: need parseable timestamps
+            try:
+                start = _dt.datetime.fromisoformat(str(start_raw).replace("Z", "+00:00")) if start_raw else None
+            except Exception:
+                start = None
+            try:
+                end = _dt.datetime.fromisoformat(str(end_raw).replace("Z", "+00:00")) if end_raw else None
+            except Exception:
+                end = None
+
+            if end is not None:
+                # Make end tz-aware in UTC for comparison
+                if end.tzinfo is None:
+                    end = end.replace(tzinfo=_dt.timezone.utc)
+                age = now - end
+                if age > threshold_stale:
+                    stale += 1
+                    problems.append(("stale", f"last bar {age.days}d ago (> {stale_days}d threshold)"))
+
+            if start is not None and end is not None:
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=_dt.timezone.utc)
+                if end.tzinfo is None:
+                    end = end.replace(tzinfo=_dt.timezone.utc)
+                span_days = (end - start).days
+                if span_days < min_history_days:
+                    short += 1
+                    problems.append(("short_history", f"spans {span_days}d (< {min_history_days}d threshold)"))
+
+            if start is not None and bar in median_starts:
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=_dt.timezone.utc)
+                msd = median_starts[bar]
+                if msd.tzinfo is None:
+                    msd = msd.replace(tzinfo=_dt.timezone.utc)
+                if (start - msd).days > 30:
+                    gap += 1
+                    problems.append((
+                        "range_gap",
+                        f"starts {(start - msd).days}d after peers on {bar}",
+                    ))
+
+            if not problems:
+                ok += 1
+                continue
+
+            for kind, detail in problems:
+                issues.append({
+                    "symbol": symbol,
+                    "bar_size": bar,
+                    "kind": kind,
+                    "detail": detail,
+                    "start": start_raw,
+                    "end": end_raw,
+                    "rows": row_count,
+                    "conId": cid_int,
+                })
+
+        return {
+            "as_of": now.isoformat(),
+            "stale_days_threshold": stale_days,
+            "min_history_days_threshold": min_history_days,
+            "summary": {
+                "total_symbols": len(rows),
+                "ok": ok,
+                "stale": stale,
+                "short_history": short,
+                "unresolved_conid": unresolved,
+                "range_gap": gap,
+            },
+            "issues": issues,
+        }
 
     @staticmethod
     async def data_query(
@@ -2105,14 +2626,20 @@ class MMRHelpers:
         sort_by: str = "score",
         limit: int = 25,
         strategy: Optional[str] = None,
+        symbol: Optional[str] = None,
         descending: bool = True,
         include_archived: bool = False,
         archived_only: bool = False,
         sweep_id: Optional[int] = None,
-    ) -> str:
+    ) -> dict:
         """
         List past backtest runs from the local history store.
         Does NOT require any service.
+
+        Returns ``{"data": [{...}, ...], "title": "Backtests"}`` — one
+        dict per run with run_id, class_name, symbols, params, score,
+        sharpe, return, drawdown, sweep_id (when sourced from a sweep),
+        and archived status.
 
         The default ``sort_by="score"`` ranks by a composite quality score
         (weighted blend of sortino, profit_factor, expectancy_bps, return,
@@ -2127,30 +2654,35 @@ class MMRHelpers:
         :param sort_by: Sort column (default "score")
         :param limit: Max rows (default 25; ``0`` or ``-1`` = no cap)
         :param strategy: Filter by class name (optional)
+        :param symbol: Filter to runs whose symbols list contains this ticker (optional)
         :param descending: Descending order (default True — "best first")
         :param include_archived: Show archived runs alongside active (default False)
         :param archived_only: Show only archived runs (default False)
+        :param sweep_id: Filter to runs from a specific sweep (optional)
 
         Example:
         result = await MMRHelpers.backtests_list(sort_by="score", limit=10)
         result = await MMRHelpers.backtests_list(strategy="KeltnerBreakout")
-        result = await MMRHelpers.backtests_list(include_archived=True)
+        result = await MMRHelpers.backtests_list(symbol="XLK")
+        result = await MMRHelpers.backtests_list(sweep_id=4)
         """
         args = ["backtests", "--sort-by", sort_by, "--limit", str(limit)]
         if not descending:
             args.append("--asc")
         if strategy:
             args.extend(["--strategy", strategy])
+        if symbol:
+            args.extend(["--symbol", symbol])
         if sweep_id is not None:
             args.extend(["--sweep", str(sweep_id)])
         if archived_only:
             args.append("--archived")
         elif include_archived:
             args.append("--all")
-        return await _run_cli_json_str(*args)
+        return await _run_cli_json(*args)
 
     @staticmethod
-    async def backtests_archive(run_ids: List[int]) -> str:
+    async def backtests_archive(run_ids: List[int]) -> dict:
         """
         Archive one or more backtest runs — hides them from the default
         ``backtests_list`` but keeps the data for later analysis. Reversible
@@ -2166,10 +2698,10 @@ class MMRHelpers:
         result = await MMRHelpers.backtests_archive([72, 73, 74])
         """
         args = ["backtests", "archive"] + [str(i) for i in run_ids]
-        return await _run_cli_json_str(*args)
+        return await _run_cli_json(*args)
 
     @staticmethod
-    async def backtests_unarchive(run_ids: List[int]) -> str:
+    async def backtests_unarchive(run_ids: List[int]) -> dict:
         """
         Restore previously-archived runs to the default ``backtests_list``.
 
@@ -2181,10 +2713,10 @@ class MMRHelpers:
         result = await MMRHelpers.backtests_unarchive([72])
         """
         args = ["backtests", "unarchive"] + [str(i) for i in run_ids]
-        return await _run_cli_json_str(*args)
+        return await _run_cli_json(*args)
 
     @staticmethod
-    async def backtests_show(run_id: int, include_raw: bool = False) -> str:
+    async def backtests_show(run_id: int, include_raw: bool = False) -> dict:
         """Full detail for one run, including the ``statistical_confidence``
         block (PSR, t-stat, bootstrap CIs, skew/kurt, losing-streak MC).
 
@@ -2199,7 +2731,7 @@ class MMRHelpers:
         args = ["backtests", "show", str(run_id)]
         if include_raw:
             args.append("--include-raw")
-        return await _run_cli_json_str(*args)
+        return await _run_cli_json(*args)
 
     @staticmethod
     async def sweep_run(
@@ -2233,12 +2765,13 @@ class MMRHelpers:
         return await _run_cli_json_str(*args, timeout=timeout)
 
     @staticmethod
-    async def sweeps_list(limit: int = 25) -> str:
+    async def sweeps_list(limit: int = 25) -> dict:
         """
         List past sweeps with their status and summary counts.
 
-        Returns per-sweep metadata including ``digest_path`` so you can
-        go read the morning markdown report directly. Use this as the
+        Returns ``{"data": [{...}, ...], "title": "Sweeps"}``.
+        Per-sweep metadata includes ``digest_path`` so you can go
+        read the morning markdown report directly. Use this as the
         entry point on "what backtesting has been done?" questions —
         it's the curated view; ``backtests_list`` is the flat per-run
         view.
@@ -2246,27 +2779,30 @@ class MMRHelpers:
         Does NOT require any service.
         """
         args = ["sweep", "list", "--limit", str(limit)]
-        return await _run_cli_json_str(*args)
+        return await _run_cli_json(*args)
 
     @staticmethod
-    async def sweeps_show(sweep_id: int, top: int = 10) -> str:
+    async def sweeps_show(sweep_id: int, top: int = 10) -> dict:
         """
         Show a sweep's metadata + the top-N runs by composite score.
 
-        Drill-down from ``sweeps_list`` → ``sweeps_show`` → (optionally)
+        Returns a dict (always — no more defensive ``json.loads`` guard).
+        Schema: ``{"sweep": {...metadata...}, "top_runs": [...], ...}``.
+
+        Drill-down from ``sweeps_list`` -> ``sweeps_show`` -> (optionally)
         ``backtests_confidence`` on the top run ids for full statistical
         validation.
 
         Does NOT require any service.
         """
         args = ["sweep", "show", str(sweep_id), "--top", str(top)]
-        return await _run_cli_json_str(*args)
+        return await _run_cli_json(*args)
 
     @staticmethod
     async def backtests_confidence(
         run_ids: List[int],
         timeout: int = 180,
-    ) -> str:
+    ) -> dict:
         """Bulk PSR/CI/skew/streak read across N runs. Compact
         (~500 bytes/run) — the right post-sweep tool for ranking
         candidates without paging through MB-scale per-run blobs.
@@ -2277,7 +2813,7 @@ class MMRHelpers:
         larger batches or raise ``timeout``.
         """
         args = ["backtests", "confidence"] + [str(i) for i in run_ids]
-        return await _run_cli_json_str(*args, timeout=timeout)
+        return await _run_cli_json(*args, timeout=timeout)
 
     # ------------------------------------------------------------------
     # Position Management
@@ -2389,23 +2925,54 @@ class MMRHelpers:
         return await _run_cli_json(*args, timeout=30)
 
     @staticmethod
-    async def proposals(status: Optional[str] = None, all_statuses: bool = False) -> str:
+    async def proposals(status: Optional[str] = None, all_statuses: bool = False) -> dict:
         """
         List trade proposals. Does NOT require trader_service.
 
-        :param status: Filter by status (PENDING, EXECUTED, REJECTED, etc.)
+        Returns a dict ``{"data": [{...}, ...], "title": "Proposals (...)"}``.
+        Each record has the structured proposal fields (id, status, symbol,
+        side, quantity, amount, rationale, created_at, ...). Use
+        ``proposal_show(id)`` for the full payload including failure
+        diagnostics on FAILED proposals.
+
+        :param status: Filter by status (PENDING, EXECUTED, REJECTED, FAILED, ...)
         :param all_statuses: Show all statuses (default: PENDING only)
 
         Example:
         result = await MMRHelpers.proposals()
-        result = await MMRHelpers.proposals(status="EXECUTED")
+        failed = [p for p in result["data"] if p["status"] == "FAILED"]
         """
         args = ["proposals"]
         if status:
             args.extend(["--status", status])
         if all_statuses:
             args.append("--all")
-        return await _run_cli(*args)
+        return await _run_cli_json(*args)
+
+    @staticmethod
+    async def proposal_show(proposal_id: int) -> dict:
+        """
+        Show full detail for a single proposal — the right call for
+        diagnosing FAILED proposals (the list view doesn\'t include
+        rejection_reason / metadata).
+
+        Returns the complete proposal record:
+            id, status, symbol, action, sec_type, quantity, amount,
+            order_type, limit_price, exit_type, take_profit_price,
+            stop_loss_price, trailing_stop_*, tif, outside_rth,
+            good_till_date, reasoning, confidence, thesis, source,
+            metadata, created_at, updated_at, order_ids,
+            rejection_reason  ← the failure diagnostic for FAILED runs,
+            group, snapshot_*, leverage_*
+
+        Does NOT require trader_service.
+
+        Example:
+        result = await MMRHelpers.proposal_show(42)
+        if result.get("status") == "FAILED":
+            print("Reason:", result.get("rejection_reason"))
+        """
+        return await _run_cli_json("proposals", "show", str(proposal_id))
 
     @staticmethod
     async def approve(proposal_id: int) -> str:
@@ -2571,16 +3138,62 @@ class MMRHelpers:
     @staticmethod
     async def forex_snapshot(pair: str, source: str = "ib") -> str:
         """
-        Get forex pair snapshot. Requires trader_service (IB source) or massive_api_key (massive source).
+        Get forex pair snapshot.
 
         :param pair: Currency pair (e.g. "EURUSD")
-        :param source: "ib" or "massive"
+        :param source: "ib" (default, needs trader_service), "massive" (needs
+            massive_api_key + a Polygon forex plan), or "twelvedata" (needs
+            twelvedata_api_key, returns OHLC + last + change but no bid/ask).
 
         Example:
         result = await MMRHelpers.forex_snapshot("EURUSD")
         result = await MMRHelpers.forex_snapshot("GBPUSD", source="massive")
+        result = await MMRHelpers.forex_snapshot("EURUSD", source="twelvedata")
         """
         return await _run_cli("forex", "snapshot", pair, "--source", source)
+
+    @staticmethod
+    async def forex_quote(from_currency: str, to_currency: str, source: str = "ib") -> str:
+        """
+        Get the last forex quote for a currency pair.
+
+        :param from_currency: Base currency (e.g. "EUR")
+        :param to_currency: Quote currency (e.g. "USD")
+        :param source: "ib" (default, needs trader_service), "massive" (needs
+            massive_api_key), or "twelvedata" (uses /exchange_rate; returns
+            ``{pair, last, timestamp}`` — no bid/ask on REST).
+
+        Example:
+        result = await MMRHelpers.forex_quote("EUR", "USD", source="twelvedata")
+        """
+        return await _run_cli(
+            "forex", "quote", from_currency, to_currency, "--source", source,
+        )
+
+    @staticmethod
+    async def forex_convert(
+        from_currency: str,
+        to_currency: str,
+        amount: float,
+        source: str = "massive",
+    ) -> str:
+        """
+        Convert an amount between currencies.
+
+        :param from_currency: Base currency (e.g. "EUR")
+        :param to_currency: Quote currency (e.g. "USD")
+        :param amount: Amount in the base currency
+        :param source: "massive" (default, returns bid/ask + converted) or
+            "twelvedata" (uses /currency_conversion; returns rate + converted).
+
+        Example:
+        result = await MMRHelpers.forex_convert("EUR", "USD", 100.0)
+        result = await MMRHelpers.forex_convert("EUR", "USD", 100.0, source="twelvedata")
+        """
+        return await _run_cli(
+            "forex", "convert", from_currency, to_currency, str(amount),
+            "--source", source,
+        )
 
     @staticmethod
     async def forex_movers(losers: bool = False) -> str:

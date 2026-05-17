@@ -3,8 +3,10 @@ from ib_async.ib import IB
 from ib_async.ticker import Ticker
 from reactivex.observer import AutoDetachObserver
 from trader.common.exceptions import TraderConnectionException, TraderException
+from trader.common.helpers import dateify
 from trader.common.logging_helper import get_callstack, log_method, setup_logging
 from trader.data.market_data import normalize_ticker
+from trader.data.store import DateRange
 
 from trader.data.data_access import SecurityDefinition, TickStorage
 from trader.data.universe import UniverseAccessor
@@ -24,6 +26,7 @@ from typing import cast, Dict, List, Optional
 import asyncio
 import backoff
 import datetime as dt
+import exchange_calendars
 import importlib
 import importlib.util
 import inspect
@@ -41,6 +44,27 @@ error_table = {
     'trader.common.exceptions.TraderException': TraderException,
     'trader.common.exceptions.TraderConnectionException': TraderConnectionException
 }
+
+
+def _whattoshow_for_contract(contract: Contract) -> WhatToShow:
+    """Pick the right IB whatToShow for an instrument's secType.
+
+    For OHLCV history:
+      * STK / FUT / IND / OPT  -> TRADES (real prints, larger IB chunk caps,
+        not throttled the way MIDPOINT is, and matches what humans see on
+        a chart).
+      * CASH (FX spot)         -> MIDPOINT (FX has no consolidated tape,
+        so trade prints don't exist; MIDPOINT is the only sensible bar).
+      * anything else / unset  -> TRADES (safe default; IB will surface a
+        162 "no data" if it's the wrong choice and the caller can retry).
+
+    Override at the call site only if the strategy genuinely needs
+    quote-mid history (e.g. spread modeling).
+    """
+    sec_type = (contract.secType or '').upper()
+    if sec_type == 'CASH':
+        return WhatToShow.MIDPOINT
+    return WhatToShow.TRADES
 
 
 class StrategyRuntime():
@@ -466,6 +490,123 @@ class StrategyRuntime():
             pass
         await self.historical_data_client.connect_async()
 
+    @staticmethod
+    def _try_get_exchange_calendar(security: Optional[SecurityDefinition]):
+        """Best-effort lookup of an exchange_calendars Calendar for a security.
+
+        Tries primaryExchange first (e.g. NASDAQ, ARCA) then falls back to
+        the IB exchange field (often SMART, which has no calendar). Returns
+        None if neither resolves — callers should treat None as "no
+        calendar, skip the missing-range optimization and pull the full
+        window."
+        """
+        if not security:
+            return None
+        try:
+            return exchange_calendars.get_calendar(security.primaryExchange)
+        except Exception:
+            try:
+                return exchange_calendars.get_calendar(security.exchange)
+            except Exception:
+                return None
+
+    async def _fetch_history_with_resume(
+        self,
+        security: SecurityDefinition,
+        bar_size: BarSize,
+        historical_days: int,
+        strategy_name: str,
+    ):
+        """Fetch historical bars only for the date ranges not already in DuckDB.
+
+        Mirrors the cache-aware pattern in data_service: ask TickStorage
+        which calendar days inside the requested window are missing, then
+        pull *just those* from IB and write the result back. This turns a
+        90-day backfill on every strategy_service restart into a no-op
+        once the local store is warm.
+
+        Errors:
+          * IBNoDataError    -> swallowed (logged at warning); some IB
+                                contracts genuinely have no history.
+          * IBConnectivityError -> propagated; caller decides whether to
+                                reconnect and retry.
+        """
+        contract = SecurityDefinition.to_contract(security)
+        what_to_show = _whattoshow_for_contract(contract)
+
+        tick_data = self.storage.get_tickdata(bar_size=bar_size)
+        tz = security.timeZoneId or 'US/Eastern'
+        # dateify() with timezone= returns a tz-aware dt.datetime even
+        # when given a naive datetime or a dt.date.
+        window_start = dateify(
+            dt.datetime.now() - dt.timedelta(days=historical_days),
+            timezone=tz, make_sod=True,
+        )
+        window_end = dateify(dt.datetime.now(), timezone=tz, make_eod=True)
+
+        cal = self._try_get_exchange_calendar(security)
+        if cal is not None:
+            try:
+                date_ranges = tick_data.missing(
+                    security, cal,
+                    date_range=DateRange(start=window_start, end=window_end),
+                )
+            except Exception as ex:
+                logging.warning(
+                    'tick_data.missing() failed for %s strategy %s: %s — '
+                    'falling back to full-window pull',
+                    security.symbol, strategy_name, ex,
+                )
+                date_ranges = [DateRange(start=window_start, end=window_end)]
+        else:
+            # No calendar -> can't compute trading-day gaps. Pull the full
+            # window. tick_data.write() upserts so we still won't double-store.
+            date_ranges = [DateRange(start=window_start, end=window_end)]
+
+        if not date_ranges:
+            logging.debug(
+                'history cache hit for %s (%s, %sd) — skipping IB fetch',
+                security.symbol, strategy_name, historical_days,
+            )
+            return
+
+        for dr in date_ranges:
+            # tick_data.missing() returns DateRanges whose start/end are
+            # bare dt.date objects (from exchange_calendars sessions.date)
+            # — despite DateRange being type-annotated dt.datetime. The
+            # IB worker expects tz-aware datetimes (it reads .tzinfo on
+            # the input), so promote here before the call.
+            dr_start = dateify(dr.start, timezone=tz, make_sod=True)
+            dr_end = dateify(dr.end, timezone=tz, make_eod=True)
+            try:
+                df = await self.historical_data_client.get_contract_history(
+                    security=contract,
+                    what_to_show=what_to_show,
+                    bar_size=bar_size,
+                    start_date=dr_start,
+                    end_date=dr_end,
+                )
+            except IBNoDataError as ex:
+                logging.warning(
+                    'no historical data for %s (%s) %s..%s strategy %s: %s',
+                    security.symbol, security.conId,
+                    dr.start, dr.end, strategy_name, ex,
+                )
+                continue
+
+            if df is not None and len(df) > 0:
+                try:
+                    tick_data.write(security, df)
+                    logging.debug(
+                        'wrote %d bars for %s (%s) strategy %s',
+                        len(df), security.symbol, security.conId, strategy_name,
+                    )
+                except Exception as ex:
+                    logging.warning(
+                        'tick_data.write() failed for %s strategy %s: %s',
+                        security.symbol, strategy_name, ex,
+                    )
+
     async def get_historical_data(self):
         for strategy in self.strategy_implementations:
             historical_days = strategy.historical_days_prior if strategy.historical_days_prior else 1
@@ -475,35 +616,30 @@ class StrategyRuntime():
                     security_definitions = self.trader_client.rpc().resolve_symbol(conId)
                     if security_definitions:
                         try:
-                            await self.historical_data_client.get_contract_history(
-                                security=SecurityDefinition.to_contract(security_definitions[0]),
-                                what_to_show=WhatToShow.MIDPOINT,
+                            await self._fetch_history_with_resume(
+                                security=security_definitions[0],
                                 bar_size=strategy.bar_size,
-                                start_date=dt.datetime.now() - dt.timedelta(days=historical_days),
-                                end_date=dt.datetime.now(),
+                                historical_days=historical_days,
+                                strategy_name=strategy.name,
                             )
-                        except IBNoDataError as ex:
-                            logging.warning('no historical data for conId {} strategy {}: {}'.format(
-                                conId, strategy.name, ex))
                         except IBConnectivityError:
                             raise
                     else:
                         logging.error('could not find security definition for conId {} for strategy {}'.format(conId, strategy))
 
             if strategy.universe:
-                conids = [x.conId for x in self.universe_accessor.get(strategy.universe).security_definitions]
-                for conId in conids:
+                # Iterate SecurityDefinitions directly so we can pass them to
+                # _fetch_history_with_resume (which needs primaryExchange,
+                # timeZoneId, etc. for calendar lookup and missing-range
+                # computation; a bare Contract(conId=...) wouldn't suffice).
+                for sd in self.universe_accessor.get(strategy.universe).security_definitions:
                     try:
-                        await self.historical_data_client.get_contract_history(
-                            security=Contract(conId=conId),
-                            what_to_show=WhatToShow.MIDPOINT,
+                        await self._fetch_history_with_resume(
+                            security=sd,
                             bar_size=strategy.bar_size,
-                            start_date=dt.datetime.now() - dt.timedelta(days=historical_days),
-                            end_date=dt.datetime.now(),
+                            historical_days=historical_days,
+                            strategy_name=strategy.name,
                         )
-                    except IBNoDataError as ex:
-                        logging.warning('no historical data for conId {} strategy {}: {}'.format(
-                            conId, strategy.name, ex))
                     except IBConnectivityError:
                         raise
         logging.debug('finished get_historical_data()')

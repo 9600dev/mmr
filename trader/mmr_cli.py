@@ -313,6 +313,9 @@ def build_parser() -> argparse.ArgumentParser:
     snap_p.add_argument('--delayed', action='store_true', default=False, help='Use delayed market data')
     snap_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
     snap_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
+    snap_p.add_argument('--source', choices=['ib', 'twelvedata'], default='ib',
+                        help='Data source (default: ib). twelvedata uses REST /quote — '
+                             'no bid/ask, but no trader_service or IB connection required.')
 
     # snapshot-batch
     snap_batch_p = sub.add_parser('snapshot-batch', help='Batch price snapshots (JSON)',
@@ -323,6 +326,9 @@ def build_parser() -> argparse.ArgumentParser:
     snap_batch_p.add_argument('symbols', nargs='+', help='Symbols to snapshot')
     snap_batch_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
     snap_batch_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
+    snap_batch_p.add_argument('--source', choices=['ib', 'twelvedata'], default='ib',
+                              help='Data source (default: ib). twelvedata batches up to '
+                                   '120 symbols per /quote call.')
 
     # depth
     depth_p = sub.add_parser('depth', help='Market depth (Level 2 order book)',
@@ -526,12 +532,37 @@ def build_parser() -> argparse.ArgumentParser:
     listen_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
     listen_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
 
-    # watch
-    sub.add_parser('watch', aliases=['w'], help='Live portfolio monitor (Ctrl+C to stop)',
-                   epilog='Examples:\n'
-                          '  watch\n'
-                          '  w',
-                   formatter_class=fmt)
+    # watch — portfolio cards (no args), or refreshing-table dashboard for
+    # arbitrary tickers / a universe when symbols or --universe are supplied.
+    # Tickers mode is backed by the Massive.com (Polygon) WebSocket consumer
+    # used by `stream`, so it bypasses IB entirely (no market-data lock).
+    watch_p = sub.add_parser('watch', aliases=['w'],
+                             help='Live portfolio monitor, or refreshing dashboard for tickers (Ctrl+C to stop)',
+                             epilog='Examples:\n'
+                                    '  watch                                       # held positions only\n'
+                                    '  watch MSFT AMZN META GOOG                   # refreshing table (Massive default)\n'
+                                    '  watch --universe sp500                      # universe dashboard\n'
+                                    '  watch BTCUSD ETHUSD --feed crypto           # crypto via Massive\n'
+                                    '  watch EURUSD GBPUSD --feed forex --quotes   # forex bid/ask via Massive\n'
+                                    '  watch AAPL MSFT --source twelvedata         # TD WebSocket feed',
+                             formatter_class=fmt)
+    watch_p.add_argument('symbols', nargs='*', help='Symbols to dashboard (omit for portfolio mode)')
+    watch_p.add_argument('--universe', '-u', default=None,
+                         help='Universe name to dashboard (alternative to positional symbols)')
+    watch_p.add_argument('--source', choices=['massive', 'twelvedata'], default='massive',
+                         help='Streaming data source for ticker dashboard mode (default: massive). '
+                              'massive = Polygon WebSocket, supports stocks/forex/crypto/indices/options/futures. '
+                              'twelvedata = TD WebSocket, supports stocks + forex + crypto (uses BASE/QUOTE form). '
+                              'TD WebSocket access requires a TD Pro plan or higher.')
+    watch_p.add_argument('--feed', default=None,
+                         choices=['stocks', 'forex', 'crypto', 'options', 'indices', 'futures'],
+                         help='Massive market feed (default: from config)')
+    watch_p.add_argument('--delayed', action='store_true', default=False,
+                         help='Use delayed Massive feed (free Polygon tier)')
+    watch_p.add_argument('--trades', action='store_true', default=False,
+                         help='Subscribe to per-trade ticks instead of 1-min aggs')
+    watch_p.add_argument('--quotes', action='store_true', default=False,
+                         help='Subscribe to bid/ask quotes (forex/crypto)')
 
     # account
     sub.add_parser('account', help='Show IB account ID',
@@ -825,7 +856,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     fx_snap_p = fx_sub.add_parser('snapshot', aliases=['snap'], help='Forex pair snapshot')
     fx_snap_p.add_argument('pair', help='Currency pair (e.g. EURUSD)')
-    fx_snap_p.add_argument('--source', default='ib', choices=['ib', 'massive'],
+    fx_snap_p.add_argument('--source', default='ib', choices=['ib', 'massive', 'twelvedata'],
                             help='Data source (default: ib)')
 
     fx_sub.add_parser('snapshot-all', help='All forex pair snapshots (Massive only)')
@@ -836,13 +867,16 @@ def build_parser() -> argparse.ArgumentParser:
     fx_quote_p = fx_sub.add_parser('quote', help='Last forex quote')
     fx_quote_p.add_argument('from_currency', help='From currency (e.g. EUR)')
     fx_quote_p.add_argument('to_currency', help='To currency (e.g. USD)')
-    fx_quote_p.add_argument('--source', default='ib', choices=['ib', 'massive'],
+    fx_quote_p.add_argument('--source', default='ib', choices=['ib', 'massive', 'twelvedata'],
                              help='Data source (default: ib)')
 
     fx_convert_p = fx_sub.add_parser('convert', help='Currency conversion (Massive only)')
     fx_convert_p.add_argument('from_currency', help='From currency (e.g. EUR)')
     fx_convert_p.add_argument('to_currency', help='To currency (e.g. USD)')
     fx_convert_p.add_argument('amount', type=float, help='Amount to convert')
+    fx_convert_p.add_argument('--source', default='massive', choices=['massive', 'twelvedata'],
+                              help='Data source (default: massive). twelvedata uses TD\'s '
+                                   '/currency_conversion endpoint.')
 
     # movers
     movers_p = sub.add_parser('movers', help='Top market movers (Massive.com or TwelveData)')
@@ -1254,6 +1288,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     def _add_list_args(p):
         p.add_argument('--strategy', default=None, help='Filter by strategy class name')
+        p.add_argument('--symbol', default=None,
+                       help='Filter to runs whose symbol list contains this ticker '
+                            '(case-insensitive substring match against conIds via universe)')
         p.add_argument('--sweep', type=int, default=None, dest='sweep_id',
                        help='Filter to runs from a specific sweep (see `mmr sweep list`)')
         p.add_argument('--limit', type=int, default=25,
@@ -1393,7 +1430,14 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
         'portfolio-diff', 'pdiff',
     }
 
-    if cmd in _ib_commands:
+    # Snapshot commands routed via a non-IB source (--source twelvedata) don't
+    # need the IB upstream — they hit a REST endpoint directly. Same for watch
+    # in dashboard mode, which the gate around `is_local` handles separately.
+    _bypass_ib_check = False
+    if cmd in ('snapshot', 'snap', 'snapshot-batch') and getattr(args, 'source', 'ib') != 'ib':
+        _bypass_ib_check = True
+
+    if cmd in _ib_commands and not _bypass_ib_check:
         upstream_err = mmr.check_ib_upstream()
         if upstream_err:
             if _json_mode:
@@ -1558,14 +1602,19 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
             print_df(mmr.trades(), title='Trades')
 
         elif cmd in ('snapshot', 'snap'):
+            source = getattr(args, 'source', 'ib')
             result = mmr.snapshot(args.symbol, delayed=args.delayed,
-                                  exchange=args.exchange, currency=args.currency)
-            print_dict(result, title=f'Snapshot: {args.symbol}')
+                                  exchange=args.exchange, currency=args.currency,
+                                  source=source)
+            title = f'Snapshot: {args.symbol}' + (f' ({source})' if source != 'ib' else '')
+            print_dict(result, title=title)
 
         elif cmd == 'snapshot-batch':
+            source = getattr(args, 'source', 'ib')
             results = mmr.snapshot_batch(args.symbols, exchange=args.exchange,
-                                          currency=args.currency)
-            print(json.dumps({"data": results, "title": "Snapshots"}, default=str))
+                                          currency=args.currency, source=source)
+            title = 'Snapshots' + (f' ({source})' if source != 'ib' else '')
+            print(json.dumps({"data": results, "title": title}, default=str))
 
         elif cmd == 'depth':
             _handle_depth(mmr, args)
@@ -1689,7 +1738,7 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
             _handle_listen(mmr, args)
 
         elif cmd in ('watch', 'w'):
-            _handle_watch(mmr)
+            _handle_watch(mmr, args)
 
         elif cmd == 'account':
             console.print(f'Account: {mmr.account()}')
@@ -1702,7 +1751,44 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
             if _json_mode:
                 import logging as _logging
                 _logging.disable(_logging.NOTSET)
-            print_dict(result, title='Status')
+                # JSON path: emit raw structured values verbatim. Agents
+                # / scripts can do math on result['pnl']['daily'] without
+                # parsing currency strings or stripping Rich markup.
+                print_dict(result, title='Status')
+            else:
+                # Human path: format raw values into a Rich-friendly view.
+                # Keeps presentation concerns out of sdk.status().
+                display: dict = {}
+                for k in ('connected', 'account', 'ib_upstream_connected'):
+                    if k in result:
+                        display[k] = result[k]
+                for key, entry in (result.get('account_values') or {}).items():
+                    display[key] = f"${entry['value']:,.2f} {entry['currency']}"
+                if 'leverage' in result and result['leverage'] is not None:
+                    display['Leverage'] = f"{result['leverage']:.2f}x"
+                if result.get('margin_used'):
+                    mu = result['margin_used']
+                    display['MarginUsed'] = f"${mu['init_margin']:,.2f} / ${mu['net_liq']:,.2f}"
+                if 'cushion' in result and result['cushion'] is not None:
+                    display['Cushion'] = f"{result['cushion']:.4f}"
+                display['positions'] = result.get('positions', '?')
+                if result.get('pnl'):
+                    pnl = result['pnl']
+                    def _pnl_str(val):
+                        if val is None or val != val:  # NaN
+                            return '[dim]-[/dim]'
+                        color = 'green' if val >= 0 else 'red'
+                        sign = '+' if val >= 0 else '-'
+                        return f'[{color}]{sign}${abs(val):,.2f}[/{color}]'
+                    display['DailyPnL'] = _pnl_str(pnl.get('daily'))
+                    display['UnrealizedPnL'] = _pnl_str(pnl.get('unrealized'))
+                    display['RealizedPnL'] = _pnl_str(pnl.get('realized'))
+                    display['TotalPnL'] = _pnl_str(pnl.get('total'))
+                for k in ('open_orders', 'streaming', 'pending_proposals'):
+                    if k in result:
+                        display[k] = result[k]
+                print_dict(display, title='Status')
+
             if not _json_mode and not result.get('ib_upstream_connected', True):
                 console.print(
                     f'\n[bold red]IB Gateway is not connected to IBKR servers[/bold red]\n'
@@ -3604,21 +3690,30 @@ def _handle_backtests(args: argparse.Namespace):
         include_archived = getattr(args, 'include_archived', False)
         archived_only = getattr(args, 'archived_only', False)
         sweep_id = getattr(args, 'sweep_id', None)
+        symbol_filter = getattr(args, 'symbol', None)
+        if symbol_filter:
+            symbol_filter = symbol_filter.upper()
 
         # --limit 0 or negative means "no cap" — pass None through to the
         # store so the SQL LIMIT clause is dropped entirely.
         effective_limit: Optional[int] = None if limit <= 0 else limit
+
+        # When a symbol filter is active, the post-filter step would otherwise
+        # discard most of the pool — pull everything and apply limit AFTER
+        # filter+sort. UniverseAccessor lookup is cheap (<1ms per conId) so
+        # the unbounded scan is fine even on 5k+ runs.
+        store_limit: Optional[int] = None if symbol_filter else effective_limit
 
         try:
             if sort_column == _BTS_SCORE_SENTINEL:
                 # Composite score is computed in Python (not a DB column).
                 # Pull a bigger pool than `limit` so the top-`limit` by
                 # quality isn't skewed by the arbitrary created_at cutoff,
-                # then truncate after ranking. When `limit` is unbounded,
-                # pull all rows.
+                # then truncate after ranking. When `limit` is unbounded
+                # OR a symbol filter is in play, pull all rows.
                 pool_size: Optional[int] = (
-                    None if effective_limit is None
-                    else max(effective_limit * 4, 100)
+                    None if store_limit is None
+                    else max(store_limit * 4, 100)
                 )
                 records = store.list(
                     strategy_class=strategy,
@@ -3633,12 +3728,14 @@ def _handle_backtests(args: argparse.Namespace):
                     key=_bt_composite_score,
                     reverse=descending,
                 )
-                if effective_limit is not None:
+                # If symbol_filter is set we'll truncate after filtering;
+                # otherwise truncate now.
+                if not symbol_filter and effective_limit is not None:
                     records = records[:effective_limit]
             else:
                 records = store.list(
                     strategy_class=strategy,
-                    limit=effective_limit,
+                    limit=store_limit,
                     sort_by=sort_column,
                     descending=descending,
                     include_archived=include_archived,
@@ -3649,7 +3746,85 @@ def _handle_backtests(args: argparse.Namespace):
             print_status(str(ex), success=False)
             return
 
+        if symbol_filter:
+            # Build a conid -> symbol map ONCE by walking every universe
+            # and indexing its security_definitions. This is O(universes ×
+            # symbols) but uses N+1 DuckDB queries instead of one per
+            # record × conid (which on a 5000-row history times out the
+            # CLI). Map is case-insensitive on the value side.
+            conid_to_symbol: Dict[int, str] = {}
+            try:
+                from trader.container import Container
+                from trader.data.universe import UniverseAccessor
+                _cfg = Container.instance().config()
+                _accessor = UniverseAccessor(
+                    _cfg.get('duckdb_path', ''),
+                    _cfg.get('universe_library', 'Universes'),
+                )
+                for _uni_name in _accessor.list_universes():
+                    try:
+                        _uni = _accessor.get(_uni_name)
+                        for _sd in (_uni.security_definitions or []):
+                            try:
+                                conid_to_symbol[int(_sd.conId)] = (_sd.symbol or '').upper()
+                            except (TypeError, ValueError):
+                                continue
+                    except Exception:
+                        continue
+            except Exception:
+                conid_to_symbol = {}
+
+            def _record_has_symbol(rec) -> bool:
+                for cid in (rec.conids or []):
+                    try:
+                        if conid_to_symbol.get(int(cid)) == symbol_filter:
+                            return True
+                    except (TypeError, ValueError):
+                        continue
+                return False
+
+            records = [r for r in records if _record_has_symbol(r)]
+            # Now apply the user-requested limit on the filtered set.
+            if effective_limit is not None:
+                records = records[:effective_limit]
+
         if _json_mode:
+            # Reuse the conid->symbol map already built for symbol_filter when
+            # present; otherwise build it on demand for output enrichment.
+            # Falling back to None keeps payload size bounded if the universe
+            # DB is unreachable.
+            _payload_conid_map = locals().get('conid_to_symbol') or {}
+            if not _payload_conid_map:
+                try:
+                    from trader.container import Container
+                    from trader.data.universe import UniverseAccessor
+                    _cfg2 = Container.instance().config()
+                    _ua = UniverseAccessor(
+                        _cfg2.get('duckdb_path', ''),
+                        _cfg2.get('universe_library', 'Universes'),
+                    )
+                    for _u in _ua.list_universes():
+                        try:
+                            for _sd in (_ua.get(_u).security_definitions or []):
+                                try:
+                                    _payload_conid_map[int(_sd.conId)] = (_sd.symbol or '').upper()
+                                except (TypeError, ValueError):
+                                    pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            def _syms_for(rec) -> List[str]:
+                out: List[str] = []
+                for cid in (rec.conids or []):
+                    try:
+                        s = _payload_conid_map.get(int(cid))
+                    except (TypeError, ValueError):
+                        s = None
+                    out.append(s or f'?({cid})')
+                return out
+
             print(json.dumps({
                 'data': [
                     {
@@ -3658,6 +3833,12 @@ def _handle_backtests(args: argparse.Namespace):
                         'bar_size': r.bar_size,
                         'start_date': str(r.start_date),
                         'end_date': str(r.end_date),
+                        'conids': r.conids,
+                        # `symbols`: stable list of resolved tickers in the
+                        # same order as conids. Lets agents filter / search
+                        # without a second lookup.
+                        'symbols': _syms_for(r),
+                        'params': r.params or {},
                         'total_trades': r.total_trades,
                         'total_return': r.total_return,
                         'sharpe_ratio': r.sharpe_ratio,
@@ -3808,10 +3989,17 @@ def _handle_backtests(args: argparse.Namespace):
                 'probabilistic_sharpe':  stats.psr,
                 't_stat':                stats.t_stat,
                 'p_value':               stats.p_value,
-                'return_ci_lo':          stats.return_ci_lo,
-                'return_ci_hi':          stats.return_ci_hi,
-                'sharpe_ci_lo':          stats.sharpe_ci_lo,
-                'sharpe_ci_hi':          stats.sharpe_ci_hi,
+                # Self-describing names are preferred. The bare aliases
+                # stay for back-compat (see backtests confidence handler
+                # for the matching change).
+                'mean_trade_pnl_ci_lo_dollars': stats.return_ci_lo,
+                'mean_trade_pnl_ci_hi_dollars': stats.return_ci_hi,
+                'return_ci_lo':          stats.return_ci_lo,    # deprecated alias
+                'return_ci_hi':          stats.return_ci_hi,    # deprecated alias
+                'sharpe_ratio_ci_lo_annualized': stats.sharpe_ci_lo,
+                'sharpe_ratio_ci_hi_annualized': stats.sharpe_ci_hi,
+                'sharpe_ci_lo':          stats.sharpe_ci_lo,    # deprecated alias
+                'sharpe_ci_hi':          stats.sharpe_ci_hi,    # deprecated alias
                 'pnl_skew':              stats.pnl_skew,
                 'pnl_excess_kurtosis':   stats.pnl_excess_kurtosis,
                 'losing_streak_actual':  stats.losing_streak_actual,
@@ -3953,10 +4141,24 @@ def _handle_backtests(args: argparse.Namespace):
                     'probabilistic_sharpe': stats.psr,
                     't_stat': stats.t_stat,
                     'p_value': stats.p_value,
-                    'return_ci_lo': stats.return_ci_lo,
-                    'return_ci_hi': stats.return_ci_hi,
-                    'sharpe_ci_lo': stats.sharpe_ci_lo,
-                    'sharpe_ci_hi': stats.sharpe_ci_hi,
+                    # Bootstrap 95% CI on **mean per-trade P&L in $**.
+                    # The new self-describing field names are preferred —
+                    # the bare ``return_ci_*`` aliases stay for back-compat
+                    # with prior consumers but are deprecated.
+                    'mean_trade_pnl_ci_lo_dollars': stats.return_ci_lo,
+                    'mean_trade_pnl_ci_hi_dollars': stats.return_ci_hi,
+                    'return_ci_lo': stats.return_ci_lo,           # deprecated alias
+                    'return_ci_hi': stats.return_ci_hi,           # deprecated alias
+                    # Bootstrap 95% CI on **annualized Sharpe ratio** —
+                    # multiplied by sqrt(bars_per_year) to match the run\'s
+                    # headline ``summary.sharpe_ratio``. CI should bracket
+                    # the point estimate; if it doesn\'t there\'s a data
+                    # issue (e.g. equity curve mostly zeroes from rare-trade
+                    # strategy or insufficient n_bar_returns < 30).
+                    'sharpe_ratio_ci_lo_annualized': stats.sharpe_ci_lo,
+                    'sharpe_ratio_ci_hi_annualized': stats.sharpe_ci_hi,
+                    'sharpe_ci_lo': stats.sharpe_ci_lo,           # deprecated alias
+                    'sharpe_ci_hi': stats.sharpe_ci_hi,           # deprecated alias
                     'pnl_skew': stats.pnl_skew,
                     'pnl_excess_kurtosis': stats.pnl_excess_kurtosis,
                     'losing_streak_actual': stats.losing_streak_actual,
@@ -7389,8 +7591,10 @@ def _handle_forex(mmr: MMR, args: argparse.Namespace):
             print_dict(result, title=f'Forex Quote: {args.from_currency.upper()}/{args.to_currency.upper()} ({source})')
 
         elif action == 'convert':
-            result = mmr.forex_convert(args.from_currency.upper(), args.to_currency.upper(), args.amount)
-            print_dict(result, title=f'Convert: {args.amount} {args.from_currency.upper()} → {args.to_currency.upper()}')
+            source = getattr(args, 'source', 'massive')
+            result = mmr.forex_convert(args.from_currency.upper(), args.to_currency.upper(), args.amount, source=source)
+            title_src = f' ({source})' if source != 'massive' else ''
+            print_dict(result, title=f'Convert: {args.amount} {args.from_currency.upper()} → {args.to_currency.upper()}{title_src}')
 
         else:
             console.print(f'[yellow]Unknown forex action: {action}[/yellow]')
@@ -7423,16 +7627,13 @@ def _handle_movers(mmr: MMR, args: argparse.Namespace):
         print_df(df, title=f'{market.title()} Movers ({direction}){title_suffix}')
         return
 
-    # Detail card view — Massive-only (needs ratios + news enrichment that
-    # TwelveData's Python client doesn't provide for this view).
+    # Detail card view — TD path skips news (TD has no news endpoint) but
+    # still enriches each row with name + ratios via TD /statistics calls.
     if source == 'twelvedata':
-        console.print('[yellow]--detail is Massive-only. Dropping to table view for TwelveData.[/yellow]')
-        df = mmr.movers(market=market, direction=direction, source='twelvedata')
-        if args.num and len(df) > args.num:
-            df = df.head(args.num)
-        print_df(df, title=f'{market.title()} Movers ({direction}) — TwelveData')
-        return
-    movers = mmr.movers_detail(market=market, direction=direction, num=args.num)
+        console.print(
+            '[dim]TwelveData detail mode: ~100 credits per ticker for ratios, no news.[/dim]'
+        )
+    movers = mmr.movers_detail(market=market, direction=direction, num=args.num, source=source)
     if not movers:
         console.print('[dim]No data[/dim]')
         return
@@ -8017,8 +8218,371 @@ def _handle_universe(mmr: MMR, args: argparse.Namespace):
         console.print(f'[yellow]Unknown universe action: {action}[/yellow]')
 
 
-def _handle_watch(mmr: MMR):
-    """Live-updating portfolio cards until Ctrl+C."""
+def _handle_watch_dashboard(args: argparse.Namespace):
+    """Refreshing-table dashboard for arbitrary tickers, fed by either
+    the Massive.com (Polygon) WebSocket or the TwelveData WebSocket.
+    Bypasses IB entirely — no trader_service required, no market-data
+    lock to compete with.
+
+    Source is selected via ``args.source`` ('massive' default, 'twelvedata').
+    TwelveData WebSocket access requires a TD Pro plan or higher.
+    """
+    from threading import Lock
+    from trader.container import Container
+
+    container = Container.instance()
+    config = container.config()
+
+    source = getattr(args, 'source', 'massive') or 'massive'
+
+    # Resolve symbols (positional or --universe) — same logic for both sources
+    duckdb_path = config.get('duckdb_path', '')
+    universe_library = config.get('universe_library', 'Universes')
+
+    if args.universe:
+        from trader.data.universe import UniverseAccessor
+        accessor = UniverseAccessor(duckdb_path, universe_library)
+        universe = accessor.get(args.universe)
+        if not universe.security_definitions:
+            console.print(f'[red]Universe "{args.universe}" is empty or does not exist[/red]')
+            return
+        symbols = [d.symbol for d in universe.security_definitions]
+    elif args.symbols:
+        symbols = args.symbols
+    else:
+        console.print('[red]Specify symbols or --universe[/red]')
+        return
+
+    feed = args.feed or config.get('massive_feed', 'stocks')
+    delayed = args.delayed or config.get('massive_delayed', False)
+
+    is_forex = feed == 'forex'
+    is_crypto = feed == 'crypto'
+    use_quotes = bool(getattr(args, 'quotes', False))
+    use_trades = bool(getattr(args, 'trades', False))
+
+    # Build the reactive provider + per-source data_type code
+    if source == 'twelvedata':
+        from trader.listeners.twelvedata_reactive import TwelveDataReactive
+
+        td_api_key = config.get('twelvedata_api_key', '')
+        if not td_api_key:
+            import os as _os
+            td_api_key = _os.getenv('TWELVEDATA_API_KEY', '')
+        if not td_api_key:
+            console.print(
+                '[red]twelvedata_api_key not configured (set in trader.yaml '
+                'or the TWELVEDATA_API_KEY env var)[/red]'
+            )
+            return
+
+        if use_trades:
+            console.print(
+                '[yellow]--trades has no effect on TwelveData (no per-trade stream); '
+                'falling back to price events.[/yellow]'
+            )
+            use_trades = False
+
+        reactive = TwelveDataReactive(
+            twelvedata_api_key=td_api_key,
+            duckdb_path=duckdb_path,
+            universe_library=universe_library,
+        )
+        data_type = 'A'  # ignored by TD, kept for surface parity
+
+    else:  # massive
+        from trader.listeners.massive_reactive import MassiveReactive
+
+        massive_api_key = config.get('massive_api_key', '')
+        if not massive_api_key:
+            console.print('[red]massive_api_key not configured in trader.yaml[/red]')
+            return
+
+        reactive = MassiveReactive(
+            massive_api_key=massive_api_key,
+            massive_feed=feed,
+            massive_delayed=delayed,
+            duckdb_path=duckdb_path,
+            universe_library=universe_library,
+        )
+
+        if use_quotes and (is_forex or is_crypto):
+            data_type = 'C'   # ForexQuote / CryptoQuote
+        elif use_trades and (is_forex or is_crypto):
+            data_type = 'CAS'  # per-second currency aggs
+        elif is_forex or is_crypto:
+            data_type = 'CA'  # 1-min aggs
+        elif use_trades:
+            data_type = 'T'   # per-trade
+        else:
+            data_type = 'A'   # 1-min aggs
+
+    pfmt = '.5f' if is_forex else '.2f'
+    mode_label = 'quotes' if use_quotes else ('trades' if use_trades else 'aggs')
+    delay_label = ' [yellow](delayed)[/yellow]' if (source == 'massive' and delayed) else ''
+    source_label = 'Massive' if source == 'massive' else 'TwelveData'
+
+    # Fetch prior-session close once at startup so Δ% can be computed
+    # against the conventional baseline (today vs prior session) instead
+    # of the current 1-min bar's open. Stocks only — forex/crypto are
+    # 24h markets where "prev close" is ill-defined; we fall back to
+    # bar-open Δ% for those.
+    prev_close: dict[str, float] = {}
+    if not (is_forex or is_crypto):
+        if source == 'massive':
+            try:
+                from massive import RESTClient
+                _rest = RESTClient(api_key=massive_api_key)
+                snaps = list(_rest.get_snapshot_all(
+                    market_type='stocks', tickers=symbols,
+                ))
+                for s in snaps:
+                    t = (getattr(s, 'ticker', None) or '').upper()
+                    pd_ = getattr(s, 'prev_day', None)
+                    if t and pd_ is not None:
+                        c = getattr(pd_, 'close', None)
+                        if c:
+                            prev_close[t] = float(c)
+            except Exception as e:
+                console.print(
+                    f'[yellow]Could not fetch prior closes for Δ% baseline '
+                    f'({type(e).__name__}: {e}). Falling back to bar-open Δ%.[/yellow]'
+                )
+        else:  # twelvedata — pull previous_close from TD /quote per symbol (cheap, ~1 credit each)
+            try:
+                from twelvedata import TDClient
+                _td = TDClient(apikey=td_api_key)
+                # TD /quote accepts comma-joined symbols; one call covers the whole watchlist
+                joined = ','.join(s.upper() for s in symbols[:120])
+                payload = _td.quote(symbol=joined).as_json()
+                if isinstance(payload, dict) and 'symbol' in payload and len(symbols) == 1:
+                    payload = {payload.get('symbol', symbols[0].upper()): payload}
+                if isinstance(payload, dict):
+                    for sym in symbols:
+                        p = payload.get(sym.upper()) or payload.get(sym) or {}
+                        pc = p.get('previous_close')
+                        if pc not in (None, ''):
+                            try:
+                                prev_close[sym.upper()] = float(pc)
+                            except (TypeError, ValueError):
+                                pass
+            except Exception as e:
+                console.print(
+                    f'[yellow]Could not fetch prior closes for Δ% baseline '
+                    f'({type(e).__name__}: {e}). Falling back to bar-open Δ%.[/yellow]'
+                )
+
+    # Per-symbol state, written by reactive callbacks (different threads),
+    # read by the render loop. Lock keeps reads coherent.
+    state: dict[str, dict] = {sym: {'symbol': sym} for sym in symbols}
+    state_lock = Lock()
+    update_count = 0
+
+    def on_agg(ticker):
+        nonlocal update_count
+        sym = ticker.contract.symbol if ticker.contract else None
+        if not sym:
+            return
+        with state_lock:
+            entry = state.setdefault(sym, {'symbol': sym})
+            entry['time'] = ticker.time
+            entry['open'] = ticker.open
+            entry['high'] = ticker.high
+            entry['low'] = ticker.low
+            entry['close'] = ticker.close
+            entry['last'] = ticker.last if ticker.last == ticker.last else ticker.close
+            entry['volume'] = ticker.volume
+            update_count += 1
+
+    def on_trade(ticker):
+        nonlocal update_count
+        sym = ticker.contract.symbol if ticker.contract else None
+        if not sym:
+            return
+        with state_lock:
+            entry = state.setdefault(sym, {'symbol': sym})
+            entry['time'] = ticker.time
+            entry['last'] = ticker.last
+            entry['last_size'] = ticker.lastSize
+            update_count += 1
+
+    def on_quote(ticker):
+        nonlocal update_count
+        sym = ticker.contract.symbol if ticker.contract else None
+        if not sym:
+            return
+        with state_lock:
+            entry = state.setdefault(sym, {'symbol': sym})
+            entry['time'] = ticker.time
+            entry['bid'] = ticker.bid
+            entry['ask'] = ticker.ask
+            entry['last'] = ticker.last  # mid
+            if ticker.contract and ticker.contract.currency:
+                entry['ccy'] = ticker.contract.currency
+            update_count += 1
+
+    if use_quotes:
+        reactive.quote_subject.subscribe(on_next=on_quote)
+    elif use_trades:
+        reactive.trade_subject.subscribe(on_next=on_trade)
+    else:
+        reactive.agg_subject.subscribe(on_next=on_agg)
+
+    def _fmt_price(v):
+        if v is None:
+            return '[dim]–[/dim]'
+        try:
+            fv = float(v)
+            if fv != fv:  # NaN
+                return '[dim]–[/dim]'
+            return format(fv, pfmt)
+        except (TypeError, ValueError):
+            return str(v)
+
+    def _fmt_volume(v):
+        if v is None:
+            return '[dim]–[/dim]'
+        try:
+            v = float(v)
+            if v != v:
+                return '[dim]–[/dim]'
+        except (TypeError, ValueError):
+            return str(v)
+        if v >= 1_000_000:
+            return f'{v / 1_000_000:.2f}M'
+        if v >= 1_000:
+            return f'{v / 1_000:.1f}K'
+        return f'{v:.0f}'
+
+    def _fmt_time(t):
+        if not t:
+            return '[dim]–[/dim]'
+        try:
+            return t.strftime('%H:%M:%S')
+        except AttributeError:
+            return str(t)
+
+    def _build_table() -> Table:
+        with state_lock:
+            snap = {sym: dict(state[sym]) for sym in state}
+            count = update_count
+
+        title = (
+            f'Watch · {source_label} · {mode_label} · feed={feed}{delay_label} · '
+            f'{len(symbols)} symbol{"s" if len(symbols) != 1 else ""} · '
+            f'{count} update{"s" if count != 1 else ""}'
+        )
+
+        if use_quotes:
+            tbl = Table(title=title, expand=False)
+            tbl.add_column('Time', style='dim')
+            tbl.add_column('Pair' if (is_forex or is_crypto) else 'Symbol', style='cyan bold')
+            tbl.add_column('Bid', justify='right')
+            tbl.add_column('Ask', justify='right')
+            tbl.add_column('Mid', justify='right')
+            tbl.add_column('Spread', justify='right', style='dim')
+            for sym in symbols:
+                e = snap.get(sym, {'symbol': sym})
+                bid = e.get('bid'); ask = e.get('ask'); mid = e.get('last')
+                ccy = e.get('ccy', '')
+                label = f'{sym}/{ccy}' if (is_forex or is_crypto) and ccy else sym
+                spread = ''
+                try:
+                    if bid is not None and ask is not None:
+                        spread = format(float(ask) - float(bid), pfmt)
+                except (TypeError, ValueError):
+                    pass
+                tbl.add_row(_fmt_time(e.get('time')), label,
+                            _fmt_price(bid), _fmt_price(ask),
+                            _fmt_price(mid), spread)
+            return tbl
+
+        if use_trades:
+            tbl = Table(title=title, expand=False)
+            tbl.add_column('Time', style='dim')
+            tbl.add_column('Symbol', style='cyan bold')
+            tbl.add_column('Last', justify='right')
+            tbl.add_column('Size', justify='right', style='dim')
+            for sym in symbols:
+                e = snap.get(sym, {'symbol': sym})
+                tbl.add_row(_fmt_time(e.get('time')), sym,
+                            _fmt_price(e.get('last')),
+                            _fmt_volume(e.get('last_size')))
+            return tbl
+
+        baseline_label = 'Δ%' if prev_close else 'Δ%(bar)'
+        tbl = Table(title=title, expand=False)
+        tbl.add_column('Time', style='dim')
+        tbl.add_column('Symbol', style='cyan bold')
+        tbl.add_column('Last', justify='right')
+        tbl.add_column(baseline_label, justify='right')
+        tbl.add_column('PrevC' if prev_close else 'Open', justify='right', style='dim')
+        tbl.add_column('High', justify='right', style='dim')
+        tbl.add_column('Low', justify='right', style='dim')
+        tbl.add_column('Volume', justify='right', style='dim')
+        for sym in symbols:
+            e = snap.get(sym, {'symbol': sym})
+            o = e.get('open'); c = e.get('close'); last = e.get('last') or c
+            base = prev_close.get(sym.upper())
+            if base is None:
+                base = o
+            pct_str = '[dim]–[/dim]'
+            try:
+                if base is not None and last is not None and float(base) != 0:
+                    pct = (float(last) - float(base)) / float(base) * 100
+                    color = 'green' if pct > 0 else ('red' if pct < 0 else 'white')
+                    pct_str = f'[{color}]{pct:+.2f}%[/{color}]'
+            except (TypeError, ValueError):
+                pass
+            baseline_cell = _fmt_price(base) if prev_close else _fmt_price(o)
+            tbl.add_row(
+                _fmt_time(e.get('time')), sym,
+                _fmt_price(last), pct_str,
+                baseline_cell, _fmt_price(e.get('high')), _fmt_price(e.get('low')),
+                _fmt_volume(e.get('volume')),
+            )
+        return tbl
+
+    console.print(
+        f'[dim]Watching {", ".join(symbols)} via {source_label} ({mode_label}, '
+        f'feed={feed}, Ctrl+C to stop)...[/dim]'
+    )
+
+    try:
+        reactive.start(symbols=symbols, data_type=data_type)
+    except Exception as ex:
+        console.print(f'[red]Failed to start {source_label} stream: {ex}[/red]')
+        if source == 'twelvedata':
+            console.print(
+                '[yellow]Hint: TwelveData WebSocket access requires a Pro plan or higher.[/yellow]'
+            )
+        return
+
+    try:
+        with Live(console=console, refresh_per_second=4, screen=False) as live:
+            while True:
+                live.update(_build_table())
+                time.sleep(0.25)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        reactive.stop()
+        console.print('[dim]Stopped watching.[/dim]')
+
+
+def _handle_watch(mmr: MMR, args: argparse.Namespace | None = None):
+    """Live-updating portfolio cards, OR — when symbols/--universe supplied —
+    a refreshing dashboard table fed by either Massive (Polygon WebSocket,
+    default) or TwelveData WebSocket. Dashboard mode bypasses IB entirely
+    (no market-data lock to compete with) and requires only the streaming
+    provider's API key (``massive_api_key`` or ``twelvedata_api_key``).
+    Pick a source with ``--source {massive,twelvedata}``.
+    """
+    # Branch: ticker/universe dashboard
+    if args is not None and (getattr(args, 'symbols', None) or getattr(args, 'universe', None)):
+        _handle_watch_dashboard(args)
+        return
+
     console.print('[dim]Watching portfolio (Ctrl+C to stop)...[/dim]')
 
     try:
@@ -8254,6 +8818,22 @@ def main():
         if cmd in ('strategies', 'strat'):
             strat_action = getattr(args, 'strat_action', None)
             if strat_action in _LOCAL_ONLY_STRAT_ACTIONS:
+                is_local = True
+        # `watch` in dashboard mode (any symbols / --universe) doesn't need
+        # trader_service — it streams from Massive/TwelveData directly.
+        # No-arg `watch` still needs the service for portfolio cards.
+        if cmd in ('watch', 'w'):
+            if getattr(args, 'symbols', None) or getattr(args, 'universe', None):
+                is_local = True
+        # Snapshot commands routed via TwelveData (or any non-ib source) skip
+        # trader_service entirely — they hit a REST endpoint directly.
+        if cmd in ('snapshot', 'snap', 'snapshot-batch') and getattr(args, 'source', 'ib') != 'ib':
+            is_local = True
+        # Forex commands routed via twelvedata (or massive REST) don't need IB.
+        if cmd == 'forex':
+            fx_action = getattr(args, 'fx_action', None) or getattr(args, 'forex_action', None)
+            fx_source = getattr(args, 'source', '')
+            if fx_source in ('massive', 'twelvedata') or fx_action in ('snapshot-all', 'movers', 'convert'):
                 is_local = True
 
         # Suppress logs by default; only show with --debug
