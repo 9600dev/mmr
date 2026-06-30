@@ -17,6 +17,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.markup import escape
 from trader.sdk import MMR
 from typing import Any, Dict, List, Optional
 
@@ -865,13 +866,15 @@ def build_parser() -> argparse.ArgumentParser:
     fin_filing_p.add_argument('--limit', type=int, default=1, help='Number of filings (default: 1, most recent)')
 
     # news
-    news_p = sub.add_parser('news', help='Market news from Massive.com',
+    news_p = sub.add_parser('news', help='Market news from Polygon/Benzinga (headlines)',
                              epilog='Examples:\n'
                                     '  news                          # General market news\n'
                                     '  news AAPL                     # News for AAPL\n'
                                     '  news AAPL --limit 20          # More articles\n'
                                     '  news AAPL --source benzinga   # Use Benzinga source\n'
-                                    '  news AAPL --detail            # Full article details + sentiment',
+                                    '  news AAPL --detail            # Full article details + sentiment\n'
+                                    '\n'
+                                    '  See also: news-fetch / news-search / news-enrich (~/dev/news scraper service)',
                              formatter_class=fmt)
     news_p.add_argument('ticker', nargs='?', default=None, help='Ticker to filter (optional)')
     news_p.add_argument('--limit', type=int, default=10, help='Number of articles (default: 10)')
@@ -879,6 +882,49 @@ def build_parser() -> argparse.ArgumentParser:
                          help='News source (default: polygon)')
     news_p.add_argument('--detail', action='store_true', default=False,
                          help='Show full article details with descriptions/sentiment')
+
+    # ---- news-service (~/dev/news scraper) commands — top-level so they
+    # don't conflict with `news`'s positional ticker arg. The scraper is
+    # an OPTIONAL separate Docker stack at http://127.0.0.1:8089; commands
+    # fail loudly with start instructions if it isn't running.
+    news_fetch_p = sub.add_parser('news-fetch',
+                                  help='Scrape one article URL via the local news service (~/dev/news at :8089)',
+                                  epilog='Examples:\n'
+                                         '  news-fetch https://www.reuters.com/markets/...\n'
+                                         '  news-fetch https://www.ft.com/...       # paywall → archive.ph fallback\n'
+                                         '  news-fetch URL --no-cache               # bypass local SQLite cache, fetch live\n',
+                                  formatter_class=fmt)
+    news_fetch_p.add_argument('url', help='Article URL to scrape')
+    news_fetch_p.add_argument('--no-cache', dest='use_cache', action='store_false', default=True,
+                              help="Don't replay a recent cached scrape — fetch live")
+    news_fetch_p.add_argument('--no-archive', dest='allow_archive_fallback',
+                              action='store_false', default=True,
+                              help='Skip archive.ph fallback (faster but fails on paywalls)')
+
+    news_search_p = sub.add_parser('news-search',
+                                   help='Web search via the news service (DDG / Google / Google News)',
+                                   epilog='Examples:\n'
+                                          '  news-search "AMD earnings"\n'
+                                          '  news-search "PLTR guidance" --engine google_news --limit 20\n',
+                                   formatter_class=fmt)
+    news_search_p.add_argument('query', nargs='+', help='Search query (quoted multi-word OK)')
+    news_search_p.add_argument('--engine', default='google_news',
+                               choices=['auto', 'ddg', 'google', 'google_news'],
+                               help='Search engine (default: google_news for recency)')
+    news_search_p.add_argument('--limit', type=int, default=10,
+                               help='Max results (default: 10)')
+
+    news_enrich_p = sub.add_parser('news-enrich',
+                                   help='Search + scrape recent article bodies for a ticker (via ~/dev/news)',
+                                   epilog='Examples:\n'
+                                          '  news-enrich AAPL              # top 5 article bodies\n'
+                                          '  news-enrich BHP --exchange ASX --limit 3\n',
+                                   formatter_class=fmt)
+    news_enrich_p.add_argument('ticker', help='Ticker symbol')
+    news_enrich_p.add_argument('--limit', type=int, default=5,
+                               help='Max articles to scrape (default: 5)')
+    news_enrich_p.add_argument('--exchange', default=None,
+                               help='Exchange hint for the search query (e.g. ASX, SEHK)')
 
     # options
     opt_p = sub.add_parser('options', aliases=['opt'], help='Options data and trading',
@@ -1972,6 +2018,15 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
 
         elif cmd == 'news':
             _handle_news(mmr, args)
+
+        elif cmd == 'news-fetch':
+            _handle_news_fetch(args)
+
+        elif cmd == 'news-search':
+            _handle_news_search(args)
+
+        elif cmd == 'news-enrich':
+            _handle_news_enrich(args)
 
         elif cmd in ('options', 'opt'):
             _handle_options(mmr, args)
@@ -7969,8 +8024,194 @@ def _resolve_expiration(mmr: MMR, symbol: str, expiration_arg: str | None, defau
     return best
 
 
+# ---- news service (~/dev/news scraper) integration -----------------------
+
+
+def _news_service_health_or_die():
+    """Hit /v1/health. Print a clear error + start instructions and abort
+    if the service isn't reachable. Returns the health dict on success."""
+    import os as _os
+    import json as _json
+    try:
+        import httpx
+    except ImportError:
+        print_status('httpx is required for news service calls — pip install httpx', success=False)
+        sys.exit(1)
+    url = _os.environ.get('NEWS_SERVICE_URL', 'http://127.0.0.1:8089').rstrip('/')
+    try:
+        with httpx.Client(timeout=5.0) as c:
+            r = c.get(f'{url}/v1/health')
+        if r.status_code != 200:
+            print_status(
+                f'news service at {url} returned HTTP {r.status_code}. '
+                f'Check `cd ~/dev/news && ./docker.sh -l` for logs.',
+                success=False,
+            )
+            sys.exit(1)
+        body = r.json()
+        if body.get('status') != 'ok':
+            print_status(f'news service unhealthy: {body}', success=False)
+            sys.exit(1)
+        return body
+    except httpx.ConnectError as ex:
+        print_status(
+            f'news service NOT REACHABLE at {url} ({ex}). '
+            f'Start it with: cd ~/dev/news && ./docker.sh -g '
+            f'(or set NEWS_SERVICE_URL to a remote instance)',
+            success=False,
+        )
+        sys.exit(1)
+    except Exception as ex:
+        print_status(f'news service health-check failed: {type(ex).__name__}: {ex}', success=False)
+        sys.exit(1)
+
+
+def _news_service_post(path: str, payload: dict, timeout: float = 120.0) -> dict:
+    """POST helper. Caller has already health-checked."""
+    import os as _os
+    import httpx
+    url = _os.environ.get('NEWS_SERVICE_URL', 'http://127.0.0.1:8089').rstrip('/')
+    with httpx.Client(timeout=timeout) as c:
+        r = c.post(f'{url}{path}', json=payload)
+    r.raise_for_status()
+    return r.json()
+
+
+def _handle_news_fetch(args: argparse.Namespace):
+    """`mmr news fetch URL` — scrape one article via the news service."""
+    _news_service_health_or_die()
+    url = args.url
+    if not (url.startswith('http://') or url.startswith('https://')):
+        print_status(f'URL must start with http:// or https:// — got {url!r}', success=False)
+        return
+    if not _json_mode:
+        console.print(f'[dim]Fetching {url}...[/dim]')
+    try:
+        body = _news_service_post('/v1/scrape', {
+            'url': url,
+            'use_cache': getattr(args, 'use_cache', True),
+            'allow_archive_fallback': getattr(args, 'allow_archive_fallback', True),
+        })
+    except Exception as ex:
+        print_status(f'scrape failed: {type(ex).__name__}: {ex}', success=False)
+        return
+    article = body.get('article') or {}
+    if _json_mode:
+        print(json.dumps(body, default=str))
+        return
+    if not body.get('ok'):
+        print_status(f'service returned not-ok: {body.get("status")} {body.get("error", "")}', success=False)
+        return
+    title = article.get('title') or '(no title)'
+    md = article.get('markdown', '')
+    src = body.get('fetcher_source') or '?'
+    # rich's markup parser will try to interpret []s in the source if we
+    # don't disable it — Wikipedia's IPA pronunciation like
+    # ``[/ˈpælənˌtɪər/]`` crashes with MarkupError. Title also goes
+    # without markup so a `[BREAKING]` prefix doesn't trip it.
+    console.print(f'\n[bold]{escape(title)}[/bold]')
+    console.print(f'[dim]via {src} — {len(md):,} chars of markdown[/dim]\n')
+    preview = md[:4000]
+    console.print(preview, markup=False, highlight=False)
+    if len(md) > 4000:
+        console.print(f'\n[dim]…truncated ({len(md)-4000:,} more chars). Use --json to get the full body.[/dim]')
+
+
+def _handle_news_search(args: argparse.Namespace):
+    """`mmr news search QUERY...` — run a web search via the news service."""
+    _news_service_health_or_die()
+    query = ' '.join(args.query)
+    if not _json_mode:
+        console.print(f'[dim]Searching ({args.engine}): {query!r}...[/dim]')
+    try:
+        body = _news_service_post('/v1/search', {
+            'query': query,
+            'engine': args.engine,
+            'max_results': args.limit,
+        }, timeout=30.0)
+    except Exception as ex:
+        print_status(f'search failed: {type(ex).__name__}: {ex}', success=False)
+        return
+    results = body.get('results') or []
+    if _json_mode:
+        print(json.dumps({'data': results, 'title': f'Search: {query!r}'}, default=str))
+        return
+    if not results:
+        console.print('[yellow]No results.[/yellow]')
+        return
+    table = Table(title=f'Search: {query!r} ({args.engine})', show_lines=False)
+    table.add_column('source', style='cyan', no_wrap=True)
+    table.add_column('date', no_wrap=True)
+    table.add_column('title', overflow='fold')
+    for r in results:
+        title = (r.get('title') or '')[:120]
+        src = (r.get('source') or '')[:20]
+        published = (r.get('published_at') or '')[:10]
+        table.add_row(src, published, f'{title}\n[dim]{r.get("url","")}[/dim]')
+    console.print(table)
+
+
+def _handle_news_enrich(args: argparse.Namespace):
+    """`mmr news enrich TICKER` — search + parallel-scrape news for a ticker."""
+    _news_service_health_or_die()
+    ticker = args.ticker.upper()
+    exchange = getattr(args, 'exchange', None)
+    q_suffix = f' {exchange}' if exchange else ''
+    query = f'{ticker} stock{q_suffix} news'
+    if not _json_mode:
+        console.print(f'[dim]Searching + scraping top {args.limit} articles for {ticker}...[/dim]')
+    try:
+        body = _news_service_post('/v1/search', {
+            'query': query, 'engine': 'google_news', 'max_results': args.limit,
+        }, timeout=30.0)
+    except Exception as ex:
+        print_status(f'search failed: {type(ex).__name__}: {ex}', success=False)
+        return
+    results = body.get('results') or []
+    if not results:
+        print_status(f'no search results for {ticker}', success=False)
+        return
+    # Scrape each URL serially via the cached path — keeps it simple. The
+    # service itself is parallel-aware (cache-replay is fast).
+    enriched = []
+    for r in results[:args.limit]:
+        url = r.get('url')
+        if not url:
+            continue
+        try:
+            s = _news_service_post('/v1/scrape', {
+                'url': url, 'use_cache': True, 'allow_archive_fallback': True,
+            }, timeout=120.0)
+            article = s.get('article') or {}
+            enriched.append({
+                'title': article.get('title') or r.get('title') or '',
+                'url': url,
+                'source': r.get('source') or s.get('fetcher_source') or '',
+                'published_at': r.get('published_at') or '',
+                'markdown_chars': len(article.get('markdown', '')),
+                'markdown_preview': (article.get('markdown', '') or '')[:500],
+                'ok': bool(s.get('ok')),
+                'fetcher': s.get('fetcher_source') or '',
+            })
+        except Exception as ex:
+            enriched.append({'title': r.get('title', ''), 'url': url, 'ok': False, 'error': str(ex)})
+
+    if _json_mode:
+        print(json.dumps({'data': enriched, 'title': f'News enrich: {ticker}'}, default=str))
+        return
+    for e in enriched:
+        mark = '[green]✓[/]' if e.get('ok') else '[red]✗[/]'
+        console.print(f'\n{mark} [bold]{escape(e["title"][:120])}[/]')
+        console.print(f'[dim]{escape(str(e.get("source","")))} | {e.get("published_at","")} | via {e.get("fetcher","?")} | {e.get("markdown_chars",0):,} chars[/dim]')
+        console.print(f'[dim]{e["url"]}[/dim]')
+        preview = e.get('markdown_preview', '')
+        if preview:
+            console.print(preview, markup=False, highlight=False)
+    console.print(f'\n[bold]{sum(1 for e in enriched if e.get("ok"))}/{len(enriched)} scraped successfully[/]')
+
+
 def _handle_news(mmr: MMR, args: argparse.Namespace):
-    """Fetch news from Massive.com."""
+    """Fetch news from Massive.com (headline path)."""
     import logging as _logging
     _logging.getLogger('urllib3').setLevel(_logging.WARNING)
 

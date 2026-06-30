@@ -38,6 +38,7 @@ pyyaml>=6.0
 pyzmq>=27.1
 reactivex>=4.1
 requests>=2.32
+httpx>=0.27
 rich>=14.3
 scikit-learn>=1.8
 scipy>=1.17

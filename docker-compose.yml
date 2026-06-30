@@ -68,6 +68,10 @@ services:
       TRADING_MODE: ${TRADING_MODE:-paper}
       IB_SERVER_ADDRESS: ib-gateway
       IB_ACCOUNT: ${IB_ACCOUNT:-}
+      # ~/dev/news scraper service runs on the HOST (separate stack);
+      # host.docker.internal lets the container reach the host loopback.
+      # Override with NEWS_SERVICE_URL=http://... for a remote instance.
+      NEWS_SERVICE_URL: ${NEWS_SERVICE_URL:-http://host.docker.internal:8089}
       # Bind ZMQ to 0.0.0.0 so host can reach services via port mapping
       ZMQ_RPC_SERVER_ADDRESS: tcp://0.0.0.0
       ZMQ_PUBSUB_SERVER_ADDRESS: tcp://0.0.0.0
