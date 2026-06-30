@@ -1111,6 +1111,12 @@ def build_parser() -> argparse.ArgumentParser:
                           help='Enrich results with financial ratios (PE, D/E, ROE, etc.)')
     ideas_p.add_argument('--news', action='store_true', default=False,
                           help='Enrich results with latest news headline and sentiment')
+    ideas_p.add_argument('--news-bodies', dest='news_bodies', action='store_true', default=False,
+                          help='Fetch full article bodies via the local news service '
+                               '(~/dev/news at :8089) for the top N results — answers '
+                               '"WHY is it moving?". Set --news-bodies-limit to control N.')
+    ideas_p.add_argument('--news-bodies-limit', dest='news_bodies_limit', type=int, default=3,
+                          help='How many top-ranked symbols to enrich with article bodies (default: 3)')
     ideas_p.add_argument('--location', '-l', default=None,
                           help='IB market location (e.g. STK.AU.ASX, STK.CA, STK.HK.SEHK)')
     ideas_p.add_argument('--source', choices=['massive', 'twelvedata'],
@@ -1147,6 +1153,13 @@ def build_parser() -> argparse.ArgumentParser:
     propose_p.add_argument('--confidence', type=float, default=0.0, help='Confidence 0-1')
     propose_p.add_argument('--thesis', default='', help='Short thesis label')
     propose_p.add_argument('--source', default='manual', help='Source label (manual, llm, scanner)')
+    propose_p.add_argument('--enrich-news', dest='enrich_news', action='store_true', default=False,
+                           help='Fetch top news articles for the symbol via the news service '
+                                '(~/dev/news at :8089) and append a "News context" section to '
+                                '--reasoning. Useful when an LLM will review the proposal — '
+                                'gives them the why behind the move. Requires news service running.')
+    propose_p.add_argument('--enrich-news-limit', type=int, default=3,
+                           help='Number of articles to attach when --enrich-news is set (default: 3)')
     propose_p.add_argument('--sectype', default='STK', help='Security type (STK, CASH, OPT, etc.)')
     propose_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
     propose_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
@@ -2193,13 +2206,70 @@ def _handle_propose(mmr: MMR, args: argparse.Namespace):
             print_status(e, success=False)
         return
 
+    # Optional: enrich --reasoning with top news articles for the symbol
+    # so a downstream LLM reviewer (or future-you reading the proposal)
+    # sees the catalyst, not just the technical setup. Human-triggered
+    # only — explicit --enrich-news flag — because it costs time and
+    # network. If the news service is down we degrade gracefully (no
+    # enrichment, deploy continues, no crash).
+    reasoning = args.reasoning
+    if getattr(args, 'enrich_news', False):
+        # Direct health check (don't go through _news_service_health_or_die
+        # — that sys.exits, and losing news enrichment shouldn't block the
+        # proposal from being saved).
+        try:
+            import httpx, os as _os
+            url = _os.environ.get('NEWS_SERVICE_URL', 'http://127.0.0.1:8089').rstrip('/')
+            with httpx.Client(timeout=5.0) as c:
+                hr = c.get(f'{url}/v1/health')
+            if hr.status_code != 200:
+                raise RuntimeError(f'health HTTP {hr.status_code}')
+            # search + scrape (mirrors news-enrich)
+            search_body = _news_service_post('/v1/search', {
+                'query': f'{args.symbol} stock news',
+                'engine': 'google_news',
+                'max_results': int(args.enrich_news_limit),
+            }, timeout=30.0)
+            results = search_body.get('results') or []
+            blocks = []
+            for r in results[:int(args.enrich_news_limit)]:
+                u = r.get('url')
+                if not u: continue
+                try:
+                    s = _news_service_post('/v1/scrape', {
+                        'url': u, 'use_cache': True, 'allow_archive_fallback': True,
+                    }, timeout=60.0)
+                    if not s.get('ok'): continue
+                    body_md = (s.get('article') or {}).get('markdown', '') or ''
+                    # Trim to first ~600 chars (a paragraph or two — keeps
+                    # the proposal record from bloating the DuckDB row).
+                    excerpt = body_md.strip()[:600]
+                    if excerpt:
+                        title = r.get('title') or (s.get('article') or {}).get('title') or u
+                        published = r.get('published_at') or ''
+                        source = r.get('source') or ''
+                        blocks.append(f'- **{title}** ({source}{(", "+published) if published else ""})\n  {u}\n  {excerpt}')
+                except Exception:
+                    pass
+            if blocks:
+                appended = '\n\n## News context (auto-enriched)\n\n' + '\n\n'.join(blocks)
+                reasoning = (reasoning + appended) if reasoning else appended
+                if not _json_mode:
+                    console.print(f'[dim]Enriched reasoning with {len(blocks)} news article(s)[/dim]')
+            else:
+                if not _json_mode:
+                    console.print('[yellow]--enrich-news: no articles successfully scraped — proposal saved without news[/yellow]')
+        except Exception as ex:
+            if not _json_mode:
+                console.print(f'[yellow]--enrich-news skipped ({type(ex).__name__}: {ex}) — is the news service running? `cd ~/dev/news && ./docker.sh -g`. Proposal will be saved without news enrichment.[/yellow]')
+
     proposal_id, leverage_info, snapshot_info = mmr.propose(
         symbol=args.symbol,
         action=args.action,
         quantity=args.quantity,
         amount=args.amount,
         execution=spec,
-        reasoning=args.reasoning,
+        reasoning=reasoning,
         confidence=args.confidence,
         thesis=args.thesis,
         source=args.source,
@@ -8735,6 +8805,59 @@ def _handle_ideas(mmr: MMR, args: argparse.Namespace):
     source_label = ' — TwelveData' if data_source == 'twelvedata' and not args.location else ''
     title = f'Ideas: {args.preset}{location_label}{source_label}'
 
+    # Optional body enrichment via the local news scraper service.
+    # Done before the print so JSON mode also gets the bodies. Failures
+    # downgrade silently — the scan itself shouldn't fail if news is
+    # down. The data is attached as new columns ``news_body`` (excerpt)
+    # and ``news_url`` on the dataframe rows that got enriched.
+    if getattr(args, 'news_bodies', False) and not df.empty:
+        try:
+            import httpx, os as _os
+            url = _os.environ.get('NEWS_SERVICE_URL', 'http://127.0.0.1:8089').rstrip('/')
+            with httpx.Client(timeout=5.0) as c:
+                hr = c.get(f'{url}/v1/health')
+            if hr.status_code != 200:
+                raise RuntimeError(f'health HTTP {hr.status_code}')
+            df['news_body'] = ''
+            df['news_url'] = ''
+            df['news_title'] = ''
+            limit = max(1, int(args.news_bodies_limit))
+            # Enrich top N rows only — body fetches are slow even with cache.
+            top_idx = df.head(limit).index
+            for idx in top_idx:
+                ticker = str(df.at[idx, 'ticker'] or '')
+                if not ticker:
+                    continue
+                try:
+                    sb = _news_service_post('/v1/search', {
+                        'query': f'{ticker} stock news',
+                        'engine': 'google_news',
+                        'max_results': 1,
+                    }, timeout=20.0)
+                    top = (sb.get('results') or [None])[0]
+                    if not top or not top.get('url'):
+                        continue
+                    s = _news_service_post('/v1/scrape', {
+                        'url': top['url'], 'use_cache': True, 'allow_archive_fallback': True,
+                    }, timeout=60.0)
+                    if not s.get('ok'):
+                        continue
+                    body_md = (s.get('article') or {}).get('markdown', '') or ''
+                    excerpt = body_md.strip()[:400]
+                    if excerpt:
+                        df.at[idx, 'news_body'] = excerpt
+                        df.at[idx, 'news_url'] = top['url']
+                        df.at[idx, 'news_title'] = top.get('title') or ''
+                except Exception:
+                    continue
+        except Exception as ex:
+            if not _json_mode:
+                console.print(
+                    f'[yellow]--news-bodies skipped ({type(ex).__name__}: {ex}) — '
+                    f'is the news service running? `cd ~/dev/news && ./docker.sh -g`. '
+                    f'Scan results returned without article bodies.[/yellow]'
+                )
+
     if _json_mode:
         print_df(df, title=title)
         return
@@ -8827,6 +8950,19 @@ def _handle_ideas(mmr: MMR, args: argparse.Namespace):
                 sent_color = 'green' if 'positive' in str(sentiment).lower() else 'red' if 'negative' in str(sentiment).lower() else 'yellow'
                 sent_str = f'  [{sent_color}][{sentiment}][/{sent_color}]'
             console.print(f'[dim italic]{headline}[/dim italic]{sent_str}')
+
+        # Article body (from --news-bodies)
+        body = row.get('news_body')
+        if body and body == body and str(body).strip():
+            nt = str(row.get('news_title') or '').strip()
+            nu = str(row.get('news_url') or '').strip()
+            if nt:
+                console.print(f'  [bold]{escape(nt[:100])}[/bold]')
+            if nu:
+                console.print(f'  [dim]{nu}[/dim]')
+            # Render body with markup off (article markdown contains [bracketed]
+            # text that rich would mis-parse — same risk as news-fetch).
+            console.print('  ' + str(body), markup=False, highlight=False)
 
         console.print()
 
