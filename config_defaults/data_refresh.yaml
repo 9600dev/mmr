@@ -1,0 +1,62 @@
+# TEMPLATE — copied to ~/.config/mmr/ on first run (container.ensure_config_dir,
+# start_mmr.sh, docker-entrypoint.sh). Edits here do NOT affect a running
+# system. The live config lives in ~/.config/mmr/ (bind-mounted into the
+# container at /home/trader/.config/mmr/). Use this file to update defaults
+# that ship with the repo for fresh installs only.
+#
+# Declarative refresh jobs: what data to keep current in the local DuckDB.
+# Pycron owns the SCHEDULING (see pycron.yaml — `data_refresh_*` entries).
+# This file owns WHAT to fetch.
+#
+# Run manually:
+#   mmr data refresh <job_name> [<job_name> ...]   # one or more named jobs
+#   mmr data refresh --all                          # everything below
+#   mmr data status                                 # what's stale
+#
+# Fields per job:
+#   universe   — name of a universe (mmr universe show <name>). Required
+#                (use a synthetic universe via `mmr universe create ...`
+#                + `mmr universe add ...` if you want an ad-hoc list).
+#   source     — 'twelvedata', 'massive', or 'ib'. Optional — when
+#                omitted, the runner auto-picks: US exchanges (NASDAQ,
+#                NYSE, SMART, ARCA) → 'twelvedata' (cheap, fast). All
+#                others (ASX, SEHK, TSE, EU, ...) → 'ib' (TwelveData
+#                doesn't cover international equities).
+#   bar_size   — "1 day", "1 min", etc. Same vocab as `mmr data download`.
+#   days       — lookback window. Keep 1-min windows small (90d for US,
+#                30d for ASX) — IB historical pacing is the bottleneck.
+#   force      — bool, default false. When true, refetches the full
+#                window every time (otherwise incremental: only missing
+#                date ranges are fetched, so a daily cron is cheap).
+
+jobs:
+  # ---- US (TwelveData) — runs after US after-hours close (20:30 ET) ----
+  # 1-min bars span 4:00 AM ET (pre) through 19:59 ET (post) for ~960
+  # bars/day. The TwelveData worker enables `prepost=true` automatically
+  # for 1/5/15/30-min US intraday bars (see twelvedata_history.py).
+  us_top20_daily:
+    universe: downloads          # the auto-registered universe from `mmr data download`
+    source: twelvedata
+    bar_size: "1 day"
+    days: 365
+
+  us_top20_1min:
+    universe: downloads
+    source: twelvedata
+    bar_size: "1 min"
+    days: 90
+
+  # ---- ASX (IB) — runs after ASX close (16:30 AEST / 16:30 ET prev day) ----
+  # ASX has no after-hours session — once the 16:00 closing auction
+  # settles, the day's bars are final. Run 30 min after to be safe.
+  asx_daily:
+    universe: asx
+    source: ib
+    bar_size: "1 day"
+    days: 365
+
+  asx_1min:
+    universe: asx
+    source: ib
+    bar_size: "1 min"
+    days: 30                     # IB historical pacing makes longer windows expensive

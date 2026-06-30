@@ -669,15 +669,27 @@ class IBAIORx():
         # is root-caused. Logs at WARNING level so it shows up even at the
         # default log level.
         # Fast path: if ib_async already has a live ticker for this contract
-        # (e.g. a publish_contract() subscription from earlier in this session
-        # is keeping the feed warm), return its current state immediately.
-        # Avoids racing a fresh snapshot request that may never fire its
-        # first update because IB dedupes the duplicate subscription.
+        # with FULLY populated bid/ask/last, return its current state
+        # immediately. Avoids racing a fresh snapshot request that may
+        # never fire its first update because IB dedupes the duplicate
+        # subscription. The check requires all three because partial
+        # state (e.g. only ``last`` set from a stale prior session, but
+        # no fresh bid/ask) was returning half-populated tickers — better
+        # to fall through to the wait loop and let real updates arrive.
         if not snapshot and not tick_list:
+            import math
+            def _populated(x):
+                if x is None:
+                    return False
+                try:
+                    return not math.isnan(float(x))
+                except (TypeError, ValueError):
+                    return True
             existing = self.ib.ticker(contract)
             if existing is not None and (
-                existing.bid == existing.bid or existing.ask == existing.ask
-                or existing.last == existing.last
+                _populated(existing.bid)
+                and _populated(existing.ask)
+                and _populated(existing.last)
             ):
                 return existing
 
@@ -694,61 +706,111 @@ class IBAIORx():
                 pass
 
 
-        _task: asyncio.Event = asyncio.Event()
+        # Two-phase completion semantics:
+        #   - ``_first_event`` fires on the FIRST ticker update from IB
+        #     (proves data is flowing — used as the hard timeout signal).
+        #   - ``_complete_event`` fires when the ticker has bid, ask AND
+        #     last populated (the realistic "snapshot is usable" state).
+        #
+        # Why not return on the first event? IB fires ``pendingTickersEvent``
+        # multiple times as ticks arrive from different servers — the
+        # price-server tick (last/OHLC) usually arrives ~100ms before the
+        # quote-server tick (bid/ask). The first event often has only
+        # ``last`` set; bid/ask are NaN. Returning immediately gives the
+        # caller a half-populated ticker.
+        #
+        # Strategy: wait up to ``PARTIAL_WAIT`` for full data. If timing
+        # out partial, accept whatever we have (some symbols never get
+        # bid/ask because the venue isn't quoting one — e.g. PLTR
+        # off-hours where IB returns bid/ask=-1 sentinel).
+        import math
+        # 4s is empirically tuned: cold-subscribe to ASX symbols takes
+        # ~1.5-2.5s for bid/ask to arrive (vs ~500ms for US during open
+        # hours). Once an ib_async ticker is warm the bid/ask is
+        # already populated and we hit the fast path with zero wait.
+        # 4s gives headroom for the cold case without making snapshot
+        # latency painful for human use.
+        PARTIAL_WAIT = 4.0
+
+        _first_event: asyncio.Event = asyncio.Event()
+        _complete_event: asyncio.Event = asyncio.Event()
         populated_ticker: Optional[Ticker] = None
         thrown_exception: Optional[Exception] = None
+
+        def _is_populated(x):
+            # NaN means "not set yet"; -1 is IB's "no top-of-book quote"
+            # sentinel — still counts as IB having spoken.
+            if x is None:
+                return False
+            try:
+                return not math.isnan(float(x))
+            except (TypeError, ValueError):
+                return True
 
         def on_next(ticker: Ticker):
             nonlocal populated_ticker
             populated_ticker = ticker
-            _task.set()
+            _first_event.set()
+            if (_is_populated(ticker.last)
+                    and _is_populated(ticker.bid)
+                    and _is_populated(ticker.ask)):
+                _complete_event.set()
 
         def on_error(ex: Exception):
             nonlocal thrown_exception
             thrown_exception = ex
-            _task.set()
+            _first_event.set()
+            _complete_event.set()
 
         def on_completed():
             logging.debug('get_snapshot() aclose')
 
-        # we've got to subscribe, then wait for the first Ticker to arrive in the events
-        # cachedeventsource, subscribers get the last value after calling subscribe
+        # Subscribe to the raw stream — no ``take(1)``. Ticker fires
+        # multiple events as price/quote/volume ticks arrive; we want
+        # to see all of them until we have a complete picture or
+        # PARTIAL_WAIT expires.
         observable: Observable[Ticker] = self.__subscribe_contract(
             contract=contract,
             tick_list=tick_list,
             one_time_snapshot=snapshot,
             delayed=delayed,
         )
-
-        xs: Observable[Ticker] = observable.pipe(
-            ops.take(1)
-        )
+        xs: Observable[Ticker] = observable
 
         observer = AutoDetachObserver[Ticker](on_next=on_next, on_error=on_error, on_completed=on_completed)
         subscription = xs.subscribe(observer)
 
-        # Bounded wait — without this the coroutine hangs forever if IB
-        # never delivers a ticker (it can happen when a duplicate
-        # subscription on the same clientId silently no-ops because
-        # IB-side dedup'd it). The RPC client times out the call but the
-        # server-side task leaks. Cancel + raise so the caller sees a
-        # clear error instead of a 30s mystery timeout.
+        # Two-phase wait:
+        #   Phase 1 — wait up to PARTIAL_WAIT for bid+ask+last all populated
+        #             (the realistic "snapshot is usable" state).
+        #   Phase 2 — if PARTIAL_WAIT expires, fall back to "any data at all"
+        #             up to the hard ``wait_timeout``. Some symbols never
+        #             quote bid/ask in this venue (IB returns -1 or NaN);
+        #             returning partial data is better than timing out.
+        #   Phase 3 — if even the first event never arrives, raise so the
+        #             caller sees a clear error instead of a silent hang.
         try:
-            await asyncio.wait_for(_task.wait(), timeout=wait_timeout)
+            await asyncio.wait_for(_complete_event.wait(), timeout=PARTIAL_WAIT)
         except asyncio.TimeoutError:
-            subscription.dispose()
+            # Didn't get the full bid/ask/last triple in time; accept
+            # whatever we have if at least one tick arrived.
+            remaining = max(0.5, wait_timeout - PARTIAL_WAIT)
             try:
-                self.ib.cancelMktData(contract)
-            except Exception:
-                pass
-            sym = getattr(contract, 'symbol', '?')
-            cid = getattr(contract, 'conId', '?')
-            raise TimeoutError(
-                f'No market data received for {sym} (conId={cid}) within {wait_timeout}s. '
-                f'Check: (1) IB market-data subscription enabled for this exchange, '
-                f'(2) symbol qualifies on the chosen exchange, '
-                f'(3) market is open or pass delayed=True for frozen data.'
-            )
+                await asyncio.wait_for(_first_event.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                subscription.dispose()
+                try:
+                    self.ib.cancelMktData(contract)
+                except Exception:
+                    pass
+                sym = getattr(contract, 'symbol', '?')
+                cid = getattr(contract, 'conId', '?')
+                raise TimeoutError(
+                    f'No market data received for {sym} (conId={cid}) within {wait_timeout}s. '
+                    f'Check: (1) IB market-data subscription enabled for this exchange, '
+                    f'(2) symbol qualifies on the chosen exchange, '
+                    f'(3) market is open or pass delayed=True for frozen data.'
+                )
         observer.on_completed()
         subscription.dispose()
         await asyncio.sleep(0.1)
@@ -1002,23 +1064,32 @@ class IBAIORx():
         )
 
     async def get_snapshots_batch(self, contracts: list[Contract], delayed: bool = False) -> list[dict]:
-        """Get snapshots for multiple contracts sequentially."""
-        results = []
-        for contract in contracts:
+        """Get snapshots for many contracts in parallel.
+
+        Previously this was sequential — at ``get_snapshot``'s ~4s
+        cold-cache wait, a 53-symbol ASX scan took 200+ s and blew past
+        the RPC client's 30 s timeout. ``asyncio.gather`` fires all the
+        IB ``reqMktData`` calls concurrently; each ticker streams its
+        first events independently, so total wall-clock is roughly
+        max(individual_waits) ≈ 4-5 s for 50+ symbols.
+
+        Failures don't abort the batch — symbols that fail get omitted
+        from the result (logged at WARNING). Matches the prior contract.
+        """
+        async def _one(contract: Contract):
             try:
                 ticker = await self.get_snapshot(contract, delayed=delayed)
-                results.append({
+                return {
                     'symbol': contract.symbol, 'conId': contract.conId,
                     'exchange': contract.primaryExchange or contract.exchange,
                     'currency': contract.currency,
                     'bid': ticker.bid, 'ask': ticker.ask, 'last': ticker.last,
                     'open': ticker.open, 'high': ticker.high, 'low': ticker.low,
                     'close': ticker.close, 'volume': ticker.volume,
-                })
+                }
             except Exception as ex:
-                # 10197 is a user-environment issue (TWS also logged in),
-                # not a code bug — keep it to one line and don't spam the
-                # full Contract repr every time it hits.
+                # 10197 = competing live session (TWS open). Surface once,
+                # don't dump the full Contract repr on every failure.
                 msg = str(ex)
                 if 'errorCode: 10197' in msg or 'competing live session' in msg:
                     logging.warning(
@@ -1028,7 +1099,10 @@ class IBAIORx():
                     )
                 else:
                     logging.warning(f'Snapshot failed for {contract.symbol}: {ex}')
-        return results
+                return None
+
+        gathered = await asyncio.gather(*(_one(c) for c in contracts), return_exceptions=False)
+        return [r for r in gathered if r is not None]
 
     async def get_history_bars(self, contract: Contract, duration: str = '60 D', bar_size: str = '1 day') -> list[dict]:
         """Get recent history bars for indicator computation."""

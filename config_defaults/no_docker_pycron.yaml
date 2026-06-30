@@ -39,3 +39,21 @@ jobs:
       depends_on:
         - trader_service
       delay: 15
+    # ---- declarative data refreshes (driven by data_refresh.yaml) ----
+    # See pycron.yaml for the full explanation.
+    - name: data_refresh_us
+      description: refresh US universes (TwelveData) — after US after-hours close
+      command: python3
+      arguments: -m trader.mmr_cli data refresh us_top20_daily us_top20_1min
+      start: "30 20 * * 1-5"     # 8:30 PM ET (30 min after AH close at 20:00)
+      start_on_pycron_start: False
+      restart_if_found: False
+      restart_if_finished: False
+    - name: data_refresh_asx
+      description: refresh ASX universes (IB) — after ASX close (no AH session)
+      command: python3
+      arguments: -m trader.mmr_cli data refresh asx_daily asx_1min
+      start: "30 16 * * 0-4"     # 4:30 PM ET Sun-Thu = 16:30 AEST Mon-Fri
+      start_on_pycron_start: False
+      restart_if_found: False
+      restart_if_finished: False

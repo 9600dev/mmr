@@ -38,3 +38,39 @@ jobs:
       depends_on:
         - trader_service
       delay: 15
+    # ---- declarative data refreshes (driven by data_refresh.yaml) ----
+    # One-shot subprocesses on a schedule. Each cron entry calls
+    # `mmr data refresh JOB [JOB ...]` with the job names declared in
+    # data_refresh.yaml. Failures in one cron entry don't take down
+    # pycron or the other entries.
+    #
+    # IMPORTANT: cron expressions are interpreted in the CONTAINER's
+    # local TZ (set via docker-compose's TZ env var, which defaults to
+    # America/New_York but is overridden by the TIME_ZONE variable in
+    # .env). Examples below ANCHOR to NY time — if your container runs
+    # in another TZ, edit ~/.config/mmr/pycron.yaml accordingly. Common
+    # adjustments:
+    #   - Container in PT? subtract 3 hours from the NY times below
+    #   - Container in UTC? add 4 (EDT/summer) or 5 (EST/winter) hours
+    - name: data_refresh_us
+      description: refresh US universes (TwelveData) — after US after-hours close
+      command: python3
+      arguments: -m trader.mmr_cli data refresh us_top20_daily us_top20_1min
+      start: "30 20 * * 1-5"     # 8:30 PM ET weekdays. TwelveData 1-min bars
+                                 # include pre (4-9:30 AM) + post (16-20:00 ET);
+                                 # AH closes at 20:00 so we wait 30 min for the
+                                 # final bars to publish.
+      start_on_pycron_start: False
+      restart_if_found: False
+      restart_if_finished: False
+    - name: data_refresh_asx
+      description: refresh ASX universes (IB) — after ASX close
+      command: python3
+      arguments: -m trader.mmr_cli data refresh asx_daily asx_1min
+      start: "30 16 * * 0-4"     # 4:30 PM ET Sun-Thu = 6:30 AM UTC Mon-Fri =
+                                 # 16:30 AEST (30 min after Sydney 16:00 close
+                                 # to let the closing auction settle). ASX has
+                                 # no after-hours session, so this is final.
+      start_on_pycron_start: False
+      restart_if_found: False
+      restart_if_finished: False

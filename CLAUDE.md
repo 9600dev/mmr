@@ -96,7 +96,9 @@ The reason PubSub and MessageBus are separate (despite overlap) is efficiency: Z
 
 **PnL subscription race**: `__subscribe_pnl` registers `(account, conId)` under `_pnl_subscriptions_lock` using first-claim-wins semantics. If the actual `subscribe_single_pnl` call fails, the registry entry is backed out so a retry can re-attempt. Portfolio updates fired from IB-eventkit threads are routed onto the main loop via `run_coroutine_threadsafe` (the main loop is captured in `connected_event`), so disk I/O during a universe update doesn't block the IB callback thread.
 
-**Idea scanner**: Raises `IdeaScannerError` (not an empty DataFrame) when the IB scanner returns no results or when every supplied ticker fails to resolve. This follows the "fail loudly" principle so callers can distinguish "API failure" from "zero matches".
+**Idea scanner**: Raises `IdeaScannerError` (not an empty DataFrame) when the IB scanner returns no results or when every supplied ticker fails to resolve. This follows the "fail loudly" principle so callers can distinguish "API failure" from "zero matches". Batch operations (`get_snapshots_batch`, historical bar fetches) run via `asyncio.gather` / `ThreadPoolExecutor(max_workers=8)`, not sequential `for` loops — a 50-symbol ASX scan goes from ~200s sequential to ~15-20s parallel. The remaining cost is IB's own historical-data pacing (~6 concurrent requests, ~2s spacing), which is why the cron-driven `data refresh` exists — it keeps the local DuckDB warm so scans never hit IB historical on the hot path.
+
+**Data refresh loop** (`trader/mmr_cli.py:_handle_data_refresh` + `config_defaults/data_refresh.yaml`): Declarative jobs `{universe, source?, bar_size, days, force?}` keep universes' OHLCV current in the local DuckDB. Pycron owns the schedule (`data_refresh_us` and `data_refresh_asx` cron entries in `pycron.yaml`); the YAML owns *what* to fetch. Source auto-detects from the universe's dominant exchange when omitted (US → twelvedata; else IB). Incremental by default — only missing date ranges are fetched — so a daily cron run costs ~seconds for fresh windows. `mmr data status` shows per-(job, bar_size) coverage and stale-days, color-coded; `mmr data refresh JOB [JOB ...]` runs jobs ad-hoc. Failures in one job are isolated (per-job result, batch keeps going) and don't take down the cron entry.
 
 ## Project Structure
 
@@ -111,6 +113,7 @@ mmr/
 │   ├── strategy_runtime.yaml  # Strategy definitions
 │   ├── position_sizing.yaml   # Position sizing defaults (base size, risk level, limits)
 │   ├── trading_filters.yaml   # Trading filter config (denylist, allowlist, exchanges)
+│   ├── data_refresh.yaml      # Declarative refresh jobs (universe × bar_size × days, cron-driven)
 │   └── logging.yaml           # Python logging config
 │
 ├── trader/                    # Core library + entry points
@@ -487,7 +490,9 @@ User configs live in `~/.config/mmr/`. On first run, bundled defaults from `conf
 - `default_data_source` (default `twelvedata`) — sets the default for every `--source` arg on CLI commands where the value is in that command's choice set (history download, snapshot, watch, financials, fx, movers, ideas). News/propose are unaffected (they don't accept those values). Override per-shell with `MMR_DEFAULT_DATA_SOURCE`.
 - `equity_decimation` (default `daily`) — sets how aggressively backtest persist downsamples `equity_curve_json` before storing. `daily` resamples to last-value-per-day (~17 KB/run vs ~9.9 MB for raw 1-min); `none` keeps everything; an integer N uniform-samples to N points. The blob feeds PSR + Sharpe-CI (both n≥30 minima), so daily decimation is statistically lossless. Override per-shell with `MMR_EQUITY_DECIMATION`.
 
-**`~/.config/mmr/pycron.yaml`**: Service definitions with cron scheduling, auto-restart, dependency ordering.
+**`~/.config/mmr/pycron.yaml`**: Service definitions with cron scheduling, auto-restart, dependency ordering. Also hosts `data_refresh_us` / `data_refresh_asx` cron entries that drive the data-refresh loop (see below).
+
+**`~/.config/mmr/data_refresh.yaml`**: Declarative refresh jobs that keep universes' OHLCV current in the local DuckDB. Each job is `{universe, source, bar_size, days, force?}`. Pycron owns the *when* (`data_refresh_*` entries in `pycron.yaml`), this file owns the *what*. Source auto-detects from the universe's dominant exchange (US → twelvedata, else IB) when omitted. Commands: `mmr data refresh <job> [<job> ...]` runs jobs ad-hoc, `mmr data refresh --all` runs everything, `mmr data status` shows per-(job, bar_size) freshness with stale-day coloring. Refresh is incremental by default (only missing date ranges fetched, so daily crons are cheap); set `force: true` to refetch the full window.
 
 **`~/.config/mmr/strategy_runtime.yaml`**: Strategy name, Python module path, class name, bar_size, conids/universe, historical_days_prior.
 
@@ -607,11 +612,14 @@ JSON output always follows the structure `{"data": ..., "title": ...}` for data 
 ```bash
 mmr --json data summary                                    # What data is in local DuckDB
 mmr --json data query AAPL --bar-size "1 day" --days 30    # Read OHLCV from local store
+mmr data status                                            # Freshness per (universe, bar_size) job from data_refresh.yaml
 ```
 
 **Step 2: Download historical data** (no service needed, requires massive_api_key)
 ```bash
-mmr data download AAPL MSFT --bar-size "1 day" --days 365
+mmr data download AAPL MSFT --bar-size "1 day" --days 365  # Ad-hoc download
+mmr data refresh us_top20_daily                            # Declarative — runs a named job from data_refresh.yaml
+mmr data refresh --all                                     # All jobs (what pycron runs daily)
 ```
 
 **Step 3: Create a strategy**
@@ -716,7 +724,7 @@ mmr reject 42 --reason "Group over budget"  # Reject with reason
 ### Command Service Requirements
 
 **No service needed** (fully local):
-- `data summary`, `data query`, `data download`
+- `data summary`, `data query`, `data download`, `data refresh`, `data status`
 - `backtest` / `bt`, `bt-sweep`, `sweep run/list/show`
 - `backtests list/show/compare/confidence/archive/unarchive/delete`
 - `strategies create`, `strategies deploy`, `strategies undeploy`, `strategies inspect`

@@ -1100,23 +1100,38 @@ class IBIdeaScanner:
         )
 
         # 4. Get history for prev_close/prev_volume + local indicator computation
-        #    Limit history fetches to top candidates. If >50% of fetches fail,
-        #    raise so we don't silently score on missing indicators.
+        #    in parallel. Limit history fetches to top candidates. If >50%
+        #    of fetches fail, raise so we don't silently score on missing
+        #    indicators.
+        #
+        #    Was sequential: 30 fetches × ~0.5s = 15s of pure wait, the
+        #    main reason a 50-symbol scan took ~20s end-to-end. With an
+        #    8-way pool it drops to ~3-4s.
         history_map: Dict[str, list[dict]] = {}
         history_limit = min(len(contracts), top_n * 2)
         history_failures: list = []
-        for contract in contracts[:history_limit]:
+
+        def _fetch_one(contract):
             try:
                 bars = consume(
                     self._rpc.rpc(return_type=list[dict]).get_history_bars(contract, '60 D', '1 day')
                 )
-                if bars:
-                    history_map[contract.symbol] = bars
-                else:
-                    history_failures.append((contract.symbol, 'no bars returned'))
+                return (contract.symbol, bars, None)
             except Exception as ex:
-                history_failures.append((contract.symbol, str(ex)))
-                logger.warning('history fetch failed for %s: %s', contract.symbol, ex)
+                return (contract.symbol, None, ex)
+
+        if history_limit > 0:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = {pool.submit(_fetch_one, c): c for c in contracts[:history_limit]}
+                for fut in as_completed(futures):
+                    sym, bars, ex = fut.result()
+                    if ex is not None:
+                        history_failures.append((sym, str(ex)))
+                        logger.warning('history fetch failed for %s: %s', sym, ex)
+                    elif bars:
+                        history_map[sym] = bars
+                    else:
+                        history_failures.append((sym, 'no bars returned'))
 
         # When every history fetch fails, indicators will be None and scoring
         # becomes meaningless — better to fail than return nonsense rankings.

@@ -21,6 +21,7 @@ from trader.sdk import MMR
 from typing import Any, Dict, List, Optional
 
 import argparse
+import asyncio
 import json
 import shlex
 import sys
@@ -1474,9 +1475,11 @@ def build_parser() -> argparse.ArgumentParser:
     data_dl_p.add_argument('--days', type=int, default=365, help='Days of history (default: 365)')
     data_dl_p.add_argument(
         '--source',
-        choices=['massive', 'twelvedata'],
-        default=_src_default(['massive', 'twelvedata'], 'massive'),
-        help='Data source (default: massive)',
+        choices=['massive', 'twelvedata', 'ib'],
+        default=_src_default(['massive', 'twelvedata', 'ib'], 'massive'),
+        help='Data source (default: massive). Use `ib` for international '
+             'exchanges (ASX, SEHK, TSE, EU) where massive/twelvedata do '
+             'not have coverage — requires trader_service / IB Gateway.',
     )
     data_dl_p.add_argument(
         '--force', '-f',
@@ -1490,6 +1493,27 @@ def build_parser() -> argparse.ArgumentParser:
         'migrate-symbols',
         help='Rewrite string-keyed tick_data rows to conId-keyed '
              '(requires trader_service)',
+    )
+
+    data_refresh_p = data_sub.add_parser(
+        'refresh',
+        help='Run declarative refresh jobs from ~/.config/mmr/data_refresh.yaml. '
+             'Designed to be cron-driven (see pycron.yaml data_refresh_* entries) '
+             'but also runnable ad-hoc.',
+        epilog='Examples:\n'
+               '  data refresh us_top20_daily         # one job\n'
+               '  data refresh us_top20_daily asx_daily  # multiple\n'
+               '  data refresh --all                  # everything in the YAML\n',
+        formatter_class=fmt,
+    )
+    data_refresh_p.add_argument('jobs', nargs='*', help='Job names from data_refresh.yaml')
+    data_refresh_p.add_argument('--all', dest='refresh_all', action='store_true',
+                                help='Run every job in the YAML')
+
+    data_sub.add_parser(
+        'status',
+        help='Show freshness of universes referenced by data_refresh.yaml — '
+             'per (universe, bar_size): last bar date, row count, staleness',
     )
 
     # help
@@ -3640,6 +3664,97 @@ def _handle_strategy_deploy(args: argparse.Namespace):
         entry['universe'] = args.universe
     if params_dict:
         entry['params'] = params_dict
+
+    # Auto-register conids in the ``downloads`` universe so
+    # strategy_runtime's local resolve_symbol(conid=...) succeeds at load
+    # time. Without this, deploying with --conids X for a symbol that's
+    # not in any universe causes strategy_runtime to log "could not find
+    # security definition for conId X" and DISABLE the strategy. We
+    # learned this the hard way with orb_gld (conid 51529211) and
+    # vwap_reclaim_cat (conid 5437) — both silently sat disabled because
+    # the prior `strategies deploy` calls hadn't added them to a
+    # universe. The resolve goes through trader_service → IB; if either
+    # is unreachable we proceed with a warning rather than blocking the
+    # deploy (the strategy_service's 30s reconcile will still load the
+    # strategy once the universe is populated).
+    if args.conids:
+        try:
+            from trader.container import Container
+            from trader.data.universe import UniverseAccessor, Universe
+            container_cfg = Container.instance().config()
+            duckdb_path = container_cfg.get('duckdb_path', '')
+            accessor = UniverseAccessor(
+                duckdb_path,
+                container_cfg.get('universe_library', 'Universes'),
+            )
+            # Which conids aren't already in ANY universe?
+            unregistered = []
+            for cid in args.conids:
+                found = False
+                try:
+                    # Iterate all universes to check membership
+                    for u_name in accessor.list_universes():
+                        u = accessor.get(u_name)
+                        if u and any(sd.conId == int(cid) for sd in u.security_definitions):
+                            found = True
+                            break
+                except Exception:
+                    pass
+                if not found:
+                    unregistered.append(int(cid))
+            if unregistered:
+                # Resolve each via trader_service (it knows how to ask IB).
+                from trader.sdk import MMR as _MMR
+                rpc_mmr = _MMR(
+                    rpc_address=container_cfg.get('zmq_rpc_server_address'),
+                    rpc_port=container_cfg.get('zmq_rpc_server_port'),
+                    timeout=5,
+                )
+                try:
+                    rpc_mmr.connect()
+                    target_universe = 'downloads'
+                    try:
+                        u = accessor.get(target_universe)
+                    except Exception:
+                        u = None
+                    # Resolve each conid via IB. SDK.resolve(int) is
+                    # local-DB-only by design — we have to go through
+                    # resolve_contract (live IB reqContractDetails) for
+                    # genuinely-new conids.
+                    from ib_async import Contract
+                    new_defs = []
+                    for cid in unregistered:
+                        try:
+                            resolved = rpc_mmr._rpc.rpc().resolve_contract(
+                                Contract(conId=int(cid))
+                            )
+                            if resolved:
+                                new_defs.append(resolved[0])
+                        except Exception as ex:
+                            if not _json_mode:
+                                console.print(f'[yellow]  could not resolve conId {cid}: {ex}[/yellow]')
+                    if new_defs:
+                        if u is None:
+                            u = Universe(name=target_universe, security_definitions=list(new_defs))
+                        else:
+                            existing_ids = {sd.conId for sd in u.security_definitions}
+                            for sd in new_defs:
+                                if sd.conId not in existing_ids:
+                                    u.security_definitions.append(sd)
+                        accessor.update(u)
+                        if not _json_mode:
+                            for sd in new_defs:
+                                console.print(f'[dim]  registered {sd.symbol} (conId {sd.conId}) in universe {target_universe!r}[/dim]')
+                finally:
+                    try: rpc_mmr.close()
+                    except Exception: pass
+        except Exception as ex:
+            if not _json_mode:
+                console.print(
+                    f'[yellow]  auto-register skipped ({type(ex).__name__}: {ex}) — '
+                    f'strategy_service may report "could not find security definition" '
+                    f'until the conid is added to a universe manually.[/yellow]'
+                )
 
     strategies.append(entry)
     config['strategies'] = strategies
@@ -6666,7 +6781,7 @@ def _handle_data(args: argparse.Namespace):
     """Handle data subcommands."""
     action = getattr(args, 'data_action', None)
     if not action:
-        console.print('[yellow]Usage: data summary|query|download|migrate-symbols[/yellow]')
+        console.print('[yellow]Usage: data summary|query|download|migrate-symbols|refresh|status[/yellow]')
         return
 
     if action == 'summary':
@@ -6677,6 +6792,10 @@ def _handle_data(args: argparse.Namespace):
         _handle_data_download(args)
     elif action == 'migrate-symbols':
         _handle_data_migrate_symbols(args)
+    elif action == 'refresh':
+        _handle_data_refresh(args)
+    elif action == 'status':
+        _handle_data_status()
     else:
         console.print(f'[yellow]Unknown data action: {action}[/yellow]')
 
@@ -6846,16 +6965,24 @@ def _handle_data_download(args: argparse.Namespace):
     duckdb_path = cfg.get('duckdb_path', '')
     source = getattr(args, 'source', 'massive')
 
+    api_key = ''
     if source == 'twelvedata':
         api_key = cfg.get('twelvedata_api_key', '')
         if not api_key:
             print_status('twelvedata_api_key not configured (set TWELVEDATA_API_KEY env var)', success=False)
             return
-    else:
+    elif source == 'massive':
         api_key = cfg.get('massive_api_key', '')
         if not api_key:
             print_status('massive_api_key not configured in trader.yaml', success=False)
             return
+    elif source == 'ib':
+        # IB needs no API key — uses the trader_service / Gateway connection.
+        # We'll spin a short-lived IBHistoryWorker connection per call.
+        pass
+    else:
+        print_status(f'Unknown source: {source!r}', success=False)
+        return
 
     if not duckdb_path:
         print_status('duckdb_path not configured', success=False)
@@ -6869,9 +6996,45 @@ def _handle_data_download(args: argparse.Namespace):
     if source == 'twelvedata':
         from trader.listeners.twelvedata_history import TwelveDataHistoryWorker
         worker = TwelveDataHistoryWorker(twelvedata_api_key=api_key)
-    else:
+    elif source == 'massive':
         from trader.listeners.massive_history import MassiveHistoryWorker
         worker = MassiveHistoryWorker(massive_api_key=api_key)
+    else:  # source == 'ib'
+        from trader.listeners.ib_history_worker import IBHistoryWorker
+        import os as _os
+        # docker-entrypoint.sh writes the resolved IB_SERVER_* values to
+        # /home/trader/.mmr_env on container start. Interactive bash logins
+        # source it via .bash_profile, but `docker exec` non-interactive
+        # subprocesses don't see it. Source it manually so refreshes run
+        # from cron OR docker exec both pick up the right port.
+        mmr_env = Path('/home/trader/.mmr_env')
+        if mmr_env.exists():
+            for line in mmr_env.read_text().splitlines():
+                line = line.strip()
+                if not line.startswith('export '): continue
+                kv = line[len('export '):].split('=', 1)
+                if len(kv) == 2:
+                    _os.environ.setdefault(kv[0].strip(), kv[1].strip().strip('"'))
+        # YAML's ib_server_address defaults to 127.0.0.1 (host-mode default)
+        # but Docker overrides via env to ib-gateway. Same for the port.
+        trading_mode = (_os.environ.get('TRADING_MODE')
+                        or cfg.get('trading_mode', 'paper')).lower()
+        port_key = 'ib_live_port' if trading_mode == 'live' else 'ib_paper_port'
+        ib_addr = _os.environ.get('IB_SERVER_ADDRESS') or cfg.get('ib_server_address', '127.0.0.1')
+        ib_port = int(_os.environ.get('IB_SERVER_PORT')
+                      or cfg.get(port_key, 4002 if trading_mode == 'paper' else 4001))
+        # Use a pid-based clientId so concurrent invocations and
+        # leftover stale connections from prior failed runs don't
+        # collide. ib_async uses clientId for connection identity, and
+        # IB rejects a re-connect with the same ID for ~30s even after
+        # the prior connection died.
+        base = int(cfg.get('trading_runtime_ib_client_id', 5)) + 100
+        client_id = base + (_os.getpid() % 100)  # 100..199 range
+        worker = IBHistoryWorker(
+            ib_server_address=ib_addr,
+            ib_server_port=ib_port,
+            ib_client_id=client_id,
+        )
 
     # If trader_service is reachable, fall back to it for symbols that aren't
     # in the local universe so rows end up conId-keyed (instead of strings
@@ -6981,12 +7144,40 @@ def _handle_data_download(args: argparse.Namespace):
                         f'[dim]Downloading {symbol} ({bar_size}) '
                         f'{dr.start.strftime("%Y-%m-%d")} → {dr.end.strftime("%Y-%m-%d")}...[/dim]'
                     )
-                df = worker.get_history(
-                    ticker=symbol,
-                    bar_size=bar_size,
-                    start_date=dr.start,
-                    end_date=dr.end,
-                )
+                if source == 'ib':
+                    # IBHistoryWorker takes a contract, not a ticker string —
+                    # ticker-based lookup would resolve via Polygon and return
+                    # the wrong exchange's instrument (e.g. asking for "BHP"
+                    # got NYSE ADR @ ~$80 instead of ASX @ ~$59).
+                    if sec_def is None:
+                        raise ValueError(
+                            f'cannot fetch {symbol} via IB — no SecurityDefinition '
+                            f'resolved (check that the symbol is in your local '
+                            f'universe or trader_service is reachable for resolution)'
+                        )
+                    from trader.objects import WhatToShow
+                    # tickdata.missing() returns DateRange objects with
+                    # dt.date start/end; IBHistoryWorker requires
+                    # dt.datetime with tzinfo. Promote here.
+                    def _to_dt(x):
+                        if isinstance(x, dt.datetime):
+                            return x if x.tzinfo else x.replace(tzinfo=dt.timezone.utc)
+                        # dt.date or anything else with year/month/day
+                        return dt.datetime(x.year, x.month, x.day, tzinfo=dt.timezone.utc)
+                    df = asyncio.run(worker.get_contract_history(
+                        security=sec_def,
+                        what_to_show=WhatToShow.TRADES,
+                        bar_size=bar_size,
+                        start_date=_to_dt(dr.start),
+                        end_date=_to_dt(dr.end),
+                    ))
+                else:
+                    df = worker.get_history(
+                        ticker=symbol,
+                        bar_size=bar_size,
+                        start_date=dr.start,
+                        end_date=dr.end,
+                    )
                 if not df.empty:
                     storage_key = conid if conid else symbol
                     tickdata.write_resolve_overlap(storage_key, df)
@@ -7012,6 +7203,13 @@ def _handle_data_download(args: argparse.Namespace):
     if rpc_mmr is not None:
         try: rpc_mmr.close()
         except Exception: pass
+
+    # Tear down IB connection if we opened one
+    if source == 'ib':
+        try:
+            worker.shutdown()
+        except Exception:
+            pass
 
     if _json_mode:
         print(json.dumps({
@@ -7129,6 +7327,252 @@ def _handle_data_migrate_symbols(args: argparse.Namespace):
         }))
     else:
         print_status(f'Migration complete: {migrated} migrated, {skipped} skipped/failed')
+
+
+# ---- data refresh / data status -----------------------------------------
+
+# US-exchange codes that route to TwelveData by default. Anything else falls
+# through to IB. Kept module-level so a future symbol-level override can
+# reference the same list.
+_US_EXCHANGES_FOR_TD = frozenset({
+    'NASDAQ', 'NYSE', 'ARCA', 'AMEX', 'BATS', 'IEX', 'SMART',
+})
+
+
+def _load_data_refresh_yaml() -> Dict[str, Any]:
+    """Load ~/.config/mmr/data_refresh.yaml; raise a clear error if absent
+    or malformed. Returns the parsed dict."""
+    import os
+    import yaml
+    path = Path(os.environ.get('DATA_REFRESH_CONFIG',
+                               '~/.config/mmr/data_refresh.yaml')).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(
+            f'data_refresh.yaml not found at {path}. '
+            f'Copy config_defaults/data_refresh.yaml to ~/.config/mmr/ or '
+            f'set DATA_REFRESH_CONFIG to its absolute path.'
+        )
+    with path.open() as f:
+        data = yaml.safe_load(f) or {}
+    if 'jobs' not in data or not isinstance(data['jobs'], dict):
+        raise ValueError(f'{path}: missing top-level `jobs:` dict')
+    return data
+
+
+def _auto_source_for_universe(universe_symbols) -> str:
+    """Pick 'twelvedata' or 'ib' based on the dominant exchange in
+    ``universe_symbols``. Bias to TD when any meaningful fraction of the
+    universe is US-listed, since TD downloads cost ~nothing and IB
+    historical pacing is the bottleneck."""
+    if not universe_symbols:
+        return 'ib'
+    us_count = sum(1 for sd in universe_symbols
+                   if (sd.exchange or '').upper() in _US_EXCHANGES_FOR_TD
+                   or (sd.primaryExchange or '').upper() in _US_EXCHANGES_FOR_TD)
+    return 'twelvedata' if us_count >= len(universe_symbols) / 2 else 'ib'
+
+
+def _handle_data_refresh(args: argparse.Namespace):
+    """Run declarative refresh jobs from data_refresh.yaml. Each job is a
+    thin wrapper around ``data download`` — same underlying machinery, just
+    parameterised by a named YAML entry instead of per-call flags. Per-job
+    failures don't abort the batch."""
+    global _json_mode  # we toggle this around inner _handle_data_download calls
+    import argparse as _ap
+    try:
+        cfg = _load_data_refresh_yaml()
+    except (FileNotFoundError, ValueError) as ex:
+        print_status(str(ex), success=False)
+        return
+
+    all_jobs = cfg['jobs']
+    requested = list(getattr(args, 'jobs', []) or [])
+    if getattr(args, 'refresh_all', False):
+        requested = sorted(all_jobs.keys())
+    if not requested:
+        print_status('No jobs requested. Pass job names or --all. '
+                     f'Available: {sorted(all_jobs.keys())}', success=False)
+        return
+
+    unknown = [j for j in requested if j not in all_jobs]
+    if unknown:
+        print_status(f'Unknown jobs: {unknown}. Available: {sorted(all_jobs.keys())}',
+                     success=False)
+        return
+
+    from trader.container import Container
+    from trader.data.universe import UniverseAccessor
+    container = Container.instance()
+    container_cfg = container.config()
+    accessor = UniverseAccessor(
+        container_cfg.get('duckdb_path', ''),
+        container_cfg.get('universe_library', 'Universes'),
+    )
+
+    results = []
+    for job_name in requested:
+        spec = all_jobs[job_name]
+        universe_name = spec.get('universe')
+        bar_size = spec.get('bar_size', '1 day')
+        days = int(spec.get('days', 365))
+        force = bool(spec.get('force', False))
+        source = spec.get('source')
+
+        if not universe_name:
+            results.append({'job': job_name, 'success': False,
+                            'error': 'missing `universe` in YAML'})
+            continue
+
+        uni = accessor.get(universe_name)
+        if uni is None or not uni.security_definitions:
+            results.append({'job': job_name, 'success': False,
+                            'error': f'universe {universe_name!r} is empty or missing'})
+            continue
+
+        if not source:
+            source = _auto_source_for_universe(uni.security_definitions)
+
+        symbols = [sd.symbol for sd in uni.security_definitions]
+        if not _json_mode:
+            console.print(
+                f'[bold]→ {job_name}[/]: {len(symbols)} symbols, '
+                f'{bar_size} × {days}d, source={source}'
+            )
+
+        # Reuse _handle_data_download: build a synthetic argparse.Namespace
+        # so we don't duplicate the download logic. The downstream worker
+        # is incremental by default (skips already-current ranges).
+        dl_args = _ap.Namespace(
+            symbols=symbols,
+            bar_size=bar_size,
+            days=days,
+            source=source,
+            force=force,
+        )
+        try:
+            # _handle_data_download() prints JSON to stdout when _json_mode is
+            # set — for a multi-job batch that's noisy. Run it in non-JSON
+            # mode locally and synthesise a single JSON summary at the end.
+            saved_json_mode = _json_mode
+            _json_mode = False
+            try:
+                _handle_data_download(dl_args)
+                results.append({'job': job_name, 'success': True,
+                                'universe': universe_name, 'source': source,
+                                'symbols': len(symbols), 'bar_size': bar_size,
+                                'days': days})
+            finally:
+                _json_mode = saved_json_mode
+        except Exception as ex:
+            results.append({'job': job_name, 'success': False,
+                            'error': f'{type(ex).__name__}: {ex}'})
+
+    ok = sum(1 for r in results if r['success'])
+    fail = len(results) - ok
+    if _json_mode:
+        print(json.dumps({
+            'success': fail == 0,
+            'ok': ok, 'failed': fail,
+            'results': results,
+        }))
+    else:
+        for r in results:
+            mark = '[green]✓[/]' if r['success'] else '[red]✗[/]'
+            detail = (f"{r.get('symbols','?')} syms via {r.get('source','?')}"
+                      if r['success'] else r.get('error', '?'))
+            console.print(f'  {mark} {r["job"]}: {detail}')
+        console.print(f'[bold]{ok}/{len(results)} jobs ok[/]'
+                      + (f', {fail} failed' if fail else ''))
+
+
+def _handle_data_status():
+    """Show freshness of every (universe, bar_size) combination referenced
+    in data_refresh.yaml. Surfaces what's stale before deciding whether to
+    fire a manual refresh."""
+    import datetime as dt
+    from trader.container import Container
+    from trader.data.universe import UniverseAccessor
+    from trader.data.duckdb_store import DuckDBConnection
+
+    try:
+        cfg = _load_data_refresh_yaml()
+    except (FileNotFoundError, ValueError) as ex:
+        print_status(str(ex), success=False)
+        return
+
+    container_cfg = Container.instance().config()
+    history_path = (container_cfg.get('history_duckdb_path', '')
+                    or container_cfg.get('duckdb_path', ''))
+    accessor = UniverseAccessor(
+        container_cfg.get('duckdb_path', ''),
+        container_cfg.get('universe_library', 'Universes'),
+    )
+    db = DuckDBConnection.get_instance(history_path)
+    now = dt.datetime.now(dt.timezone.utc)
+
+    rows = []
+    for job_name, spec in cfg['jobs'].items():
+        universe_name = spec.get('universe')
+        bar_size = spec.get('bar_size', '1 day')
+        uni = accessor.get(universe_name) if universe_name else None
+        sec_defs = uni.security_definitions if uni else []
+        if not sec_defs:
+            rows.append({'job': job_name, 'universe': universe_name or '—',
+                         'bar_size': bar_size, 'covered': 0, 'total': 0,
+                         'last_bar': None, 'stale_days': None})
+            continue
+
+        cids = [str(sd.conId) for sd in sec_defs]
+        placeholders = ','.join('?' * len(cids))
+        # Per-symbol latest-bar lookup
+        per_sym = db.execute(
+            f"SELECT symbol, MAX(date) FROM tick_data "
+            f"WHERE bar_size = ? AND symbol IN ({placeholders}) GROUP BY symbol",
+            ['1 day' if bar_size == '1 day' else bar_size, *cids],
+            fetch='all',
+        ) or []
+        per_sym_map = {r[0]: r[1] for r in per_sym}
+        latest_bars = [v for v in per_sym_map.values() if v is not None]
+        if latest_bars:
+            latest = max(latest_bars)
+            # Compare as naive UTC
+            latest_naive = (latest.replace(tzinfo=None) if latest.tzinfo
+                            else latest)
+            stale_days = (now.replace(tzinfo=None) - latest_naive).days
+        else:
+            latest = None
+            stale_days = None
+        rows.append({
+            'job': job_name,
+            'universe': universe_name,
+            'bar_size': bar_size,
+            'covered': len(per_sym_map),
+            'total': len(cids),
+            'last_bar': latest.isoformat() if latest else None,
+            'stale_days': stale_days,
+        })
+
+    if _json_mode:
+        print(json.dumps({'data': rows, 'title': 'Data Refresh Status'}, default=str))
+        return
+
+    table = Table(title='Data Refresh Status', show_lines=False)
+    table.add_column('job', style='bold cyan')
+    table.add_column('universe')
+    table.add_column('bar_size')
+    table.add_column('coverage', justify='right')
+    table.add_column('last bar', justify='right')
+    table.add_column('stale (d)', justify='right')
+    for r in rows:
+        cov = f"{r['covered']}/{r['total']}"
+        last = r['last_bar'][:10] if r['last_bar'] else '—'
+        stale = '—' if r['stale_days'] is None else str(r['stale_days'])
+        style = ('red' if r['stale_days'] is not None and r['stale_days'] > 3
+                 else 'yellow' if r['stale_days'] is not None and r['stale_days'] > 1
+                 else 'green')
+        table.add_row(r['job'], r['universe'] or '—', r['bar_size'],
+                      cov, last, f'[{style}]{stale}[/{style}]')
+    console.print(table)
 
 
 def _handle_depth(mmr: MMR, args: argparse.Namespace):
