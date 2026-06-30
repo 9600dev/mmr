@@ -2885,6 +2885,8 @@ class MMRHelpers:
         group: str = "",
         exchange: str = "",
         currency: str = "",
+        enrich_news: bool = False,
+        enrich_news_limit: int = 3,
     ) -> dict:
         """Create a trade proposal (stored locally; not executed until
         ``approve()``). When neither ``quantity`` nor ``amount`` is
@@ -2895,9 +2897,21 @@ class MMRHelpers:
         ``action``: "BUY" | "SELL". ``group`` auto-registers the symbol
         into the named group. ``exchange``/``currency`` for international.
 
+        ``enrich_news=True`` calls the local ``~/dev/news`` scraper at
+        ``http://127.0.0.1:8089`` (or ``$NEWS_SERVICE_URL``) and appends
+        the top ``enrich_news_limit`` article excerpts as a
+        "## News context (auto-enriched)" section to ``reasoning``. The
+        next reviewer (LLM or human) sees the catalyst, not just the
+        thesis. Degrades silently if the news service is down — the
+        proposal is still saved without enrichment. Use when you want
+        the recorded reasoning to include the WHY behind a move.
+
         Example:
         result = await MMRHelpers.propose("AAPL", "BUY", confidence=0.7, reasoning="Breakout above resistance")
         result = await MMRHelpers.propose("BHP", "BUY", confidence=0.6, group="mining", exchange="ASX", currency="AUD")
+        # With news enrichment (records article excerpts in the proposal's reasoning)
+        result = await MMRHelpers.propose("AMD", "BUY", confidence=0.8,
+            reasoning="Wells Fargo target raise to $615", enrich_news=True, enrich_news_limit=3)
         """
         args = ["propose", symbol, action]
         if market:
@@ -2922,7 +2936,12 @@ class MMRHelpers:
             args.extend(["--exchange", exchange])
         if currency:
             args.extend(["--currency", currency])
-        return await _run_cli_json(*args, timeout=30)
+        if enrich_news:
+            args.append("--enrich-news")
+            args.extend(["--enrich-news-limit", str(enrich_news_limit)])
+        # News enrichment adds search + N scrapes; allow extra time when on.
+        timeout = 90 if enrich_news else 30
+        return await _run_cli_json(*args, timeout=timeout)
 
     @staticmethod
     async def proposals(status: Optional[str] = None, all_statuses: bool = False) -> dict:
@@ -3016,6 +3035,8 @@ class MMRHelpers:
         detail: bool = False,
         fundamentals: bool = False,
         news: bool = False,
+        news_bodies: bool = False,
+        news_bodies_limit: int = 3,
         source: str = "massive",
     ) -> dict:
         """
@@ -3040,7 +3061,16 @@ class MMRHelpers:
         :param detail: Show all columns including indicators
         :param fundamentals: Enrich with financial ratios (slower). On
             TwelveData, ~100 credits per enriched ticker.
-        :param news: Enrich with latest news + sentiment. MASSIVE ONLY.
+        :param news: Enrich with latest news + sentiment from the underlying
+            data provider (Polygon/Massive). MASSIVE ONLY — headline only.
+        :param news_bodies: Enrich the top ``news_bodies_limit`` results
+            with FULL article bodies via the local ~/dev/news scraper at
+            ``http://127.0.0.1:8089``. Adds ``news_title``/``news_url``/
+            ``news_body`` columns (~400 char excerpt). Answers "WHY is it
+            moving?" rather than just "what's moving". Slower (~3-5s per
+            enriched ticker). Degrades silently if news service is down.
+        :param news_bodies_limit: How many top-ranked tickers to enrich
+            with article bodies (default 3). Each adds search+scrape time.
         :param source: "massive" (default) or "twelvedata". Ignored if location is set.
 
         Example:
@@ -3048,6 +3078,9 @@ class MMRHelpers:
         result = await MMRHelpers.ideas("momentum", tickers=["AAPL", "MSFT", "AMD"])
         result = await MMRHelpers.ideas("momentum", tickers=["AAPL"], source="twelvedata", fundamentals=True)
         result = await MMRHelpers.ideas("momentum", location="STK.AU.ASX", tickers=["BHP", "RIO"])
+        # WHY-is-it-moving: bodies for the top 3 results inline
+        result = await MMRHelpers.ideas("momentum", tickers=["AMD","NVDA","AAPL"],
+            news_bodies=True, news_bodies_limit=3)
         """
         args = ["ideas", preset, "--num", str(num)]
         if tickers:
@@ -3064,15 +3097,24 @@ class MMRHelpers:
             args.append("--fundamentals")
         if news:
             args.append("--news")
+        if news_bodies:
+            args.append("--news-bodies")
+            args.extend(["--news-bodies-limit", str(news_bodies_limit)])
         # TwelveData scans add ~1s per indicator-fetched ticker (one time_series
         # call each) vs Massive's batched server-side indicators.
         timeout = 120 if location else (60 if source == "twelvedata" else 30)
+        if news_bodies:
+            # ~5s per scraped article (search + scrape + parse); cap headroom.
+            timeout = max(timeout, 30 + int(news_bodies_limit) * 10)
         return await _run_cli_json(*args, timeout=timeout)
 
     @staticmethod
     async def news(ticker: str = "", limit: int = 10, detail: bool = False) -> str:
         """
-        Get market news, optionally for a specific ticker with sentiment.
+        Get market news headlines via Polygon/Benzinga. For full article
+        bodies use ``news_fetch``/``news_enrich`` (calls the local
+        ~/dev/news scraper instead — different backend).
+
         Requires massive_api_key. Does NOT require trader_service.
 
         :param ticker: Stock ticker (omit for general market news)
@@ -3090,6 +3132,95 @@ class MMRHelpers:
         if detail:
             args.append("--detail")
         return await _run_cli(*args)
+
+    @staticmethod
+    async def news_fetch(url: str, use_cache: bool = True,
+                         allow_archive_fallback: bool = True) -> dict:
+        """
+        Scrape one article URL via the local ~/dev/news service. Returns
+        the article as clean Markdown — handles Cloudflare, paywalls
+        (FT/WSJ/NYT/Bloomberg fall through to archive.ph), bot blocks.
+
+        REQUIRES the news service to be running:
+            cd ~/dev/news && ./docker.sh -g
+        If unreachable, the CLI fails fast with that exact start command.
+
+        Returned dict (``ok=True`` case)::
+            {"ok": true, "status": "ok",
+             "article": {"title": str, "markdown": str, "metadata": {...}},
+             "fetcher_source": "httpx" | "playwright" | "scrapingbee" |
+                               "archive.ph" | ..., "attempts": [...]}
+        On failure ``ok=False`` and ``error`` is populated; always check
+        ``ok`` before trusting ``article.markdown``.
+
+        :param url: Article URL (http:// or https://)
+        :param use_cache: Replay a recent cached scrape if available (default True)
+        :param allow_archive_fallback: Fall through to archive.ph for paywalls (default True)
+
+        Example:
+        result = await MMRHelpers.news_fetch("https://www.ft.com/content/...")
+        if result.get("ok"): print(result["article"]["markdown"][:2000])
+        """
+        args = ["news-fetch", url]
+        if not use_cache:
+            args.append("--no-cache")
+        if not allow_archive_fallback:
+            args.append("--no-archive")
+        return await _run_cli_json(*args, timeout=180)
+
+    @staticmethod
+    async def news_search(query: str, engine: str = "google_news",
+                          limit: int = 10) -> dict:
+        """
+        Web search via the local ~/dev/news service. Returns ranked result
+        list with source / published_at / title / url. Doesn't scrape;
+        pair with ``news_fetch`` for bodies, or use ``news_enrich``
+        (which composes both).
+
+        REQUIRES the news service to be running.
+
+        :param query: Search query (single quoted string)
+        :param engine: "google_news" (default, freshest), "google", "ddg", "auto"
+        :param limit: Max results (default 10)
+
+        Example:
+        result = await MMRHelpers.news_search("AMD earnings", limit=5)
+        for r in result.get("data", []): print(r["source"], r["title"])
+        """
+        return await _run_cli_json(
+            "news-search", query, "--engine", engine, "--limit", str(limit),
+            timeout=60,
+        )
+
+    @staticmethod
+    async def news_enrich(ticker: str, limit: int = 5,
+                          exchange: Optional[str] = None) -> dict:
+        """
+        Search + parallel-scrape top news article bodies for a ticker.
+        google_news query of the form ``"{TICKER} stock [{exchange}] news"``,
+        then scrapes each result's URL via the news service.
+
+        Returns ``{"data": [{title, url, source, published_at,
+        markdown_chars, markdown_preview, ok, fetcher}, ...]}``.
+        ``markdown_preview`` is the first 500 chars of the article body —
+        use ``news_fetch(url)`` on a specific result for the full body.
+
+        REQUIRES the news service to be running.
+
+        :param ticker: Stock ticker symbol (e.g. "AMD", "BHP")
+        :param limit: Max articles to scrape (default 5). Each costs ~3-5s.
+        :param exchange: Exchange hint added to the search query (e.g. "ASX")
+
+        Example:
+        result = await MMRHelpers.news_enrich("AMD", limit=3)
+        # → 3 dicts with title, url, source, preview etc.
+        result = await MMRHelpers.news_enrich("BHP", exchange="ASX")
+        """
+        args = ["news-enrich", ticker, "--limit", str(limit)]
+        if exchange:
+            args.extend(["--exchange", exchange])
+        # ~5s per article + search overhead.
+        return await _run_cli_json(*args, timeout=30 + limit * 15)
 
     @staticmethod
     async def movers(

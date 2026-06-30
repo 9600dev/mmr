@@ -1026,6 +1026,58 @@ ideas = await MMRHelpers.ideas("momentum", tickers=["XOM", "CVX", "COP", "EOG"])
 emit(ideas)
 ```
 
+### Pattern 16: News Enrichment (WHY is it moving?)
+
+The `mmr news` command (Polygon headlines) tells you WHAT happened.
+For WHY — actual article bodies — there's a separate optional service
+at `~/dev/news` exposing an HTTP scraper at `http://127.0.0.1:8089`.
+It handles Cloudflare, paywalls (via archive.ph fallback), and returns
+clean Markdown. Three helpers wrap it:
+
+```python
+# Direct: scrape one URL
+result = await MMRHelpers.news_fetch("https://www.ft.com/content/...")
+if result.get("ok"):
+    print(result["article"]["markdown"][:2000])
+
+# Search the web for recent items
+hits = await MMRHelpers.news_search("AMD earnings", limit=10)
+for r in hits.get("data", []):
+    print(r["source"], r["published_at"], r["title"])
+
+# Composite: search + parallel-scrape bodies for a ticker
+articles = await MMRHelpers.news_enrich("AMD", limit=3)
+# → 3 dicts: {title, url, source, published_at, markdown_preview, ok}
+```
+
+**Each requires the news service to be running.** If unreachable, the
+CLI fails with `cd ~/dev/news && ./docker.sh -g` instructions. None of
+these block trading paths — they're optional research helpers.
+
+**Inline enrichment on the core commands:**
+
+```python
+# `ideas` with full article bodies for the top N — answers
+# "what's moving AND why?" in one call
+result = await MMRHelpers.ideas("momentum",
+    tickers=["AMD", "NVDA", "AAPL"],
+    news_bodies=True, news_bodies_limit=3)
+# Each row in result["data"][:3] gains news_title / news_url / news_body cols
+
+# `propose` with news context appended to the saved reasoning. The
+# next reviewer (LLM or human running `mmr proposals show 42`) sees
+# the catalyst as a "## News context (auto-enriched)" section.
+prop = await MMRHelpers.propose("AMD", "BUY", confidence=0.8,
+    reasoning="Wells Fargo target raise to $615",
+    enrich_news=True, enrich_news_limit=3)
+```
+
+Both `news_bodies=` and `enrich_news=` degrade silently if the news
+service is down — the underlying scan / proposal still completes,
+just without article bodies attached. Use when you genuinely want
+the WHY recorded — they add real latency (~5s per article scrape)
+and aren't free.
+
 ## References
 
 For detailed documentation on specific topics, see:
