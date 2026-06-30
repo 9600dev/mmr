@@ -3193,6 +3193,77 @@ class MMRHelpers:
         )
 
     @staticmethod
+    async def news_universe(universe: str, limit: int = 2,
+                            since_hours: int = 24,
+                            include_bodies: bool = False,
+                            max_symbols: int = 0,
+                            concurrency: int = 4,
+                            exchange: Optional[str] = None,
+                            show_empty: bool = False) -> dict:
+        """
+        Pre-market news hunt across an entire universe. For each ticker
+        runs ``news_search`` and filters to articles published within
+        ``since_hours``. Optionally scrapes article bodies (slower —
+        ~3-5s per article; use ``include_bodies=False`` for a fast
+        headlines-only sweep that's good for narrowing to "which
+        symbols have anything to talk about").
+
+        Use case: 10-30 min before market open, find which symbols in
+        your watchlist had overnight catalysts.
+
+        Returns ``{"data": [{symbol, articles: [{title, url, source,
+        published_at, markdown_preview}, ...], count}, ...], ...}``.
+        Sorted by ``count`` descending; tickers with 0 fresh articles
+        are omitted by default.
+
+        REQUIRES the news service to be running.
+
+        :param universe: Universe name (use ``await MMRHelpers.universe_list()``
+            to discover available universes; common: "asx", "downloads")
+        :param limit: Max articles per ticker (default 2)
+        :param since_hours: Only include articles published in last N
+            hours (default 24). Set 0 to disable time filter.
+        :param include_bodies: If True, scrape each article body too.
+            Default False because headlines + URLs are usually enough
+            to decide which symbols deserve deeper attention.
+        :param max_symbols: Cap symbols scanned (default 0 = all)
+        :param concurrency: Parallel scrape workers (default 4)
+        :param exchange: Hint added to the search query (e.g. "ASX")
+        :param show_empty: Include tickers with no fresh news (default False)
+
+        Example:
+        # Quick pre-open ASX scan (headlines only, ~30s for 53 syms)
+        result = await MMRHelpers.news_universe("asx", since_hours=12)
+        for row in result.get("data", []):
+            print(f'{row["symbol"]}: {row["count"]} articles')
+            for a in row["articles"]:
+                print(f'  {a["published_at"]} {a["source"]}: {a["title"]}')
+
+        # Deeper dive on the same set with bodies (slower, minutes)
+        result = await MMRHelpers.news_universe("asx", limit=2,
+            include_bodies=True, since_hours=24, concurrency=6)
+        """
+        args = [
+            "news-universe", universe,
+            "--limit", str(limit),
+            "--since-hours", str(since_hours),
+            "--concurrency", str(concurrency),
+        ]
+        if max_symbols:
+            args.extend(["--max-symbols", str(max_symbols)])
+        if exchange:
+            args.extend(["--exchange", exchange])
+        if show_empty:
+            args.append("--show-empty")
+        if not include_bodies:
+            args.append("--no-bodies")
+        # Wall-time estimate: search-only ~0.5s/sym, with bodies +5s × limit.
+        # Cap at 600s — universe could be 100+ symbols.
+        per_sym = 0.5 + (5 * limit if include_bodies else 0)
+        est = int(per_sym * 60 / max(1, concurrency)) + 30
+        return await _run_cli_json(*args, timeout=min(600, max(60, est)))
+
+    @staticmethod
     async def news_enrich(ticker: str, limit: int = 5,
                           exchange: Optional[str] = None) -> dict:
         """

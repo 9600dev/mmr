@@ -1048,6 +1048,17 @@ for r in hits.get("data", []):
 # Composite: search + parallel-scrape bodies for a ticker
 articles = await MMRHelpers.news_enrich("AMD", limit=3)
 # → 3 dicts: {title, url, source, published_at, markdown_preview, ok}
+
+# Pre-market / pre-open sweep across an entire universe — find which
+# symbols had overnight catalysts. Default headlines-only (~30s for
+# 50 syms); set include_bodies=True for excerpts (slower).
+result = await MMRHelpers.news_universe("asx", since_hours=12)
+for row in result.get("data", []):
+    print(f'{row["symbol"]}: {row["count"]} articles')
+    for a in row["articles"]:
+        print(f'  {a["published_at"]} {a["source"]}: {a["title"]}')
+# → only tickers with fresh news appear, sorted by article count desc.
+# Great for narrowing "what should I look at this morning?"
 ```
 
 **Each requires the news service to be running.** If unreachable, the

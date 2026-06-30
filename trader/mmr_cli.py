@@ -926,6 +926,35 @@ def build_parser() -> argparse.ArgumentParser:
     news_enrich_p.add_argument('--exchange', default=None,
                                help='Exchange hint for the search query (e.g. ASX, SEHK)')
 
+    news_universe_p = sub.add_parser('news-universe',
+                                     help='Pre-market news hunt across a universe — fetch recent articles for every symbol',
+                                     epilog='Examples:\n'
+                                            '  news-universe asx                           # all 53 ASX symbols, last 24h\n'
+                                            '  news-universe asx --since-hours 12          # tighter window, pre-open\n'
+                                            '  news-universe downloads --limit 3 --since-hours 24\n'
+                                            '  news-universe asx --concurrency 8 --max-symbols 20  # faster, partial\n'
+                                            '\n'
+                                            'Output: one row per ticker that has news in the window. Sorted by article count.\n'
+                                            'Tickers with no fresh news are omitted (use --show-empty to include).\n',
+                                     formatter_class=fmt)
+    news_universe_p.add_argument('universe', help='Universe name (mmr universe list)')
+    news_universe_p.add_argument('--limit', type=int, default=2,
+                                 help='Max articles per ticker (default: 2)')
+    news_universe_p.add_argument('--since-hours', type=int, default=24,
+                                 help='Only include articles published within last N hours (default: 24). '
+                                      'Pass 0 to disable the time filter.')
+    news_universe_p.add_argument('--max-symbols', type=int, default=0,
+                                 help='Cap the number of symbols scanned (default: 0 = all). '
+                                      'Use to limit IB pacing / time when iterating.')
+    news_universe_p.add_argument('--concurrency', type=int, default=4,
+                                 help='Parallel scrape requests (default: 4). Higher = faster but more news-service load.')
+    news_universe_p.add_argument('--exchange', default=None,
+                                 help='Exchange hint added to search query for all tickers (e.g. ASX, SEHK)')
+    news_universe_p.add_argument('--show-empty', action='store_true', default=False,
+                                 help='Include tickers with no fresh news (default: hide them)')
+    news_universe_p.add_argument('--no-bodies', dest='include_bodies', action='store_false', default=True,
+                                 help='Headlines only — skip the article scrape (much faster, ~10s vs ~3min for 53 syms)')
+
     # options
     opt_p = sub.add_parser('options', aliases=['opt'], help='Options data and trading',
                            epilog='Examples:\n'
@@ -2040,6 +2069,9 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
 
         elif cmd == 'news-enrich':
             _handle_news_enrich(args)
+
+        elif cmd == 'news-universe':
+            _handle_news_universe(args)
 
         elif cmd in ('options', 'opt'):
             _handle_options(mmr, args)
@@ -8278,6 +8310,146 @@ def _handle_news_enrich(args: argparse.Namespace):
         if preview:
             console.print(preview, markup=False, highlight=False)
     console.print(f'\n[bold]{sum(1 for e in enriched if e.get("ok"))}/{len(enriched)} scraped successfully[/]')
+
+
+def _handle_news_universe(args: argparse.Namespace):
+    """`mmr news-universe UNIVERSE` — pre-market news hunt across every
+    ticker in a universe. For each symbol, run google_news search; keep
+    only articles within ``--since-hours``; optionally scrape bodies in
+    parallel via the news service. Useful at 5-15 minutes before the
+    market opens to catch overnight catalysts on a watchlist."""
+    import datetime as dt
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    _news_service_health_or_die()
+
+    from trader.container import Container
+    from trader.data.universe import UniverseAccessor
+    cfg = Container.instance().config()
+    accessor = UniverseAccessor(cfg.get('duckdb_path', ''),
+                                cfg.get('universe_library', 'Universes'))
+    u = accessor.get(args.universe)
+    if u is None or not u.security_definitions:
+        print_status(
+            f'universe {args.universe!r} not found or empty. '
+            f'List with: mmr universe list',
+            success=False,
+        )
+        return
+
+    symbols = [sd.symbol for sd in u.security_definitions]
+    if args.max_symbols and args.max_symbols > 0:
+        symbols = symbols[:args.max_symbols]
+
+    since_hours = max(0, int(args.since_hours))
+    cutoff = (dt.datetime.now(dt.timezone.utc)
+              - dt.timedelta(hours=since_hours)) if since_hours else None
+
+    if not _json_mode:
+        bodies_msg = 'with article bodies' if args.include_bodies else 'headlines only'
+        window_msg = (f'last {since_hours}h' if since_hours else 'any age')
+        console.print(
+            f'[dim]Scanning {len(symbols)} symbols from universe {args.universe!r} '
+            f'({bodies_msg}, {window_msg}, concurrency={args.concurrency})...[/dim]'
+        )
+
+    def _is_fresh(published_iso: Optional[str]) -> bool:
+        if not cutoff:
+            return True
+        if not published_iso:
+            # No timestamp from the provider — keep it conservatively.
+            return True
+        try:
+            t = dt.datetime.fromisoformat(published_iso.replace('Z', '+00:00'))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=dt.timezone.utc)
+            return t >= cutoff
+        except Exception:
+            return True
+
+    def _scan_one(symbol: str) -> Dict[str, Any]:
+        q_suffix = f' {args.exchange}' if args.exchange else ''
+        query = f'{symbol} stock{q_suffix} news'
+        try:
+            sb = _news_service_post('/v1/search', {
+                'query': query, 'engine': 'google_news',
+                # Over-fetch then time-filter — google_news may return
+                # 1-month-old SEO chum mixed with today's catalysts.
+                'max_results': max(args.limit * 3, 5),
+            }, timeout=30.0)
+        except Exception as ex:
+            return {'symbol': symbol, 'error': str(ex), 'articles': []}
+
+        results = sb.get('results') or []
+        fresh = [r for r in results if _is_fresh(r.get('published_at'))][:args.limit]
+        articles = []
+        for r in fresh:
+            entry = {
+                'title': r.get('title') or '',
+                'url': r.get('url') or '',
+                'source': r.get('source') or '',
+                'published_at': r.get('published_at') or '',
+                'markdown_preview': '',
+            }
+            if args.include_bodies and r.get('url'):
+                try:
+                    s = _news_service_post('/v1/scrape', {
+                        'url': r['url'], 'use_cache': True,
+                        'allow_archive_fallback': True,
+                    }, timeout=60.0)
+                    if s.get('ok'):
+                        body = (s.get('article') or {}).get('markdown', '') or ''
+                        entry['markdown_preview'] = body.strip()[:400]
+                except Exception:
+                    pass
+            articles.append(entry)
+        return {'symbol': symbol, 'articles': articles, 'count': len(articles)}
+
+    # Concurrent fan-out — each thread does the search + (optional)
+    # scrapes for one ticker. News service is happy with this.
+    rows: List[Dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as pool:
+        futs = {pool.submit(_scan_one, s): s for s in symbols}
+        for fut in as_completed(futs):
+            row = fut.result()
+            if row.get('count', 0) > 0 or args.show_empty:
+                rows.append(row)
+
+    rows.sort(key=lambda r: (-(r.get('count') or 0), r['symbol']))
+
+    if _json_mode:
+        print(json.dumps({'data': rows, 'title': f'News-universe: {args.universe}'},
+                         default=str))
+        return
+
+    if not rows:
+        console.print(
+            f'[dim]No fresh news for any symbol in {args.universe!r} '
+            f'in the last {since_hours}h.[/dim]'
+        )
+        return
+
+    console.print(
+        f'[bold]News-universe: {args.universe}[/] — '
+        f'{len(rows)} symbols with news (of {len(symbols)} scanned)\n'
+    )
+    for row in rows:
+        sym = row['symbol']
+        articles = row.get('articles', [])
+        if not articles:
+            console.print(f'[dim]{sym}: no fresh news[/dim]')
+            continue
+        console.print(f'[bold cyan]{sym}[/]  '
+                      f'[dim]{len(articles)} article{"s" if len(articles)!=1 else ""}[/dim]')
+        for a in articles:
+            published = (a.get('published_at') or '')[:16].replace('T', ' ')
+            src = a.get('source') or '?'
+            console.print(f'  • [bold]{escape(a["title"][:120])}[/]')
+            console.print(f'    [dim]{published} | {escape(src)} | {a["url"]}[/dim]')
+            preview = a.get('markdown_preview', '')
+            if preview:
+                console.print('    ' + preview, markup=False, highlight=False)
+        console.print()
 
 
 def _handle_news(mmr: MMR, args: argparse.Namespace):
