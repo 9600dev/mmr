@@ -43,5 +43,10 @@ mkdir -p /home/trader/.local/share/mmr/logs
 # Fix permissions — use chmod to avoid chown failures in podman rootless
 chown -R trader:trader /home/trader/.local/share/mmr 2>/dev/null || chmod -R 777 /home/trader/.local/share/mmr
 
-# Keep container running
-exec tail -f /dev/null
+# Source the env file we just wrote and launch services. start_mmr.sh
+# launches data/trader/strategy as children and waits in a monitor loop —
+# becomes PID 1, so the container exits if all services die (and Docker's
+# restart policy can react).
+. /home/trader/.mmr_env
+export TRADER_CONFIG="${TRADER_CONFIG:-/home/trader/.config/mmr/trader.yaml}"
+exec /home/trader/mmr/start_mmr.sh

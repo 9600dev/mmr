@@ -59,6 +59,26 @@ class TestDuckDBDataStore:
         assert "AMD" in symbols
         assert "NVDA" in symbols
 
+    def test_write_does_not_clobber_other_bar_sizes(self, data_store):
+        # Regression: write()'s DELETE used to filter only by symbol+date
+        # range, so writing a wide 1-min window for AAPL silently wiped
+        # any daily rows for AAPL in that range. The fix adds bar_size
+        # to the DELETE predicate. This test would have failed before.
+        daily = _sample_df(n=5, start="2024-01-02 09:30").copy()
+        daily["bar_size"] = "1 day"
+        data_store.write("AAPL", daily)
+
+        # Now write 1-min data covering the SAME date range for the same
+        # symbol. Pre-fix this DELETE'd all daily rows above.
+        minute = _sample_df(n=60, start="2024-01-02 09:30").copy()
+        minute["bar_size"] = "1 min"
+        data_store.write("AAPL", minute)
+
+        daily_after = data_store.read("AAPL", bar_size="1 day")
+        minute_after = data_store.read("AAPL", bar_size="1 min")
+        assert len(daily_after) == 5, "daily rows should survive a 1-min write"
+        assert len(minute_after) == 60
+
 
 class TestDuckDBObjectStore:
     def test_write_read_roundtrip(self, object_store):

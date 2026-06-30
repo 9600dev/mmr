@@ -56,7 +56,7 @@ The reason PubSub and MessageBus are separate (despite overlap) is efficiency: Z
 
 **Serialization**: All ZMQ messages use msgpack with custom ExtType handlers for datetime, date, time, timedelta, pandas DataFrames (via PyArrow IPC), and a dill fallback for arbitrary Python objects. Defined in `clientserver.py` (`ext_pack`/`ext_unpack`). Because `dill.loads` can execute arbitrary code, the fallback is policy-gated: set `MMR_DILL_STRICT=1` in the environment to refuse all `EXT_OBJECT` payloads, or call `set_dill_whitelist([Type1, Type2, ...])` to allow only specific classes.
 
-**Storage (DuckDB)**: `trader/data/duckdb_store.py` wraps every query in a short-lived connection held under a per-database lock (`execute_atomic` opens, runs, closes atomically; `execute(query, params, fetch='all'|'one'|'df'|'none')` is the common-case wrapper). This lets multiple services share the same database file without leaking connections or tearing rows across concurrent writers. Two tables: `tick_data` (time-series OHLCV) and `object_store` (dill-serialized blobs).
+**Storage (DuckDB)**: `trader/data/duckdb_store.py` wraps every query in a short-lived connection held under a per-database lock (`execute_atomic` opens, runs, closes atomically; `execute(query, params, fetch='all'|'one'|'df'|'none')` is the common-case wrapper). This lets multiple services share the same database file without leaking connections or tearing rows across concurrent writers. Two tables: `tick_data` (time-series OHLCV) and `object_store` (dill-serialized blobs). The OHLCV `write()` upsert filters its DELETE by `bar_size` as well as `symbol + date range` — without that filter a wide 1-min write (potentially expanded by `write_resolve_overlap` merging in years of pre-existing rows) would clobber every daily bar for the same conid in that range. The DuckDB live file lives in a named volume (`mmr_db_data`) rather than a host bind mount — on macOS Docker Desktop, VirtioFS has quirky mmap/fsync semantics for write-heavy single-file DBs. Use `./docker.sh -B [name]` to snapshot DB files out to the host bind-mount backup dir.
 
 **Event store**: `trader/data/event_store.py` records trading events (signals, orders, fills, rejections) in DuckDB for audit trail and risk gate lookback. All writes and queries use the atomic `DuckDBConnection.execute`/`execute_atomic` APIs — earlier versions leaked connections on the hot path.
 
@@ -92,7 +92,7 @@ The reason PubSub and MessageBus are separate (despite overlap) is efficiency: Z
 
 **Composite quality score** (`_bt_composite_score` in `mmr_cli.py`): Ranks backtest runs by a weighted blend of sortino, profit_factor, expectancy_bps, return, and drawdown, each clipped to a sensible band, multiplied by a reliability factor that penalises low trade counts (< 10 → ×0.2, < 30 → ×0.6, < 100 → ×0.9). Used as the default sort for `backtests list` and the leaderboard sort in `sweep show`. Not a decision metric — use the statistical-confidence block for deploy/reject — just an ordering heuristic so strong runs float to the top.
 
-**Subprocess concurrency + DuckDB**: The `mmr-skill` helper's `_CLI_SLOTS = asyncio.Semaphore(16)` caps concurrent CLI subprocess launches without serialising them (the previous `_CLI_LOCK` made `backtest_batch(concurrency=6)` a no-op). DuckDB has file-level locking across processes; `DuckDBConnection.execute_atomic` retries on `IOException` with exponential backoff + jitter up to 8 attempts so brief collisions during concurrent subprocess startup don't fail the run. This is what makes `sweep run` and `backtest_batch` actually peg CPU instead of bottlenecking at 10%.
+**Subprocess concurrency + DuckDB**: The `mmr-skill` helper's `_CLI_SLOTS = asyncio.Semaphore(16)` caps concurrent CLI subprocess launches without serialising them (the previous `_CLI_LOCK` made `backtest_batch(concurrency=6)` a no-op). DuckDB has file-level locking across processes; `DuckDBConnection.execute_atomic` retries on `IOException` with exponential backoff + jitter up to **32 attempts (~45s total)** so a burst of 15+ concurrent backtest-end writes don't get starved (the prior 8-attempt budget was too tight and caused silent persist failures). This is what makes `sweep run` and `backtest_batch` actually peg CPU instead of bottlenecking at 10%. The sweep parent also checks for `run_id=None` in each child's JSON response and reports `persist_failed` distinctly, so a silently-dropped persist isn't counted as success. Child persist failures additionally always log to stderr (not just rich console), so the digest captures the traceback even in `--json` runs. Sweep manifests pass strategy paths relative to the project root; `_resolve_strategy_path` resolves them to absolute before subprocess launch (subprocess CWD is `/home/trader`, not the mmr install root, so a raw relative path resolves to a non-existent file).
 
 **PnL subscription race**: `__subscribe_pnl` registers `(account, conId)` under `_pnl_subscriptions_lock` using first-claim-wins semantics. If the actual `subscribe_single_pnl` call fails, the registry entry is backed out so a retry can re-attempt. Portfolio updates fired from IB-eventkit threads are routed onto the main loop via `run_coroutine_threadsafe` (the main loop is captured in `connected_event`), so disk I/O during a universe update doesn't block the IB callback thread.
 
@@ -224,12 +224,16 @@ mmr/
 ## Docker Setup
 
 Two-container model via docker-compose:
-- **ib-gateway**: `ghcr.io/gnzsnz/ib-gateway:latest` — runs IB Gateway. Configured via `.env` file.
-- **mmr**: Built from Dockerfile. Connects to ib-gateway via Docker DNS. Access via `docker exec`.
+- **ib-gateway**: `ghcr.io/gnzsnz/ib-gateway:latest` — runs IB Gateway. Configured via `.env` file. `scripts/ib-gateway-run.sh` is bind-mounted in to patch the upstream's broken `inst_jre.cfg` (it records a build-time `/tmp/setup/<pid>.dir/jre` path that doesn't exist at runtime, so install4j can't find Java on first launch).
+- **mmr**: Built from `python:3.12-slim-bookworm` base. Connects to ib-gateway via Docker DNS. Access via `docker exec`. The entrypoint auto-launches services via `start_mmr.sh` — interactive exec-ins (`docker exec -it bash`) do NOT re-launch (the `.bash_profile` only sets env), so they won't collide on ZMQ ports / IB client id. Container resource limits: 24 GB mem / 24 GB swap (sized for in-place DuckDB CHECKPOINT compaction on bloated DBs).
 
 IB Gateway ports: 4003 (live), 4004 (paper), mapped to host as 4001/4002.
 
-Data and logs are bind-mounted from `./data` and `./logs` on the host.
+Storage layout (host paths):
+- `~/.local/share/mmr/logs/` — bind mount; tail-able from the host
+- `~/.local/share/mmr/tws_settings/` — bind mount; IB session state
+- `~/.local/share/mmr/backups/` — bind mount; `docker.sh -B` writes here
+- DuckDB files (`mmr.duckdb`, `mmr_history.duckdb`) live in the **`mmr_db_data` named volume** (not bind-mounted) — native ext4 is faster + safer than VirtioFS for write-heavy single-file DBs. Snapshot to host with `./docker.sh -B [name]`.
 
 ## Build & Run
 
@@ -243,6 +247,8 @@ Data and logs are bind-mounted from `./data` and `./logs` on the host.
 ./docker.sh -e              # Exec into container
 ./docker.sh -l              # Tail logs
 ./docker.sh -c              # Clean all images/volumes
+./docker.sh -B              # Backup DuckDB files (auto-timestamped subdir)
+./docker.sh -B before_run   # Backup with a custom name
 
 # Inside container (or non-Docker)
 ./start_mmr.sh              # Start tmux session with all services
@@ -477,7 +483,9 @@ When explicit tickers are provided with `--location`, the `min_change_pct`/`max_
 
 User configs live in `~/.config/mmr/`. On first run, bundled defaults from `config_defaults/` are copied there automatically (`container.ensure_config_dir()`). The `TRADER_CONFIG` env var overrides the config file path.
 
-**`~/.config/mmr/trader.yaml`**: IB connection (address, port, client IDs, account), DuckDB path, ZMQ port assignments. Env vars override config values (uppercased param name).
+**`~/.config/mmr/trader.yaml`**: IB connection (address, port, client IDs, account), DuckDB path, ZMQ port assignments. Env vars override config values (uppercased param name). Two CLI-only knobs the Container doesn't otherwise know about:
+- `default_data_source` (default `twelvedata`) — sets the default for every `--source` arg on CLI commands where the value is in that command's choice set (history download, snapshot, watch, financials, fx, movers, ideas). News/propose are unaffected (they don't accept those values). Override per-shell with `MMR_DEFAULT_DATA_SOURCE`.
+- `equity_decimation` (default `daily`) — sets how aggressively backtest persist downsamples `equity_curve_json` before storing. `daily` resamples to last-value-per-day (~17 KB/run vs ~9.9 MB for raw 1-min); `none` keeps everything; an integer N uniform-samples to N points. The blob feeds PSR + Sharpe-CI (both n≥30 minima), so daily decimation is statistically lossless. Override per-shell with `MMR_EQUITY_DECIMATION`.
 
 **`~/.config/mmr/pycron.yaml`**: Service definitions with cron scheduling, auto-restart, dependency ordering.
 

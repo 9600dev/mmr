@@ -182,7 +182,16 @@ class EventSubject(Subject[TSource]):
         callable_lambda()
         self.on_completed()
 
-    async def on_eventkit_update(self, e: TSource, *args):
+    def on_eventkit_update(self, e: TSource, *args):
+        # MUST be sync. eventkit accepts async callbacks but schedules them
+        # via asyncio.ensure_future on whatever loop is running at fire
+        # time — if the loop that was active at registration time has gone
+        # (e.g. the IBAIORx instance was built before the trader's run-loop
+        # started, or the loop was replaced during a reconnect), eventkit
+        # silently drops the events. Observed: pendingTickersEvent fires
+        # but no downstream subscriber sees the ticks. Making the handler
+        # sync sidesteps the scheduling entirely — Subject.on_next is
+        # thread-safe for our usage (single producer thread).
         self.on_next(e)
 
 

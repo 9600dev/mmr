@@ -249,16 +249,12 @@ class BacktestStore:
             conn.execute(self._CREATE_SWEEPS_TABLE)
             conn.execute(self._CREATE_SWEEPS_SEQUENCE)
             # Idempotent column adds for databases created before the
-            # extended-metrics release. DuckDB raises on duplicate ADD
-            # COLUMN; we swallow that specific error and move on.
+            # extended-metrics release. IF NOT EXISTS skips duplicates
+            # cleanly — important on a fresh DB where _CREATE_TABLE
+            # already declares all these columns, and a duplicate ADD
+            # would otherwise abort the surrounding transaction.
             for name, decl in self._MIGRATE_COLUMNS:
-                try:
-                    conn.execute(f"ALTER TABLE backtest_runs ADD COLUMN {name} {decl}")
-                except Exception as ex:
-                    msg = str(ex).lower()
-                    if 'already exists' in msg or 'duplicate' in msg:
-                        continue
-                    raise
+                conn.execute(f"ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS {name} {decl}")
         self.db.execute_atomic(_init)
 
     def add(self, record: BacktestRecord) -> int:

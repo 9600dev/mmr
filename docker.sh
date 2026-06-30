@@ -170,10 +170,10 @@ print_data_sizes() {
 print_data_sizes
 
 # Required RAM (bytes) for the full MMR stack. Set by the mem_limit values
-# in docker-compose.yml (4 GB mmr + 1.5 GB ib-gateway = 5.5 GB minimum;
-# leave 2 GB headroom for the VM/kernel, so ~8 GB is the target).
-MIN_VM_RAM_MB=6144
-RECOMMENDED_VM_RAM_MB=8192
+# in docker-compose.yml (24 GB mmr + 2 GB ib-gateway = 26 GB; leave a few
+# GB for the VM/kernel, so 28 GB minimum / 32 GB target).
+MIN_VM_RAM_MB=28672
+RECOMMENDED_VM_RAM_MB=32768
 
 check_vm_ram() {
     # On macOS, Docker Desktop + Podman both run a Linux VM with its own
@@ -346,10 +346,15 @@ echo_usage() {
     echo "  -e (exec: shell into running MMR container)"
     echo "  -n (news: bring up the news scraper stack at \$NEWS_DIR"
     echo "      — default ~/dev/news; idempotent. Used by the news skill.)"
+    echo "  -B [name] (backup DuckDB files from the named volume to"
+    echo "      ~/.local/share/mmr/backups/<name>/ — defaults to a timestamp"
+    echo "      if no name given. Briefly stops the MMR container so the"
+    echo "      copy is consistent, then restarts.)"
     echo ""
 }
 
-b=n c=n f=n u=n d=n s=n a=n g=n l=n e=n i=n r=n n=n
+b=n c=n f=n u=n d=n s=n a=n g=n l=n e=n i=n r=n n=n B=n
+BACKUP_NAME=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -405,6 +410,15 @@ while [[ $# -gt 0 ]]; do
       n=y
       shift
       ;;
+    -B|--backup)
+      B=y
+      shift
+      # Optional positional arg: backup name (must not look like a flag).
+      if [[ $# -gt 0 && ! "$1" =~ ^- ]]; then
+        BACKUP_NAME="$1"
+        shift
+      fi
+      ;;
     -*|--*)
       echo "Unknown option $1"
       echo_usage
@@ -417,7 +431,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # show usage if no action flags were set
-if [[ $b == "n" && $c == "n" && $f == "n" && $u == "n" && $d == "n" && $s == "n" && $a == "n" && $g == "n" && $l == "n" && $e == "n" && $i == "n" && $r == "n" && $n == "n" ]]; then
+if [[ $b == "n" && $c == "n" && $f == "n" && $u == "n" && $d == "n" && $s == "n" && $a == "n" && $g == "n" && $l == "n" && $e == "n" && $i == "n" && $r == "n" && $n == "n" && $B == "n" ]]; then
     echo_usage
     exit 0
 fi
@@ -648,6 +662,39 @@ down() {
     $RUNTIME network rm mmr_default 2>/dev/null || true
 }
 
+backup() {
+    # Copy the DuckDB files out of the mmr_db_data named volume into a
+    # host-visible bind-mount directory. Briefly stops mmr-mmr-1 so the
+    # copy can't race with an in-flight write; ib-gateway stays up.
+    local name="$BACKUP_NAME"
+    if [[ -z "$name" ]]; then
+        name="$(date +%Y-%m-%d_%H-%M-%S)"
+    fi
+    local dest_host="$HOME/.local/share/mmr/backups/$name"
+    mkdir -p "$dest_host"
+    echo "Backing up DuckDB files to $dest_host/"
+
+    local was_running="no"
+    if [[ -n "$($RUNTIME ps -q -f name=mmr-mmr-1 2>/dev/null)" ]]; then
+        was_running="yes"
+        echo "  stopping mmr-mmr-1 for a consistent snapshot..."
+        $RUNTIME stop mmr-mmr-1 >/dev/null
+    fi
+
+    # Sidecar with the named volume (RO) + backups dir (RW) — keeps the
+    # operation atomic and doesn't depend on host duckdb tooling.
+    $RUNTIME run --rm \
+        -v mmr_mmr_db_data:/src:ro \
+        -v "$dest_host":/dst \
+        alpine sh -c 'cp -v /src/mmr.duckdb /src/mmr_history.duckdb /dst/ 2>&1; ls -lh /dst/'
+
+    if [[ "$was_running" == "yes" ]]; then
+        echo "  restarting mmr-mmr-1..."
+        $RUNTIME start mmr-mmr-1 >/dev/null
+    fi
+    echo "Backup complete: $dest_host/"
+}
+
 clean() {
     echo "Stopping and removing all containers and images..."
     $COMPOSE -f "$BUILDDIR/docker-compose.yml" down --rmi all --volumes 2>/dev/null || true
@@ -759,7 +806,7 @@ sync_all() {
     rsync -e "$RSYNC_RSH" -av --delete $BUILDDIR/ $CONTID:/home/trader/mmr/ --exclude='.git'
 }
 
-echo "action: build=$b clean=$c force=$f up=$u down=$d sync=$s sync_all=$a go=$g logs=$l exec=$e ib-only=$i restart-ib=$r news=$n | runtime: $RUNTIME"
+echo "action: build=$b clean=$c force=$f up=$u down=$d sync=$s sync_all=$a go=$g logs=$l exec=$e ib-only=$i restart-ib=$r news=$n backup=$B${BACKUP_NAME:+($BACKUP_NAME)} | runtime: $RUNTIME"
 
 if [[ $b == "y" ]]; then
     build
@@ -805,4 +852,7 @@ if [[ $g == "y" ]]; then
     echo "Waiting for containers to start..."
     sleep 3
     exec_in
+fi
+if [[ $B == "y" ]]; then
+    backup
 fi

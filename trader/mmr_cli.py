@@ -266,6 +266,95 @@ def print_status(message, success=True):
 # Argparse parser
 # ------------------------------------------------------------------
 
+def _load_default_data_source() -> str:
+    import os
+    val = os.environ.get('MMR_DEFAULT_DATA_SOURCE')
+    if val:
+        return val
+    try:
+        import yaml
+        path = Path(os.environ.get('TRADER_CONFIG', '~/.config/mmr/trader.yaml')).expanduser()
+        if path.exists():
+            with path.open() as f:
+                cfg = yaml.safe_load(f) or {}
+            val = cfg.get('default_data_source')
+            if val:
+                return val
+    except Exception:
+        pass
+    return 'massive'
+
+
+_DEFAULT_DATA_SOURCE = _load_default_data_source()
+
+
+def _src_default(choices, fallback):
+    return _DEFAULT_DATA_SOURCE if _DEFAULT_DATA_SOURCE in choices else fallback
+
+
+def _load_equity_decimation() -> str:
+    import os
+    val = os.environ.get('MMR_EQUITY_DECIMATION')
+    if val:
+        return val
+    try:
+        import yaml
+        path = Path(os.environ.get('TRADER_CONFIG', '~/.config/mmr/trader.yaml')).expanduser()
+        if path.exists():
+            with path.open() as f:
+                cfg = yaml.safe_load(f) or {}
+            val = cfg.get('equity_decimation')
+            if val is not None:
+                return str(val)
+    except Exception:
+        pass
+    return 'daily'
+
+
+_EQUITY_DECIMATION = _load_equity_decimation()
+
+
+def _decimate_equity_curve_json(ec) -> str:
+    """Serialize a pandas equity-curve Series to JSON, decimated per
+    MMR_EQUITY_DECIMATION / config.equity_decimation. Default 'daily' —
+    1-min backtests drop from ~98k points (~9.9 MB) to ~252 points
+    (~17 KB) with no statistical loss for PSR / Sharpe CI (the only
+    stats that read this blob; both have n>=30 minima).
+
+    Modes:
+      'daily'            resample to last-value-per-day
+      'none' / 'off'     no decimation (legacy bloat behaviour)
+      <int N>            uniform sample down to N points
+    """
+    if ec is None or len(ec) == 0:
+        return ''
+    import pandas as pd
+    mode = (_EQUITY_DECIMATION or '').strip().lower()
+    if mode == 'daily':
+        decimated = ec.resample('1D').last().dropna()
+        if len(decimated) == 0 or decimated.index[-1] != ec.index[-1]:
+            decimated = pd.concat([decimated, ec.iloc[[-1]]])
+    elif mode in ('none', 'off', ''):
+        decimated = ec
+    else:
+        try:
+            n = int(mode)
+        except ValueError:
+            decimated = ec
+        else:
+            if n <= 0 or len(ec) <= n:
+                decimated = ec
+            else:
+                step = max(1, len(ec) // n)
+                decimated = ec.iloc[::step]
+                if decimated.index[-1] != ec.index[-1]:
+                    decimated = pd.concat([decimated, ec.iloc[[-1]]])
+    return json.dumps([
+        {'timestamp': str(ts), 'value': float(v)}
+        for ts, v in decimated.items()
+    ])
+
+
 def build_parser() -> argparse.ArgumentParser:
     fmt = argparse.RawDescriptionHelpFormatter
     parser = argparse.ArgumentParser(prog='mmr', description='MMR Trading CLI')
@@ -313,7 +402,8 @@ def build_parser() -> argparse.ArgumentParser:
     snap_p.add_argument('--delayed', action='store_true', default=False, help='Use delayed market data')
     snap_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
     snap_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
-    snap_p.add_argument('--source', choices=['ib', 'twelvedata'], default='ib',
+    snap_p.add_argument('--source', choices=['ib', 'twelvedata'],
+                        default=_src_default(['ib', 'twelvedata'], 'ib'),
                         help='Data source (default: ib). twelvedata uses REST /quote — '
                              'no bid/ask, but no trader_service or IB connection required.')
 
@@ -326,7 +416,8 @@ def build_parser() -> argparse.ArgumentParser:
     snap_batch_p.add_argument('symbols', nargs='+', help='Symbols to snapshot')
     snap_batch_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
     snap_batch_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
-    snap_batch_p.add_argument('--source', choices=['ib', 'twelvedata'], default='ib',
+    snap_batch_p.add_argument('--source', choices=['ib', 'twelvedata'],
+                              default=_src_default(['ib', 'twelvedata'], 'ib'),
                               help='Data source (default: ib). twelvedata batches up to '
                                    '120 symbols per /quote call.')
 
@@ -549,7 +640,8 @@ def build_parser() -> argparse.ArgumentParser:
     watch_p.add_argument('symbols', nargs='*', help='Symbols to dashboard (omit for portfolio mode)')
     watch_p.add_argument('--universe', '-u', default=None,
                          help='Universe name to dashboard (alternative to positional symbols)')
-    watch_p.add_argument('--source', choices=['massive', 'twelvedata'], default='massive',
+    watch_p.add_argument('--source', choices=['massive', 'twelvedata'],
+                         default=_src_default(['massive', 'twelvedata'], 'massive'),
                          help='Streaming data source for ticker dashboard mode (default: massive). '
                               'massive = Polygon WebSocket, supports stocks/forex/crypto/indices/options/futures. '
                               'twelvedata = TD WebSocket, supports stocks + forex + crypto (uses BASE/QUOTE form). '
@@ -737,7 +829,8 @@ def build_parser() -> argparse.ArgumentParser:
     fin_balance_p.add_argument('--limit', type=int, default=4, help='Number of periods (default: 4)')
     fin_balance_p.add_argument('--timeframe', default='quarterly', choices=['quarterly', 'annual'],
                                help='Timeframe (default: quarterly)')
-    fin_balance_p.add_argument('--source', choices=['massive', 'twelvedata'], default='massive',
+    fin_balance_p.add_argument('--source', choices=['massive', 'twelvedata'],
+                               default=_src_default(['massive', 'twelvedata'], 'massive'),
                                help='Data source (default: massive)')
 
     fin_income_p = fin_sub.add_parser('income', help='Income statement')
@@ -745,7 +838,8 @@ def build_parser() -> argparse.ArgumentParser:
     fin_income_p.add_argument('--limit', type=int, default=4, help='Number of periods (default: 4)')
     fin_income_p.add_argument('--timeframe', default='quarterly', choices=['quarterly', 'annual'],
                               help='Timeframe (default: quarterly)')
-    fin_income_p.add_argument('--source', choices=['massive', 'twelvedata'], default='massive',
+    fin_income_p.add_argument('--source', choices=['massive', 'twelvedata'],
+                              default=_src_default(['massive', 'twelvedata'], 'massive'),
                               help='Data source (default: massive)')
 
     fin_cashflow_p = fin_sub.add_parser('cashflow', help='Cash flow statement')
@@ -753,12 +847,14 @@ def build_parser() -> argparse.ArgumentParser:
     fin_cashflow_p.add_argument('--limit', type=int, default=4, help='Number of periods (default: 4)')
     fin_cashflow_p.add_argument('--timeframe', default='quarterly', choices=['quarterly', 'annual'],
                                 help='Timeframe (default: quarterly)')
-    fin_cashflow_p.add_argument('--source', choices=['massive', 'twelvedata'], default='massive',
+    fin_cashflow_p.add_argument('--source', choices=['massive', 'twelvedata'],
+                                default=_src_default(['massive', 'twelvedata'], 'massive'),
                                 help='Data source (default: massive)')
 
     fin_ratios_p = fin_sub.add_parser('ratios', help='Financial ratios (TTM)')
     fin_ratios_p.add_argument('symbol', help='Stock ticker (e.g. AAPL)')
-    fin_ratios_p.add_argument('--source', choices=['massive', 'twelvedata'], default='massive',
+    fin_ratios_p.add_argument('--source', choices=['massive', 'twelvedata'],
+                              default=_src_default(['massive', 'twelvedata'], 'massive'),
                               help='Data source (default: massive)')
 
     fin_filing_p = fin_sub.add_parser('filing', help='10-K filing sections (business, risk_factors)')
@@ -856,7 +952,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     fx_snap_p = fx_sub.add_parser('snapshot', aliases=['snap'], help='Forex pair snapshot')
     fx_snap_p.add_argument('pair', help='Currency pair (e.g. EURUSD)')
-    fx_snap_p.add_argument('--source', default='ib', choices=['ib', 'massive', 'twelvedata'],
+    fx_snap_p.add_argument('--source', choices=['ib', 'massive', 'twelvedata'],
+                           default=_src_default(['ib', 'massive', 'twelvedata'], 'ib'),
                             help='Data source (default: ib)')
 
     fx_sub.add_parser('snapshot-all', help='All forex pair snapshots (Massive only)')
@@ -867,14 +964,16 @@ def build_parser() -> argparse.ArgumentParser:
     fx_quote_p = fx_sub.add_parser('quote', help='Last forex quote')
     fx_quote_p.add_argument('from_currency', help='From currency (e.g. EUR)')
     fx_quote_p.add_argument('to_currency', help='To currency (e.g. USD)')
-    fx_quote_p.add_argument('--source', default='ib', choices=['ib', 'massive', 'twelvedata'],
+    fx_quote_p.add_argument('--source', choices=['ib', 'massive', 'twelvedata'],
+                            default=_src_default(['ib', 'massive', 'twelvedata'], 'ib'),
                              help='Data source (default: ib)')
 
     fx_convert_p = fx_sub.add_parser('convert', help='Currency conversion (Massive only)')
     fx_convert_p.add_argument('from_currency', help='From currency (e.g. EUR)')
     fx_convert_p.add_argument('to_currency', help='To currency (e.g. USD)')
     fx_convert_p.add_argument('amount', type=float, help='Amount to convert')
-    fx_convert_p.add_argument('--source', default='massive', choices=['massive', 'twelvedata'],
+    fx_convert_p.add_argument('--source', choices=['massive', 'twelvedata'],
+                              default=_src_default(['massive', 'twelvedata'], 'massive'),
                               help='Data source (default: massive). twelvedata uses TD\'s '
                                    '/currency_conversion endpoint.')
 
@@ -889,7 +988,8 @@ def build_parser() -> argparse.ArgumentParser:
                            help='Enrich with company name, ratios, and news (card view; Massive only)')
     movers_p.add_argument('--num', '-n', type=int, default=20,
                            help='Number of results (default: 20)')
-    movers_p.add_argument('--source', choices=['massive', 'twelvedata'], default='massive',
+    movers_p.add_argument('--source', choices=['massive', 'twelvedata'],
+                          default=_src_default(['massive', 'twelvedata'], 'massive'),
                            help='Data source (default: massive)')
 
     # scan
@@ -966,7 +1066,8 @@ def build_parser() -> argparse.ArgumentParser:
                           help='Enrich results with latest news headline and sentiment')
     ideas_p.add_argument('--location', '-l', default=None,
                           help='IB market location (e.g. STK.AU.ASX, STK.CA, STK.HK.SEHK)')
-    ideas_p.add_argument('--source', choices=['massive', 'twelvedata'], default='massive',
+    ideas_p.add_argument('--source', choices=['massive', 'twelvedata'],
+                         default=_src_default(['massive', 'twelvedata'], 'massive'),
                           help='Data source for US equities (default: massive). '
                                'Ignored when --location is set (IB path).')
 
@@ -1374,7 +1475,7 @@ def build_parser() -> argparse.ArgumentParser:
     data_dl_p.add_argument(
         '--source',
         choices=['massive', 'twelvedata'],
-        default='massive',
+        default=_src_default(['massive', 'twelvedata'], 'massive'),
         help='Data source (default: massive)',
     )
     data_dl_p.add_argument(
@@ -5025,7 +5126,7 @@ def _freshness_check(
     from trader.objects import BarSize
 
     cfg = Container.instance().config()
-    storage = TickStorage(cfg.get('duckdb_path', ''))
+    storage = TickStorage(cfg.get('history_duckdb_path', ''))
     tick = storage.get_tickdata(BarSize.Days1)
 
     stale = []
@@ -5119,6 +5220,38 @@ def _sweep_manifest_validate(manifest: Any) -> List[Dict[str, Any]]:
     return cleaned
 
 
+def _resolve_strategy_path(raw: str) -> str:
+    """Resolve a strategy path to an absolute file path.
+
+    Sweep manifests typically use relative paths like
+    ``strategies/foo.py``. The sweep parent's subprocess launches don't
+    pin a cwd, so the relative resolution falls through to ``getcwd()``
+    — for a containerised ``mmr`` invocation that's usually
+    ``/home/trader``, NOT the mmr install root where ``strategies/``
+    actually lives. The result: every child reports "strategy module
+    not found", exits 0 with ``{"success": false, ...}``, and the
+    sweep parent sees a JSON response with no ``run_id`` and records
+    1080 silent ``persist_failed`` outcomes.
+
+    Try, in order: as-is (works for absolute paths), cwd-relative,
+    mmr-install-root-relative. Return the first that exists; otherwise
+    return as-is and let the child fail loudly with a clear message.
+    """
+    import os
+    if os.path.isabs(raw) and os.path.exists(raw):
+        return raw
+    cwd_try = os.path.abspath(raw)
+    if os.path.exists(cwd_try):
+        return cwd_try
+    # mmr root = parent of the `trader/` package dir
+    import trader
+    mmr_root = os.path.dirname(os.path.dirname(os.path.abspath(trader.__file__)))
+    install_try = os.path.join(mmr_root, raw)
+    if os.path.exists(install_try):
+        return install_try
+    return raw
+
+
 def _expand_sweep_jobs(
     sweep: Dict[str, Any], accessor,
 ) -> List[Dict[str, Any]]:
@@ -5159,13 +5292,14 @@ def _expand_sweep_jobs(
     else:
         param_combos = [{}]  # single "run with defaults" job
 
+    strategy_abs = _resolve_strategy_path(sweep['strategy'])
     jobs = []
     for symbol, cid in symbol_conids:
         for params in param_combos:
             jobs.append({
                 'sweep_name': sweep['name'],
                 'symbol': symbol,
-                'strategy': sweep['strategy'],
+                'strategy': strategy_abs,
                 'class_name': sweep['class'],
                 'conids': [cid],
                 'days': sweep['days'],
@@ -5466,6 +5600,17 @@ async def _execute_jobs_parallel(
             try:
                 parsed = json.loads(stdout.decode().strip())
                 summary = parsed.get('data', {}).get('summary', {})
+                # A child that ran the backtest but couldn't persist the row
+                # exits 0 with summary.run_id=None. Without this guard we
+                # report 180/180 successful and the digest is built on
+                # nothing — caught after sweep b4v1od34x silently dropped
+                # 1080 runs to a DB-lock-contention storm.
+                if summary.get('run_id') is None:
+                    err_tail = stderr.decode()[-2000:] if stderr else ''
+                    return {
+                        'status': 'persist_failed', 'job': job,
+                        'error': f'child returned ok but persist failed (run_id=None). stderr tail:\n{err_tail}',
+                    }
                 return {'status': 'ok', 'job': job, 'summary': summary}
             except json.JSONDecodeError:
                 return {
@@ -6033,7 +6178,8 @@ def _handle_backtest_sweep(args: argparse.Namespace):
     container = Container.instance()
     cfg = container.config()
     duckdb_path = cfg.get('duckdb_path', '')
-    storage = TickStorage(duckdb_path)
+    history_duckdb_path = cfg.get('history_duckdb_path', '')
+    storage = TickStorage(history_duckdb_path)
     accessor = UniverseAccessor(
         duckdb_path, cfg.get('universe_library', 'Universes'),
     )
@@ -6096,10 +6242,7 @@ def _handle_backtest_sweep(args: argparse.Namespace):
                 'signal_probability': float(t.signal_probability),
                 'signal_risk': float(t.signal_risk),
             } for t in result.trades])
-            equity_curve_json = json.dumps([
-                {'timestamp': str(ts), 'value': float(v)}
-                for ts, v in result.equity_curve.items()
-            ])
+            equity_curve_json = _decimate_equity_curve_json(result.equity_curve)
 
         record = BacktestRecord(
             strategy_path=args.strategy,
@@ -6391,10 +6534,7 @@ def _handle_backtest(args: argparse.Namespace):
                     'signal_probability': float(t.signal_probability),
                     'signal_risk': float(t.signal_risk),
                 } for t in result.trades])
-                equity_curve_json = json.dumps([
-                    {'timestamp': str(ts), 'value': float(v)}
-                    for ts, v in result.equity_curve.items()
-                ])
+                equity_curve_json = _decimate_equity_curve_json(result.equity_curve)
 
             # Capture effective --param overrides so `backtests show` can
             # display what was varied. ``applied_params`` is populated by
@@ -6435,6 +6575,15 @@ def _handle_backtest(args: argparse.Namespace):
             run_id = bstore.add(record)
             summary['run_id'] = run_id
         except Exception as ex:
+            # ALWAYS log to stderr — even in --json mode — so sweep
+            # parents can see *why* a child failed. Previously this only
+            # went to rich's console (stdout) and was suppressed in JSON
+            # mode, making 1080 silent persist failures look like 1080
+            # successes to the sweep parent.
+            import traceback
+            sys.stderr.write(f'PERSIST_FAILED: {type(ex).__name__}: {ex}\n')
+            sys.stderr.write(traceback.format_exc())
+            sys.stderr.flush()
             if not _json_mode:
                 console.print(f'[yellow]Could not persist backtest run: {ex}[/yellow]')
 

@@ -69,14 +69,28 @@ _PRESERVED_IB_EVENTS = (
 
 
 def _snapshot_event_handlers(ib):
-    """Return a dict[event_name -> list[(obj_or_None, func)]] snapshot of
-    every handler currently attached to ``ib``'s known events.
+    """Return a dict[event_name -> list[handler]] snapshot of every
+    handler currently attached to ``ib``'s known events.
 
-    eventkit's ``Event`` stores connections in ``_slots.slots`` as
-    ``Slot(obj, weakref, func)`` triples. We preserve both ``obj`` and
-    ``func`` so bound methods re-attach correctly (the ``+=`` operator
-    handles both plain functions and bound methods — we just hand it
-    back what we captured)."""
+    eventkit's ``Slot`` is a dataclass with THREE fields:
+      - ``obj``: usually ``None``; populated when registering a plain
+        function with an explicit owner reference (rare).
+      - ``weakref``: a ``weakref.ref`` to the bound-method owner; this
+        is what gets set when you do ``event += instance.method`` —
+        the common case for our code.
+      - ``func``: the unbound function (``method.__func__``).
+
+    Previously this helper only checked ``slot.obj`` (always ``None``
+    for bound-method registrations), fell through to ``handler = func``
+    (the unbound function), and re-registered THAT on the fresh IB
+    instance. When events fired, eventkit called the unbound function
+    with the ticker as ``self``, which silently no-op'd because the
+    "self" was a ``Set[Ticker]`` with no ``on_next`` attribute.
+    Symptom: ``pendingTickersEvent`` fired with real data but no
+    ``EventSubject`` downstream ever saw a tick — so ``mmr snapshot``,
+    strategy bars, and anything else built on the reactive layer
+    silently stopped working after a reconnect.
+    """
     snapshot = {}
     for name in _PRESERVED_IB_EVENTS:
         event = getattr(ib, name, None)
@@ -85,15 +99,24 @@ def _snapshot_event_handlers(ib):
         captured = []
         try:
             for slot in event._slots.slots:
-                obj = getattr(slot, 'obj', None)
                 func = getattr(slot, 'func', None)
                 if func is None:
                     continue
-                # Reconstruct what was originally registered: a bound method
-                # if obj was present, otherwise the bare function.
-                if obj is not None:
+                # Prefer the weakref (bound-method case). Fall back to
+                # ``obj`` (explicit-owner plain function), then to the
+                # bare ``func`` if neither resolves to a live object.
+                bound_to = None
+                weak = getattr(slot, 'weakref', None)
+                if weak is not None:
                     try:
-                        handler = getattr(obj, func.__name__)
+                        bound_to = weak()  # dereference weakref
+                    except Exception:
+                        bound_to = None
+                if bound_to is None:
+                    bound_to = getattr(slot, 'obj', None)
+                if bound_to is not None:
+                    try:
+                        handler = getattr(bound_to, func.__name__)
                     except Exception:
                         handler = func
                 else:
@@ -640,7 +663,37 @@ class IBAIORx():
         tick_list: List[TickList] = [],
         snapshot: bool = False,
         delayed: bool = False,
+        wait_timeout: float = 15.0,
     ) -> Ticker:
+        # DIAGNOSTIC instrumentation — remove after the snapshot-stalls bug
+        # is root-caused. Logs at WARNING level so it shows up even at the
+        # default log level.
+        # Fast path: if ib_async already has a live ticker for this contract
+        # (e.g. a publish_contract() subscription from earlier in this session
+        # is keeping the feed warm), return its current state immediately.
+        # Avoids racing a fresh snapshot request that may never fire its
+        # first update because IB dedupes the duplicate subscription.
+        if not snapshot and not tick_list:
+            existing = self.ib.ticker(contract)
+            if existing is not None and (
+                existing.bid == existing.bid or existing.ask == existing.ask
+                or existing.last == existing.last
+            ):
+                return existing
+
+        # Explicitly force live market data mode (type 1) before every
+        # snapshot request. We've observed sessions get stuck in a state
+        # where reqMktData silently delivers no ticks — a stale
+        # market-data-type setting from a prior delayed/frozen request
+        # on the same connection appears to be the cause. Calling
+        # reqMarketDataType(1) every time is cheap and idempotent.
+        if not delayed:
+            try:
+                self.ib.reqMarketDataType(1)
+            except Exception:
+                pass
+
+
         _task: asyncio.Event = asyncio.Event()
         populated_ticker: Optional[Ticker] = None
         thrown_exception: Optional[Exception] = None
@@ -674,7 +727,28 @@ class IBAIORx():
         observer = AutoDetachObserver[Ticker](on_next=on_next, on_error=on_error, on_completed=on_completed)
         subscription = xs.subscribe(observer)
 
-        await _task.wait()
+        # Bounded wait — without this the coroutine hangs forever if IB
+        # never delivers a ticker (it can happen when a duplicate
+        # subscription on the same clientId silently no-ops because
+        # IB-side dedup'd it). The RPC client times out the call but the
+        # server-side task leaks. Cancel + raise so the caller sees a
+        # clear error instead of a 30s mystery timeout.
+        try:
+            await asyncio.wait_for(_task.wait(), timeout=wait_timeout)
+        except asyncio.TimeoutError:
+            subscription.dispose()
+            try:
+                self.ib.cancelMktData(contract)
+            except Exception:
+                pass
+            sym = getattr(contract, 'symbol', '?')
+            cid = getattr(contract, 'conId', '?')
+            raise TimeoutError(
+                f'No market data received for {sym} (conId={cid}) within {wait_timeout}s. '
+                f'Check: (1) IB market-data subscription enabled for this exchange, '
+                f'(2) symbol qualifies on the chosen exchange, '
+                f'(3) market is open or pass delayed=True for frozen data.'
+            )
         observer.on_completed()
         subscription.dispose()
         await asyncio.sleep(0.1)

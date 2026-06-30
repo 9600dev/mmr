@@ -119,6 +119,11 @@ start_xvfb
 # setup SSH Tunnel
 setup_ssh
 
+# Workaround for ghcr.io/gnzsnz/ib-gateway upstream bug: inst_jre.cfg is
+# baked at build time with /tmp/setup/<build-pid>.dir/jre, which is gone
+# at runtime, so install4j can't find Java. Rewrite to the colocated JRE.
+for cfg in /home/ibgateway/Jts/ibgateway/*/.install4j/inst_jre.cfg; do [ -f "$cfg" ] && echo "${cfg%/.install4j/inst_jre.cfg}/jre" > "$cfg"; done
+
 # Java heap size
 set_java_heap
 

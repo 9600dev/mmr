@@ -1,0 +1,73 @@
+name: nasdaq_top20_daytrade
+note: |
+  Day-trade (low-frequency intraday) strategies × top 20 NASDAQ stocks.
+  6 strategies × 9 param combos × 20 symbols = 1080 backtests, 1-min bars,
+  90 days. Goal: identify which strategy/symbol/param combos have a real
+  edge (PSR > 0.95, expectancy_bps > 0, trades >= 30 for statistical power).
+
+sweeps:
+  - name: orb
+    strategy: strategies/opening_range_breakout.py
+    class: OpeningRangeBreakout
+    symbols: [AAPL, MSFT, NVDA, AMZN, META, GOOGL, GOOG, AVGO, TSLA, COST,
+              NFLX, ADBE, PEP, CSCO, AMD, TMUS, CMCSA, INTC, INTU, QCOM]
+    bar_size: "1 min"
+    days: 90
+    param_grid:
+      RANGE_MINUTES: [15, 30, 45]
+      VOLUME_MULT: [1.2, 1.5, 2.0]
+
+  - name: opening_drive_fade
+    strategy: strategies/opening_drive_fade.py
+    class: OpeningDriveFade
+    symbols: [AAPL, MSFT, NVDA, AMZN, META, GOOGL, GOOG, AVGO, TSLA, COST,
+              NFLX, ADBE, PEP, CSCO, AMD, TMUS, CMCSA, INTC, INTU, QCOM]
+    bar_size: "1 min"
+    days: 90
+    param_grid:
+      DRIVE_WINDOW_MIN: [15, 30, 45]
+      DRIVE_ATR_MULT: [1.0, 1.5, 2.0]
+
+  - name: vwap_reclaim
+    strategy: strategies/vwap_reclaim.py
+    class: VwapReclaim
+    symbols: [AAPL, MSFT, NVDA, AMZN, META, GOOGL, GOOG, AVGO, TSLA, COST,
+              NFLX, ADBE, PEP, CSCO, AMD, TMUS, CMCSA, INTC, INTU, QCOM]
+    bar_size: "1 min"
+    days: 90
+    param_grid:
+      MIN_DIP_PCT: [0.2, 0.3, 0.5]
+      VOL_MULT: [1.1, 1.3, 1.5]
+
+  - name: vwap_reversion
+    strategy: strategies/vwap_reversion.py
+    class: VwapReversion
+    symbols: [AAPL, MSFT, NVDA, AMZN, META, GOOGL, GOOG, AVGO, TSLA, COST,
+              NFLX, ADBE, PEP, CSCO, AMD, TMUS, CMCSA, INTC, INTU, QCOM]
+    bar_size: "1 min"
+    days: 90
+    param_grid:
+      ENTRY_STD: [1.0, 1.5, 2.0]
+      RSI_OVERSOLD: [25, 35, 45]
+
+  - name: late_day_momentum
+    strategy: strategies/late_day_momentum.py
+    class: LateDayMomentum
+    symbols: [AAPL, MSFT, NVDA, AMZN, META, GOOGL, GOOG, AVGO, TSLA, COST,
+              NFLX, ADBE, PEP, CSCO, AMD, TMUS, CMCSA, INTC, INTU, QCOM]
+    bar_size: "1 min"
+    days: 90
+    param_grid:
+      VWAP_PREMIUM_PCT: [0.3, 0.5, 0.7]
+      RANGE_EXPANSION: [1.1, 1.15, 1.25]
+
+  - name: gap_reversion
+    strategy: strategies/gap_reversion.py
+    class: GapReversion
+    symbols: [AAPL, MSFT, NVDA, AMZN, META, GOOGL, GOOG, AVGO, TSLA, COST,
+              NFLX, ADBE, PEP, CSCO, AMD, TMUS, CMCSA, INTC, INTU, QCOM]
+    bar_size: "1 min"
+    days: 90
+    param_grid:
+      GAP_MIN_PCT: [0.3, 0.5, 1.0]
+      VOL_MULT: [1.1, 1.2, 1.5]

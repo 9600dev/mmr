@@ -89,7 +89,14 @@ class DuckDBConnection:
         with self._lock:
             delay = 0.05
             last_err: Optional[Exception] = None
-            for attempt in range(8):
+            # 32 attempts × growing-then-capped backoff gives ~45s of total
+            # wait before giving up. Sized so 15+ concurrent backtest
+            # subprocesses all land their final-row writes without a
+            # single one getting starved out. The 8-attempt prior budget
+            # (~6s) silently dropped most writes under sweeps with
+            # concurrency >= 8 — see sweep b4v1od34x: 1080 "successful"
+            # children, 0 actually persisted.
+            for attempt in range(32):
                 try:
                     conn = duckdb.connect(self.db_path)
                     break
@@ -102,7 +109,7 @@ class DuckDBConnection:
                         raise
                     last_err = ex
                     _time.sleep(delay + random.uniform(0, delay))
-                    delay = min(delay * 2, 1.5)
+                    delay = min(delay * 2, 2.0)
             else:
                 # Exhausted retries. Propagate so the caller (usually a
                 # backtest subprocess) exits loudly rather than silently
@@ -244,15 +251,34 @@ class DuckDBDataStore(DataStore):
                 'average', 'bar_count', 'bar_size', 'what_to_show']
         write_df = write_df[[c for c in cols if c in write_df.columns]]
 
-        # Upsert: delete existing rows for this symbol in the date range, then insert
+        # Upsert: delete existing rows for this symbol in the date range, then insert.
+        # CRITICAL: filter the DELETE by bar_size too — otherwise writing a
+        # 1-min window for AAPL clobbers any daily rows for AAPL in that same
+        # date range. With write_resolve_overlap() merging in pre-existing rows,
+        # the date span can grow to span years of history, deleting everything.
+        # Observed: 10/20 NASDAQ daily downloads silently disappeared because
+        # they were wiped by the subsequent 1-min write for the same conid.
         min_date = write_df['date'].min()
         max_date = write_df['date'].max()
+        bar_sizes_being_written = list(write_df['bar_size'].dropna().unique())
 
         def _write(conn):
-            conn.execute(
-                f"DELETE FROM {self.TABLE_NAME} WHERE symbol = ? AND date >= ? AND date <= ?",
-                [symbol, min_date, max_date],
-            )
+            if bar_sizes_being_written:
+                for bs in bar_sizes_being_written:
+                    conn.execute(
+                        f"DELETE FROM {self.TABLE_NAME} "
+                        f"WHERE symbol = ? AND date >= ? AND date <= ? AND bar_size = ?",
+                        [symbol, min_date, max_date, bs],
+                    )
+            else:
+                # Caller didn't set bar_size on any row — fall back to the old
+                # behavior (delete all bar_sizes in range). Should never happen
+                # for proper TickData writes; preserved for safety.
+                conn.execute(
+                    f"DELETE FROM {self.TABLE_NAME} "
+                    f"WHERE symbol = ? AND date >= ? AND date <= ?",
+                    [symbol, min_date, max_date],
+                )
             conn.register('__write_df', write_df)
             try:
                 conn.execute(f"INSERT INTO {self.TABLE_NAME} SELECT * FROM __write_df")

@@ -69,3 +69,21 @@ massive_delayed: false
 
 # TwelveData (parallel history backend; set TWELVEDATA_API_KEY env var as alternative)
 twelvedata_api_key: ''
+
+# CLI default for --source on commands that take it (history download,
+# snapshot, watch, financials, fx, movers, ideas). Per-command --source
+# arguments still win. Override per-shell with MMR_DEFAULT_DATA_SOURCE.
+# Recognised values: massive, twelvedata, ib (only used where the choice
+# set for that command includes it; otherwise the command's own default
+# applies).
+default_data_source: twelvedata
+
+# Equity-curve decimation at backtest-persist time. The full per-bar
+# series is ~9.9 MB per 1-min run (4,713 runs took ~47 GB pre-fix);
+# daily decimation drops this to ~17 KB with no statistical loss for
+# PSR/Sharpe-CI (both n>=30, daily gives n=252). Override per-shell
+# with MMR_EQUITY_DECIMATION.
+#   daily     resample to last-value-per-day (recommended)
+#   none      no decimation (legacy bloat)
+#   <int>     uniform sample down to N points
+equity_decimation: daily

@@ -1,4 +1,4 @@
-FROM debian:bookworm-slim
+FROM python:3.12-slim-bookworm
 WORKDIR /home/trader/mmr
 ENV container=docker
 ENV PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -9,9 +9,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN useradd -m -d /home/trader -s /bin/bash -G sudo trader \
     && mkdir -p /tmp
 
-# System packages (no TWS/VNC/X11 — IB Gateway runs in a separate container)
+# System packages (no TWS/VNC/X11 — IB Gateway runs in a separate container).
+# Python 3.12 is provided by the python:3.12-slim-bookworm base image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    dialog apt-utils ca-certificates python3 python3-pip python3-venv python3-dev \
+    dialog apt-utils ca-certificates \
     git wget vim dpkg build-essential \
     curl locales-all sudo unzip tmux \
     iproute2 net-tools rsync iputils-ping lnav jq \
@@ -56,6 +57,16 @@ RUN --mount=type=cache,target=/home/trader/.cache/pip \
 # but everything above is cached)
 USER root
 COPY --chown=trader:trader ./ /home/trader/mmr/
+
+# Register the mmr package + console entry points (mmr, trader-service, ...)
+# defined in pyproject.toml. --no-deps because requirements.txt covered them.
+USER trader
+RUN pip install --no-deps -e /home/trader/mmr
+
+USER root
+# .bash_profile sets env for interactive exec-ins. Services are launched
+# by docker-entrypoint.sh — interactive shells must NOT re-launch them or
+# they'll collide on ZMQ ports + IB client id.
 RUN printf '%s\n' \
     'export HOME=/home/trader' \
     'export PATH="$HOME/.venv/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"' \
@@ -66,7 +77,6 @@ RUN printf '%s\n' \
     '[ -f "$HOME/.mmr_env" ] && . "$HOME/.mmr_env"' \
     '' \
     'cd $HOME/mmr' \
-    '$HOME/mmr/start_mmr.sh' \
     > /home/trader/.bash_profile \
     && chown trader:trader /home/trader/.bash_profile
 
