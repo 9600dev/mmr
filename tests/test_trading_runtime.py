@@ -535,3 +535,44 @@ class TestGetAccountCashByCurrency:
         out = self._api(values).get_account_cash_by_currency()
         assert out['consolidated'] is False
         assert set(out['currencies']) == {'USD'}
+
+    def test_ledger_tags_from_req_account_updates(self):
+        """reqAccountUpdates delivers per-currency cash as ``$LEDGER-*`` rows
+        (ib_async's rendering) — the real shape for U26774889's 5k/5k/5k."""
+        values = [
+            _AV('U26774889', 'NetLiquidation', '17005', 'CAD'),
+            _AV('U26774889', '$LEDGER-CashBalance', '5000', 'AUD'),
+            _AV('U26774889', '$LEDGER-CashBalance', '5000', 'CAD'),
+            _AV('U26774889', '$LEDGER-CashBalance', '5000', 'USD'),
+            _AV('U26774889', '$LEDGER-CashBalance', '17005', 'BASE'),   # consolidated — skip
+            _AV('U26774889', '$LEDGER-ExchangeRate', '0.9808467', 'AUD'),
+            _AV('U26774889', '$LEDGER-ExchangeRate', '1.00', 'CAD'),
+            _AV('U26774889', '$LEDGER-ExchangeRate', '1.4202328', 'USD'),
+        ]
+        out = self._api(values).get_account_cash_by_currency()
+        assert out['consolidated'] is False
+        assert out['base_currency'] == 'CAD'
+        assert set(out['currencies']) == {'AUD', 'CAD', 'USD'}
+        assert out['currencies']['USD']['cash'] == 5000.0
+        assert out['currencies']['USD']['base_value'] == pytest.approx(5000 * 1.4202328)
+        assert out['currencies']['AUD']['base_value'] == pytest.approx(5000 * 0.9808467)
+        assert out['currencies']['CAD']['base_value'] == pytest.approx(5000.0)
+        assert out['total_base_value'] == pytest.approx(
+            5000 * 0.9808467 + 5000 + 5000 * 1.4202328
+        )
+
+    def test_ledger_form_wins_over_plain_and_base_fx_backfilled(self):
+        """If both ledger and plain tags appear, ledger wins; and a missing
+        base-currency exchange rate is backfilled to 1.0."""
+        values = [
+            _AV('U26774889', 'NetLiquidation', '5000', 'CAD'),
+            _AV('U26774889', 'CashBalance', '99', 'USD'),            # plain — overridden
+            _AV('U26774889', '$LEDGER-CashBalance', '5000', 'USD'),  # ledger wins
+            _AV('U26774889', '$LEDGER-ExchangeRate', '1.42', 'USD'),
+            _AV('U26774889', '$LEDGER-CashBalance', '5000', 'CAD'),  # no CAD FX row supplied
+        ]
+        out = self._api(values).get_account_cash_by_currency()
+        assert out['currencies']['USD']['cash'] == 5000.0
+        # CAD is base → rate backfilled to 1.0 → base_value == cash
+        assert out['currencies']['CAD']['exchange_rate'] == 1.0
+        assert out['currencies']['CAD']['base_value'] == pytest.approx(5000.0)

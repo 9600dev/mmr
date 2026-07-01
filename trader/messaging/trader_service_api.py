@@ -350,6 +350,16 @@ class TraderServiceApi(RPCHandler):
         return self.trader.ib_account
 
     @rpcmethod
+    def debug_raw_account_values(self) -> list:
+        """Every AccountValue row the service currently holds (all tags, all
+        currencies, all accounts). Diagnostic — used to see whether IB is
+        streaming per-currency cash into this connection."""
+        return [
+            {'account': v.account, 'tag': v.tag, 'currency': v.currency, 'value': v.value, 'modelCode': getattr(v, 'modelCode', '')}
+            for v in self.trader.client.ib.accountValues()
+        ]
+
+    @rpcmethod
     def get_account_values(self) -> dict:
         """Return key account values (cash, net liquidation, buying power, etc.).
 
@@ -421,26 +431,52 @@ class TraderServiceApi(RPCHandler):
         def _for_account(v) -> bool:
             return not (active_account and v.account and v.account != active_account)
 
-        cash: dict = {}
-        fx: dict = {}
+        # Per-currency cash arrives via reqAccountUpdates as ``$LEDGER-*``
+        # rows (ib_async's rendering of IB's ``$LEDGER:ALL`` summary): tag
+        # ``$LEDGER-CashBalance`` / ``$LEDGER-ExchangeRate`` per currency,
+        # plus a consolidated ``BASE`` row we skip. Some non-ledger IB
+        # account types instead expose plain ``CashBalance`` / ``ExchangeRate``
+        # tags, so we accept both — the ledger form takes precedence.
+        def _num(x):
+            try:
+                return float(x)
+            except (TypeError, ValueError):
+                return None
+
+        ledger_cash: dict = {}
+        plain_cash: dict = {}
+        ledger_fx: dict = {}
+        plain_fx: dict = {}
         base_currency = None
         for v in self.trader.client.ib.accountValues():
             if not _for_account(v):
                 continue
-            if v.tag == 'CashBalance' and v.currency and v.currency != 'BASE':
-                try:
-                    cash[v.currency] = float(v.value)
-                except (TypeError, ValueError):
-                    continue
-            elif v.tag == 'ExchangeRate' and v.currency and v.currency != 'BASE':
-                try:
-                    fx[v.currency] = float(v.value)
-                except (TypeError, ValueError):
-                    continue
-            elif v.tag == 'NetLiquidation' and v.currency and v.currency != 'BASE':
+            if v.tag == 'NetLiquidation' and v.currency and v.currency != 'BASE':
                 # The account's own NetLiquidation row is denominated in the
                 # account base currency — use it to label the base column.
                 base_currency = v.currency
+                continue
+            cur = v.currency
+            if not cur or cur == 'BASE':
+                continue
+            n = _num(v.value)
+            if n is None:
+                continue
+            if v.tag == '$LEDGER-CashBalance':
+                ledger_cash[cur] = n
+            elif v.tag == 'CashBalance':
+                plain_cash[cur] = n
+            elif v.tag == '$LEDGER-ExchangeRate':
+                ledger_fx[cur] = n
+            elif v.tag == 'ExchangeRate':
+                plain_fx[cur] = n
+
+        # Ledger form wins where present; plain tags fill any gaps.
+        cash = {**plain_cash, **ledger_cash}
+        fx = {**plain_fx, **ledger_fx}
+        # Base currency's rate is 1.0 by definition — backfill if IB omitted it.
+        if base_currency and base_currency not in fx:
+            fx[base_currency] = 1.0
 
         currencies: dict = {}
         total_base = 0.0
