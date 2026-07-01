@@ -2056,6 +2056,16 @@ class MMR:
         """Return the IB account ID."""
         return consume(self._rpc.rpc(return_type=str).get_ib_account())
 
+    def account_cash(self) -> dict:
+        """Per-currency cash balances for the configured account.
+
+        Returns ``{account, base_currency, currencies: {CUR: {cash,
+        exchange_rate, base_value}}, total_base_value}``. Scoped to the
+        configured ``ib_account`` — a multi-account login won't leak another
+        account's cash.
+        """
+        return consume(self._rpc.rpc(return_type=dict).get_account_cash_by_currency())
+
     def get_risk_limits(self) -> dict:
         """Get current risk gate limits from trader_service."""
         return consume(self._rpc.rpc(return_type=dict).get_risk_limits())

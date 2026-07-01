@@ -1954,7 +1954,47 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
             _handle_watch(mmr, args)
 
         elif cmd == 'account':
-            console.print(f'Account: {mmr.account()}')
+            acct_id = mmr.account()
+            cash = None
+            try:
+                cash = mmr.account_cash()
+            except Exception as ex:
+                cash_error = f'{type(ex).__name__}: {ex}'
+            else:
+                cash_error = None
+            if _json_mode:
+                print_dict({'account': acct_id, 'cash': cash, 'cash_error': cash_error}, title='Account')
+            else:
+                console.print(f'Account: [bold]{acct_id}[/bold]')
+                currencies = (cash or {}).get('currencies') or {}
+                if currencies:
+                    base_cur = cash.get('base_currency') or ''
+                    tbl = Table(title='Cash by currency', show_edge=True)
+                    tbl.add_column('Currency', style='cyan')
+                    tbl.add_column('Cash', justify='right')
+                    tbl.add_column('FX→base', justify='right')
+                    tbl.add_column(f'≈ {base_cur}'.rstrip(), justify='right')
+                    for cur, row in currencies.items():
+                        fx = row.get('exchange_rate')
+                        bv = row.get('base_value')
+                        tbl.add_row(
+                            cur,
+                            f"{row['cash']:,.2f}",
+                            f"{fx:.4f}" if fx is not None else '[dim]-[/dim]',
+                            f"{bv:,.2f}" if bv is not None else '[dim]-[/dim]',
+                        )
+                    total = cash.get('total_base_value')
+                    if total is not None:
+                        tbl.add_section()
+                        tbl.add_row('[bold]Total[/bold]', '', '', f"[bold]{total:,.2f}[/bold]")
+                    console.print(tbl)
+                    if cash.get('consolidated'):
+                        console.print('[dim]Account holds only its base currency; showing consolidated cash '
+                                      '(IB reported no per-currency ledger rows).[/dim]')
+                elif cash_error:
+                    console.print(f'[yellow]Per-currency cash unavailable: {cash_error}[/yellow]')
+                else:
+                    console.print('[dim]No per-currency cash rows reported for this account.[/dim]')
 
         elif cmd == 'status':
             if _json_mode:

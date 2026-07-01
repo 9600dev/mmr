@@ -860,11 +860,23 @@ class Trader():
 
         # 2. Leverage limit check
         if margin_impact and getattr(self, 'risk_gate', None) is not None:
+            # Scope NetLiquidation to the configured account. With a
+            # multi-account login, accountValues() returns rows for every
+            # managed account; picking the first NetLiquidation row blind
+            # could size the leverage check against the wrong (e.g. master
+            # aggregate) account. Pin to self.ib_account.
+            active_account = self.ib_account
+            if not active_account:
+                managed = self.client.ib.managedAccounts() or []
+                active_account = managed[0] if managed else None
             net_liq = 0.0
             for v in self.client.ib.accountValues():
-                if v.tag == 'NetLiquidation' and v.currency != 'BASE':
-                    net_liq = float(v.value)
-                    break
+                if v.tag != 'NetLiquidation' or v.currency == 'BASE':
+                    continue
+                if active_account and v.account and v.account != active_account:
+                    continue
+                net_liq = float(v.value)
+                break
 
             leverage_result = self.risk_gate.check_leverage(margin_impact, net_liq)
             if not leverage_result.approved:

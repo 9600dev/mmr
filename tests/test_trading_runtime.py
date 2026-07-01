@@ -387,3 +387,151 @@ class TestIBUpstreamDetection:
         assert t._ib_upstream_connected is True  # 2103 alone doesn't trip
         t._on_ib_error(_FakeIBError(1100, 'Full disconnect'))
         assert t._ib_upstream_connected is False
+
+
+# ---------------------------------------------------------------------------
+# get_account_values() scoping — multi-account login must not leak another
+# account's balances (regression: a master/aggregate account's NetLiquidation
+# clobbered the configured sub-account's under last-wins iteration).
+# ---------------------------------------------------------------------------
+
+from collections import namedtuple
+
+from trader.messaging.trader_service_api import TraderServiceApi
+
+# Mirror the fields of ib_async.AccountValue that get_account_values reads.
+_AV = namedtuple('AccountValue', ['account', 'tag', 'value', 'currency'])
+
+
+def _api_with_account_values(configured_account, values, managed=None):
+    trader = MagicMock()
+    trader.ib_account = configured_account
+    trader.client.ib.accountValues = MagicMock(return_value=values)
+    trader.client.ib.managedAccounts = MagicMock(return_value=managed or [])
+    return TraderServiceApi(trader)
+
+
+class TestGetAccountValuesScoping:
+    def test_multi_account_login_returns_only_configured_account(self):
+        """Two managed accounts: the configured sub-account's values must be
+        returned, never the master/aggregate account's — even though the
+        master rows come last in iteration order (the clobber that showed a
+        32M balance under a 17k account's label)."""
+        values = [
+            # Configured account (the real ~17k one)
+            _AV('U26774889', 'NetLiquidation', '17000', 'CAD'),
+            _AV('U26774889', 'AvailableFunds', '16500', 'CAD'),
+            _AV('U26774889', 'BuyingPower', '68000', 'CAD'),
+            # Master/aggregate — MUST be ignored. Ordered last on purpose.
+            _AV('U21390344', 'NetLiquidation', '32800816', 'CAD'),
+            _AV('U21390344', 'AvailableFunds', '31900000', 'CAD'),
+            _AV('U21390344', 'BuyingPower', '106000000', 'CAD'),
+        ]
+        api = _api_with_account_values('U26774889', values, managed=['U21390344', 'U26774889'])
+        result = api.get_account_values()
+        assert result['NetLiquidation'] == {'value': '17000', 'currency': 'CAD'}
+        assert result['AvailableFunds'] == {'value': '16500', 'currency': 'CAD'}
+        assert result['BuyingPower'] == {'value': '68000', 'currency': 'CAD'}
+
+    def test_base_currency_rows_still_excluded(self):
+        values = [
+            _AV('U26774889', 'NetLiquidation', '0', 'BASE'),
+            _AV('U26774889', 'NetLiquidation', '17000', 'CAD'),
+        ]
+        api = _api_with_account_values('U26774889', values, managed=['U26774889'])
+        result = api.get_account_values()
+        assert result['NetLiquidation'] == {'value': '17000', 'currency': 'CAD'}
+
+    def test_no_configured_account_falls_back_to_unfiltered(self):
+        """If ib_account is empty and there are no managed accounts, keep the
+        old behaviour rather than returning nothing."""
+        values = [_AV('U26774889', 'NetLiquidation', '17000', 'CAD')]
+        api = _api_with_account_values('', values, managed=[])
+        result = api.get_account_values()
+        assert result['NetLiquidation'] == {'value': '17000', 'currency': 'CAD'}
+
+
+class TestGetAccountCashByCurrency:
+    def _api(self, values, account='U26774889', managed=None):
+        return _api_with_account_values(account, values, managed=managed or [account])
+
+    def test_per_currency_cash_with_fx_and_total(self):
+        values = [
+            _AV('U26774889', 'NetLiquidation', '17000', 'CAD'),  # base currency = CAD
+            _AV('U26774889', 'CashBalance', '5000', 'AUD'),
+            _AV('U26774889', 'CashBalance', '5000', 'CAD'),
+            _AV('U26774889', 'CashBalance', '5000', 'USD'),
+            _AV('U26774889', 'CashBalance', '17300', 'BASE'),   # consolidated — ignored
+            _AV('U26774889', 'ExchangeRate', '0.90', 'AUD'),
+            _AV('U26774889', 'ExchangeRate', '1.00', 'CAD'),
+            _AV('U26774889', 'ExchangeRate', '1.36', 'USD'),
+        ]
+        out = self._api(values).get_account_cash_by_currency()
+        assert out['account'] == 'U26774889'
+        assert out['base_currency'] == 'CAD'
+        assert set(out['currencies']) == {'AUD', 'CAD', 'USD'}
+        assert out['currencies']['USD']['cash'] == 5000.0
+        assert out['currencies']['USD']['exchange_rate'] == 1.36
+        assert out['currencies']['USD']['base_value'] == pytest.approx(6800.0)
+        assert out['currencies']['AUD']['base_value'] == pytest.approx(4500.0)
+        # 4500 + 5000 + 6800
+        assert out['total_base_value'] == pytest.approx(16300.0)
+
+    def test_scoped_to_configured_account(self):
+        """Master account's cash rows must not appear."""
+        values = [
+            _AV('U26774889', 'CashBalance', '5000', 'USD'),
+            _AV('U21390344', 'CashBalance', '9000000', 'USD'),  # master — excluded
+        ]
+        out = self._api(values, managed=['U21390344', 'U26774889']).get_account_cash_by_currency()
+        assert out['currencies']['USD']['cash'] == 5000.0
+        assert len(out['currencies']) == 1
+
+    def test_missing_fx_yields_none_and_no_total_contribution(self):
+        values = [
+            _AV('U26774889', 'NetLiquidation', '5000', 'CAD'),
+            _AV('U26774889', 'CashBalance', '5000', 'CAD'),
+            _AV('U26774889', 'CashBalance', '5000', 'USD'),  # no ExchangeRate row
+            _AV('U26774889', 'ExchangeRate', '1.00', 'CAD'),
+        ]
+        out = self._api(values).get_account_cash_by_currency()
+        assert out['currencies']['USD']['exchange_rate'] is None
+        assert out['currencies']['USD']['base_value'] is None
+        # only CAD contributes to the total
+        assert out['total_base_value'] == pytest.approx(5000.0)
+
+    def test_no_cash_rows_returns_empty_currencies_and_none_total(self):
+        values = [_AV('U26774889', 'NetLiquidation', '17000', 'CAD')]
+        out = self._api(values).get_account_cash_by_currency()
+        assert out['currencies'] == {}
+        assert out['total_base_value'] is None
+        assert out['consolidated'] is False
+
+    def test_single_base_currency_falls_back_to_total_cash_value(self):
+        """Account holding only its base currency has no per-currency
+        CashBalance rows — fall back to the consolidated TotalCashValue so
+        the view still shows real cash (regression: U26774889 held all CAD)."""
+        values = [
+            _AV('U26774889', 'NetLiquidation', '17006.30', 'CAD'),
+            _AV('U26774889', 'TotalCashValue', '17006.30', 'CAD'),
+            _AV('U26774889', 'TotalCashValue', '17006.30', 'BASE'),  # BASE ignored
+        ]
+        out = self._api(values).get_account_cash_by_currency()
+        assert out['consolidated'] is True
+        assert out['base_currency'] == 'CAD'
+        assert out['currencies'] == {
+            'CAD': {'cash': 17006.30, 'exchange_rate': 1.0, 'base_value': 17006.30}
+        }
+        assert out['total_base_value'] == pytest.approx(17006.30)
+
+    def test_real_per_currency_rows_take_precedence_over_fallback(self):
+        """When genuine per-currency CashBalance rows exist, don't fall back."""
+        values = [
+            _AV('U26774889', 'NetLiquidation', '17000', 'CAD'),
+            _AV('U26774889', 'TotalCashValue', '17000', 'CAD'),
+            _AV('U26774889', 'CashBalance', '5000', 'USD'),
+            _AV('U26774889', 'ExchangeRate', '1.36', 'USD'),
+        ]
+        out = self._api(values).get_account_cash_by_currency()
+        assert out['consolidated'] is False
+        assert set(out['currencies']) == {'USD'}

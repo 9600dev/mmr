@@ -351,7 +351,16 @@ class TraderServiceApi(RPCHandler):
 
     @rpcmethod
     def get_account_values(self) -> dict:
-        """Return key account values (cash, net liquidation, buying power, etc.)."""
+        """Return key account values (cash, net liquidation, buying power, etc.).
+
+        Scoped to the configured ``ib_account``. When the login manages
+        multiple accounts (e.g. an advisor/master + client sub-accounts),
+        ``ib.accountValues()`` returns rows for *all* of them; without an
+        account filter the per-tag dict would be clobbered last-wins and
+        could surface a different account's balances (the master's
+        aggregate, say) under our account's label. Pin to ``ib_account``
+        so the numbers always match the account we actually trade.
+        """
         vals = self.trader.client.ib.accountValues()
         keys = {
             'TotalCashValue', 'NetLiquidation', 'AvailableFunds',
@@ -360,8 +369,124 @@ class TraderServiceApi(RPCHandler):
             'FullInitMarginReq', 'FullMaintMarginReq',
             'DayTradesRemaining',
         }
+        active_account = self.trader.ib_account
+        if not active_account:
+            managed = self.trader.client.ib.managedAccounts() or []
+            active_account = managed[0] if managed else None
         result = {}
         for v in vals:
-            if v.tag in keys and v.currency != 'BASE':
-                result[v.tag] = {'value': v.value, 'currency': v.currency}
+            if v.tag not in keys or v.currency == 'BASE':
+                continue
+            # Only accept rows for the configured account. If we couldn't
+            # determine one (no ib_account, no managed accounts), fall back
+            # to unfiltered behaviour rather than returning nothing.
+            if active_account and v.account and v.account != active_account:
+                continue
+            result[v.tag] = {'value': v.value, 'currency': v.currency}
         return result
+
+    @rpcmethod
+    def get_account_cash_by_currency(self) -> dict:
+        """Per-currency cash ledger for the configured account.
+
+        trader_service already holds the ``reqAccountUpdates`` subscription,
+        so ``accountValues()`` carries the per-currency ``CashBalance`` and
+        ``ExchangeRate`` rows. A second ad-hoc IB client can't obtain these
+        — ``reqAccountUpdates`` is single-subscriber per account and the
+        service owns it — which is why this read lives on the service.
+
+        Scoped to ``ib_account`` exactly like ``get_account_values`` so a
+        multi-account (advisor/master) login never leaks another account's
+        cash. Returns::
+
+            {
+              'account': 'U26774889',
+              'base_currency': 'CAD',
+              'currencies': {
+                'AUD': {'cash': 5000.0, 'exchange_rate': 0.9, 'base_value': 4500.0},
+                'CAD': {'cash': 5000.0, 'exchange_rate': 1.0, 'base_value': 5000.0},
+                'USD': {'cash': 5000.0, 'exchange_rate': 1.36, 'base_value': 6800.0},
+              },
+              'total_base_value': 16300.0,
+            }
+
+        ``exchange_rate`` / ``base_value`` are ``None`` when IB didn't supply
+        a rate for that currency.
+        """
+        active_account = self.trader.ib_account
+        if not active_account:
+            managed = self.trader.client.ib.managedAccounts() or []
+            active_account = managed[0] if managed else None
+
+        def _for_account(v) -> bool:
+            return not (active_account and v.account and v.account != active_account)
+
+        cash: dict = {}
+        fx: dict = {}
+        base_currency = None
+        for v in self.trader.client.ib.accountValues():
+            if not _for_account(v):
+                continue
+            if v.tag == 'CashBalance' and v.currency and v.currency != 'BASE':
+                try:
+                    cash[v.currency] = float(v.value)
+                except (TypeError, ValueError):
+                    continue
+            elif v.tag == 'ExchangeRate' and v.currency and v.currency != 'BASE':
+                try:
+                    fx[v.currency] = float(v.value)
+                except (TypeError, ValueError):
+                    continue
+            elif v.tag == 'NetLiquidation' and v.currency and v.currency != 'BASE':
+                # The account's own NetLiquidation row is denominated in the
+                # account base currency — use it to label the base column.
+                base_currency = v.currency
+
+        currencies: dict = {}
+        total_base = 0.0
+        have_total = False
+        for cur in sorted(cash):
+            amt = cash[cur]
+            rate = fx.get(cur)
+            base_value = (amt * rate) if rate is not None else None
+            if base_value is not None:
+                total_base += base_value
+                have_total = True
+            currencies[cur] = {
+                'cash': amt,
+                'exchange_rate': rate,
+                'base_value': base_value,
+            }
+
+        # Fallback: an account holding only its base currency (or one where
+        # IB reports just the consolidated TotalCashValue and no per-currency
+        # CashBalance rows) would otherwise come back with no currencies at
+        # all — misleading when there's clearly cash. Surface the base-
+        # currency TotalCashValue so the view always reflects real cash.
+        consolidated = False
+        if not currencies:
+            for v in self.trader.client.ib.accountValues():
+                if not _for_account(v):
+                    continue
+                if v.tag == 'TotalCashValue' and v.currency and v.currency != 'BASE':
+                    try:
+                        amt = float(v.value)
+                    except (TypeError, ValueError):
+                        continue
+                    currencies[v.currency] = {
+                        'cash': amt,
+                        'exchange_rate': 1.0 if v.currency == base_currency else fx.get(v.currency),
+                        'base_value': amt if v.currency == base_currency else None,
+                    }
+                    total_base = amt
+                    have_total = True
+                    consolidated = True
+                    break
+
+        return {
+            'account': active_account,
+            'base_currency': base_currency,
+            'currencies': currencies,
+            'total_base_value': total_base if have_total else None,
+            'consolidated': consolidated,
+        }
