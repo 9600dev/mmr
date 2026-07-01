@@ -119,6 +119,36 @@ async def test_account_mismatch_rejected():
 
 
 @pytest.mark.asyncio
+async def test_blank_order_account_rejected():
+    """A blank order.account routes to IB's default account (wrong on a
+    multi-account login). It must be rejected even when ib_account is set."""
+    ex, trader = _make_executioner_with_trader(ib_account='U26774889')
+
+    blank = _Order(account='')
+    observable = await ex.subscribe_place_order_direct(_Contract(), blank)
+    errors = []
+    observable.subscribe(on_next=lambda _: None, on_error=errors.append)
+    assert len(errors) == 1
+    assert 'blank' in str(errors[0]).lower()
+    assert trader.client.subscribe_place_order.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_blank_configured_account_rejected():
+    """If ib_account itself is blank, the old equality guard ('' == '') would
+    pass a blank order straight to IB. Must be rejected."""
+    ex, trader = _make_executioner_with_trader(ib_account='')
+
+    order = _Order(account='')
+    observable = await ex.subscribe_place_order_direct(_Contract(), order)
+    errors = []
+    observable.subscribe(on_next=lambda _: None, on_error=errors.append)
+    assert len(errors) == 1
+    assert 'no ib_account' in str(errors[0]).lower()
+    assert trader.client.subscribe_place_order.call_count == 0
+
+
+@pytest.mark.asyncio
 async def test_happy_path_reaches_ib():
     """When the gates approve, place_order should reach the IB client."""
     class _Gate:

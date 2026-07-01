@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from trader.trading.trading_runtime import Trader
+from trader.trading.trading_runtime import AccountNotPinnedError, Trader
 
 
 def _minimal_trader() -> Trader:
@@ -449,6 +449,53 @@ class TestGetAccountValuesScoping:
         api = _api_with_account_values('', values, managed=[])
         result = api.get_account_values()
         assert result['NetLiquidation'] == {'value': '17000', 'currency': 'CAD'}
+
+
+class TestAssertAccountPinned:
+    """Startup gate: refuse to run unless pinned to a real, mode-matched
+    account. Closes the 'blank ib_account routes to IB default account' hole
+    on a multi-account login."""
+
+    def _trader(self, ib_account, paper_trading):
+        t = object.__new__(Trader)
+        t.ib_account = ib_account
+        t.paper_trading = paper_trading
+        return t
+
+    def test_valid_live_account_in_managed_returns_it(self):
+        t = self._trader('U26774889', paper_trading=False)
+        assert t._assert_account_pinned(['U21390344', 'U26774889']) == 'U26774889'
+
+    def test_valid_paper_account_returns_it(self):
+        t = self._trader('DU12345', paper_trading=True)
+        assert t._assert_account_pinned(['DU12345']) == 'DU12345'
+
+    def test_blank_ib_account_raises(self):
+        t = self._trader('', paper_trading=False)
+        with pytest.raises(AccountNotPinnedError, match='no ib_account configured'):
+            t._assert_account_pinned(['U26774889'])
+
+    def test_empty_managed_accounts_raises(self):
+        t = self._trader('U26774889', paper_trading=False)
+        with pytest.raises(AccountNotPinnedError, match='no managed accounts'):
+            t._assert_account_pinned([])
+
+    def test_account_not_in_managed_raises(self):
+        """The catastrophic case: configured account isn't one IB manages —
+        e.g. a typo, or the master leaked in — must refuse, not fall back."""
+        t = self._trader('U99999999', paper_trading=False)
+        with pytest.raises(AccountNotPinnedError, match='not among IB managed'):
+            t._assert_account_pinned(['U26774889', 'U21390344'])
+
+    def test_paper_mode_with_live_account_raises(self):
+        t = self._trader('U26774889', paper_trading=True)
+        with pytest.raises(AccountNotPinnedError, match='paper.*looks live'):
+            t._assert_account_pinned(['U26774889'])
+
+    def test_live_mode_with_paper_account_raises(self):
+        t = self._trader('DU12345', paper_trading=False)
+        with pytest.raises(AccountNotPinnedError, match='live.*looks like a paper'):
+            t._assert_account_pinned(['DU12345'])
 
 
 class TestGetAccountCashByCurrency:

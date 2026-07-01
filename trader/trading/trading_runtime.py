@@ -48,6 +48,16 @@ logging = setup_logging(module_name='trading_runtime')
 # talks about trades/orders being tied to clientId, which means we'll need to always have a consistent clientid
 
 
+class AccountNotPinnedError(Exception):
+    """The trader is not pinned to a valid, mode-matched IB account.
+
+    Raised at connect time to refuse trading when ``ib_account`` is blank,
+    not among IB's ``managedAccounts()``, or mismatched with the trading
+    mode — any of which could let orders route to the wrong account on a
+    multi-account login. A hard, fatal refusal (not retried).
+    """
+
+
 class Trader():
     def __init__(self,
                  ib_server_address: str,
@@ -149,6 +159,50 @@ class Trader():
 
         self.disposables: List[DisposableBase] = []
 
+    def _assert_account_pinned(self, managed: list) -> str:
+        """Verify the trader is pinned to exactly one configured account that
+        IB actually manages, matching the trading mode. Returns the active
+        account or raises ``AccountNotPinnedError``.
+
+        This is the startup half of the account-safety story (the per-order
+        half is the guard in ``TradeExecutioner.subscribe_place_order_direct``).
+        The IB login can manage multiple accounts (e.g. a client sub-account
+        plus a master/aggregate). If ``ib_account`` were blank, every order
+        would be built with ``account=''`` and IB would route it to the
+        *default* account — potentially the wrong one. So we refuse to start
+        unless ``ib_account`` is non-empty AND present in ``managedAccounts()``.
+        Paper accounts start with "D" (DU.../DF...); live accounts don't.
+        """
+        mode = 'paper' if self.paper_trading else 'live'
+        if not self.ib_account:
+            raise AccountNotPinnedError(
+                f'SAFETY: no ib_account configured (trading_mode={mode}, managed={managed}). '
+                'Set ib_paper_account / ib_live_account in trader.yaml or the IB_ACCOUNT env var. '
+                'Refusing to continue.'
+            )
+        if not managed:
+            raise AccountNotPinnedError(
+                f'SAFETY: IB returned no managed accounts; cannot verify ib_account '
+                f'"{self.ib_account}". Refusing to continue.'
+            )
+        if self.ib_account not in managed:
+            raise AccountNotPinnedError(
+                f'SAFETY: configured ib_account "{self.ib_account}" is not among IB managed '
+                f'accounts {managed}. Refusing to continue.'
+            )
+        is_paper_account = self.ib_account.startswith('D')
+        if self.paper_trading and not is_paper_account:
+            raise AccountNotPinnedError(
+                f'SAFETY: trading_mode is "paper" but ib_account "{self.ib_account}" looks live. '
+                f'Managed accounts: {managed}. Refusing to continue.'
+            )
+        if not self.paper_trading and is_paper_account:
+            raise AccountNotPinnedError(
+                f'SAFETY: trading_mode is "live" but ib_account "{self.ib_account}" looks like a '
+                f'paper account. Managed accounts: {managed}. Check your config.'
+            )
+        return self.ib_account
+
     @backoff.on_exception(backoff.expo, (ConnectionRefusedError, TimeoutError), max_tries=10, max_time=120)
     def connect(self):
         logging.debug('trading_runtime.connect() connecting to services: %s:%s' % (self.ib_server_address, self.ib_server_port))
@@ -174,25 +228,16 @@ class Trader():
                 on_error=lambda e: None,
             ))
 
-            # Safety check: verify IB account matches expected trading mode.
-            # Paper accounts start with "D" (e.g. DU..., DF...), live accounts don't.
+            # Hard safety gate: refuse to run unless we're pinned to exactly
+            # one configured account that IB actually manages (and it matches
+            # the trading mode). See _assert_account_pinned for the rationale.
             managed = self.client.ib.managedAccounts()
-            if managed:
-                active_account = self.ib_account if self.ib_account else managed[0]
-                is_paper_account = active_account.startswith('D')
-                if self.paper_trading and not is_paper_account:
-                    self.client.ib.disconnect()
-                    raise TraderConnectionException(
-                        f'SAFETY: trading_mode is "paper" but connected to live account "{active_account}". '
-                        f'Managed accounts: {managed}. Refusing to continue.'
-                    )
-                if not self.paper_trading and is_paper_account:
-                    self.client.ib.disconnect()
-                    raise TraderConnectionException(
-                        f'SAFETY: trading_mode is "live" but connected to paper account "{active_account}". '
-                        f'Managed accounts: {managed}. Check your config.'
-                    )
-                logging.info('trading mode verified: %s, account: %s', 'paper' if self.paper_trading else 'live', active_account)
+            try:
+                active_account = self._assert_account_pinned(managed)
+            except AccountNotPinnedError:
+                self.client.ib.disconnect()
+                raise
+            logging.info('trading mode verified: %s, account: %s', 'paper' if self.paper_trading else 'live', active_account)
 
             self.last_connect_time = dt.datetime.now()
             self.zmq_rpc_server = RPCServer[bus.TraderServiceApi](

@@ -72,9 +72,24 @@ class TradeExecutioner():
                 exception=trader_exception(self.trader, exception_type=TraderException, message='place_order()', inner=ex)
             )
 
-        # validate that the order is being placed with the right ib_account number
-        if order.account != self.trader.ib_account:
-            return trader_exception_helper(ValueError('Order.account is not equal to the ib_account configured'))
+        # Validate the order is pinned to the exact configured ib_account.
+        # A blank order.account routes to IB's *default* account — with a
+        # multi-account login (e.g. a master + sub-accounts sharing one login)
+        # that could silently be the wrong account. Fail loud on a blank
+        # configured account, a blank order account, or any mismatch — never
+        # let a non-specific account reach IB.
+        configured = self.trader.ib_account
+        if not configured:
+            return trader_exception_helper(ValueError(
+                'Refusing to place order: no ib_account is configured on the trader'))
+        if not order.account:
+            return trader_exception_helper(ValueError(
+                'Refusing to place order: order.account is blank '
+                '(a blank account routes to IB\'s default account)'))
+        if order.account != configured:
+            return trader_exception_helper(ValueError(
+                f'Refusing to place order: order.account {order.account!r} '
+                f'!= configured ib_account {configured!r}'))
 
         try:
             observable = await self.trader.client.subscribe_place_order(contract, order)
