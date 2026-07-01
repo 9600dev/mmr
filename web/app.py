@@ -29,12 +29,31 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import quote
 
+import markdown as _markdown
 import pandas as pd
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 logger = logging.getLogger('web')
+
+# Reasoning text is authored by the user / their own LLM (trusted, single-user
+# local dashboard), so we render its markdown to HTML server-side and mark it
+# safe in the template. A shared converter is fine as long as we .reset() it.
+_MD = _markdown.Markdown(extensions=['fenced_code', 'tables', 'sane_lists', 'nl2br'])
+
+
+def _render_md(text: Any) -> str:
+    if not text:
+        return ''
+    _MD.reset()
+    return _MD.convert(str(text))
+
+
+def _preview(text: Any, n: int = 90) -> str:
+    """One-line, collapsed-whitespace snippet of the reasoning for the cell."""
+    s = ' '.join(str(text or '').split())
+    return (s[: n - 1] + '…') if len(s) > n else s
 
 app = FastAPI(title='MMR Dashboard')
 _TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / 'templates'))
@@ -127,7 +146,13 @@ def fetch_strategies() -> list[dict]:
 
 def fetch_proposals() -> list[dict]:
     # No status filter -> every proposal, with a 'status' column.
-    return _records(_call(lambda m: m.proposals(limit=100)))
+    rows = _records(_call(lambda m: m.proposals(limit=100)))
+    for r in rows:
+        raw = r.get('reasoning') or ''
+        r['reasoning_preview'] = _preview(raw)
+        r['reasoning_html'] = _render_md(raw)
+        r['has_reasoning'] = bool(str(raw).strip())
+    return rows
 
 
 # ---------------------------------------------------------------------------

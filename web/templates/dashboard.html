@@ -3,7 +3,6 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="15">
   <title>MMR Dashboard</title>
   <style>
     :root {
@@ -53,6 +52,32 @@
     .flash { padding: 10px 24px; background: rgba(88,166,255,.1); color: var(--accent);
       border-bottom: 1px solid var(--border); }
     .reasoning { color: var(--dim); font-size: 12px; white-space: normal; max-width: 340px; text-align: left; }
+    a.reason-link { color: var(--accent); text-decoration: none; cursor: pointer; }
+    a.reason-link:hover { text-decoration: underline; }
+    .modal { display: none; position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,.6);
+      align-items: flex-start; justify-content: center; padding: 6vh 16px; }
+    .modal-box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+      width: min(760px, 100%); max-height: 82vh; display: flex; flex-direction: column; overflow: hidden;
+      box-shadow: 0 12px 40px rgba(0,0,0,.5); }
+    .modal-head { display: flex; justify-content: space-between; align-items: center; gap: 12px;
+      padding: 12px 18px; border-bottom: 1px solid var(--border); color: var(--dim);
+      font-size: 13px; font-weight: 600; }
+    .modal-x { background: transparent; border: none; color: var(--dim); font-size: 16px; cursor: pointer; padding: 2px 6px; }
+    .modal-x:hover { color: var(--fg); }
+    .markdown { padding: 16px 20px; overflow-y: auto; color: var(--fg); font-size: 14px; line-height: 1.6; }
+    .markdown h1, .markdown h2, .markdown h3, .markdown h4 { margin: 1em 0 .4em; line-height: 1.25; }
+    .markdown h1 { font-size: 20px; } .markdown h2 { font-size: 17px; } .markdown h3 { font-size: 15px; }
+    .markdown p { margin: .6em 0; } .markdown ul, .markdown ol { margin: .5em 0; padding-left: 1.4em; }
+    .markdown li { margin: .2em 0; }
+    .markdown code { background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+      padding: 1px 5px; font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .markdown pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+      padding: 12px 14px; overflow-x: auto; }
+    .markdown pre code { background: none; border: none; padding: 0; }
+    .markdown blockquote { margin: .6em 0; padding: .1em 1em; border-left: 3px solid var(--border); color: var(--dim); }
+    .markdown a { color: var(--accent); }
+    .markdown table { margin: .6em 0; }
+    .markdown th, .markdown td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
     form.inline { display: inline; }
     button { font: inherit; border: 1px solid var(--border); border-radius: 6px; cursor: pointer;
       padding: 4px 10px; background: var(--chip); color: var(--fg); }
@@ -169,7 +194,20 @@
           <td>{{ p.size or '—' }}</td>
           <td>{{ num(p.conf, 2) if p.conf is not none else '—' }}</td>
           <td><span class="chip {{ p.status }}">{{ p.status }}</span></td>
-          <td class="reasoning">{{ p.reasoning or '' }}</td>
+          <td class="reasoning">
+            {% if p.has_reasoning %}
+              <a class="reason-link" href="#" onclick="return openReason('r{{ p.id }}')">{{ p.reasoning_preview }}</a>
+              <div id="r{{ p.id }}" class="modal" onclick="if(event.target===this)closeReason('r{{ p.id }}')">
+                <div class="modal-box">
+                  <div class="modal-head">
+                    <span>Proposal #{{ p.id }} · {{ p.action }} {{ p.symbol }}{% if p.size %} · {{ p.size }}{% endif %}</span>
+                    <button class="modal-x" type="button" onclick="closeReason('r{{ p.id }}')">&times;</button>
+                  </div>
+                  <div class="markdown">{{ p.reasoning_html | safe }}</div>
+                </div>
+              </div>
+            {% else %}<span class="dim">—</span>{% endif %}
+          </td>
           <td>
             {% if (p.status or '')|upper == 'PENDING' %}
               <form class="inline" method="post" action="/proposals/{{ p.id }}/approve"
@@ -191,6 +229,28 @@
 
 </main>
 
-<div class="foot">Read-only except proposal approve/reject · auto-refreshes every 15s · MMR dashboard</div>
+<div class="foot">Read-only except proposal approve/reject · auto-refreshes every 15s (paused while a popup is open) · MMR dashboard</div>
+
+<script>
+  // Track open popups so auto-refresh doesn't yank a reasoning popup out from
+  // under you mid-read.
+  let _openModals = 0;
+  function openReason(id) {
+    var el = document.getElementById(id);
+    if (el) { el.style.display = 'flex'; _openModals++; }
+    return false;
+  }
+  function closeReason(id) {
+    var el = document.getElementById(id);
+    if (el && el.style.display !== 'none') { el.style.display = 'none'; _openModals = Math.max(0, _openModals - 1); }
+  }
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+      document.querySelectorAll('.modal').forEach(function (m) { m.style.display = 'none'; });
+      _openModals = 0;
+    }
+  });
+  setInterval(function () { if (_openModals === 0) location.reload(); }, 15000);
+</script>
 </body>
 </html>
