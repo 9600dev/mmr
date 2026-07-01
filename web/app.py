@@ -136,6 +136,18 @@ def fetch_snapshot() -> Optional[dict]:
     return _call(lambda m: m.portfolio_snapshot())
 
 
+def fetch_status() -> Optional[dict]:
+    return _call(lambda m: m.status())
+
+
+def fetch_risk() -> Optional[dict]:
+    return _call(lambda m: m.risk_report())
+
+
+def fetch_risk_limits() -> Optional[dict]:
+    return _call(lambda m: m.get_risk_limits())
+
+
 def fetch_positions() -> list[dict]:
     return _records(_call(lambda m: m.portfolio()))
 
@@ -176,6 +188,9 @@ def dashboard(request: Request, flash: str = ''):
     fetchers: dict[str, Callable[[], Any]] = {
         'cash': fetch_cash,
         'snapshot': fetch_snapshot,
+        'status': fetch_status,
+        'risk': fetch_risk,
+        'risk_limits': fetch_risk_limits,
         'positions': fetch_positions,
         'strategies': fetch_strategies,
         'proposals': fetch_proposals,
@@ -192,6 +207,9 @@ def dashboard(request: Request, flash: str = ''):
     return _TEMPLATES.TemplateResponse(request, 'dashboard.html', {
         'cash': sections.get('cash'),
         'snapshot': sections.get('snapshot'),
+        'status': sections.get('status'),
+        'risk': sections.get('risk'),
+        'risk_limits': sections.get('risk_limits'),
         'positions': sections.get('positions') or [],
         'strategies': strategies,
         'enabled_count': sum(1 for s in strategies if s.get('enabled')),
