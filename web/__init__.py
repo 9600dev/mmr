@@ -1,0 +1,1 @@
+"""MMR web dashboard package."""

@@ -92,6 +92,8 @@ services:
     ports:
       # pycron web
       - "127.0.0.1:8081:8081"
+      # MMR dashboard (web/app.py)
+      - "127.0.0.1:7424:7424"
       # ZMQ RPC/PubSub — allows host CLI to talk to services
       - "127.0.0.1:42001:42001"   # trader_service RPC
       - "127.0.0.1:42002:42002"   # ticker PubSub

@@ -6,6 +6,10 @@ requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.13",
     "backoff>=2.2",
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
     "beautifulsoup4>=4.14",
     "bs4",
     "click>=8.3",
@@ -83,7 +87,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["trader*"]
+include = ["trader*", "web*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

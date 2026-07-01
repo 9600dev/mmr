@@ -38,6 +38,17 @@ jobs:
       depends_on:
         - trader_service
       delay: 15
+    - name: web_dashboard
+      description: read-only web dashboard (currencies, positions, strategies, proposals) on port 7424
+      command: python3
+      arguments: -m web.app
+      start: "* * * * *"
+      start_on_pycron_start: True
+      restart_if_found: True
+      restart_if_finished: True
+      depends_on:
+        - trader_service
+      delay: 20
     # ---- declarative data refreshes (driven by data_refresh.yaml) ----
     # One-shot subprocesses on a schedule. Each cron entry calls
     # `mmr data refresh JOB [JOB ...]` with the job names declared in

@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="15">
+  <title>MMR Dashboard</title>
+  <style>
+    :root {
+      --bg: #0e1116; --panel: #171b22; --border: #262c36; --fg: #d7dce3;
+      --dim: #7d8794; --pos: #3fb950; --neg: #f85149; --accent: #58a6ff;
+      --warn: #d29922; --chip: #21262d;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg);
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+      padding: 16px 24px; border-bottom: 1px solid var(--border); background: var(--panel); }
+    header h1 { font-size: 18px; margin: 0; letter-spacing: .5px; }
+    header .acct { color: var(--accent); font-weight: 600; }
+    header .tiles { margin-left: auto; display: flex; gap: 22px; }
+    .tile .k { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+    .tile .v { font-size: 18px; font-weight: 600; }
+    main { padding: 20px 24px; display: grid; gap: 22px;
+      grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); }
+    section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+    section.full { grid-column: 1 / -1; }
+    section > h2 { margin: 0; padding: 12px 16px; font-size: 13px; text-transform: uppercase;
+      letter-spacing: .6px; color: var(--dim); border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 8px 16px; text-align: right; white-space: nowrap; }
+    th:first-child, td:first-child { text-align: left; }
+    thead th { color: var(--dim); font-weight: 500; font-size: 12px; border-bottom: 1px solid var(--border); }
+    tbody tr { border-top: 1px solid var(--border); }
+    tbody tr:first-child { border-top: none; }
+    td.sym { font-weight: 600; }
+    .pos { color: var(--pos); } .neg { color: var(--neg); } .dim { color: var(--dim); }
+    .num { font-variant-numeric: tabular-nums; }
+    tfoot td { border-top: 2px solid var(--border); font-weight: 700; }
+    .chip { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px;
+      font-weight: 600; background: var(--chip); color: var(--dim); }
+    .chip.on { background: rgba(63,185,80,.15); color: var(--pos); }
+    .chip.off { background: rgba(125,135,148,.15); color: var(--dim); }
+    .chip.err { background: rgba(248,81,73,.15); color: var(--neg); }
+    .chip.buy { background: rgba(63,185,80,.15); color: var(--pos); }
+    .chip.sell { background: rgba(248,81,73,.15); color: var(--neg); }
+    .chip.PENDING { background: rgba(210,153,34,.18); color: var(--warn); }
+    .chip.EXECUTED { background: rgba(63,185,80,.15); color: var(--pos); }
+    .chip.REJECTED, .chip.FAILED, .chip.EXPIRED { background: rgba(125,135,148,.15); color: var(--dim); }
+    .banner { padding: 10px 16px; margin: 0; font-size: 13px; }
+    .banner.err { color: var(--neg); background: rgba(248,81,73,.08); }
+    .flash { padding: 10px 24px; background: rgba(88,166,255,.1); color: var(--accent);
+      border-bottom: 1px solid var(--border); }
+    .reasoning { color: var(--dim); font-size: 12px; white-space: normal; max-width: 340px; text-align: left; }
+    form.inline { display: inline; }
+    button { font: inherit; border: 1px solid var(--border); border-radius: 6px; cursor: pointer;
+      padding: 4px 10px; background: var(--chip); color: var(--fg); }
+    button.approve { background: rgba(248,81,73,.15); border-color: var(--neg); color: #ffb4ae; font-weight: 600; }
+    button.approve:hover { background: rgba(248,81,73,.3); }
+    button.reject:hover { background: #2d333b; }
+    input.reason { width: 92px; background: var(--bg); border: 1px solid var(--border);
+      color: var(--fg); border-radius: 6px; padding: 4px 6px; }
+    .foot { padding: 8px 24px; color: var(--dim); font-size: 11px; }
+    .empty { padding: 16px; color: var(--dim); }
+  </style>
+</head>
+<body>
+
+{% macro num(v, dp=2) %}{% if v is none or v == '' %}<span class="dim">—</span>{% else %}<span class="num">{{ ('{:,.%df}' % dp).format(v|float) }}</span>{% endif %}{% endmacro %}
+{% macro pnl(v) %}{% if v is none %}<span class="dim">—</span>{% else %}<span class="num {{ 'pos' if v|float >= 0 else 'neg' }}">{{ '{:+,.2f}'.format(v|float) }}</span>{% endif %}{% endmacro %}
+
+<header>
+  <h1>MMR</h1>
+  {% if cash and cash.account %}<span class="acct">{{ cash.account }}</span>{% endif %}
+  <div class="tiles">
+    {% if snapshot %}
+    <div class="tile"><div class="k">Net Liq</div><div class="v">{{ num(snapshot.net_liquidation or snapshot.total_value) }} {{ cash.base_currency if cash else '' }}</div></div>
+    <div class="tile"><div class="k">Daily P&amp;L</div><div class="v">{{ pnl(snapshot.daily_pnl) }}</div></div>
+    <div class="tile"><div class="k">Positions</div><div class="v">{{ snapshot.position_count if snapshot.position_count is not none else positions|length }}</div></div>
+    {% elif cash %}
+    <div class="tile"><div class="k">Total</div><div class="v">{{ num(cash.total_base_value) }} {{ cash.base_currency }}</div></div>
+    {% endif %}
+  </div>
+</header>
+
+{% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
+
+<main>
+
+  <!-- Currencies -->
+  <section>
+    <h2>Cash by currency</h2>
+    {% if errors.cash %}<p class="banner err">trader_service: {{ errors.cash }}</p>
+    {% elif cash and cash.currencies %}
+    <table>
+      <thead><tr><th>Currency</th><th>Cash</th><th>FX&rarr;{{ cash.base_currency }}</th><th>&asymp; {{ cash.base_currency }}</th></tr></thead>
+      <tbody>
+      {% for cur, row in cash.currencies.items() %}
+        <tr><td class="sym">{{ cur }}</td><td>{{ num(row.cash) }}</td><td>{{ num(row.exchange_rate, 4) }}</td><td>{{ num(row.base_value) }}</td></tr>
+      {% endfor %}
+      </tbody>
+      <tfoot><tr><td>Total</td><td></td><td></td><td>{{ num(cash.total_base_value) }}</td></tr></tfoot>
+    </table>
+    {% if cash.consolidated %}<p class="foot">Consolidated base-currency cash (no per-currency ledger reported).</p>{% endif %}
+    {% else %}<p class="empty">No cash data.</p>{% endif %}
+  </section>
+
+  <!-- Strategies -->
+  <section>
+    <h2>Strategies <span class="chip on">{{ enabled_count }} enabled</span></h2>
+    {% if errors.strategies %}<p class="banner err">{{ errors.strategies }}</p>
+    {% elif strategies %}
+    <table>
+      <thead><tr><th>Name</th><th>State</th><th>Bar</th><th>ConIds</th></tr></thead>
+      <tbody>
+      {% for s in strategies %}
+        <tr>
+          <td class="sym">{{ s.name }}</td>
+          <td><span class="chip {{ 'on' if s.enabled else ('err' if s.state == 'ERROR' else 'off') }}">{{ s.state }}</span></td>
+          <td>{{ s.bar_size or '—' }}</td>
+          <td class="dim">{{ s.conids or '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="empty">No strategies loaded.</p>{% endif %}
+  </section>
+
+  <!-- Positions -->
+  <section class="full">
+    <h2>Positions &amp; P&amp;L</h2>
+    {% if errors.positions %}<p class="banner err">trader_service: {{ errors.positions }}</p>
+    {% elif positions %}
+    <table>
+      <thead><tr><th>Symbol</th><th>Qty</th><th>Mkt Price</th><th>Avg Cost</th><th>Mkt Value</th><th>Unrealized</th><th>Realized</th><th>Daily</th></tr></thead>
+      <tbody>
+      {% for p in positions %}
+        <tr>
+          <td class="sym">{{ p.symbol }}</td>
+          <td>{{ num(p.position, 0) }}</td>
+          <td>{{ num(p.mktPrice) }}</td>
+          <td>{{ num(p.avgCost) }}</td>
+          <td>{{ num(p.marketValue) }}</td>
+          <td>{{ pnl(p.unrealizedPNL) }}</td>
+          <td>{{ pnl(p.realizedPNL) }}</td>
+          <td>{{ pnl(p.dailyPNL) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="empty">No open positions.</p>{% endif %}
+  </section>
+
+  <!-- Proposals -->
+  <section class="full">
+    <h2>Proposals</h2>
+    {% if errors.proposals %}<p class="banner err">{{ errors.proposals }}</p>
+    {% elif proposals %}
+    <table>
+      <thead><tr><th>#</th><th>Created</th><th>Symbol</th><th>Action</th><th>Size</th><th>Conf</th><th>Status</th><th>Reasoning</th><th>Actions</th></tr></thead>
+      <tbody>
+      {% for p in proposals %}
+        <tr>
+          <td>{{ p.id }}</td>
+          <td class="dim">{{ p.created or '—' }}</td>
+          <td class="sym">{{ p.symbol }}</td>
+          <td><span class="chip {{ 'buy' if (p.action or '')|upper == 'BUY' else 'sell' }}">{{ p.action }}</span></td>
+          <td>{{ p.size or '—' }}</td>
+          <td>{{ num(p.conf, 2) if p.conf is not none else '—' }}</td>
+          <td><span class="chip {{ p.status }}">{{ p.status }}</span></td>
+          <td class="reasoning">{{ p.reasoning or '' }}</td>
+          <td>
+            {% if (p.status or '')|upper == 'PENDING' %}
+              <form class="inline" method="post" action="/proposals/{{ p.id }}/approve"
+                    onsubmit="return confirm('LIVE ORDER: approve proposal #{{ p.id }} ({{ p.action }} {{ p.symbol }} {{ p.size }})? This places a real order.');">
+                <button class="approve" type="submit">Approve</button>
+              </form>
+              <form class="inline" method="post" action="/proposals/{{ p.id }}/reject">
+                <input class="reason" name="reason" placeholder="reason" />
+                <button class="reject" type="submit">Reject</button>
+              </form>
+            {% else %}<span class="dim">—</span>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="empty">No proposals.</p>{% endif %}
+  </section>
+
+</main>
+
+<div class="foot">Read-only except proposal approve/reject · auto-refreshes every 15s · MMR dashboard</div>
+</body>
+</html>

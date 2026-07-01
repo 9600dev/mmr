@@ -971,11 +971,20 @@ step "Starting strategy_service..."
 $PY -m trader.strategy_service &
 STRATEGY_PID=$!
 
+sleep 3
+
+# web_dashboard — read-only view (currencies, positions, strategies, proposals)
+# on port 7424. PYTHONPATH so `web` resolves whether or not it's pip-installed.
+step "Starting web_dashboard..."
+PYTHONPATH="$MMR_DIR${PYTHONPATH:+:$PYTHONPATH}" WEB_PORT="${WEB_PORT:-7424}" $PY -m web.app &
+WEB_PID=$!
+
 echo ""
 hdr "All services running"
 kv "data_service"     "PID $DATA_PID"
 kv "trader_service"   "PID $TRADER_PID"
 kv "strategy_service" "PID $STRATEGY_PID"
+kv "web_dashboard"    "PID $WEB_PID (http://localhost:${WEB_PORT:-7424})"
 echo ""
 info "Press Ctrl-C to stop all services"
 info "Run './start_mmr.sh --cli' in another terminal for the CLI"
@@ -986,7 +995,7 @@ echo ""
 
 # Monitor child processes — report if any die unexpectedly
 while true; do
-    for pid_info in "$DATA_PID:data_service" "$TRADER_PID:trader_service" "$STRATEGY_PID:strategy_service"; do
+    for pid_info in "$DATA_PID:data_service" "$TRADER_PID:trader_service" "$STRATEGY_PID:strategy_service" "$WEB_PID:web_dashboard"; do
         pid="${pid_info%%:*}"
         name="${pid_info##*:}"
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
