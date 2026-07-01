@@ -40,14 +40,20 @@ logger = logging.getLogger('web')
 # Reasoning text is authored by the user / their own LLM (trusted, single-user
 # local dashboard), so we render its markdown to HTML server-side and mark it
 # safe in the template. A shared converter is fine as long as we .reset() it.
-_MD = _markdown.Markdown(extensions=['fenced_code', 'tables', 'sane_lists', 'nl2br'])
+# magiclink auto-links *bare* URLs (news links land in the reasoning on their
+# own line, which core markdown would otherwise leave as plain text).
+_MD = _markdown.Markdown(extensions=[
+    'fenced_code', 'tables', 'sane_lists', 'nl2br', 'pymdownx.magiclink',
+])
 
 
 def _render_md(text: Any) -> str:
     if not text:
         return ''
     _MD.reset()
-    return _MD.convert(str(text))
+    html = _MD.convert(str(text))
+    # Reasoning links point at external references — open them in a new tab.
+    return html.replace('<a href=', '<a target="_blank" rel="noopener noreferrer" href=')
 
 
 def _preview(text: Any, n: int = 90) -> str:
