@@ -73,7 +73,7 @@ unambiguous proposal-status divergences remains a deliberate future opt-in.
 
 ---
 
-## Cluster B — IB historical-data timezone keying  (M, med risk)
+## Cluster B — IB historical-data timezone keying  ✅ DONE (paper-validated)
 
 - **Problem** (`ib_history_worker.py:287`, `:329`): IB daily bars are timestamped
   at UTC midnight and null-row markers use the host machine's local tz, while

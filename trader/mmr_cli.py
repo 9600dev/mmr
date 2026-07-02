@@ -1589,6 +1589,14 @@ def build_parser() -> argparse.ArgumentParser:
              '(requires trader_service)',
     )
 
+    _mtz = data_sub.add_parser(
+        'migrate-timezone',
+        help='Re-key IB daily bars stored at UTC-midnight to exchange-tz midnight '
+             '(one-time; aligns them with Massive/TwelveData daily bars)',
+    )
+    _mtz.add_argument('--dry-run', action='store_true',
+                      help='Report what would change without writing')
+
     data_refresh_p = data_sub.add_parser(
         'refresh',
         help='Run declarative refresh jobs from ~/.config/mmr/data_refresh.yaml. '
@@ -7117,6 +7125,8 @@ def _handle_data(args: argparse.Namespace):
         _handle_data_download(args)
     elif action == 'migrate-symbols':
         _handle_data_migrate_symbols(args)
+    elif action == 'migrate-timezone':
+        _handle_data_migrate_timezone(args)
     elif action == 'refresh':
         _handle_data_refresh(args)
     elif action == 'status':
@@ -7572,6 +7582,118 @@ def _handle_data_download(args: argparse.Namespace):
         'failed': failed,
         'rows_written': total_rows_written,
     }
+
+
+def _handle_data_migrate_timezone(args: argparse.Namespace):
+    """One-time: re-key IB daily bars stored at UTC-midnight to exchange-tz
+    midnight, so they align with Massive/TwelveData daily bars (which key at
+    exchange midnight). Only rows whose exchange-midnight differs from
+    UTC-midnight are changed — so GMT/UTC-tz symbols are left untouched. Use
+    --dry-run first and review the per-symbol timezone before writing."""
+    import datetime as _dt
+    import pandas as _pd
+    import pytz as _pytz
+    from trader.container import Container
+    from trader.data.duckdb_store import DuckDBConnection
+    from trader.data.universe import UniverseAccessor
+
+    cfg = Container.instance().config()
+    duckdb_path = cfg.get('duckdb_path', '')
+    history_path = cfg.get('history_duckdb_path', '') or duckdb_path
+    accessor = UniverseAccessor(duckdb_path, cfg.get('universe_library', 'Universes'))
+    db = DuckDBConnection.get_instance(history_path)
+    dry = getattr(args, 'dry_run', False)
+
+    # Resolve a symbol/conId key to its exchange timezone via the universe
+    # definitions; default to US/Eastern (the common cross-source case).
+    _defs = []
+    try:
+        for u in accessor.get_all():
+            _defs.extend(u.security_definitions or [])
+    except Exception:
+        pass
+
+    def _tz_for(key: str) -> str:
+        want_conid = int(key) if str(key).isdigit() else None
+        for d in _defs:
+            if (want_conid is not None and getattr(d, 'conId', None) == want_conid) or \
+               (want_conid is None and getattr(d, 'symbol', None) == key):
+                tzid = getattr(d, 'timeZoneId', '') or ''
+                if tzid:
+                    try:
+                        _pytz.timezone(tzid)
+                        return tzid
+                    except Exception:
+                        break
+        return 'US/Eastern'
+
+    symbols = [r[0] for r in (db.execute(
+        "SELECT DISTINCT symbol FROM tick_data WHERE bar_size = '1 day'",
+        fetch='all') or [])]
+
+    total_rekeyed = 0
+    details = []
+    # The `date` column is TIMESTAMP WITH TIME ZONE — read the UTC time-of-day
+    # via `AT TIME ZONE 'UTC'` to find the stale UTC-midnight daily bars.
+    _WHERE_UTC_MIDNIGHT = (
+        "symbol = ? AND bar_size = '1 day' "
+        "AND CAST((date AT TIME ZONE 'UTC') AS TIME) = TIME '00:00:00'")
+    for sym in symbols:
+        rows = db.execute(
+            f"SELECT date FROM tick_data WHERE {_WHERE_UTC_MIDNIGHT}",
+            [sym], fetch='all') or []
+        if not rows:
+            continue
+        tz = _tz_for(sym)
+        # Plan the re-keys (skip ones where exchange-midnight == UTC-midnight,
+        # e.g. a genuine GMT/UTC exchange). Timestamps stay tz-aware UTC so they
+        # round-trip cleanly through the TIMESTAMPTZ column.
+        plan = []  # (old_ts, new_ts) both tz-aware
+        for (old_ts,) in rows:
+            ts = _pd.Timestamp(old_ts)
+            ts = ts.tz_localize('UTC') if ts.tz is None else ts.tz_convert('UTC')
+            d = ts.date()
+            new_ts = _pd.Timestamp(d).tz_localize(tz).tz_convert('UTC').to_pydatetime()
+            old_dt = ts.to_pydatetime()
+            if new_ts != old_dt:
+                plan.append((old_dt, new_ts))
+        if not plan:
+            continue
+
+        if not dry:
+            def _work(conn, _sym=sym, _plan=plan):
+                for old_dt, new_ts in _plan:
+                    exists = conn.execute(
+                        "SELECT 1 FROM tick_data WHERE symbol = ? AND bar_size = '1 day' "
+                        "AND date = ?", [_sym, new_ts]).fetchone()
+                    if exists:
+                        # A correctly-keyed bar (e.g. from Massive) already owns
+                        # this day — drop the stale UTC-midnight duplicate.
+                        conn.execute(
+                            "DELETE FROM tick_data WHERE symbol = ? AND bar_size = '1 day' "
+                            "AND date = ?", [_sym, old_dt])
+                    else:
+                        conn.execute(
+                            "UPDATE tick_data SET date = ? WHERE symbol = ? "
+                            "AND bar_size = '1 day' AND date = ?", [new_ts, _sym, old_dt])
+            db.execute_atomic(_work)
+
+        total_rekeyed += len(plan)
+        details.append({'symbol': sym, 'tz': tz, 'rekeyed': len(plan)})
+
+    if _json_mode:
+        print(json.dumps({'data': {'dry_run': dry, 'total_rekeyed': total_rekeyed,
+                                   'symbols': details}, 'title': 'Migrate Timezone'}))
+        return
+    verb = 'would re-key' if dry else 're-keyed'
+    if not details:
+        print_status('No UTC-midnight daily bars to migrate — nothing to do.')
+        return
+    console.print(f'[bold]Timezone migration{" (dry-run)" if dry else ""}[/bold]\n')
+    for d in details:
+        console.print(f'  {d["symbol"]:>10}  {verb} {d["rekeyed"]:>4} daily bar(s)  [dim]tz={d["tz"]}[/dim]')
+    console.print(f'\n[bold]{verb} {total_rekeyed} bar(s) across {len(details)} symbol(s).[/bold]'
+                  + ('' if not dry else '\n[dim]Re-run without --dry-run to apply.[/dim]'))
 
 
 def _handle_data_migrate_symbols(args: argparse.Namespace):

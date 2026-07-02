@@ -171,10 +171,22 @@ class IBHistoryWorker():
             logging.debug('get_contract_history() start_date had no timezone, applying tz_info')
             start_date.astimezone(pytz.timezone(tz_info))
 
-        # todo doing this with 'asx' based stocks gives us a dataframe with the incorrect timezone
-        # figure this out
         self.__clear_error()
         contract = Universe.to_contract(security)
+
+        # Derive the exchange timezone from the security so daily bars key at the
+        # correct exchange midnight (US → ET, ASX → Sydney, etc.) — matching the
+        # `data migrate-timezone` migration and keeping old + new bars for the
+        # same symbol on one consistent key. Falls back to the tz_info default if
+        # the security has no / an unparseable timeZoneId. (This resolves the
+        # long-standing "asx stocks get the incorrect timezone" TODO.)
+        _sec_tz = getattr(security, 'timeZoneId', '') or ''
+        if _sec_tz:
+            try:
+                pytz.timezone(_sec_tz)
+                tz_info = _sec_tz
+            except Exception:
+                logging.debug('unparseable timeZoneId %r; keeping tz_info=%s', _sec_tz, tz_info)
 
         if not self.connected:
             await self.connect_async()
@@ -279,16 +291,22 @@ class IBHistoryWorker():
                 df_result['what_to_show'] = int(what_to_show)
                 df_result.rename({'barCount': 'bar_count'}, inplace=True, axis=1)
 
-                utc = False
-                if type(df_result.index[0]) is date:
-                    utc = True
+                is_daily_dates = type(df_result.index[0]) is date
 
-                # ensure timezone is set on the index
-                df_result.index = pd.to_datetime(df_result.index, utc=utc)  # type: ignore
-
-                # next line no leonger required as we pass in =2 to formatDate
-                # df_result.index = df_result.index.tz_localize(local_tz)  # type: ignore
-                df_result.index = df_result.index.tz_convert(tz_info)
+                if is_daily_dates:
+                    # Daily bars: IB returns date objects. Key them at
+                    # EXCHANGE-tz midnight (tz_localize), matching the
+                    # Massive/TwelveData daily convention. The old
+                    # to_datetime(utc=True).tz_convert(tz_info) put the bar at
+                    # UTC midnight — ~5h off ET midnight — so the same trading
+                    # day had two different timestamps across sources and daily
+                    # merges mis-aligned by a day.
+                    df_result.index = pd.to_datetime(df_result.index).tz_localize(tz_info)  # type: ignore
+                else:
+                    # Intraday: IB timestamps are absolute (formatDate=2);
+                    # convert to the exchange tz for display/keying.
+                    df_result.index = pd.to_datetime(df_result.index, utc=False)  # type: ignore
+                    df_result.index = df_result.index.tz_convert(tz_info)
                 df_result.sort_index(ascending=True, inplace=True)
 
                 pd_date = pd.to_datetime(df_result.index[0])
@@ -326,8 +344,10 @@ class IBHistoryWorker():
                 }
                 temp_row = pd.DataFrame.from_dict(null_row)
                 temp_row = temp_row.set_index('date')
-                temp_row.index = temp_row.index.tz_localize(local_tz)  # type: ignore
-                temp_row.index = temp_row.index.tz_convert(tz_info)
+                # Localise to the EXCHANGE tz (tz_info), not the host machine's
+                # local tz — so injected null-day markers key consistently with
+                # the real daily bars regardless of where the process runs.
+                temp_row.index = temp_row.index.tz_localize(tz_info)  # type: ignore
                 df_result = pd.concat([df_result, temp_row])
 
             # add to the bars list
