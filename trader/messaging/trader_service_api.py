@@ -370,6 +370,27 @@ class TraderServiceApi(RPCHandler):
         ]
 
     @rpcmethod
+    def get_fx_rates(self) -> dict:
+        """Return per-currency FX multipliers to the account's BASE currency.
+
+        IB reports an ``ExchangeRate`` row per currency in ``accountValues()``;
+        the multiplier converts an amount in that currency to base:
+        ``base_amount = local_amount * rate``. The base currency itself maps to
+        1.0. Used to normalise per-position marketValue (reported in the
+        instrument's own currency) before summing against base-currency figures
+        like NetLiquidation — otherwise a USD position in a CAD account is
+        mis-weighted by the ~1.4x FX factor.
+        """
+        rates: dict = {}
+        for v in self.trader.client.ib.accountValues():
+            if v.tag == 'ExchangeRate' and v.currency and v.currency != 'BASE':
+                try:
+                    rates[v.currency] = float(v.value)
+                except (TypeError, ValueError):
+                    continue
+        return rates
+
+    @rpcmethod
     def get_account_values(self) -> dict:
         """Return key account values (cash, net liquidation, buying power, etc.).
 

@@ -65,7 +65,13 @@ def compute_resize_deltas(
     """
     import math
 
-    total_value = sum(abs(p.get('marketValue', 0) or 0) for p in positions)
+    # Prefer a base-currency-normalised value when the caller supplied one
+    # (compute_resize_plan sets 'marketValueBase'); fall back to raw marketValue
+    # for the single-currency case and existing pure-function callers/tests.
+    def _val(p):
+        return p.get('marketValueBase', p.get('marketValue', 0)) or 0
+
+    total_value = sum(abs(_val(p)) for p in positions)
 
     if total_value == 0:
         return 1.0, []
@@ -485,6 +491,7 @@ class MMR:
                 'mktPrice': mkt_price,
                 'avgCost': avg_cost,
                 'marketValue': mkt_value,
+                'currency': con.get('currency', ''),
                 'unrealizedPNL': unrealized,
                 'realizedPNL': realized,
                 'dailyPNL': daily,
@@ -502,6 +509,30 @@ class MMR:
                 i + 1: row['symbol'] for i, row in df.iterrows()
             }
         return df
+
+    def _fx_rates(self) -> dict:
+        """Per-currency multipliers to the account's base currency (base → 1.0).
+
+        Degrades to an empty dict on RPC failure; callers then treat unknown
+        currencies as already-base (rate 1.0).
+        """
+        try:
+            return consume(self._rpc.rpc(return_type=dict).get_fx_rates()) or {}
+        except Exception as ex:
+            logging.warning('could not fetch FX rates, treating values as base: %s', ex)
+            return {}
+
+    @staticmethod
+    def _to_base(value: float, currency: str, fx_rates: dict) -> float:
+        """Convert a local-currency amount to base using fx_rates.
+
+        An unknown currency (or empty rates) falls back to rate 1.0 — i.e. it is
+        treated as already base. That's the safe degradation: no worse than the
+        old unconverted behaviour, and correct for the common single-currency case.
+        """
+        if not currency:
+            return value
+        return value * float(fx_rates.get(currency, 1.0) or 1.0)
 
     def positions(self) -> pd.DataFrame:
         """Raw positions (no P&L)."""
@@ -941,6 +972,15 @@ class MMR:
 
         portfolio_df = self.portfolio()
         positions = portfolio_df.to_dict('records') if portfolio_df is not None and not portfolio_df.empty else []
+
+        # Convert each position's marketValue to the account base currency before
+        # the analyzer compares it against NetLiquidation (base). The analyzer is
+        # currency-agnostic — it just needs every value in the same currency — so
+        # we normalise here. Preserves sign (shorts stay negative).
+        fx_rates = self._fx_rates()
+        for p in positions:
+            p['marketValue'] = self._to_base(
+                float(p.get('marketValue', 0) or 0), p.get('currency', ''), fx_rates)
 
         # Let RPC failures propagate — silently defaulting net_liq to 0 makes
         # every exposure %/HHI/group-budget number wrong without signaling why.
@@ -1637,7 +1677,17 @@ class MMR:
             return {'scale_factor': 1.0, 'current_total': 0, 'target_total': 0, 'adjustments': []}
 
         positions = portfolio_df.to_dict('records')
-        total_value = sum(abs(p.get('marketValue', 0) or 0) for p in positions)
+
+        # Normalise each position's marketValue (reported in the instrument's own
+        # currency) to the account base currency before summing against the
+        # user-supplied bounds (which are in base). Without this, an AUD/USD
+        # position in a CAD account is scaled by the wrong total and the plan
+        # over/under-shoots the bound by the FX factor.
+        fx_rates = self._fx_rates()
+        for p in positions:
+            p['marketValueBase'] = self._to_base(
+                float(p.get('marketValue', 0) or 0), p.get('currency', ''), fx_rates)
+        total_value = sum(abs(p.get('marketValueBase', 0) or 0) for p in positions)
 
         scale_factor, adjustments = compute_resize_deltas(positions, max_bound, min_bound)
 
