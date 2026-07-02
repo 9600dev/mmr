@@ -590,6 +590,25 @@ class Trader():
             # we must resubscribe or the strategy tick feed goes silently dead.
             # No-op on the first connect (nothing published yet).
             self._republish_ticker_subscriptions()
+
+            # One-shot startup broker-truth reconciliation: after a restart,
+            # cross-check proposals + positions against live IB and log any
+            # divergence (report-only). Delayed so IB open-orders/positions have
+            # populated; runs off the connected_event path so it can't block it.
+            if not getattr(self, '_startup_reconciled', False):
+                self._startup_reconciled = True
+
+                async def _delayed_reconcile():
+                    try:
+                        await asyncio.sleep(8)
+                        await self.reconcile_with_broker()
+                    except Exception as ex:
+                        logging.warning('startup reconciliation failed: %s', ex)
+
+                try:
+                    asyncio.get_event_loop().create_task(_delayed_reconcile())
+                except RuntimeError:
+                    pass
         finally:
             self._in_connected_event = False
 
@@ -1580,6 +1599,85 @@ class Trader():
         except Exception as ex:
             logging.warning('ib.positions() failed, using cache: %s', ex)
         return self.portfolio.get_positions()
+
+    async def reconcile_with_broker(self) -> dict:
+        """Cross-check recent proposals + positions against live IB truth.
+
+        REPORT-ONLY: fetches IB open orders, executions and positions, compares
+        them to the proposal store and current positions, and returns a
+        divergence report. Places/cancels nothing and mutates no proposal status.
+        """
+        from trader.trading.reconciliation import reconcile
+        from trader.data.proposal_store import ProposalStore
+
+        def _action(o):
+            return str(getattr(o, 'action', '') or '')
+
+        # Open orders — reqAllOpenOrders returns Trade objects (order+contract+status).
+        open_orders = []
+        try:
+            for t in (await self.client.get_open_orders()) or []:
+                order = getattr(t, 'order', t)
+                contract = getattr(t, 'contract', None)
+                st = getattr(t, 'orderStatus', None)
+                open_orders.append({
+                    'order_id': int(getattr(order, 'orderId', 0) or 0),
+                    'conId': int(getattr(contract, 'conId', 0) or 0) if contract else 0,
+                    'symbol': getattr(contract, 'symbol', '') if contract else '',
+                    'action': _action(order),
+                    'orderType': str(getattr(order, 'orderType', '') or ''),
+                    'status': str(getattr(st, 'status', '') or ''),
+                })
+        except Exception as ex:
+            logging.warning('reconcile: get_open_orders failed: %s', ex)
+
+        executions = []
+        try:
+            for fill in (await self.client.get_executions()) or []:
+                ex_obj = getattr(fill, 'execution', None)
+                contract = getattr(fill, 'contract', None)
+                executions.append({
+                    'order_id': int(getattr(ex_obj, 'orderId', 0) or 0) if ex_obj else 0,
+                    'conId': int(getattr(contract, 'conId', 0) or 0) if contract else 0,
+                    'symbol': getattr(contract, 'symbol', '') if contract else '',
+                    'side': str(getattr(ex_obj, 'side', '') or '') if ex_obj else '',
+                    'shares': float(getattr(ex_obj, 'shares', 0.0) or 0.0) if ex_obj else 0.0,
+                    'price': float(getattr(ex_obj, 'price', 0.0) or 0.0) if ex_obj else 0.0,
+                })
+        except Exception as ex:
+            logging.warning('reconcile: get_executions failed: %s', ex)
+
+        positions = []
+        try:
+            for p in self.get_positions() or []:
+                contract = getattr(p, 'contract', None)
+                positions.append({
+                    'conId': int(getattr(contract, 'conId', 0) or 0) if contract else 0,
+                    'symbol': getattr(contract, 'symbol', '') if contract else '',
+                    'position': float(getattr(p, 'position', 0.0) or 0.0),
+                })
+        except Exception as ex:
+            logging.warning('reconcile: get_positions failed: %s', ex)
+
+        proposals = []
+        try:
+            store = ProposalStore(self.duckdb_path)
+            proposals = (store.query(status='EXECUTED', limit=100)
+                         + store.query(status='APPROVED', limit=100))
+        except Exception as ex:
+            logging.warning('reconcile: proposal query failed: %s', ex)
+
+        report = reconcile(proposals, open_orders, executions, positions)
+        for f in report.findings:
+            level = logging.error if f.severity == 'critical' else logging.warning
+            level('reconcile [%s] %s (proposal=%s): %s',
+                  f.severity, f.symbol, f.proposal_id, f.detail)
+        if not report.findings:
+            logging.info('reconcile: no divergence (%d proposals, %d positions, '
+                         '%d open orders, %d executions checked)',
+                         report.checked_proposals, report.checked_positions,
+                         report.ib_open_orders, report.ib_executions)
+        return report.to_dict()
 
     def diagnose_portfolio_feed(self) -> dict:
         """Dump raw IB portfolio/positions from every managed account.

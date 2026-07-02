@@ -1268,6 +1268,12 @@ def build_parser() -> argparse.ArgumentParser:
                                      '  portfolio-risk --json           # JSON for LLM consumption',
                               formatter_class=fmt)
 
+    sub.add_parser('reconcile', help='Reconcile proposals + positions against live IB (report-only)',
+                   epilog='Examples:\n'
+                          '  reconcile           # divergence report vs broker truth\n'
+                          '  reconcile --json    # JSON for LLM consumption',
+                   formatter_class=fmt)
+
     # portfolio-snapshot (compact JSON for LLM loop)
     sub.add_parser('portfolio-snapshot', aliases=['psnap'], help='Compact portfolio snapshot (JSON)')
 
@@ -1641,6 +1647,7 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
         'portfolio-risk', 'prisk',
         'portfolio-snapshot', 'psnap',
         'portfolio-diff', 'pdiff',
+        'reconcile',
     }
 
     # Snapshot commands routed via a non-IB source (--source twelvedata) don't
@@ -2145,6 +2152,9 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
 
         elif cmd in ('portfolio-risk', 'prisk'):
             _handle_portfolio_risk(mmr, args)
+
+        elif cmd == 'reconcile':
+            _handle_reconcile(mmr, args)
 
         elif cmd in ('portfolio-snapshot', 'psnap'):
             print_dict(mmr.portfolio_snapshot(), title='Portfolio Snapshot')
@@ -2680,6 +2690,34 @@ def _handle_group(mmr: MMR, args: argparse.Namespace):
                 f'  [bold]{g.name}[/bold]{budget_label}  '
                 f'{len(g.members)} members: {", ".join(g.members) if g.members else "-"}'
             )
+
+
+def _handle_reconcile(mmr: MMR, args: argparse.Namespace):
+    try:
+        report = mmr.reconcile()
+    except Exception as e:
+        print_status(f'Reconciliation failed: {e}', success=False)
+        return
+
+    if _json_mode:
+        print_dict(report, title='Broker Reconciliation')
+        return
+
+    console.print('[bold]Broker Reconciliation[/bold] (report-only)\n')
+    console.print(f'  checked {report.get("checked_proposals", 0)} proposals, '
+                  f'{report.get("checked_positions", 0)} positions · IB: '
+                  f'{report.get("ib_open_orders", 0)} open orders, '
+                  f'{report.get("ib_executions", 0)} executions\n')
+    findings = report.get('findings', [])
+    if not findings:
+        console.print('[green]  No divergence — internal state matches the broker.[/green]')
+        return
+    for f in findings:
+        color = 'red' if f.get('severity') == 'critical' else 'yellow'
+        pid = f.get('proposal_id')
+        tag = f'#{pid} ' if pid else ''
+        console.print(f'  [{color}]{f.get("severity", "").upper()}[/{color}] '
+                      f'{tag}{f.get("symbol", "")}: {f.get("detail", "")}')
 
 
 def _handle_portfolio_risk(mmr: MMR, args: argparse.Namespace):

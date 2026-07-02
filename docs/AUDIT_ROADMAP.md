@@ -45,7 +45,7 @@ one new component — an **OrderLifecycleTracker** that subscribes to
 - **Validate (paper)**: fill a market order, confirm an `ORDER_FILLED` row lands
   in the event store with the right qty/price.
 
-### A3 — Startup reconciliation pass  (L, med risk)
+### A3 — Startup reconciliation pass  ✅ DONE (paper-validated, report-only)
 - **Problem** (`sdk.py:1419`, design): proposals are marked EXECUTED at
   *submission*, never confirmed against fills; after a trader_service restart the
   book is repopulated from `reqAllOpenOrders` but nothing re-syncs proposal state
@@ -65,9 +65,11 @@ one new component — an **OrderLifecycleTracker** that subscribes to
   mid-flight, confirm the reconciliation pass reports the correct
   filled/unfilled state instead of a stale EXECUTED.
 
-**Status:** A1+A2 shipped via `OrderLifecycleTracker` (validated in paper — real
-AAPL BUY/SELL fills recorded ORDER_FILLED events, acceptance check passed). **A3
-(startup reconciliation) is the remaining piece** and builds on the same tracker.
+**Status:** ✅ **Cluster A complete.** A1+A2 via `OrderLifecycleTracker`; A3 via
+`reconciliation.py` + `mmr reconcile` (report-only). All paper-validated: real
+fills recorded ORDER_FILLED/CANCELLED, and reconcile flagged a real
+executed-still-working proposal and an unprotected position. Auto-repair of
+unambiguous proposal-status divergences remains a deliberate future opt-in.
 
 ---
 

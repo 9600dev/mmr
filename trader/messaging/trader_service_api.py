@@ -370,6 +370,11 @@ class TraderServiceApi(RPCHandler):
         ]
 
     @rpcmethod
+    async def reconcile_with_broker(self) -> dict:
+        """Report-only broker-truth reconciliation (proposals + positions vs IB)."""
+        return await self.trader.reconcile_with_broker()
+
+    @rpcmethod
     def get_fx_rates(self) -> dict:
         """Return per-currency FX multipliers to the account's BASE currency.
 

@@ -963,6 +963,15 @@ class MMR:
         state = self._get_portfolio_state()
         return PositionSizer(config).session_summary(state)
 
+    def reconcile(self) -> dict:
+        """Report-only broker-truth reconciliation. Requires trader_service.
+
+        Returns a divergence report comparing recent proposals + current
+        positions against live IB open-orders / executions / positions. Places
+        or cancels nothing.
+        """
+        return consume(self._rpc.rpc(return_type=dict).reconcile_with_broker())
+
     def risk_report(self) -> dict:
         """Generate a portfolio risk report. Requires trader_service for portfolio data."""
         from trader.trading.portfolio_risk import PortfolioRiskAnalyzer
