@@ -933,6 +933,47 @@ class TestClosePosition:
         assert not result.is_success()
 
 
+class TestProtectiveOrder:
+    def test_invalid_order_type_rejected(self):
+        mmr = _make_mmr_with_mock(_make_mock_rpc())
+        result = mmr.place_protective_order('PLS', 'SELL', 100, 'MKT')
+        assert not result.is_success()
+        assert 'STP/TRAIL/LMT' in (result.error or '')
+
+    def test_non_positive_quantity_rejected(self):
+        mmr = _make_mmr_with_mock(_make_mock_rpc())
+        result = mmr.place_protective_order('PLS', 'SELL', 0, 'STP', aux_price=4.75)
+        assert not result.is_success()
+
+    def test_stp_uses_cached_contract_and_forwards_args(self):
+        mock_client = _make_mock_rpc()
+        mock_client.rpc.return_value.place_standalone_order.return_value = SuccessFail.success()
+        mmr = _make_mmr_with_mock(mock_client)
+        contract = FakeContract(conId=71294096, symbol='PLS', localSymbol='PLS')
+        mmr._contract_map = {'PLS': contract}
+
+        result = mmr.place_protective_order(
+            'PLS', 'sell', 3800, 'stp', aux_price=4.75, tif='GTC')
+        assert result.is_success()
+        call = mock_client.rpc.return_value.place_standalone_order.call_args
+        assert call.kwargs['action'] == 'SELL'          # upper-cased
+        assert call.kwargs['order_type'] == 'STP'
+        assert call.kwargs['quantity'] == 3800
+        assert call.kwargs['aux_price'] == 4.75
+        assert call.kwargs['contract'] is contract      # cached, no re-resolve
+
+    def test_trail_forwards_trailing_percent(self):
+        mock_client = _make_mock_rpc()
+        mock_client.rpc.return_value.place_standalone_order.return_value = SuccessFail.success()
+        mmr = _make_mmr_with_mock(mock_client)
+        mmr._contract_map = {'PLS': FakeContract(conId=1, symbol='PLS', localSymbol='PLS')}
+        result = mmr.place_protective_order('PLS', 'SELL', 3800, 'TRAIL', trailing_percent=8.0)
+        assert result.is_success()
+        call = mock_client.rpc.return_value.place_standalone_order.call_args
+        assert call.kwargs['order_type'] == 'TRAIL'
+        assert call.kwargs['trailing_percent'] == 8.0
+
+
 class TestAccount:
     def test_account_returns_string(self):
         mock_client = _make_mock_rpc()

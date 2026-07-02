@@ -513,6 +513,28 @@ def build_parser() -> argparse.ArgumentParser:
     close_p.add_argument('row', type=int, help='Row number from portfolio/watch output')
     close_p.add_argument('--quantity', type=float, default=None, help='Partial quantity (default: entire position)')
 
+    protect_p = sub.add_parser(
+        'protect', help='Place a protective order (stop / trailing stop / take-profit) for a position',
+        epilog='Examples:\n'
+               '  protect PLS --stop 4.75                     # SELL STP for the full PLS position\n'
+               '  protect PLS --stop 4.75 --quantity 2000     # protect part of it\n'
+               '  protect PLS --trail 8                        # 8% trailing stop\n'
+               '  protect AAPL --take-profit 260               # take-profit LMT\n'
+               '  protect XYZ --stop 10 --exchange ASX --currency AUD --action SELL',
+        formatter_class=fmt)
+    protect_p.add_argument('symbol', help='Symbol to protect (must be an existing position)')
+    protect_p.add_argument('--stop', type=float, default=None, help='Stop (STP) trigger price')
+    protect_p.add_argument('--trail', type=float, default=None, help='Trailing stop percent (TRAIL)')
+    protect_p.add_argument('--take-profit', type=float, default=None, dest='take_profit',
+                           help='Take-profit limit (LMT) price')
+    protect_p.add_argument('--quantity', type=float, default=None,
+                           help='Quantity to protect (default: full position size)')
+    protect_p.add_argument('--action', default='SELL', choices=['SELL', 'BUY'],
+                           help='SELL protects a long (default); BUY protects a short')
+    protect_p.add_argument('--tif', default='GTC', help='Time in force (default GTC)')
+    protect_p.add_argument('--exchange', default='', help='Exchange hint for resolution (e.g. ASX)')
+    protect_p.add_argument('--currency', default='', help='Currency hint for resolution (e.g. AUD)')
+
     # close-all-positions
     sub.add_parser('close-all-positions', help='Close all positions at market',
                    epilog='Examples:\n'
@@ -1655,7 +1677,7 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
     # Commands that require a live IB upstream connection
     _ib_commands = {
         'portfolio', 'p', 'positions', 'pos', 'orders', 'trades', 'account',
-        'buy', 'sell', 'cancel', 'cancel-all', 'close',
+        'buy', 'sell', 'cancel', 'cancel-all', 'close', 'protect',
         'snapshot', 'snap', 'snapshot-batch', 'depth', 'resolve',
         'listen', 'watch', 'scan',
         'approve',
@@ -1960,6 +1982,9 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
 
         elif cmd in ('close', 'c'):
             _handle_close(mmr, args)
+
+        elif cmd == 'protect':
+            _handle_protect(mmr, args)
 
         elif cmd == 'close-all-positions':
             _handle_close_all(mmr)
@@ -2899,6 +2924,73 @@ def _handle_close_all(mmr: MMR):
             console.print(f'[green]Close {symbol}: submitted[/green]')
         else:
             console.print(f'[red]Close {symbol}: failed — {result.error}[/red]')
+
+
+def _handle_protect(mmr: MMR, args: argparse.Namespace):
+    symbol = args.symbol
+    # Exactly one protection type.
+    chosen = [(args.stop, 'STP'), (args.trail, 'TRAIL'), (args.take_profit, 'LMT')]
+    active = [(v, ot) for v, ot in chosen if v is not None]
+    if len(active) != 1:
+        msg = 'specify exactly one of --stop, --trail, or --take-profit'
+        if _json_mode:
+            print(json.dumps({'success': False, 'message': msg}))
+        else:
+            console.print(f'[red]{msg}[/red]')
+        return
+    value, order_type = active[0]
+
+    # Resolve quantity + conId + currency from the live position.
+    pos_size = None
+    con_id = None
+    currency = args.currency
+    df = mmr.portfolio()
+    if not df.empty and 'symbol' in df.columns:
+        match = df[df['symbol'] == symbol]
+        if not match.empty:
+            pos_size = float(match.iloc[0]['position'])
+            if 'conId' in df.columns and match.iloc[0].get('conId'):
+                con_id = int(match.iloc[0]['conId'])
+            if not currency and 'currency' in df.columns:
+                currency = str(match.iloc[0].get('currency') or '')
+
+    qty = abs(args.quantity) if args.quantity else (abs(pos_size) if pos_size else None)
+    if not qty:
+        msg = f'{symbol}: no open position found — protect only applies to existing positions'
+        if _json_mode:
+            print(json.dumps({'success': False, 'message': msg}))
+        else:
+            console.print(f'[yellow]{msg}[/yellow]')
+        return
+    if pos_size and args.quantity and abs(args.quantity) > abs(pos_size):
+        msg = f'{symbol}: requested {abs(args.quantity):g} exceeds position size {abs(pos_size):g}'
+        if _json_mode:
+            print(json.dumps({'success': False, 'message': msg}))
+        else:
+            console.print(f'[yellow]{msg}[/yellow]')
+        return
+
+    aux_price = value if order_type == 'STP' else 0.0
+    limit_price = value if order_type == 'LMT' else 0.0
+    trailing_percent = value if order_type == 'TRAIL' else 0.0
+
+    result = mmr.place_protective_order(
+        symbol=symbol, action=args.action, quantity=qty, order_type=order_type,
+        aux_price=aux_price, limit_price=limit_price, trailing_percent=trailing_percent,
+        tif=args.tif, exchange=args.exchange, currency=currency, con_id=con_id)
+
+    ok = result.is_success() if hasattr(result, 'is_success') else bool(result)
+    desc = {'STP': f'stop @ {value:g}', 'TRAIL': f'{value:g}% trailing stop',
+            'LMT': f'take-profit @ {value:g}'}[order_type]
+    if _json_mode:
+        print(json.dumps({'success': ok,
+                          'message': (f'{args.action} {order_type} ({desc}) for {qty:g} {symbol}'
+                                      if ok else getattr(result, 'error', 'failed'))}))
+    elif ok:
+        console.print(f'[green]Protective {args.action} {order_type} placed: {desc} '
+                      f'for {qty:g} {symbol} ({args.tif})[/green]')
+    else:
+        console.print(f'[red]Failed to place protective order: {getattr(result, "error", "unknown")}[/red]')
 
 
 def _handle_resize_positions(mmr: MMR, args: argparse.Namespace):

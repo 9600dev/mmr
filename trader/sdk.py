@@ -1613,6 +1613,56 @@ class MMR:
             return SuccessFail.fail(error=str(ex))
 
     # ------------------------------------------------------------------
+    # Protective orders for existing positions
+    # ------------------------------------------------------------------
+
+    def place_protective_order(
+        self,
+        symbol: Union[str, int],
+        action: str,
+        quantity: float,
+        order_type: str,
+        aux_price: float = 0.0,
+        limit_price: float = 0.0,
+        trailing_percent: float = 0.0,
+        tif: str = 'GTC',
+        sec_type: str = 'STK',
+        exchange: str = '',
+        currency: str = '',
+        con_id: Optional[int] = None,
+    ) -> SuccessFail:
+        """Place a standalone protective order (STP / TRAIL / LMT) for an existing
+        position. Resolves the contract (preferring a cached one from the last
+        portfolio() call, else exchange/currency-hinted resolution) and submits
+        via the trader_service. order_type: 'STP', 'TRAIL', or 'LMT'."""
+        order_type = (order_type or '').upper()
+        if order_type not in ('STP', 'TRAIL', 'LMT'):
+            return SuccessFail.fail(error=f"order_type must be STP/TRAIL/LMT, got {order_type!r}")
+        if quantity is None or quantity <= 0:
+            return SuccessFail.fail(error='quantity must be positive')
+
+        contract = self._contract_map.get(symbol)
+        if contract is None:
+            try:
+                contract = self._resolve_contract(
+                    con_id or symbol, sec_type=sec_type, exchange=exchange, currency=currency)
+            except Exception as ex:
+                return SuccessFail.fail(error=f"Could not resolve symbol {symbol}: {ex}")
+
+        return consume(
+            self._rpc.rpc(return_type=SuccessFail[Trade]).place_standalone_order(
+                contract=contract,
+                action=action.upper(),
+                quantity=quantity,
+                order_type=order_type,
+                aux_price=aux_price,
+                limit_price=limit_price,
+                trailing_percent=trailing_percent,
+                tif=tif,
+            )
+        )
+
+    # ------------------------------------------------------------------
     # Position closing
     # ------------------------------------------------------------------
 
