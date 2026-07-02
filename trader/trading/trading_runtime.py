@@ -142,6 +142,14 @@ class Trader():
         self.zmq_pubsub_contracts: Dict[int, Observable[IBAIORxError]] = {}
         self.zmq_pubsub_contract_filters: Dict[int, bool] = {}
         self.zmq_pubsub_contract_subscription: DisposableBase = Disposable()
+        # conId -> (Contract, delayed). Remembered so live ticker subscriptions
+        # can be re-established after an IB reconnect (the old market-data lines
+        # die with the previous session). Survives reconnects; reset on a fresh
+        # connect(). Without this the strategy tick feed silently dies on reconnect.
+        self.zmq_pubsub_published_contracts: Dict[int, Tuple[Contract, bool]] = {}
+        # Coalesces the connected_event double-fire (eventkit emit + explicit call
+        # on reconnect) so re-subscription doesn't run twice concurrently.
+        self._in_connected_event: bool = False
 
         self.zmq_strategy_client: RPCClient[strategy_bus.StrategyServiceApi]
         self.zmq_messagebus: MessageBusServer
@@ -523,25 +531,65 @@ class Trader():
 
     @log_method
     async def connected_event(self):
-        # Capture the main event loop now that we're running inside it. Used
-        # to schedule async work from IB callback threads without spinning up
-        # a throwaway loop.
+        # Coalesce the reconnect double-fire: connect_async() emits the IB
+        # connectedEvent (→ this handler) AND the reconnect loop calls this
+        # explicitly. Running both would dispose/rebuild subscriptions twice and
+        # could double-subscribe the ticker feed. First one wins; skip the rest.
+        if self._in_connected_event:
+            logging.debug('connected_event already running — skipping duplicate invocation')
+            return
+        self._in_connected_event = True
         try:
-            self._main_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-
-        # Dispose old subscriptions before re-subscribing (happens on reconnect)
-        for disposable in self.disposables:
+            # Capture the main event loop now that we're running inside it. Used
+            # to schedule async work from IB callback threads without spinning up
+            # a throwaway loop.
             try:
-                disposable.dispose()
-            except Exception:
+                self._main_loop = asyncio.get_running_loop()
+            except RuntimeError:
                 pass
-        self.disposables.clear()
-        with self._pnl_subscriptions_lock:
-            self.pnl_subscriptions.clear()
 
-        await self.setup_subscriptions()
+            # Dispose old subscriptions before re-subscribing (happens on reconnect)
+            for disposable in self.disposables:
+                try:
+                    disposable.dispose()
+                except Exception:
+                    pass
+            self.disposables.clear()
+            with self._pnl_subscriptions_lock:
+                self.pnl_subscriptions.clear()
+
+            await self.setup_subscriptions()
+
+            # Re-establish live ticker (pubsub) subscriptions. Their IB
+            # market-data lines died with the previous session, so on a reconnect
+            # we must resubscribe or the strategy tick feed goes silently dead.
+            # No-op on the first connect (nothing published yet).
+            self._republish_ticker_subscriptions()
+        finally:
+            self._in_connected_event = False
+
+    def _republish_ticker_subscriptions(self):
+        """Replay remembered publish_contract() calls after a reconnect."""
+        remembered = dict(self.zmq_pubsub_published_contracts)
+        if not remembered:
+            return
+        logging.info('re-establishing %d live ticker subscription(s) after reconnect',
+                     len(remembered))
+        # Tear down the stale shared subscription + per-contract state; the old
+        # session's market-data lines are gone.
+        try:
+            self.zmq_pubsub_contract_subscription.dispose()
+        except Exception:
+            pass
+        self.zmq_pubsub_contract_subscription = Disposable()
+        self.zmq_pubsub_contracts = {}
+        self.zmq_pubsub_contract_filters = {}
+        for con_id, (contract, delayed) in remembered.items():
+            try:
+                self.publish_contract(contract, delayed=delayed)
+            except Exception as ex:
+                logging.error('failed to re-publish ticker subscription for conId %s: %s',
+                              con_id, ex)
 
     @log_method
     async def disconnected_event(self):
@@ -717,6 +765,8 @@ class Trader():
 
     @log_method
     def publish_contract(self, contract: Contract, delayed: bool) -> Observable[IBAIORxError]:
+        # Remember the request so it can be replayed after a reconnect.
+        self.zmq_pubsub_published_contracts[contract.conId] = (contract, delayed)
         if contract.conId in self.zmq_pubsub_contract_filters:
             return self.zmq_pubsub_contracts[contract.conId]
 

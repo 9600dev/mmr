@@ -626,3 +626,50 @@ class TestGetAccountCashByCurrency:
         # CAD is base → rate backfilled to 1.0 → base_value == cash
         assert out['currencies']['CAD']['exchange_rate'] == 1.0
         assert out['currencies']['CAD']['base_value'] == pytest.approx(5000.0)
+
+
+# ---------------------------------------------------------------------------
+# IB reconnect: live ticker (pubsub) subscriptions must be re-established
+# ---------------------------------------------------------------------------
+
+class _FakeContract:
+    def __init__(self, conId):
+        self.conId = conId
+
+
+class TestReconnectTickerResubscription:
+    def _trader(self):
+        t = object.__new__(Trader)
+        t.zmq_pubsub_contracts = {}
+        t.zmq_pubsub_contract_filters = {}
+        from reactivex.disposable import Disposable
+        t.zmq_pubsub_contract_subscription = Disposable()
+        t.zmq_pubsub_published_contracts = {}
+        t._published_calls = []
+        # Stub publish_contract to record replays without touching IB.
+        def _pub(contract, delayed):
+            t._published_calls.append((contract.conId, delayed))
+            t.zmq_pubsub_contract_filters[contract.conId] = True
+            return None
+        t.publish_contract = _pub
+        return t
+
+    def test_republish_replays_remembered_contracts(self):
+        t = self._trader()
+        t.zmq_pubsub_published_contracts = {
+            1: (_FakeContract(1), False),
+            2: (_FakeContract(2), True),
+        }
+        # simulate stale post-reconnect state
+        t.zmq_pubsub_contract_filters = {1: True, 2: True}
+        t.zmq_pubsub_contracts = {1: object(), 2: object()}
+
+        Trader._republish_ticker_subscriptions(t)
+
+        # Every remembered contract is re-published with its original delayed flag.
+        assert sorted(t._published_calls) == [(1, False), (2, True)]
+
+    def test_republish_noop_when_nothing_published(self):
+        t = self._trader()
+        Trader._republish_ticker_subscriptions(t)
+        assert t._published_calls == []
