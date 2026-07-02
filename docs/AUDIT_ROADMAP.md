@@ -117,7 +117,7 @@ unambiguous proposal-status divergences remains a deliberate future opt-in.
 
 ## Cluster D — Service robustness
 
-### D1 — strategy_runtime run() EADDRINUSE restart-safety  (S, low risk)
+### D1 — strategy_runtime run() EADDRINUSE restart-safety  ✅ DONE
 - **Problem** (`strategy_runtime.py:655`): a crash-restart re-binds the RPC port;
   if the old socket lingers, EADDRINUSE turns any transient startup failure into
   permanent service death.
@@ -127,7 +127,7 @@ unambiguous proposal-status divergences remains a deliberate future opt-in.
 - **Validate (paper)**: kill -9 the strategy_service, confirm it restarts and
   re-binds instead of crash-looping.
 
-### D2 — strategy enabled-state persistence  (S, low risk)
+### D2 — strategy enabled-state persistence  ✅ DONE (paper-validated)
 - **Problem** (`strategy_runtime.py:217`): enabled/disabled state isn't
   persisted and `WAITING_HISTORICAL_DATA` never transitions, so a restart can
   lose a strategy's enabled state.

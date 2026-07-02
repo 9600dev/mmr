@@ -184,6 +184,44 @@ class StrategyRuntime():
             )
 
     @log_method
+    def _persist_enabled(self, name: str, enabled: bool) -> None:
+        """Persist a strategy's enabled/disabled state so it survives a restart
+        (otherwise a runtime disable is silently undone when the config reloads)."""
+        try:
+            from trader.data.duckdb_store import DuckDBConnection
+            db = DuckDBConnection.get_instance(self.duckdb_path)
+
+            def _w(conn):
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS strategy_state "
+                    "(name VARCHAR PRIMARY KEY, enabled BOOLEAN, updated_at TIMESTAMP)")
+                conn.execute("DELETE FROM strategy_state WHERE name = ?", [name])
+                conn.execute(
+                    "INSERT INTO strategy_state (name, enabled, updated_at) VALUES (?, ?, ?)",
+                    [name, bool(enabled), dt.datetime.now()])
+            db.execute_atomic(_w)
+        except Exception as ex:
+            logging.warning('could not persist enabled-state for %s: %s', name, ex)
+
+    def _load_enabled(self, name: str):
+        """Return the persisted enabled state for *name* (True/False), or None if
+        it was never explicitly enabled/disabled."""
+        try:
+            from trader.data.duckdb_store import DuckDBConnection
+            db = DuckDBConnection.get_instance(self.duckdb_path)
+
+            def _r(conn):
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS strategy_state "
+                    "(name VARCHAR PRIMARY KEY, enabled BOOLEAN, updated_at TIMESTAMP)")
+                row = conn.execute(
+                    "SELECT enabled FROM strategy_state WHERE name = ?", [name]).fetchone()
+                return row[0] if row else None
+            return db.execute_atomic(_r)
+        except Exception as ex:
+            logging.warning('could not read enabled-state for %s: %s', name, ex)
+            return None
+
     def enable_strategy(self, name: str, paper_only: bool = False) -> StrategyState:
         """Enable a strategy.
 
@@ -194,14 +232,18 @@ class StrategyRuntime():
         """
         for implementation in self.strategy_implementations:
             if name == implementation.name:
-                return implementation.enable()
+                state = implementation.enable()
+                self._persist_enabled(name, True)
+                return state
         return StrategyState.ERROR
 
     @log_method
     def disable_strategy(self, name: str) -> StrategyState:
         for implementation in self.strategy_implementations:
             if name == implementation.name:
-                return implementation.disable()
+                state = implementation.disable()
+                self._persist_enabled(name, False)
+                return state
         return StrategyState.ERROR
 
     @log_method
@@ -419,6 +461,15 @@ class StrategyRuntime():
                 instance.install(context)
                 # Give the strategy a reference to the runtime for subscriptions
                 instance.strategy_runtime = self
+
+                # Restore the persisted enabled/disabled state so a runtime
+                # enable/disable survives a service restart. Unset (None) leaves
+                # the strategy INSTALLED, as before.
+                persisted = self._load_enabled(name)
+                if persisted is True:
+                    instance.enable()
+                elif persisted is False:
+                    instance.disable()
 
                 self.strategy_implementations.append(cast(Strategy, instance))
 
