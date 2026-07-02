@@ -175,10 +175,15 @@ class Container():
                     inspect.Parameter.VAR_KEYWORD,
                 ):
                     continue
+                _env_val = os.getenv(param.name.upper())
                 if extra_args and param.name in extra_args.keys():
                     args[param.name] = extra_args[param.name]
-                elif os.getenv(param.name.upper()) is not None:
-                    args[param.name] = self._coerce_env_value(os.getenv(param.name.upper()), param)
+                elif _env_val is not None and _env_val != '':
+                    # An empty-string env var is treated as UNSET so it can't
+                    # clobber a valid YAML value. IB_ACCOUNT='' (a common
+                    # docker-compose default) must not blank out the configured
+                    # account and brick trading.
+                    args[param.name] = self._coerce_env_value(_env_val, param)
                 elif param.name in self.configuration and self.configuration[param.name] is not None:
                     args[param.name] = self.configuration[param.name]
                 elif param.default is inspect.Parameter.empty:

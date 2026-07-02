@@ -33,18 +33,16 @@ def main(simulation: bool,
         nonlocal is_stopping
         if loop.is_running() and not is_stopping:
             is_stopping = True
+            # Cannot call loop.run_until_complete() here — the loop IS running
+            # (this fires while it's spinning), which raises RuntimeError and
+            # aborts the clean shutdown. Cancel the pending tasks and stop the
+            # loop; their CancelledError is delivered on the next iteration.
             pending_tasks = [
-                task for task in asyncio.all_tasks() if not task.done()
+                task for task in asyncio.all_tasks(loop) if not task.done()
             ]
-
-            if len(pending_tasks) > 0:
-                for task in pending_tasks:
-                    logging.debug(task.get_stack())
-
-                logging.debug('waiting five seconds for {} pending tasks'.format(len(pending_tasks)))
-                loop.run_until_complete(asyncio.wait(pending_tasks, timeout=5))
+            for task in pending_tasks:
+                task.cancel()
             loop.stop()
-            exit(0)
 
     if simulation:
         raise ValueError('simulation not implemented yet')

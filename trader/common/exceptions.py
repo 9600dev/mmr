@@ -18,12 +18,16 @@ def trader_exception(trader: 'Trader', exception_type: type, message: str, inner
     client = trader.client.is_connected() if hasattr(trader, 'client') else False
     last_connect_time = trader.last_connect_time if hasattr(trader, 'last_connect_time') else dt.datetime.min
 
+    # Argument order must match TraderException.__init__:
+    # (message, storage_connected, ib_connected, startup_time, last_connect_time,
+    #  inner, call_stack). The old call shifted everything by one, so every
+    # exception's `.message` was actually the storage-connected bool.
     exception = exception_type(
+        message,
         data is not None,
         client,
         trader.startup_time,
         last_connect_time,
-        message,
         inner,
         get_callstack(10)
     )

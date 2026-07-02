@@ -22,8 +22,11 @@ Design notes:
 """
 from __future__ import annotations
 
+import html as _html
 import logging
 import os
+import re
+import secrets
 import threading
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -31,27 +34,61 @@ from urllib.parse import quote
 
 import markdown as _markdown
 import pandas as pd
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 logger = logging.getLogger('web')
 
-# Reasoning text is authored by the user / their own LLM (trusted, single-user
-# local dashboard), so we render its markdown to HTML server-side and mark it
-# safe in the template. A shared converter is fine as long as we .reset() it.
-# magiclink auto-links *bare* URLs (news links land in the reasoning on their
-# own line, which core markdown would otherwise leave as plain text).
+# Proposal reasoning is UNTRUSTED: it originates from an LLM (prompt-injectable)
+# and from scraped news headlines (attacker-controlled). It is rendered into the
+# always-present DOM, so an <img onerror> / <script> payload would execute on
+# page load and could same-origin POST to the approve endpoint. We therefore
+# sanitize before marking it safe. Two layers:
+#   1. Prefer nh3 (Rust ammonia bindings) if installed — a real HTML sanitizer.
+#   2. Fallback (no nh3 in the image yet): HTML-escape the source BEFORE markdown
+#      so any raw tag becomes inert text, then strip non-http(s)/mailto link
+#      schemes from generated anchors (kills javascript: URIs).
+try:
+    import nh3 as _nh3  # type: ignore
+except Exception:  # pragma: no cover - nh3 optional
+    _nh3 = None
+
 _MD = _markdown.Markdown(extensions=[
     'fenced_code', 'tables', 'sane_lists', 'nl2br', 'pymdownx.magiclink',
 ])
+
+_ALLOWED_URL_SCHEMES = ('http:', 'https:', 'mailto:')
+_ANCHOR_RE = re.compile(r'<a\b[^>]*\bhref\s*=\s*(["\'])(.*?)\1', re.IGNORECASE | re.DOTALL)
+
+
+def _neutralize_bad_hrefs(html: str) -> str:
+    """Replace anchors whose href is not an allowed scheme with inert text."""
+    def repl(m: re.Match) -> str:
+        href = (m.group(2) or '').strip().lower()
+        if href.startswith(_ALLOWED_URL_SCHEMES) or href.startswith(('/', '#')) or href.startswith('www.'):
+            return m.group(0)
+        # Drop the href entirely (leaves <a ...> with no navigation).
+        return '<a '
+    return _ANCHOR_RE.sub(repl, html)
 
 
 def _render_md(text: Any) -> str:
     if not text:
         return ''
-    _MD.reset()
-    html = _MD.convert(str(text))
+    if _nh3 is not None:
+        _MD.reset()
+        raw = _MD.convert(str(text))
+        html = _nh3.clean(
+            raw,
+            link_rel='noopener noreferrer nofollow',
+        )
+    else:
+        # Escape first so raw HTML tags can never be emitted; markdown syntax
+        # (*, _, [](), `) survives escaping untouched.
+        _MD.reset()
+        html = _MD.convert(_html.escape(str(text), quote=False))
+        html = _neutralize_bad_hrefs(html)
     # Reasoning links point at external references — open them in a new tab.
     return html.replace('<a href=', '<a target="_blank" rel="noopener noreferrer" href=')
 
@@ -63,6 +100,31 @@ def _preview(text: Any, n: int = 90) -> str:
 
 app = FastAPI(title='MMR Dashboard')
 _TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / 'templates'))
+
+# CSRF: a per-process token embedded as a hidden field in every approve/reject
+# form and verified on POST. This blocks the blind cross-origin / injected POST
+# that could otherwise place a live order (the endpoints have no other auth).
+# Even with reasoning now sanitized, defense-in-depth: a mutating endpoint that
+# places real orders must not be triggerable by a forged request.
+_CSRF_TOKEN = secrets.token_urlsafe(32)
+
+# Optional shared-secret gate for the whole dashboard. When MMR_WEB_TOKEN is set,
+# every request must present it (?token= or X-MMR-Token header). Unset ⇒ open,
+# relying on the compose 127.0.0.1-only port mapping (documented default).
+_ACCESS_TOKEN = os.environ.get('MMR_WEB_TOKEN', '').strip()
+
+
+def _check_access(request: Request) -> None:
+    if not _ACCESS_TOKEN:
+        return
+    supplied = request.headers.get('X-MMR-Token') or request.query_params.get('token') or ''
+    if not secrets.compare_digest(supplied, _ACCESS_TOKEN):
+        raise HTTPException(status_code=401, detail='unauthorized')
+
+
+def _check_csrf(token: str) -> None:
+    if not secrets.compare_digest(token or '', _CSRF_TOKEN):
+        raise HTTPException(status_code=403, detail='CSRF token mismatch')
 
 # States that count as "live / enabled" (mirrors strategy_runtime semantics).
 _ENABLED_STATES = {'RUNNING', 'WAITING_HISTORICAL_DATA', 'INSTALLED'}
@@ -183,6 +245,7 @@ def healthz():
 
 @app.get('/')
 def dashboard(request: Request, flash: str = ''):
+    _check_access(request)
     sections: dict[str, Any] = {}
     errors: dict[str, str] = {}
     fetchers: dict[str, Callable[[], Any]] = {
@@ -216,12 +279,15 @@ def dashboard(request: Request, flash: str = ''):
         'proposals': sections.get('proposals') or [],
         'errors': errors,
         'flash': flash,
+        'csrf_token': _CSRF_TOKEN,
     })
 
 
 @app.post('/proposals/{pid}/approve')
-def approve(pid: int):
+def approve(pid: int, request: Request, csrf_token: str = Form('')):
     """Approve a proposal — this PLACES A LIVE ORDER via trader_service."""
+    _check_access(request)
+    _check_csrf(csrf_token)
     try:
         result = _call(lambda m: m.approve(pid), retry=False)
         ok = getattr(result, 'success', None)
@@ -236,7 +302,9 @@ def approve(pid: int):
 
 
 @app.post('/proposals/{pid}/reject')
-def reject(pid: int, reason: str = Form('')):
+def reject(pid: int, request: Request, reason: str = Form(''), csrf_token: str = Form('')):
+    _check_access(request)
+    _check_csrf(csrf_token)
     try:
         ok = _call(lambda m: m.reject(pid, reason), retry=False)
         msg = f'#{pid} rejected' if ok else f'#{pid} not rejected (not pending?)'

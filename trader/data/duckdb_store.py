@@ -263,27 +263,37 @@ class DuckDBDataStore(DataStore):
         bar_sizes_being_written = list(write_df['bar_size'].dropna().unique())
 
         def _write(conn):
-            if bar_sizes_being_written:
-                for bs in bar_sizes_being_written:
+            # Wrap the DELETE + INSERT in a single transaction. Without this the
+            # DELETE autocommits, so a crash (or an INSERT failure) between the
+            # two leaves the old rows gone and the new rows never written —
+            # permanent, silent data loss for that symbol/range.
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                if bar_sizes_being_written:
+                    for bs in bar_sizes_being_written:
+                        conn.execute(
+                            f"DELETE FROM {self.TABLE_NAME} "
+                            f"WHERE symbol = ? AND date >= ? AND date <= ? AND bar_size = ?",
+                            [symbol, min_date, max_date, bs],
+                        )
+                else:
+                    # Caller didn't set bar_size on any row — fall back to the old
+                    # behavior (delete all bar_sizes in range). Should never happen
+                    # for proper TickData writes; preserved for safety.
                     conn.execute(
                         f"DELETE FROM {self.TABLE_NAME} "
-                        f"WHERE symbol = ? AND date >= ? AND date <= ? AND bar_size = ?",
-                        [symbol, min_date, max_date, bs],
+                        f"WHERE symbol = ? AND date >= ? AND date <= ?",
+                        [symbol, min_date, max_date],
                     )
-            else:
-                # Caller didn't set bar_size on any row — fall back to the old
-                # behavior (delete all bar_sizes in range). Should never happen
-                # for proper TickData writes; preserved for safety.
-                conn.execute(
-                    f"DELETE FROM {self.TABLE_NAME} "
-                    f"WHERE symbol = ? AND date >= ? AND date <= ?",
-                    [symbol, min_date, max_date],
-                )
-            conn.register('__write_df', write_df)
-            try:
-                conn.execute(f"INSERT INTO {self.TABLE_NAME} SELECT * FROM __write_df")
-            finally:
-                conn.unregister('__write_df')
+                conn.register('__write_df', write_df)
+                try:
+                    conn.execute(f"INSERT INTO {self.TABLE_NAME} SELECT * FROM __write_df")
+                finally:
+                    conn.unregister('__write_df')
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
         self._db.execute_atomic(_write)
 

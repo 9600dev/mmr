@@ -31,11 +31,12 @@ class Universe():
         return None
 
     def find_symbol(self, symbol: Union[int, str]) -> Optional[SecurityDefinition]:
+        # A str is ALWAYS a ticker, even a numeric one — HK/JP tickers like
+        # "0700" are symbols, not conIds. Only an int argument is a conId.
+        # (The old `isnumeric() → conId` branch misresolved numeric tickers, the
+        #  exact conId-vs-ticker confusion the precision principle warns about.)
         for definition in self.security_definitions:
-            if type(symbol) is str and cast(str, symbol).isnumeric():
-                if definition.conId == int(symbol):
-                    return definition
-            elif type(symbol) is str:
+            if isinstance(symbol, str):
                 if definition.symbol == symbol:
                     return definition
             else:

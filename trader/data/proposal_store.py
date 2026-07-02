@@ -175,7 +175,12 @@ class ProposalStore:
                 )
             current = row[0]
             if current == status:
-                return
+                # Per the docstring: same-status "transitions" are rejected, not
+                # silently absorbed. Silently passing here let a second concurrent
+                # approver re-mark PENDING→APPROVED as success and double-execute.
+                raise InvalidProposalTransition(
+                    f'proposal {id} is already {current!r}; refusing no-op transition'
+                )
             allowed = _ALLOWED_TRANSITIONS.get(current, set())
             if status not in allowed:
                 raise InvalidProposalTransition(
@@ -198,6 +203,44 @@ class ProposalStore:
             conn.execute(query, params)
 
         self.db.execute_atomic(_update)
+
+    def try_transition(self, id: int, from_status: str, to_status: str, **kwargs) -> bool:
+        """Atomically move a proposal from `from_status` to `to_status`.
+
+        Compare-and-swap: the UPDATE only matches a row still in `from_status`,
+        so exactly one of N concurrent callers wins. Returns True if this caller
+        performed the transition, False if the row was not in `from_status`
+        (already claimed, terminal, or missing). Use this — not get()+update_status
+        — whenever the transition guards a side effect like placing a live order.
+        """
+        if to_status not in _ALLOWED_TRANSITIONS and to_status not in _TERMINAL:
+            raise InvalidProposalTransition(f'unknown proposal status: {to_status!r}')
+        allowed = _ALLOWED_TRANSITIONS.get(from_status, set())
+        if to_status not in allowed:
+            raise InvalidProposalTransition(
+                f'cannot transition proposal {id} from {from_status!r} to {to_status!r}'
+            )
+
+        now = dt.datetime.now()
+
+        def _cas(conn):
+            sets = ["status = ?", "updated_at = ?"]
+            params: list = [to_status, now]
+            if 'order_ids' in kwargs:
+                sets.append("order_ids = ?")
+                params.append(json.dumps(kwargs['order_ids']))
+            if 'rejection_reason' in kwargs:
+                sets.append("rejection_reason = ?")
+                params.append(kwargs['rejection_reason'])
+            params.extend([id, from_status])
+            query = (
+                f"UPDATE trade_proposals SET {', '.join(sets)} "
+                f"WHERE id = ? AND status = ? RETURNING id"
+            )
+            return conn.execute(query, params).fetchall()
+
+        rows = self.db.execute_atomic(_cas)
+        return bool(rows)
 
     def get(self, id: int) -> Optional[TradeProposal]:
         rows = self.db.execute(

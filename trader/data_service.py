@@ -193,19 +193,33 @@ class DataService:
                 ))
 
                 def _ib_work():
-                    with IBHistoryWorker(
+                    # Connect AND fetch on the SAME event loop. The previous
+                    # code sync-connected via `with IBHistoryWorker(...)`
+                    # (__enter__ → sync connect, binding the IB socket to
+                    # ib_async's util loop) and then drove the request on a
+                    # separate asyncio.run() loop — so every request timed out
+                    # and the empty result was backfilled with NaN bars.
+                    worker = IBHistoryWorker(
                         self.ib_server_address,
                         self.ib_server_port,
                         ib_client_id,
-                    ) as worker:
-                        return asyncio.run(worker.get_contract_history(
-                            security=Universe.to_contract(security),
-                            what_to_show=WhatToShow.TRADES,
-                            start_date=dateify(date_range.start, timezone=security.timeZoneId, make_sod=True),
-                            end_date=dateify(date_range.end, timezone=security.timeZoneId, make_eod=True),
-                            bar_size=bar_size,
-                            filter_between_dates=True,
-                        ))
+                    )
+
+                    async def _run():
+                        try:
+                            await worker.connect_async()
+                            return await worker.get_contract_history(
+                                security=Universe.to_contract(security),
+                                what_to_show=WhatToShow.TRADES,
+                                start_date=dateify(date_range.start, timezone=security.timeZoneId, make_sod=True),
+                                end_date=dateify(date_range.end, timezone=security.timeZoneId, make_eod=True),
+                                bar_size=bar_size,
+                                filter_between_dates=True,
+                            )
+                        finally:
+                            worker.shutdown()
+
+                    return asyncio.run(_run())
 
                 df = await asyncio.to_thread(_ib_work)
 

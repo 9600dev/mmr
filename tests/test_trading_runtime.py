@@ -189,6 +189,9 @@ async def test_bracket_rolls_back_when_tp_fails(monkeypatch):
     class _Book:
         def get_orders(self):
             return []
+
+        def get_open_order_count(self):
+            return 0
     trader.book = _Book()
 
     from trader.trading.proposal import ExecutionSpec

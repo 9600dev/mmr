@@ -372,7 +372,13 @@ class Data():
 
     def read(self,
              contract: Union[Contract, SecurityDefinition, int],
-             date_range: DateRange = DateRange(dt.datetime(1970, 1, 1), dt.datetime.now())) -> pd.DataFrame:
+             date_range: Optional[DateRange] = None) -> pd.DataFrame:
+        # Construct the default fresh per call — a DateRange literal in the
+        # signature freezes dt.datetime.now() at import time, so in a long-lived
+        # process the upper bound would stop advancing and reads would silently
+        # miss recent bars.
+        if date_range is None:
+            date_range = DateRange(dt.datetime(1970, 1, 1), dt.datetime.now())
         result = self.library.read(self._to_symbol(contract), start=date_range.start, end=date_range.end)
         if result.empty:
             return pd.DataFrame()
@@ -425,7 +431,7 @@ class DictData(Data, Generic[T]):
 
     def read(self,
              contract: Union[Contract, SecurityDefinition, int],
-             date_range: DateRange = DateRange(dt.datetime(1970, 1, 1), dt.datetime.now())) -> Optional[T]:
+             date_range: Optional[DateRange] = None) -> Optional[T]:
         key = self.library_name + '/' + self._to_symbol(contract)
         return self.object_store.read(key)
 
@@ -504,13 +510,28 @@ class TickData(Data):
         # DuckDB store handles upserts natively, so overlapping data
         # is resolved automatically.  We merge with existing data to
         # maintain dedup semantics when merging overlapping data.
+
+        # A bar with no close is not a real observation. Never persist it and
+        # never let it overwrite a good bar — this is the defensive backstop for
+        # the "empty IB response persisted as NaN bars" poisoning path.
+        def _drop_empty_bars(df: pd.DataFrame) -> pd.DataFrame:
+            if 'close' in df.columns:
+                return cast(pd.DataFrame, df[df['close'].notna()])
+            return df
+
+        data_frame = _drop_empty_bars(data_frame)
         existing_data = self.read(contract)
         if existing_data.empty:
             self.write(contract, data_frame)
             return
+        if data_frame.empty:
+            return
 
+        # keep='last' so a freshly downloaded bar CORRECTS a previously stored
+        # one for the same timestamp, instead of the stale existing bar winning
+        # forever (the old keep='first' made re-downloads a no-op).
         temp_df = pd.concat([existing_data, data_frame])
-        result = cast(pd.DataFrame, temp_df[~temp_df.index.duplicated(keep='first')])
+        result = cast(pd.DataFrame, temp_df[~temp_df.index.duplicated(keep='last')])
         result.sort_index(inplace=True)
 
         # todo this probably shouldn't go here -- there's a bug upstream
@@ -523,7 +544,9 @@ class TickData(Data):
 
     def read(self,
              contract: Union[Contract, SecurityDefinition, int],
-             date_range: DateRange = DateRange(dt.datetime(1970, 1, 1), dt.datetime.now())) -> pd.DataFrame:
+             date_range: Optional[DateRange] = None) -> pd.DataFrame:
+        if date_range is None:
+            date_range = DateRange(dt.datetime(1970, 1, 1), dt.datetime.now())
         return self.get_data(contract, date_range=date_range)
 
     def get_date_range(self,
@@ -617,8 +640,16 @@ class TickData(Data):
         if len(df) == 0:
             dates = no_data_dates
         else:
-            # make sure we have all the trading days
-            dates = df.resample('D').first().index.date  # type: ignore
+            # Count only days that actually carry a (non-NaN) observation.
+            # The old `df.resample('D').first().index.date` fabricated an index
+            # entry for EVERY calendar day between min and max — so an interior
+            # gap (a missing trading day in the middle) looked "present" and was
+            # never re-fetched, silently leaving holes backtests then train on.
+            if 'close' in df.columns:
+                valid = df[df['close'].notna()]
+            else:
+                valid = df
+            dates = sorted(set(valid.index.date))  # type: ignore
             dates = list(dates) + no_data_dates
 
         # filter
@@ -694,8 +725,10 @@ class TickStorage():
     def read(
         self,
         contract: Union[Contract, SecurityDefinition, int],
-        date_range: DateRange = DateRange(dt.datetime(1970, 1, 1), dt.datetime.now())
+        date_range: Optional[DateRange] = None
     ) -> pd.DataFrame:
+        if date_range is None:
+            date_range = DateRange(dt.datetime(1970, 1, 1), dt.datetime.now())
         results = pd.DataFrame()
 
         for bar_size in self.list_libraries_barsize():

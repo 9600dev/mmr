@@ -2347,15 +2347,17 @@ class MMRHelpers:
             errors = []
             for entry in entries:
                 if entry.get("status") == "ok":
+                    # Defensive `or {}` at each level: a timed-out/failed child
+                    # can have result=None (or missing input), and the plain
+                    # .get("k", {}) chain then does None.get(...) → AttributeError,
+                    # crashing the whole parallel sweep.
                     summary = (
-                        entry.get("result", {})
-                             .get("data", {})
-                             .get("summary", {})
+                        ((entry.get("result") or {}).get("data") or {}).get("summary") or {}
                     )
                     leaderboard.append({
                         "run_id": summary.get("run_id"),
                         "params": summary.get("applied_params", {})
-                                   or entry["input"].get("params", {}),
+                                   or (entry.get("input") or {}).get("params", {}),
                         "total_return": summary.get("total_return"),
                         "sharpe_ratio": summary.get("sharpe_ratio"),
                         "sortino_ratio": summary.get("sortino_ratio"),
@@ -3003,7 +3005,21 @@ class MMRHelpers:
         Example:
         result = await MMRHelpers.approve(42)
         """
-        return await _run_cli("approve", str(proposal_id), timeout=30)
+        # approve places a LIVE order. The CLI's own RPC timeout (~30s) handles a
+        # slow trader_service by leaving the proposal APPROVED and printing an
+        # UNKNOWN/reconcile message. Give the subprocess extra headroom beyond
+        # that so it can finish and report, instead of being SIGKILLed mid-order
+        # at exactly the RPC timeout (which would look like a clean failure while
+        # the order may actually be live).
+        result = await _run_cli("approve", str(proposal_id), timeout=90)
+        if "timed out" in result.lower():
+            return (
+                f"UNKNOWN: approve #{proposal_id} did not return in time. The order "
+                f"MAY BE LIVE on the broker — do NOT re-approve. Reconcile with "
+                f"`orders` / `portfolio` and `proposals show {proposal_id}` before "
+                f"taking any further action.\n\n{result}"
+            )
+        return result
 
     @staticmethod
     async def reject(proposal_id: int, reason: str = "") -> str:
@@ -3627,5 +3643,8 @@ class MMRHelpers:
         result = await MMRHelpers.cli("universe list")
         result = await MMRHelpers.cli("resolve AAPL")
         """
-        args = command.split()
+        # shlex.split respects quotes so `propose AMD BUY --reasoning "a b c"`
+        # keeps "a b c" as one argument instead of being mangled into three.
+        import shlex
+        args = shlex.split(command)
         return await _run_cli(*args)

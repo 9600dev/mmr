@@ -315,7 +315,10 @@ def apply_filters(candidates: List[Dict], filters: ScanFilter,
                 continue
         if c['price'] < filters.min_price or c['price'] > filters.max_price:
             continue
-        if c['volume'] > 0 and c['volume'] < filters.min_volume:
+        # A zero-volume instrument is the MOST illiquid — it must be filtered by
+        # a min_volume liquidity gate, not exempted. The old `volume > 0` guard
+        # let zero/unknown-volume names slip straight through the filter.
+        if filters.min_volume > 0 and c['volume'] < filters.min_volume:
             continue
         if filters.min_change_pct is not None and c['change_pct'] < filters.min_change_pct:
             continue
@@ -604,8 +607,10 @@ class IdeaScanner:
             if not ticker or ticker in seen:
                 continue
             # Skip warrants, units, rights, preferred stocks
-            # (e.g. AEVAW, SRTAW, KKRpD, ACHR.U)
-            if any(ticker.endswith(s) for s in ('W', 'WS', '.U', '.R')):
+            # (e.g. AEVAW, SRTAW, KKRpD, ACHR.U). A bare trailing 'W' only counts
+            # as a warrant on a 5-char ticker (base+W) — otherwise legitimate
+            # names like SNOW, DOW, LOW, GEO were being silently dropped.
+            if ticker.endswith(('.WS', 'WS', '.U', '.R')) or (len(ticker) >= 5 and ticker.endswith('W')):
                 continue
             if 'p' in ticker and ticker != ticker.upper():
                 # Preferred stock: contains lowercase 'p' (e.g. KKRpD)
@@ -852,10 +857,10 @@ class IdeaScanner:
                             sentiment = getattr(i, 'sentiment', '') or ''
                             sentiment_reason = getattr(i, 'sentiment_reasoning', '') or ''
                             break
-                    # If no ticker-specific insight, take the first one
-                    if not sentiment and a.insights:
-                        sentiment = getattr(a.insights[0], 'sentiment', '') or ''
-                        sentiment_reason = getattr(a.insights[0], 'sentiment_reasoning', '') or ''
+                    # Deliberately NO fallback to a.insights[0]: that would attribute
+                    # ANOTHER ticker's sentiment (a co-mentioned symbol in the same
+                    # article) to this one — confidently-wrong data. If there's no
+                    # insight for this ticker, sentiment stays empty (unknown).
                 title = a.title or ''
                 # Truncate long titles
                 if len(title) > 120:
@@ -1078,6 +1083,13 @@ class IBIdeaScanner:
                 )
 
             # Build Contract objects from scanner results
+            # exchange_hint from the location code (e.g. STK.AU.ASX → ASX); it is
+            # referenced below but was only defined in _resolve_tickers, so the
+            # IB scanner-discovery path raised NameError. Derive it here too.
+            exchange_hint = ''
+            _loc_parts = (location or '').split('.')
+            if len(_loc_parts) >= 3:
+                exchange_hint = _loc_parts[2]
             contracts = []
             conid_map: Dict[str, int] = {}  # symbol → conId for news lookup
             for r in scanner_results:
@@ -1271,8 +1283,11 @@ class IBIdeaScanner:
                     )
                     contracts.append(c)
                     conid_map[c.symbol] = c.conId
-            except Exception:
-                logger.debug('Failed to resolve symbol: %s', sym)
+            except Exception as ex:
+                # WARNING, not DEBUG — a requested ticker silently vanishing from
+                # the scan (invisible at default log level) is exactly the kind of
+                # "confidently-wrong" gap the scanner should surface.
+                logger.warning('Failed to resolve symbol %s: %s', sym, ex)
         return contracts, conid_map
 
     @staticmethod

@@ -274,9 +274,11 @@
             {% if (p.status or '')|upper == 'PENDING' %}
               <form class="inline" method="post" action="/proposals/{{ p.id }}/approve"
                     onsubmit="return confirm('LIVE ORDER: approve proposal #{{ p.id }} ({{ p.action }} {{ p.symbol }} {{ p.size }})? This places a real order.');">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
                 <button class="approve" type="submit">Approve</button>
               </form>
               <form class="inline" method="post" action="/proposals/{{ p.id }}/reject">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
                 <input class="reason" name="reason" placeholder="reason" />
                 <button class="reject" type="submit">Reject</button>
               </form>

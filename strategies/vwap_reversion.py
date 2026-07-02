@@ -53,7 +53,16 @@ class VwapReversion(Strategy):
         # day, up to i]. No cross-day leakage.
         close = prices['close']
         volume = prices['volume']
-        day = prices.index.normalize() if prices.index.tz else prices.index.normalize()
+        # Reset the session VWAP on the US TRADING day, not the UTC calendar day.
+        # index.normalize() alone buckets by UTC midnight, which lands mid-session
+        # in ET — so the VWAP reset happened at the wrong bar and the intraday
+        # signal was computed against a bogus session boundary.
+        idx = prices.index
+        if idx.tz is not None:
+            local = idx.tz_convert('America/New_York')
+        else:
+            local = idx.tz_localize('UTC').tz_convert('America/New_York')
+        day = local.normalize()
         pv = close * volume
         cum_pv = pv.groupby(day).cumsum()
         cum_v = volume.groupby(day).cumsum()

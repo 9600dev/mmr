@@ -3,6 +3,7 @@
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional  # noqa: F401
 
+import logging
 import math
 
 
@@ -33,8 +34,12 @@ class RiskReport:
 class PortfolioRiskAnalyzer:
     """Analyzes portfolio risk: concentration, correlation, group budgets."""
 
-    def __init__(self, duckdb_path: str = ''):
+    def __init__(self, duckdb_path: str = '', history_duckdb_path: str = ''):
+        # duckdb_path holds universes (symbol → conId); OHLCV bars live in a
+        # SEPARATE history DB. Reading correlation history from the trading DB
+        # returned nothing. Default history to the trading DB for back-compat.
         self._duckdb_path = duckdb_path
+        self._history_duckdb_path = history_duckdb_path or duckdb_path
 
     def analyze(
         self,
@@ -176,8 +181,10 @@ class PortfolioRiskAnalyzer:
 
                 all_symbols = {p['symbol'] for p in pos_data}
                 report.ungrouped_symbols = sorted(all_symbols - grouped_symbols)
-            except Exception:
-                pass
+            except Exception as ex:
+                # Don't silently drop over-budget warnings — a group breach is a
+                # risk signal the operator needs to see.
+                logging.warning('group-budget analysis failed: %s', ex, exc_info=True)
 
         # Correlation analysis.
         # We pass signed_weights through so clusters can report combined NET
@@ -228,36 +235,50 @@ class PortfolioRiskAnalyzer:
             from trader.data.duckdb_store import DuckDBDataStore, DuckDBConnection
             from trader.data.universe import UniverseAccessor
 
-            ds = DuckDBDataStore(self._duckdb_path)
+            import datetime as _dt
 
-            # Look up conIds for each symbol from universe
-            accessor = UniverseAccessor(self._duckdb_path)
-            all_defs = accessor.all_definitions()
+            ds = DuckDBDataStore(self._history_duckdb_path)
+
+            # Look up conIds for each symbol from the universe definitions. The
+            # OHLCV store is keyed by conId-as-string (falling back to ticker),
+            # so we must resolve symbol → conId to read the right rows.
+            # (Previously this used a nonexistent UniverseAccessor arity and an
+            #  all_definitions() method that doesn't exist, plus a ds.read()
+            #  call with a bogus `count=` kwarg — all three raised and were
+            #  swallowed, so cluster warnings never fired.)
+            accessor = UniverseAccessor(self._duckdb_path, '')
             symbol_to_conid = {}
-            for d in all_defs:
-                if hasattr(d, 'symbol') and hasattr(d, 'conId'):
-                    symbol_to_conid[d.symbol] = d.conId
+            for u in accessor.get_all():
+                for sd in getattr(u, 'security_definitions', []) or []:
+                    sym = getattr(sd, 'symbol', None)
+                    conid = getattr(sd, 'conId', None)
+                    if sym and conid:
+                        symbol_to_conid.setdefault(sym, conid)
 
-            # Read 60 days of daily closes for each symbol
+            # Read ~60 trading days of daily closes for each symbol.
+            start = _dt.datetime.now() - _dt.timedelta(days=90)
             close_series = {}
             for sym in symbols:
                 con_id = symbol_to_conid.get(sym)
-                if con_id is None:
-                    continue
-                hist = ds.read(con_id, '1 day', count=60)
+                key = str(con_id) if con_id is not None else sym
+                hist = ds.read(key, start=start, bar_size='1 day')
                 if hist is not None and not hist.empty and 'close' in hist.columns:
-                    close_series[sym] = hist['close']
+                    close_series[sym] = hist['close'].tail(60)
 
             data_coverage = len(close_series)
             if data_coverage < 2:
                 return [], data_coverage
 
-            # Build DataFrame and compute correlation
+            # Build DataFrame and correlate on daily RETURNS, not raw price
+            # levels. Two unrelated stocks that both drift upward show high
+            # price-level correlation (a spurious cluster); return correlation is
+            # the meaningful co-movement measure for risk clustering.
             df = pd.DataFrame(close_series).dropna()
-            if len(df) < 10:
+            returns = df.pct_change().dropna()
+            if len(returns) < 10:
                 return [], data_coverage
 
-            corr = df.corr()
+            corr = returns.corr()
 
             # Greedy agglomeration: cluster symbols with pairwise corr > 0.7
             clustered = set()
@@ -299,7 +320,11 @@ class PortfolioRiskAnalyzer:
 
             return clusters, data_coverage
 
-        except Exception:
+        except Exception as ex:
+            # Correlation clustering is advisory — degrade gracefully, but log so
+            # a genuine breakage (like the API-signature bugs this replaced) is
+            # visible instead of silently disabling all cluster warnings.
+            logging.warning('correlation clustering failed: %s', ex, exc_info=True)
             return [], 0
 
     def _generate_summary(self, report: RiskReport) -> str:

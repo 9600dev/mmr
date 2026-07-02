@@ -2567,8 +2567,11 @@ def _handle_reject(mmr: MMR, args: argparse.Namespace):
             print_status('No pending proposals to reject')
             return
         for p in pending:
-            mmr.reject(p.id, reason=args.reason)
-            print_status(f'Proposal #{p.id} rejected')
+            if mmr.reject(p.id, reason=args.reason):
+                print_status(f'Proposal #{p.id} rejected')
+            else:
+                print_status(f'Proposal #{p.id} could not be rejected (no longer pending?)',
+                             success=False)
         return
 
     if args.proposal_id is None:
@@ -2592,7 +2595,10 @@ def _handle_group(mmr: MMR, args: argparse.Namespace):
         return
 
     if action == 'create':
-        budget = args.budget / 100.0 if args.budget > 1 else args.budget
+        # --budget is a PERCENTAGE (documented: `--budget 20` = 20%). Always
+        # divide by 100 — the old `> 1` heuristic turned `--budget 1` into 100%
+        # and `--budget 0.5` into 50%, a 100x error on tight budgets.
+        budget = args.budget / 100.0
         try:
             gs.create_group(args.name, description=args.description, max_allocation_pct=budget)
             if budget >= 0.01:
@@ -2649,7 +2655,8 @@ def _handle_group(mmr: MMR, args: argparse.Namespace):
     elif action == 'set':
         budget = None
         if args.budget is not None:
-            budget = args.budget / 100.0 if args.budget > 1 else args.budget
+            # Percentage semantics — always /100 (see `create` above).
+            budget = args.budget / 100.0
         if gs.update_group(args.name, description=args.description, max_allocation_pct=budget):
             print_status(f'Group "{args.name}" updated')
         else:
@@ -2771,14 +2778,22 @@ def _handle_close(mmr: MMR, args: argparse.Namespace):
         if not match.empty:
             con_id = int(match.iloc[0]['conId'])
 
-    close_qty = args.quantity if args.quantity else abs(pos_size)
+    close_qty = abs(args.quantity) if args.quantity else abs(pos_size)
+    # Never close more than we hold — an oversized close would flip the position
+    # into an equal-and-opposite one at market rather than flattening it.
+    if close_qty > abs(pos_size):
+        console.print(
+            f'[yellow]{symbol}: requested {close_qty} exceeds position '
+            f'{abs(pos_size)}; clamping to {abs(pos_size)} to avoid flipping the '
+            f'position.[/yellow]')
+        close_qty = abs(pos_size)
 
     confirm = input(f'Close #{row}: {symbol} ({close_qty} shares) at market? [y/N] ')
     if confirm.lower() != 'y':
         console.print('[dim]Cancelled[/dim]')
         return
 
-    result = mmr.close_position(symbol, quantity=args.quantity, con_id=con_id,
+    result = mmr.close_position(symbol, quantity=close_qty, con_id=con_id,
                                 _pos_size=pos_size)
     if result.is_success():
         console.print(f'[green]Close {symbol}: submitted[/green]')
@@ -3623,7 +3638,11 @@ def _handle_strategies_available(args: argparse.Namespace):
         # Resolve relative to project root (walk up from this file)
         cur = Path(__file__).resolve().parent
         while cur != cur.parent:
-            if (cur / 'configs' / 'trader.yaml').exists():
+            # pyproject.toml is the unambiguous project-root marker. The old probe
+            # looked for 'configs/trader.yaml', a path that doesn't exist (the
+            # project uses config_defaults/), so the root was never found and the
+            # strategies dir never resolved.
+            if (cur / 'pyproject.toml').exists():
                 strategies_dir = cur / strategies_dir
                 break
             cur = cur.parent
@@ -4972,7 +4991,10 @@ def _compute_bt_stats(record):
     # Sharpe bootstrap CI is on the same scale as the stored sharpe_ratio.
     try:
         from trader.objects import BarSize
-        bar_size_enum = BarSize(record.bar_size) if record.bar_size else BarSize.Days1
+        # bar_size is persisted as the display string ('1 min', '1 day'). BarSize
+        # is an IntEnum, so BarSize('1 min') ALWAYS raises — the annualisation was
+        # silently pinned to 252 for every run. parse_str is the correct decoder.
+        bar_size_enum = BarSize.parse_str(record.bar_size) if record.bar_size else BarSize.Days1
         bars_per_year = Backtester._bars_per_year(bar_size_enum)
     except Exception:
         bars_per_year = 252.0
@@ -7300,6 +7322,13 @@ def _handle_data_download(args: argparse.Namespace):
             ib_server_port=ib_port,
             ib_client_id=client_id,
         )
+        # One persistent event loop for the worker's whole lifetime. The IB
+        # connection (socket + reader tasks) binds to the loop it first connects
+        # on; calling asyncio.run() per fetch would create a fresh loop each time
+        # and every request after the first would silently time out — and a timed
+        # out request gets backfilled with NaN bars. Drive all fetches on this
+        # single loop instead.
+        _ib_loop = asyncio.new_event_loop()
 
     # If trader_service is reachable, fall back to it for symbols that aren't
     # in the local universe so rows end up conId-keyed (instead of strings
@@ -7429,7 +7458,7 @@ def _handle_data_download(args: argparse.Namespace):
                             return x if x.tzinfo else x.replace(tzinfo=dt.timezone.utc)
                         # dt.date or anything else with year/month/day
                         return dt.datetime(x.year, x.month, x.day, tzinfo=dt.timezone.utc)
-                    df = asyncio.run(worker.get_contract_history(
+                    df = _ib_loop.run_until_complete(worker.get_contract_history(
                         security=sec_def,
                         what_to_show=WhatToShow.TRADES,
                         bar_size=bar_size,
@@ -7475,6 +7504,10 @@ def _handle_data_download(args: argparse.Namespace):
             worker.shutdown()
         except Exception:
             pass
+        try:
+            _ib_loop.close()
+        except Exception:
+            pass
 
     if _json_mode:
         print(json.dumps({
@@ -7492,6 +7525,15 @@ def _handle_data_download(args: argparse.Namespace):
             f'{skipped_up_to_date} already current, {failed} failed, '
             f'{total_rows_written:,} rows written'
         )
+
+    # Return a summary so batch callers (data refresh) can tell whether the job
+    # actually succeeded instead of assuming success.
+    return {
+        'completed': completed,
+        'skipped_up_to_date': skipped_up_to_date,
+        'failed': failed,
+        'rows_written': total_rows_written,
+    }
 
 
 def _handle_data_migrate_symbols(args: argparse.Namespace):
@@ -7721,11 +7763,19 @@ def _handle_data_refresh(args: argparse.Namespace):
             saved_json_mode = _json_mode
             _json_mode = False
             try:
-                _handle_data_download(dl_args)
-                results.append({'job': job_name, 'success': True,
+                summary = _handle_data_download(dl_args) or {}
+                # A job is only successful if nothing failed. Previously every
+                # job was marked success=True even when every symbol failed,
+                # so a stale universe looked fresh — a fail-loudly violation
+                # that could lead to trading on stale data.
+                dl_failed = int(summary.get('failed', 0))
+                job_ok = dl_failed == 0
+                results.append({'job': job_name, 'success': job_ok,
                                 'universe': universe_name, 'source': source,
                                 'symbols': len(symbols), 'bar_size': bar_size,
-                                'days': days})
+                                'days': days, 'downloaded': summary.get('completed', 0),
+                                'failed_symbols': dl_failed,
+                                **({} if job_ok else {'error': f'{dl_failed} symbol(s) failed to download'})})
             finally:
                 _json_mode = saved_json_mode
         except Exception as ex:

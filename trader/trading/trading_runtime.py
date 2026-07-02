@@ -283,6 +283,15 @@ class Trader():
         except KeyboardInterrupt:
             logging.info('connect() interrupted, shutting down')
             raise
+        except (ConnectionRefusedError, TimeoutError):
+            # Propagate un-wrapped so the @backoff.on_exception decorator on
+            # connect() actually retries them. The old blanket `except Exception`
+            # rewrapped these as TraderConnectionException, which backoff doesn't
+            # match — so the retry decorator was dead code.
+            raise
+        except AccountNotPinnedError:
+            # Fatal safety refusal — must never be retried or wrapped.
+            raise
         except Exception as ex:
             raise trader_exception(self, TraderConnectionException, message='trading_runtime connect() exception', inner=ex)
 
@@ -927,7 +936,7 @@ class Trader():
             if not leverage_result.approved:
                 return SuccessFail.fail(error=leverage_result.reason)
 
-        # 3. Risk gate checks (open orders, daily loss)
+        # 3. Risk gate checks (open orders, daily loss, concentration)
         if getattr(self, 'risk_gate', None) is not None:
             from trader.trading.strategy import Signal
             signal = Signal(
@@ -936,9 +945,54 @@ class Trader():
                 probability=1.0,
                 risk=0.0,
             )
+
+            # Count only *working* orders, not every order ever booked — else the
+            # limit trips permanently mid-session and blocks all trading.
+            open_order_count = (
+                self.book.get_open_order_count() if hasattr(self, 'book') else 0
+            )
+
+            # Feed the daily-loss and concentration limits the state they need —
+            # previously only open_order_count was passed, so those two limits were
+            # dead code. Best-effort; on any read failure they degrade to 0 (skip)
+            # rather than blocking the order.
+            daily_pnl = 0.0
+            try:
+                for p in (self.get_pnl() or []):
+                    daily_pnl += float(getattr(p, 'dailyPnL', 0.0) or 0.0)
+            except Exception as ex:
+                logging.warning('risk gate: could not read daily PnL: %s', ex)
+
+            portfolio_value = 0.0
+            try:
+                active_account = self.ib_account or (
+                    (self.client.ib.managedAccounts() or [None])[0])
+                for v in self.client.ib.accountValues():
+                    if v.tag != 'NetLiquidation' or v.currency == 'BASE':
+                        continue
+                    if active_account and v.account and v.account != active_account:
+                        continue
+                    portfolio_value = float(v.value)
+                    break
+            except Exception as ex:
+                logging.warning('risk gate: could not read NetLiquidation: %s', ex)
+
+            # Position notional is only reliable without a price fetch for LIMIT
+            # orders; for market orders leave it 0 (concentration check skipped)
+            # rather than guessing and false-blocking.
+            position_value = 0.0
+            if spec.order_type != 'MARKET' and spec.limit_price:
+                try:
+                    position_value = abs(float(quantity) * float(spec.limit_price))
+                except (TypeError, ValueError):
+                    position_value = 0.0
+
             gate_result = self.risk_gate.evaluate(
                 signal=signal,
-                open_order_count=len(self.book.get_orders()) if hasattr(self, 'book') else 0,
+                open_order_count=open_order_count,
+                daily_pnl=daily_pnl,
+                portfolio_value=portfolio_value,
+                position_value=position_value,
             )
             if not gate_result.approved:
                 return SuccessFail.fail(error=f'Risk gate: {gate_result.reason}')
@@ -1079,8 +1133,16 @@ class Trader():
                 trail_obs = await self.executioner.subscribe_place_order_direct(contract, trail)
                 trail_obs.subscribe(Observer(on_next=on_trail, on_error=lambda e: trail_task.set(), on_completed=lambda: None))
                 await trail_task.wait()
-                if trail_trade:
-                    trades.append(trail_trade)
+                if trail_trade is None:
+                    # All-or-nothing: the trailing stop is what transmits the
+                    # staged (transmit=False) entry. If it failed, roll back the
+                    # entry so we don't leave a zombie staged order and, crucially,
+                    # don't report success for an unprotected/undelivered order.
+                    _cancel_trade_safely(entry_trade)
+                    return SuccessFail.fail(
+                        error='Trailing-stop aborted: protective leg rejected; entry rolled back'
+                    )
+                trades.append(trail_trade)
 
             elif spec.exit_type == 'STOP_LOSS':
                 entry = _build_entry(**common)
@@ -1126,8 +1188,15 @@ class Trader():
                 sl_obs = await self.executioner.subscribe_place_order_direct(contract, sl)
                 sl_obs.subscribe(Observer(on_next=on_sl_only, on_error=lambda e: sl_task.set(), on_completed=lambda: None))
                 await sl_task.wait()
-                if sl_trade:
-                    trades.append(sl_trade)
+                if sl_trade is None:
+                    # All-or-nothing: the stop-loss transmits the staged
+                    # (transmit=False) entry. If it failed, roll back the entry
+                    # rather than returning success for an unprotected order.
+                    _cancel_trade_safely(entry_trade)
+                    return SuccessFail.fail(
+                        error='Stop-loss aborted: protective leg rejected; entry rolled back'
+                    )
+                trades.append(sl_trade)
 
             else:
                 # NONE — simple entry only
@@ -1145,8 +1214,9 @@ class Trader():
                 observable = await self.executioner.subscribe_place_order_direct(contract, entry)
                 observable.subscribe(Observer(on_next=on_entry_simple, on_error=lambda e: task.set(), on_completed=lambda: None))
                 await task.wait()
-                if entry_trade:
-                    trades.append(entry_trade)
+                if entry_trade is None:
+                    return SuccessFail.fail(error='Failed to place entry order')
+                trades.append(entry_trade)
 
             return SuccessFail.success(obj=trades)
 

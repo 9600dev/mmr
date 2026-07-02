@@ -117,8 +117,12 @@ class PositionSizingConfig:
                 spread_penalty_threshold=float(data.get('spread_penalty_threshold', 0.005)),
                 spread_penalty_factor=float(data.get('spread_penalty_factor', 0.5)),
             )
-        except Exception:
-            return PositionSizingConfig()
+        except Exception as ex:
+            # A config that EXISTS but won't parse is an operator error. Silently
+            # falling back to built-in defaults would size positions against
+            # limits the operator never chose (e.g. a much larger base size).
+            raise ValueError(
+                f'failed to parse position sizing config {filepath}: {ex}') from ex
 
     def save(self, path: Optional[str] = None) -> None:
         """Save to YAML file."""

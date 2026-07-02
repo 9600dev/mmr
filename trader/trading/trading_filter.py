@@ -10,6 +10,15 @@ import yaml
 _DEFAULT_CONFIG_NAME = 'trading_filters.yaml'
 
 
+class TradingFilterError(Exception):
+    """Raised when a trading-filter config exists but cannot be parsed.
+
+    We fail loudly rather than degrade to an empty allow-everything filter — a
+    silently-dropped denylist would let orders through that the operator
+    explicitly meant to block.
+    """
+
+
 def _default_path() -> Path:
     from trader.container import ensure_config_dir
     return ensure_config_dir() / _DEFAULT_CONFIG_NAME
@@ -98,11 +107,17 @@ class TradingFilter:
     def load(path: Optional[str] = None) -> 'TradingFilter':
         """Load from YAML file. Returns default if file doesn't exist."""
         filepath = Path(path) if path else _default_path()
+        # A missing file legitimately means "no filter configured" → default.
         if not filepath.exists():
             return TradingFilter.default()
+        # A file that EXISTS but won't parse is an operator error, not an
+        # invitation to trade with no denylist. Fail loudly.
         try:
             with open(filepath) as f:
                 data = yaml.safe_load(f) or {}
+            if not isinstance(data, dict):
+                raise TradingFilterError(
+                    f'{filepath}: expected a mapping, got {type(data).__name__}')
             return TradingFilter(
                 denylist=data.get('denylist') or [],
                 allowlist=data.get('allowlist') or [],
@@ -114,8 +129,11 @@ class TradingFilter:
                 deny_locations=data.get('deny_locations') or [],
                 min_price=float(data.get('min_price', 0.0)),
             )
-        except Exception:
-            return TradingFilter.default()
+        except TradingFilterError:
+            raise
+        except Exception as ex:
+            raise TradingFilterError(
+                f'failed to parse trading filter {filepath}: {ex}') from ex
 
     def save(self, path: Optional[str] = None) -> None:
         """Save to YAML file."""

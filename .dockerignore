@@ -1,6 +1,14 @@
 # ignore .git and .cache folders
 .git
 .cache
+# Secrets: docker-compose loads .env at runtime via `env_file`, so it must NOT
+# be baked into the image (image layers are shippable and would leak live IB
+# credentials). Keep the example template for reference.
+.env
+.env.*
+!.env.example
+secrets.env
+*.secrets
 .venv
 .devcontainer
 .vscode

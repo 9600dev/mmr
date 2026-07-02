@@ -348,20 +348,19 @@ def _reconstruct_rpc_exception(
 
 
 class _SyncMethodCall:
-    __slots__ = ('_socket', '_lock', '_timeout', '_names', '_return_type', '_error_table')
+    __slots__ = ('_client', '_timeout', '_names', '_return_type', '_error_table')
 
-    def __init__(self, socket, lock, timeout=None, names=(),
+    def __init__(self, client, timeout=None, names=(),
                  return_type: Optional[Type] = None,
                  error_table: Optional[Dict[str, type]] = None):
-        self._socket = socket
-        self._lock = lock
+        self._client = client
         self._timeout = timeout
         self._names = names
         self._return_type = return_type
         self._error_table = error_table
 
     def __getattr__(self, name):
-        return _SyncMethodCall(self._socket, self._lock, self._timeout,
+        return _SyncMethodCall(self._client, self._timeout,
                                self._names + (name,), self._return_type,
                                self._error_table)
 
@@ -376,28 +375,60 @@ class _SyncMethodCall:
             'kwargs': kwargs,
             'req_id': req_id,
         }
+        method_str = '.'.join(self._names)
 
-        with self._lock:
-            self._socket.send(pack(request))
-            # Server sends multipart [empty_delimiter, payload] via ROUTER→DEALER.
-            # Poll in short intervals so Ctrl+C can interrupt instead of
-            # blocking for the full RCVTIMEO duration inside C code.
+        # The DEALER socket is shared across all calls on this client and the
+        # lock serializes them. Two failure modes are guarded here:
+        #   1. On timeout we DROP AND RECREATE the socket (new ZMQ identity)
+        #      so the in-flight request cannot be redelivered later when the
+        #      server reconnects, and so any late reply is routed to the dead
+        #      identity and discarded by ZMQ. Without this a "failed" order can
+        #      silently fire when trader_service comes back.
+        #   2. We match every received reply's req_id against the one we sent,
+        #      discarding stale frames left over from a prior timed-out call.
+        #      Without this one timeout desyncs the request/reply stream forever
+        #      (each call returns the *previous* call's result).
+        with self._client._lock:
+            socket = self._client._require_socket()
+            try:
+                socket.send(pack(request))
+            except zmq.Again:
+                # IMMEDIATE=1 means an un-connected DEALER refuses to queue —
+                # surface "server unreachable" loudly instead of buffering an order.
+                self._client._reset_socket()
+                raise ConnectionError(
+                    f'RPC call to {method_str} could not be sent: no route to server')
+
             poller = zmq.Poller()
-            poller.register(self._socket, zmq.POLLIN)
+            poller.register(socket, zmq.POLLIN)
             timeout_ms = (self._timeout or 10) * 1000
+            deadline = timeout_ms
             elapsed = 0
             poll_interval = 250  # ms
-            while elapsed < timeout_ms:
+            response = None
+            while elapsed < deadline:
                 ready = poller.poll(poll_interval)
-                if ready:
-                    break
-                elapsed += poll_interval
-            else:
-                raise TimeoutError(f'RPC call to {".".join(self._names)} timed out after {timeout_ms}ms')
-            frames = self._socket.recv_multipart(zmq.NOBLOCK)
-            response_data = frames[-1]
-
-        response = unpack(response_data)
+                if not ready:
+                    elapsed += poll_interval
+                    continue
+                frames = socket.recv_multipart(zmq.NOBLOCK)
+                candidate = unpack(frames[-1])
+                if candidate.get('req_id') != req_id:
+                    # Stale reply from an earlier timed-out call. Discard and
+                    # keep waiting for OUR reply within the remaining budget.
+                    logging.warning(
+                        f'RPC {method_str}: discarding stale reply '
+                        f'{candidate.get("req_id")!r} (awaiting {req_id!r})')
+                    elapsed += poll_interval
+                    continue
+                response = candidate
+                break
+            if response is None:
+                # Drop the poisoned pipe: prevents late redelivery of this
+                # request and clears any buffered mismatched replies.
+                self._client._reset_socket()
+                raise TimeoutError(
+                    f'RPC call to {method_str} timed out after {timeout_ms}ms')
 
         if response.get('error'):
             exc_type = response.get('exc_type', 'Exception')
@@ -469,12 +500,19 @@ class RPCServer(Generic[T]):
             args = tuple(args)
 
         try:
-            # Navigate dotted method names
-            obj = self.instance
-            for part in method_name.split('.'):
-                obj = getattr(obj, part)
+            # Resolve ONLY a single-segment method registered with @rpcmethod on
+            # the API instance. Dotted traversal (e.g. trader.place_order_simple,
+            # trader.client.ib.reqGlobalCancel) is refused — otherwise any local
+            # client could walk the whole object graph and place live orders,
+            # bypassing the proposal-approval gate that lives on the API wrapper.
+            if '.' in method_name or method_name.startswith('_'):
+                raise AttributeError(f'RPC method {method_name!r} is not permitted')
+            method = getattr(self.instance, method_name, None)
+            if method is None or not getattr(method, '_is_rpc_method', False):
+                raise AttributeError(
+                    f'RPC method {method_name!r} is not a registered @rpcmethod endpoint')
 
-            result = obj(*args, **kwargs)
+            result = method(*args, **kwargs)
             if asyncio.iscoroutine(result):
                 result = await result
 
@@ -523,19 +561,55 @@ class RPCClient(Generic[T]):
         self._lock = threading.Lock()
         self.error_table = error_table
 
+    def _configure_socket(self, socket):
+        # LINGER=0: closing the socket immediately discards any queued request
+        #   instead of leaking it for later redelivery (see _SyncMethodCall).
+        # IMMEDIATE=1: never queue a send to a peer that has no live connection —
+        #   an order to a down trader_service fails loudly rather than firing later.
+        socket.setsockopt(zmq.LINGER, 0)
+        socket.setsockopt(zmq.IMMEDIATE, 1)
+        if self.timeout:
+            socket.setsockopt(zmq.RCVTIMEO, self.timeout * 1000)
+            socket.setsockopt(zmq.SNDTIMEO, self.timeout * 1000)
+
     async def connect(self, loop=None):
         logging.debug('trying RPCClient.connect()')
         self.socket = self.ctx.socket(zmq.DEALER)
+        self._configure_socket(self.socket)
         self.socket.connect(self.address)
-        if self.timeout:
-            self.socket.setsockopt(zmq.RCVTIMEO, self.timeout * 1000)
-            self.socket.setsockopt(zmq.SNDTIMEO, self.timeout * 1000)
         self.is_setup = True
+
+    def _require_socket(self):
+        if not (self.socket and self.is_setup):
+            raise ConnectionError('not connected')
+        return self.socket
+
+    def _reset_socket(self):
+        """Drop and recreate the DEALER socket with a fresh ZMQ identity.
+
+        Called after a timeout/send failure so a stale in-flight request cannot
+        be redelivered on reconnect and buffered mismatched replies are cleared.
+        Must be called while holding self._lock.
+        """
+        old = self.socket
+        self.socket = None
+        if old is not None:
+            try:
+                old.close(linger=0)
+            except Exception:
+                pass
+        try:
+            self.socket = self.ctx.socket(zmq.DEALER)
+            self._configure_socket(self.socket)
+            self.socket.connect(self.address)
+        except Exception:
+            self.is_setup = False
+            raise
 
     def rpc(self, return_type: Optional[Type] = None) -> T:
         if self.socket and self.is_setup:
             return _SyncMethodCall(
-                self.socket, self._lock, self.timeout,
+                self, self.timeout,
                 return_type=return_type,
                 error_table=self.error_table,
             )  # type: ignore
@@ -545,7 +619,7 @@ class RPCClient(Generic[T]):
     def arpc(self, return_type: Optional[Type] = None) -> T:
         if self.socket and self.is_setup:
             return _SyncMethodCall(
-                self.socket, self._lock, self.timeout,
+                self, self.timeout,
                 return_type=return_type,
                 error_table=self.error_table,
             )  # type: ignore

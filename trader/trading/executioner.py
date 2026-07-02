@@ -93,12 +93,21 @@ class TradeExecutioner():
 
         try:
             observable = await self.trader.client.subscribe_place_order(contract, order)
-            self._log_event(EventType.ORDER_SUBMITTED, contract, order)
-            return observable.pipe(
-                ops.catch(lambda ex, src: trader_exception_helper(ex))
-            )
         except Exception as ex:
             return trader_exception_helper(ex)
+
+        # The order is now LIVE at IB. Event-store logging must NEVER be able to
+        # turn a successful placement into a reported failure — a caller that
+        # sees failure may retry and place a duplicate order. Isolate it.
+        try:
+            self._log_event(EventType.ORDER_SUBMITTED, contract, order)
+        except Exception as ex:
+            logging.error(
+                'order placed but ORDER_SUBMITTED event-store append failed '
+                '(order IS live, not retrying): %s', ex)
+        return observable.pipe(
+            ops.catch(lambda ex, src: trader_exception_helper(ex))
+        )
 
     async def place_order(
         self,
@@ -136,7 +145,7 @@ class TradeExecutioner():
             )
             result = self.trader.risk_gate.evaluate(
                 signal=signal,
-                open_order_count=len(self.trader.book.get_orders()) if hasattr(self.trader, 'book') else 0,
+                open_order_count=self.trader.book.get_open_order_count() if hasattr(self.trader, 'book') else 0,
             )
             if not result.approved:
                 self._log_event(EventType.RISK_GATE_REJECTED, contract_order.contract, contract_order.order)
@@ -237,39 +246,31 @@ class TradeExecutioner():
         if debug and action == Action.SELL:
             order_price = round(order_price * 1.1, ndigits=2)
 
-        stop_loss_price = 0.0
-
-        # calculate stop_loss
+        # This single-order helper cannot express "enter now + attach a
+        # protective stop" — it builds ONE order. The old code, when asked for a
+        # market order WITH a stop loss, made a bare StopOrder the *entry*: the
+        # stop-loss level became the trigger to open the position (a stop-entry),
+        # so the position had no protection and, for a BUY, a stop below market
+        # fires immediately. That is a wrong-direction trade. Refuse loudly and
+        # point at the path that does protection correctly (propose / bracket).
         if stop_loss_percentage > 0.0:
-            stop_loss_price = round(order_price - order_price * stop_loss_percentage, ndigits=2)
+            raise ValueError(
+                'stop-loss protection is not supported on the simple order path — '
+                'it would be placed as the entry trigger (wrong). Use `mmr propose ... '
+                '--stop-loss <price>` / place_expressive_order (bracket) for a '
+                'protected order.'
+            )
 
         order: Order = Order()
 
-        if market_order and stop_loss_price > 0:
-            order = StopOrder(
-                action=str(action),
-                totalQuantity=cast(float, quantity),
-                stopPrice=stop_loss_price,
-                orderRef=algo_name,
-                account=self.trader.ib_account,
-            )
-        elif market_order and stop_loss_price == 0.0:
+        if market_order:
             order = MarketOrder(
                 action=str(action),
                 totalQuantity=cast(float, quantity),
                 orderRef=algo_name,
                 account=self.trader.ib_account,
             )
-        if not market_order and stop_loss_price > 0:
-            order = StopLimitOrder(
-                action=str(action),
-                totalQuantity=cast(float, quantity),
-                lmtPrice=order_price,
-                stopPrice=stop_loss_price,
-                orderRef=algo_name,
-                account=self.trader.ib_account,
-            )
-        elif not market_order and stop_loss_price == 0.0:
+        else:
             order = LimitOrder(
                 action=str(action),
                 totalQuantity=cast(float, quantity),

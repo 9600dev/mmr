@@ -94,7 +94,17 @@ class TraderServiceApi(RPCHandler):
         # changes as orders get hit etc
         logging.warn('place_order_simple() is not complete, your mileage may vary')
         from trader.trading.trading_runtime import Action
-        act = Action.BUY if 'BUY' in action else Action.SELL
+        # Strict: any string not literally BUY/SELL must be refused, not silently
+        # coerced. The old `'BUY' in action else SELL` turned a typo like 'BYU'
+        # (or lowercase 'buy') into a live SELL.
+        _a = str(action).strip().upper()
+        if _a == 'BUY':
+            act = Action.BUY
+        elif _a == 'SELL':
+            act = Action.SELL
+        else:
+            return SuccessFail.fail(
+                error=f'invalid action {action!r}: expected "BUY" or "SELL"')
 
         task = asyncio.Event()
         disposable: DisposableBase = Disposable()

@@ -586,6 +586,7 @@ class Backtester:
         # expectancy_bps below.
         avg_entry: Dict[int, float] = {}   # conid -> weighted avg entry price
         avg_qty: Dict[int, float] = {}     # conid -> total held quantity
+        avg_buy_comm: Dict[int, float] = {}  # conid -> weighted buy commission PER SHARE
         winning_trades = 0
         sell_trades = 0
         round_trip_pnl: List[float] = []           # dollar P&L per SELL
@@ -594,17 +595,22 @@ class Backtester:
             if trade.action == Action.BUY:
                 prev_qty = avg_qty.get(trade.conid, 0.0)
                 prev_cost = avg_entry.get(trade.conid, 0.0) * prev_qty
+                prev_comm = avg_buy_comm.get(trade.conid, 0.0) * prev_qty
                 new_qty = prev_qty + trade.quantity
                 if new_qty > 0:
                     avg_entry[trade.conid] = (prev_cost + trade.price * trade.quantity) / new_qty
                     avg_qty[trade.conid] = new_qty
+                    # Carry buy-side commission as a per-share figure so a later
+                    # partial sell can attribute its share of entry cost.
+                    avg_buy_comm[trade.conid] = (prev_comm + trade.commission) / new_qty
             elif trade.action == Action.SELL:
                 sell_trades += 1
                 entry_price = avg_entry.get(trade.conid, 0.0)
-                # Round-trip P&L and return-on-notional for this SELL. Commission
-                # was already deducted from the equity curve at fill time; we
-                # subtract the sell-side commission here for a trade-level view.
-                pnl = (trade.price - entry_price) * trade.quantity - trade.commission
+                # Round-trip P&L: subtract BOTH sides' commissions. The old code
+                # only netted the sell-side commission, overstating expectancy,
+                # profit factor and win rate (the buy-side fee was ignored).
+                buy_comm_alloc = avg_buy_comm.get(trade.conid, 0.0) * trade.quantity
+                pnl = (trade.price - entry_price) * trade.quantity - trade.commission - buy_comm_alloc
                 round_trip_pnl.append(pnl)
                 if entry_price > 0:
                     notional = entry_price * trade.quantity
@@ -616,6 +622,7 @@ class Backtester:
                 if remaining <= 0:
                     avg_entry.pop(trade.conid, None)
                     avg_qty.pop(trade.conid, None)
+                    avg_buy_comm.pop(trade.conid, None)
                 else:
                     avg_qty[trade.conid] = remaining
 
@@ -628,10 +635,15 @@ class Backtester:
         sortino_ratio = 0.0
         if len(equity_curve) > 1:
             returns = equity_curve.pct_change().dropna()
-            negative = returns[returns < 0]
-            if len(negative) > 0 and negative.std() > 0:
+            # Proper downside deviation: RMS of min(r, 0) over ALL returns
+            # (target = 0). The old code used the std of only the negative
+            # subsample — which subtracts the negatives' own mean (wrong target)
+            # and divides by the count of negatives (wrong N), inflating Sortino.
+            downside = returns.clip(upper=0.0)
+            downside_dev = float(np.sqrt((downside ** 2).mean())) if len(returns) > 0 else 0.0
+            if downside_dev > 0:
                 bars_per_year = self._bars_per_year(self.config.bar_size)
-                sortino_ratio = float((returns.mean() / negative.std()) * np.sqrt(bars_per_year))
+                sortino_ratio = float((returns.mean() / downside_dev) * np.sqrt(bars_per_year))
 
         # Calmar: raw total_return / |max_drawdown|. Not annualized — raw
         # form is comparable across short and long backtests. "How many

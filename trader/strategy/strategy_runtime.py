@@ -242,10 +242,29 @@ class StrategyRuntime():
         else:
             self.streams[conId] = pd.concat([self.streams[conId], normalized], axis=0, copy=False)
 
-        # execute the strategies attached to the conId's
+        # Execute the strategies attached to the conId. CRITICAL: each strategy
+        # is isolated in its own try/except. Without this, one strategy raising
+        # (e.g. a pandas IndexError on a short window) propagates all the way up
+        # to the pubsub subscriber loop, which calls on_error and permanently
+        # DETACHES this observer from the ticker subject — every subsequent tick
+        # for ALL strategies is then silently dropped and open positions go
+        # unmanaged. A single misbehaving strategy must not take down the feed.
         for strategy in self.__get_enabled_strategies(conId):
-            signal = strategy.on_prices(self.streams[conId])
-            if signal:
+            try:
+                signal = strategy.on_prices(self.streams[conId])
+            except Exception as ex:
+                logging.exception(
+                    'strategy %s raised on_prices for conId %s; disabling it and '
+                    'continuing the tick feed', getattr(strategy, 'name', '?'), conId)
+                try:
+                    strategy.state = StrategyState.ERROR
+                except Exception:
+                    pass
+                continue
+
+            if not signal:
+                continue
+            try:
                 if signal.action == Action.BUY:
                     logging.info('BUY signal from %s', strategy.name)
                 elif signal.action == Action.SELL:
@@ -265,9 +284,15 @@ class StrategyRuntime():
 
                 # Publish signal via MessageBus for cross-strategy use and subscribers
                 self.zmq_messagebus_client.write('signal', signal)
+            except Exception:
+                # A failure persisting/publishing one signal must not kill the
+                # feed or the other strategies either.
+                logging.exception(
+                    'failed to record/publish signal from %s for conId %s',
+                    getattr(strategy, 'name', '?'), conId)
 
     def on_ticker_error(self, ex: Exception):
-        logging.debug('StrategyRuntime.on_error')
+        logging.error('StrategyRuntime ticker stream error: %s', ex, exc_info=True)
 
     def on_ticker_completed(self):
         logging.debug('StrategyRuntime.on_completed')

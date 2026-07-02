@@ -81,6 +81,19 @@ class TestPositionSizingConfig:
         finally:
             os.unlink(tmp_path)
 
+    def test_load_malformed_yaml_raises(self):
+        """A config that exists but won't parse must fail loudly, not silently
+        fall back to built-in defaults (which could size positions against
+        limits the operator never chose)."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            f.write('base_position_usd: [unterminated\n  : : :\n')
+            tmp_path = f.name
+        try:
+            with pytest.raises(Exception):
+                PositionSizingConfig.load(path=tmp_path)
+        finally:
+            os.unlink(tmp_path)
+
 
 class TestPortfolioState:
     def test_defaults(self):

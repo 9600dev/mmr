@@ -291,7 +291,10 @@ class JobScheduler():
                 job.return_code
                 and job.return_code > 0
                 and job.last_started
-                and (dt.datetime.now() - job.last_started).seconds < self.polling_period * (job.start_count + 1)
+                # total_seconds(), not .seconds — the latter drops the days
+                # component (it is 0..86399), so after 24h the restart-suppression
+                # window wrapped and misbehaved.
+                and (dt.datetime.now() - job.last_started).total_seconds() < self.polling_period * (job.start_count + 1)
             )
 
         def within_polling_period(cron: CronTab):

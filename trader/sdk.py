@@ -776,10 +776,36 @@ class MMR:
         contract = trade.contract
         order = trade.order
         action = order.action
-        quantity = float(order.totalQuantity)
 
         if order.orderType == 'MKT':
             return SuccessFail.fail(error=f'Order #{order_id} is already a market order')
+
+        def _remaining(tr) -> float:
+            # Replace only the UNFILLED portion. totalQuantity is the original
+            # order size; using it double-counts anything already filled and
+            # oversizes the resulting position.
+            st = getattr(tr, 'orderStatus', None)
+            total = float(tr.order.totalQuantity)
+            try:
+                rem = getattr(st, 'remaining', None)
+                rem = float(rem) if rem is not None else None
+            except (TypeError, ValueError):
+                rem = None
+            try:
+                filled = float(getattr(st, 'filled', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                filled = 0.0
+            # Unpopulated status (fresh/unacked order): treat as fully unfilled.
+            if (rem is None or rem == 0.0) and filled == 0.0:
+                return total
+            if rem is not None and rem > 0.0:
+                return rem
+            return total - filled
+
+        remaining = _remaining(trade)
+        if remaining <= 0:
+            return SuccessFail.fail(
+                error=f'Order #{order_id} has no unfilled quantity to convert to market')
 
         # Find stop-loss child (parentId == this order)
         stop_price = None
@@ -789,10 +815,33 @@ class MMR:
                 stop_price = child.order.auxPrice
                 break
 
-        # Cancel parent (IB auto-cancels bracket children)
-        self.cancel(order_id)
+        # Cancel parent (IB auto-cancels bracket children) and REQUIRE the cancel
+        # to be accepted before placing the market order — otherwise a cancel that
+        # is rejected because the limit just filled would leave both orders live
+        # and double the position.
+        cancel_result = self.cancel(order_id)
+        if not getattr(cancel_result, 'is_success', lambda: True)():
+            return SuccessFail.fail(
+                error=(f'Order #{order_id}: cancel not confirmed '
+                       f'({getattr(cancel_result, "error", "?")}); not placing market '
+                       f'order to avoid double execution'))
 
-        # Build execution spec and re-place as market
+        # Re-read the order to pick up any fill that landed during cancellation and
+        # recompute the still-unfilled quantity. If it fully filled in the window,
+        # there is nothing left to convert.
+        try:
+            trades_after = self._rpc.rpc(
+                return_type=dict[int, list[Trade]]
+            ).get_trades()
+            if trades_after and order_id in trades_after:
+                remaining = _remaining(trades_after[order_id][0])
+        except Exception as ex:
+            logging.warning(f'to_market: could not re-read order #{order_id} after cancel: {ex}')
+        if remaining <= 0:
+            return SuccessFail.fail(
+                error=f'Order #{order_id} filled during cancellation; nothing left to convert')
+
+        # Build execution spec and re-place the remaining quantity as market
         from trader.trading.proposal import ExecutionSpec
         if stop_price:
             spec = ExecutionSpec(order_type='MARKET', exit_type='STOP_LOSS', stop_loss_price=stop_price)
@@ -803,7 +852,7 @@ class MMR:
             self._rpc.rpc(return_type=SuccessFail[list[Trade]]).place_expressive_order(
                 contract=contract,
                 action=action,
-                quantity=quantity,
+                quantity=remaining,
                 execution_spec=spec.to_dict(),
                 algo_name='to_market',
             )
@@ -848,7 +897,17 @@ class MMR:
             if portfolio_df is not None and not portfolio_df.empty:
                 state.position_count = len(portfolio_df)
                 if 'dailyPNL' in portfolio_df.columns:
-                    state.daily_pnl = portfolio_df['dailyPNL'].sum()
+                    col = portfolio_df['dailyPNL']
+                    # .sum() skips NaN, so a position whose PnL subscription is
+                    # missing counts as 0 and the daily-loss circuit breaker
+                    # under-fires. Surface the gap so daily_pnl isn't trusted as
+                    # a hard floor when incomplete.
+                    nan_count = int(col.isna().sum())
+                    state.daily_pnl = float(col.sum())
+                    if nan_count:
+                        state.rpc_errors.append(
+                            f'daily_pnl incomplete: {nan_count} position(s) missing PnL '
+                            f'(subscription gap) — daily-loss limit may under-count')
         except Exception as e:
             logger.warning('portfolio() RPC failed: %s', e)
             state.rpc_errors.append(f'portfolio: {type(e).__name__}: {e}')
@@ -878,6 +937,7 @@ class MMR:
         from trader.trading.portfolio_risk import PortfolioRiskAnalyzer
         cfg = self._container.config()
         duckdb_path = cfg.get('duckdb_path', '')
+        history_duckdb_path = cfg.get('history_duckdb_path', '') or duckdb_path
 
         portfolio_df = self.portfolio()
         positions = portfolio_df.to_dict('records') if portfolio_df is not None and not portfolio_df.empty else []
@@ -887,7 +947,7 @@ class MMR:
         acct_vals = consume(self._rpc.rpc(return_type=dict).get_account_values())
         net_liq = float(acct_vals.get('NetLiquidation', {}).get('value', 0)) if acct_vals else 0.0
 
-        analyzer = PortfolioRiskAnalyzer(duckdb_path)
+        analyzer = PortfolioRiskAnalyzer(duckdb_path, history_duckdb_path)
         try:
             gs = self._group_store()
         except Exception:
@@ -1128,11 +1188,18 @@ class MMR:
                             import datetime as _dt
                             from trader.data.duckdb_store import DuckDBDataStore
                             cfg = self._container.config()
-                            duckdb_path = cfg.get('duckdb_path', '')
-                            if duckdb_path:
-                                ds = DuckDBDataStore(duckdb_path)
+                            # OHLCV lives in the history DB and is keyed by
+                            # conId-string, not ticker. Reading the trading DB by
+                            # ticker returned nothing, so ADV/ATR were always
+                            # unset and the volatility + liquidity adjustments were
+                            # silently inert.
+                            hist_path = cfg.get('history_duckdb_path', '') or cfg.get('duckdb_path', '')
+                            _conid = (_cached_snap or {}).get('conId') if _cached_snap else None
+                            read_key = str(_conid) if _conid else symbol
+                            if hist_path:
+                                ds = DuckDBDataStore(hist_path)
                                 start = _dt.datetime.now() - _dt.timedelta(days=60)
-                                hist = ds.read(symbol, start=start, bar_size='1 day')
+                                hist = ds.read(read_key, start=start, bar_size='1 day')
                                 if hist is not None and not hist.empty:
                                     # Use last 20 bars for ADV
                                     recent = hist.tail(20)
@@ -1166,6 +1233,17 @@ class MMR:
                         'capped_by': result.capped_by,
                         'warnings': result.warnings,
                     }
+                else:
+                    # The sizer blocked/zeroed the trade (e.g. at the position
+                    # cap or daily-loss limit). Surface WHY rather than emitting
+                    # a mysteriously unsized proposal with the reason discarded.
+                    metadata['sizing_blocked'] = True
+                    metadata['sizing_result'] = {
+                        'amount': result.amount_usd,
+                        'reasoning': result.reasoning,
+                        'capped_by': result.capped_by,
+                        'warnings': result.warnings,
+                    }
             except Exception:
                 pass  # Fall through — proposal will have no size, same as before
 
@@ -1191,9 +1269,26 @@ class MMR:
         if group:
             try:
                 gs = self._group_store()
-                gs.add_member(group, symbol)
-            except Exception:
-                pass
+                if gs.get_group(group) is None:
+                    # The group doesn't exist, so tagging it silently disables
+                    # the budget tracking the user asked for. Surface it on the
+                    # proposal instead of no-op'ing.
+                    msg = (f"group {group!r} does not exist — budget tracking NOT "
+                           f"applied; create it with `mmr group create {group}`")
+                    logging.warning('propose: %s', msg)
+                    try:
+                        self._proposal_store().update_metadata(
+                            proposal_id, {'group_warning': msg})
+                    except Exception:
+                        pass
+                else:
+                    # Uppercase to match how the portfolio-risk group-budget
+                    # analyzer keys symbols — otherwise 'amd' vs 'AMD' silently
+                    # excludes the position from its group's budget tracking.
+                    gs.add_member(group, symbol.upper())
+            except Exception as ex:
+                logging.warning('propose: group membership registration failed '
+                                'for %s/%s: %s', group, symbol, ex)
 
         # Attempt to capture snapshot + leverage estimate (requires trader_service, gracefully degrades)
         # Reuse snapshot from sizing if available to avoid a duplicate RPC call.
@@ -1344,10 +1439,10 @@ class MMR:
         p = self._proposal_store().get(proposal_id)
         if not p:
             return False
-        if p.status != 'PENDING':
-            return False
-        self._proposal_store().update_status(proposal_id, 'REJECTED', rejection_reason=reason)
-        return True
+        # Atomic CAS so a concurrent approve/reject race resolves cleanly instead
+        # of raising on a same-status no-op.
+        return self._proposal_store().try_transition(
+            proposal_id, 'PENDING', 'REJECTED', rejection_reason=reason)
 
     def approve(self, proposal_id: int) -> SuccessFail:
         """Approve and execute a proposal. REQUIRES trader_service."""
@@ -1360,8 +1455,13 @@ class MMR:
         if proposal.status != 'PENDING':
             return SuccessFail.fail(error=f'Proposal #{proposal_id} is {proposal.status}, not PENDING')
 
-        # Mark as approved
-        store.update_status(proposal_id, 'APPROVED')
+        # Atomically claim the proposal. This is a compare-and-swap on the DB row
+        # (UPDATE ... WHERE status='PENDING'), so if a second process — the LLM
+        # loop and a human, or two `approve --all` shells — races us, exactly one
+        # wins and the loser aborts here instead of placing a duplicate live order.
+        if not store.try_transition(proposal_id, 'PENDING', 'APPROVED'):
+            return SuccessFail.fail(
+                error=f'Proposal #{proposal_id} was already claimed by another approver')
 
         try:
             contract = self._resolve_contract(
@@ -1399,15 +1499,40 @@ class MMR:
                 store.update_status(proposal_id, 'FAILED')
                 return SuccessFail.fail(error='No valid quantity or amount specified')
 
-            result = consume(
-                self._rpc.rpc(return_type=SuccessFail[list[Trade]]).place_expressive_order(
-                    contract=contract,
-                    action=proposal.action,
-                    quantity=float(qty),
-                    execution_spec=proposal.execution.to_dict(),
-                    algo_name='proposal',
+            # The order-placement RPC is the one call where a client-side
+            # timeout is genuinely ambiguous: the request may already be
+            # executing on trader_service. We must NOT mark such a proposal
+            # FAILED (terminal, immutable) — that would tell the operator the
+            # trade never happened while a live order fills. Only a *clean*
+            # failure (explicit reject, or a send that never left the client)
+            # is safe to record as FAILED.
+            try:
+                result = consume(
+                    self._rpc.rpc(return_type=SuccessFail[list[Trade]]).place_expressive_order(
+                        contract=contract,
+                        action=proposal.action,
+                        quantity=float(qty),
+                        execution_spec=proposal.execution.to_dict(),
+                        algo_name='proposal',
+                    )
                 )
-            )
+            except TimeoutError as ex:
+                # Ambiguous: order may be live. Leave the proposal APPROVED so a
+                # reconciliation pass / the operator can resolve it against the
+                # broker, and surface the uncertainty loudly.
+                return SuccessFail.fail(
+                    error=(
+                        f'Proposal #{proposal_id}: order submission timed out — status UNKNOWN. '
+                        f'The order may be live on the broker. Left APPROVED (not FAILED); '
+                        f'reconcile with `mmr orders` / `mmr portfolio` before re-approving. ({ex})'
+                    ),
+                    exception=ex,
+                )
+            except ConnectionError as ex:
+                # The request could not be sent at all (no route to
+                # trader_service). No order was placed — safe to fail cleanly.
+                store.try_transition(proposal_id, 'APPROVED', 'FAILED')
+                return SuccessFail.fail(error=str(ex), exception=ex)
 
             if result.is_success():
                 order_ids = []
@@ -1416,14 +1541,16 @@ class MMR:
                         oid = getattr(t, 'orderId', None) or getattr(getattr(t, 'order', None), 'orderId', None)
                         if oid:
                             order_ids.append(oid)
-                store.update_status(proposal_id, 'EXECUTED', order_ids=order_ids)
+                store.try_transition(proposal_id, 'APPROVED', 'EXECUTED', order_ids=order_ids)
                 return SuccessFail.success(obj=order_ids)
             else:
-                store.update_status(proposal_id, 'FAILED')
+                store.try_transition(proposal_id, 'APPROVED', 'FAILED')
                 return SuccessFail.fail(error=result.error, exception=result.exception)
 
         except Exception as ex:
-            store.update_status(proposal_id, 'FAILED')
+            # Pre-order failures (contract resolution, price snapshot, quantity):
+            # no order was placed, so FAILED is the correct terminal state.
+            store.try_transition(proposal_id, 'APPROVED', 'FAILED')
             return SuccessFail.fail(error=str(ex))
 
     # ------------------------------------------------------------------
@@ -1460,6 +1587,13 @@ class MMR:
             return SuccessFail.fail(error=f"Position for {symbol} is zero")
 
         close_qty = abs(quantity) if quantity is not None else abs(pos_size)
+        # Clamp: closing more than we hold would flip the position into an
+        # equal-and-opposite one at market instead of flattening it.
+        if close_qty > abs(pos_size):
+            logging.warning(
+                'close_position(%s): requested %s exceeds position %s; clamping to '
+                'position size to avoid a flip', symbol, close_qty, abs(pos_size))
+            close_qty = abs(pos_size)
         action = 'SELL' if pos_size > 0 else 'BUY'
 
         # Prefer cached contract from portfolio (works for all exchanges).
@@ -1598,21 +1732,13 @@ class MMR:
             target_qty = adj['target_qty']
             associated = adj.get('associated_orders', [])
 
-            # 1. Cancel associated protective orders
-            for order_info in associated:
-                try:
-                    cancel_result = self.cancel(order_info['orderId'])
-                    if not cancel_result.is_success():
-                        results['warnings'].append(
-                            f'{symbol}: failed to cancel order #{order_info["orderId"]}: {cancel_result.error}'
-                        )
-                except Exception as ex:
-                    results['warnings'].append(
-                        f'{symbol}: error cancelling order #{order_info["orderId"]}: {ex}'
-                    )
-
-            # 2. Place market order for delta shares
-            #    Use cached contract from portfolio to support international stocks.
+            # 1. Place the delta market order FIRST, while the existing protective
+            #    orders are still live. If the delta fails (risk gate, timeout, IB
+            #    reject) we simply skip this symbol: the position is unchanged and
+            #    its original protectives still match it exactly. This is the fix
+            #    for the naked-position hole — the old ordering cancelled stops
+            #    first and then `continue`d past a delta failure, leaving the full
+            #    position with no stop-loss.
             try:
                 cached_contract = self._contract_map.get(symbol)
                 if cached_contract:
@@ -1641,39 +1767,90 @@ class MMR:
                     )
                 else:
                     results['failures'].append(
-                        f'{symbol}: {action} {abs(delta_qty)} failed — {order_result.error}'
+                        f'{symbol}: {action} {abs(delta_qty)} failed — {order_result.error} '
+                        f'(protective orders left untouched; position still protected)'
                     )
-                    continue  # Skip re-creating protectives if delta order failed
+                    continue
+            except TimeoutError as ex:
+                # Ambiguous: the trim may have executed. Do NOT touch protectives —
+                # if it filled they're now slightly oversized (still protective),
+                # if it didn't they still match. Flag for manual reconciliation.
+                results['failures'].append(
+                    f'{symbol}: {action} {abs(delta_qty)} TIMED OUT — status unknown, '
+                    f'protectives left in place; reconcile manually — {ex}'
+                )
+                continue
             except Exception as ex:
-                results['failures'].append(f'{symbol}: {action} {abs(delta_qty)} error — {ex}')
+                results['failures'].append(
+                    f'{symbol}: {action} {abs(delta_qty)} error — {ex} '
+                    f'(protective orders left untouched)'
+                )
                 continue
 
-            # 3. Re-create protective orders with new quantity
-            for order_info in associated:
+            # 2. The delta filled: now bring each protective to the new quantity,
+            #    one at a time — cancel, confirm, then re-create. If a cancel does
+            #    NOT confirm we must not place a second protective (that would
+            #    double-cover the position and can flip it on a trigger), so we
+            #    leave the old one and flag it. If the re-create fails after a
+            #    confirmed cancel the position is momentarily unprotected — that
+            #    is surfaced as a loud, explicit warning for manual action.
+            contract = self._contract_map.get(symbol)
+            if contract is None:
                 try:
-                    contract = self._contract_map.get(symbol)
-                    if contract is None:
-                        contract = self._resolve_contract(symbol)
-                    new_qty = abs(target_qty)
+                    contract = self._resolve_contract(symbol)
+                except Exception as ex:
+                    results['warnings'].append(
+                        f'{symbol}: RESIZED but could not resolve contract to reset protectives '
+                        f'({ex}); old protectives remain at old quantity — manual review needed'
+                    )
+                    continue
+            new_qty = abs(target_qty)
 
-                    consume(
+            for order_info in associated:
+                oid = order_info['orderId']
+                otype = order_info['orderType']
+                try:
+                    cancel_result = self.cancel(oid)
+                    cancelled = cancel_result.is_success()
+                except Exception as ex:
+                    cancelled = False
+                    cancel_result = None
+                    results['warnings'].append(f'{symbol}: error cancelling {otype} #{oid}: {ex}')
+
+                if not cancelled:
+                    err = getattr(cancel_result, 'error', 'unknown') if cancel_result else 'exception'
+                    results['warnings'].append(
+                        f'{symbol}: could not confirm cancel of {otype} #{oid} ({err}); '
+                        f'leaving it at old quantity to avoid double protection — manual review needed'
+                    )
+                    continue
+
+                try:
+                    place_result = consume(
                         self._rpc.rpc(return_type=SuccessFail[Trade]).place_standalone_order(
                             contract=contract,
                             action=order_info['action'],
                             quantity=new_qty,
-                            order_type=order_info['orderType'],
+                            order_type=otype,
                             aux_price=order_info['auxPrice'],
                             limit_price=order_info['lmtPrice'],
                             trailing_percent=order_info['trailingPercent'],
                             tif=order_info['tif'],
                         )
                     )
-                    results['successes'].append(
-                        f'{symbol}: re-created {order_info["orderType"]} {order_info["action"]} {new_qty}'
-                    )
+                    if getattr(place_result, 'is_success', lambda: True)():
+                        results['successes'].append(
+                            f'{symbol}: re-created {otype} {order_info["action"]} {new_qty}'
+                        )
+                    else:
+                        results['warnings'].append(
+                            f'{symbol}: CANCELLED {otype} #{oid} but re-create FAILED '
+                            f'({getattr(place_result, "error", "?")}) — POSITION UNPROTECTED, act now'
+                        )
                 except Exception as ex:
                     results['warnings'].append(
-                        f'{symbol}: failed to re-create {order_info["orderType"]}: {ex}'
+                        f'{symbol}: CANCELLED {otype} #{oid} but re-create raised ({ex}) — '
+                        f'POSITION UNPROTECTED, act now'
                     )
 
         return results

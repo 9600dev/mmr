@@ -166,6 +166,24 @@ class TestTradingFilter:
         tf = TradingFilter.load(filepath)
         assert tf.is_empty() is True
 
+    def test_load_malformed_file_raises(self, tmp_path):
+        """A config that exists but won't parse must fail loudly, not silently
+        degrade to an empty allow-everything filter (dropping the denylist)."""
+        import pytest
+        from trader.trading.trading_filter import TradingFilterError
+        bad = tmp_path / 'bad.yaml'
+        bad.write_text('denylist: [NKLA, RIDE\n  broken: : :\n')
+        with pytest.raises(TradingFilterError):
+            TradingFilter.load(str(bad))
+
+    def test_load_non_mapping_raises(self, tmp_path):
+        import pytest
+        from trader.trading.trading_filter import TradingFilterError
+        bad = tmp_path / 'list.yaml'
+        bad.write_text('- just\n- a\n- list\n')
+        with pytest.raises(TradingFilterError):
+            TradingFilter.load(str(bad))
+
     def test_to_dict(self):
         tf = TradingFilter(denylist=['NKLA'], min_price=3.0)
         d = tf.to_dict()

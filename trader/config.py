@@ -161,10 +161,14 @@ class MMRConfig:
                 section = getattr(config, nested_path[0])
                 attr = nested_path[1]
                 current_val = getattr(section, attr)
-                if isinstance(current_val, int):
+                # bool is a subclass of int, so the bool check MUST come first —
+                # otherwise `int("true")` runs and crashes startup, and the bool
+                # branch is unreachable. Also `bool("false")` is True, so parse
+                # the string explicitly rather than truthiness of the string.
+                if isinstance(current_val, bool):
+                    setattr(section, attr, str(value).strip().lower() in ('1', 'true', 'yes', 'on'))
+                elif isinstance(current_val, int):
                     setattr(section, attr, int(value))
-                elif isinstance(current_val, bool):
-                    setattr(section, attr, bool(value))
                 else:
                     setattr(section, attr, str(value))
 

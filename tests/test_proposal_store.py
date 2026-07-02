@@ -152,17 +152,33 @@ class TestProposalStore:
             proposal_store.update_status(pid, 'EXECUTED')
 
     def test_cannot_double_approve(self, proposal_store):
-        """Re-approving an APPROVED proposal is a no-op; re-executing fails."""
+        """Re-approving an APPROVED proposal must RAISE, not silently pass.
+
+        A silent same-status no-op let a second concurrent approver believe it
+        won the transition and place a duplicate live order. Same-status
+        transitions are now rejected.
+        """
         from trader.data.proposal_store import InvalidProposalTransition
 
         pid = proposal_store.add(_make_proposal())
         proposal_store.update_status(pid, 'APPROVED')
-        # Same-state update is a no-op (idempotent)
-        proposal_store.update_status(pid, 'APPROVED')
+        # Re-approving the same proposal is refused (defeats double-execution).
+        with pytest.raises(InvalidProposalTransition):
+            proposal_store.update_status(pid, 'APPROVED')
         proposal_store.update_status(pid, 'EXECUTED', order_ids=[1])
         # EXECUTED is terminal — cannot re-approve
         with pytest.raises(InvalidProposalTransition):
             proposal_store.update_status(pid, 'APPROVED')
+
+    def test_try_transition_is_atomic_cas(self, proposal_store):
+        """Exactly one of two concurrent PENDING->APPROVED claims wins."""
+        pid = proposal_store.add(_make_proposal())
+        assert proposal_store.try_transition(pid, 'PENDING', 'APPROVED') is True
+        # Second claimant loses — row is no longer PENDING.
+        assert proposal_store.try_transition(pid, 'PENDING', 'APPROVED') is False
+        # Legal onward CAS works; terminal is immutable.
+        assert proposal_store.try_transition(pid, 'APPROVED', 'EXECUTED', order_ids=[1]) is True
+        assert proposal_store.try_transition(pid, 'APPROVED', 'FAILED') is False
 
     def test_unknown_status_raises(self, proposal_store):
         from trader.data.proposal_store import InvalidProposalTransition

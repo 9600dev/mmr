@@ -423,9 +423,15 @@ CRITICAL: Do NOT emit long analysis text. Keep output minimal. The summary in me
             if sym and price and price == price:  # NaN check
                 price_map[sym] = float(price)
 
+        stale_symbols = []
         for symbol, pos in cls._state["tracked_positions"].items():
             last_price = price_map.get(symbol)
             if last_price is None:
+                # Do NOT silently skip: a missing price means we cannot evaluate
+                # this position's stop-loss. During a data outage every symbol
+                # lands here and monitoring goes blind with no signal — surface
+                # it so the operator/LLM knows stop-loss alerting is degraded.
+                stale_symbols.append(symbol)
                 continue
 
             entry = pos["entry"]
@@ -450,6 +456,14 @@ CRITICAL: Do NOT emit long analysis text. Keep output minimal. The summary in me
                     f"now {last_price:.2f} ({pnl_pct:+.2f}%). "
                     f"Threshold: +{pos['add_pct']}%. Consider taking profit or adding."
                 )
+
+        if stale_symbols:
+            alerts.append(
+                "MONITORING DEGRADED: no current price for "
+                f"{', '.join(stale_symbols)} — stop-loss/target checks were "
+                "SKIPPED for these positions this cycle (data outage?). "
+                "Verify prices manually."
+            )
 
         return alerts
 
