@@ -2387,6 +2387,7 @@ def _handle_propose(mmr: MMR, args: argparse.Namespace):
             'action': args.action,
             'amount': detail.get('amount') if detail else args.amount,
             'quantity': detail.get('quantity') if detail else args.quantity,
+            'currency': (detail.get('currency') if detail else None) or getattr(args, 'currency', None),
             'confidence': args.confidence,
             'group': getattr(args, 'group', ''),
             'order_type': order_type,
@@ -10416,7 +10417,13 @@ def main():
             _logging.disable(_logging.CRITICAL)
 
         mmr = MMR()
-        if not is_local:
+        # Some local-first commands ENRICH from trader_service when it's up:
+        # propose's position sizing wants a live snapshot + net-liq, and session
+        # reports live portfolio capacity. Connect opportunistically for those
+        # (still degrading gracefully if the service is down) — otherwise their
+        # sizing silently falls back to the fixed base with no volatility/FX.
+        _enrich = cmd in ('propose', 'session')
+        if not is_local or _enrich:
             try:
                 mmr.connect()
             except Exception as e:

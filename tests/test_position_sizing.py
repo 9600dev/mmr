@@ -765,6 +765,39 @@ class TestComputeATR:
         closes = [9.5] * 20
         assert compute_atr(highs, lows, closes) is None
 
+    def test_nan_bars_are_dropped_not_propagated(self):
+        """A single NaN OHLC bar (holiday/gap marker) must not poison the whole
+        ATR — it did before, silently disabling volatility-aware sizing for any
+        symbol whose history had one gap bar (e.g. refreshed ASX names)."""
+        import math
+        highs = [10.0 + i * 0.1 for i in range(20)]
+        lows = [9.0 + i * 0.1 for i in range(20)]
+        closes = [9.5 + i * 0.1 for i in range(20)]
+        highs[8] = lows[8] = closes[8] = float('nan')
+        result = compute_atr(highs, lows, closes, period=14)
+        assert result is not None
+        assert not math.isnan(result)
+        assert result > 0
+
+    def test_nan_in_single_field_dropped(self):
+        """A NaN in only one field of a bar drops that bar too."""
+        import math
+        highs = [10.0 + i * 0.1 for i in range(20)]
+        lows = [9.0 + i * 0.1 for i in range(20)]
+        closes = [9.5 + i * 0.1 for i in range(20)]
+        closes[5] = float('nan')          # only close is NaN
+        result = compute_atr(highs, lows, closes, period=14)
+        assert result is not None and not math.isnan(result)
+
+    def test_too_many_nan_bars_returns_none(self):
+        """If dropping NaN bars leaves < period+1 valid bars, return None."""
+        highs = [10.0 + i * 0.1 for i in range(18)]
+        lows = [9.0 + i * 0.1 for i in range(18)]
+        closes = [9.5 + i * 0.1 for i in range(18)]
+        for i in range(10):               # nuke 10 of 18 bars → only 8 valid
+            highs[i] = float('nan')
+        assert compute_atr(highs, lows, closes, period=14) is None
+
     def test_constant_price_zero_atr(self):
         """Flat price → ATR = H-L only (no gaps)."""
         n = 20

@@ -35,15 +35,31 @@ def compute_atr(highs: List[float], lows: List[float], closes: List[float],
     TR = max(H-L, |H-prevC|, |L-prevC|), then SMA over period.
     Returns None if insufficient data.
     """
+    import math
+
     n = len(highs)
-    if n < period + 1 or len(lows) != n or len(closes) != n:
+    if len(lows) != n or len(closes) != n:
+        return None
+
+    # Drop bars with a missing/NaN H, L or C. A single NaN (e.g. an injected
+    # null-day marker for a holiday) otherwise propagates through max()/sum() and
+    # makes the whole ATR NaN — which silently disabled volatility-aware sizing
+    # for any symbol whose history had even one gap bar.
+    def _bad(x) -> bool:
+        return x is None or (isinstance(x, float) and math.isnan(x))
+
+    triples = [(h, l, c) for h, l, c in zip(highs, lows, closes)
+               if not (_bad(h) or _bad(l) or _bad(c))]
+    if len(triples) < period + 1:
         return None
 
     true_ranges = []
-    for i in range(1, n):
-        hl = highs[i] - lows[i]
-        hc = abs(highs[i] - closes[i - 1])
-        lc = abs(lows[i] - closes[i - 1])
+    for i in range(1, len(triples)):
+        h, l, _ = triples[i]
+        prev_c = triples[i - 1][2]
+        hl = h - l
+        hc = abs(h - prev_c)
+        lc = abs(l - prev_c)
         true_ranges.append(max(hl, hc, lc))
 
     if len(true_ranges) < period:

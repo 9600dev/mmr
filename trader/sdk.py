@@ -1442,6 +1442,7 @@ class MMR:
             'action': p.action,
             'quantity': p.quantity,
             'amount': p.amount,
+            'currency': getattr(p, 'currency', None),
             'sec_type': p.sec_type,
             'order_type': p.execution.order_type,
             'limit_price': p.execution.limit_price,
@@ -1540,7 +1541,16 @@ class MMR:
                 if not price:
                     store.update_status(proposal_id, 'FAILED')
                     return SuccessFail.fail(error='Could not determine price for quantity calculation')
-                qty = round(proposal.amount / price)
+                # Convert the instrument price to the account BASE currency before
+                # dividing, so `amount` (a base-currency notional target) yields
+                # the correct quantity for a foreign instrument. Without this, a
+                # base amount was divided by a foreign price directly — e.g. an
+                # AUD-priced ASX name sized as if the price were in the base
+                # currency, over/under-sizing by the FX factor. Degrades to no
+                # conversion (rate 1.0) when FX is unavailable or same-currency.
+                _cur = getattr(contract, 'currency', '') or proposal.currency or ''
+                _price_base = self._to_base(price, _cur, self._fx_rates())
+                qty = round(proposal.amount / (_price_base if _price_base > 0 else price))
                 if qty < 1:
                     qty = 1
 
