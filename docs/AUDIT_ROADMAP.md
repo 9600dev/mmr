@@ -139,7 +139,7 @@ unambiguous proposal-status divergences remains a deliberate future opt-in.
 
 ---
 
-## Cluster E — ibreactive resource leaks  (M, med risk — IB-runtime)
+## Cluster E — ibreactive resource leaks  ⏭️ SKIPPED (see note)
 
 - **Problem**: `ibreactive.py:520` leaks two Rx subscriptions per snapshot on the
   hot ticker path; `:822` `get_shortable_shares` starts a streaming `reqMktData`
@@ -152,6 +152,11 @@ unambiguous proposal-status divergences remains a deliberate future opt-in.
   feed. Validate carefully in paper (watch md-line count over many snapshots).
 - **Validate (paper)**: loop 100 snapshots, confirm IB market-data line usage
   returns to baseline (no monotonic growth).
+- **DECISION (skipped):** on inspection, 520/541 live in `__subscribe_contract` —
+  the *live* long-lived ticker-subscription path (just fixed for reconnect); a
+  "fix" there risks regressing the strategy feed. 822 is a minor infrequent leak
+  whose only safe fix needs subscriber ref-counting (cancelling a shared
+  contract stream would kill a strategy). Poor risk/reward on the hot path.
 
 ---
 

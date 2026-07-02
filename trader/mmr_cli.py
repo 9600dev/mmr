@@ -1597,6 +1597,14 @@ def build_parser() -> argparse.ArgumentParser:
     _mtz.add_argument('--dry-run', action='store_true',
                       help='Report what would change without writing')
 
+    _dd = data_sub.add_parser(
+        'dedup-daily',
+        help='Remove duplicate daily bars for the same session (keeps the most '
+             'complete / canonically-keyed one)',
+    )
+    _dd.add_argument('--dry-run', action='store_true',
+                     help='Report what would be removed without deleting')
+
     data_refresh_p = data_sub.add_parser(
         'refresh',
         help='Run declarative refresh jobs from ~/.config/mmr/data_refresh.yaml. '
@@ -7127,6 +7135,8 @@ def _handle_data(args: argparse.Namespace):
         _handle_data_migrate_symbols(args)
     elif action == 'migrate-timezone':
         _handle_data_migrate_timezone(args)
+    elif action == 'dedup-daily':
+        _handle_data_dedup_daily(args)
     elif action == 'refresh':
         _handle_data_refresh(args)
     elif action == 'status':
@@ -7385,6 +7395,7 @@ def _handle_data_download(args: argparse.Namespace):
     # a blank conId in `data summary`. Timeout is kept tight (1s) so a
     # misconfigured or down trader_service doesn't make the CLI look hung.
     rpc_mmr = None
+    candidate = None
     try:
         from trader.sdk import MMR  # local import — avoids SDK cost when unused
         candidate = MMR(
@@ -7397,10 +7408,13 @@ def _handle_data_download(args: argparse.Namespace):
         candidate._rpc.rpc().get_status()  # type: ignore[attr-defined]
         rpc_mmr = candidate
     except Exception:
-        if rpc_mmr is not None:
-            try: rpc_mmr.close()
+        # connect() may have opened a socket before the probe failed — close the
+        # CANDIDATE (the old code closed rpc_mmr, which is still None on the
+        # failure path, so the connected candidate leaked its socket).
+        if candidate is not None:
+            try: candidate.close()
             except Exception: pass
-            rpc_mmr = None
+        rpc_mmr = None
 
     end_date = dt.datetime.now()
     start_date = end_date - dt.timedelta(days=args.days)
@@ -7582,6 +7596,106 @@ def _handle_data_download(args: argparse.Namespace):
         'failed': failed,
         'rows_written': total_rows_written,
     }
+
+
+def _handle_data_dedup_daily(args: argparse.Namespace):
+    """Collapse duplicate daily bars for the same trading session (e.g. a symbol
+    downloaded twice under different keying conventions). Keeps the most complete
+    bar per session — non-NaN close first, then the one closest to the exchange
+    session midnight (the canonical key) — and deletes the rest. Source-agnostic.
+    Use --dry-run first."""
+    import collections
+    import math
+    import pandas as _pd
+    import pytz as _pytz
+    from trader.container import Container
+    from trader.data.duckdb_store import DuckDBConnection
+    from trader.data.universe import UniverseAccessor
+
+    cfg = Container.instance().config()
+    duckdb_path = cfg.get('duckdb_path', '')
+    history_path = cfg.get('history_duckdb_path', '') or duckdb_path
+    accessor = UniverseAccessor(duckdb_path, cfg.get('universe_library', 'Universes'))
+    db = DuckDBConnection.get_instance(history_path)
+    dry = getattr(args, 'dry_run', False)
+
+    _defs = []
+    try:
+        for u in accessor.get_all():
+            _defs.extend(u.security_definitions or [])
+    except Exception:
+        pass
+
+    def _tz_for(key: str) -> str:
+        want = int(key) if str(key).isdigit() else None
+        for d in _defs:
+            if (want is not None and getattr(d, 'conId', None) == want) or \
+               (want is None and getattr(d, 'symbol', None) == key):
+                tzid = getattr(d, 'timeZoneId', '') or ''
+                if tzid:
+                    try:
+                        _pytz.timezone(tzid)
+                        return tzid
+                    except Exception:
+                        break
+        return 'US/Eastern'
+
+    symbols = [r[0] for r in (db.execute(
+        "SELECT DISTINCT symbol FROM tick_data WHERE bar_size = '1 day'",
+        fetch='all') or [])]
+
+    total_removed = 0
+    details = []
+    for sym in symbols:
+        rows = db.execute(
+            "SELECT date, close FROM tick_data WHERE symbol = ? AND bar_size = '1 day'",
+            [sym], fetch='all') or []
+        if len(rows) < 2:
+            continue
+        tz = _tz_for(sym)
+        groups = collections.defaultdict(list)   # session date -> [(ts, is_nan, mid_dist)]
+        for ts, close in rows:
+            t = _pd.Timestamp(ts)
+            t = t.tz_localize('UTC') if t.tz is None else t.tz_convert('UTC')
+            local = t.tz_convert(tz)
+            session = local.date()
+            is_nan = close is None or (isinstance(close, float) and math.isnan(close))
+            mid_dist = abs((local - local.normalize()).total_seconds())
+            groups[session].append((t.to_pydatetime(), is_nan, mid_dist))
+
+        to_delete = []
+        for _session, items in groups.items():
+            if len(items) < 2:
+                continue
+            # keeper = non-NaN first (is_nan False sorts before True), then closest
+            # to exchange midnight; delete the rest.
+            ordered = sorted(items, key=lambda x: (x[1], x[2]))
+            to_delete.extend(ts for ts, _, _ in ordered[1:])
+        if not to_delete:
+            continue
+        if not dry:
+            def _work(conn, _sym=sym, _dl=to_delete):
+                for ts in _dl:
+                    conn.execute(
+                        "DELETE FROM tick_data WHERE symbol = ? AND bar_size = '1 day' "
+                        "AND date = ?", [_sym, ts])
+            db.execute_atomic(_work)
+        total_removed += len(to_delete)
+        details.append({'symbol': sym, 'removed': len(to_delete), 'tz': tz})
+
+    if _json_mode:
+        print(json.dumps({'data': {'dry_run': dry, 'total_removed': total_removed,
+                                   'symbols': details}, 'title': 'Dedup Daily'}))
+        return
+    verb = 'would remove' if dry else 'removed'
+    if not details:
+        print_status('No duplicate daily bars found — nothing to dedup.')
+        return
+    console.print(f'[bold]Daily dedup{" (dry-run)" if dry else ""}[/bold]\n')
+    for d in details:
+        console.print(f'  {d["symbol"]:>10}  {verb} {d["removed"]:>4} duplicate bar(s)  [dim]tz={d["tz"]}[/dim]')
+    console.print(f'\n[bold]{verb} {total_removed} duplicate bar(s) across {len(details)} symbol(s).[/bold]'
+                  + ('' if not dry else '\n[dim]Re-run without --dry-run to apply.[/dim]'))
 
 
 def _handle_data_migrate_timezone(args: argparse.Namespace):
