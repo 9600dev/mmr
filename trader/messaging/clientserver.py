@@ -464,7 +464,23 @@ class RPCServer(Generic[T]):
 
     async def serve(self):
         self.socket = self.ctx.socket(zmq.ROUTER)
-        self.socket.bind(self.address)
+        self.socket.setsockopt(zmq.LINGER, 0)
+        # Retry the bind with backoff. After a crash-restart the previous
+        # process's socket can briefly linger, and a one-shot bind would raise
+        # EADDRINUSE and kill the service permanently (crash-loop) instead of
+        # recovering once the old bind is released.
+        last_err: Optional[Exception] = None
+        for attempt in range(10):
+            try:
+                self.socket.bind(self.address)
+                break
+            except zmq.ZMQError as ex:
+                last_err = ex
+                logging.warning('RPC bind %s in use (attempt %d), retrying: %s',
+                                self.address, attempt + 1, ex)
+                await asyncio.sleep(min(2 ** attempt, 8) * 0.25)  # ~0.25s → 2s
+        else:
+            raise last_err  # type: ignore[misc]
         self._serve_task = asyncio.create_task(self._serve_loop())
 
     async def _serve_loop(self):

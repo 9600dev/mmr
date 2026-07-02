@@ -143,7 +143,15 @@ class UniverseAccessor():
 
         if type(symbol) is int and int(symbol) in self._resolver_cache:
             u, definition = self._resolver_cache[int(symbol)]
-            if check_exchange(exchange, definition) and not universe or universe == u.name:
+            # A cache HIT must honour the exact same filters as a miss —
+            # exchange AND sec_type AND universe. The old condition
+            # (`check_exchange and not universe or universe == u.name`) had a
+            # precedence bug that skipped the exchange check whenever a universe
+            # was given and skipped sec_type entirely, so a cached entry could
+            # be returned for the wrong exchange/type.
+            if (check_exchange(exchange, definition)
+                    and check_sec_type(sec_type, definition)
+                    and (not universe or universe == u.name)):
                 return [(u, definition)]
 
         if universe:
@@ -209,8 +217,17 @@ class UniverseAccessor():
         result = {definition for _, definition in self.resolve_universe(symbol, exchange, universe, sec_type, first_only)}
         return list(result)
 
+    def invalidate_resolver_cache(self) -> None:
+        """Drop the conId → (universe, definition) resolver cache.
+
+        Called on any universe mutation so a cached resolution can't outlive a
+        change to the universe it came from (add/remove/re-import a symbol).
+        """
+        self._resolver_cache.clear()
+
     def update(self, universe: Universe) -> None:
         self.library.write(universe.name, universe)
+        self.invalidate_resolver_cache()
 
     def insert(self, universe_name: str, security_definition: SecurityDefinition):
         universe = self.get(universe_name)
@@ -219,6 +236,7 @@ class UniverseAccessor():
 
     def delete(self, name: str) -> None:
         self.library.delete(name)
+        self.invalidate_resolver_cache()
 
     def update_from_csv_str(self, name: str, csv_str: str) -> int:
         reader = csv.DictReader(csv_str.splitlines())
