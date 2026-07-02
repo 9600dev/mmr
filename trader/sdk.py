@@ -2200,6 +2200,7 @@ class MMR:
                     'bar_size': str(s.bar_size),
                     'conids': s.conids or [],
                     'hist_days_prior': s.historical_days_prior,
+                    'auto_execute': getattr(s, 'auto_execute', False),
                 }
                 params = getattr(s, 'params', None)
                 if params:

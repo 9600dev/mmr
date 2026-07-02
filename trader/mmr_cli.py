@@ -3494,6 +3494,7 @@ def _handle_strategies_list(mmr: MMR):
     table = _RTable(title='Strategies (live from strategy_service)', show_lines=False, expand=True)
     table.add_column('name', style='bold cyan', no_wrap=True)
     table.add_column('state', justify='center', no_wrap=True)
+    table.add_column('auto', justify='center', no_wrap=True)
     table.add_column('bar', no_wrap=True)
     table.add_column('hist', justify='right', no_wrap=True)
     table.add_column('symbols', no_wrap=False, ratio=2)
@@ -3540,9 +3541,12 @@ def _handle_strategies_list(mmr: MMR):
         else:
             params_disp = '[dim]-[/dim]'
 
+        auto_disp = '[bold red]AUTO[/bold red]' if row.get('auto_execute') else '[dim]-[/dim]'
+
         table.add_row(
             str(row.get('name', '?')),
             state_disp,
+            auto_disp,
             str(row.get('bar_size', '?')),
             str(row.get('hist_days_prior', '?')),
             symbols_disp,
