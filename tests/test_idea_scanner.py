@@ -1687,3 +1687,49 @@ class TestIBIdeaScannerTickersPath:
         call_args = rpc_mock.resolve_contract.call_args
         contract_arg = call_args[0][0]
         assert contract_arg.exchange == 'SMART'  # no exchange hint, falls back to SMART
+
+
+# ---------------------------------------------------------------------------
+# C1: location→exchange resolution honours the local market (no US ADRs)
+# ---------------------------------------------------------------------------
+
+class TestLocationExchangeResolution:
+    def test_asx_picks_local_listing_over_us_adr(self, ib_scanner, mock_rpc):
+        adr = SimpleNamespace(symbol='BHP', conId=999, primaryExchange='NYSE', currency='USD')
+        local = SimpleNamespace(symbol='BHP', conId=4036812, primaryExchange='ASX', currency='AUD')
+        contracts, conid_map = ib_scanner._resolve_symbols(
+            ['BHP'], 'STK.AU.ASX', consume=lambda _x: [adr, local])
+        assert len(contracts) == 1
+        assert contracts[0].conId == 4036812      # ASX local, NOT the NYSE ADR
+        assert contracts[0].currency == 'AUD'
+
+    def test_asx_rejects_when_only_adr_available(self, ib_scanner, mock_rpc):
+        adr = SimpleNamespace(symbol='BHP', conId=999, primaryExchange='NYSE', currency='USD')
+        contracts, conid_map = ib_scanner._resolve_symbols(
+            ['BHP'], 'STK.AU.ASX', consume=lambda _x: [adr])
+        assert contracts == []                    # refuse the wrong-market instrument
+
+    def test_us_major_resolves_on_smart_not_major(self, ib_scanner, mock_rpc):
+        captured = {}
+
+        def _resolve(partial):
+            captured['exchange'] = partial.exchange
+            return 'defs'
+        mock_rpc.rpc.return_value.resolve_contract.side_effect = _resolve
+        aapl = SimpleNamespace(symbol='AAPL', conId=265598, primaryExchange='NASDAQ', currency='USD')
+        contracts, _ = ib_scanner._resolve_symbols(
+            ['AAPL'], 'STK.US.MAJOR', consume=lambda _x: [aapl])
+        assert captured['exchange'] == 'SMART'    # not the bogus 'MAJOR'
+        assert len(contracts) == 1 and contracts[0].currency == 'USD'
+
+    def test_tokyo_uses_tsej_not_tse(self, ib_scanner, mock_rpc):
+        captured = {}
+
+        def _resolve(partial):
+            captured['exchange'] = partial.exchange
+            return 'defs'
+        mock_rpc.rpc.return_value.resolve_contract.side_effect = _resolve
+        ib_scanner._resolve_symbols(
+            ['7203'], 'STK.JP.TSE',
+            consume=lambda _x: [SimpleNamespace(symbol='7203', conId=1, primaryExchange='TSEJ', currency='JPY')])
+        assert captured['exchange'] == 'TSEJ'     # Tokyo, not Toronto's 'TSE'

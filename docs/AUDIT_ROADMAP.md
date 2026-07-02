@@ -92,7 +92,7 @@ unambiguous proposal-status divergences remains a deliberate future opt-in.
 
 ## Cluster C — Contract / universe resolution integrity
 
-### C1 — idea-scanner location→exchange resolution  (M, med risk — needs live IB)
+### C1 — idea-scanner location→exchange resolution  ✅ DONE (paper-validated: ASX/US)
 - **Problem** (`idea_scanner.py:1229`): location-code parsing can resolve symbols
   on the wrong exchange (SMART fallback, TSE-vs-TSEJ, region tokens like `MAJOR`
   taken as an exchange). Feeds an LLM confidently-wrong instruments — a direct

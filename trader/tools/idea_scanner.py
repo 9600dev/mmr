@@ -112,6 +112,28 @@ PRESET_SCAN_CODES: Dict[str, str] = {
 }
 
 
+# Location code → (resolution_exchange, expected_currency, {valid primaryExchanges}).
+# resolution_exchange is what to put on the resolution Contract: SMART for US
+# (smart-routed; primary tells NYSE/NASDAQ apart) and the specific foreign
+# exchange otherwise, so IB returns the LOCAL listing rather than a US ADR.
+# expected_currency + valid primaries are used to VALIDATE the resolved contract
+# and reject a wrong-exchange/ADR match (the precision principle). Blindly using
+# the last dotted token got this wrong: STK.US.MAJOR → 'MAJOR' (not an exchange),
+# STK.JP.TSE → 'TSE' (Tokyo is 'TSEJ' at IB, not Toronto's 'TSE').
+_US_PRIMARIES = {'NYSE', 'NASDAQ', 'ARCA', 'AMEX', 'BATS', 'ISLAND', 'PINK', 'NYSENAT', 'IEX'}
+_LOCATION_EXCHANGE: Dict[str, tuple] = {
+    'STK.US': ('SMART', 'USD', _US_PRIMARIES),
+    'STK.US.MAJOR': ('SMART', 'USD', _US_PRIMARIES),
+    'STK.US.NYSE': ('NYSE', 'USD', {'NYSE'}),
+    'STK.US.NASDAQ': ('NASDAQ', 'USD', {'NASDAQ', 'ISLAND'}),
+    'STK.AU.ASX': ('ASX', 'AUD', {'ASX'}),
+    'STK.CA': ('SMART', 'CAD', {'TSE', 'VENTURE'}),  # Canada, smart-routed
+    'STK.CA.TSE': ('TSE', 'CAD', {'TSE'}),          # Toronto
+    'STK.JP.TSE': ('TSEJ', 'JPY', {'TSEJ'}),         # Tokyo — IB code is TSEJ, not TSE
+    'STK.HK.SEHK': ('SEHK', 'HKD', {'SEHK'}),
+}
+
+
 def list_presets() -> pd.DataFrame:
     """Return a DataFrame describing all available presets."""
     rows = []
@@ -1234,55 +1256,75 @@ class IBIdeaScanner:
         """
         from ib_async.contract import Contract
 
-        # Extract exchange hint from location code (e.g. STK.AU.ASX → ASX)
-        exchange_hint = ''
-        parts = location.split('.')
-        if len(parts) >= 3:
-            exchange_hint = parts[2]  # e.g. ASX, SEHK, TSE
+        loc = (location or '').upper()
+        mapping = _LOCATION_EXCHANGE.get(loc)
+        if mapping:
+            resolution_exchange, expected_currency, valid_primaries = mapping
+        else:
+            # Unknown location: a 3-part STK.XX.<EXCH> uses the explicit exchange;
+            # a 2-part STK.XX (country only) has no exchange to force, so fall back
+            # to SMART. No currency validation (target currency unknown).
+            parts = loc.split('.')
+            resolution_exchange = parts[2] if len(parts) >= 3 else 'SMART'
+            expected_currency, valid_primaries = '', set()
+            logger.warning('location %r not in exchange map — resolving on %r without '
+                           'currency validation', location, resolution_exchange)
+
+        def _mismatch(currency: str, primary: str) -> str:
+            """Return a reason string if the resolved contract is NOT the intended
+            local listing, else ''."""
+            cur = (currency or '').upper()
+            pri = (primary or '').upper()
+            if expected_currency and cur and cur != expected_currency:
+                return f'currency {cur} != expected {expected_currency}'
+            if valid_primaries and pri and pri not in valid_primaries:
+                return f'primaryExchange {pri} not in {sorted(valid_primaries)}'
+            return ''
 
         contracts = []
         conid_map: Dict[str, int] = {}
         for sym in symbols:
             try:
-                # Build a partial contract with the right exchange
-                partial = Contract(
-                    symbol=sym,
-                    secType='STK',
-                    exchange=exchange_hint or 'SMART',
-                )
+                partial = Contract(symbol=sym, secType='STK', exchange=resolution_exchange)
                 defs = consume(
                     self._rpc.rpc(return_type=list).resolve_contract(partial)
                 )
                 if not defs:
-                    logger.debug('Could not resolve symbol: %s (exchange=%s)', sym, exchange_hint)
+                    logger.warning('Could not resolve %s on %s (location=%s)',
+                                   sym, resolution_exchange, location)
                     continue
-                # Pick the first matching definition
-                d = defs[0]
-                # Handle both SecurityDefinition objects and dicts
-                if hasattr(d, 'conId'):
-                    primary = d.primaryExchange or exchange_hint or ''
-                    c = Contract(
-                        conId=d.conId,
-                        symbol=d.symbol,
-                        secType='STK',
-                        exchange='SMART',
-                        primaryExchange=primary,
-                        currency=d.currency or '',
-                    )
-                    contracts.append(c)
-                    conid_map[d.symbol] = d.conId
-                elif isinstance(d, dict):
-                    primary = d.get('primaryExchange', '') or exchange_hint or ''
-                    c = Contract(
-                        conId=d.get('conId', 0),
-                        symbol=d.get('symbol', sym),
-                        secType='STK',
-                        exchange='SMART',
-                        primaryExchange=primary,
-                        currency=d.get('currency', ''),
-                    )
-                    contracts.append(c)
-                    conid_map[c.symbol] = c.conId
+
+                # Pick the FIRST definition that passes the currency/exchange
+                # validation — not blindly defs[0], which can be a US ADR when a
+                # foreign local listing was requested.
+                chosen = None
+                for d in defs:
+                    if hasattr(d, 'conId'):
+                        cur, pri, conid, dsym = d.currency, d.primaryExchange, d.conId, d.symbol
+                    else:
+                        cur = d.get('currency', ''); pri = d.get('primaryExchange', '')
+                        conid = d.get('conId', 0); dsym = d.get('symbol', sym)
+                    reason = _mismatch(cur or '', pri or '')
+                    if not reason:
+                        chosen = (conid, dsym, pri or resolution_exchange, cur or expected_currency)
+                        break
+                if chosen is None:
+                    # Every candidate failed validation — refuse rather than feed
+                    # the scanner a wrong-market instrument (precision principle).
+                    d0 = defs[0]
+                    c0 = getattr(d0, 'currency', None) or (d0.get('currency', '') if isinstance(d0, dict) else '')
+                    p0 = getattr(d0, 'primaryExchange', None) or (d0.get('primaryExchange', '') if isinstance(d0, dict) else '')
+                    logger.warning('rejecting %s for location %s: no candidate on the intended '
+                                   'market (%s); first was currency=%s primary=%s',
+                                   sym, location, _mismatch(c0 or '', p0 or '') or 'mismatch', c0, p0)
+                    continue
+
+                conid, dsym, primary, currency = chosen
+                contracts.append(Contract(
+                    conId=conid, symbol=dsym, secType='STK',
+                    exchange='SMART', primaryExchange=primary, currency=currency,
+                ))
+                conid_map[dsym] = conid
             except Exception as ex:
                 # WARNING, not DEBUG — a requested ticker silently vanishing from
                 # the scan (invisible at default log level) is exactly the kind of
