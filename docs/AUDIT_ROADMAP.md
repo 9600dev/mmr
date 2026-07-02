@@ -17,7 +17,7 @@ book) and broker reality can silently diverge. Three related pieces that share
 one new component — an **OrderLifecycleTracker** that subscribes to
 `orderStatusEvent` + `execDetailsEvent`, and is the one place order truth flows in.
 
-### A1 — Order success from IB ack, not the local echo  (M, med risk)
+### A1 — Order success from IB ack, not the local echo  ✅ DONE (paper-validated)
 - **Problem** (`trading_runtime.py:956`): `place_expressive_order` treats the
   `placeOrder` echo (a `Trade` object comes back) as success. IB-side rejection
   (`orderStatus.status ∈ {Cancelled, Inactive, ApiCancelled}` with a reject
@@ -34,7 +34,7 @@ one new component — an **OrderLifecycleTracker** that subscribes to
   far outside NBBO, or an unsupported combo) and confirm it returns failure with
   the IB reason instead of success.
 
-### A2 — Record fill / cancel / reject events  (S, low risk)
+### A2 — Record fill / cancel / reject events  ✅ DONE (paper-validated)
 - **Problem**: `EventType.ORDER_FILLED/CANCELLED/REJECTED` are defined but only
   `ORDER_SUBMITTED` is ever written. The risk-gate lookback and the audit trail
   are blind to outcomes.
@@ -65,8 +65,9 @@ one new component — an **OrderLifecycleTracker** that subscribes to
   mid-flight, confirm the reconciliation pass reports the correct
   filled/unfilled state instead of a stale EXECUTED.
 
-**Cluster A total ≈ L+M** (~1 week). A1+A2 first (share the tracker), A3 builds on
-the same event stream.
+**Status:** A1+A2 shipped via `OrderLifecycleTracker` (validated in paper — real
+AAPL BUY/SELL fills recorded ORDER_FILLED events, acceptance check passed). **A3
+(startup reconciliation) is the remaining piece** and builds on the same tracker.
 
 ---
 

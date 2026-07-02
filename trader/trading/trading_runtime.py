@@ -150,6 +150,12 @@ class Trader():
         # Coalesces the connected_event double-fire (eventkit emit + explicit call
         # on reconnect) so re-subscription doesn't run twice concurrently.
         self._in_connected_event: bool = False
+        # Single sink for IB order-status truth (fill/cancel/reject events +
+        # acceptance queries). Built here so it exists before the first
+        # connected_event/setup_subscriptions runs; its event store is wired in
+        # connect() and it's attached to orderStatusEvent in setup_subscriptions.
+        from trader.trading.order_lifecycle import OrderLifecycleTracker
+        self.order_tracker = OrderLifecycleTracker(None)
 
         self.zmq_strategy_client: RPCClient[strategy_bus.StrategyServiceApi]
         self.zmq_messagebus: MessageBusServer
@@ -277,6 +283,11 @@ class Trader():
             self.event_store = EventStore(self.duckdb_path)
             self.risk_gate = RiskGate(RiskLimits(), self.event_store)
 
+            # The order-lifecycle tracker itself is built in __init__ (so it
+            # exists before the first connected_event runs); wire its event store
+            # now that it's available.
+            self.order_tracker.set_event_store(self.event_store)
+
             # load trading filters (allowlist/denylist)
             from trader.trading.trading_filter import TradingFilter
             self.risk_gate.trading_filter = TradingFilter.load()
@@ -386,6 +397,20 @@ class Trader():
                 self.client.ib.openOrderEvent,
             ]
         )
+
+        # Feed the order-lifecycle tracker directly from the CURRENT ib's
+        # orderStatusEvent. Use connect(keep_ref=True) — eventkit defaults to a
+        # WEAK reference, which silently drops a freshly-bound method handler; a
+        # strong ref guarantees delivery. disconnect-then-connect keeps exactly
+        # one registration across reconnects (the ib instance is fresh each time).
+        if getattr(self, 'order_tracker', None) is not None:
+            _ev = self.client.ib.orderStatusEvent
+            try:
+                _ev.disconnect(self.order_tracker.on_trade)
+            except Exception:
+                pass
+            _ev.connect(self.order_tracker.on_trade, keep_ref=True)
+            logging.info('order-lifecycle tracker attached to orderStatusEvent')
 
         positions_observer = Observer(
             on_next=self.__update_positions,
@@ -1267,6 +1292,23 @@ class Trader():
                 if entry_trade is None:
                     return SuccessFail.fail(error='Failed to place entry order')
                 trades.append(entry_trade)
+
+            # Confirm IB actually ACCEPTED the order — the placeOrder echo above
+            # returns a Trade even for an order IB then rejects. Only an explicit
+            # rejection downgrades to failure; a slow (timeout) status leaves the
+            # result as success, because the order is placed and may be working
+            # and reporting failure there would be the more dangerous lie.
+            tracker = getattr(self, 'order_tracker', None)
+            if tracker is not None and trades:
+                entry_id = int(getattr(trades[0].order, 'orderId', 0) or 0)
+                if entry_id:
+                    verdict = await tracker.wait_decisive(entry_id, timeout=8.0)
+                    if verdict == 'rejected':
+                        for t in trades:
+                            _cancel_trade_safely(t)
+                        reason = tracker.latest_status(entry_id) or 'rejected'
+                        return SuccessFail.fail(
+                            error=f'Order rejected by IB (entry status={reason})')
 
             return SuccessFail.success(obj=trades)
 
