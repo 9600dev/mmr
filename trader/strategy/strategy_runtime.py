@@ -123,6 +123,16 @@ class StrategyRuntime():
         self.strategies: Dict[int, List[Strategy]] = {}
         self.strategy_implementations: List[Strategy] = []
         self.streams: Dict[int, pd.DataFrame] = {}
+        # Historical OHLCV bars per (conId, bar_size), loaded from the DB on
+        # subscribe. These PRIME the live frame so bar-based strategies have
+        # warmup + today's opening bars — the live tick stream alone only holds
+        # ticks since subscription.
+        self._hist_bars: Dict[tuple, pd.DataFrame] = {}
+        # Last completed bar timestamp dispatched per (conId, strategy name), so
+        # a strategy sees each bar once (not on every tick).
+        self._last_dispatched_bar: Dict[tuple, pd.Timestamp] = {}
+        # Keep at most this many days of raw ticks per conid (bounds compute).
+        self._tick_retention_days: int = 2
 
         self.historical_data_client: IBHistoryWorker
 
@@ -263,6 +273,74 @@ class StrategyRuntime():
     def get_strategies(self) -> List[Strategy]:
         return self.strategy_implementations
 
+    def _cap_tick_stream(self, conId: int) -> None:
+        """Bound the raw tick buffer to the retention window so resampling stays
+        cheap over a long session."""
+        df = self.streams.get(conId)
+        if df is None or df.empty:
+            return
+        try:
+            cutoff = df.index[-1] - pd.Timedelta(days=self._tick_retention_days)
+            if df.index[0] < cutoff:
+                self.streams[conId] = df.loc[df.index >= cutoff]
+        except Exception:
+            pass
+
+    def _prime_hist_bars(self, conId: int, bar_size: BarSize) -> None:
+        """One-time load of recent historical OHLCV bars for (conId, bar_size)
+        from the DB into the priming cache, normalized to the live schema so it
+        concatenates cleanly with resampled ticks. Marks the key as primed even
+        on no-data so we don't re-read the DB on every tick."""
+        from trader.data.duckdb_store import DuckDBDataStore
+        from trader.data.market_data import normalize_historical
+        key = (conId, bar_size)
+        self._hist_bars[key] = pd.DataFrame()   # mark primed (default empty)
+        try:
+            ds = DuckDBDataStore(self.history_duckdb_path)
+            end = dt.datetime.now(dt.timezone.utc)
+            start = end - dt.timedelta(days=max(self._tick_retention_days, 5) + 5)
+            df = ds.read(str(conId), start=start, end=end, bar_size=str(bar_size))
+            if df is not None and not df.empty:
+                norm = normalize_historical(df)
+                idx = norm.index
+                norm.index = idx.tz_localize('UTC') if idx.tz is None else idx.tz_convert('UTC')
+                self._hist_bars[key] = norm
+        except Exception as ex:
+            logging.warning('could not prime hist bars for conId %s %s: %s', conId, bar_size, ex)
+
+    def _strategy_frame(self, conId: int, bar_size: BarSize) -> Optional[pd.DataFrame]:
+        """The OHLCV frame a bar-based strategy should see: historical priming
+        bars + the live tick stream resampled to `bar_size` (completed bars only).
+        This is what makes bar strategies work live — previously they were handed
+        the raw per-tick, cumulative-volume stream and couldn't compute bars."""
+        from trader.data.market_data import resample_ticks_to_bars
+        key = (conId, bar_size)
+        if key not in self._hist_bars:
+            self._prime_hist_bars(conId, bar_size)
+        try:
+            freq = BarSize.to_pandas_freq(bar_size)
+        except Exception:
+            return self.streams.get(conId)   # unknown freq: legacy raw stream
+
+        def _utc(df):
+            if df is None or df.empty:
+                return None
+            idx = df.index
+            if idx.tz is None:
+                df = df.copy(); df.index = idx.tz_localize('UTC')
+            return df
+
+        hist = self._hist_bars.get(key)
+        ticks = self.streams.get(conId)
+        live = resample_ticks_to_bars(ticks, freq) if ticks is not None and not ticks.empty else None
+        frames = [f for f in (_utc(hist), _utc(live)) if f is not None and not f.empty]
+        if not frames:
+            return None
+        if len(frames) == 1:
+            return frames[0].sort_index()
+        combined = pd.concat(frames)
+        return combined[~combined.index.duplicated(keep='last')].sort_index()
+
     def on_ticker_next(self, ticker: Ticker):
         if ticker.contract:
             logging.debug('StrategyRuntime.on_ticker_next({} {})'.format(ticker.contract.symbol, ticker.contract.conId))
@@ -277,12 +355,13 @@ class StrategyRuntime():
         else:
             conId = ticker.contract.conId
 
-        # populate the dataframe subscription cache
+        # populate the raw tick buffer, then bound it so resampling stays cheap
         normalized = normalize_ticker(ticker)
         if conId not in self.streams:
             self.streams[conId] = normalized
         else:
             self.streams[conId] = pd.concat([self.streams[conId], normalized], axis=0, copy=False)
+        self._cap_tick_stream(conId)
 
         # Execute the strategies attached to the conId. CRITICAL: each strategy
         # is isolated in its own try/except. Without this, one strategy raising
@@ -293,7 +372,20 @@ class StrategyRuntime():
         # unmanaged. A single misbehaving strategy must not take down the feed.
         for strategy in self.__get_enabled_strategies(conId):
             try:
-                signal = strategy.on_prices(self.streams[conId])
+                # Hand the strategy proper OHLCV bars (historical priming +
+                # resampled live ticks), and only when a NEW completed bar has
+                # formed — so bar-based strategies see each bar once, matching
+                # the backtest, instead of the raw per-tick cumulative-volume
+                # stream re-evaluated on every tick.
+                frame = self._strategy_frame(conId, strategy.bar_size)
+                if frame is None or frame.empty:
+                    continue
+                last_bar = frame.index[-1]
+                dkey = (conId, strategy.name)
+                if self._last_dispatched_bar.get(dkey) == last_bar:
+                    continue
+                self._last_dispatched_bar[dkey] = last_bar
+                signal = strategy.on_prices(frame)
             except Exception as ex:
                 logging.exception(
                     'strategy %s raised on_prices for conId %s; disabling it and '

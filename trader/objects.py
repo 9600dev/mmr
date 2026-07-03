@@ -109,6 +109,27 @@ class BarSize(IntEnum):
         return mapping[bar_size]
 
     @staticmethod
+    def to_pandas_freq(bar_size: 'BarSize') -> str:
+        """Pandas resample frequency string for a BarSize (e.g. '1min', '1D').
+
+        Used to resample the live per-tick stream into proper OHLCV bars before
+        dispatching to bar-based strategies.
+        """
+        mapping = {
+            BarSize.Secs1: '1s', BarSize.Secs5: '5s', BarSize.Secs10: '10s',
+            BarSize.Secs15: '15s', BarSize.Secs30: '30s',
+            BarSize.Mins1: '1min', BarSize.Mins2: '2min', BarSize.Mins3: '3min',
+            BarSize.Mins5: '5min', BarSize.Mins10: '10min', BarSize.Mins15: '15min',
+            BarSize.Mins20: '20min', BarSize.Mins30: '30min',
+            BarSize.Hours1: '1h', BarSize.Hours2: '2h', BarSize.Hours3: '3h',
+            BarSize.Hours4: '4h', BarSize.Hours8: '8h',
+            BarSize.Days1: '1D', BarSize.Weeks1: '1W', BarSize.Months1: '1MS',
+        }
+        if bar_size not in mapping:
+            raise ValueError(f'no pandas freq for BarSize: {bar_size}')
+        return mapping[bar_size]
+
+    @staticmethod
     def to_twelvedata_interval(bar_size: 'BarSize') -> str:
         # TwelveData interval strings:
         # https://twelvedata.com/docs#time-series

@@ -84,6 +84,66 @@ def normalize_ticker(ticker: Ticker) -> pd.DataFrame:
     return pd.DataFrame([row], index=idx, columns=NORMALIZED_COLUMNS)
 
 
+def resample_ticks_to_bars(ticks: pd.DataFrame, freq: str,
+                           drop_forming: bool = True) -> pd.DataFrame:
+    """Aggregate a per-tick normalized DataFrame into OHLCV bars of period ``freq``.
+
+    The live tick stream (from ``normalize_ticker``) has one row per tick with
+    ``open==high==low==close==tick price`` and ``volume`` = the exchange's
+    *cumulative* day volume. Bar-based strategies (opening-range, VWAP, MA
+    crossovers) need real per-bar OHLCV, so this:
+
+    - builds OHLC from the tick prices in each ``freq`` window,
+    - derives PER-BAR volume by differencing the cumulative counter (the last
+      cumulative value in each bar minus the previous bar's), guarding against
+      the day-boundary reset where the counter drops back toward zero,
+    - carries bid/ask/last/vwap as the last value in the bar.
+
+    With ``drop_forming=True`` the final (still-forming) bar — the one containing
+    the most recent tick — is dropped, so callers only ever see COMPLETED bars.
+    That keeps crossing logic (``close`` crossed a level on THIS bar vs the prior)
+    from re-firing on every tick while a bar is still building.
+    """
+    if ticks is None or ticks.empty:
+        return ticks if ticks is not None else pd.DataFrame(columns=NORMALIZED_COLUMNS)
+    if not isinstance(ticks.index, pd.DatetimeIndex):
+        raise ValueError('resample_ticks_to_bars requires a DatetimeIndex')
+
+    price = ticks['close']
+    ohlc = price.resample(freq).ohlc()          # open/high/low/close
+    ohlc = ohlc.dropna(subset=['close'])
+    if ohlc.empty:
+        return pd.DataFrame(columns=NORMALIZED_COLUMNS)
+
+    # Per-bar volume from the cumulative day counter.
+    cum = ticks['volume'].resample(freq).last().reindex(ohlc.index)
+    per_bar = cum.diff()
+    if len(per_bar):
+        per_bar.iloc[0] = cum.iloc[0]           # first bar: volume since session start
+    # A negative diff means the cumulative counter reset (new day) — the bar's
+    # own cumulative is the best estimate of its volume in that case.
+    per_bar = per_bar.where(per_bar >= 0, cum)
+    ohlc['volume'] = per_bar
+
+    for col in ('vwap', 'bid', 'ask', 'last', 'last_size'):
+        if col in ticks.columns:
+            ohlc[col] = ticks[col].resample(freq).last().reindex(ohlc.index)
+    ohlc['bar_count'] = price.resample(freq).count().reindex(ohlc.index)
+
+    if drop_forming and len(ohlc) >= 1:
+        # The bar containing the most recent tick is still forming — drop it.
+        last_tick = ticks.index[-1]
+        try:
+            forming_start = last_tick.floor(freq)
+            if forming_start in ohlc.index:
+                ohlc = ohlc.loc[ohlc.index < forming_start]
+        except (ValueError, TypeError):
+            ohlc = ohlc.iloc[:-1]   # freq doesn't support floor() — drop the last bar
+
+    ohlc.index.name = 'date'
+    return ohlc[[c for c in NORMALIZED_COLUMNS if c in ohlc.columns]]
+
+
 def normalize_historical(df: pd.DataFrame) -> pd.DataFrame:
     """Convert a DuckDB / backtester historical DataFrame to the normalized schema.
 
