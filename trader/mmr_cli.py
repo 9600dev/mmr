@@ -1627,6 +1627,14 @@ def build_parser() -> argparse.ArgumentParser:
     _dd.add_argument('--dry-run', action='store_true',
                      help='Report what would be removed without deleting')
 
+    _bk = data_sub.add_parser(
+        'backup',
+        help='Clean, consistent snapshot of the DuckDB files to the host-mounted '
+             'backups/ dir (safe on a live DB; keeps the newest N)',
+    )
+    _bk.add_argument('--keep', type=int, default=7,
+                     help='Number of auto-snapshots to retain (default 7)')
+
     data_refresh_p = data_sub.add_parser(
         'refresh',
         help='Run declarative refresh jobs from ~/.config/mmr/data_refresh.yaml. '
@@ -7234,6 +7242,8 @@ def _handle_data(args: argparse.Namespace):
         _handle_data_migrate_timezone(args)
     elif action == 'dedup-daily':
         _handle_data_dedup_daily(args)
+    elif action == 'backup':
+        _handle_data_backup(args)
     elif action == 'refresh':
         _handle_data_refresh(args)
     elif action == 'status':
@@ -7693,6 +7703,47 @@ def _handle_data_download(args: argparse.Namespace):
         'failed': failed,
         'rows_written': total_rows_written,
     }
+
+
+def _handle_data_backup(args: argparse.Namespace):
+    """Clean, consistent snapshot of the DuckDB files to the host-mounted backups
+    dir. `data/` is a Docker named volume (not host-visible), but `backups/` is a
+    host bind-mount, so snapshots written here survive volume loss / rebuilds."""
+    import os as _os
+    from pathlib import Path as _Path
+    from trader.container import Container
+    from trader.data.db_backup import run_backup
+
+    cfg = Container.instance().config()
+    duckdb_path = _os.path.expanduser(cfg.get('duckdb_path', '') or '')
+    if not duckdb_path:
+        msg = 'duckdb_path not configured — nothing to back up'
+        print(json.dumps({'success': False, 'message': msg}) if _json_mode else msg)
+        return
+    data_dir = _Path(duckdb_path).parent
+    backup_dir = data_dir.parent / 'backups'
+    keep = getattr(args, 'keep', 7)
+
+    summary = run_backup(data_dir, backup_dir, keep=keep)
+
+    if _json_mode:
+        print(json.dumps({'data': summary, 'title': 'DB Backup'}))
+        return
+    if not summary['ok']:
+        print_status('DB backup FAILED — no databases were snapshotted:', success=False)
+        for d in summary['databases']:
+            if not d['ok']:
+                console.print(f"  [red]{d['db']}: {d.get('error')}[/red]")
+        return
+    console.print(f'[bold]DB backup → {summary["dir"]}[/bold]\n')
+    for d in summary['databases']:
+        if d['ok']:
+            console.print(f'  [green]✓[/green] {d["db"]:>22}  {d["bytes"]/1e6:.0f} MB')
+        else:
+            console.print(f'  [red]✗ {d["db"]:>22}  {d.get("error")}[/red]')
+    if summary['pruned']:
+        console.print(f'\n[dim]pruned {len(summary["pruned"])} old snapshot(s), keeping newest {keep}[/dim]')
+    console.print(f'[dim]latest → {backup_dir}/latest[/dim]')
 
 
 def _handle_data_dedup_daily(args: argparse.Namespace):

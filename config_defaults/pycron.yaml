@@ -85,3 +85,14 @@ jobs:
       start_on_pycron_start: False
       restart_if_found: False
       restart_if_finished: False
+    - name: db_backup
+      description: clean DuckDB snapshot to the host-mounted backups/ dir
+      command: python3
+      arguments: -m trader.mmr_cli data backup --keep 7
+      start: "17 22 * * *"       # 10:17 PM daily — after both data-refresh jobs
+                                 # (ASX 16:30, US 20:30) and before the IB Gateway
+                                 # nightly restart (~23:59). Snapshots survive
+                                 # volume loss / rebuilds; keeps the newest 7.
+      start_on_pycron_start: False
+      restart_if_found: False
+      restart_if_finished: False
