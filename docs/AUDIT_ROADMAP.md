@@ -205,6 +205,23 @@ e2b2fd1 (VwapReclaim on_prices). These are the residual robustness items.
 - **Validate:** enable 10+ strategies in a tight loop under concurrent load,
   confirm no enable RPC timeout and all reach RUNNING.
 
+### G2 — IB market-data-farm status codes logged at ERROR  (XS, cosmetic)
+
+- **Symptom:** during the nightly IB Gateway restart/reconnect, farm-status
+  messages (`errorCode 2119` "Market data farm is connecting", and the related
+  2103/2105 "farm disconnected") are logged at ERROR by `ibreactivex`
+  (`__handle_error`). Observed 3× on one reconnect.
+- **Mechanism:** `__handle_error` early-returns (suppresses) only the "farm OK"
+  codes (2104/2106/2107/2158); the transient "connecting/disconnected" farm
+  codes fall through to the ERROR log path.
+- **Impact:** none functional — pure log noise, but it can mask a real error in a
+  `grep -i error` scan (as it briefly did in this review).
+- **Fix:** add 2103/2105/2119 (and 2158 if not covered) to the suppressed/INFO
+  set in `__handle_error`, or log all `reqId == -1` farm-status codes at INFO.
+- **NOTE:** the reconnect itself recovered cleanly (reentrancy guard fired,
+  subscriptions republished, all strategies stayed RUNNING) — this is only about
+  the log level of the status messages, not the reconnect behaviour.
+
 ---
 
 ## Recommended sequence
