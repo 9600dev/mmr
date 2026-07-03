@@ -81,6 +81,21 @@ class VwapReclaim(Strategy):
             "et_minute": et_minute,
         }
 
+    def on_prices(self, prices: pd.DataFrame) -> Optional[Signal]:
+        """Live dispatch path. The backtester uses precompute()+on_bar() directly;
+        the live strategy_runtime calls only on_prices(), so without this the
+        strategy emitted NOTHING live (base on_prices returns None). Runs the same
+        precompute over the accumulated window and evaluates on_bar() at the latest
+        bar. Relies on the runtime's tick→bar resampling to supply proper per-bar
+        OHLCV (VWAP + volume confirmation need real per-bar volume, not the raw
+        cumulative tick counter)."""
+        if prices is None or len(prices) < self.MIN_BARS:
+            return None
+        state = self.precompute(prices)
+        if not state:
+            return None
+        return self.on_bar(prices, state, len(prices) - 1)
+
     def on_bar(self, prices: pd.DataFrame, state: Dict[str, Any], index: int) -> Optional[Signal]:
         if not state or index < self.MIN_BARS:
             return None
