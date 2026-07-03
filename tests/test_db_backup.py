@@ -105,6 +105,25 @@ def test_best_effort_one_bad_db(tmp_path):
     assert r['ok'] is True   # partial success — good.duckdb was captured
 
 
+def test_named_manual_backup_not_rotated_and_keeps_latest(tmp_path):
+    data = tmp_path / 'data'; data.mkdir()
+    backups = tmp_path / 'backups'
+    _make_db(data / 'mmr.duckdb', [(1, 'a')])
+    # an auto snapshot first, so `latest` exists and points at it
+    run_backup(data, backups, keep=7, timestamp='2026-07-03T00-00-00')
+    auto_latest = (backups / 'latest').resolve().name
+    # a named milestone backup
+    r = run_backup(data, backups, name='before_upgrade')
+    assert r['ok']
+    assert (backups / 'before_upgrade' / 'mmr.duckdb').exists()
+    # named dir has no _clean suffix → immune to rotation
+    for ts in ('2026-07-04T00-00-00', '2026-07-05T00-00-00'):
+        run_backup(data, backups, keep=1, timestamp=ts)
+    assert (backups / 'before_upgrade').exists()
+    # latest still tracks the newest AUTO snapshot, not the manual one
+    assert (backups / 'latest').resolve().name == '2026-07-05T00-00-00_clean'
+
+
 def test_missing_source_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         backup_database(str(tmp_path / 'nope.duckdb'), str(tmp_path / 'out.duckdb'))

@@ -549,6 +549,10 @@ up() {
     # can't recover from the stuck-dependent state described in
     # `_remove_mmr_dependents`.
     _remove_mmr_dependents
+    # Disaster-recovery: if the DB volume is empty (lost / reset / fresh machine),
+    # seed it from the newest host backup BEFORE the services start. No-op when the
+    # volume already has data.
+    seed_db_if_empty
     $COMPOSE -f "$BUILDDIR/docker-compose.yml" up -d
     echo ""
     echo "Containers started. Use './docker.sh -e' to exec in, or './docker.sh -l' for logs."
@@ -663,36 +667,62 @@ down() {
 }
 
 backup() {
-    # Copy the DuckDB files out of the mmr_db_data named volume into a
-    # host-visible bind-mount directory. Briefly stops mmr-mmr-1 so the
-    # copy can't race with an in-flight write; ib-gateway stays up.
+    # Snapshot the DuckDB files to the host-visible backups/ dir.
     local name="$BACKUP_NAME"
+
+    # Preferred path: if mmr-mmr-1 is running, take a CLEAN in-DB snapshot via the
+    # container — no downtime. DuckDB `COPY FROM DATABASE` (in `mmr data backup`)
+    # produces a consistent, compacted copy even while the services write, so we
+    # no longer need to stop the daemon like the old plain-cp path did.
+    if [[ -n "$($RUNTIME ps -q -f name=mmr-mmr-1 2>/dev/null)" ]]; then
+        echo "Clean in-DB snapshot via running container (no downtime)..."
+        if [[ -n "$name" ]]; then
+            $RUNTIME exec mmr-mmr-1 mmr data backup --name "$name"
+        else
+            $RUNTIME exec mmr-mmr-1 mmr data backup --keep 30
+        fi
+        echo "Backup complete → $HOME/.local/share/mmr/backups/"
+        return
+    fi
+
+    # Fallback: container down — the DB isn't being written, so a plain sidecar
+    # copy is safe and needs no host duckdb tooling.
     if [[ -z "$name" ]]; then
         name="$(date +%Y-%m-%d_%H-%M-%S)"
     fi
     local dest_host="$HOME/.local/share/mmr/backups/$name"
     mkdir -p "$dest_host"
-    echo "Backing up DuckDB files to $dest_host/"
-
-    local was_running="no"
-    if [[ -n "$($RUNTIME ps -q -f name=mmr-mmr-1 2>/dev/null)" ]]; then
-        was_running="yes"
-        echo "  stopping mmr-mmr-1 for a consistent snapshot..."
-        $RUNTIME stop mmr-mmr-1 >/dev/null
-    fi
-
-    # Sidecar with the named volume (RO) + backups dir (RW) — keeps the
-    # operation atomic and doesn't depend on host duckdb tooling.
+    echo "Container not running — plain-copy snapshot to $dest_host/"
     $RUNTIME run --rm \
         -v mmr_mmr_db_data:/src:ro \
         -v "$dest_host":/dst \
-        alpine sh -c 'cp -v /src/mmr.duckdb /src/mmr_history.duckdb /dst/ 2>&1; ls -lh /dst/'
-
-    if [[ "$was_running" == "yes" ]]; then
-        echo "  restarting mmr-mmr-1..."
-        $RUNTIME start mmr-mmr-1 >/dev/null
-    fi
+        alpine sh -c 'cp -v /src/*.duckdb /dst/ 2>&1; ls -lh /dst/'
     echo "Backup complete: $dest_host/"
+}
+
+# Seed an EMPTY named volume from the newest host backup (backups/latest) before
+# the containers start. Without this, a lost/reset volume would restart from
+# whatever the image happened to seed — the "stale seed" trap. Never overwrites a
+# volume that already has data; no-ops when there's no latest backup.
+seed_db_if_empty() {
+    local vol="mmr_mmr_db_data"
+    local latest_link="$HOME/.local/share/mmr/backups/latest"
+    local latest
+    latest=$(cd -P "$latest_link" 2>/dev/null && pwd) || return 0
+    [[ -n "$latest" && -d "$latest" ]] || return 0
+    ls "$latest"/*.duckdb >/dev/null 2>&1 || return 0
+
+    local has_db
+    has_db=$($RUNTIME run --rm -v "$vol":/v alpine sh -c \
+        'ls /v/*.duckdb >/dev/null 2>&1 && echo yes || echo no' 2>/dev/null || echo no)
+    if [[ "$has_db" == "yes" ]]; then
+        return 0   # volume already populated — NEVER overwrite live data
+    fi
+
+    echo "Named volume '$vol' is empty — seeding from newest backup $latest ..."
+    $RUNTIME run --rm -v "$vol":/v -v "$latest":/seed:ro \
+        alpine sh -c 'cp -v /seed/*.duckdb /v/ 2>&1; ls -lh /v/'
+    echo "Seed complete."
 }
 
 clean() {

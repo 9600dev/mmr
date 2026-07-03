@@ -1634,6 +1634,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _bk.add_argument('--keep', type=int, default=7,
                      help='Number of auto-snapshots to retain (default 7)')
+    _bk.add_argument('--name', default=None,
+                     help='Milestone name — a named backup that is never auto-pruned '
+                          '(e.g. before_upgrade). Omit for a rotating timestamped snapshot.')
 
     data_refresh_p = data_sub.add_parser(
         'refresh',
@@ -7723,8 +7726,9 @@ def _handle_data_backup(args: argparse.Namespace):
     data_dir = _Path(duckdb_path).parent
     backup_dir = data_dir.parent / 'backups'
     keep = getattr(args, 'keep', 7)
+    name = getattr(args, 'name', None)
 
-    summary = run_backup(data_dir, backup_dir, keep=keep)
+    summary = run_backup(data_dir, backup_dir, keep=keep, name=name)
 
     if _json_mode:
         print(json.dumps({'data': summary, 'title': 'DB Backup'}))

@@ -101,16 +101,24 @@ def _prune(backup_dir: Path, keep: int) -> list:
 
 
 def run_backup(data_dir, backup_dir, keep: int = 7,
-               timestamp: Optional[str] = None) -> dict:
-    """Snapshot every ``*.duckdb`` in *data_dir* into a timestamped subdir of
-    *backup_dir*, update the ``latest`` symlink, and prune to the newest *keep*.
+               timestamp: Optional[str] = None, name: Optional[str] = None) -> dict:
+    """Snapshot every ``*.duckdb`` in *data_dir* into a subdir of *backup_dir*.
+
+    Default (auto) mode: a timestamped ``<ts>_clean`` dir, updates the ``latest``
+    symlink, and prunes to the newest *keep*. If *name* is given it's a MANUAL
+    milestone backup: the dir is exactly *name* (no ``_clean`` suffix, so rotation
+    never deletes it, and ``latest`` is left pointing at the newest auto-snapshot).
 
     Best-effort per database — one DB failing does not abort the others. Returns
     a summary dict."""
     data_dir = Path(os.path.expanduser(str(data_dir)))
     backup_dir = Path(os.path.expanduser(str(backup_dir)))
-    ts = timestamp or dt.datetime.utcnow().strftime('%Y-%m-%dT%H-%M-%S')
-    dst_dir = backup_dir / f'{ts}{_SUFFIX}'
+    manual = bool(name)
+    if manual:
+        dst_dir = backup_dir / name
+    else:
+        ts = timestamp or dt.datetime.utcnow().strftime('%Y-%m-%dT%H-%M-%S')
+        dst_dir = backup_dir / f'{ts}{_SUFFIX}'
     dst_dir.mkdir(parents=True, exist_ok=True)
 
     results = []
@@ -125,17 +133,17 @@ def run_backup(data_dir, backup_dir, keep: int = 7,
 
     ok_any = any(r['ok'] for r in results)
     pruned = []
-    if ok_any:
+    if ok_any and not manual:
         _update_latest(backup_dir, dst_dir)
         pruned = _prune(backup_dir, keep)
-    else:
+    elif not ok_any:
         try:
             dst_dir.rmdir()   # nothing written — don't leave an empty dir
         except Exception:
             pass
 
     return {
-        'timestamp': ts,
+        'timestamp': dst_dir.name,
         'dir': str(dst_dir) if ok_any else None,
         'databases': results,
         'ok': ok_any,
