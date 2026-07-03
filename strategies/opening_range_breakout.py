@@ -23,28 +23,52 @@ class OpeningRangeBreakout(Strategy):
 
     RANGE_MINUTES = 30
     VOLUME_MULT = 1.5              # current bar volume must exceed this × 20-bar SMA
-    RTH_OPEN_MIN = 9 * 60 + 30     # 09:30 ET (in minutes since ET midnight)
-    RTH_CLOSE_MIN = 16 * 60        # 16:00 ET
+    # Session is defined in SESSION_TZ so "market open" is stable year-round and
+    # the strategy works on ANY exchange, not just the US. Override per-deployment:
+    #   US   (default): SESSION_TZ='America/New_York', open 09:30, close 16:00
+    #   ASX          : SESSION_TZ='Australia/Sydney',  open 10:00 (600), close 16:00 (960)
+    #   LSE          : SESSION_TZ='Europe/London',     open 08:00 (480), close 16:30 (990)
+    SESSION_TZ = 'America/New_York'
+    RTH_OPEN_MIN = 9 * 60 + 30     # session open, minutes since SESSION_TZ midnight
+    RTH_CLOSE_MIN = 16 * 60        # session close, minutes since SESSION_TZ midnight
     MIN_BARS = 40
+
+    def _cfg(self, key: str, default: Any) -> Any:
+        """Read a session-config value from live params (``self.params``) with the
+        class-attribute as fallback. The live runtime delivers ``--params`` into
+        ``self.params`` (it does NOT setattr upper-case class attrs — that's
+        backtest-only), so reading here is what makes SESSION_TZ / RTH_OPEN_MIN /
+        RTH_CLOSE_MIN / RANGE_MINUTES actually configurable per-deployment live.
+        In backtests the value is either setattr'd on the class attr (upper-case
+        override) or absent from params, so the fallback still returns the right
+        thing."""
+        params = getattr(self, 'params', None) or {}
+        return params[key] if key in params else default
 
     def precompute(self, prices: pd.DataFrame) -> Dict[str, Any]:
         if len(prices) < self.MIN_BARS:
             return {}
 
-        # Convert to ET so "market open" has a stable definition year-round.
+        session_tz = self._cfg('SESSION_TZ', self.SESSION_TZ)
+        rth_open = int(self._cfg('RTH_OPEN_MIN', self.RTH_OPEN_MIN))
+        rth_close = int(self._cfg('RTH_CLOSE_MIN', self.RTH_CLOSE_MIN))
+        range_min = int(self._cfg('RANGE_MINUTES', self.RANGE_MINUTES))
+
+        # Convert to the session timezone so "market open" has a stable
+        # definition year-round and works on any exchange (US/ASX/LSE/…).
         idx = prices.index
         if idx.tz is None:
             idx = idx.tz_localize('UTC')
-        et = idx.tz_convert('America/New_York')
+        et = idx.tz_convert(session_tz)
 
         et_minute = (et.hour * 60 + et.minute).to_numpy()
         et_date = et.date  # python date objects, one per bar
 
-        # Determine the ORB window per day: bars with 9:30 ≤ ET-minute < 9:30 + RANGE_MINUTES
-        orb_mask = (et_minute >= self.RTH_OPEN_MIN) & (
-            et_minute < self.RTH_OPEN_MIN + self.RANGE_MINUTES
+        # ORB window per day: bars with rth_open ≤ session-minute < rth_open + range
+        orb_mask = (et_minute >= rth_open) & (
+            et_minute < rth_open + range_min
         )
-        rth_mask = (et_minute >= self.RTH_OPEN_MIN) & (et_minute < self.RTH_CLOSE_MIN)
+        rth_mask = (et_minute >= rth_open) & (et_minute < rth_close)
 
         high = prices['high'].to_numpy()
         low = prices['low'].to_numpy()
@@ -78,7 +102,7 @@ class OpeningRangeBreakout(Strategy):
                 if low[i] < running_lo:  running_lo = low[i]
                 # Still inside the ORB window — don't publish the range yet
                 # (we only act on breakouts AFTER the range is fully formed).
-            elif et_minute[i] >= self.RTH_OPEN_MIN + self.RANGE_MINUTES:
+            elif et_minute[i] >= rth_open + range_min:
                 # Window closed for today; freeze the range.
                 if running_hi != -np.inf and np.isnan(locked_hi):
                     locked_hi, locked_lo = running_hi, running_lo
@@ -95,6 +119,24 @@ class OpeningRangeBreakout(Strategy):
             'orb_low':   orb_low,
             'rth':       rth_mask.astype(bool),
         }
+
+    def on_prices(self, prices: pd.DataFrame) -> Optional[Signal]:
+        """Live dispatch path (the strategy_runtime calls this per bar).
+
+        The backtester uses precompute()+on_bar() directly for O(N) replay; the
+        live runtime only calls on_prices(), so without this the strategy emitted
+        NOTHING live. Here we run the same precompute over the accumulated window
+        and evaluate on_bar() at the latest bar — identical breakout semantics,
+        just driven per-tick instead of by the backtest loop. This is O(N) per
+        call, which is fine live (one call per bar on a bounded window) but is
+        exactly why the backtester must NOT route through here.
+        """
+        if prices is None or len(prices) < self.MIN_BARS:
+            return None
+        state = self.precompute(prices)
+        if not state:
+            return None
+        return self.on_bar(prices, state, len(prices) - 1)
 
     def on_bar(self, prices: pd.DataFrame, state: Dict[str, Any], index: int) -> Optional[Signal]:
         if not state or index < self.MIN_BARS:
