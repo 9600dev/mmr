@@ -173,6 +173,40 @@ unambiguous proposal-status divergences remains a deliberate future opt-in.
 
 ---
 
+## Cluster G — Discovered in live paper operation (2026-07-03)
+
+Found while running the ASX/US ORB+VWAP strategies live (paper). The live-trading
+path for bar-based strategies was rebuilt this session — see commits e2db6f3
+(ORB on_prices + exchange-aware session), e911fee (tick→bar resampling layer),
+e2b2fd1 (VwapReclaim on_prices). These are the residual robustness items.
+
+### G1 — mass-enable of strategies can time out the enable RPC under DB contention  (S, low risk)
+
+- **Symptom:** enabling many strategies in quick succession (observed: 11 at once
+  after a restart) produced one `enable_strategy: RPC call ... timed out after
+  6000ms` plus a burst of asyncio slow-callback warnings, all at startup.
+- **Mechanism:** each `StrategyRuntime.enable_strategy` calls
+  `_persist_enabled()` (D2), which does a DuckDB DELETE+INSERT to `strategy_state`.
+  N simultaneous enables → N writes to a DB also serving event_store, priming
+  reads, and a concurrent reconcile. Under `DuckDBConnection.execute_atomic`'s
+  IOException backoff (up to ~45s), one enable's write can exceed the client's
+  6s RPC timeout. The `strategies enable` CLI then reports the cosmetic
+  "Enable failed: None" even though the server completes the write and the
+  strategy ends up RUNNING.
+- **Impact:** none observed — self-resolving; every strategy ended up enabled.
+  Latent edge: under heavier contention a write *could* fail after retries and
+  leave a strategy not-enabled while the client already gave up.
+- **NOT caused by** the new priming/resampling (priming is lazy/on-first-tick,
+  not on the enable path).
+- **Fix options (offline, pick one):** (a) stagger enables in the CLI loop with a
+  small delay; (b) raise the enable RPC timeout; (c) make `_persist_enabled`
+  fire-and-forget / off the RPC-reply path; (d) batch multiple enables into one
+  RPC + one DB write. (a) or (d) preferred.
+- **Validate:** enable 10+ strategies in a tight loop under concurrent load,
+  confirm no enable RPC timeout and all reach RUNNING.
+
+---
+
 ## Recommended sequence
 
 1. **Cluster A (A1+A2, then A3)** — the capital-safety core; do first. ~1 week.
