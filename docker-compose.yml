@@ -3,10 +3,11 @@ name: mmr
 services:
   ib-gateway:
     image: ghcr.io/gnzsnz/ib-gateway:latest
-    # `on-failure` (not `always`) so that when the cgroup OOM-killer reaps
-    # a process inside we see `State.OOMKilled=true` in `podman/docker
-    # inspect` — an `always` restart mask silently hides the signal.
-    restart: on-failure
+    # unless-stopped so IB Gateway comes back after a host reboot / Docker restart
+    # (the mmr container depends on it). OOM kills still surface on the last-exit
+    # state (RestartCount / OOMKilled=true); availability wins for an always-on
+    # trading stack. (Was `on-failure` to keep the OOM signal visible.)
+    restart: unless-stopped
     # IB Gateway itself (Java + XVfb + VNC) sits around 600–800 MB steady
     # state. Capping at 1.5G gives headroom for the JVM to GC without
     # letting it run away and starve the rest of the VM.
@@ -48,11 +49,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    # on-failure so OOM kills surface as State.OOMKilled=true on the
-    # container (pre-2026-04-20 those kills were invisible from the
-    # outside — start_mmr.sh caught the child PID death but the OOM flag
-    # never propagated to the container state).
-    restart: on-failure
+    # unless-stopped so the live trading stack survives a host reboot / Docker
+    # Desktop restart / sleep — critical for an always-on trading system that
+    # must be up for market opens, nightly backups, and armed strategies.
+    # Trade-off vs the old `on-failure`: an OOM kill now auto-restarts (visible as
+    # a rising RestartCount / State.OOMKilled=true on the last exit) rather than
+    # staying stopped. At ~3% steady-state memory that risk is remote, and
+    # availability wins for this workload. (History: on-failure was chosen so OOM
+    # kills surfaced as State.OOMKilled=true after the 2026-04-20 fix.)
+    restart: unless-stopped
     # trader_service + strategy_service + data_service + pycron together
     # run around 1.6–2.2 GB RSS with a full universe loaded. 4 GB leaves
     # clear headroom and still protects the Podman/Docker VM from being
