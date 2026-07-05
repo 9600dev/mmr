@@ -1,5 +1,10 @@
 # CLAUDE.md
 
+> **Current deployed/running state** (armed strategies, backtest findings, data
+> coverage, backups, restart policy, Monday plan) lives in
+> [`docs/OPERATIONAL_STATE.md`](docs/OPERATIONAL_STATE.md) — read it first when
+> resuming operational work. Code backlog is in `docs/AUDIT_ROADMAP.md`.
+
 ## Project Overview
 
 MMR (Make Me Rich) is a Python-based algorithmic trading platform for Interactive Brokers. It supports automated strategy execution, interactive CLI trading, historical data collection, real-time market data streaming, and idea scanning across US and international markets.
