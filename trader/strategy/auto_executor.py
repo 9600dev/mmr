@@ -47,16 +47,23 @@ Safety rails, in the order they are checked:
      filter, risk gate: position size, daily loss, open orders, signal rate).
 """
 import datetime as dt
-import logging
 import os
 import queue
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
+from trader.common.logging_helper import setup_logging
 from trader.data.duckdb_store import DuckDBConnection
 from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.objects import Action
+
+# Named logger routed to the strategy_service log (logging.yaml) so the
+# OPENED/CLOSING/CLOSED/CLOSE FAILED audit lines land in the same file as the
+# BUY/SELL signal lines — the trading monitor watches exactly one file. A
+# plain `import logging` here would route through the ROOT logger into
+# trader.log instead.
+logging = setup_logging(module_name='auto_executor')
 
 
 class AutoExecutionError(Exception):
@@ -349,6 +356,12 @@ class AutoExecutor:
         """Entry bar_ts if this (strategy, conid) has an open auto position."""
         with self._view_lock:
             return self._open_view.get((strategy_name, conid))
+
+    def open_count(self) -> int:
+        """Number of executor-attributed OPEN positions (loop-side view).
+        Used by the runtime pulse / runtime_status RPC."""
+        with self._view_lock:
+            return len(self._open_view)
 
     # -- worker ---------------------------------------------------------------
 

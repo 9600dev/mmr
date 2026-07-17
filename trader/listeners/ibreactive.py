@@ -229,6 +229,16 @@ class IBAIORx():
                 'ibrx reqId: {} errorCode: {} errorString: {} contract: {}'.format(
                     reqId, errorCode, errorString, contract
                 ))
+        elif errorCode in (2103, 2105, 2119):
+            # G2: transient farm-status codes (farm disconnected / connecting)
+            # during the nightly gateway restart are status, not errors — at
+            # ERROR they false-match every `grep -i error` health scan. They
+            # still flow to error_subject below, which is what drives the
+            # upstream-connectivity tracking.
+            logging.info(
+                'ibrx farm status: reqId: {} errorCode: {} errorString: {}'.format(
+                    reqId, errorCode, errorString
+                ))
         else:
             logging.error(
                 'ibrx reqId: {} errorCode: {} errorString: {} contract: {}'.format(

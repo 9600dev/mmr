@@ -234,6 +234,13 @@ class TraderServiceApi(RPCHandler):
         return self.trader.status()
 
     @rpcmethod
+    async def ping_ib(self) -> dict:
+        """Live IB round-trip — the honest socket-liveness probe. Unlike
+        get_status()'s cached flags, this fails loudly on a half-open
+        socket (see Trader.ping_ib)."""
+        return await self.trader.ping_ib()
+
+    @rpcmethod
     async def scanner_data(
         self,
         scan_code: str = 'TOP_PERC_GAIN',

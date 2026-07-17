@@ -68,6 +68,102 @@ def _whattoshow_for_contract(contract: Contract) -> WhatToShow:
     return WhatToShow.TRADES
 
 
+def _count_recent(index, now_utc: pd.Timestamp, seconds: int) -> int:
+    """Rows of a DatetimeIndex within the trailing window. Naive indexes are
+    treated as UTC (matching ``_strategy_frame``'s convention)."""
+    if index is None or len(index) == 0:
+        return 0
+    try:
+        cutoff = now_utc - pd.Timedelta(seconds=seconds)
+        if getattr(index, 'tz', None) is None:
+            cutoff = cutoff.tz_localize(None)
+        return int((index >= cutoff).sum())
+    except Exception:
+        return 0
+
+
+def _age_seconds(ts, now_utc: pd.Timestamp) -> Optional[int]:
+    """Whole seconds between a bar timestamp and now (naive ts = UTC)."""
+    try:
+        t = pd.Timestamp(ts)
+        t = t.tz_localize('UTC') if t.tz is None else t.tz_convert('UTC')
+        return int((now_utc - t).total_seconds())
+    except Exception:
+        return None
+
+
+def build_runtime_status(
+    now_utc: pd.Timestamp,
+    strategies,
+    streams: Dict[int, pd.DataFrame],
+    last_dispatched_bar: Dict[tuple, pd.Timestamp],
+    auto_exec_open: int,
+) -> dict:
+    """Pure snapshot of pipeline health: strategy states, tick flow per conId,
+    freshest dispatched-bar age per conId, and open auto-exec positions.
+
+    Consumed two ways: formatted by ``format_pulse`` into the periodic log
+    line, and returned raw by the ``runtime_status`` RPC for `mmr verify` /
+    healthchecks. Pure function of its inputs so tests can drive it with
+    fabricated state.
+    """
+    states = {}
+    running = 0
+    for s in strategies:
+        state = getattr(s, 'state', None)
+        if state == StrategyState.RUNNING:
+            running += 1
+        ctx = getattr(s, '_context', None)
+        states[getattr(s, 'name', None) or '?'] = {
+            'state': getattr(state, 'value', None),
+            'state_name': getattr(state, 'name', str(state)),
+            'auto_execute': bool(getattr(ctx, 'auto_execute', False)) if ctx else False,
+        }
+
+    ticks_60s = {int(conid): _count_recent(getattr(df, 'index', None), now_utc, 60)
+                 for conid, df in streams.items()}
+
+    bar_age_s: Dict[int, int] = {}
+    for key, ts in last_dispatched_bar.items():
+        try:
+            conid = int(key[0])
+        except (TypeError, ValueError, IndexError):
+            continue
+        age = _age_seconds(ts, now_utc)
+        if age is None:
+            continue
+        if conid not in bar_age_s or age < bar_age_s[conid]:
+            bar_age_s[conid] = age
+
+    return {
+        'ts': str(now_utc),
+        'strategies': states,
+        'strategies_running': running,
+        'strategies_total': len(states),
+        'ticks_60s': ticks_60s,
+        'bar_age_s': bar_age_s,
+        'auto_exec_open': int(auto_exec_open),
+    }
+
+
+def format_pulse(status: dict) -> str:
+    """One greppable INFO line per interval. ``ticks_60s=0`` for a subscribed
+    conId during market hours is the escalate condition — a dead feed shows
+    up as this line going to zero, not as an absence of errors."""
+    ticks = ','.join(f'{k}:{v}' for k, v in sorted(status.get('ticks_60s', {}).items()))
+    ages = ','.join(f'{k}:{v}' for k, v in sorted(status.get('bar_age_s', {}).items()))
+    return (
+        'pulse strategies={running}/{total} ticks_60s=[{ticks}] '
+        'bar_age_s=[{ages}] auto_exec_open={open}'.format(
+            running=status.get('strategies_running', 0),
+            total=status.get('strategies_total', 0),
+            ticks=ticks,
+            ages=ages,
+            open=status.get('auto_exec_open', 0),
+        )
+    )
+
+
 class StrategyRuntime():
     def __init__(
         self,
@@ -286,6 +382,29 @@ class StrategyRuntime():
     def get_strategies(self) -> List[Strategy]:
         return self.strategy_implementations
 
+    def runtime_status(self) -> dict:
+        """Health snapshot for the pulse line, `mmr verify`, and healthchecks."""
+        executor = getattr(self, 'auto_executor', None)
+        auto_open = executor.open_count() if executor is not None else 0
+        return build_runtime_status(
+            now_utc=pd.Timestamp.now(tz='UTC'),
+            strategies=self.strategy_implementations,
+            streams=self.streams,
+            last_dispatched_bar=self._last_dispatched_bar,
+            auto_exec_open=auto_open,
+        )
+
+    def _log_pulse(self) -> None:
+        """Periodic heartbeat. A healthy pipeline is otherwise SILENT at INFO
+        between signals, so a dead feed (gateway hang, dropped subscription,
+        pubsub break) is indistinguishable from a quiet market in the logs —
+        the pulse makes liveness positively visible. Never raises: the
+        reconcile loop must not die to a formatting error."""
+        try:
+            logging.info(format_pulse(self.runtime_status()))
+        except Exception as ex:
+            logging.warning('pulse failed: %s', ex)
+
     def _cap_tick_stream(self, conId: int) -> None:
         """Bound the raw tick buffer to the retention window so resampling stays
         cheap over a long session."""
@@ -355,18 +474,12 @@ class StrategyRuntime():
         return combined[~combined.index.duplicated(keep='last')].sort_index()
 
     def on_ticker_next(self, ticker: Ticker):
-        if ticker.contract:
-            logging.debug('StrategyRuntime.on_ticker_next({} {})'.format(ticker.contract.symbol, ticker.contract.conId))
-        else:
-            logging.debug('StrategyRuntime.on_ticker_next()')
-
-        conId = 0
-
+        # Deliberately no per-tick logging: one line per tick per instrument
+        # floods the service log all session for zero triage value. Tick-flow
+        # visibility comes from the periodic pulse line (ticks_60s) instead.
         if not ticker.contract:
-            logging.debug('no contract associated with Ticker')
             return
-        else:
-            conId = ticker.contract.conId
+        conId = ticker.contract.conId
 
         # populate the raw tick buffer, then bound it so resampling stays cheap
         normalized = normalize_ticker(ticker)
@@ -984,4 +1097,5 @@ class StrategyRuntime():
                 await self._reconcile()
             except Exception as ex:
                 logging.error('reconciliation error: {}'.format(ex))
+            self._log_pulse()
 

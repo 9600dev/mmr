@@ -106,27 +106,49 @@ loggers:
         level: WARNING
         handlers: [rich_console, debug_file_handler]
         propagate: no
+    # NOTE on `propagate: yes` (deliberate, was a silent `propogate` typo for
+    # years): service loggers write their own file AND propagate to root
+    # (console via rich_console, trader.log at INFO+, /tmp/debug.log at DEBUG,
+    # errors.log — the last doubles with the logger's own error_file_handler,
+    # accepted). Propagation is load-bearing: /tmp/debug.log stays a complete
+    # single-file triage log, and pytest's caplog captures via root. The
+    # monitors don't depend on it either way — they read the service files.
     data_service:
         level: DEBUG
         handlers: [data_service_handler, error_file_handler]
-        propogate: no
+        propagate: yes
     ib_history:
         level: DEBUG
         handlers: [data_service_handler, error_file_handler]
-        propogate: no
+        propagate: yes
     trader_service:
         level: DEBUG
         handlers: [trader_service_handler, error_file_handler]
-        propogate: no
+        propagate: yes
     trading_runtime:
         level: DEBUG
         handlers: [trader_service_handler, error_file_handler]
-        propogate: no
+        propagate: yes
+    # ibreactivex (IBAIORx) carries the IB connectivity/farm-status lines the
+    # health monitor needs — route it into the trader_service log (it used to
+    # fall through to root only, leaving trader_service_<ts>.log blind to
+    # connectivity events).
+    ibreactivex:
+        level: DEBUG
+        handlers: [trader_service_handler, error_file_handler]
+        propagate: yes
     strategy_service:
         level: DEBUG
         handlers: [strategy_service_handler, error_file_handler]
-        propogate: no
+        propagate: yes
     strategy_runtime:
         level: DEBUG
         handlers: [strategy_service_handler, error_file_handler]
-        propogate: no
+        propagate: yes
+    # auto_executor's OPENED/CLOSING/CLOSED/CLOSE FAILED audit lines belong in
+    # the strategy_service log next to the signals that caused them — the
+    # trading monitor watches one file.
+    auto_executor:
+        level: DEBUG
+        handlers: [strategy_service_handler, error_file_handler]
+        propagate: yes

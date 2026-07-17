@@ -54,6 +54,14 @@ class StrategyServiceApi(RPCHandler):
         return [StrategyConfig.from_strategy(strategy) for strategy in self.strategy.get_strategies()]
 
     @rpcmethod
+    def runtime_status(self) -> dict:
+        """Pipeline-health snapshot (strategy states, ticks_60s per conId,
+        dispatched-bar ages, open auto-exec positions). Plain primitives so
+        `mmr verify` and container healthchecks can consume it without any
+        dataclass deserialization."""
+        return self.strategy.runtime_status()
+
+    @rpcmethod
     async def reload_strategies(self) -> SuccessFail[List[StrategyConfig]]:
         try:
             await self.strategy._reconcile()

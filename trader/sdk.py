@@ -2420,6 +2420,19 @@ class MMR:
         tf.save()
         return tf.to_dict()
 
+    def get_service_status(self) -> Dict:
+        """Raw ``get_status`` RPC — connectivity flags only, none of the
+        account-value aggregation ``status()`` does. Cheap enough for
+        healthchecks and `mmr verify`."""
+        return self._rpc.rpc(return_type=dict).get_status()
+
+    def ping_ib(self) -> Dict:
+        """Live IB socket round-trip via trader_service (reqCurrentTime).
+        The honest liveness probe: ``get_status()``'s flags can freeze true
+        on a half-open socket (AUDIT_ROADMAP G3), a real request/response
+        cannot. Returns ``{'ok': bool, 'ib_server_time'|'error': ...}``."""
+        return self._rpc.rpc(return_type=dict).ping_ib()
+
     def status(self) -> dict:
         """Check connectivity to trader_service via ZMQ RPC with diagnostics.
 

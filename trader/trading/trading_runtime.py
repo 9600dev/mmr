@@ -507,6 +507,12 @@ class Trader():
         scheduled_disposable = self.scheduler.schedule_periodic(10, lambda x: self.pnl.post_all())
         self.disposables.append(scheduled_disposable)
 
+        # heartbeat: one INFO line per 30s proving the service is alive and
+        # what it believes about the IB socket. All fields are local reads —
+        # never blocks the loop.
+        pulse_disposable = self.scheduler.schedule_periodic(30, lambda x: self._log_pulse())
+        self.disposables.append(pulse_disposable)
+
     def _on_ib_error(self, error: IBAIORxError):
         """Track IB upstream connectivity from error codes.
 
@@ -1492,6 +1498,38 @@ class Trader():
 
     def is_ib_connected(self) -> bool:
         return self.client.ib.isConnected()
+
+    def _log_pulse(self) -> None:
+        """Periodic heartbeat (scheduled in connected_event). Local reads
+        only; never raises. The line's ABSENCE for >~2 intervals means the
+        service (or its event loop) is wedged — greppable by the health
+        monitor, unlike a silent hang."""
+        try:
+            book = getattr(self, 'book', None)
+            logging.info(
+                'pulse ib_connected=%s ib_upstream=%s open_orders=%s',
+                self.client.ib.isConnected(),
+                self._ib_upstream_connected,
+                book.get_open_order_count() if book is not None else 0,
+            )
+        except Exception as ex:
+            logging.warning('pulse failed: %s', ex)
+
+    async def ping_ib(self) -> dict:
+        """Live IB socket round-trip (reqCurrentTime with a 5s deadline).
+
+        ``get_status()``'s flags can freeze true on a half-open socket —
+        G3's 10.5h invisible outage — because they are driven by error
+        codes that never arrive when the socket itself dies. An actual
+        request/response is the only honest liveness signal; `mmr verify`
+        and the container healthcheck use this instead of the flags.
+        """
+        try:
+            server_time = await asyncio.wait_for(
+                self.client.ib.reqCurrentTimeAsync(), timeout=5.0)
+            return {'ok': True, 'ib_server_time': str(server_time)}
+        except Exception as ex:
+            return {'ok': False, 'error': '{}: {}'.format(type(ex).__name__, ex)}
 
     @log_method
     def red_button(self):
