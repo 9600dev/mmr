@@ -128,8 +128,11 @@ PLS position (3800sh, AUD) has a protective SELL STP @ 4.75.
 - 5 strategies auto-execute from the open (live-watching if the container stays
   up). Best-effort cron for a monitoring session; reliable path = prompt for a
   live watch before the open.
-- Monitor script: `scratchpad/monitor.sh` (market-aware; may be gone if the
-  scratchpad is cleared — regenerate if needed).
+- Monitoring is now a committed artifact (2026-07-16): `scripts/monitor_trading.sh`,
+  `scripts/monitor_health.sh`, `scripts/last_pulse.sh`, with the escalation
+  policy + triage order in `docs/MONITORING.md`. Post-restart assertions:
+  `mmr verify` (non-zero exit on FAIL). The old `scratchpad/monitor.sh`
+  pattern is retired.
 - The live path was just rebuilt this session (on_prices + tick→bar resampling +
   priming); Monday is the first from-the-open clean test.
 - **2026-07-05 incident + recovery:** gateway had been dead since Sat 23:59

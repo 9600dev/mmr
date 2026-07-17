@@ -692,6 +692,22 @@ def build_parser() -> argparse.ArgumentParser:
                           '  status',
                    formatter_class=fmt)
 
+    # verify — scripted post-restart verification (the Monday-checklist
+    # assertions as one command; exits non-zero on FAIL in one-shot mode)
+    verify_p = sub.add_parser(
+        'verify',
+        help='Post-restart stack verification (services, IB socket, roster, tick flow)',
+        epilog='Examples:\n'
+               '  verify                      # after ./docker.sh -u / start_mmr.sh\n'
+               '  verify --expect-running 5   # assert exactly 5 RUNNING strategies\n'
+               '  verify --exchanges NYSE,ASX # markets whose open hours require tick flow\n',
+        formatter_class=fmt)
+    verify_p.add_argument('--exchanges', default='NYSE,ASX',
+                          help='Comma-separated markets that make tick flow mandatory while open '
+                               '(default: NYSE,ASX — the exchanges the armed book trades)')
+    verify_p.add_argument('--expect-running', type=int, default=None,
+                          help='Exact number of RUNNING strategies expected (FAIL on mismatch)')
+
     # diagnose — low-level diagnostics for bugs that are hard to see
     # from the normal commands (e.g. "positions=0 but margin used").
     diag_p = sub.add_parser('diagnose',
@@ -2054,6 +2070,9 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
                     console.print(f'[yellow]Per-currency cash unavailable: {cash_error}[/yellow]')
                 else:
                     console.print('[dim]No per-currency cash rows reported for this account.[/dim]')
+
+        elif cmd == 'verify':
+            return _handle_verify(args)
 
         elif cmd == 'status':
             if _json_mode:
@@ -4242,6 +4261,196 @@ def _handle_strategy_undeploy(args: argparse.Namespace):
         yaml.dump(config, f, default_flow_style=False)
 
     print_status(f'Undeployed strategy: {name}')
+
+
+def _verify_roster_check(yaml_armed: list, runtime_status: dict,
+                         expect_running: Optional[int] = None) -> tuple:
+    """Pure roster assertion: (status, detail) for the armed-strategy check.
+
+    WARN (not FAIL) on individual armed-in-YAML strategies that aren't
+    RUNNING — enabled-state persists in the DB across restarts, so a
+    deliberately disabled strategy still carries auto_execute: true in the
+    YAML. FAIL only when nothing is running (or --expect-running mismatches).
+    """
+    states = runtime_status.get('strategies', {})
+    running = [n for n in yaml_armed if states.get(n, {}).get('state_name') == 'RUNNING']
+    missing = [n for n in yaml_armed if n not in states]
+    stopped = [n for n in yaml_armed
+               if n in states and states.get(n, {}).get('state_name') != 'RUNNING']
+
+    if expect_running is not None:
+        actual = runtime_status.get('strategies_running', 0)
+        if actual != expect_running:
+            return ('FAIL', f'expected {expect_running} RUNNING strategies, got {actual}')
+    if not running:
+        detail = f'none of the {len(yaml_armed)} armed strategies is RUNNING'
+        if missing:
+            detail += f' (not loaded: {", ".join(missing)})'
+        return ('FAIL', detail)
+    if missing or stopped:
+        detail = f'{len(running)}/{len(yaml_armed)} armed strategies RUNNING'
+        if missing:
+            detail += f'; not loaded: {", ".join(missing)}'
+        if stopped:
+            detail += f'; not running: {", ".join(stopped)}'
+        return ('WARN', detail + ' (deliberate disables also show up here)')
+    return ('PASS', f'all {len(yaml_armed)} armed strategies RUNNING')
+
+
+def _handle_verify(args: argparse.Namespace) -> bool:
+    """Scripted post-restart verification (the Monday checklist as one command).
+
+    Asserts the stack can actually trade — not merely that containers are Up:
+    trader/strategy RPC reachability, a LIVE IB round-trip (get_status's
+    flags can freeze true on a half-open socket — AUDIT_ROADMAP G3, the
+    10.5h invisible outage), the armed roster loaded + RUNNING, and ticks
+    flowing whenever a watched market is open. Exits non-zero on any FAIL
+    in one-shot mode so cron / scripts / an LLM monitor can gate on it.
+    """
+    import socket as _socket
+    import yaml as _yaml
+    from trader.sdk import MMR as _MMR
+
+    checks: list = []
+
+    def record(name: str, status: str, detail: str):
+        checks.append({'check': name, 'status': status, 'detail': detail})
+
+    # -- trader_service + IB (own short-timeout client: the shared one uses
+    #    a 30s timeout, which turns a dead service into a 30s hang per call) --
+    vmmr = None
+    service_status = None
+    try:
+        vmmr = _MMR(timeout=8).connect()
+        service_status = vmmr.get_service_status()
+        record('trader_service', 'PASS', 'RPC responsive')
+    except Exception as ex:
+        record('trader_service', 'FAIL', f'RPC unreachable: {ex}')
+
+    if service_status is not None:
+        try:
+            pong = vmmr.ping_ib()
+            if pong.get('ok'):
+                record('ib_socket', 'PASS',
+                       f'live round-trip OK (IB time {pong.get("ib_server_time")})')
+            else:
+                record('ib_socket', 'FAIL',
+                       f'round-trip failed: {pong.get("error")} — gateway hung or socket '
+                       'half-open (status flags may still read true)')
+        except Exception as ex:
+            record('ib_socket', 'FAIL',
+                   f'ping_ib RPC failed: {ex} (a service predating `mmr verify` '
+                   'needs a restart on current code)')
+        if service_status.get('ib_upstream_connected'):
+            record('ib_upstream', 'PASS', 'gateway reports upstream connected')
+        else:
+            record('ib_upstream', 'FAIL',
+                   f'upstream down: {service_status.get("ib_upstream_error", "?")}')
+        if not service_status.get('storage_connected', True):
+            record('storage', 'FAIL', 'DuckDB storage not connected')
+    else:
+        record('ib_socket', 'SKIP', 'trader_service unreachable')
+        record('ib_upstream', 'SKIP', 'trader_service unreachable')
+
+    # -- strategy_service (direct on 42005 — must work when trader is down) --
+    runtime_status = None
+    try:
+        from trader.container import Container
+        from trader.messaging.clientserver import RPCClient
+        cfg = Container.instance().config()
+        sc = RPCClient(
+            zmq_server_address=cfg.get('zmq_strategy_rpc_server_address', 'tcp://127.0.0.1'),
+            zmq_server_port=int(cfg.get('zmq_strategy_rpc_server_port', 42005)),
+            timeout=8,
+        )
+        asyncio.run(sc.connect())
+        runtime_status = sc.rpc(return_type=dict).runtime_status()
+        record('strategy_service', 'PASS',
+               f'RPC responsive ({runtime_status.get("strategies_running", 0)}/'
+               f'{runtime_status.get("strategies_total", 0)} strategies RUNNING, '
+               f'{runtime_status.get("auto_exec_open", 0)} auto-exec positions open)')
+    except Exception as ex:
+        record('strategy_service', 'FAIL', f'RPC unreachable or runtime_status failed: {ex}')
+
+    # -- armed roster: YAML auto_execute:true names must be loaded + RUNNING --
+    yaml_armed: list = []
+    config_path = Path('~/.config/mmr/strategy_runtime.yaml').expanduser()
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                ycfg = _yaml.safe_load(f) or {}
+            yaml_armed = [s.get('name', '?') for s in (ycfg.get('strategies') or [])
+                          if s.get('auto_execute')]
+        except Exception as ex:
+            record('strategy_roster', 'WARN', f'could not parse strategy_runtime.yaml: {ex}')
+    if runtime_status is not None and yaml_armed:
+        status, detail = _verify_roster_check(yaml_armed, runtime_status, args.expect_running)
+        record('strategy_roster', status, detail)
+    elif runtime_status is not None:
+        record('strategy_roster', 'SKIP', 'no auto_execute strategies in strategy_runtime.yaml')
+    else:
+        record('strategy_roster', 'SKIP', 'strategy_service unreachable')
+
+    # -- tick flow: mandatory while a watched market is open --
+    if runtime_status is not None:
+        wanted = {e.strip().upper() for e in (args.exchanges or '').split(',') if e.strip()}
+        try:
+            mh = (vmmr or _MMR()).market_hours()
+            open_names = [m['exchange'] for m in mh
+                          if m['status'] == 'OPEN' and m['exchange'].upper() in wanted]
+        except Exception as ex:
+            record('tick_flow', 'WARN', f'could not determine market hours: {ex}')
+            open_names = None
+        if open_names is not None:
+            ticks = runtime_status.get('ticks_60s', {})
+            total = sum(ticks.values())
+            if not open_names:
+                record('tick_flow', 'SKIP',
+                       f'no watched market ({args.exchanges}) is open — 0 ticks expected')
+            elif runtime_status.get('strategies_running', 0) == 0:
+                record('tick_flow', 'SKIP', 'no RUNNING strategies to receive ticks')
+            elif total > 0:
+                live = sum(1 for v in ticks.values() if v)
+                record('tick_flow', 'PASS',
+                       f'{total} ticks in last 60s across {live} instruments '
+                       f'({", ".join(open_names)} open)')
+            else:
+                record('tick_flow', 'FAIL',
+                       f'0 ticks in 60s while {", ".join(open_names)} open — feed dead? '
+                       '(if the stack just started, wait ~60s and re-run)')
+
+    # -- pycron cron scheduler (WARN-only: absent by design outside the container) --
+    try:
+        with _socket.create_connection(('127.0.0.1', 8081), timeout=2):
+            record('pycron', 'PASS', 'cron health port 8081 responding')
+    except Exception:
+        record('pycron', 'WARN',
+               'port 8081 not responding — nightly db_backup/data_refresh jobs are not '
+               'scheduled (expected when running outside the container)')
+
+    failed = [c for c in checks if c['status'] == 'FAIL']
+    warned = [c for c in checks if c['status'] == 'WARN']
+    ok = not failed
+
+    if _json_mode:
+        print_dict({'ok': ok, 'checks': checks}, title='Verify')
+    else:
+        import pandas as _pd
+        print_df(_pd.DataFrame(checks), title='Stack verification')
+        if ok and not warned:
+            print_status('VERIFY PASS — stack is trade-ready', success=True)
+        elif ok:
+            print_status(f'VERIFY PASS with {len(warned)} warning(s)', success=True)
+        else:
+            print_status(
+                'VERIFY FAIL: ' + '; '.join(f'{c["check"]}: {c["detail"]}' for c in failed),
+                success=False)
+
+    # One-shot mode (mmr verify from a shell/cron): non-zero exit on FAIL.
+    # In the REPL (bare argv) sys.exit would kill the session — skip it there.
+    if failed and len(sys.argv) > 1:
+        sys.exit(1)
+    return True
 
 
 def _handle_strategy_signals(args: argparse.Namespace):
