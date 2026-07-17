@@ -169,3 +169,108 @@ class EventStore:
             params.append(strategy_name)
         row = self.db.execute(query, params, fetch='one')
         return row[0] if row else 0
+
+    # Fill tags that are NOT strategy names (manual/CLI order paths). Kept in
+    # the aggregation output but excluded from "per-strategy" views by the CLI.
+    NON_STRATEGY_TAGS = ('', 'order', 'proposal', 'to_market')
+
+    def realized_pnl_by_strategy(self) -> dict:
+        """Aggregate ORDER_FILLED events into per-strategy realized PnL.
+
+        Requires fills tagged with the strategy name via orderRef (approve
+        derives it from proposal.metadata['strategy']); fills recorded before
+        tagging shipped carry 'proposal' and land under that key. Pairing
+        exploits the auto-executor's long-only invariant — see
+        ``pair_fills_long_only``.
+        """
+        rows = self.db.execute(
+            "SELECT strategy_name, conid, action, quantity, price, timestamp "
+            "FROM trading_events WHERE event_type = ? ORDER BY timestamp ASC, id ASC",
+            [EventType.ORDER_FILLED.value],
+            fetch='all',
+        )
+        closed, open_lots, unmatched = pair_fills_long_only(rows or [])
+
+        today = dt.date.today()
+        strategies: Dict[str, dict] = {}
+
+        def _bucket(name: str) -> dict:
+            return strategies.setdefault(name, {
+                'realized_total': 0.0, 'realized_today': 0.0,
+                'closed_trades': 0, 'wins': 0, 'open_lots': [],
+            })
+
+        for trade in closed:
+            b = _bucket(trade['strategy'])
+            b['realized_total'] += trade['pnl']
+            b['closed_trades'] += 1
+            if trade['pnl'] > 0:
+                b['wins'] += 1
+            closed_at = trade['closed_at']
+            if closed_at is not None and getattr(closed_at, 'date', None) and closed_at.date() == today:
+                b['realized_today'] += trade['pnl']
+        for lot in open_lots:
+            _bucket(lot['strategy'])['open_lots'].append(
+                {'conid': lot['conid'], 'quantity': lot['quantity'],
+                 'entry_price': lot['entry_price']})
+
+        return {
+            'strategies': strategies,
+            'closed_trades': closed,
+            'unmatched_sells': unmatched,
+        }
+
+
+def pair_fills_long_only(fills) -> tuple:
+    """Pair BUY/SELL fills into round trips under the long-only invariant.
+
+    ``fills``: iterable of (strategy_name, conid, action, quantity, price,
+    timestamp) in CHRONOLOGICAL order. A BUY opens/extends the (strategy,
+    conid) lot at a volume-weighted entry; a SELL realizes
+    ``(exit - entry) x min(sell_qty, lot_qty)``. A SELL with no lot (manual
+    interleaving, fills predating attribution) is counted, never guessed at.
+
+    Returns ``(closed_trades, open_lots, unmatched_sells)``. Pure function —
+    tests drive it with fabricated rows.
+    """
+    lots: Dict[tuple, list] = {}
+    closed: List[dict] = []
+    unmatched_sells = 0
+    for strategy, conid, action, quantity, price, ts in fills:
+        try:
+            qty = float(quantity or 0.0)
+            px = float(price or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0:
+            continue
+        key = (strategy, conid)
+        side = (action or '').upper()
+        if side == 'BUY':
+            if key in lots:
+                held_qty, held_px = lots[key]
+                new_qty = held_qty + qty
+                lots[key] = [new_qty, (held_qty * held_px + qty * px) / new_qty]
+            else:
+                lots[key] = [qty, px]
+        elif side == 'SELL':
+            if key not in lots or lots[key][0] <= 0:
+                unmatched_sells += 1
+                continue
+            held_qty, held_px = lots[key]
+            close_qty = min(qty, held_qty)
+            closed.append({
+                'strategy': strategy, 'conid': conid, 'quantity': close_qty,
+                'entry_price': held_px, 'exit_price': px,
+                'pnl': (px - held_px) * close_qty, 'closed_at': ts,
+            })
+            remaining = held_qty - close_qty
+            if remaining <= 1e-9:
+                del lots[key]
+            else:
+                lots[key][0] = remaining
+    open_lots = [
+        {'strategy': k[0], 'conid': k[1], 'quantity': v[0], 'entry_price': v[1]}
+        for k, v in lots.items()
+    ]
+    return closed, open_lots, unmatched_sells

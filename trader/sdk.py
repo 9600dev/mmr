@@ -1565,6 +1565,12 @@ class MMR:
             # trade never happened while a live order fills. Only a *clean*
             # failure (explicit reject, or a send that never left the client)
             # is safe to record as FAILED.
+            # Strategy-originated proposals (auto-executor sets
+            # metadata['strategy']) tag the order with the strategy name —
+            # it flows through orderRef into ORDER_FILLED.strategy_name, so
+            # fills are attributable per strategy (`mmr strategies pnl`,
+            # live-vs-backtest comparison). Manual proposals stay 'proposal'.
+            algo_name = str(proposal.metadata.get('strategy') or 'proposal')
             try:
                 result = consume(
                     self._rpc.rpc(return_type=SuccessFail[list[Trade]]).place_expressive_order(
@@ -1572,7 +1578,7 @@ class MMR:
                         action=proposal.action,
                         quantity=float(qty),
                         execution_spec=proposal.execution.to_dict(),
-                        algo_name='proposal',
+                        algo_name=algo_name,
                     )
                 )
             except TimeoutError as ex:

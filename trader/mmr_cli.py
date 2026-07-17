@@ -629,6 +629,12 @@ def build_parser() -> argparse.ArgumentParser:
     strat_signals_p.add_argument('name', help='Strategy name')
     strat_signals_p.add_argument('--limit', type=int, default=20, help='Number of signals (default: 20)')
 
+    # strategies pnl — per-strategy realized/unrealized PnL from attributed fills
+    strat_pnl_p = strat_sub.add_parser(
+        'pnl', help='Per-strategy PnL from attributed fills (realized needs no service)')
+    strat_pnl_p.add_argument('--all', action='store_true', default=False,
+                             help='Include non-strategy fill tags (proposal/order/to_market)')
+
     # strategies backtest
     strat_bt_p = strat_sub.add_parser('backtest', help='Backtest a deployed strategy')
     strat_bt_p.add_argument('name', help='Strategy name')
@@ -707,6 +713,20 @@ def build_parser() -> argparse.ArgumentParser:
                                '(default: NYSE,ASX — the exchanges the armed book trades)')
     verify_p.add_argument('--expect-running', type=int, default=None,
                           help='Exact number of RUNNING strategies expected (FAIL on mismatch)')
+
+    # preflight — cron-driven pre-open one-shot: same checks as verify, one
+    # greppable OK/FAIL line appended to preflight.log
+    preflight_p = sub.add_parser(
+        'preflight',
+        help='Pre-open readiness one-shot (cron): verify checks -> one OK/FAIL line + preflight.log',
+        epilog='Examples:\n'
+               '  preflight                   # scheduled by pycron ~30 min before each open\n'
+               '  preflight --expect-running 5\n',
+        formatter_class=fmt)
+    preflight_p.add_argument('--exchanges', default='NYSE,ASX',
+                             help='Markets whose open hours make tick flow mandatory (default: NYSE,ASX)')
+    preflight_p.add_argument('--expect-running', type=int, default=None,
+                             help='Exact number of RUNNING strategies expected (FAIL on mismatch)')
 
     # diagnose — low-level diagnostics for bugs that are hard to see
     # from the normal commands (e.g. "positions=0 but margin used").
@@ -2073,6 +2093,9 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
 
         elif cmd == 'verify':
             return _handle_verify(args)
+
+        elif cmd == 'preflight':
+            return _handle_preflight(args)
 
         elif cmd == 'status':
             if _json_mode:
@@ -3469,6 +3492,8 @@ def _handle_strategies(mmr: MMR, args: argparse.Namespace):
         _handle_strategy_undeploy(args)
     elif action == 'signals':
         _handle_strategy_signals(args)
+    elif action == 'pnl':
+        _handle_strategy_pnl(args)
     elif action == 'backtest':
         _handle_strategy_backtest(args)
     elif action in ('available', 'avail', 'list-files'):
@@ -4297,16 +4322,15 @@ def _verify_roster_check(yaml_armed: list, runtime_status: dict,
     return ('PASS', f'all {len(yaml_armed)} armed strategies RUNNING')
 
 
-def _handle_verify(args: argparse.Namespace) -> bool:
-    """Scripted post-restart verification (the Monday checklist as one command).
-
-    Asserts the stack can actually trade — not merely that containers are Up:
+def _collect_stack_checks(exchanges: str = 'NYSE,ASX',
+                          expect_running: Optional[int] = None) -> list:
+    """The stack trade-readiness checks shared by `mmr verify` (full table,
+    post-restart) and `mmr preflight` (one-line OK/FAIL, cron pre-open):
     trader/strategy RPC reachability, a LIVE IB round-trip (get_status's
     flags can freeze true on a half-open socket — AUDIT_ROADMAP G3, the
-    10.5h invisible outage), the armed roster loaded + RUNNING, and ticks
-    flowing whenever a watched market is open. Exits non-zero on any FAIL
-    in one-shot mode so cron / scripts / an LLM monitor can gate on it.
-    """
+    10.5h invisible outage), the armed roster loaded + RUNNING, and tick
+    flow whenever a watched market is open (auto-SKIPs when closed, so
+    pre-open preflights aren't penalized for a quiet feed)."""
     import socket as _socket
     import yaml as _yaml
     from trader.sdk import MMR as _MMR
@@ -4384,7 +4408,7 @@ def _handle_verify(args: argparse.Namespace) -> bool:
         except Exception as ex:
             record('strategy_roster', 'WARN', f'could not parse strategy_runtime.yaml: {ex}')
     if runtime_status is not None and yaml_armed:
-        status, detail = _verify_roster_check(yaml_armed, runtime_status, args.expect_running)
+        status, detail = _verify_roster_check(yaml_armed, runtime_status, expect_running)
         record('strategy_roster', status, detail)
     elif runtime_status is not None:
         record('strategy_roster', 'SKIP', 'no auto_execute strategies in strategy_runtime.yaml')
@@ -4393,7 +4417,7 @@ def _handle_verify(args: argparse.Namespace) -> bool:
 
     # -- tick flow: mandatory while a watched market is open --
     if runtime_status is not None:
-        wanted = {e.strip().upper() for e in (args.exchanges or '').split(',') if e.strip()}
+        wanted = {e.strip().upper() for e in (exchanges or '').split(',') if e.strip()}
         try:
             mh = (vmmr or _MMR()).market_hours()
             open_names = [m['exchange'] for m in mh
@@ -4406,7 +4430,7 @@ def _handle_verify(args: argparse.Namespace) -> bool:
             total = sum(ticks.values())
             if not open_names:
                 record('tick_flow', 'SKIP',
-                       f'no watched market ({args.exchanges}) is open — 0 ticks expected')
+                       f'no watched market ({exchanges}) is open — 0 ticks expected')
             elif runtime_status.get('strategies_running', 0) == 0:
                 record('tick_flow', 'SKIP', 'no RUNNING strategies to receive ticks')
             elif total > 0:
@@ -4428,6 +4452,14 @@ def _handle_verify(args: argparse.Namespace) -> bool:
                'port 8081 not responding — nightly db_backup/data_refresh jobs are not '
                'scheduled (expected when running outside the container)')
 
+    return checks
+
+
+def _handle_verify(args: argparse.Namespace) -> bool:
+    """Scripted post-restart verification (the Monday checklist as one
+    command). Full check table + non-zero exit on FAIL in one-shot mode so
+    cron / scripts / an LLM monitor can gate on it."""
+    checks = _collect_stack_checks(args.exchanges, args.expect_running)
     failed = [c for c in checks if c['status'] == 'FAIL']
     warned = [c for c in checks if c['status'] == 'WARN']
     ok = not failed
@@ -4451,6 +4483,136 @@ def _handle_verify(args: argparse.Namespace) -> bool:
     if failed and len(sys.argv) > 1:
         sys.exit(1)
     return True
+
+
+PREFLIGHT_LOG = Path('~/.local/share/mmr/logs/preflight.log').expanduser()
+
+
+def _preflight_summary(checks: list) -> tuple:
+    """(ok, one-line summary) for a check list. Pure — unit-testable."""
+    failed = [c for c in checks if c['status'] == 'FAIL']
+    warned = [c for c in checks if c['status'] == 'WARN']
+    if failed:
+        return False, ('PREFLIGHT FAIL: '
+                       + '; '.join(f'{c["check"]}: {c["detail"]}' for c in failed))
+    passed = sum(1 for c in checks if c['status'] == 'PASS')
+    line = f'PREFLIGHT OK — {passed} checks pass'
+    if warned:
+        line += f' ({len(warned)} warn: ' + ', '.join(c['check'] for c in warned) + ')'
+    return True, line
+
+
+def _handle_preflight(args: argparse.Namespace) -> bool:
+    """Pre-open readiness one-shot (cron-driven ~30 min before each session
+    open). Same checks as `mmr verify` — including the live ping_ib
+    round-trip rather than the G3-frozen status flags — but the output is a
+    single greppable line, appended to preflight.log so a hung gateway or a
+    missing roster is caught BEFORE the open instead of by missing trades
+    after it. Read-only: it reports; remediation is the operator's job."""
+    import datetime as dt
+
+    checks = _collect_stack_checks(args.exchanges, args.expect_running)
+    ok, line = _preflight_summary(checks)
+
+    stamped = f'{dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")} {line}'
+    try:
+        PREFLIGHT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(PREFLIGHT_LOG, 'a') as f:
+            f.write(stamped + '\n')
+    except OSError as ex:
+        # The log is the monitor's surface — losing it silently would defeat
+        # the point, so surface the write failure in the output itself.
+        line += f' [preflight.log write failed: {ex}]'
+
+    if _json_mode:
+        print_dict({'ok': ok, 'summary': line, 'checks': checks}, title='Preflight')
+    else:
+        print(stamped)
+    if not ok and len(sys.argv) > 1:
+        sys.exit(1)
+    return True
+
+
+def _handle_strategy_pnl(args: argparse.Namespace):
+    """Per-strategy PnL from attributed fills (the live-vs-backtest ledger).
+
+    Realized numbers come purely from the event store (no service needed):
+    ORDER_FILLED events tagged with the strategy name via orderRef, paired
+    long-only. Unrealized marks are best-effort — they need trader_service
+    for current prices and degrade to '-' when it's down.
+    """
+    import pandas as pd
+    from trader.container import Container
+    from trader.data.event_store import EventStore
+
+    cfg = Container.instance().config()
+    duckdb_path = cfg.get('duckdb_path', '')
+    if not duckdb_path:
+        print_status('duckdb_path not configured', success=False)
+        return
+
+    store = EventStore(duckdb_path)
+    report = store.realized_pnl_by_strategy()
+    strategies = report['strategies']
+    if not getattr(args, 'all', False):
+        strategies = {k: v for k, v in strategies.items()
+                      if k not in EventStore.NON_STRATEGY_TAGS}
+
+    if not strategies:
+        print_status(
+            'No strategy-attributed fills yet. Fills are tagged from the first '
+            'auto-executed trade after fill-tagging shipped; older fills carry '
+            "'proposal' (view with --all).", success=True)
+        return
+
+    # Best-effort unrealized mark: current prices from the live portfolio.
+    prices: dict = {}
+    try:
+        from trader.sdk import MMR as _MMR
+        pmmr = _MMR(timeout=6).connect()
+        for item in (pmmr._rpc.rpc().get_portfolio() or []):
+            contract = getattr(item, 'contract', None)
+            conid = int(getattr(contract, 'conId', 0) or 0)
+            if conid:
+                prices[conid] = float(getattr(item, 'marketPrice', 0.0) or 0.0)
+    except Exception:
+        pass  # service down — realized is still exact, unrealized shows '-'
+
+    rows = []
+    for name in sorted(strategies):
+        s = strategies[name]
+        open_qty = sum(lot['quantity'] for lot in s['open_lots'])
+        unrealized = None
+        if s['open_lots'] and prices:
+            unrealized = 0.0
+            for lot in s['open_lots']:
+                mkt = prices.get(lot['conid'])
+                if mkt:
+                    unrealized += (mkt - lot['entry_price']) * lot['quantity']
+        closed = s['closed_trades']
+        rows.append({
+            'strategy': name,
+            'realized_today': round(s['realized_today'], 2),
+            'realized_total': round(s['realized_total'], 2),
+            'trades': closed,
+            'win_rate': f"{s['wins'] / closed:.0%}" if closed else '-',
+            'open_qty': open_qty,
+            'unrealized': round(unrealized, 2) if unrealized is not None else '-',
+        })
+
+    if _json_mode:
+        print_dict({'strategies': strategies,
+                    'unmatched_sells': report['unmatched_sells'],
+                    'rows': rows}, title='Strategy PnL')
+        return
+    print_df(pd.DataFrame(rows), title='Per-strategy PnL (attributed fills)')
+    if report['unmatched_sells']:
+        console.print(f"[dim]{report['unmatched_sells']} SELL fill(s) had no matching "
+                      'attributed BUY (manual interleaving or pre-tagging fills) — '
+                      'excluded from PnL.[/dim]')
+    if not prices:
+        console.print('[dim]trader_service unreachable — unrealized marks unavailable '
+                      '(realized numbers are exact).[/dim]')
 
 
 def _handle_strategy_signals(args: argparse.Namespace):
@@ -10735,7 +10897,7 @@ def repl(mmr: MMR):
 # ------------------------------------------------------------------
 
 _LOCAL_ONLY_COMMANDS = {'backtest', 'bt', 'data', 'propose', 'proposals', 'reject', 'market-hours', 'mh', 'session', 'group'}
-_LOCAL_ONLY_STRAT_ACTIONS = {'create', 'deploy', 'undeploy', 'signals', 'backtest'}
+_LOCAL_ONLY_STRAT_ACTIONS = {'create', 'deploy', 'undeploy', 'signals', 'backtest', 'pnl'}
 
 
 def main():
