@@ -4,6 +4,8 @@
 > coverage, backups, restart policy, Monday plan) lives in
 > [`docs/OPERATIONAL_STATE.md`](docs/OPERATIONAL_STATE.md) — read it first when
 > resuming operational work. Code backlog is in `docs/AUDIT_ROADMAP.md`.
+> The live-session operating loop (monitors, pulse lines, escalation policy,
+> triage order) is [`docs/MONITORING.md`](docs/MONITORING.md).
 
 ## Project Overview
 
@@ -237,6 +239,8 @@ Two-container model via docker-compose:
 - **ib-gateway**: `ghcr.io/gnzsnz/ib-gateway:latest` — runs IB Gateway. Configured via `.env` file. `scripts/ib-gateway-run.sh` is bind-mounted in to patch the upstream's broken `inst_jre.cfg` (it records a build-time `/tmp/setup/<pid>.dir/jre` path that doesn't exist at runtime, so install4j can't find Java on first launch).
 - **mmr**: Built from `python:3.12-slim-bookworm` base. Connects to ib-gateway via Docker DNS. Access via `docker exec`. The entrypoint auto-launches services via `start_mmr.sh` — interactive exec-ins (`docker exec -it bash`) do NOT re-launch (the `.bash_profile` only sets env), so they won't collide on ZMQ ports / IB client id. Container resource limits: 24 GB mem / 24 GB swap (sized for in-place DuckDB CHECKPOINT compaction on bloated DBs).
 
+Both containers carry compose **healthchecks** (`docker ps` shows `(healthy)`): ib-gateway = API port listening (the condition the 2026-07-04 hung restart violated for 10.5h while showing plain "Up"); mmr = both trading services answer RPC (`scripts/container_healthcheck.sh` — deliberately not gated on IB connectivity, which is the gateway check's and `mmr verify`'s job). Docker only *reports* unhealthy — restart remains the host watchdog's job. Inside the mmr container, `start_mmr.sh` runs every service under a **supervise() loop**: crash → restart with bounded backoff (5s→60s); 5 rapid deaths → circuit breaker exits the stack with code 42 so `restart: unless-stopped` recreates a clean container. A lone service crash can no longer leave a half-dead "Up" container.
+
 IB Gateway ports: 4003 (live), 4004 (paper), mapped to host as 7496/7497 (VNC: 5901). A host launchd watchdog (`scripts/ib_gateway_watchdog.sh`, every 5 min) restarts the gateway container if the paper port stays closed ~15 min — the nightly 23:59 IBC auto-restart can hang at a login dialog.
 
 Storage layout (host paths):
@@ -290,6 +294,8 @@ mmr                          # trader.mmr_cli:main
 
 ```
 status                       # Service connectivity check
+verify                       # Post-restart stack verification (services, live IB round-trip, roster, tick flow); exits non-zero on FAIL
+verify --expect-running 5    # Also assert exactly 5 RUNNING strategies
 resolve AMD                  # Resolve symbol to conId/universe
 resolve EURUSD --sectype CASH # Resolve forex pair via IB (IDEALPRO)
 portfolio                    # Current portfolio
@@ -511,6 +517,29 @@ User configs live in `~/.config/mmr/`. On first run, bundled defaults from `conf
 
 Logs are written to `~/.local/share/mmr/logs/` with per-session timestamps (e.g. `trader_service_2026-02-19_18-38-06.log`). The directory is created automatically. Console output uses Rich for colored log levels and timestamps. Configured in `~/.config/mmr/logging.yaml`.
 
+**Routing (matters for monitoring):** every named logger writes its
+service's file directly — trading/execution signals (`auto-executor:` lines
+via the `auto_executor` logger, BUY/SELL signals, the strategy pulse) land
+in `strategy_service_<ts>.log`; IB connectivity (`ibreactivex`
+farm/upstream lines, the trader pulse) lands in `trader_service_<ts>.log`.
+Loggers ALSO propagate to root (deliberate — `propagate: yes` in
+logging.yaml): console, `trader_<ts>.log` at INFO+, and `/tmp/debug.log` as
+the complete single-file triage log; pytest's caplog depends on this
+propagation too. Note: EVERY process that loads the logging config (each
+CLI run, pytest) creates its own empty session-stamped file set — the
+monitor scripts resolve the newest *non-empty* file for this reason.
+
+**Heartbeat pulses:** both services emit a 30s INFO `pulse ...` line
+(strategy side: `strategies=N/N ticks_60s=[conid:n,...] bar_age_s=[...]
+auto_exec_open=N`; trader side: `ib_connected/ib_upstream/open_orders`). A
+healthy pipeline is otherwise silent at INFO, so pulse absence — or
+`ticks_60s` at zero during market hours — is the dead-feed signal (the G3
+outage class). See `docs/MONITORING.md` for the monitors
+(`scripts/monitor_trading.sh`, `scripts/monitor_health.sh`,
+`scripts/last_pulse.sh`), the escalation policy, and triage order. After any
+restart: `mmr verify` asserts trade-readiness (live IB round-trip via the
+`ping_ib` RPC — not the cached status flags), and exits non-zero on FAIL.
+
 ## Key ZMQ Ports
 
 | Port  | Protocol | Service |
@@ -529,11 +558,13 @@ Python >= 3.12. Install: `pip install -e .` or `pip install -r requirements.txt`
 
 ## Testing
 
-Tests use pytest with shared fixtures in `tests/conftest.py`. All tests are unit tests that use temporary DuckDB databases (no IB connection required). The suite currently runs **1059 tests in ~48s** with zero failures:
+Tests use pytest with shared fixtures in `tests/conftest.py`. All tests are unit tests that use temporary DuckDB databases (no IB connection required). The suite currently runs **1363 tests in ~1.5-2.5 min** with zero failures (run it in the `mmr` conda env — `~/miniforge3/envs/mmr/bin/python3` — other envs lack `twelvedata` and error at collection):
 
 ```bash
-pytest tests/ --timeout=30 -q --ignore=tests/test_ibrx_async.py
+~/miniforge3/envs/mmr/bin/python3 -m pytest tests/ --timeout=30 -q --ignore=tests/test_ibrx_async.py
 ```
+
+Known flake: `test_bar_size_filtering.py::TestNewStrategies::test_vbt_macd_bb_strategy` occasionally fails in the full run (numba/vectorbt ordering interaction) but passes in isolation and on re-run.
 
 `test_ibrx_async.py` is excluded because it spins up long-lived asyncio tasks that interact with a mocked ib_async event loop; it works in isolation but flakes in the full suite.
 

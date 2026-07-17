@@ -205,7 +205,13 @@ e2b2fd1 (VwapReclaim on_prices). These are the residual robustness items.
 - **Validate:** enable 10+ strategies in a tight loop under concurrent load,
   confirm no enable RPC timeout and all reach RUNNING.
 
-### G2 — IB market-data-farm status codes logged at ERROR  (XS, cosmetic)
+### G2 — IB market-data-farm status codes logged at ERROR  (XS, cosmetic) — **FIXED 2026-07-16**
+
+> **Fix shipped:** `__handle_error` now logs 2103/2105/2119 at INFO
+> (`ibrx farm status:` prefix); `error_subject.on_next` still fires for them,
+> so upstream-connectivity tracking is unchanged. 2110 (total outage)
+> deliberately stays at ERROR. The `ibreactivex` logger is also routed into
+> `trader_service_<ts>.log` now, so these lines are monitorable in one file.
 
 - **Symptom:** during the nightly IB Gateway restart/reconnect, farm-status
   messages (`errorCode 2119` "Market data farm is connecting", and the related
@@ -223,6 +229,16 @@ e2b2fd1 (VwapReclaim on_prices). These are the residual robustness items.
   the log level of the status messages, not the reconnect behaviour.
 
 ### G3 — `get_status` reports connected/upstream-OK while the IB socket is dead  (S, medium value)
+
+> **Detection layer shipped 2026-07-16** (the flags themselves are still not
+> fixed — the root-cause item below remains open): (1) `ping_ib` RPC does a
+> LIVE reqCurrentTime round-trip with a 5s deadline — the honest probe a
+> frozen flag can't fake; (2) both services emit a 30s `pulse` line
+> (strategy side includes `ticks_60s` per conId — zero during market hours =
+> dead feed, THE signature of this outage); (3) `mmr verify` asserts
+> ping_ib + roster + tick flow post-restart and exits non-zero on FAIL;
+> (4) compose healthchecks surface a hung gateway as `(unhealthy)` in
+> `docker ps`. See docs/MONITORING.md.
 
 - **Symptom (2026-07-05):** IB Gateway's 23:59 auto-restart hung (stuck login
   dialog, API port never opened). trader_service retried reconnection every
