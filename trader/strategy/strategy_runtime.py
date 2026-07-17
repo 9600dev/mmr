@@ -571,6 +571,15 @@ class StrategyRuntime():
         the auto-executor worker. Guards are evaluated on the worker so the
         skip decision lands in the persistent decision log."""
         ctx = strategy._context
+        # Bar interval in seconds for the executor's stale-bar gate. Unknown/
+        # unparseable bar sizes leave it at 0, which disables the gate for
+        # this strategy rather than blocking its trades.
+        bar_size_seconds = 0.0
+        try:
+            bar_size_seconds = float(
+                pd.Timedelta(BarSize.to_pandas_freq(strategy.bar_size)).total_seconds())
+        except Exception:
+            pass
         work = SignalWork(
             strategy_name=strategy.name or 'unknown',
             conid=conId,
@@ -584,6 +593,7 @@ class StrategyRuntime():
             state_running=strategy.state == StrategyState.RUNNING,
             close_by_time=getattr(signal, 'close_by_time', None),
             max_hold_bars=getattr(signal, 'max_hold_bars', None),
+            bar_size_seconds=bar_size_seconds,
         )
         self.auto_executor.submit_signal(work)
 

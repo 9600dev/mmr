@@ -89,6 +89,26 @@ class SignalWork:
     state_running: bool = True
     close_by_time: Optional[dt.time] = None
     max_hold_bars: Optional[int] = None
+    bar_size_seconds: float = 0.0     # 0 = unknown -> stale-bar gate disabled
+
+
+def bar_age_seconds(bar_ts, now_utc: Optional[dt.datetime] = None) -> Optional[float]:
+    """Seconds between a bar timestamp and now. Naive timestamps are UTC wall
+    time (the runtime's frames are UTC; ``_naive`` strips tz without
+    converting). None on anything unparseable — the gate then stays off
+    rather than blocking trades on a formatting quirk."""
+    if bar_ts is None:
+        return None
+    try:
+        now_utc = now_utc or dt.datetime.now(dt.timezone.utc)
+        ts = bar_ts
+        if hasattr(ts, 'to_pydatetime'):
+            ts = ts.to_pydatetime()
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=dt.timezone.utc)
+        return (now_utc - ts).total_seconds()
+    except Exception:
+        return None
 
 
 @dataclass
@@ -115,6 +135,8 @@ def decide_signal(
     held_qty: float,
     already_executed_bar: bool,
     cooldown_active: bool,
+    bar_age_seconds: Optional[float] = None,
+    stale_bar_multiple: float = 3.0,
 ) -> Directive:
     """Long-only decision matching backtester semantics (backtester.py:372-424).
 
@@ -137,6 +159,17 @@ def decide_signal(
     if work.action == Action.BUY:
         if held_qty > 0:
             return Directive('skip', 'already holding — no pyramiding')
+        # Stale-bar sanity gate (OPENS ONLY — a stale exit still reduces
+        # risk; refusing it would be worse than acting on it). A bar much
+        # older than its interval means the feed stalled, the queue backed
+        # up, or a reconnect flushed old data — opening at CURRENT market
+        # off that bar is trading on garbage (the G3 outage class).
+        if (work.bar_size_seconds > 0 and bar_age_seconds is not None
+                and bar_age_seconds > stale_bar_multiple * work.bar_size_seconds):
+            return Directive(
+                'skip',
+                f'stale_bar: bar age {bar_age_seconds:.0f}s > {stale_bar_multiple:g}x '
+                f'bar_size ({work.bar_size_seconds:.0f}s) — refusing to open on stale data')
         if cooldown_active:
             return Directive('skip', 'cooldown active')
         return Directive('open', 'BUY while flat',
@@ -342,6 +375,15 @@ class AutoExecutor:
     def kill_switch(self) -> bool:
         return os.environ.get(self.KILL_SWITCH_ENV, '') not in ('', '0', 'false', 'False')
 
+    @property
+    def stale_bar_multiple(self) -> float:
+        """Bar-age multiple beyond which a BUY is refused (opens only).
+        Env-tunable for coarse bar sizes; malformed values fall back to 3."""
+        try:
+            return float(os.environ.get('MMR_STALE_BAR_MULTIPLE', '') or 3.0)
+        except ValueError:
+            return 3.0
+
     # -- loop-side API (called from the runtime's event loop; never blocks) ----
 
     def submit_signal(self, work: SignalWork):
@@ -457,6 +499,8 @@ class AutoExecutor:
             already_executed_bar=self.state.executed_for_bar(
                 work.strategy_name, work.conid, work.bar_ts),
             cooldown_active=cooldown_active,
+            bar_age_seconds=bar_age_seconds(work.bar_ts),
+            stale_bar_multiple=self.stale_bar_multiple,
         )
 
         if directive.kind == 'skip':
