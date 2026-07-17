@@ -610,11 +610,77 @@ check_tcp_port() {
     fi
 }
 
+# ─── Supervision ─────────────────────────────────────────────────────────────
+
+# Per-service restart supervision (A5). Previously a lone service crash left
+# a half-dead stack: the container stayed "Up" (or the host session kept
+# running) with, say, strategy_service — the trading brain — gone until a
+# human noticed. Each long-lived service now runs under supervise():
+#   - unexpected exit  -> restart with bounded backoff (5s doubling to 60s,
+#     reset after 5 minutes of clean uptime)
+#   - 5 rapid deaths   -> circuit breaker: stop restarting and bring the
+#     whole stack down with exit code 42 so docker-compose's
+#     `restart: unless-stopped` recreates a clean container (a service that
+#     can't hold itself up needs a clean slate, not restart #6)
+#   - deliberate shutdown (cleanup touches $SHUTDOWN_FLAG) -> no restart
+RUN_DIR="$HOME/.local/share/mmr/run"
+SHUTDOWN_FLAG="$RUN_DIR/start_mmr.shutdown"
+SUPERVISED_MODE=false
+CLEANUP_EXIT_CODE=0
+
+supervise() {
+    # usage: supervise <name> <command...>   (run in the background: `... &`)
+    local name="$1"; shift
+    local backoff=5 restarts=0 started uptime rc child
+    while true; do
+        "$@" &
+        child=$!
+        echo "$child" > "$RUN_DIR/$name.pid"
+        started=$(date +%s)
+        rc=0
+        wait "$child" || rc=$?   # `|| rc=$?` keeps set -e from killing the loop
+        rm -f "$RUN_DIR/$name.pid"
+        if [ -f "$SHUTDOWN_FLAG" ]; then
+            exit 0
+        fi
+        uptime=$(( $(date +%s) - started ))
+        if [ "$uptime" -ge 300 ]; then
+            backoff=5
+            restarts=0
+        fi
+        restarts=$((restarts + 1))
+        if [ "$restarts" -ge 5 ]; then
+            echo "[supervise] $name: $restarts rapid exits (last rc=$rc) — circuit breaker" >&2
+            echo "rc=$rc restarts=$restarts" > "$RUN_DIR/$name.breaker"
+            exit 42
+        fi
+        echo "[supervise] $name exited rc=$rc after ${uptime}s — restart #$restarts in ${backoff}s" >&2
+        sleep "$backoff"
+        backoff=$((backoff * 2))
+        [ "$backoff" -gt 60 ] && backoff=60
+    done
+}
+
+_svc_pid() {
+    cat "$RUN_DIR/$1.pid" 2>/dev/null || true
+}
+
 # ─── Signal Handling ─────────────────────────────────────────────────────────
 
 cleanup() {
     echo ""
     step "Shutting down services..."
+    # Stop supervisors from restarting anything we're about to kill. Only
+    # read the pidfiles when THIS process launched the services — in CLI
+    # mode the pidfiles belong to another session's live stack.
+    if [ "$SUPERVISED_MODE" = true ]; then
+        touch "$SHUTDOWN_FLAG" 2>/dev/null || true
+        STRATEGY_PID=$(_svc_pid strategy_service)
+        TRADER_PID=$(_svc_pid trader_service)
+        DATA_PID=$(_svc_pid data_service)
+        WEB_PID=$(_svc_pid web_dashboard)
+        PYCRON_PID=$(_svc_pid pycron)
+    fi
     # Send SIGINT first (services handle it gracefully)
     for pid in $STRATEGY_PID $TRADER_PID $DATA_PID; do
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -643,9 +709,17 @@ cleanup() {
             kill -9 "$pid" 2>/dev/null || true
         fi
     done
+    # Side services + supervisor loops (supervisors exit on their own once
+    # the shutdown flag is up; kill covers ones parked in `sleep backoff`).
+    for pid in $WEB_PID $PYCRON_PID \
+               $DATA_SUP_PID $TRADER_SUP_PID $STRATEGY_SUP_PID $WEB_SUP_PID $PYCRON_SUP_PID; do
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+        fi
+    done
     wait 2>/dev/null || true
     ok "all services stopped"
-    exit 0
+    exit "$CLEANUP_EXIT_CODE"
 }
 
 trap cleanup SIGINT SIGTERM
@@ -952,86 +1026,108 @@ echo ""
 step "Launching services..."
 echo ""
 
+# All long-lived services run under supervise() (see Supervision section):
+# crash -> bounded-backoff restart; crash-loop -> circuit breaker exits the
+# stack with code 42 so the container restart policy recreates it clean.
+SUPERVISED_MODE=true
+mkdir -p "$RUN_DIR"
+rm -f "$SHUTDOWN_FLAG" "$RUN_DIR"/*.pid "$RUN_DIR"/*.breaker 2>/dev/null || true
+
 # data_service
-step "Starting data_service..."
-$PY -m trader.data_service &
-DATA_PID=$!
+step "Starting data_service (supervised)..."
+supervise data_service $PY -m trader.data_service &
+DATA_SUP_PID=$!
 
 sleep 3
 
 # trader_service
-step "Starting trader_service..."
-$PY -m trader.trader_service &
-TRADER_PID=$!
+step "Starting trader_service (supervised)..."
+supervise trader_service $PY -m trader.trader_service &
+TRADER_SUP_PID=$!
 
 sleep 5
 
 # strategy_service
-step "Starting strategy_service..."
-$PY -m trader.strategy_service &
-STRATEGY_PID=$!
+step "Starting strategy_service (supervised)..."
+supervise strategy_service $PY -m trader.strategy_service &
+STRATEGY_SUP_PID=$!
 
 sleep 3
 
 # web_dashboard — read-only view (currencies, positions, strategies, proposals)
 # on port 7424. PYTHONPATH so `web` resolves whether or not it's pip-installed.
-step "Starting web_dashboard..."
-PYTHONPATH="$MMR_DIR${PYTHONPATH:+:$PYTHONPATH}" WEB_PORT="${WEB_PORT:-7424}" $PY -m web.app &
-WEB_PID=$!
+step "Starting web_dashboard (supervised)..."
+supervise web_dashboard env \
+    PYTHONPATH="$MMR_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    WEB_PORT="${WEB_PORT:-7424}" \
+    $PY -m web.app &
+WEB_SUP_PID=$!
 
 # pycron (cron-only) — the services above are launched directly, so load ONLY
 # the scheduled jobs from pycron.yaml (nightly db_backup, data_refresh_*).
 # Without this nothing ever fires them. Its web port (8081) doubles as a
 # double-start guard: a second instance fails the bind and exits before
 # scheduling anything.
-PYCRON_PID=""
-if [ "$IN_DOCKER" = true ]; then
-    step "Starting pycron (cron jobs: db_backup, data_refresh_us, data_refresh_asx)..."
+run_pycron() {
     $PY -m pycron.pycron --config "$HOME/.config/mmr/pycron.yaml" \
         -s db_backup -s data_refresh_us -s data_refresh_asx \
         --no-health-check \
-        >> "$HOME/.local/share/mmr/logs/pycron_cron.log" 2>&1 &
-    PYCRON_PID=$!
+        >> "$HOME/.local/share/mmr/logs/pycron_cron.log" 2>&1
+}
+PYCRON_SUP_PID=""
+if [ "$IN_DOCKER" = true ]; then
+    step "Starting pycron (cron jobs: db_backup, data_refresh_us, data_refresh_asx; supervised)..."
+    supervise pycron run_pycron &
+    PYCRON_SUP_PID=$!
 fi
 
 echo ""
-hdr "All services running"
-kv "data_service"     "PID $DATA_PID"
-kv "trader_service"   "PID $TRADER_PID"
-kv "strategy_service" "PID $STRATEGY_PID"
-kv "web_dashboard"    "PID $WEB_PID (http://localhost:${WEB_PORT:-7424})"
-if [ -n "$PYCRON_PID" ]; then
-    kv "pycron (cron)" "PID $PYCRON_PID"
+hdr "All services running (supervised)"
+kv "data_service"     "PID $(_svc_pid data_service)"
+kv "trader_service"   "PID $(_svc_pid trader_service)"
+kv "strategy_service" "PID $(_svc_pid strategy_service)"
+kv "web_dashboard"    "PID $(_svc_pid web_dashboard) (http://localhost:${WEB_PORT:-7424})"
+if [ -n "$PYCRON_SUP_PID" ]; then
+    kv "pycron (cron)" "PID $(_svc_pid pycron)"
 fi
+kv "supervision"      "crash -> restart w/ backoff; crash-loop -> exit 42 (container recreate)"
 echo ""
 info "Press Ctrl-C to stop all services"
 info "Run './start_mmr.sh --cli' in another terminal for the CLI"
+info "After startup, assert trade-readiness with: mmr verify"
 info "IB Gateway VNC: vnc://localhost:5901"
 echo ""
 
-# ─── Wait for Children ───────────────────────────────────────────────────────
+# ─── Wait for Supervisors ────────────────────────────────────────────────────
 
-# Monitor child processes — report if any die unexpectedly
+# Supervisors never exit on their own except (a) deliberate shutdown (flag)
+# or (b) circuit breaker. Detect (b) and bring the whole stack down with the
+# breaker's exit code so `restart: unless-stopped` recreates a clean container.
 while true; do
-    for pid_info in "$DATA_PID:data_service" "$TRADER_PID:trader_service" "$STRATEGY_PID:strategy_service" "$WEB_PID:web_dashboard" "$PYCRON_PID:pycron"; do
+    for pid_info in "$DATA_SUP_PID:data_service" "$TRADER_SUP_PID:trader_service" "$STRATEGY_SUP_PID:strategy_service" "$WEB_SUP_PID:web_dashboard" "$PYCRON_SUP_PID:pycron"; do
         pid="${pid_info%%:*}"
         name="${pid_info##*:}"
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-            wait "$pid" 2>/dev/null || true
-            EXIT_CODE=$?
+            if [ -f "$RUN_DIR/$name.breaker" ]; then
+                echo ""
+                fail "$name hit the restart circuit-breaker ($(cat "$RUN_DIR/$name.breaker"))"
+                fail "tearing the stack down with exit 42 — restart policy will recreate it clean"
+                CLEANUP_EXIT_CODE=42
+                cleanup
+            fi
+            # Supervisor gone without a breaker file: killed externally or a
+            # shutdown already in flight. Report once and stop tracking it.
             echo ""
-            fail "$name (PID $pid) exited with code $EXIT_CODE"
-            # Clear the PID so we don't report it again
+            fail "$name supervisor (PID $pid) is gone (no circuit-breaker file)"
             case "$name" in
-                data_service)     DATA_PID="" ;;
-                trader_service)   TRADER_PID="" ;;
-                strategy_service) STRATEGY_PID="" ;;
-                web_dashboard)    WEB_PID="" ;;
-                pycron)           PYCRON_PID="" ;;
+                data_service)     DATA_SUP_PID="" ;;
+                trader_service)   TRADER_SUP_PID="" ;;
+                strategy_service) STRATEGY_SUP_PID="" ;;
+                web_dashboard)    WEB_SUP_PID="" ;;
+                pycron)           PYCRON_SUP_PID="" ;;
             esac
-            # If all services are dead, exit
-            if [ -z "$DATA_PID" ] && [ -z "$TRADER_PID" ] && [ -z "$STRATEGY_PID" ]; then
-                fail "all services have exited"
+            if [ -z "$DATA_SUP_PID" ] && [ -z "$TRADER_SUP_PID" ] && [ -z "$STRATEGY_SUP_PID" ]; then
+                fail "all service supervisors have exited"
                 exit 1
             fi
         fi

@@ -44,6 +44,19 @@ services:
       - "127.0.0.1:7497:4004"
       # VNC for viewing IB Gateway GUI
       - "127.0.0.1:5901:5900"
+    # "Up (healthy)" == login completed and the API port is listening — the
+    # exact condition the 2026-07-04 hung auto-restart violated for 10.5h
+    # while `docker ps` said plain "Up". bash /dev/tcp avoids needing nc in
+    # the image. $$ defers env expansion to container runtime (paper 4004 /
+    # live 4003). Docker only REPORTS unhealthy; the host launchd watchdog
+    # (scripts/ib_gateway_watchdog.sh) remains the restart actor.
+    healthcheck:
+      test: ["CMD", "bash", "-c", "p=4004; [ \"$$TRADING_MODE\" = live ] && p=4003; exec 3<>/dev/tcp/127.0.0.1/$$p"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      # Gateway login takes ~2 min on a good day; 2FA/restart paths longer.
+      start_period: 300s
 
   mmr:
     build:
@@ -105,6 +118,17 @@ services:
       - "127.0.0.1:42003:42003"   # data_service RPC
       - "127.0.0.1:42005:42005"   # strategy_service RPC
       - "127.0.0.1:42006:42006"   # strategy MessageBus
+    # Health == both trading services answer RPC (trader 42001, strategy
+    # 42005). NOT gated on IB connectivity — that's the gateway healthcheck's
+    # and `mmr verify`'s job. Requires an image rebuild to pick up the probe
+    # script. Docker reports unhealthy but does not auto-restart on it.
+    healthcheck:
+      test: ["CMD", "/home/trader/mmr/scripts/container_healthcheck.sh"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      # start_mmr.sh waits for the gateway, then staggers service launches.
+      start_period: 240s
     volumes:
       # Bind mount for logs/, tws_settings/ — host-visible for tailing/backup
       - ${HOME}/.local/share/mmr:/home/trader/.local/share/mmr
