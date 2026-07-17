@@ -4,7 +4,7 @@
 # container at /home/trader/.config/mmr/). Use this file to update defaults
 # that ship with the repo for fresh installs only.
 root_directory: .
-port: 8081
+port: 7425
 env: TRADER_CHECK=False
 health_check_eval:
   - "exec('from trader.tools.trader_check import health_check') or health_check('~/.config/mmr/trader.yaml')"

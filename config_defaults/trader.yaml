@@ -48,7 +48,7 @@ universe_library: 'Universes'
 
 # Pycron process manager
 pycron_server_address: 127.0.0.1
-pycron_server_port: 8081
+pycron_server_port: 7425
 
 # ZeroMQ messaging
 zmq_rpc_server_address: tcp://127.0.0.1

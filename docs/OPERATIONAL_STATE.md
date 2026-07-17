@@ -116,9 +116,9 @@ would have been first to trade real money without the per-strategy gate).
   since the job was added). Fix: `start_mmr.sh` now also launches a cron-only
   pycron (`python3 -m pycron.pycron --config ~/.config/mmr/pycron.yaml -s
   db_backup -s data_refresh_us -s data_refresh_asx`, log:
-  `~/.local/share/mmr/logs/pycron_cron.log`, status: `curl :8081` in-container).
+  `~/.local/share/mmr/logs/pycron_cron.log`, status: `curl :7425` — LAN-visible since 2026-07-17).
   A detached instance was also started in the running container so tonight's
-  jobs fire without a restart. Port 8081 bind doubles as a double-start guard.
+  jobs fire without a restart. The pycron web-port bind doubles as a double-start guard (7425 since 2026-07-17; was 8081).
 - **IB Gateway watchdog (added 2026-07-05):** the gateway's nightly 23:59
   auto-restart hung on 2026-07-04 (stuck login dialog; API port never opened;
   **10.5 h outage**, invisible to `mmr status` — see AUDIT_ROADMAP G3). Host-side

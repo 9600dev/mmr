@@ -4445,12 +4445,17 @@ def _collect_stack_checks(exchanges: str = 'NYSE,ASX',
 
     # -- pycron cron scheduler (WARN-only: absent by design outside the container) --
     try:
-        with _socket.create_connection(('127.0.0.1', 8081), timeout=2):
-            record('pycron', 'PASS', 'cron health port 8081 responding')
+        from trader.container import Container as _Container
+        pycron_port = int(_Container.instance().config().get('pycron_server_port', 7425))
+    except Exception:
+        pycron_port = 7425
+    try:
+        with _socket.create_connection(('127.0.0.1', pycron_port), timeout=2):
+            record('pycron', 'PASS', f'cron health port {pycron_port} responding')
     except Exception:
         record('pycron', 'WARN',
-               'port 8081 not responding — nightly db_backup/data_refresh jobs are not '
-               'scheduled (expected when running outside the container)')
+               f'port {pycron_port} not responding — nightly db_backup/data_refresh jobs are '
+               'not scheduled (expected when running outside the container)')
 
     return checks
 

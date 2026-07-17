@@ -108,8 +108,10 @@ services:
       MASSIVE_API_KEY: ${MASSIVE_API_KEY:-}
       TWELVEDATA_API_KEY: ${TWELVEDATA_API_KEY:-}
     ports:
-      # pycron web
-      - "127.0.0.1:8081:8081"
+      # pycron job-status page (read-only GET). Deliberately bound to ALL host
+      # interfaces (LAN-visible) per operator choice — it exposes job
+      # names/schedules only, no mutating endpoints.
+      - "7425:7425"
       # MMR dashboard (web/app.py)
       - "127.0.0.1:7424:7424"
       # ZMQ RPC/PubSub — allows host CLI to talk to services

@@ -49,7 +49,7 @@ class ZMQConfig:
 class PycronConfig:
     config_file: str = '~/.config/mmr/pycron.yaml'
     server_address: str = '127.0.0.1'
-    server_port: int = 8081
+    server_port: int = 7425
 
 
 @dataclass

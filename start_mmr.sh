@@ -1065,7 +1065,7 @@ WEB_SUP_PID=$!
 
 # pycron (cron-only) — the services above are launched directly, so load ONLY
 # the scheduled jobs from pycron.yaml (nightly db_backup, data_refresh_*).
-# Without this nothing ever fires them. Its web port (8081) doubles as a
+# Without this nothing ever fires them. Its web port (7425) doubles as a
 # double-start guard: a second instance fails the bind and exits before
 # scheduling anything.
 run_pycron() {
