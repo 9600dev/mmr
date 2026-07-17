@@ -1071,12 +1071,13 @@ WEB_SUP_PID=$!
 run_pycron() {
     $PY -m pycron.pycron --config "$HOME/.config/mmr/pycron.yaml" \
         -s db_backup -s data_refresh_us -s data_refresh_asx \
+        -s preflight_us -s preflight_asx \
         --no-health-check \
         >> "$HOME/.local/share/mmr/logs/pycron_cron.log" 2>&1
 }
 PYCRON_SUP_PID=""
 if [ "$IN_DOCKER" = true ]; then
-    step "Starting pycron (cron jobs: db_backup, data_refresh_us, data_refresh_asx; supervised)..."
+    step "Starting pycron (cron jobs: db_backup, data_refresh_*, preflight_*; supervised)..."
     supervise pycron run_pycron &
     PYCRON_SUP_PID=$!
 fi

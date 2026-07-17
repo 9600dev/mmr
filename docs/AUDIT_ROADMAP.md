@@ -331,6 +331,22 @@ e2b2fd1 (VwapReclaim on_prices). These are the residual robustness items.
 
 ---
 
+### G7 — test suite touches the live stack when it's running  (S, hygiene)
+
+- **Symptom (2026-07-16 23:07):** while the deployed stack was live, a full
+  `pytest tests/` run produced a burst of IB error-200 lookups for the
+  fixture `conId=12345` in the LIVE trader_service log (reqIds 93–100) —
+  caught within seconds by the session monitor.
+- **Mechanism:** at least one test constructs a real ZMQ RPC client against
+  the default `tcp://127.0.0.1:42001` instead of a stub; with the stack up,
+  the request lands on the live service, which dutifully asks IB to resolve
+  the bogus contract. Harmless today (read-only lookups, fail-loudly), but
+  a test that PLACES anything would be a real hazard.
+- **Fix:** find the offender (`grep -rl 12345 tests/` + audit RPCClient
+  construction in tests), point tests at an unroutable port or an in-process
+  stub server, and consider a `MMR_TEST_MODE` guard that refuses default
+  ports under pytest.
+
 ## Recommended sequence
 
 1. **Cluster A (A1+A2, then A3)** — the capital-safety core; do first. ~1 week.

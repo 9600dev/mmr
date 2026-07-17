@@ -19,7 +19,16 @@ mmr verify                       # non-zero exit on FAIL; --json for scripts
 
 # on-demand health read (the monitors exclude the heartbeat on purpose):
 ./scripts/last_pulse.sh          # non-zero exit if a pulse is stale/missing
+
+# per-strategy scoreboard (realized needs no service; the live-vs-backtest ledger):
+mmr strategies pnl
 ```
+
+Pre-open readiness is automated: pycron runs `mmr preflight` ~30 min before
+each session open (`preflight_us` 06:00 PT weekdays, `preflight_asx` 16:30 PT
+Sun–Thu) — same checks as verify, one line appended to
+`~/.local/share/mmr/logs/preflight.log`. **A `PREFLIGHT FAIL` line is an
+escalation** — the stack won't trade the open without intervention.
 
 Container recreation (`./docker.sh -d && -u`, `-g`) kills exec-based monitor
 sessions — **re-arm both monitors immediately after**, then run `mmr verify`.
@@ -69,7 +78,10 @@ Reads:
   resolve within a few minutes.
 - Single reconcile-RPC timeouts while trader_service restarts.
 - `auto-executor: … skip` decisions (cooldown, no-pyramiding, SELL-while-flat,
-  already-executed-bar) — these are correct behavior, logged for audit.
+  already-executed-bar, `stale_bar`) — these are correct behavior, logged for
+  audit. A `stale_bar` skip means the gate refused to open on old data;
+  *recurring* stale_bar skips during market hours mean the feed is lagging —
+  check the pulse's `bar_age_s`.
 - G5's `KeyError: 81` ib_async decoder traceback after a reconnect (console
   noise only; root-caused, harmless).
 

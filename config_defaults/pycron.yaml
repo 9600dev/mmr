@@ -96,3 +96,27 @@ jobs:
       start_on_pycron_start: False
       restart_if_found: False
       restart_if_finished: False
+    # ---- pre-open readiness preflights ----
+    # `mmr preflight` runs the verify checks (live IB round-trip via ping_ib,
+    # armed roster RUNNING, services responsive) and appends one
+    # "PREFLIGHT OK|FAIL: ..." line to ~/.local/share/mmr/logs/preflight.log —
+    # a hung gateway or missing roster is caught BEFORE the open instead of
+    # by missing trades after it. Same TZ caveat as the refresh jobs above.
+    - name: preflight_us
+      description: pre-open stack readiness check ~30 min before the US open
+      command: python3
+      arguments: -m trader.mmr_cli preflight
+      start: "0 9 * * 1-5"       # 9:00 AM ET weekdays — 30 min before the
+                                 # 09:30 NYSE/NASDAQ open.
+      start_on_pycron_start: False
+      restart_if_found: False
+      restart_if_finished: False
+    - name: preflight_asx
+      description: pre-open stack readiness check ~30 min before the ASX open
+      command: python3
+      arguments: -m trader.mmr_cli preflight
+      start: "30 19 * * 0-4"     # 7:30 PM ET Sun-Thu = 09:30 AEST Mon-Fri —
+                                 # 30 min before the 10:00 Sydney open.
+      start_on_pycron_start: False
+      restart_if_found: False
+      restart_if_finished: False
