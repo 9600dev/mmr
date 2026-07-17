@@ -137,6 +137,7 @@ def decide_signal(
     cooldown_active: bool,
     bar_age_seconds: Optional[float] = None,
     stale_bar_multiple: float = 3.0,
+    live_armed: bool = False,
 ) -> Directive:
     """Long-only decision matching backtester semantics (backtester.py:372-424).
 
@@ -157,6 +158,18 @@ def decide_signal(
         return Directive('skip', f'already executed for bar {work.bar_ts}')
 
     if work.action == Action.BUY:
+        # Live double-arm (horserank's L2 analog): real-money auto-execution
+        # needs BOTH the live trading mode AND an explicit, strict-'1' arming
+        # knob — a single `--live` flag flip must never arm the whole book by
+        # itself. Code default is DISARMED (`live_armed=False`); the un-armed
+        # first live session records exactly what WOULD have traded via these
+        # skip rows. OPENS ONLY — closes below are never gated, so disarming
+        # with live positions open can't strand them unmanaged.
+        if not paper_trading and not live_armed:
+            return Directive(
+                'skip',
+                'live auto-execute not armed (set MMR_AUTO_EXECUTE_LIVE=1) — '
+                'opens refused, closes unaffected')
         if held_qty > 0:
             return Directive('skip', 'already holding — no pyramiding')
         # Stale-bar sanity gate (OPENS ONLY — a stale exit still reduces
@@ -320,6 +333,7 @@ def _naive(ts):
 
 class AutoExecutor:
     KILL_SWITCH_ENV = 'MMR_AUTO_EXECUTE_DISABLED'
+    LIVE_ARM_ENV = 'MMR_AUTO_EXECUTE_LIVE'
 
     def __init__(
         self,
@@ -349,6 +363,14 @@ class AutoExecutor:
         self._worker = threading.Thread(target=self._run, name='auto-executor', daemon=True)
         self._started = False
         self._load_open_view()
+        # Loud, greppable arming state at startup: a live session that sits
+        # silent because the double-arm isn't set must say so once, up front —
+        # not read as "no signals today".
+        if not self.paper_trading and not self.live_armed:
+            logging.warning(
+                'auto-executor: LIVE trading mode but %s != 1 — auto-execution is '
+                'DISARMED (opens will be refused and logged; closes unaffected)',
+                self.LIVE_ARM_ENV)
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -383,6 +405,13 @@ class AutoExecutor:
             return float(os.environ.get('MMR_STALE_BAR_MULTIPLE', '') or 3.0)
         except ValueError:
             return 3.0
+
+    @property
+    def live_armed(self) -> bool:
+        """Second arming knob for LIVE auto-execution. STRICT '1' — unlike
+        the kill switch's loose truthy parsing, arming real money must not
+        happen via 'true'/'yes'/typo (mirrors horserank's double-arm)."""
+        return os.environ.get(self.LIVE_ARM_ENV, '') == '1'
 
     # -- loop-side API (called from the runtime's event loop; never blocks) ----
 
@@ -501,6 +530,7 @@ class AutoExecutor:
             cooldown_active=cooldown_active,
             bar_age_seconds=bar_age_seconds(work.bar_ts),
             stale_bar_multiple=self.stale_bar_multiple,
+            live_armed=self.live_armed,
         )
 
         if directive.kind == 'skip':

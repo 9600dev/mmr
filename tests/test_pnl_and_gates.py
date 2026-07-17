@@ -189,11 +189,12 @@ def _work(action, bar_size_seconds=60.0, **kw):
         bar_size_seconds=bar_size_seconds, **kw)
 
 
-def _decide(work, bar_age=None, multiple=3.0, held=0.0):
+def _decide(work, bar_age=None, multiple=3.0, held=0.0, paper=True, armed=False):
     return decide_signal(
-        work, kill_switch=False, paper_trading=True, held_qty=held,
+        work, kill_switch=False, paper_trading=paper, held_qty=held,
         already_executed_bar=False, cooldown_active=False,
-        bar_age_seconds=bar_age, stale_bar_multiple=multiple)
+        bar_age_seconds=bar_age, stale_bar_multiple=multiple,
+        live_armed=armed)
 
 
 class TestStaleBarGate:
@@ -219,6 +220,47 @@ class TestStaleBarGate:
     def test_multiple_is_tunable(self):
         assert _decide(_work(Action.BUY), bar_age=200.0, multiple=10.0).kind == 'open'
         assert _decide(_work(Action.BUY), bar_age=200.0, multiple=2.0).kind == 'skip'
+
+
+class TestLiveDoubleArm:
+    """Real-money auto-execution needs BOTH trading_mode=live AND the strict
+    MMR_AUTO_EXECUTE_LIVE=1 knob (horserank's L2 analog). Code default is
+    DISARMED; a regression here arms the whole book off a single --live flag."""
+
+    def test_live_unarmed_buy_refused(self):
+        d = _decide(_work(Action.BUY), paper=False, armed=False)
+        assert d.kind == 'skip'
+        assert 'MMR_AUTO_EXECUTE_LIVE' in d.reason
+
+    def test_live_armed_buy_opens(self):
+        assert _decide(_work(Action.BUY), paper=False, armed=True).kind == 'open'
+
+    def test_paper_unaffected_by_arming(self):
+        # Paper mode trades with or without the knob — zero cost today.
+        assert _decide(_work(Action.BUY), paper=True, armed=False).kind == 'open'
+
+    def test_live_unarmed_close_still_works(self):
+        # NEVER gate exits: disarming with live positions open must not
+        # strand them unmanaged.
+        d = _decide(_work(Action.SELL), paper=False, armed=False, held=5.0)
+        assert d.kind == 'close'
+
+    def test_default_is_disarmed(self):
+        # Omitting live_armed entirely must fail CLOSED in live mode.
+        d = decide_signal(
+            _work(Action.BUY), kill_switch=False, paper_trading=False,
+            held_qty=0.0, already_executed_bar=False, cooldown_active=False)
+        assert d.kind == 'skip'
+
+    def test_env_parsing_is_strict_one(self, tmp_path, monkeypatch):
+        from trader.strategy.auto_executor import AutoExecutor
+        ex = AutoExecutor(duckdb_path=str(tmp_path / 'arm.duckdb'), paper_trading=True)
+        for value, expected in [('1', True), ('true', False), ('yes', False),
+                                ('True', False), ('0', False), ('', False)]:
+            monkeypatch.setenv(AutoExecutor.LIVE_ARM_ENV, value)
+            assert ex.live_armed is expected, f'{value!r} -> {ex.live_armed}'
+        monkeypatch.delenv(AutoExecutor.LIVE_ARM_ENV)
+        assert ex.live_armed is False
 
 
 class TestBarAgeSeconds:
