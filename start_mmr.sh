@@ -979,12 +979,30 @@ step "Starting web_dashboard..."
 PYTHONPATH="$MMR_DIR${PYTHONPATH:+:$PYTHONPATH}" WEB_PORT="${WEB_PORT:-7424}" $PY -m web.app &
 WEB_PID=$!
 
+# pycron (cron-only) — the services above are launched directly, so load ONLY
+# the scheduled jobs from pycron.yaml (nightly db_backup, data_refresh_*).
+# Without this nothing ever fires them. Its web port (8081) doubles as a
+# double-start guard: a second instance fails the bind and exits before
+# scheduling anything.
+PYCRON_PID=""
+if [ "$IN_DOCKER" = true ]; then
+    step "Starting pycron (cron jobs: db_backup, data_refresh_us, data_refresh_asx)..."
+    $PY -m pycron.pycron --config "$HOME/.config/mmr/pycron.yaml" \
+        -s db_backup -s data_refresh_us -s data_refresh_asx \
+        --no-health-check \
+        >> "$HOME/.local/share/mmr/logs/pycron_cron.log" 2>&1 &
+    PYCRON_PID=$!
+fi
+
 echo ""
 hdr "All services running"
 kv "data_service"     "PID $DATA_PID"
 kv "trader_service"   "PID $TRADER_PID"
 kv "strategy_service" "PID $STRATEGY_PID"
 kv "web_dashboard"    "PID $WEB_PID (http://localhost:${WEB_PORT:-7424})"
+if [ -n "$PYCRON_PID" ]; then
+    kv "pycron (cron)" "PID $PYCRON_PID"
+fi
 echo ""
 info "Press Ctrl-C to stop all services"
 info "Run './start_mmr.sh --cli' in another terminal for the CLI"
@@ -995,7 +1013,7 @@ echo ""
 
 # Monitor child processes — report if any die unexpectedly
 while true; do
-    for pid_info in "$DATA_PID:data_service" "$TRADER_PID:trader_service" "$STRATEGY_PID:strategy_service" "$WEB_PID:web_dashboard"; do
+    for pid_info in "$DATA_PID:data_service" "$TRADER_PID:trader_service" "$STRATEGY_PID:strategy_service" "$WEB_PID:web_dashboard" "$PYCRON_PID:pycron"; do
         pid="${pid_info%%:*}"
         name="${pid_info##*:}"
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
@@ -1008,6 +1026,8 @@ while true; do
                 data_service)     DATA_PID="" ;;
                 trader_service)   TRADER_PID="" ;;
                 strategy_service) STRATEGY_PID="" ;;
+                web_dashboard)    WEB_PID="" ;;
+                pycron)           PYCRON_PID="" ;;
             esac
             # If all services are dead, exit
             if [ -z "$DATA_PID" ] && [ -z "$TRADER_PID" ] && [ -z "$STRATEGY_PID" ]; then

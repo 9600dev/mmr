@@ -222,6 +222,97 @@ e2b2fd1 (VwapReclaim on_prices). These are the residual robustness items.
   subscriptions republished, all strategies stayed RUNNING) — this is only about
   the log level of the status messages, not the reconnect behaviour.
 
+### G3 — `get_status` reports connected/upstream-OK while the IB socket is dead  (S, medium value)
+
+- **Symptom (2026-07-05):** IB Gateway's 23:59 auto-restart hung (stuck login
+  dialog, API port never opened). trader_service retried reconnection every
+  ~130s for **10.5 hours** (289 attempts) — yet `mmr status` reported
+  `connected: true, ib_upstream_connected: true` the whole time. The only
+  honest tell was the (stale) `account_values_warning`.
+- **Mechanism:** `ib_upstream_connected` is driven by IB error codes
+  (1100/1102/2103/…). When the *socket itself* dies, no error code ever
+  arrives, so the flag freezes at its last value. `connected` likewise doesn't
+  reflect the live socket state during a reconnect loop.
+- **Impact:** a dead gateway is invisible to `status` and to any monitoring
+  built on it. The 2026-07-04 outage would have silently killed Monday's
+  open had it not been caught manually.
+- **Fix:** `get_status` should surface socket truth: `ib.isConnected()`,
+  reconnect-loop state (attempt count, time since last success), and flip
+  `ib_upstream_connected` to false/unknown while disconnected. The CLI
+  pre-flight check should treat "reconnecting" as down.
+- **Validate (paper):** stop the gateway container, confirm `mmr status`
+  reports disconnected within one reconnect cycle.
+
+### G4 — SDK status `open_orders` counts order *updates*, not open orders  (XS, cosmetic)
+
+- **Symptom:** `mmr status` showed `open_orders` climbing 6 → 8 → 10 across
+  gateway reconnects while `mmr orders` (broker truth) showed 1 (the PLS stop).
+- **Mechanism:** `sdk.py:2578` computes `sum(len(v) for v in orders.values())`
+  over the book's per-orderId *update-history lists*; every reconnect re-report
+  appends entries. The risk gate is unaffected — it uses
+  `book.get_open_order_count()` (deduped by orderId, active statuses only).
+- **Fix:** count distinct orderIds with an active latest status (reuse
+  `get_open_order_count` via RPC instead of recomputing in the SDK).
+
+### G6 — Strategy signals never execute: the auto-execute path does not exist  ✅ DONE (paper-validated live 2026-07-05)
+
+> **Built** as `trader/strategy/auto_executor.py` + strategy_runtime hooks, per
+> the design constraints below. 42 unit tests (`tests/test_auto_executor.py`).
+> **Live paper validation** (Sunday evening, ASX closing auction): a test
+> strategy's BUY signal flowed ticks → bar → on_prices → Signal →
+> AutoExecutor → propose (auto-sized 55 sh FMG) → approve → IB ACK
+> (PreSubmitted MKT order, proposal #14 EXECUTED); a second bar's BUY was
+> correctly skipped (no pyramiding); a *separate process* was also refused by
+> the shared attribution DB; after cancelling the unfilled order, reconcile
+> correctly marked the attribution CLOSED_EXTERNALLY. Time exits + SELL-close
+> + broker-clamping are unit-tested but did not run live (market closed by
+> validation time) — watch the first real session. Kill switch:
+> `MMR_AUTO_EXECUTE_DISABLED=1`.
+
+- **Symptom (2026-07-05 ASX session):** orb_wds emitted a BUY at 17:39 PDT
+  (correct ORB timing), it was logged, written to the event store, and
+  published — and nothing happened. No proposal, no order, no trade. Same for
+  orb_bhp on 2026-07-02.
+- **Mechanism — the pipeline dead-ends at the MessageBus:**
+  `strategy_runtime.py:403-420` (signal → log → event store →
+  `zmq_messagebus_client.write('signal', signal)`) is the *entire* signal
+  handling. Nothing anywhere subscribes to the `'signal'` topic. The
+  `auto_execute` flag is loaded from YAML, surfaced in `strategies` output
+  (commit dabca4b), carried in StrategyConfig/StrategyContext — and never read
+  by any execution logic. `git log -S auto_execute` confirms no consumer was
+  ever written; the strategy-side execution half was simply never built.
+- **Also missing live:** `Signal.max_hold_bars` / `close_by_time` time-exits
+  are backtest-only by documented admission (`strategy.py:23-30`) — VwapReclaim
+  sets `close_by_time` on every entry signal, so even with an executor its
+  positions would never flatten EOD without this.
+- **Design constraints for the fix** (match the backtest semantics that
+  validated these strategies):
+  - Long-only: BUY opens (one position per conid per strategy, no pyramiding),
+    SELL closes the held quantity, SELL-when-flat is a no-op
+    (`backtester.py:372-424`).
+  - Sizing via `PositionSizer` (confidence=probability, risk from signal) —
+    same knobs the propose pipeline uses.
+  - Route through the existing machinery, not around it: proposal record for
+    audit + executioner path (trading filter + risk gate already live there).
+  - Honor `paper_only` and account-mismatch guards.
+  - Time-exits: a small scheduler in strategy_runtime that synthesizes SELLs
+    for `close_by_time`/`max_hold_bars`, mirroring `backtester.py:469-515`.
+  - Idempotency across reconnects/restarts (signal dedup by (strategy, conid,
+    bar-timestamp) — the event store already has the data).
+- **Validate (paper):** replay a session where a strategy signals; confirm
+  proposal → order → fill → position, EOD flatten, and risk-gate rejection
+  paths all land in the event store.
+
+### G5 — ib_async decoder KeyError traceback noise after reconnect  (XS, cosmetic)
+
+- **Symptom:** `KeyError: 81` traceback from `ib_async/wrapper.py:874`
+  (`contractDetails` for a reqId with no `_results` slot) logged after a
+  reconnect, with the full PLS contract dump (~40 lines of noise).
+- **Mechanism:** a contract-details response from the pre-disconnect session
+  arrives after reconnect; the wrapper's request table was reset.
+- **Fix:** harmless upstream race — either suppress via logging filter on
+  `ib_async.decoder` for this signature, or ignore.
+
 ---
 
 ## Recommended sequence

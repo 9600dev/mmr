@@ -20,6 +20,7 @@ from trader.messaging.clientserver import (
 )
 from trader.objects import Action, BarSize, WhatToShow
 from trader.data.event_store import EventStore, EventType, TradingEvent
+from trader.strategy.auto_executor import AutoExecutor, SignalWork
 from trader.trading.strategy import Signal, Strategy, StrategyConfig, StrategyContext, StrategyState
 from typing import cast, Dict, List, Optional
 
@@ -87,7 +88,8 @@ class StrategyRuntime():
         strategy_config_file: str,
         history_duckdb_path: str = '',
         paper_trading: bool = False,
-        simulation: bool = False
+        simulation: bool = False,
+        trading_mode: str = 'paper',
     ):
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
@@ -97,6 +99,9 @@ class StrategyRuntime():
         self.universe_library = universe_library
         self.simulation: bool = simulation
         self.paper_trading = paper_trading
+        # trading_mode comes from trader.yaml (the same key the trader service
+        # uses); paper_trading above predates it and is not Container-resolved.
+        self.trading_mode = trading_mode
         self.zmq_pubsub_server_address = zmq_pubsub_server_address
         self.zmq_pubsub_server_port = zmq_pubsub_server_port
         self.zmq_rpc_server_address = zmq_rpc_server_address
@@ -169,6 +174,14 @@ class StrategyRuntime():
             self.storage = TickStorage(self.history_duckdb_path)
             self.universe_accessor = UniverseAccessor(self.duckdb_path, self.universe_library)
             self.event_store = EventStore(self.duckdb_path)
+            # G6: bridges auto_execute strategy signals to orders via the
+            # proposal pipeline. Runs on its own worker thread; submitting
+            # work never blocks the tick feed.
+            self.auto_executor = AutoExecutor(
+                duckdb_path=self.duckdb_path,
+                paper_trading=(self.trading_mode == 'paper'),
+                event_store=self.event_store,
+            )
             self.trader_client = RPCClient[TraderServiceApi](
                 zmq_server_address=self.zmq_rpc_server_address,
                 zmq_server_port=self.zmq_rpc_server_port,
@@ -385,6 +398,10 @@ class StrategyRuntime():
                 if self._last_dispatched_bar.get(dkey) == last_bar:
                     continue
                 self._last_dispatched_bar[dkey] = last_bar
+                # G6: evaluate time-based exits once per new bar, whether or
+                # not the strategy emits a signal (mirrors the backtester's
+                # per-bar exit_conditions check).
+                self._check_time_exit(strategy, conId, frame, last_bar)
                 signal = strategy.on_prices(frame)
             except Exception as ex:
                 logging.exception(
@@ -424,6 +441,59 @@ class StrategyRuntime():
                 logging.exception(
                     'failed to record/publish signal from %s for conId %s',
                     getattr(strategy, 'name', '?'), conId)
+
+            # G6: hand the signal to the auto-executor (guards + long-only
+            # decision + proposal-pipeline execution happen on its worker
+            # thread). Isolated from the persist/publish block above so a
+            # failure there can't swallow execution, and vice versa.
+            try:
+                self._submit_auto_execution(strategy, conId, signal, last_bar)
+            except Exception:
+                logging.exception(
+                    'auto-execute submission failed for %s conId %s',
+                    getattr(strategy, 'name', '?'), conId)
+
+    def _submit_auto_execution(self, strategy: Strategy, conId: int, signal, last_bar) -> None:
+        """Flatten the signal + strategy config to primitives and enqueue for
+        the auto-executor worker. Guards are evaluated on the worker so the
+        skip decision lands in the persistent decision log."""
+        ctx = strategy._context
+        work = SignalWork(
+            strategy_name=strategy.name or 'unknown',
+            conid=conId,
+            action=signal.action,
+            bar_ts=last_bar,
+            probability=float(getattr(signal, 'probability', 0.0) or 0.0),
+            risk=float(getattr(signal, 'risk', 0.0) or 0.0),
+            quantity=float(getattr(signal, 'quantity', 0.0) or 0.0),
+            auto_execute=bool(ctx.auto_execute) if ctx else False,
+            paper_only=bool(ctx.paper_only) if ctx else False,
+            state_running=strategy.state == StrategyState.RUNNING,
+            close_by_time=getattr(signal, 'close_by_time', None),
+            max_hold_bars=getattr(signal, 'max_hold_bars', None),
+        )
+        self.auto_executor.submit_signal(work)
+
+    def _check_time_exit(self, strategy: Strategy, conId: int, frame, last_bar) -> None:
+        """If this (strategy, conid) has an open auto position, report the new
+        bar so the executor can evaluate close_by_time / max_hold_bars.
+        bars_held counts frame bars after the entry bar — the same bar
+        arithmetic the backtester uses."""
+        try:
+            name = strategy.name or 'unknown'
+            entry_ts = self.auto_executor.open_entry_bar(name, conId)
+            if entry_ts is None:
+                return
+            idx = frame.index
+            # Entry timestamps are stored tz-naive (DuckDB TIMESTAMP); strip
+            # the frame's tz for comparison — same feed, same wall time.
+            if getattr(idx, 'tz', None) is not None:
+                idx = idx.tz_localize(None)
+            bars_held = int((idx > pd.Timestamp(entry_ts)).sum())
+            self.auto_executor.submit_bar(name, conId, last_bar, bars_held)
+        except Exception:
+            logging.exception('time-exit check failed for %s conId %s',
+                              getattr(strategy, 'name', '?'), conId)
 
     def on_ticker_error(self, ex: Exception):
         logging.error('StrategyRuntime ticker stream error: %s', ex, exc_info=True)

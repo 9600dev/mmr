@@ -42,7 +42,7 @@ trader.data_service ──► DataService (data_service.py)
                           └── ZMQ RPC Server (port 42003)
 
 trader.mmr_cli ──► ZMQ RPC Client → trader_service / strategy_service
-pycron/pycron.py ──► Process manager for all services
+pycron/pycron.py ──► Cron scheduler (db_backup, data_refresh_*) — services are launched directly by start_mmr.sh
 ```
 
 ### Key Patterns
@@ -77,6 +77,8 @@ The reason PubSub and MessageBus are separate (despite overlap) is efficiency: Z
 
 **Portfolio resizing**: `trader/sdk.py` provides `compute_resize_deltas()` (pure function) and `compute_resize_plan()`/`execute_resize_plan()` (SDK methods) for proportionally scaling all positions to fit within a target portfolio value. The resize workflow: (1) compute scale factor from max/min bounds, (2) find associated protective orders (stops, trailing stops, take-profits) for each position, (3) cancel protective orders, (4) place market orders for position deltas, (5) re-create protective orders at new quantities preserving original prices. Exposed via `resize-positions` CLI command. The `place_standalone_order()` RPC method on `trading_runtime.py` supports placing standalone STP/TRAIL/LMT orders for existing positions (used to re-create protectives after resizing).
 
+**Signal auto-execution** (`trader/strategy/auto_executor.py`): strategies with `auto_execute: true` have their signals executed automatically. The runtime hands each signal (plus a per-bar time-exit check) to an `AutoExecutor` worker thread, which routes through the proposal pipeline (`sdk.MMR.propose` → `approve`), so auto-trades get position sizing (confidence/ATR/liquidity), FX-correct quantities, the proposal audit trail, and the server-side trading filter + risk gate. Semantics match the backtester that validates strategies: **long-only** — BUY opens one sized position per (strategy, conid) (no pyramiding), SELL closes the executor-attributed quantity (clamped to the live broker position — a manual position in the same instrument is never touched), SELL-when-flat is a no-op. `Signal.close_by_time`/`max_hold_bars` time exits are honored live, evaluated against **bar timestamps** (not wall clock) exactly like the backtester. State (attribution + per-bar execution dedup) persists in DuckDB (`auto_exec_positions`, `auto_exec_bar_log`) and survives restarts; a first-work reconcile marks positions closed externally when the broker disagrees. Safety rails: `MMR_AUTO_EXECUTE_DISABLED=1` kill switch, RUNNING-state + `paper_only` guards, per-bar dedup, 300s per-(strategy, conid) cooldown (never applied to closes), and a conId precision round-trip check that refuses to trade stale identifiers.
+
 **Strategy reconciliation**: The strategy_service runs a reconciliation loop every 30 seconds (`strategy_runtime.py:_reconcile()`). It re-reads the portfolio universe from DuckDB and re-subscribes strategies to any new instruments (idempotent — `subscribe()` skips already-subscribed conIds). It also checks the YAML config file's modification time and loads any newly added strategies. This means: (1) an empty portfolio at startup automatically picks up positions as they're added via trades, (2) new strategies deployed to the YAML are loaded without restarting the service, (3) the `reload_strategies` RPC method triggers immediate reconciliation without waiting for the 30-second cycle. Note: modifying an existing strategy's config (changing conIds or bar_size) still requires a service restart. If the YAML is mid-write when reconcile reads it, the parse error is caught and the mtime is *not* advanced, so the reload retries on the next tick instead of silently leaving zombie strategies loaded. Strategy modules are loaded with `yaml.safe_load` (no Python-object tags) and path-sandboxed to `strategies_directory` (absolute paths or `../` traversal are rejected). Each strategy gets a unique `sys.modules` key derived from its `name` so two strategies that share a filename don't clobber each other and a reload actually re-imports the new source.
 
 **IB upstream connectivity detection**: The trader_service tracks IB Gateway's upstream connection to IBKR servers via IB error codes (1100/2103/2105/2157 = lost, 1102/2104/2106/2158 = restored). The `get_status()` RPC exposes `ib_upstream_connected` and `ib_upstream_error`. The CLI checks this before any IB-dependent command (portfolio, orders, buy/sell, snapshot, etc.) and shows a clear error with VNC/restart instructions instead of silently timing out. The `status` command also shows upstream connectivity and a warning when it's down.
@@ -109,7 +111,7 @@ The reason PubSub and MessageBus are separate (despite overlap) is efficiency: Z
 
 ```
 mmr/
-├── pycron/pycron.py           # Process manager / scheduler
+├── pycron/pycron.py           # Cron scheduler — start_mmr.sh runs it with -s for the scheduled jobs only
 │
 ├── config_defaults/           # Template defaults (copied to ~/.config/mmr/ on first run only; edits here don't affect a running system)
 │   ├── trader.yaml            # IB connection, ZMQ ports, DuckDB path
@@ -225,7 +227,7 @@ mmr/
 ├── Dockerfile                 # Debian bookworm + Python venv
 ├── docker-compose.yml         # IB Gateway sidecar + MMR container
 ├── docker.sh                  # Docker/Podman build/deploy helper
-├── start_mmr.sh               # Startup script (tmux + pycron)
+├── start_mmr.sh               # Startup script (launches services as child processes + cron-only pycron)
 └── pyproject.toml             # Package config, dependencies, entry points
 ```
 
@@ -235,7 +237,7 @@ Two-container model via docker-compose:
 - **ib-gateway**: `ghcr.io/gnzsnz/ib-gateway:latest` — runs IB Gateway. Configured via `.env` file. `scripts/ib-gateway-run.sh` is bind-mounted in to patch the upstream's broken `inst_jre.cfg` (it records a build-time `/tmp/setup/<pid>.dir/jre` path that doesn't exist at runtime, so install4j can't find Java on first launch).
 - **mmr**: Built from `python:3.12-slim-bookworm` base. Connects to ib-gateway via Docker DNS. Access via `docker exec`. The entrypoint auto-launches services via `start_mmr.sh` — interactive exec-ins (`docker exec -it bash`) do NOT re-launch (the `.bash_profile` only sets env), so they won't collide on ZMQ ports / IB client id. Container resource limits: 24 GB mem / 24 GB swap (sized for in-place DuckDB CHECKPOINT compaction on bloated DBs).
 
-IB Gateway ports: 4003 (live), 4004 (paper), mapped to host as 4001/4002.
+IB Gateway ports: 4003 (live), 4004 (paper), mapped to host as 7496/7497 (VNC: 5901). A host launchd watchdog (`scripts/ib_gateway_watchdog.sh`, every 5 min) restarts the gateway container if the paper port stays closed ~15 min — the nightly 23:59 IBC auto-restart can hang at a login dialog.
 
 Storage layout (host paths):
 - `~/.local/share/mmr/logs/` — bind mount; tail-able from the host
@@ -259,9 +261,9 @@ Storage layout (host paths):
 ./docker.sh -B before_run   # Backup with a custom name
 
 # Inside container (or non-Docker)
-./start_mmr.sh              # Start tmux session with all services
+./start_mmr.sh              # Start all services as child processes (hybrid: gateway in Docker)
 ./start_mmr.sh --paper      # Paper trading mode
-./start_mmr.sh --no-tmux    # Run pycron directly
+./start_mmr.sh --cli        # Verify services + launch the interactive CLI
 
 # Individual services
 python3 -m trader.trader_service

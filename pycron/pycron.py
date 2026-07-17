@@ -434,7 +434,7 @@ class MainHandler(RequestHandler):
             self.write(json.dumps([ob.__dict__() for ob in self.job_scheduler.jobs]))
 
 
-def main(config_file: str, only_list: List[str], except_list: List[str]):
+def main(config_file: str, only_list: List[str], except_list: List[str], no_health_check: bool = False):
     def get_network_ip() -> str:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -455,7 +455,12 @@ def main(config_file: str, only_list: List[str], except_list: List[str]):
         os.chdir(root_directory)
 
     port = config['port']
-    health_check_eval = config['health_check_eval']
+    # The health_check_eval imports trader modules and opens an IB connection —
+    # that's wanted when pycron supervises the full service stack, but a
+    # cron-only instance (started by start_mmr.sh alongside directly-launched
+    # services) must not: it runs inside pycron's own event loop and just spams
+    # connection errors every 10 minutes.
+    health_check_eval = None if no_health_check else config['health_check_eval']
     env = config['env']
     if env:
         for env_line in env.split(' '):
@@ -495,11 +500,13 @@ def main(config_file: str, only_list: List[str], except_list: List[str]):
 @click.option('--config', required=True, help='yaml configuration file')
 @click.option('--start', '-s', multiple=True, required=False, help='process name(s) to start [repeat option for more]')
 @click.option('--butnot', '-n', multiple=True, required=False, help='process names(s) not to start [repeat option for more]')
+@click.option('--no-health-check', is_flag=True, required=False, help='skip the periodic health_check_eval (use for cron-only instances)')
 @click.option('--debug', is_flag=True, required=False, help='show debug output')
 def bootstrap(
     config: str,
     start,
     butnot,
+    no_health_check,
     debug
 ):
     debug_level = 'DEBUG' if debug else 'INFO'
@@ -511,7 +518,7 @@ def bootstrap(
         log.error('config_file at {} does not exist'.format(config))
         sys.exit(1)
 
-    main(config, start, butnot)
+    main(config, start, butnot, no_health_check)
 
 
 if __name__ == '__main__':
