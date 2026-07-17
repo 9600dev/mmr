@@ -68,10 +68,27 @@ PLS position (3800sh, AUD) has a protective SELL STP @ 4.75.
   positive return + negative expectancy on fixed sizing) — treat return + PF as
   the reliable metrics until the expectancy_bps calc is reconciled. (Worth an
   AUDIT_ROADMAP item.)
-- **Not done:** statistical-confidence tests (PSR/t-test/bootstrap) — the script
-  hung on MC/bootstrap over large trade sets after ~3 of 6 survivors. Rerun with
-  iteration caps + per-strategy timeouts if wanted. No results saved; nothing
-  relies on partial numbers.
+
+### Re-validation at deployed configs (2026-07-17, 365d 1-min, statistical confidence NOW COMPUTED)
+
+The armed roster was re-validated at each strategy's EXACT deployed params
+(the July-4/5 provenance had drifted: GOOGL was deployed at a never-tested
+combo; CAT/WDS validations were never persisted). `source_run_id` + verdicts
+now live in the strategies' YAML entries. Bar = PSR ≥ 0.95, positive trade-CI,
+PF ≥ 1.5:
+
+| Strategy | Run | Ret | PF | PSR | p | Verdict |
+|---|---|---|---|---|---|---|
+| orb_pltr | 2901 | +13.1% | 2.63 | 0.957 | 0.009 | **clears** — only clean pass |
+| orb_wds | 2898 | +9.4% | 1.89 | 0.900 | 0.002 | near-pass (CI [+15,+66] positive; PSR just under; streak 14>MC95 9) |
+| vwap_reclaim_cat | 2900 | +3.9% | 1.35 | 0.893 | 0.087 | marginal (CI touches zero) |
+| orb_googl @45/1.3 | 2899 | +4.8% | 1.34 | 0.738 | 0.203 | **FAILS at deployed params** — validated combo is 30/1.5 (run 2666: +14.3%, PSR 0.986, p=0.001); consider redeploying at 30/1.5 |
+| orb_bhp | 2896 | +4.7% | 1.26 | 0.757 | 0.289 | **fails** — CI crosses zero, streak 17>MC95 10; weakest armed edge, watch live-vs-backtest closely |
+
+Also: the 6 killed strategies now carry `auto_execute: false` + kill-verdict
+descriptions in the YAML (they were one mass-enable away before), and
+`paper_only: true` was extended to orb_bhp/orb_wds (was unset — the ASX pair
+would have been first to trade real money without the per-strategy gate).
 
 ---
 
