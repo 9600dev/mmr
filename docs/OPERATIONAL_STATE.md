@@ -4,39 +4,43 @@ Living snapshot of the **deployed/running** state (config, strategies, data, inf
 and the reasoning behind it. Distinct from `AUDIT_ROADMAP.md` (code backlog).
 Update the date + relevant sections when the running config changes.
 
-**Last updated: 2026-07-05 (Sun, midday) — paper trading, account `DUM422056`.**
+**Last updated: 2026-07-17 (Fri evening) — paper trading, account `DUM422056`. STACK IS UP (healthy) and trading autonomously.**
 
 ---
 
-## Live strategy config (armed for Monday 2026-07-06 US open)
+## Live strategy config
 
-> **⚠ STACK IS DOWN + AUTO-EXECUTION IS NOW REAL (2026-07-05 ~23:30 PDT).**
-> The missing signal→order path (G6, found earlier tonight when orb_wds's
-> 17:39 BUY went nowhere) was **built and paper-validated live** the same
-> night: `trader/strategy/auto_executor.py`, routed through the proposal
-> pipeline, long-only semantics matching the backtester, time exits honored,
-> DuckDB-persisted attribution, 42 tests. See AUDIT_ROADMAP G6 for the
-> validation evidence. The docker stack was then wound down for morning
-> review (`./docker.sh -d`).
+> **✅ LIVE AUTO-EXECUTION ERA STARTED 2026-07-17.** First auto-executed
+> trade: orb_pltr BUY 3 × PLTR @ $132.83, 09:28 PDT — signal→sized
+> proposal→risk gate→fill in 1.3s, strategy-attributed in the event store
+> (`mmr strategies pnl`). The no-pyramiding rail refused a second signal at
+> 12:56. Position open into the weekend (ORB exits on its SELL signal; no
+> time exit). Kill options: `mmr strategies disable <name>` (per-strategy,
+> live RPC) or `MMR_AUTO_EXECUTE_DISABLED=1` (env — service restart to
+> apply). Real money additionally requires the **double-arm**:
+> `trading_mode: live` AND `MMR_AUTO_EXECUTE_LIVE=1` (strict '1'; deployed
+> 2026-07-17, closes never gated). The old PLS position is GONE (flat before
+> the 2026-07-16 redeploy — likely the GTC stop filled while the stack was
+> down; not investigated further).
 >
-> **Restarting the stack now means the 5 armed strategies actually TRADE**
-> (paper account) from the next session open — that was never true before.
-> Bring it back with `./docker.sh -u`; disarm instantly by exporting
-> `MMR_AUTO_EXECUTE_DISABLED=1` into the strategy_service environment or
-> `mmr strategies disable <name>`. The PLS position + its GTC stop @4.75
-> rest server-side at IB and are unaffected by the stack being down.
+> Monitoring/self-heal layer (2026-07-16/17): 30s pulse lines from both
+> services, `mmr verify` / cron-driven `mmr preflight`, committed monitor
+> scripts + docs/MONITORING.md, container healthchecks, supervised service
+> restarts, stale-bar gate, per-strategy PnL ledger.
 
-**5 strategies armed** (RUNNING + `auto_execute=True`), all individually
-backtested-positive over 1yr of 1-min data. D2 persists enabled-state across
-restarts.
+**5 strategies armed** (RUNNING + `auto_execute=True`). D2 persists
+enabled-state across restarts. **The July-5 numbers in this table were
+superseded by the 2026-07-17 re-validation at deployed configs** (see the
+re-validation section below — source_run_id + verdicts also live in each
+strategy's YAML entry):
 
-| Strategy | Sym | conId | Class | 1yr return | PF | Notes |
-|---|---|---|---|---|---|---|
-| orb_googl | GOOGL | 208813719 | OpeningRangeBreakout | +13.9% | 2.45 | strongest |
-| orb_pltr | PLTR | 444857009 | OpeningRangeBreakout | +7.5% | 1.44 | |
-| orb_wds | WDS | 564155292 | OpeningRangeBreakout | +7.1% | 1.68 | ASX (Sydney session) |
-| vwap_reclaim_cat | CAT | 5437 | VwapReclaim | +4.7% | 1.44 | 55% win, −2.3% dd |
-| orb_bhp | BHP | 4036812 | OpeningRangeBreakout | +4.7% | 1.26 | ASX (Sydney session) |
+| Strategy | Sym | conId | Class | Re-validated (run) | Confidence verdict |
+|---|---|---|---|---|---|
+| orb_pltr | PLTR | 444857009 | OpeningRangeBreakout | +13.1% PF 2.63 (2901) | **clears the bar** — only clean pass |
+| orb_wds | WDS | 564155292 | OpeningRangeBreakout | +9.4% PF 1.89 (2898) | near-pass |
+| vwap_reclaim_cat | CAT | 5437 | VwapReclaim | +3.9% PF 1.35 (2900) | marginal |
+| orb_googl | GOOGL | 208813719 | OpeningRangeBreakout | +4.8% PF 1.34 (2899) | **fails at deployed 45/1.3** — validated combo is 30/1.5 (run 2666); redeploy decision pending |
+| orb_bhp | BHP | 4036812 | OpeningRangeBreakout | +4.7% PF 1.26 (2896) | fails — watch live-vs-backtest |
 
 **ASX strategies** carry `params: {SESSION_TZ: Australia/Sydney, RTH_OPEN_MIN: 600,
 RTH_CLOSE_MIN: 960}`. US strategies use the class defaults (09:30 ET). The live
@@ -139,50 +143,49 @@ would have been first to trade real money without the per-strategy gate).
 
 ---
 
-## Monday 2026-07-06 plan
+## Weekend state (2026-07-17 Fri evening) + Monday 2026-07-20 plan
 
-- US opens 06:30 PDT / 09:30 ET. ASX reopens Sun ~17:00 PDT (Mon 10:00 Sydney).
-- 5 strategies auto-execute from the open (live-watching if the container stays
-  up). Best-effort cron for a monitoring session; reliable path = prompt for a
-  live watch before the open.
-- Monitoring is now a committed artifact (2026-07-16): `scripts/monitor_trading.sh`,
-  `scripts/monitor_health.sh`, `scripts/last_pulse.sh`, with the escalation
-  policy + triage order in `docs/MONITORING.md`. Post-restart assertions:
-  `mmr verify` (non-zero exit on FAIL). The old `scratchpad/monitor.sh`
-  pattern is retired.
-- The live path was just rebuilt this session (on_prices + tick→bar resampling +
-  priming); Monday is the first from-the-open clean test.
-- **2026-07-05 incident + recovery:** gateway had been dead since Sat 23:59
-  (hung auto-restart). Restarted ~10:18 Sun; trader reconnected, account values
-  streaming again, all 5 armed strategies re-subscribed, PLS stop confirmed
-  live at IB. Watchdog now guards tonight's 23:59 auto-restart (which happens
-  ~7 h *after* ASX's Sunday-evening open and ~6.5 h before US open — if it
-  hangs again, the watchdog bounces it by ~00:15).
-- **2026-07-05 ASX-open validation:** ticks flowed to all ASX strategies from
-  the Sunday 17:00 PDT open, tick→bar resampling + priming worked, and orb_wds
-  emitted a correctly-timed BUY signal at 17:39 PDT. No trade resulted — which
-  exposed the missing auto-execute path. **G6 was built and paper-validated
-  live the same night** (see warning at top + AUDIT_ROADMAP G6). The stack was
-  wound down afterwards; nothing trades until it is restarted.
-- **Monday morning checklist (after review):** `./docker.sh -u` → wait for
-  gateway login (~2 min) → `mmr status` (expect account values streaming) →
-  `mmr strategies` (expect 5 × state 3). US open 06:30 PDT: GOOGL/PLTR/CAT
-  strategies will trade their first live signals. Watch
-  `strategy_service` logs for `auto-executor:` lines; first-session items to
-  eyeball: VwapReclaim's EOD flatten (close_by_time time-exit — unit-tested,
-  not yet seen live) and proposal audit rows (`mmr proposals --all`).
-- Overnight schedule (PDT): 17:00 ASX open → 22:17 db_backup → 23:30
-  data_refresh_asx → 23:59 gateway auto-restart (watchdog armed).
+- **Stack is UP, healthy, and autonomous over the weekend.** Both containers
+  `(healthy)`; `mmr verify --expect-running 5` all-PASS post-deploy. Nightly
+  cadence runs itself: db_backup 22:17 → data_refresh (US 17:30 wk / ASX
+  23:30) → gateway auto-restart 23:59 (watchdog armed; the 07-16 and 07-17
+  restarts recovered in 47s/17s, observed end-to-end via the pulse layer) →
+  `preflight_us` 06:00 wk / `preflight_asx` 16:30 Sun-Thu writing
+  `PREFLIGHT OK|FAIL` to `logs/preflight.log`.
+- **First live-trading day (Fri 2026-07-17) recap:** orb_pltr traded (see top
+  block); GOOGL/CAT produced no signals (correct-quiet, provable via pulse
+  `ticks_60s`/`bar_age_s`); two mid-day IBKR upstream flaps self-healed
+  (100s/23s, data maintained throughout). **PLTR position (3 sh) is open into
+  the weekend** — exits on the strategy's SELL signal (no time exit).
+- **ASX Monday open (Sun 17:00 PDT / Mon 10:00 Sydney)**: BHP + WDS trade
+  their first live signals. `preflight_asx` fires 16:30 PDT Sunday; check
+  `preflight.log` or run `mmr verify` before the open if watching live.
+  Monitors: `scripts/monitor_trading.sh` + `monitor_health.sh` (re-arm after
+  any container recreate), `scripts/last_pulse.sh` on demand,
+  `mmr strategies pnl` for the ledger.
+- **Pending operator decisions:**
+  - orb_googl: redeploy at the validated 30/1.5 (run 2666 clears the bar;
+    deployed 45/1.3 fails it). One YAML edit; reconcile picks it up in ≤30s
+    (params are read at load — restart to be sure).
+  - orb_bhp: statistically unestablished edge — keep watching live-vs-backtest
+    via `strategies pnl`, or demote.
 
 ---
 
 ## Open items / follow-ups (offline)
 
-- Cluster G (AUDIT_ROADMAP): **G6 signals never execute — THE blocker for live
-  trading (see top of file)**, G1 mass-enable RPC timeout, G2 IB farm-status log
-  noise, **G3 status lies while IB socket is dead (it hid a 10.5 h outage)**,
-  G4 status open_orders counts updates not orders, G5 ib_async decoder KeyError
-  noise.
+- Cluster G (AUDIT_ROADMAP): ~~G6~~ DONE (live-validated 2026-07-17 — first
+  auto-executed trade), ~~G2~~ FIXED (farm codes at INFO), G3 detection layer
+  shipped (ping_ib + pulses + verify) but the status-flag truthfulness fix
+  itself remains open, G1 mass-enable RPC timeout, G4 open_orders counts
+  updates not orders, G5 decoder noise, **G7 (new 2026-07-17): pytest touches
+  the live stack when it's up**.
+- Backtest persist can still fail silently under concurrent live-service +
+  backfill load (`run_id: None`, reproduced 2026-07-17 despite the 32-attempt
+  retry) — check `run_id` in every `--json backtest` response.
+- Host-side CLI **data/backtest commands hit a different (stale) DuckDB** than
+  the stack — the live DBs are in the `mmr_db_data` volume. Always
+  `docker exec` for data work; RPC-backed commands are unaffected.
 - `expectancy_bps` metric inconsistency (see above).
-- Statistical-confidence script needs timeouts/caps before rerun.
-- ORB-ASX: consider a proper train/test split before trusting BHP/WDS edges live.
+- ORB-ASX: consider a proper train/test split before trusting BHP/WDS edges
+  live (BHP's confidence stats already argue for caution).
