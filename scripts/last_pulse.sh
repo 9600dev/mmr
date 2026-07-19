@@ -19,11 +19,12 @@ STALE_AFTER="${MMR_PULSE_STALE_SECONDS:-120}"
 rc=0
 
 for svc in trader_service strategy_service; do
-    # Newest NON-EMPTY session log (every CLI/pytest run creates empty
-    # session-stamped files for all services; only the service writes).
-    f=$(ls -t "$LOG_DIR/${svc}_"*.log 2>/dev/null | while read -r c; do
-            [ -s "$c" ] && { echo "$c"; break; }
-        done)
+    # Newest NON-EMPTY session log via find+stat — a glob here breaks past
+    # ARG_MAX once the dir accumulates enough session-stamped files (66k
+    # found 2026-07-19). stat -f = macOS, -c = Linux.
+    f=$(find "$LOG_DIR" -maxdepth 1 -name "${svc}_*.log" -size +0c \
+            \( -exec stat -f '%m %N' {} \; -o -exec stat -c '%Y %n' {} \; \) 2>/dev/null \
+            | sort -rn | head -1 | cut -d' ' -f2-)
     if [ -z "$f" ]; then
         echo "$svc: NO LOG FILE in $LOG_DIR"
         rc=1

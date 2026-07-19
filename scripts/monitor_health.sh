@@ -29,16 +29,14 @@ BACKLOG="${MMR_MONITOR_BACKLOG:-50}"
 INCLUDE='ib_upstream|upstream|1100|1102|2110|2157|farm status|SUBSCRIPTION|reconnect|relogin|disconnect|AccountNotPinned|::ERROR::|::CRITICAL::|Traceback'
 EXCLUDE='::DEBUG::|::INFO::pulse '
 
-# Newest NON-EMPTY session log. Every process that loads the logging config
-# (each mmr CLI run, pytest) creates its own empty session-stamped file set —
-# only the real service ever writes to its file, so size>0 disambiguates.
+# Newest NON-EMPTY session log. find+stat instead of a shell glob: the logs
+# dir accumulates session-stamped files from every CLI/pytest run (66k found
+# 2026-07-19 — enough to blow ARG_MAX and silently break glob expansion).
+# stat -f is macOS, -c is Linux — try both for host/container portability.
 newest() {
-    ls -t "$LOG_DIR/${SERVICE}_"*.log 2>/dev/null | while read -r f; do
-        if [ -s "$f" ]; then
-            echo "$f"
-            break
-        fi
-    done
+    find "$LOG_DIR" -maxdepth 1 -name "${SERVICE}_*.log" -size +0c \
+        \( -exec stat -f '%m %N' {} \; -o -exec stat -c '%Y %n' {} \; \) 2>/dev/null \
+        | sort -rn | head -1 | cut -d' ' -f2-
 }
 
 echo "[monitor_health] watching $LOG_DIR/${SERVICE}_*.log"

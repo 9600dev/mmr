@@ -27,9 +27,13 @@ set -u
 PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
 
 CONTAINER="mmr-ib-gateway-1"
-# Paper API port on the host (container 4004 → host 7497). Live is 7496.
-WATCH_HOST="127.0.0.1"
-WATCH_PORT="${WATCH_PORT:-7497}"
+# INTERNAL Java API port (paper 4002, live 4001). We probe this via docker
+# exec instead of the host-mapped port: socat keeps the host port (7497)
+# accepting even when the Java process is dead, so a host-port check reads
+# "healthy" through a hung gateway — proven 2026-07-19, when the Saturday
+# 23:59 auto-restart hung against IB weekend maintenance and this watchdog
+# stayed satisfied for 8 hours while trader_service failed 226 reconnects.
+WATCH_INTERNAL_PORT="${WATCH_INTERNAL_PORT:-4002}"
 FAIL_THRESHOLD=3
 RESTART_COOLDOWN_SECS=1800
 
@@ -49,10 +53,11 @@ if [ "$running" != "true" ]; then
     exit 0
 fi
 
-if nc -z -w 3 "$WATCH_HOST" "$WATCH_PORT" 2>/dev/null; then
-    # Healthy — clear any failure streak. Log only the recovery edge.
+if docker exec "$CONTAINER" bash -c "exec 3<>/dev/tcp/127.0.0.1/$WATCH_INTERNAL_PORT" 2>/dev/null; then
+    # Healthy — the Java API itself is listening. Clear any failure streak;
+    # log only the recovery edge.
     if [ -f "$FAIL_FILE" ]; then
-        log "port $WATCH_PORT reachable again (was down $(cat "$FAIL_FILE") checks)"
+        log "internal port $WATCH_INTERNAL_PORT reachable again (was down $(cat "$FAIL_FILE") checks)"
         rm -f "$FAIL_FILE"
     fi
     exit 0
@@ -60,7 +65,7 @@ fi
 
 fails=$(( $(cat "$FAIL_FILE" 2>/dev/null || echo 0) + 1 ))
 echo "$fails" > "$FAIL_FILE"
-log "port $WATCH_PORT closed (consecutive failures: $fails/$FAIL_THRESHOLD)"
+log "internal port $WATCH_INTERNAL_PORT closed (consecutive failures: $fails/$FAIL_THRESHOLD)"
 
 if [ "$fails" -lt "$FAIL_THRESHOLD" ]; then
     exit 0
