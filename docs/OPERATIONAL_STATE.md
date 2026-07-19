@@ -123,6 +123,18 @@ would have been first to trade real money without the per-strategy gate).
   `~/.local/share/mmr/logs/pycron_cron.log`, status: `curl :7425` — LAN-visible since 2026-07-17).
   A detached instance was also started in the running container so tonight's
   jobs fire without a restart. The pycron web-port bind doubles as a double-start guard (7425 since 2026-07-17; was 8081).
+- **2026-07-19 incident (Sun am): Saturday's 23:59 gateway auto-restart hung
+  against IB weekend maintenance — 8h socket outage, caught by `last_pulse.sh`
+  (`ib_connected=False`), missed by every automatic layer.** The watchdog
+  stayed satisfied because socat keeps host port 7497 accepting while the
+  Java API (internal 4002) is dead — port-open ≠ gateway-alive, the G3 lesson
+  one layer down. Manual `docker restart` at 07:58 recovered in ~3 min
+  (reconnect + resubscribe + live ping_ib verified). **Watchdog now probes
+  the INTERNAL Java port via docker exec** instead of the host port. The
+  16:30 preflight would have been the last-resort catch pre-open. Also fixed
+  same morning: 64k accumulated empty session-log files broke the monitors'
+  shell-glob newest-file resolution (ARG_MAX) — purged, and all log-reading
+  scripts now resolve via find+stat.
 - **IB Gateway watchdog (added 2026-07-05):** the gateway's nightly 23:59
   auto-restart hung on 2026-07-04 (stuck login dialog; API port never opened;
   **10.5 h outage**, invisible to `mmr status` — see AUDIT_ROADMAP G3). Host-side
