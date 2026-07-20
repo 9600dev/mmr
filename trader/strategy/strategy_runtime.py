@@ -68,6 +68,28 @@ def _whattoshow_for_contract(contract: Contract) -> WhatToShow:
     return WhatToShow.TRADES
 
 
+def _session_bar_ts(last_bar, params: Optional[dict],
+                    default_tz: str = 'America/New_York'):
+    """Convert a live (UTC) bar timestamp to the strategy's SESSION timezone
+    for time-of-day comparisons (``close_by_time``).
+
+    The backtester's frames are session-tz-aware (US history is ET-keyed,
+    ASX Sydney-keyed), so ``bar_ts.time()`` compares in session wall time
+    there. Live frames are UTC — without this conversion a 15:45 ET flatten
+    fires at 15:45 UTC = 11:45 ET, 4h15m early (happened live 2026-07-20 on
+    the first-ever live time-exit). SESSION_TZ param wins (the ASX strategies
+    set Australia/Sydney); default matches US history storage. Any failure
+    falls back to the raw bar (the old behavior) rather than blocking exits.
+    """
+    try:
+        session_tz = (params or {}).get('SESSION_TZ') or default_tz
+        ts = pd.Timestamp(last_bar)
+        ts = ts.tz_localize('UTC') if ts.tzinfo is None else ts
+        return ts.tz_convert(session_tz)
+    except Exception:
+        return last_bar
+
+
 def _count_recent(index, now_utc: pd.Timestamp, seconds: int) -> int:
     """Rows of a DatetimeIndex within the trailing window. Naive indexes are
     treated as UTC (matching ``_strategy_frame``'s convention)."""
@@ -613,7 +635,9 @@ class StrategyRuntime():
             if getattr(idx, 'tz', None) is not None:
                 idx = idx.tz_localize(None)
             bars_held = int((idx > pd.Timestamp(entry_ts)).sum())
-            self.auto_executor.submit_bar(name, conId, last_bar, bars_held)
+            ctx = getattr(strategy, '_context', None)
+            exit_bar = _session_bar_ts(last_bar, getattr(ctx, 'params', None) if ctx else None)
+            self.auto_executor.submit_bar(name, conId, exit_bar, bars_held)
         except Exception:
             logging.exception('time-exit check failed for %s conId %s',
                               getattr(strategy, 'name', '?'), conId)

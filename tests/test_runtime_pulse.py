@@ -6,6 +6,7 @@ pieces the LLM monitoring loop keys off — ``ticks_60s`` going to zero during
 market hours is the escalate condition, so the counting/timezone math must
 be exact.
 """
+import datetime as dt
 from types import SimpleNamespace
 
 import pandas as pd
@@ -196,3 +197,48 @@ class TestAutoExecutorOpenCount:
         ex.state.record_close('s1', 123, 'CLOSED', 'test')
         ex._load_open_view()
         assert ex.open_count() == 0
+
+
+class TestSessionBarTs:
+    """Time-exit tz fix (found live 2026-07-20: a 15:45 ET close_by_time
+    fired at 15:45 UTC — 11:45 ET — on its first live firing). Live UTC bars
+    must convert to the strategy's session tz before .time() comparison so
+    live matches the backtester's session-tz-aware frames."""
+
+    def test_utc_bar_converts_to_et_by_default(self):
+        from trader.strategy.strategy_runtime import _session_bar_ts
+        bar = pd.Timestamp('2026-07-20 15:46:00', tz='UTC')   # 11:46 ET
+        out = _session_bar_ts(bar, None)
+        assert out.time() == dt.time(11, 46)
+
+    def test_et_afternoon_reaches_close_by_time(self):
+        from trader.strategy.strategy_runtime import _session_bar_ts
+        bar = pd.Timestamp('2026-07-20 19:46:00', tz='UTC')   # 15:46 ET
+        out = _session_bar_ts(bar, None)
+        assert out.time() >= dt.time(15, 45)
+
+    def test_session_tz_param_wins(self):
+        from trader.strategy.strategy_runtime import _session_bar_ts
+        bar = pd.Timestamp('2026-07-20 01:30:00', tz='UTC')   # 11:30 Sydney
+        out = _session_bar_ts(bar, {'SESSION_TZ': 'Australia/Sydney'})
+        assert out.time() == dt.time(11, 30)
+
+    def test_naive_bar_treated_as_utc(self):
+        from trader.strategy.strategy_runtime import _session_bar_ts
+        bar = pd.Timestamp('2026-07-20 19:46:00')
+        out = _session_bar_ts(bar, None)
+        assert out.time() == dt.time(15, 46)
+
+    def test_garbage_falls_back_to_raw(self):
+        from trader.strategy.strategy_runtime import _session_bar_ts
+        assert _session_bar_ts('not-a-ts', {'SESSION_TZ': 'Nope/Nowhere'}) == 'not-a-ts'
+
+    def test_exit_fires_at_correct_wall_time_end_to_end(self):
+        # The composed behavior: UTC bar -> session ts -> check_time_exit.
+        from trader.strategy.auto_executor import check_time_exit
+        from trader.strategy.strategy_runtime import _session_bar_ts
+        flatten = dt.time(15, 45)
+        morning = _session_bar_ts(pd.Timestamp('2026-07-20 15:46:00', tz='UTC'), None)
+        afternoon = _session_bar_ts(pd.Timestamp('2026-07-20 19:46:00', tz='UTC'), None)
+        assert check_time_exit(morning, 10, flatten, None) is None          # 11:46 ET: hold
+        assert check_time_exit(afternoon, 10, flatten, None) is not None    # 15:46 ET: exit
