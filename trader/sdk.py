@@ -1636,11 +1636,13 @@ class MMR:
         exchange: str = '',
         currency: str = '',
         con_id: Optional[int] = None,
+        order_ref: str = '',
     ) -> SuccessFail:
         """Place a standalone protective order (STP / TRAIL / LMT) for an existing
         position. Resolves the contract (preferring a cached one from the last
         portfolio() call, else exchange/currency-hinted resolution) and submits
-        via the trader_service. order_type: 'STP', 'TRAIL', or 'LMT'."""
+        via the trader_service. order_type: 'STP', 'TRAIL', or 'LMT'.
+        ``order_ref`` stamps orderRef for fill attribution."""
         order_type = (order_type or '').upper()
         if order_type not in ('STP', 'TRAIL', 'LMT'):
             return SuccessFail.fail(error=f"order_type must be STP/TRAIL/LMT, got {order_type!r}")
@@ -1665,6 +1667,7 @@ class MMR:
                 limit_price=limit_price,
                 trailing_percent=trailing_percent,
                 tif=tif,
+                order_ref=order_ref,
             )
         )
 
@@ -2591,10 +2594,19 @@ class MMR:
             result['positions'] = None
 
         try:
-            orders = consume(
-                self._rpc.rpc(return_type=dict[int, list[Order]]).get_orders()
+            # Count only WORKING orders. get_orders()/get_trades() return the
+            # book, which retains every order ever seen (it doubles as an
+            # audit log) — summing it reports long-dead orders as open and
+            # contradicts both the pulse (book.get_open_order_count) and the
+            # `orders` command. Same terminal-status filter as orders().
+            trades_raw = consume(
+                self._rpc.rpc(return_type=dict[int, list[Trade]]).get_trades()
             )
-            result['open_orders'] = sum(len(v) for v in (orders or {}).values())
+            _terminal = {'Cancelled', 'Filled', 'Inactive', 'ApiCancelled'}
+            result['open_orders'] = sum(
+                1 for tl in (trades_raw or {}).values()
+                if tl and tl[0].orderStatus.status not in _terminal
+            )
         except Exception:
             result['open_orders'] = None
 

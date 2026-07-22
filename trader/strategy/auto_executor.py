@@ -90,6 +90,12 @@ class SignalWork:
     close_by_time: Optional[dt.time] = None
     max_hold_bars: Optional[int] = None
     bar_size_seconds: float = 0.0     # 0 = unknown -> stale-bar gate disabled
+    # Bounded pyramiding (validated 2026-07-22: the pyramid structure is the
+    # statistically-real part of ORB's edge — see OPERATIONAL_STATE.md).
+    # 0 = single-lot (default, historical behaviour); N = allow N adds after
+    # the initial entry, so a stack tops out at N+1 fixed-size lots. Set per
+    # strategy via ``pyramid_max_adds`` in strategy_runtime.yaml.
+    pyramid_max_adds: int = 0
 
 
 def bar_age_seconds(bar_ts, now_utc: Optional[dt.datetime] = None) -> Optional[float]:
@@ -138,6 +144,7 @@ def decide_signal(
     bar_age_seconds: Optional[float] = None,
     stale_bar_multiple: float = 3.0,
     live_armed: bool = False,
+    held_lots: int = 0,
 ) -> Directive:
     """Long-only decision matching backtester semantics (backtester.py:372-424).
 
@@ -171,7 +178,16 @@ def decide_signal(
                 'live auto-execute not armed (set MMR_AUTO_EXECUTE_LIVE=1) — '
                 'opens refused, closes unaffected')
         if held_qty > 0:
-            return Directive('skip', 'already holding — no pyramiding')
+            # Bounded pyramiding: strategies with ``pyramid_max_adds > 0``
+            # may add fixed-size lots until the stack holds 1 + max_adds.
+            # Everything below (stale-bar, cooldown) applies to adds too.
+            if work.pyramid_max_adds <= 0:
+                return Directive('skip', 'already holding — no pyramiding')
+            if held_lots > work.pyramid_max_adds:
+                return Directive(
+                    'skip',
+                    f'pyramid stack full ({held_lots} lots, '
+                    f'max_adds={work.pyramid_max_adds})')
         # Stale-bar sanity gate (OPENS ONLY — a stale exit still reduces
         # risk; refusing it would be worse than acting on it). A bar much
         # older than its interval means the feed stalled, the queue backed
@@ -185,7 +201,9 @@ def decide_signal(
                 f'bar_size ({work.bar_size_seconds:.0f}s) — refusing to open on stale data')
         if cooldown_active:
             return Directive('skip', 'cooldown active')
-        return Directive('open', 'BUY while flat',
+        reason = ('BUY while flat' if held_qty <= 0
+                  else f'pyramid add (lot {held_lots + 1})')
+        return Directive('open', reason,
                          quantity=work.quantity if work.quantity > 0 else None)
 
     if work.action == Action.SELL:
@@ -257,6 +275,16 @@ class AutoExecState:
                     created TIMESTAMP NOT NULL
                 )
             """)
+            # Migration for pre-protective-stop databases.
+            conn.execute("""
+                ALTER TABLE auto_exec_positions
+                ADD COLUMN IF NOT EXISTS protective_order_id BIGINT
+            """)
+            # Migration for pre-pyramiding databases (NULL = 1 lot).
+            conn.execute("""
+                ALTER TABLE auto_exec_positions
+                ADD COLUMN IF NOT EXISTS lots BIGINT
+            """)
         self.db.execute_atomic(_create)
 
     # -- dedup ---------------------------------------------------------------
@@ -278,7 +306,8 @@ class AutoExecState:
 
     def open_position(self, strategy: str, conid: int) -> Optional[dict]:
         row = self.db.execute(
-            "SELECT quantity, entry_bar_ts, close_by_time, max_hold_bars, proposal_id "
+            "SELECT quantity, entry_bar_ts, close_by_time, max_hold_bars, proposal_id, "
+            "protective_order_id, lots "
             "FROM auto_exec_positions WHERE strategy=? AND conid=? AND status='OPEN' LIMIT 1",
             [strategy, conid], fetch='one')
         if row is None:
@@ -289,16 +318,45 @@ class AutoExecState:
             'close_by_time': dt.time.fromisoformat(row[2]) if row[2] else None,
             'max_hold_bars': row[3],
             'proposal_id': row[4],
+            'protective_order_id': row[5],
+            'lots': int(row[6]) if row[6] else 1,  # pre-migration rows = 1 lot
         }
+
+    def set_protective(self, strategy: str, conid: int, order_id: Optional[int]):
+        self.db.execute(
+            "UPDATE auto_exec_positions SET protective_order_id=?, updated=? "
+            "WHERE strategy=? AND conid=? AND status='OPEN'",
+            [order_id, dt.datetime.now(), strategy, conid])
 
     def record_open(self, strategy: str, conid: int, quantity: float, bar_ts,
                     proposal_id: Optional[int],
                     close_by_time: Optional[dt.time], max_hold_bars: Optional[int]):
         self.db.execute(
-            "INSERT INTO auto_exec_positions VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', NULL, NULL, ?)",
+            "INSERT INTO auto_exec_positions "
+            "(strategy, conid, quantity, entry_bar_ts, entry_time, proposal_id, "
+            " close_by_time, max_hold_bars, status, closed_reason, close_proposal_id, "
+            " updated, lots) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', NULL, NULL, ?, 1)",
             [strategy, conid, quantity, _naive(bar_ts), dt.datetime.now(), proposal_id,
              close_by_time.isoformat() if close_by_time else None,
              max_hold_bars, dt.datetime.now()])
+
+    def record_add(self, strategy: str, conid: int, quantity_delta: float, bar_ts,
+                   proposal_id: Optional[int],
+                   close_by_time: Optional[dt.time], max_hold_bars: Optional[int]):
+        """Fold a pyramid add into the open row. Latest-BUY-wins for the
+        time-exit rules and entry_bar_ts (bars_held restarts at the add) —
+        the same semantics the backtester applies to stacked entries.
+        ``proposal_id`` tracks the latest add; per-lot audit detail lives in
+        the proposal store and event store."""
+        self.db.execute(
+            "UPDATE auto_exec_positions SET quantity = quantity + ?, "
+            "lots = COALESCE(lots, 1) + 1, entry_bar_ts = ?, proposal_id = ?, "
+            "close_by_time = ?, max_hold_bars = ?, updated = ? "
+            "WHERE strategy=? AND conid=? AND status='OPEN'",
+            [quantity_delta, _naive(bar_ts), proposal_id,
+             close_by_time.isoformat() if close_by_time else None,
+             max_hold_bars, dt.datetime.now(), strategy, conid])
 
     def record_close(self, strategy: str, conid: int, status: str, reason: str,
                      close_proposal_id: Optional[int] = None):
@@ -309,8 +367,8 @@ class AutoExecState:
 
     def all_open(self) -> list:
         rows = self.db.execute(
-            "SELECT strategy, conid, quantity, entry_bar_ts FROM auto_exec_positions "
-            "WHERE status='OPEN'", fetch='all')
+            "SELECT strategy, conid, quantity, entry_bar_ts, protective_order_id "
+            "FROM auto_exec_positions WHERE status='OPEN'", fetch='all')
         return rows or []
 
 
@@ -413,6 +471,20 @@ class AutoExecutor:
         happen via 'true'/'yes'/typo (mirrors horserank's double-arm)."""
         return os.environ.get(self.LIVE_ARM_ENV, '') == '1'
 
+    @property
+    def protective_stop_pct(self) -> float:
+        """Disaster-stop distance (%) below entry for a broker-side GTC stop
+        on every attributed open. This is NOT trade management — strategy
+        exits fire long before it. It is the only protection that survives a
+        dead feed / dead strategy_service while holding (the stale-bar gate
+        only guards opens). Deliberately wide so it never competes with the
+        strategy's own exits, which the backtester does not model. 0 (or
+        malformed) disables."""
+        try:
+            return float(os.environ.get('MMR_PROTECTIVE_STOP_PCT', '') or 8.0)
+        except ValueError:
+            return 0.0
+
     # -- loop-side API (called from the runtime's event loop; never blocks) ----
 
     def submit_signal(self, work: SignalWork):
@@ -452,7 +524,7 @@ class AutoExecutor:
 
     def _load_open_view(self):
         view = {}
-        for strategy, conid, _qty, entry_bar_ts in self.state.all_open():
+        for strategy, conid, _qty, entry_bar_ts, _protective in self.state.all_open():
             view[(strategy, int(conid))] = entry_bar_ts
         with self._view_lock:
             self._open_view = view
@@ -472,13 +544,18 @@ class AutoExecutor:
         except Exception as ex:
             logging.warning('auto-executor: reconcile skipped (broker unavailable: %s)', ex)
             return  # retry on next work item
-        for strategy, conid, qty, _entry in open_rows:
+        for strategy, conid, qty, _entry, protective_id in open_rows:
             if broker.get(int(conid), 0.0) <= 0:
                 logging.warning(
                     'auto-executor: %s conId %s attributed qty %s not at broker — '
                     'marking CLOSED_EXTERNALLY', strategy, conid, qty)
                 self.state.record_close(strategy, int(conid), 'CLOSED_EXTERNALLY',
                                         'position absent at broker on reconcile')
+                # If the protective stop is what closed it, cancelling is a
+                # no-op; if the position was closed manually, this removes
+                # the orphaned stop before it can fire into a short.
+                self._cancel_protective(strategy, int(conid), protective_id,
+                                        context='reconcile (position closed externally)')
         self._load_open_view()
         self._reconciled = True
 
@@ -531,6 +608,7 @@ class AutoExecutor:
             bar_age_seconds=bar_age_seconds(work.bar_ts),
             stale_bar_multiple=self.stale_bar_multiple,
             live_armed=self.live_armed,
+            held_lots=pos['lots'] if pos else 0,
         )
 
         if directive.kind == 'skip':
@@ -610,19 +688,44 @@ class AutoExecutor:
                                     'executed quantity could not be attributed')
             self._last_exec[(work.strategy_name, work.conid)] = dt.datetime.now().timestamp()
             return
-        self.state.record_open(
-            work.strategy_name, work.conid, executed_qty, work.bar_ts, proposal_id,
-            work.close_by_time, work.max_hold_bars)
+        prior = self.state.open_position(work.strategy_name, work.conid)
+        if prior:
+            # Pyramid add: fold into the open row (latest-BUY-wins for time
+            # exits) and re-cover the WHOLE stack with a fresh protective —
+            # the old stop's quantity no longer matches.
+            self.state.record_add(
+                work.strategy_name, work.conid, executed_qty, work.bar_ts,
+                proposal_id, work.close_by_time, work.max_hold_bars)
+            if prior.get('protective_order_id'):
+                self._cancel_protective(
+                    work.strategy_name, work.conid, prior['protective_order_id'],
+                    context='pyramid add — re-covering full stack')
+        else:
+            self.state.record_open(
+                work.strategy_name, work.conid, executed_qty, work.bar_ts, proposal_id,
+                work.close_by_time, work.max_hold_bars)
         self._last_exec[(work.strategy_name, work.conid)] = dt.datetime.now().timestamp()
         self._load_open_view()
-        logging.warning('auto-executor: OPENED %s x%s for %s (proposal #%s, orders %s)',
+        logging.warning('auto-executor: %s %s x%s for %s (proposal #%s, orders %s)',
+                        'ADDED' if prior else 'OPENED',
                         ident['symbol'], executed_qty, work.strategy_name, proposal_id,
                         result.obj)
+        # Broker-side disaster stop. If the fill isn't visible in the
+        # portfolio yet this is a no-op and the next bar's self-heal places it.
+        self._ensure_protective(work.strategy_name, work.conid)
 
     def _execute_close(self, strategy_name: str, conid: int, bar_ts,
                        attributed_qty: float, reason: str):
         ident = self._resolve_exact(conid)
         sdk = self._get_sdk()
+        # Cancel the protective stop BEFORE reading the broker position and
+        # closing: if the stop fired in the meantime the cancel fails, the
+        # broker read below then shows the position gone, and the close
+        # degrades to CLOSED_EXTERNALLY instead of overselling into a short.
+        pos = self.state.open_position(strategy_name, conid)
+        if pos and pos.get('protective_order_id'):
+            self._cancel_protective(strategy_name, conid,
+                                    pos['protective_order_id'], context=reason)
         broker_qty = self._broker_positions().get(conid, 0.0)
         qty = min(attributed_qty, broker_qty)
         if qty <= 0:
@@ -672,6 +775,10 @@ class AutoExecutor:
         pos = self.state.open_position(work.strategy_name, work.conid)
         if not pos:
             return
+        # Self-heal the disaster stop: positions opened before the feature
+        # shipped, or whose placement failed, get one on the next bar.
+        if not pos.get('protective_order_id'):
+            self._ensure_protective(work.strategy_name, work.conid)
         trigger = check_time_exit(
             work.bar_ts, work.bars_held, pos['close_by_time'], pos['max_hold_bars'])
         if trigger is None:
@@ -688,6 +795,91 @@ class AutoExecutor:
                           work.strategy_name, work.conid, ex)
             self.state.log_decision(work.strategy_name, work.conid, work.bar_ts,
                                     'SELL', 'refused', str(ex))
+
+    # -- protective stops -------------------------------------------------------
+
+    def _ensure_protective(self, strategy: str, conid: int):
+        """Place the disaster stop for an OPEN attributed position that lacks
+        one. Called after every open and on every bar for held positions, so
+        a failed placement (or a position predating this feature) self-heals
+        on the next bar instead of staying naked. Never raises — a stop we
+        couldn't place must not take down signal processing."""
+        pct = self.protective_stop_pct
+        if pct <= 0:
+            return
+        try:
+            pos = self.state.open_position(strategy, conid)
+            if not pos or pos.get('protective_order_id'):
+                return
+            sdk = self._get_sdk()
+            df = sdk.positions()
+            if df is None or df.empty:
+                return
+            mine = df[df['conId'] == conid]
+            if mine.empty:
+                return  # fill not visible at broker yet — retry next bar
+            broker_qty = float(mine.iloc[0]['position'])
+            avg_cost = float(mine.iloc[0]['avgCost'])
+            qty = min(float(pos['quantity']), broker_qty)
+            if qty <= 0 or avg_cost <= 0:
+                return
+            ident = self._resolve_exact(conid)
+            stop_price = round(avg_cost * (1 - pct / 100.0), 2)
+            result = sdk.place_protective_order(
+                symbol=ident['symbol'], action='SELL', quantity=qty,
+                order_type='STP', aux_price=stop_price, tif='GTC',
+                sec_type=ident['sec_type'], exchange=ident['exchange'],
+                currency=ident['currency'], con_id=conid,
+                order_ref=strategy,
+            )
+            if not result.is_success():
+                logging.warning(
+                    'auto-executor: protective stop placement failed for %s '
+                    'conId %s (will retry next bar): %s', strategy, conid, result.error)
+                return
+            trade = result.obj
+            order_id = int(getattr(getattr(trade, 'order', None), 'orderId', 0) or 0)
+            if order_id <= 0:
+                logging.warning(
+                    'auto-executor: protective stop placed for %s conId %s but no '
+                    'orderId returned — cannot track/cancel it later', strategy, conid)
+                return
+            self.state.set_protective(strategy, conid, order_id)
+            logging.warning(
+                'auto-executor: protective stop for %s conId %s — SELL %s STP %.2f '
+                'GTC (order %s, %.1f%% below entry %.2f)',
+                strategy, conid, qty, stop_price, order_id, pct, avg_cost)
+        except Exception:
+            logging.exception(
+                'auto-executor: protective stop error for %s conId %s', strategy, conid)
+
+    def _cancel_protective(self, strategy: str, conid: int,
+                           order_id, context: str):
+        """Cancel a tracked protective stop; clear the tracking either way.
+        A cancel failure usually means the order already filled or died —
+        the close path re-reads the broker position afterwards, so acting on
+        stale state is not possible."""
+        if not order_id:
+            return
+        try:
+            result = self._get_sdk().cancel(int(order_id))
+            if result is not None and not result.is_success():
+                logging.warning(
+                    'auto-executor: cancel of protective order %s for %s conId %s '
+                    'failed (%s): %s', order_id, strategy, conid, context, result.error)
+            else:
+                logging.info(
+                    'auto-executor: cancelled protective order %s for %s conId %s (%s)',
+                    order_id, strategy, conid, context)
+        except Exception:
+            logging.exception(
+                'auto-executor: cancel of protective order %s for %s conId %s errored (%s)',
+                order_id, strategy, conid, context)
+        finally:
+            try:
+                self.state.set_protective(strategy, conid, None)
+            except Exception:
+                logging.exception('auto-executor: could not clear protective tracking')
 
     # -- helpers ----------------------------------------------------------------
 

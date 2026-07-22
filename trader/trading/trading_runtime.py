@@ -1352,10 +1352,15 @@ class Trader():
         trailing_percent: float = 0,
         tif: str = 'GTC',
         outside_rth: bool = True,
+        order_ref: str = '',
     ) -> SuccessFail:
         """Place a standalone order (e.g. protective stop for an existing position).
 
         order_type: 'STP' (stop), 'TRAIL' (trailing stop), 'LMT' (take-profit limit)
+
+        ``order_ref`` stamps the order's orderRef — for auto-executor
+        protective stops this is the strategy name, so a fired stop's fill
+        is strategy-attributed in the event store like any other exit.
         """
         try:
             if order_type == 'STP':
@@ -1394,6 +1399,9 @@ class Trader():
                 )
             else:
                 return SuccessFail.fail(error=f'Unsupported order_type: {order_type}')
+
+            if order_ref:
+                order.orderRef = order_ref
 
             task = asyncio.Event()
             result_trade: Optional[Trade] = None

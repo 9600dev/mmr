@@ -59,6 +59,9 @@ class StrategyContext:
     runs_when_crontab: Optional[str] = None
     description: Optional[str] = None
     auto_execute: bool = False
+    # Bounded pyramiding for the auto-executor: 0 = single-lot; N = up to N
+    # fixed-size adds after the initial entry (stack tops out at N+1 lots).
+    pyramid_max_adds: int = 0
     params: Dict[str, Any] = field(default_factory=dict)
 
 

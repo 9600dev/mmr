@@ -635,6 +635,25 @@ def build_parser() -> argparse.ArgumentParser:
     strat_pnl_p.add_argument('--all', action='store_true', default=False,
                              help='Include non-strategy fill tags (proposal/order/to_market)')
 
+    # strategies fills — list attributed fill events (the annotation handles)
+    strat_fills_p = strat_sub.add_parser(
+        'fills', help='List ORDER_FILLED events with ids + ledger-exclusion state')
+    strat_fills_p.add_argument('--strategy', default=None, help='Filter by strategy name')
+    strat_fills_p.add_argument('--limit', type=int, default=50,
+                               help='Number of fills (default: 50)')
+
+    # strategies exclude-fill / include-fill — ledger annotations
+    strat_excl_p = strat_sub.add_parser(
+        'exclude-fill',
+        help='Exclude fill(s) from the PnL ledger (e.g. trades executed under a '
+             'since-fixed bug). Annotate BOTH sides of a round trip.')
+    strat_excl_p.add_argument('ids', type=int, nargs='+', help='Fill event id(s)')
+    strat_excl_p.add_argument('--reason', required=True,
+                              help='Why this fill is excluded (audit trail)')
+    strat_incl_p = strat_sub.add_parser(
+        'include-fill', help='Undo exclude-fill: restore fill(s) to the PnL ledger')
+    strat_incl_p.add_argument('ids', type=int, nargs='+', help='Fill event id(s)')
+
     # strategies backtest
     strat_bt_p = strat_sub.add_parser('backtest', help='Backtest a deployed strategy')
     strat_bt_p.add_argument('name', help='Strategy name')
@@ -1445,6 +1464,25 @@ def build_parser() -> argparse.ArgumentParser:
                            '`mmr sweep run`. Persisted on the backtest row so '
                            '`backtests list --sweep <id>` can reconstruct the '
                            'leaderboard.')
+    bt_p.add_argument('--live-semantics', action='store_true', default=False,
+                      help='Execute with AutoExecutor semantics: no pyramiding '
+                           '(BUY while holding is refused), fixed per-trade '
+                           'notional (non-compounding), 300s re-open cooldown. '
+                           'Default (legacy) mode pyramids and compounds — '
+                           'validate deployment candidates with this flag.')
+    bt_p.add_argument('--execution-mode', default=None,
+                      choices=['accumulate', 'live', 'pyramid_fixed'],
+                      help='Explicit execution semantics (overrides '
+                           '--live-semantics). pyramid_fixed = stacking '
+                           'allowed but every lot is the fixed notional — '
+                           'isolates pyramiding from compounding.')
+    bt_p.add_argument('--trade-notional', type=float, default=None,
+                      help='Per-trade $ in live/pyramid_fixed modes '
+                           '(default: 2%% of --capital)')
+    bt_p.add_argument('--pyramid-max-adds', type=int, default=None,
+                      help='pyramid_fixed mode: cap adds after the initial '
+                           'entry (default unbounded). Mirrors the live '
+                           'executor pyramid_max_adds.')
 
     # sweep — declarative, cron-able nightly sweep from a YAML manifest.
     # Unlike bt-sweep (single strategy, one-shot CLI) this handles many
@@ -1515,6 +1553,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help='Show only the top-N results in the leaderboard (default: 10)')
     sw_p.add_argument('--note', default='', help='Note stamped on every sweep run')
     sw_p.add_argument('--slippage-bps', type=float, default=1.0)
+    sw_p.add_argument('--live-semantics', action='store_true', default=False,
+                      help='Run every combo under AutoExecutor semantics '
+                           '(no pyramiding, fixed notional, cooldown)')
     sw_p.add_argument('--no-save-trades', dest='save_trades',
                        action='store_false', default=True,
                        help='Skip persisting per-run trade + equity detail')
@@ -3494,6 +3535,12 @@ def _handle_strategies(mmr: MMR, args: argparse.Namespace):
         _handle_strategy_signals(args)
     elif action == 'pnl':
         _handle_strategy_pnl(args)
+    elif action == 'fills':
+        _handle_strategy_fills(args)
+    elif action == 'exclude-fill':
+        _handle_fill_exclusion(args, excluded=True)
+    elif action == 'include-fill':
+        _handle_fill_exclusion(args, excluded=False)
     elif action == 'backtest':
         _handle_strategy_backtest(args)
     elif action in ('available', 'avail', 'list-files'):
@@ -4571,17 +4618,23 @@ def _handle_strategy_pnl(args: argparse.Namespace):
         return
 
     # Best-effort unrealized mark: current prices from the live portfolio.
+    # return_type is required — PortfolioItem is a NamedTuple, which msgpack
+    # flattens to a plain list on the wire; without reconstruction the
+    # attribute reads below silently yield nothing.
     prices: dict = {}
+    rpc_error: Optional[Exception] = None
     try:
+        from ib_async.objects import PortfolioItem
         from trader.sdk import MMR as _MMR
         pmmr = _MMR(timeout=6).connect()
-        for item in (pmmr._rpc.rpc().get_portfolio() or []):
+        items = pmmr._rpc.rpc(return_type=list[PortfolioItem]).get_portfolio()
+        for item in (items or []):
             contract = getattr(item, 'contract', None)
             conid = int(getattr(contract, 'conId', 0) or 0)
             if conid:
                 prices[conid] = float(getattr(item, 'marketPrice', 0.0) or 0.0)
-    except Exception:
-        pass  # service down — realized is still exact, unrealized shows '-'
+    except Exception as e:
+        rpc_error = e  # service down — realized is still exact, unrealized shows '-'
 
     rows = []
     for name in sorted(strategies):
@@ -4615,9 +4668,67 @@ def _handle_strategy_pnl(args: argparse.Namespace):
         console.print(f"[dim]{report['unmatched_sells']} SELL fill(s) had no matching "
                       'attributed BUY (manual interleaving or pre-tagging fills) — '
                       'excluded from PnL.[/dim]')
-    if not prices:
-        console.print('[dim]trader_service unreachable — unrealized marks unavailable '
-                      '(realized numbers are exact).[/dim]')
+    if report.get('excluded_fills'):
+        console.print(f"[dim]{report['excluded_fills']} fill(s) annotated excluded "
+                      "(see 'strategies fills') — not counted above.[/dim]")
+    if rpc_error is not None:
+        console.print(f'[dim]trader_service unreachable ({rpc_error}) — unrealized '
+                      'marks unavailable (realized numbers are exact).[/dim]')
+    elif not prices:
+        console.print('[dim]no live portfolio positions to mark against — '
+                      'unrealized shows "-" (realized numbers are exact).[/dim]')
+
+
+def _handle_strategy_fills(args: argparse.Namespace):
+    """List ORDER_FILLED events with ids — the handles for exclude-fill."""
+    import pandas as pd
+    from trader.container import Container
+    from trader.data.event_store import EventStore
+
+    cfg = Container.instance().config()
+    duckdb_path = cfg.get('duckdb_path', '')
+    if not duckdb_path:
+        print_status('duckdb_path not configured', success=False)
+        return
+
+    store = EventStore(duckdb_path)
+    fills = store.list_fills(strategy=args.strategy, limit=args.limit)
+    rows = [{
+        'id': e.id,
+        'time': str(e.timestamp)[:19],
+        'strategy': e.strategy_name,
+        'symbol': e.symbol,
+        'action': e.action,
+        'qty': e.quantity,
+        'price': e.price,
+        'excluded': bool(e.metadata.get('excluded')),
+        'reason': e.metadata.get('exclude_reason', ''),
+    } for e in fills]
+    if _json_mode:
+        print_dict({'fills': rows}, title='Fills')
+        return
+    print_df(pd.DataFrame(rows), title='Attributed fills (newest first)')
+
+
+def _handle_fill_exclusion(args: argparse.Namespace, excluded: bool):
+    from trader.container import Container
+    from trader.data.event_store import EventStore
+
+    cfg = Container.instance().config()
+    duckdb_path = cfg.get('duckdb_path', '')
+    if not duckdb_path:
+        print_status('duckdb_path not configured', success=False)
+        return
+
+    store = EventStore(duckdb_path)
+    reason = getattr(args, 'reason', '') or ''
+    try:
+        n = store.set_fill_exclusion(args.ids, excluded, reason)
+    except ValueError as ex:
+        print_status(str(ex), success=False)
+        return
+    verb = 'excluded from' if excluded else 'restored to'
+    print_status(f'{n} fill(s) {verb} the PnL ledger', success=True)
 
 
 def _handle_strategy_signals(args: argparse.Namespace):
@@ -6112,6 +6223,7 @@ def _sweep_manifest_validate(manifest: Any) -> List[Dict[str, Any]]:
             bar_size: "1 min"                         # default "1 min"
             concurrency: 8                            # default auto (cpu-1)
             note: "..."                               # optional
+            live_semantics: true                      # optional; AutoExecutor semantics
 
     Returns the list of *validated* sweep dicts. Raises ValueError with
     the offending sweep + field on any problem."""
@@ -6156,6 +6268,8 @@ def _sweep_manifest_validate(manifest: Any) -> List[Dict[str, Any]]:
             'bar_size': raw.get('bar_size', '1 min'),
             'concurrency': raw.get('concurrency'),  # None = auto-tune
             'note': raw.get('note', ''),
+            'live_semantics': bool(raw.get('live_semantics', False)),
+            'execution_mode': raw.get('execution_mode'),  # explicit mode wins
         })
     return cleaned
 
@@ -6246,6 +6360,8 @@ def _expand_sweep_jobs(
                 'bar_size': sweep['bar_size'],
                 'params': params,
                 'note': sweep['note'],
+                'live_semantics': bool(sweep.get('live_semantics', False)),
+                'execution_mode': sweep.get('execution_mode'),
             })
     return jobs
 
@@ -6513,6 +6629,10 @@ async def _execute_jobs_parallel(
                 cmd.extend(['--params', json.dumps(job['params'])])
             if job.get('note'):
                 cmd.extend(['--note', job['note']])
+            if job.get('execution_mode'):
+                cmd.extend(['--execution-mode', job['execution_mode']])
+            elif job.get('live_semantics'):
+                cmd.append('--live-semantics')
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -7143,6 +7263,7 @@ def _handle_backtest_sweep(args: argparse.Namespace):
         initial_capital=args.capital,
         bar_size=bar_size,
         slippage_model=get_slippage_model('fixed', bps=args.slippage_bps),
+        execution_mode='live' if getattr(args, 'live_semantics', False) else 'accumulate',
     )
     backtester = Backtester(storage, config)
     code_hash = compute_strategy_hash(args.strategy)
@@ -7364,6 +7485,11 @@ def _handle_backtest(args: argparse.Namespace):
         initial_capital=args.capital,
         bar_size=bar_size,
         slippage_model=slippage_model,
+        execution_mode=(getattr(args, 'execution_mode', None)
+                        or ('live' if getattr(args, 'live_semantics', False)
+                            else 'accumulate')),
+        trade_notional=getattr(args, 'trade_notional', None),
+        pyramid_max_adds=getattr(args, 'pyramid_max_adds', None),
     )
 
     backtester = Backtester(storage, config)
@@ -7481,6 +7607,14 @@ def _handle_backtest(args: argparse.Namespace):
             # ``run_from_module`` after ``apply_param_overrides`` coerces
             # each entry to its class-attr type.
             params: Dict[str, Any] = dict(getattr(result, 'applied_params', {}) or {})
+            # Runs under different execution semantics are not comparable —
+            # stamp the mode (and notional) so `backtests show` surfaces it.
+            if config.execution_mode != 'accumulate':
+                params['_execution_mode'] = config.execution_mode
+                params['_trade_notional'] = (
+                    config.trade_notional or config.initial_capital * 0.02)
+                if config.pyramid_max_adds is not None:
+                    params['_pyramid_max_adds'] = config.pyramid_max_adds
 
             record = BacktestRecord(
                 strategy_path=args.strategy,

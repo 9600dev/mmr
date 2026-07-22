@@ -220,6 +220,11 @@ class FakeSDK:
         self.propose_calls = []
         self.approve_calls = []
         self.fill_qty = 140.0     # totalQuantity assigned to placed orders
+        self.avg_cost = 100.0
+        self.protective_calls = []
+        self.cancel_calls = []
+        self.next_protective_id = 900
+        self.protective_result = None   # override to fail placement
 
     def resolve(self, symbol, sec_type='STK', exchange='', universe='', currency=''):
         if symbol == 1111 or symbol == 'WDS':
@@ -246,8 +251,21 @@ class FakeSDK:
         return result
 
     def positions(self):
-        rows = [{'conId': c, 'position': q} for c, q in self.broker.items() if q != 0]
+        rows = [{'conId': c, 'position': q, 'avgCost': self.avg_cost}
+                for c, q in self.broker.items() if q != 0]
         return pd.DataFrame(rows)
+
+    def place_protective_order(self, **kwargs):
+        self.protective_calls.append(kwargs)
+        if self.protective_result is not None:
+            return self.protective_result
+        oid = self.next_protective_id
+        self.next_protective_id += 1
+        return FakeResult(ok=True, obj=SimpleNamespace(order=SimpleNamespace(orderId=oid)))
+
+    def cancel(self, order_id):
+        self.cancel_calls.append(order_id)
+        return FakeResult(ok=True)
 
     def trades(self):
         rows = [{'orderId': pid * 10, 'totalQuantity':
@@ -483,3 +501,176 @@ class TestWorkerThread:
             time.sleep(0.05)
         ex.stop()
         assert len(calls) == 2  # second item still processed after first blew up
+
+
+# ---------------------------------------------------------------------------
+# Protective (disaster) stops — placed on open, cancelled on close,
+# self-healed per bar, orphan-cancelled on reconcile.
+# ---------------------------------------------------------------------------
+
+class TestProtectiveStops:
+    def test_open_places_gtc_stop_with_attribution(self, executor):
+        ex, sdk = executor
+        ex._process_signal(make_work())
+        assert len(sdk.protective_calls) == 1
+        call = sdk.protective_calls[0]
+        assert call['action'] == 'SELL'
+        assert call['order_type'] == 'STP'
+        assert call['tif'] == 'GTC'
+        assert call['quantity'] == 140.0
+        # 8% (default) below the broker avgCost of 100.0
+        assert call['aux_price'] == pytest.approx(92.0)
+        # orderRef = strategy name so a fired stop's fill is ledger-attributed
+        assert call['order_ref'] == 'orb_test'
+        pos = ex.state.open_position('orb_test', 1111)
+        assert pos['protective_order_id'] == 900
+
+    def test_close_cancels_stop_first(self, executor):
+        ex, sdk = executor
+        ex._process_signal(make_work())
+        ex._process_signal(make_work(action=Action.SELL,
+                                     bar_ts=TS + pd.Timedelta(minutes=1)))
+        assert sdk.cancel_calls == [900]
+        assert ex.state.open_position('orb_test', 1111) is None
+
+    def test_disabled_via_env(self, executor, monkeypatch):
+        monkeypatch.setenv('MMR_PROTECTIVE_STOP_PCT', '0')
+        ex, sdk = executor
+        ex._process_signal(make_work())
+        assert sdk.protective_calls == []
+
+    def test_placement_failure_retries_on_next_bar(self, executor):
+        ex, sdk = executor
+        sdk.protective_result = FakeResult(ok=False, error='no route')
+        ex._process_signal(make_work())
+        assert ex.state.open_position('orb_test', 1111)['protective_order_id'] is None
+        # next bar self-heals once placement works again
+        sdk.protective_result = None
+        ex._process_bar(BarWork('orb_test', 1111, TS + pd.Timedelta(minutes=1), 1))
+        assert ex.state.open_position('orb_test', 1111)['protective_order_id'] == 900
+
+    def test_preexisting_position_gets_stop_on_bar(self, executor):
+        ex, sdk = executor
+        # position opened before the feature shipped: attribution exists,
+        # broker holds it, no protective tracked
+        ex.state.record_open('orb_test', 1111, 140.0, TS, None, None, None)
+        sdk.broker[1111] = 140.0
+        ex._process_bar(BarWork('orb_test', 1111, TS + pd.Timedelta(minutes=1), 1))
+        assert len(sdk.protective_calls) == 1
+        assert ex.state.open_position('orb_test', 1111)['protective_order_id'] == 900
+
+    def test_reconcile_cancels_orphaned_stop(self, executor):
+        ex, sdk = executor
+        ex.state.record_open('orb_test', 1111, 140.0, TS, None, None, None)
+        ex.state.set_protective('orb_test', 1111, 942)
+        sdk.broker.pop(1111, None)   # position gone at broker
+        ex._reconciled = False
+        ex._reconcile_once()
+        assert sdk.cancel_calls == [942]
+        assert ex.state.open_position('orb_test', 1111) is None
+
+
+# ---------------------------------------------------------------------------
+# Bounded pyramiding — pyramid_max_adds allows fixed-lot adds up to the cap
+# ---------------------------------------------------------------------------
+
+class TestPyramidingDecision:
+    def test_default_zero_keeps_single_lot(self):
+        d = decide(make_work(), held_qty=100.0)
+        assert d.kind == 'skip' and 'pyramiding' in d.reason
+
+    def test_add_allowed_under_cap(self):
+        d = decide_signal(
+            make_work(pyramid_max_adds=3), kill_switch=False, paper_trading=True,
+            held_qty=100.0, already_executed_bar=False, cooldown_active=False,
+            held_lots=1)
+        assert d.kind == 'open'
+        assert 'pyramid add (lot 2)' in d.reason
+
+    def test_stack_full_refuses(self):
+        d = decide_signal(
+            make_work(pyramid_max_adds=3), kill_switch=False, paper_trading=True,
+            held_qty=400.0, already_executed_bar=False, cooldown_active=False,
+            held_lots=4)
+        assert d.kind == 'skip' and 'stack full' in d.reason
+
+    def test_cooldown_applies_to_adds(self):
+        d = decide_signal(
+            make_work(pyramid_max_adds=3), kill_switch=False, paper_trading=True,
+            held_qty=100.0, already_executed_bar=False, cooldown_active=True,
+            held_lots=1)
+        assert d.kind == 'skip' and 'cooldown' in d.reason
+
+    def test_live_double_arm_gates_adds_too(self):
+        d = decide_signal(
+            make_work(pyramid_max_adds=3), kill_switch=False, paper_trading=False,
+            held_qty=100.0, already_executed_bar=False, cooldown_active=False,
+            live_armed=False, held_lots=1)
+        assert d.kind == 'skip' and 'not armed' in d.reason
+
+
+class TestPyramidingState:
+    def test_record_add_folds_into_open_row(self, state):
+        state.record_open('s1', 1, 10.0, TS, 7, None, None)
+        state.record_add('s1', 1, 12.0, TS + pd.Timedelta(days=1), 8,
+                         dt.time(15, 45), 60)
+        pos = state.open_position('s1', 1)
+        assert pos['quantity'] == 22.0
+        assert pos['lots'] == 2
+        # latest-BUY-wins: time-exit rules + entry bar come from the add
+        assert pos['close_by_time'] == dt.time(15, 45)
+        assert pos['max_hold_bars'] == 60
+        assert pos['proposal_id'] == 8
+
+    def test_close_clears_whole_stack(self, state):
+        state.record_open('s1', 1, 10.0, TS, 7, None, None)
+        state.record_add('s1', 1, 12.0, TS, 8, None, None)
+        state.record_close('s1', 1, 'CLOSED', 'SELL signal')
+        assert state.open_position('s1', 1) is None
+
+    def test_premigration_row_reads_as_one_lot(self, state):
+        state.record_open('s1', 1, 10.0, TS, 7, None, None)
+        state.db.execute(
+            "UPDATE auto_exec_positions SET lots = NULL WHERE strategy='s1'")
+        assert state.open_position('s1', 1)['lots'] == 1
+
+
+class TestPyramidingPipeline:
+    def test_add_executes_and_recovers_protective(self, executor):
+        ex, sdk = executor
+        ex._process_signal(make_work(pyramid_max_adds=3))
+        assert ex.state.open_position('orb_test', 1111)['lots'] == 1
+        first_stop = ex.state.open_position('orb_test', 1111)['protective_order_id']
+        ex.cooldown_seconds = 0.0
+        ex._process_signal(make_work(pyramid_max_adds=3,
+                                     bar_ts=TS + pd.Timedelta(minutes=10)))
+        pos = ex.state.open_position('orb_test', 1111)
+        assert pos['lots'] == 2
+        assert pos['quantity'] == 280.0  # two 140-share lots
+        # old stop cancelled, new stop covers the whole stack
+        assert sdk.cancel_calls == [first_stop]
+        assert len(sdk.protective_calls) == 2
+        assert sdk.protective_calls[-1]['quantity'] == 280.0
+
+    def test_sell_closes_whole_stack(self, executor):
+        ex, sdk = executor
+        ex.cooldown_seconds = 0.0
+        ex._process_signal(make_work(pyramid_max_adds=3))
+        ex._process_signal(make_work(pyramid_max_adds=3,
+                                     bar_ts=TS + pd.Timedelta(minutes=10)))
+        ex._process_signal(make_work(action=Action.SELL,
+                                     bar_ts=TS + pd.Timedelta(minutes=20)))
+        assert ex.state.open_position('orb_test', 1111) is None
+        sell = sdk.propose_calls[-1]
+        assert sell['action'] == 'SELL' and sell['quantity'] == 280.0
+
+    def test_cap_enforced_in_pipeline(self, executor):
+        ex, sdk = executor
+        ex.cooldown_seconds = 0.0
+        for i in range(4):
+            ex._process_signal(make_work(pyramid_max_adds=1,
+                                         bar_ts=TS + pd.Timedelta(minutes=10 * i)))
+        pos = ex.state.open_position('orb_test', 1111)
+        assert pos['lots'] == 2  # initial + 1 add, extra signals refused
+        opens = [c for c in sdk.propose_calls if c['action'] == 'BUY']
+        assert len(opens) == 2

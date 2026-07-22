@@ -184,12 +184,26 @@ class EventStore:
         ``pair_fills_long_only``.
         """
         rows = self.db.execute(
-            "SELECT strategy_name, conid, action, quantity, price, timestamp "
+            "SELECT strategy_name, conid, action, quantity, price, timestamp, metadata "
             "FROM trading_events WHERE event_type = ? ORDER BY timestamp ASC, id ASC",
             [EventType.ORDER_FILLED.value],
             fetch='all',
         )
-        closed, open_lots, unmatched = pair_fills_long_only(rows or [])
+        # Fills annotated excluded (e.g. executed under a since-fixed bug)
+        # must not pollute the live-vs-backtest ledger. Exclusion is
+        # all-or-nothing per fill; annotate BOTH sides of a round trip or the
+        # survivor shows up as an open lot / unmatched sell.
+        kept, excluded = [], 0
+        for r in (rows or []):
+            try:
+                meta = json.loads(r[6]) if r[6] else {}
+            except (TypeError, ValueError):
+                meta = {}
+            if meta.get('excluded'):
+                excluded += 1
+            else:
+                kept.append(r[:6])
+        closed, open_lots, unmatched = pair_fills_long_only(kept)
 
         today = dt.date.today()
         strategies: Dict[str, dict] = {}
@@ -218,7 +232,62 @@ class EventStore:
             'strategies': strategies,
             'closed_trades': closed,
             'unmatched_sells': unmatched,
+            'excluded_fills': excluded,
         }
+
+    def list_fills(self, strategy: Optional[str] = None,
+                   limit: int = 100) -> List[TradingEvent]:
+        """ORDER_FILLED events, newest first, with ids — the handles needed
+        to annotate/exclude specific fills from the PnL ledger."""
+        query = ("SELECT id, event_type, timestamp, strategy_name, conid, symbol, "
+                 "action, quantity, price, order_id, signal_probability, "
+                 "signal_risk, metadata FROM trading_events WHERE event_type = ?")
+        params: list = [EventType.ORDER_FILLED.value]
+        if strategy:
+            query += " AND strategy_name = ?"
+            params.append(strategy)
+        query += " ORDER BY timestamp DESC, id DESC LIMIT ?"
+        params.append(limit)
+        return self._rows_to_events(self.db.execute(query, params, fetch='all') or [])
+
+    def set_fill_exclusion(self, event_ids: List[int], excluded: bool,
+                           reason: str = '') -> int:
+        """Annotate fills as excluded-from-ledger (or re-include them).
+
+        Metadata merge runs atomically per event under one connection —
+        same discipline as ProposalStore.update_metadata. Returns the number
+        of events actually updated. Raises ValueError if any id is not an
+        ORDER_FILLED event: silently annotating the wrong event type would
+        hide the mistake this feature exists to make auditable.
+        """
+        updated = 0
+        for event_id in event_ids:
+            def _annotate(conn, _id=event_id):
+                nonlocal updated
+                row = conn.execute(
+                    "SELECT event_type, metadata FROM trading_events WHERE id = ?",
+                    [_id]).fetchone()
+                if row is None:
+                    raise ValueError(f'no trading event with id {_id}')
+                if row[0] != EventType.ORDER_FILLED.value:
+                    raise ValueError(
+                        f'event {_id} is {row[0]!r}, not ORDER_FILLED — '
+                        'only fills can be excluded from the PnL ledger')
+                try:
+                    meta = json.loads(row[1]) if row[1] else {}
+                except (TypeError, ValueError):
+                    meta = {}
+                if excluded:
+                    meta['excluded'] = True
+                    meta['exclude_reason'] = reason
+                else:
+                    meta.pop('excluded', None)
+                    meta.pop('exclude_reason', None)
+                conn.execute("UPDATE trading_events SET metadata = ? WHERE id = ?",
+                             [json.dumps(meta), _id])
+                updated += 1
+            self.db.execute_atomic(_annotate)
+        return updated
 
 
 def pair_fills_long_only(fills) -> tuple:

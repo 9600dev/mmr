@@ -32,6 +32,36 @@ class OpeningRangeBreakout(Strategy):
     RTH_OPEN_MIN = 9 * 60 + 30     # session open, minutes since SESSION_TZ midnight
     RTH_CLOSE_MIN = 16 * 60        # session close, minutes since SESSION_TZ midnight
     MIN_BARS = 40
+    # Exit management. Without these, the ONLY exit is a fresh volume-
+    # confirmed cross below the day's range-low — a slow low-volume bleed or
+    # an overnight gap below the next day's range never fires it, so losers
+    # ride for days (observed live: PLTR −6.7% over 3 sessions, no exit).
+    # EOD_FLATTEN emits close_by_time = session close − EOD_FLATTEN_BEFORE_MIN
+    # on every BUY, turning the strategy genuinely intraday (matching its
+    # docstring). MAX_HOLD_BARS (0 = off) caps hold duration in bars.
+    # Defaults preserve historical behaviour — enable per-deployment after
+    # validating with `backtest --live-semantics`.
+    EOD_FLATTEN = False
+    EOD_FLATTEN_BEFORE_MIN = 15    # minutes before session close to flatten
+    MAX_HOLD_BARS = 0              # 0 = no bar-count exit
+
+    def _exit_rules(self):
+        """(close_by_time, max_hold_bars) for a BUY signal, or (None, None).
+
+        The flatten time is session-relative (RTH_CLOSE_MIN −
+        EOD_FLATTEN_BEFORE_MIN) so the same class works for US and ASX
+        deployments; both the backtester and the live runtime compare
+        close_by_time against session-tz bar timestamps.
+        """
+        close_by = None
+        if self._cfg('EOD_FLATTEN', self.EOD_FLATTEN):
+            rth_close = int(self._cfg('RTH_CLOSE_MIN', self.RTH_CLOSE_MIN))
+            before = int(self._cfg('EOD_FLATTEN_BEFORE_MIN', self.EOD_FLATTEN_BEFORE_MIN))
+            minute = max(0, rth_close - before)
+            import datetime as _dt
+            close_by = _dt.time(minute // 60, minute % 60)
+        max_hold = int(self._cfg('MAX_HOLD_BARS', self.MAX_HOLD_BARS)) or None
+        return close_by, max_hold
 
     def _cfg(self, key: str, default: Any) -> Any:
         """Read a session-config value from live params (``self.params``) with the
@@ -160,9 +190,11 @@ class OpeningRangeBreakout(Strategy):
 
         # BUY: close crosses above ORB high with volume
         if close > orb_h and prev_close <= orb_h and vol_ok:
+            close_by, max_hold = self._exit_rules()
             return Signal(
                 source_name=self.name, action=Action.BUY,
                 probability=0.60, risk=0.40,
+                close_by_time=close_by, max_hold_bars=max_hold,
             )
         # SELL: close crosses below ORB low
         if close < orb_l and prev_close >= orb_l and vol_ok:

@@ -38,6 +38,35 @@ class BacktestConfig:
     # executes at bar t+1's open. ``same_close`` reproduces the (lookahead-
     # biased) legacy behavior and is only intended for regression tests.
     fill_policy: str = 'next_open'
+    # Execution semantics. ``accumulate`` (legacy): repeat BUYs pyramid into
+    # the position and each BUY sizes to 10% of CURRENT cash (compounding).
+    # ``live`` matches the AutoExecutor that trades these strategies for
+    # real: a BUY while the conid's lot is open is refused (no pyramiding),
+    # sizing is a fixed notional per trade (non-compounding), and re-opens
+    # within ``cooldown_seconds`` of the last fill are refused. Validating
+    # under ``accumulate`` and deploying under live semantics produces
+    # incomparable return distributions — trend-stacking is a different
+    # trading process. ``pyramid_fixed`` is the decomposition mode between
+    # them: repeat BUYs stack like ``accumulate``, but every lot is the
+    # fixed ``trade_notional`` and the cooldown applies — isolating
+    # "add to winners" (pyramiding) from "bet bigger as equity grows"
+    # (compounding), so you can tell which amplifier a legacy result
+    # actually came from.
+    execution_mode: str = 'accumulate'
+    # Per-trade notional in ``live`` mode. None -> 2% of initial_capital
+    # (mirrors the PositionSizer's base_position default). Live sizing also
+    # ATR-scales each trade (~0.4-1.5x); a fixed notional keeps per-trade
+    # stats (PF, win rate, expectancy) exact and only approximates the
+    # aggregate weighting.
+    trade_notional: Optional[float] = None
+    # ``live`` mode: minimum seconds between fills before a re-open is
+    # allowed for a conid (AutoExecutor default 300). Evaluated on bar
+    # timestamps — the backtest analog of the executor's wall clock.
+    cooldown_seconds: int = 300
+    # ``pyramid_fixed`` mode: maximum ADDS after the initial entry (None =
+    # unbounded). 3 means a stack tops out at 4 lots — mirror of the live
+    # executor's per-strategy ``pyramid_max_adds`` bound.
+    pyramid_max_adds: Optional[int] = None
 
 
 @dataclass
@@ -276,6 +305,12 @@ class Backtester:
         cash = self.config.initial_capital
         positions: Dict[int, float] = {}  # conid -> quantity (positive=long, negative=short)
         position_entry_prices: Dict[int, float] = {}
+        # live execution mode: last fill (open OR close) per conid, for the
+        # cooldown gate — mirrors AutoExecutor._last_exec.
+        last_fill_ts: Dict[int, Any] = {}
+        # pyramid_fixed mode: open lots per conid, for the pyramid_max_adds
+        # bound — mirrors auto_exec_positions.lots.
+        lot_counts: Dict[int, int] = {}
         # Time-based exit conditions per open position. Recorded when a
         # BUY carrying ``max_hold_bars`` / ``close_by_time`` fills; checked
         # at the top of each subsequent bar; cleared when the position
@@ -367,6 +402,31 @@ class Backtester:
             if fill_basis <= 0:
                 return
 
+            mode = self.config.execution_mode
+            fixed_sizing = mode in ('live', 'pyramid_fixed')
+            if fixed_sizing and signal.action == Action.BUY:
+                # Mirror AutoExecutor.decide_signal: in ``live`` mode a BUY
+                # while this conid's lot is open is refused (no pyramiding);
+                # ``pyramid_fixed`` allows the add — that difference is the
+                # whole point of the decomposition mode.
+                if mode == 'live' and positions.get(conid, 0) > 0:
+                    return
+                # pyramid_fixed: the stack is bounded — with max_adds=N a
+                # position tops out at N+1 lots (mirrors the live executor).
+                if (mode == 'pyramid_fixed'
+                        and self.config.pyramid_max_adds is not None
+                        and positions.get(conid, 0) > 0
+                        and lot_counts.get(conid, 0) > self.config.pyramid_max_adds):
+                    return
+                # Re-opens/adds inside the cooldown window are refused
+                # (evaluated on bar time; the executor uses wall clock).
+                prev_ts = last_fill_ts.get(conid)
+                if (prev_ts is not None and self.config.cooldown_seconds > 0
+                        and hasattr(bar_ts, 'timestamp') and hasattr(prev_ts, 'timestamp')
+                        and (bar_ts.timestamp() - prev_ts.timestamp())
+                        < self.config.cooldown_seconds):
+                    return
+
             quantity = signal.quantity if signal.quantity > 0 else 0
             if quantity == 0:
                 if signal.action == Action.SELL:
@@ -376,6 +436,14 @@ class Backtester:
                     # accumulating BUYs, silently dropping the exit).
                     held = positions.get(conid, 0)
                     quantity = held if held > 0 else 0
+                elif fixed_sizing:
+                    # Fixed notional per lot, non-compounding — matches the
+                    # live PositionSizer's base (2% of equity) rather than
+                    # the legacy 10%-of-current-cash compounding.
+                    notional = (self.config.trade_notional
+                                if self.config.trade_notional
+                                else self.config.initial_capital * 0.02)
+                    quantity = math.floor(notional / fill_basis)
                 else:
                     quantity = math.floor((cash * 0.1) / fill_basis) if fill_basis > 0 else 0
             if quantity <= 0:
@@ -390,6 +458,7 @@ class Backtester:
                     return
                 cash -= cost
                 positions[conid] = positions.get(conid, 0) + quantity
+                lot_counts[conid] = lot_counts.get(conid, 0) + 1
                 position_entry_prices[conid] = fill_price
                 # Record time-based exit conditions if the signal carries
                 # them. Latest-BUY-wins: if the strategy adds to a position
@@ -424,6 +493,7 @@ class Backtester:
                     positions.pop(conid, None)
                     position_entry_prices.pop(conid, None)
                     exit_conditions.pop(conid, None)
+                    lot_counts.pop(conid, None)
 
             trades.append(BacktestTrade(
                 timestamp=bar_ts if isinstance(bar_ts, dt.datetime) else dt.datetime.now(),
@@ -435,6 +505,7 @@ class Backtester:
                 signal_probability=signal.probability,
                 signal_risk=signal.risk,
             ))
+            last_fill_ts[conid] = bar_ts
 
         for timestamp, group in combined.groupby(combined.index):
             # Snapshot per-conid bars at this timestamp

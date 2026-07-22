@@ -271,3 +271,212 @@ class TestBacktester:
             zero_price = result_zero.trades[0].price
             sqrt_price = result_sqrt.trades[0].price
             assert zero_price != sqrt_price
+
+
+# ---------------------------------------------------------------------------
+# Live execution semantics (execution_mode='live') — the mode that matches
+# the AutoExecutor: no pyramiding, fixed notional, re-open cooldown.
+# ---------------------------------------------------------------------------
+
+class BuyEveryBarNoQty(Strategy):
+    """Emits an unsized BUY on every bar after warmup."""
+    def on_prices(self, prices):
+        if len(prices) < 2:
+            return None
+        return Signal(source_name=self.name or 'beb', action=Action.BUY,
+                      probability=0.9, risk=0.1)
+
+
+class ScriptedStrategy(Strategy):
+    """BUY/SELL at scripted call counts (unsized)."""
+    def __init__(self, buys=(), sells=()):
+        super().__init__()
+        self._n = 0
+        self._buys, self._sells = set(buys), set(sells)
+
+    def on_prices(self, prices):
+        self._n += 1
+        if self._n in self._buys:
+            return Signal(source_name=self.name or 's', action=Action.BUY,
+                          probability=0.9, risk=0.1)
+        if self._n in self._sells:
+            return Signal(source_name=self.name or 's', action=Action.SELL,
+                          probability=0.9, risk=0.1)
+        return None
+
+
+class TestLiveExecutionMode:
+    def test_accumulate_mode_pyramids_live_mode_does_not(self, tmp_duckdb_path):
+        _write_synthetic_bars(tmp_duckdb_path, n=30)
+
+        bt = _make_backtester(tmp_duckdb_path)  # default: accumulate
+        strat = _install_strategy(AlwaysBuyStrategy(), tmp_duckdb_path)
+        result = bt.run(strat, conids=[4391])
+        buys_legacy = [t for t in result.trades if t.action == Action.BUY]
+        assert len(buys_legacy) > 1  # legacy stacks repeat BUYs
+
+        bt_live = _make_backtester(tmp_duckdb_path, execution_mode='live')
+        strat = _install_strategy(AlwaysBuyStrategy(), tmp_duckdb_path)
+        result = bt_live.run(strat, conids=[4391])
+        buys_live = [t for t in result.trades if t.action == Action.BUY]
+        assert len(buys_live) == 1  # BUY while holding is refused
+
+    def test_live_mode_fixed_notional_sizing(self, tmp_duckdb_path):
+        _write_synthetic_bars(tmp_duckdb_path, n=30, base_price=100.0)
+        bt = _make_backtester(tmp_duckdb_path, execution_mode='live',
+                              initial_capital=100_000.0)
+        strat = _install_strategy(BuyEveryBarNoQty(), tmp_duckdb_path)
+        result = bt.run(strat, conids=[4391])
+        buys = [t for t in result.trades if t.action == Action.BUY]
+        assert len(buys) == 1
+        # default notional = 2% of initial capital = $2,000
+        assert buys[0].quantity == int(2000 / buys[0].price)
+
+    def test_live_mode_explicit_trade_notional(self, tmp_duckdb_path):
+        _write_synthetic_bars(tmp_duckdb_path, n=30, base_price=100.0)
+        bt = _make_backtester(tmp_duckdb_path, execution_mode='live',
+                              trade_notional=5000.0)
+        strat = _install_strategy(BuyEveryBarNoQty(), tmp_duckdb_path)
+        result = bt.run(strat, conids=[4391])
+        buys = [t for t in result.trades if t.action == Action.BUY]
+        assert buys[0].quantity == int(5000 / buys[0].price)
+
+    def test_live_mode_cooldown_blocks_quick_reopen(self, tmp_duckdb_path):
+        _write_synthetic_bars(tmp_duckdb_path, n=30)
+        # BUY@5 fills bar6; SELL@7 fills bar8; BUY@9 is within 300s of the
+        # bar-8 fill -> refused; BUY@15 fills bar16 (8 min later) -> allowed.
+        bt = _make_backtester(tmp_duckdb_path, execution_mode='live',
+                              cooldown_seconds=300)
+        strat = _install_strategy(
+            ScriptedStrategy(buys=(5, 9, 15), sells=(7,)), tmp_duckdb_path)
+        result = bt.run(strat, conids=[4391])
+        actions = [t.action for t in result.trades]
+        assert actions == [Action.BUY, Action.SELL, Action.BUY]
+
+    def test_live_mode_cooldown_zero_allows_immediate_reopen(self, tmp_duckdb_path):
+        _write_synthetic_bars(tmp_duckdb_path, n=30)
+        bt = _make_backtester(tmp_duckdb_path, execution_mode='live',
+                              cooldown_seconds=0)
+        strat = _install_strategy(
+            ScriptedStrategy(buys=(5, 9), sells=(7,)), tmp_duckdb_path)
+        result = bt.run(strat, conids=[4391])
+        actions = [t.action for t in result.trades]
+        assert actions == [Action.BUY, Action.SELL, Action.BUY]
+
+    def test_live_mode_sizing_does_not_compound(self, tmp_duckdb_path):
+        _write_synthetic_bars(tmp_duckdb_path, n=60, base_price=100.0)
+        bt = _make_backtester(tmp_duckdb_path, execution_mode='live',
+                              cooldown_seconds=0)
+        strat = _install_strategy(
+            ScriptedStrategy(buys=(5, 20), sells=(15, 40)), tmp_duckdb_path)
+        result = bt.run(strat, conids=[4391])
+        buys = [t for t in result.trades if t.action == Action.BUY]
+        assert len(buys) == 2
+        # both entries sized off the SAME fixed notional, not off equity
+        for b in buys:
+            assert b.quantity == int(2000 / b.price)
+
+
+# ---------------------------------------------------------------------------
+# ORB exit rules — EOD flatten + max-hold surface on the BUY signal
+# ---------------------------------------------------------------------------
+
+class TestOrbExitRules:
+    def _orb(self, **params):
+        from types import SimpleNamespace
+        from strategies.opening_range_breakout import OpeningRangeBreakout
+        s = OpeningRangeBreakout()
+        if params:  # live-runtime idiom: session config arrives via params
+            s._context = SimpleNamespace(params=params)
+        return s
+
+    def test_defaults_preserve_no_exit_behaviour(self):
+        assert self._orb()._exit_rules() == (None, None)
+
+    def test_eod_flatten_us_session(self):
+        close_by, max_hold = self._orb(EOD_FLATTEN=True)._exit_rules()
+        assert close_by == dt.time(15, 45)  # 16:00 close - 15 min default
+        assert max_hold is None
+
+    def test_eod_flatten_session_relative_for_asx(self):
+        close_by, _ = self._orb(
+            EOD_FLATTEN=True, RTH_CLOSE_MIN=960, EOD_FLATTEN_BEFORE_MIN=30,
+        )._exit_rules()
+        assert close_by == dt.time(15, 30)  # 960 min = 16:00 Sydney, -30
+
+    def test_max_hold_bars_param(self):
+        _, max_hold = self._orb(MAX_HOLD_BARS=390)._exit_rules()
+        assert max_hold == 390
+
+    def test_class_attr_override_backtest_idiom(self):
+        s = self._orb()
+        s.EOD_FLATTEN = True          # apply_param_overrides setattr path
+        s.EOD_FLATTEN_BEFORE_MIN = 5
+        close_by, _ = s._exit_rules()
+        assert close_by == dt.time(15, 55)
+
+
+class TestPyramidFixedMode:
+    """pyramid_fixed = stacking allowed, fixed per-lot notional. The
+    decomposition mode: differs from 'live' only by allowing adds, and from
+    'accumulate' only by non-compounding sizing."""
+
+    def test_stacks_like_accumulate_but_sizes_fixed(self, tmp_duckdb_path):
+        _write_synthetic_bars(tmp_duckdb_path, n=30, base_price=100.0)
+        bt = _make_backtester(tmp_duckdb_path, execution_mode='pyramid_fixed',
+                              cooldown_seconds=0)
+        strat = _install_strategy(BuyEveryBarNoQty(), tmp_duckdb_path)
+        result = bt.run(strat, conids=[4391])
+        buys = [t for t in result.trades if t.action == Action.BUY]
+        assert len(buys) > 1  # adds allowed (unlike 'live')
+        # every lot sized off the SAME fixed notional (unlike 'accumulate',
+        # where each add is 10% of the remaining cash)
+        for b in buys:
+            assert b.quantity == int(2000 / b.price)
+
+    def test_cooldown_spaces_the_adds(self, tmp_duckdb_path):
+        _write_synthetic_bars(tmp_duckdb_path, n=30)
+        bt = _make_backtester(tmp_duckdb_path, execution_mode='pyramid_fixed',
+                              cooldown_seconds=300)
+        strat = _install_strategy(BuyEveryBarNoQty(), tmp_duckdb_path)
+        result = bt.run(strat, conids=[4391])
+        buys = [t for t in result.trades if t.action == Action.BUY]
+        assert len(buys) > 1
+        for a, b in zip(buys, buys[1:]):
+            assert (b.timestamp - a.timestamp).total_seconds() >= 300
+
+    def test_sell_closes_whole_stack(self, tmp_duckdb_path):
+        _write_synthetic_bars(tmp_duckdb_path, n=30)
+        bt = _make_backtester(tmp_duckdb_path, execution_mode='pyramid_fixed',
+                              cooldown_seconds=0)
+        strat = _install_strategy(
+            ScriptedStrategy(buys=(5, 7, 9), sells=(15,)), tmp_duckdb_path)
+        result = bt.run(strat, conids=[4391])
+        buys = [t for t in result.trades if t.action == Action.BUY]
+        sells = [t for t in result.trades if t.action == Action.SELL]
+        assert len(buys) == 3 and len(sells) == 1
+        assert sells[0].quantity == sum(b.quantity for b in buys)
+
+
+class TestPyramidMaxAddsCap:
+    def test_cap_bounds_the_stack(self, tmp_duckdb_path):
+        _write_synthetic_bars(tmp_duckdb_path, n=30)
+        bt = _make_backtester(tmp_duckdb_path, execution_mode='pyramid_fixed',
+                              cooldown_seconds=0, pyramid_max_adds=2)
+        strat = _install_strategy(BuyEveryBarNoQty(), tmp_duckdb_path)
+        result = bt.run(strat, conids=[4391])
+        buys = [t for t in result.trades if t.action == Action.BUY]
+        assert len(buys) == 3  # initial + 2 adds, then the cap refuses
+
+    def test_cap_resets_after_full_close(self, tmp_duckdb_path):
+        _write_synthetic_bars(tmp_duckdb_path, n=40)
+        bt = _make_backtester(tmp_duckdb_path, execution_mode='pyramid_fixed',
+                              cooldown_seconds=0, pyramid_max_adds=1)
+        strat = _install_strategy(
+            ScriptedStrategy(buys=(5, 7, 9, 20, 22, 24), sells=(15,)),
+            tmp_duckdb_path)
+        result = bt.run(strat, conids=[4391])
+        actions = [t.action for t in result.trades]
+        # first stack: 2 buys (cap), close; second stack: 2 buys again
+        assert actions == [Action.BUY, Action.BUY, Action.SELL,
+                           Action.BUY, Action.BUY]

@@ -4,7 +4,88 @@ Living snapshot of the **deployed/running** state (config, strategies, data, inf
 and the reasoning behind it. Distinct from `AUDIT_ROADMAP.md` (code backlog).
 Update the date + relevant sections when the running config changes.
 
-**Last updated: 2026-07-17 (Fri evening) — paper trading, account `DUM422056`. STACK IS UP (healthy) and trading autonomously.**
+**Last updated: 2026-07-22 (Tue afternoon) — paper trading, account `DUM422056`. STACK IS UP (healthy) and trading autonomously.**
+
+---
+
+## 2026-07-22 — live-semantics re-validation + protective stops
+
+**The 2026-07-17 verdicts below are SUPERSEDED.** Reading the live book
+revealed the validating backtester pyramids (repeat BUYs stack, sizing
+compounds at 10% of current cash) while the AutoExecutor is single-lot
+fixed-notional — the roster was validated on a different trading process
+than the one deployed. `backtest --live-semantics` now exists (no
+pyramiding, fixed $-per-trade, 300s cooldown); the roster was re-run at
+deployed configs, 1yr 1-min, $2k/trade (sweeps #27-31, runs 2902-2910):
+
+| Strategy | old (accumulate) | live-sem no-exit | live-sem EOD-flatten |
+|---|---|---|---|
+| orb_pltr  | +13.1% PF 2.63 "clean pass" | PF 1.54, +92 bps/tr, PSR 0.82, p=.39 | PF 1.23, +6 bps — worse |
+| orb_googl | "fails deployed" PF 1.34 | **PF 1.81, +83 bps, PSR 0.95, p=.17 — best of roster** | PF 0.68, −10 bps |
+| orb_wds   | +9.4% PF 1.89 near-pass | PF 1.56, +36 bps, PSR 0.84 | **PF 0.42, t=−2.84, p=.005 — significantly NEGATIVE** |
+| orb_bhp   | +4.7% PF 1.26 fail | PF 1.05, +5 bps, PSR 0.55 — no edge | PF 1.14, +1 bps — no edge |
+| vwap_cat  | +3.9% PF 1.35 marginal | PF 1.20, +11 bps, PSR 0.79 | (has own 15:45 flatten) |
+
+Conclusions: (1) **nothing on the roster is statistically significant**
+under real semantics — the strong old numbers were pyramiding/compounding
+artifacts; (2) **EOD flatten hurts ORB everywhere** (decisively negative on
+WDS) — ORB's modest edge lives in the multi-day holds, so the exit
+tunables (`EOD_FLATTEN`, `MAX_HOLD_BARS`, added to the class) stay OFF;
+(3) ranking inverted — orb_googl (previously "fails, redeploy pending") is
+the best live-semantics performer, orb_pltr drops to mid-pack, **orb_bhp
+confirms as no-edge in both frameworks (disarm candidate)**.
+
+**Decomposition experiment (sweeps #32-41, `execution_mode: pyramid_fixed`)**
+— which amplifier produced the legacy numbers? Three-way at deployed
+configs, same window, $2k lots (live vs pyramid-fixed vs accumulate):
+
+| | live (single-lot) | pyramid_fixed | accumulate |
+|---|---|---|---|
+| PLTR | PF 1.54, p=.39 | **PF 2.91, t=2.95, p=.004** | PF 2.61, ret 5x pyramid |
+| WDS | PF 1.56, p=.24 | **PF 1.94, t=3.26, p=.001** | PF 1.89, ret 4x pyramid |
+| GOOGL | **PF 1.81 (best)** | PF 1.43, adds dilute | PF 1.37 |
+| CAT | PF 1.20 | PF 1.23 | PF 1.32 (all n.s.) |
+| BHP | PF 1.05 | PF 0.69 (negative) | PF 0.76 (negative) |
+
+**Conclusion: the pyramid structure IS the statistically-real edge on
+PLTR/WDS** (significant at fixed lots — not a compounding illusion;
+compounding only multiplies the headline return). GOOGL is a
+first-entry-only strategy (adds have negative marginal expectancy). BHP is
+negative in every framework — disarm. Caveats: one year ≈ one (trending)
+regime — pyramiding-into-strength is exactly what bleeds in chop; ~15
+tests run, so only the p≤.004 results survive multiple-testing discipline.
+
+**Breadth test (sweep #42)**: ORB 45/2.0 single-lot live-semantics across
+24 liquid US names → **20/24 positive** (sign-test p<.001, though returns
+are regime/sector-correlated — semis dominate the top). Mean +0.50%/name
+on $2k lots. The setup is a weak systematic edge, not a PLTR idiosyncrasy.
+
+**DECIDED + DEPLOYED (2026-07-22 evening)**: bounded pyramiding built into
+the AutoExecutor (`pyramid_max_adds` per strategy: fixed-lot adds, stack
+caps at N+1 lots, all gates apply to adds, protective stop re-covers the
+whole stack on every add, SELL closes the stack; latest-BUY-wins time
+exits). Validated at cap 3 before arming: PLTR run 2945 PF 2.63 PSR 0.90
+p=0.012; WDS run 2946 PF 2.01 PSR 0.91 p=0.002 (caution: WDS losing
+streak 13 vs MC95 8 — loss clustering; watch it in chop). **Roster now:
+orb_pltr + orb_wds armed with pyramid_max_adds=3; orb_googl + vwap_cat
+armed single-lot; orb_bhp DISARMED** (auto_execute: false, still RUNNING
+for signal data — no edge in any framework). source_run_ids updated in
+the YAML (2945/2946/2905). Restarted + `mmr verify --expect-running 5`
+PASS. Backup of prior YAML: `strategy_runtime.yaml.bak_20260722`.
+
+Also deployed 2026-07-22:
+- **Broker-side disaster stops** on every attributed open: GTC STP at
+  `MMR_PROTECTIVE_STOP_PCT` (default 8%) below entry, orderRef-attributed,
+  self-healing per bar, cancelled before executor closes / on reconcile.
+  Existing PLTR + BHP positions pick theirs up on the first bar after
+  restart. The only protection that survives a dead feed while holding.
+- **Ledger annotations**: the sole realized trade (CAT −$25.80, 07-20) was
+  executed under the UTC time-exit bug (exited 11:46 ET instead of 15:45,
+  fixed in 3575f0d minutes later) — fills 32/34 are annotated excluded
+  (`mmr strategies fills`), so realized PnL now reflects strategy alpha only.
+- **RPC NamedTuple fix** (`_convert_return_type` handles lists) — fixes the
+  false "trader_service unreachable" in `strategies pnl`; `status`
+  open_orders now counts only working orders (was: every order ever seen).
 
 ---
 

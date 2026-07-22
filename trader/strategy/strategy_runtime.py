@@ -616,6 +616,7 @@ class StrategyRuntime():
             close_by_time=getattr(signal, 'close_by_time', None),
             max_hold_bars=getattr(signal, 'max_hold_bars', None),
             bar_size_seconds=bar_size_seconds,
+            pyramid_max_adds=int(getattr(ctx, 'pyramid_max_adds', 0) or 0) if ctx else 0,
         )
         self.auto_executor.submit_signal(work)
 
@@ -677,6 +678,7 @@ class StrategyRuntime():
         paper_only: bool = False,
         auto_execute: bool = False,
         params: Optional[Dict] = None,
+        pyramid_max_adds: int = 0,
     ) -> None:
 
         # Skip if strategy with this name already loaded
@@ -765,6 +767,7 @@ class StrategyRuntime():
                     class_name=class_name,
                     description=description,
                     auto_execute=auto_execute,
+                    pyramid_max_adds=pyramid_max_adds,
                     params=params if params else {},
                 )
                 instance.install(context)
@@ -811,6 +814,7 @@ class StrategyRuntime():
                 paper_only=strategy_config.get('paper_only', False),
                 auto_execute=strategy_config.get('auto_execute', False),
                 params=strategy_config.get('params', {}),
+                pyramid_max_adds=int(strategy_config.get('pyramid_max_adds', 0) or 0),
             )
 
     async def _reconcile(self):
