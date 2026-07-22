@@ -674,3 +674,26 @@ class TestPyramidingPipeline:
         assert pos['lots'] == 2  # initial + 1 add, extra signals refused
         opens = [c for c in sdk.propose_calls if c['action'] == 'BUY']
         assert len(opens) == 2
+
+
+class TestDisarmedCloseNotStranded:
+    """auto_execute=false must not strand attributed positions — mirrors the
+    double-arm principle (closes are never gated by disarming)."""
+
+    def test_disarmed_sell_with_position_closes(self):
+        d = decide(make_work(action=Action.SELL, auto_execute=False), held_qty=18.0)
+        assert d.kind == 'close'
+        assert d.quantity == 18.0
+
+    def test_disarmed_buy_still_refused(self):
+        d = decide(make_work(auto_execute=False))
+        assert d.kind == 'skip' and 'auto_execute' in d.reason
+
+    def test_disarmed_sell_while_flat_still_refused(self):
+        d = decide(make_work(action=Action.SELL, auto_execute=False))
+        assert d.kind == 'skip' and 'auto_execute' in d.reason
+
+    def test_kill_switch_still_blocks_disarmed_close(self):
+        d = decide(make_work(action=Action.SELL, auto_execute=False),
+                   held_qty=18.0, kill_switch=True)
+        assert d.kind == 'skip' and 'kill switch' in d.reason

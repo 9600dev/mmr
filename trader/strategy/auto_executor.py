@@ -156,7 +156,11 @@ def decide_signal(
     if kill_switch:
         return Directive('skip', 'kill switch (MMR_AUTO_EXECUTE_DISABLED) is set')
     if not work.auto_execute:
-        return Directive('skip', 'auto_execute is false')
+        # Disarming must not strand attributed positions — same principle as
+        # the live double-arm ("closes are never gated"). A disarmed strategy
+        # may still CLOSE what the executor opened for it; it may not open.
+        if not (work.action == Action.SELL and held_qty > 0):
+            return Directive('skip', 'auto_execute is false')
     if not work.state_running:
         return Directive('skip', 'strategy is not RUNNING')
     if work.paper_only and not paper_trading:
