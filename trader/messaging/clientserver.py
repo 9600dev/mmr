@@ -198,22 +198,26 @@ class RPCHandler:
 
 
 # ---------------------------------------------------------------------------
-# Helper: return-type conversion (msgpack turns lists to tuples etc.)
+# Helper: return-type conversion.
+#
+# NamedTuples (PortfolioItem, PortfolioSummary, Position, ...) are tuple
+# subclasses, so msgpack packs them as plain arrays — the dill ExtType
+# fallback never sees them — and unpackb(use_list=True) hands the client
+# back plain lists. Dataclasses and other objects go through dill and
+# arrive intact (the else branch). Reconstruct NamedTuples positionally.
 # ---------------------------------------------------------------------------
 
 def _convert_return_type(obj, return_type):
-    if isinstance(obj, tuple) and hasattr(return_type, '__origin__') and return_type.__origin__ == list:
+    if isinstance(obj, (list, tuple)) and hasattr(return_type, '__origin__') and return_type.__origin__ == list:
         inner = typing.get_args(return_type)
         if inner:
             return [_convert_return_type(o, inner[0]) for o in obj]
         return list(obj)
     elif return_type == type(list):
         return list(obj)
-    elif isinstance(obj, tuple) and hasattr(return_type, '__origin__') and return_type.__origin__ is tuple:
+    elif isinstance(obj, (list, tuple)) and hasattr(return_type, '__origin__') and return_type.__origin__ is tuple:
         return return_type(obj)
-    # for whatever reason, things like PortfolioSummary are returned as tuples,
-    # so we have to new them up with *args
-    elif isinstance(obj, tuple):
+    elif isinstance(obj, (list, tuple)):
         return return_type(*obj)
     else:
         return obj

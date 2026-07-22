@@ -7,6 +7,7 @@ main thread to avoid the cross-thread-loop flakiness the previous revision had.
 
 import asyncio
 import socket
+import typing
 
 import pytest
 
@@ -16,6 +17,7 @@ from trader.messaging.clientserver import (
     RPCError,
     RPCHandler,
     RPCServer,
+    _convert_return_type,
     _reconstruct_rpc_exception,
     rpcmethod,
     set_dill_whitelist,
@@ -32,6 +34,13 @@ class CustomBusinessError(Exception):
     pass
 
 
+class _Row(typing.NamedTuple):
+    """Stand-in for ib_async NamedTuples (PortfolioItem, Position, ...) —
+    tuple subclasses that msgpack flattens to plain arrays on the wire."""
+    conid: int
+    price: float
+
+
 class _Service(RPCHandler):
     @rpcmethod
     def add(self, a: int, b: int) -> int:
@@ -40,6 +49,10 @@ class _Service(RPCHandler):
     @rpcmethod
     def echo(self, payload):
         return payload
+
+    @rpcmethod
+    def rows(self):
+        return [_Row(conid=101, price=1.5), _Row(conid=202, price=2.5)]
 
     @rpcmethod
     def raise_value(self):
@@ -52,6 +65,43 @@ class _Service(RPCHandler):
     @rpcmethod
     def raise_custom(self):
         raise CustomBusinessError('not allowed')
+
+
+# ---------------------------------------------------------------------------
+# Pure unit tests on return-type conversion (no sockets, no threads)
+# ---------------------------------------------------------------------------
+
+class TestConvertReturnType:
+    """NamedTuples cross the wire as plain lists (msgpack flattens tuple
+    subclasses to arrays; unpackb(use_list=True) yields lists). The
+    strategies-pnl "unreachable" bug was this conversion only firing on
+    tuples, so list payloads passed through unreconstructed."""
+
+    def test_list_of_lists_reconstructs_namedtuples(self):
+        wire = [[101, 1.5], [202, 2.5]]
+        out = _convert_return_type(wire, list[_Row])
+        assert out == [_Row(101, 1.5), _Row(202, 2.5)]
+        assert all(isinstance(r, _Row) for r in out)
+
+    def test_top_level_list_reconstructs_namedtuple(self):
+        assert _convert_return_type([101, 1.5], _Row) == _Row(101, 1.5)
+
+    def test_top_level_tuple_still_reconstructs(self):
+        assert _convert_return_type((101, 1.5), _Row) == _Row(101, 1.5)
+
+    def test_real_objects_pass_through_unchanged(self):
+        # Dataclasses/objects arrive intact via the dill ExtType path and
+        # must not be touched.
+        obj = CustomBusinessError('already deserialized')
+        assert _convert_return_type([obj], list[CustomBusinessError])[0] is obj
+
+    def test_primitive_lists_pass_through(self):
+        assert _convert_return_type([1, 2, 3], list[int]) == [1, 2, 3]
+        assert _convert_return_type([{'a': 1}], list[dict]) == [{'a': 1}]
+
+    def test_dict_passes_through(self):
+        d = {'k': 'v'}
+        assert _convert_return_type(d, dict) is d
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +278,14 @@ def test_rpc_round_trip_preserves_error_types():
         assert client.rpc().add(2, 3) == 5
         assert client.rpc().echo({'k': 'v'}) == {'k': 'v'}
 
+        # NamedTuples flatten to plain lists on the wire...
+        raw = client.rpc().rows()
+        assert raw == [[101, 1.5], [202, 2.5]]
+        # ...and return_type reconstructs them (the strategies-pnl regression).
+        typed = client.rpc(return_type=list[_Row]).rows()
+        assert typed == [_Row(101, 1.5), _Row(202, 2.5)]
+        assert all(isinstance(r, _Row) for r in typed)
+
         with pytest.raises(ValueError) as exc:
             client.rpc().raise_value()
         assert 'bad value' in str(exc.value)
@@ -239,7 +297,14 @@ def test_rpc_round_trip_preserves_error_types():
             client.rpc().raise_custom()
     finally:
         client.close()
+        client.ctx.term()
         loop = server_obj.get('loop')
         if loop:
+            # Close the server's ROUTER socket on its own loop BEFORE stopping.
+            # A leaked open socket makes any later zmq Context GC finalizer
+            # (ctx.term) block forever — the interpreter hangs at exit.
+            server = server_obj.get('server')
+            if server:
+                loop.call_soon_threadsafe(server.close)
             loop.call_soon_threadsafe(loop.stop)
         t.join(timeout=3.0)
