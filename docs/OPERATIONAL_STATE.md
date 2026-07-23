@@ -4,9 +4,34 @@ Living snapshot of the **deployed/running** state (config, strategies, data, inf
 and the reasoning behind it. Distinct from `AUDIT_ROADMAP.md` (code backlog).
 Update the date + relevant sections when the running config changes.
 
-**Last updated: 2026-07-22 (Tue afternoon) — paper trading, account `DUM422056`. STACK IS UP (healthy) and trading autonomously.**
+**Last updated: 2026-07-23 (Wed morning) — paper trading, account `DUM422056`. STACK IS UP (healthy) and trading autonomously.**
 
 ---
+
+## 2026-07-23 — protective stops were silently broken since the 07-22 deploy (FIXED)
+
+Every disaster-stop placement since the 07-22 15:16 restart failed with
+`TypeError: place_standalone_order() got an unexpected keyword argument
+'order_ref'` — commit `55f6d9c` added `order_ref` to `sdk.place_protective_order`
+and to `Trader.place_standalone_order` but missed the RPC-facing wrapper in
+`trader/messaging/trader_service_api.py`, and the RPC layer dispatches on the
+API class. 1,292 self-heal retries (one per bar) logged as
+`protective stop error`; PLTR (3-lot), CAT, and WDS all traded with **no
+broker-side stop**. Symptom to watch for: `open_orders=0` in the trader pulse
+while `auto_exec_open>=1`.
+
+Fixed 07-23 ~10:13 PDT: `order_ref` added to the API wrapper, synced, both
+services restarted. The executor self-healed WDS within seconds of restart
+(SELL 37 STP 29.56 GTC, order 172, orderRef `orb_wds`, state
+`protective_order_id` recorded). `tests/test_rpc_signature_drift.py` now
+AST-extracts every sdk RPC call and binds it against the real API signatures
+so client/server kwarg drift fails in CI instead of live.
+
+Ops notes from the restart: (1) trader_service **wedged on SIGTERM** mid
+"waiting five seconds for pending tasks" (56 threads, hung >8 min) — escalate
+to `kill -9` and let supervise recreate it; (2) after a trader_service-only
+restart the strategy_service reconcile loop re-subscribed market data on its
+own within ~4 min (tick flow resumed without touching strategy_service).
 
 ## 2026-07-22 — live-semantics re-validation + protective stops
 

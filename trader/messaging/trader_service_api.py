@@ -323,6 +323,7 @@ class TraderServiceApi(RPCHandler):
         trailing_percent: float = 0,
         tif: str = 'GTC',
         outside_rth: bool = True,
+        order_ref: str = '',
     ) -> SuccessFail[Trade]:
         """Place a standalone protective order (stop, trailing stop, limit)."""
         return await self.trader.place_standalone_order(
@@ -335,6 +336,7 @@ class TraderServiceApi(RPCHandler):
             trailing_percent=trailing_percent,
             tif=tif,
             outside_rth=outside_rth,
+            order_ref=order_ref,
         )
 
     @rpcmethod
