@@ -379,8 +379,10 @@ class PositionSizer:
                             f'(limit {cfg.max_adv_pct:.1%})'
                         )
 
-            # Spread penalty — wide spreads = illiquidity, reduce size proportionally
-            if liq.spread_pct > 0 and liq.spread_pct > cfg.spread_penalty_threshold:
+            # Spread penalty — wide spreads = illiquidity, reduce size proportionally.
+            # threshold <= 0 disables the penalty (a zero threshold has no
+            # meaningful ratio and would divide by zero below).
+            if cfg.spread_penalty_threshold > 0 and liq.spread_pct > cfg.spread_penalty_threshold:
                 # Linear penalty: at threshold spread = full penalty factor reduction
                 # spread_ratio of 1.0 = at threshold, 2.0 = 2x threshold, etc.
                 spread_ratio = liq.spread_pct / cfg.spread_penalty_threshold
@@ -388,7 +390,9 @@ class PositionSizer:
                 penalty = min(cfg.spread_penalty_factor, cfg.spread_penalty_factor * (spread_ratio - 1.0))
                 reduction = 1.0 - penalty
                 before = sized
-                sized = sized * reduction
+                # A penalty factor > 1 can make the reduction negative; a
+                # negative size would escape the min-size refusal below.
+                sized = max(0.0, sized * reduction)
                 if capped_by == '':
                     capped_by = 'spread_penalty'
                 parts.append(

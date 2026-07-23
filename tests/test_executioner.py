@@ -1,6 +1,10 @@
 """Targeted tests for TradeExecutioner. Exercises the risk-gate and trading-
 filter gating paths that sit between a raw order request and the IB place_order
 call. A full IB round-trip is out of scope; we stub the ib_async boundary.
+
+The boundary is the server-side EXIT-CLASS predicate: an order that reduces
+the live broker position is never refusable by gates; everything else is
+gated (fail-closed), and the client-supplied skip_risk_gate flag is ignored.
 """
 
 from unittest.mock import AsyncMock, MagicMock
@@ -9,12 +13,30 @@ import pytest
 import reactivex as rx
 
 from trader.trading.executioner import TradeExecutioner
-from trader.trading.risk_gate import RiskGateResult
+from trader.trading.risk_gate import RiskGateResult, RiskInputs
 from trader.objects import Action, ContractOrderPair, ExecutorCondition
 
 
-def _make_executioner_with_trader(risk_gate=None, book_orders=None, ib_account='DU1'):
-    """Assemble just enough of Trader for the executioner to exercise."""
+def _inputs(**kw):
+    defaults = dict(
+        open_order_count=0,
+        daily_pnl=0.0,
+        daily_pnl_evaluable=True,
+        portfolio_value=100_000.0,
+        portfolio_value_evaluable=True,
+    )
+    defaults.update(kw)
+    return RiskInputs(**defaults)
+
+
+def _make_executioner_with_trader(risk_gate=None, book_orders=None, ib_account='DU1',
+                                  is_exit=False, inputs=None):
+    """Assemble just enough of Trader for the executioner to exercise.
+
+    ``risk_gate`` is set explicitly (None means "gate missing" — the real
+    Trader declares risk_gate = None in __init__), and the exit-class
+    predicate + risk-inputs reads are stubbed since they hit IB state.
+    """
     trader = MagicMock()
     trader.ib_account = ib_account
     trader.book = MagicMock()
@@ -23,19 +45,20 @@ def _make_executioner_with_trader(risk_gate=None, book_orders=None, ib_account='
     trader.client = MagicMock()
     trader.client.subscribe_place_order = AsyncMock(return_value=rx.from_iterable([MagicMock()]))
     trader.client.get_snapshot = AsyncMock(return_value=MagicMock(bid=100, ask=101))
-    if risk_gate is not None:
-        trader.risk_gate = risk_gate
+    trader.risk_gate = risk_gate
+    trader.order_reduces_exposure = MagicMock(return_value=is_exit)
+    trader.gather_risk_inputs = MagicMock(return_value=inputs or _inputs())
     ex = TradeExecutioner()
     ex.connect(trader)
     return ex, trader
 
 
 class _Order:
-    def __init__(self, action='BUY', account='DU1'):
+    def __init__(self, action='BUY', account='DU1', lmt_price=100):
         self.action = action
         self.totalQuantity = 10
         self.account = account
-        self.lmtPrice = 100
+        self.lmtPrice = lmt_price
         self.orderId = 0
 
     def __str__(self):
@@ -51,18 +74,37 @@ class _Contract:
         self.multiplier = None
 
 
+class _ApproveAllGate:
+    def check_instrument(self, **kw):
+        return RiskGateResult(approved=True)
+
+    def check_leverage(self, *a, **kw):
+        return RiskGateResult(approved=True)
+
+    def evaluate(self, **kw):
+        return RiskGateResult(approved=True)
+
+
+class _RejectEvaluateGate(_ApproveAllGate):
+    def evaluate(self, **kw):
+        return RiskGateResult(approved=False, reason='daily loss limit')
+
+
+class _BoomGate:
+    """A gate whose limit checks must never run."""
+    def check_instrument(self, **kw):
+        return RiskGateResult(approved=False, reason='denylisted (observability only)')
+
+    def evaluate(self, **kw):
+        raise AssertionError('evaluate must not run for exit-class orders')
+
+
 @pytest.mark.asyncio
 async def test_trading_filter_rejection_blocks_order():
     """A denylist hit from the trading filter → no IB call, event logged."""
-    class _Gate:
+    class _Gate(_ApproveAllGate):
         def check_instrument(self, symbol, exchange, sec_type):
             return RiskGateResult(approved=False, reason=f'{symbol} is blocked')
-
-        def check_leverage(self, *a, **kw):
-            return RiskGateResult(approved=True)
-
-        def evaluate(self, **kw):
-            return RiskGateResult(approved=True)
 
     ex, trader = _make_executioner_with_trader(risk_gate=_Gate())
     pair = ContractOrderPair(contract=_Contract(symbol='AMD'), order=_Order())
@@ -81,18 +123,8 @@ async def test_trading_filter_rejection_blocks_order():
 
 @pytest.mark.asyncio
 async def test_risk_gate_rejection_blocks_order():
-    """A signal-rate or daily-loss rejection should also block the place."""
-    class _Gate:
-        def check_instrument(self, symbol, exchange, sec_type):
-            return RiskGateResult(approved=True)
-
-        def check_leverage(self, *a, **kw):
-            return RiskGateResult(approved=True)
-
-        def evaluate(self, **kw):
-            return RiskGateResult(approved=False, reason='daily loss limit')
-
-    ex, trader = _make_executioner_with_trader(risk_gate=_Gate())
+    """A rate-limit or daily-loss rejection should also block the place."""
+    ex, trader = _make_executioner_with_trader(risk_gate=_RejectEvaluateGate())
     pair = ContractOrderPair(contract=_Contract(), order=_Order())
 
     observable = await ex.place_order(pair, condition=ExecutorCondition.NO_CHECKS)
@@ -101,6 +133,52 @@ async def test_risk_gate_rejection_blocks_order():
     observable.subscribe(on_next=lambda _: None, on_error=errors.append)
     assert len(errors) == 1
     assert 'risk gate' in str(errors[0]).lower() or 'daily loss' in str(errors[0]).lower()
+
+
+@pytest.mark.asyncio
+async def test_evaluate_receives_full_inputs_and_price_hint():
+    """The gate must get daily_pnl / portfolio_value / evaluable flags from
+    gather_risk_inputs and the position-value hint — not just open orders
+    (the old wiring made daily-loss and concentration dead code here)."""
+    captured = {}
+
+    class _Gate(_ApproveAllGate):
+        def evaluate(self, **kw):
+            captured.update(kw)
+            return RiskGateResult(approved=True)
+
+    inputs = _inputs(open_order_count=3, daily_pnl=-42.0, portfolio_value=55_000.0)
+    ex, trader = _make_executioner_with_trader(risk_gate=_Gate(), inputs=inputs)
+    pair = ContractOrderPair(contract=_Contract(), order=_Order())
+
+    await ex.place_order(pair, condition=ExecutorCondition.NO_CHECKS,
+                         position_value_hint=1234.5)
+    assert captured['open_order_count'] == 3
+    assert captured['daily_pnl'] == -42.0
+    assert captured['daily_pnl_evaluable'] is True
+    assert captured['portfolio_value'] == 55_000.0
+    assert captured['portfolio_value_evaluable'] is True
+    assert captured['position_value'] == 1234.5
+    assert captured['position_value_evaluable'] is True
+
+
+@pytest.mark.asyncio
+async def test_limit_price_backfills_position_value_hint():
+    """No caller hint, but a limit order carries its own price — the
+    concentration check stays evaluable."""
+    captured = {}
+
+    class _Gate(_ApproveAllGate):
+        def evaluate(self, **kw):
+            captured.update(kw)
+            return RiskGateResult(approved=True)
+
+    ex, trader = _make_executioner_with_trader(risk_gate=_Gate())
+    pair = ContractOrderPair(contract=_Contract(), order=_Order(lmt_price=100))
+
+    await ex.place_order(pair, condition=ExecutorCondition.NO_CHECKS)
+    assert captured['position_value'] == 10 * 100
+    assert captured['position_value_evaluable'] is True
 
 
 @pytest.mark.asyncio
@@ -149,19 +227,24 @@ async def test_blank_configured_account_rejected():
 
 
 @pytest.mark.asyncio
+async def test_exit_class_account_pinning_still_unconditional():
+    """Exit-class exemption covers GATES only — the account-pinning guard in
+    subscribe_place_order_direct still applies to closes."""
+    ex, trader = _make_executioner_with_trader(ib_account='DU1', is_exit=True)
+    pair = ContractOrderPair(contract=_Contract(), order=_Order(action='SELL', account='DU_OTHER'))
+
+    observable = await ex.place_order(pair, condition=ExecutorCondition.NO_CHECKS)
+    errors = []
+    observable.subscribe(on_next=lambda _: None, on_error=errors.append)
+    assert len(errors) == 1
+    assert 'account' in str(errors[0]).lower()
+    assert trader.client.subscribe_place_order.call_count == 0
+
+
+@pytest.mark.asyncio
 async def test_happy_path_reaches_ib():
     """When the gates approve, place_order should reach the IB client."""
-    class _Gate:
-        def check_instrument(self, **kw):
-            return RiskGateResult(approved=True)
-
-        def check_leverage(self, *a, **kw):
-            return RiskGateResult(approved=True)
-
-        def evaluate(self, **kw):
-            return RiskGateResult(approved=True)
-
-    ex, trader = _make_executioner_with_trader(risk_gate=_Gate())
+    ex, trader = _make_executioner_with_trader(risk_gate=_ApproveAllGate())
     pair = ContractOrderPair(contract=_Contract(), order=_Order())
 
     await ex.place_order(pair, condition=ExecutorCondition.NO_CHECKS)
@@ -169,17 +252,234 @@ async def test_happy_path_reaches_ib():
 
 
 @pytest.mark.asyncio
-async def test_skip_risk_gate_bypasses_gates():
-    """skip_risk_gate=True must bypass BOTH the filter and the evaluate call."""
-    class _BoomGate:
-        def check_instrument(self, **kw):
-            raise AssertionError('should have been skipped')
-
-        def evaluate(self, **kw):
-            raise AssertionError('should have been skipped')
-
-    ex, trader = _make_executioner_with_trader(risk_gate=_BoomGate())
+async def test_skip_risk_gate_flag_no_longer_bypasses():
+    """skip_risk_gate=True is IGNORED: a non-exit-class order still runs the
+    gates and a rejection still blocks. (Close-all keeps working because its
+    orders are exit-class, not because of the flag.)"""
+    ex, trader = _make_executioner_with_trader(risk_gate=_RejectEvaluateGate())
     pair = ContractOrderPair(contract=_Contract(), order=_Order())
 
-    await ex.place_order(pair, condition=ExecutorCondition.NO_CHECKS, skip_risk_gate=True)
+    observable = await ex.place_order(
+        pair, condition=ExecutorCondition.NO_CHECKS, skip_risk_gate=True)
+    assert trader.client.subscribe_place_order.call_count == 0
+    errors = []
+    observable.subscribe(on_next=lambda _: None, on_error=errors.append)
+    assert len(errors) == 1
+    assert 'risk gate' in str(errors[0]).lower()
+
+
+@pytest.mark.asyncio
+async def test_exit_class_order_skips_gate_limits():
+    """An exit-class order (reduces the live position) is never refusable by
+    gates: evaluate must not run, and a filter hit is observability-only."""
+    ex, trader = _make_executioner_with_trader(risk_gate=_BoomGate(), is_exit=True)
+    pair = ContractOrderPair(contract=_Contract(), order=_Order(action='SELL'))
+
+    await ex.place_order(pair, condition=ExecutorCondition.NO_CHECKS)
     assert trader.client.subscribe_place_order.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_gate_missing_refuses_open_fail_closed():
+    """risk_gate is None (declared so on Trader until connect() builds it):
+    a non-exit-class order must be refused loudly, not fail open."""
+    ex, trader = _make_executioner_with_trader(risk_gate=None)
+    pair = ContractOrderPair(contract=_Contract(), order=_Order())
+
+    observable = await ex.place_order(pair, condition=ExecutorCondition.NO_CHECKS)
+    assert trader.client.subscribe_place_order.call_count == 0
+    errors = []
+    observable.subscribe(on_next=lambda _: None, on_error=errors.append)
+    assert len(errors) == 1
+    assert 'risk gate unavailable' in str(errors[0]).lower()
+
+
+@pytest.mark.asyncio
+async def test_gate_missing_still_places_exit_class():
+    """risk_gate None + exit-class close → placed. Disarming the gate can
+    never strand a position."""
+    ex, trader = _make_executioner_with_trader(risk_gate=None, is_exit=True)
+    pair = ContractOrderPair(contract=_Contract(), order=_Order(action='SELL'))
+
+    await ex.place_order(pair, condition=ExecutorCondition.NO_CHECKS)
+    assert trader.client.subscribe_place_order.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_skip_risk_gate_true_logs_deprecation(caplog):
+    ex, trader = _make_executioner_with_trader(risk_gate=_ApproveAllGate())
+    pair = ContractOrderPair(contract=_Contract(), order=_Order())
+
+    with caplog.at_level('WARNING'):
+        await ex.place_order(pair, condition=ExecutorCondition.NO_CHECKS, skip_risk_gate=True)
+    assert any('deprecated' in r.message.lower() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# ORDER_SUBMITTED stamping — the open-rate limit only works if the event's
+# strategy_name matches the gate's pseudo-signal source (the order's orderRef)
+# and exit-class submissions are marked so they don't count as opens.
+# ---------------------------------------------------------------------------
+
+class _OrderRef:
+    """An order carrying an orderRef — the real originator the event must be
+    stamped with (not a dead 'manual'/'proposal' constant)."""
+    def __init__(self, action='BUY', account='DU1', order_ref='my_strat'):
+        self.action = action
+        self.totalQuantity = 10
+        self.account = account
+        self.lmtPrice = 100
+        self.orderId = 0
+        self.orderRef = order_ref
+
+    def __str__(self):
+        return f'<Order {self.action} {self.totalQuantity} {self.orderRef}>'
+
+
+@pytest.mark.asyncio
+async def test_order_submitted_stamped_with_orderref_not_manual():
+    """ORDER_SUBMITTED must carry the order's orderRef as strategy_name so the
+    rate check (which queries by the pseudo-signal source == orderRef) counts
+    the right bucket instead of a dead 'manual' constant."""
+    ex, trader = _make_executioner_with_trader(risk_gate=_ApproveAllGate())
+    appended = []
+    trader.event_store.append = lambda ev: appended.append(ev)
+
+    order = _OrderRef(order_ref='keltner_breakout')
+    await ex.subscribe_place_order_direct(_Contract(), order)
+
+    from trader.data.event_store import EventType
+    submitted = [e for e in appended if e.event_type == EventType.ORDER_SUBMITTED]
+    assert len(submitted) == 1
+    assert submitted[0].strategy_name == 'keltner_breakout'
+    assert not submitted[0].metadata.get('exit_class')
+
+
+@pytest.mark.asyncio
+async def test_exit_class_order_submitted_is_marked():
+    """An exit-class placement stamps exit_class=True so the open-rate limit
+    excludes it."""
+    ex, trader = _make_executioner_with_trader(risk_gate=_ApproveAllGate())
+    appended = []
+    trader.event_store.append = lambda ev: appended.append(ev)
+
+    order = _OrderRef(action='SELL', order_ref='keltner_breakout')
+    await ex.subscribe_place_order_direct(_Contract(), order, is_exit=True)
+
+    from trader.data.event_store import EventType
+    submitted = [e for e in appended if e.event_type == EventType.ORDER_SUBMITTED]
+    assert len(submitted) == 1
+    assert submitted[0].metadata.get('exit_class') is True
+
+
+@pytest.mark.asyncio
+async def test_blank_orderref_falls_back_to_manual():
+    ex, trader = _make_executioner_with_trader(risk_gate=_ApproveAllGate())
+    appended = []
+    trader.event_store.append = lambda ev: appended.append(ev)
+
+    order = _OrderRef(order_ref='')
+    await ex.subscribe_place_order_direct(_Contract(), order)
+
+    from trader.data.event_store import EventType
+    submitted = [e for e in appended if e.event_type == EventType.ORDER_SUBMITTED]
+    assert submitted[0].strategy_name == 'manual'
+
+
+@pytest.mark.asyncio
+async def test_pseudo_signal_source_matches_orderref_and_sec_type_passed():
+    """place_order's pseudo-signal source_name must be the order's orderRef
+    (so rate counting lines up) and the order's sec_type must reach evaluate
+    (so the forex CASH exemption can fire)."""
+    captured = {}
+
+    class _Gate(_ApproveAllGate):
+        def evaluate(self, **kw):
+            captured.update(kw)
+            return RiskGateResult(approved=True)
+
+    ex, trader = _make_executioner_with_trader(risk_gate=_Gate())
+    order = _OrderRef(order_ref='orb_strategy')
+    pair = ContractOrderPair(contract=_Contract(sec_type='CASH'), order=order)
+
+    await ex.place_order(pair, condition=ExecutorCondition.NO_CHECKS)
+    assert captured['signal'].source_name == 'orb_strategy'
+    assert captured['sec_type'] == 'CASH'
+
+
+# ---------------------------------------------------------------------------
+# helper_create_order sizing — floor-and-refuse via whole_shares_for_notional
+# ---------------------------------------------------------------------------
+
+def _make_helper_executioner():
+    trader = MagicMock()
+    trader.ib_account = 'DU1'
+    ex = TradeExecutioner()
+    ex.connect(trader)
+    return ex
+
+
+def _tick(bid, ask):
+    t = MagicMock()
+    t.bid = bid
+    t.ask = ask
+    return t
+
+
+class TestHelperCreateOrderSizing:
+    def test_buy_sized_by_ask_and_floored(self):
+        ex = _make_helper_executioner()
+        pair = ex.helper_create_order(
+            contract=_Contract(), action=Action.BUY, latest_tick=_tick(139.0, 140.0),
+            equity_amount=5000.0, quantity=None, limit_price=None, market_order=True,
+            stop_loss_percentage=0.0, algo_name='test',
+        )
+        # 5000 / 140 = 35.7 → floor to 35, never round to 36
+        assert pair.order.totalQuantity == 35
+
+    def test_sell_sized_by_bid(self):
+        ex = _make_helper_executioner()
+        pair = ex.helper_create_order(
+            contract=_Contract(), action=Action.SELL, latest_tick=_tick(100.0, 101.0),
+            equity_amount=1000.0, quantity=None, limit_price=None, market_order=True,
+            stop_loss_percentage=0.0, algo_name='test',
+        )
+        # 1000 / 100 (bid) = 10
+        assert pair.order.totalQuantity == 10
+
+    def test_unaffordable_share_refuses_not_bumps(self):
+        """BRK.A regression: $5000 at $700k must refuse (ValueError naming
+        amount and price), never bump to 1 share."""
+        ex = _make_helper_executioner()
+        with pytest.raises(ValueError, match='5000'):
+            ex.helper_create_order(
+                contract=_Contract(symbol='BRK A'), action=Action.BUY,
+                latest_tick=_tick(699000.0, 700000.0),
+                equity_amount=5000.0, quantity=None, limit_price=None, market_order=True,
+                stop_loss_percentage=0.0, algo_name='test',
+            )
+
+    def test_explicit_quantity_untouched_including_fractional(self):
+        """Fractional closes depend on the explicit-quantity path staying
+        byte-identical — no rounding."""
+        ex = _make_helper_executioner()
+        pair = ex.helper_create_order(
+            contract=_Contract(), action=Action.SELL, latest_tick=_tick(100.0, 101.0),
+            equity_amount=None, quantity=2.5, limit_price=None, market_order=True,
+            stop_loss_percentage=0.0, algo_name='test',
+        )
+        assert pair.order.totalQuantity == 2.5
+
+    def test_multiplier_respected(self):
+        ex = _make_helper_executioner()
+        contract = _Contract()
+        contract.multiplier = '100'
+        pair = ex.helper_create_order(
+            contract=contract, action=Action.BUY, latest_tick=_tick(3.0, 3.5),
+            equity_amount=3000.0, quantity=None, limit_price=None, market_order=True,
+            stop_loss_percentage=0.0, algo_name='test',
+        )
+        # 3000 / (3.5 * 100) = 8.57 → 8 contracts
+        assert pair.order.totalQuantity == 8
+        # postcondition: notional within the sized amount
+        assert 8 * 3.5 * 100 <= 3000.0

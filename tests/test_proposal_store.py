@@ -223,6 +223,37 @@ class TestProposalStore:
         result = proposal_store.delete(999)
         assert result is True  # no row to delete, but query returns 0 count
 
+    def test_delete_terminal_requires_force(self, proposal_store):
+        """Terminal rows are the audit trail — delete without force must
+        refuse and leave the row intact."""
+        from trader.data.proposal_store import InvalidProposalTransition
+
+        pid = proposal_store.add(_make_proposal())
+        proposal_store.update_status(pid, 'REJECTED', rejection_reason='no')
+        with pytest.raises(InvalidProposalTransition):
+            proposal_store.delete(pid)
+        assert proposal_store.get(pid) is not None
+        assert proposal_store.get(pid).status == 'REJECTED'
+
+    def test_delete_terminal_with_force(self, proposal_store):
+        pid = proposal_store.add(_make_proposal())
+        proposal_store.update_status(pid, 'APPROVED')
+        proposal_store.update_status(pid, 'EXECUTED', order_ids=[7])
+        assert proposal_store.delete(pid, force=True) is True
+        assert proposal_store.get(pid) is None
+
+    def test_add_non_pending_status_refused(self, proposal_store):
+        """Proposals are born PENDING; every other state is only reachable
+        through the state machine (update_status / try_transition)."""
+        from trader.data.proposal_store import InvalidProposalTransition
+        from trader.trading.proposal import TradeProposal
+
+        for status in ('APPROVED', 'EXECUTED', 'REJECTED', 'EXPIRED', 'FAILED', 'BOGUS'):
+            with pytest.raises(InvalidProposalTransition):
+                proposal_store.add(TradeProposal(
+                    symbol='AMD', action='BUY', quantity=1.0, status=status))
+        assert proposal_store.query() == []
+
     def test_json_round_trip_execution(self, proposal_store):
         """Verify ExecutionSpec survives JSON serialization in DuckDB."""
         spec = ExecutionSpec(
@@ -288,6 +319,30 @@ class TestProposalStore:
     def test_update_metadata_nonexistent(self, proposal_store):
         """update_metadata on non-existent proposal does nothing."""
         proposal_store.update_metadata(999, {'key': 'value'})  # should not raise
+
+    def test_update_metadata_terminal_refused(self, proposal_store):
+        """Terminal proposals are immutable — including metadata. All the
+        propose() enrichment writes happen while the row is PENDING; a
+        post-terminal metadata write would mutate the audit record of a
+        completed trade."""
+        from trader.data.proposal_store import InvalidProposalTransition
+
+        pid = proposal_store.add(TradeProposal(
+            symbol='AMD', action='BUY', quantity=100,
+            metadata={'original_key': 'original_value'},
+        ))
+        proposal_store.update_metadata(pid, {'while_pending': True})  # fine
+        proposal_store.update_status(pid, 'APPROVED')
+        proposal_store.update_metadata(pid, {'while_approved': True})  # fine
+        proposal_store.update_status(pid, 'EXECUTED', order_ids=[1])
+        with pytest.raises(InvalidProposalTransition):
+            proposal_store.update_metadata(pid, {'tamper': True})
+        result = proposal_store.get(pid)
+        assert result.metadata == {
+            'original_key': 'original_value',
+            'while_pending': True,
+            'while_approved': True,
+        }
 
     def test_updated_at_changes_on_status_update(self, proposal_store):
         pid = proposal_store.add(_make_proposal())

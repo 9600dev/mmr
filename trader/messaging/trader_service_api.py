@@ -74,22 +74,6 @@ class TraderServiceApi(RPCHandler):
         debug: bool = False,
         skip_risk_gate: bool = False,
     ) -> SuccessFail[Trade]:
-        # Proposal-approval gate: when require_proposal_approval is on in
-        # trader.yaml, reject direct buy/sell unless the caller explicitly
-        # flagged this as a liquidation (skip_risk_gate=True). All actionable
-        # *new* trades have to come in via place_expressive_order, which the
-        # approve() path uses after a proposal has been reviewed. Defensive
-        # against LLM loops / scripts firing direct orders that weren't in
-        # a reviewed plan.
-        if getattr(self.trader, 'require_proposal_approval', False) and not skip_risk_gate:
-            return SuccessFail.fail(
-                error=(
-                    'Direct order rejected: require_proposal_approval is true. '
-                    'New trades must go through propose → approve (see `mmr propose` '
-                    'and `mmr approve`). Set skip_risk_gate=True only for '
-                    'liquidation paths (close-all, resize-positions).'
-                ),
-            )
         # todo: we'll have to make the cli async so we can subscribe to the trade
         # changes as orders get hit etc
         logging.warn('place_order_simple() is not complete, your mileage may vary')
@@ -105,6 +89,39 @@ class TraderServiceApi(RPCHandler):
         else:
             return SuccessFail.fail(
                 error=f'invalid action {action!r}: expected "BUY" or "SELL"')
+
+        # skip_risk_gate is kept for wire compatibility but no longer trusted:
+        # exemption is decided by asking the trader whether the order is
+        # exit-class (reduces the live broker position), never by the flag.
+        if skip_risk_gate:
+            logging.warning(
+                'place_order_simple: skip_risk_gate=True is deprecated and IGNORED — '
+                'exit-class orders are detected server-side from the live broker position')
+
+        # Proposal-approval gate: when require_proposal_approval is on in
+        # trader.yaml, reject direct buy/sell that would INCREASE exposure.
+        # Exit-class orders (closes — including close-all and resize deltas,
+        # which only ever reduce positions) are exempt: a close must never be
+        # blocked behind a proposal. All actionable *new* trades have to come
+        # in via place_expressive_order, which the approve() path uses after
+        # a proposal has been reviewed. Defensive against LLM loops / scripts
+        # firing direct orders that weren't in a reviewed plan.
+        if getattr(self.trader, 'require_proposal_approval', False):
+            is_exit = False
+            try:
+                is_exit = bool(self.trader.order_reduces_exposure(contract, _a, quantity))
+            except Exception as ex:
+                logging.warning(
+                    'proposal gate: exit-class check failed (%s) — treating as an open', ex)
+            if not is_exit:
+                return SuccessFail.fail(
+                    error=(
+                        'Direct order rejected: require_proposal_approval is true. '
+                        'New trades must go through propose → approve (see `mmr propose` '
+                        'and `mmr approve`). Orders that reduce an existing position '
+                        '(closes, resize trims) are exempt automatically.'
+                    ),
+                )
 
         task = asyncio.Event()
         disposable: DisposableBase = Disposable()

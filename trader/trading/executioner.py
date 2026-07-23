@@ -19,6 +19,7 @@ from trader.common.logging_helper import get_callstack, log_method, setup_loggin
 from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.data.universe import Universe, UniverseAccessor
 from trader.objects import Action, Basket, ContractOrderPair, ExecutorCondition
+from trader.trading.order_math import whole_shares_for_notional
 from trader.trading.order_validator import OrderValidator
 from trader.trading.risk_gate import RiskGate, RiskGateResult
 from typing import cast, List, Optional, TYPE_CHECKING
@@ -47,8 +48,19 @@ class TradeExecutioner():
         self.connected = True
 
     def _log_event(self, event_type: EventType, contract: Contract, order: Order,
-                   strategy_name: str = 'manual') -> None:
+                   strategy_name: Optional[str] = None, is_exit: bool = False) -> None:
         if hasattr(self.trader, 'event_store'):
+            # Stamp the real originator: the order's orderRef (approve derives
+            # it from proposal.metadata['strategy']; the direct path stamps its
+            # algo_name). That is exactly the source the risk gate's pseudo-
+            # signal names, so the open-rate check counts the right bucket
+            # instead of a dead 'manual'/'proposal' constant.
+            if strategy_name is None:
+                strategy_name = (getattr(order, 'orderRef', '') or '').strip() or 'manual'
+            # Exit-class submissions (closes, protective stops, bracket legs)
+            # are stamped so the rate limit — which counts only exposure-
+            # increasing opens — can exclude them.
+            metadata = {'exit_class': True} if is_exit else {}
             event = TradingEvent(
                 event_type=event_type,
                 timestamp=dt.datetime.now(),
@@ -59,6 +71,7 @@ class TradeExecutioner():
                 quantity=float(order.totalQuantity or 0),
                 price=float(order.lmtPrice or 0),
                 order_id=order.orderId or 0,
+                metadata=metadata,
             )
             self.trader.event_store.append(event)
 
@@ -66,6 +79,7 @@ class TradeExecutioner():
         self,
         contract: Contract,
         order: Order,
+        is_exit: bool = False,
     ) -> Observable[Trade]:
         def trader_exception_helper(ex):
             return rx.throw(
@@ -100,7 +114,7 @@ class TradeExecutioner():
         # turn a successful placement into a reported failure — a caller that
         # sees failure may retry and place a duplicate order. Isolate it.
         try:
-            self._log_event(EventType.ORDER_SUBMITTED, contract, order)
+            self._log_event(EventType.ORDER_SUBMITTED, contract, order, is_exit=is_exit)
         except Exception as ex:
             logging.error(
                 'order placed but ORDER_SUBMITTED event-store append failed '
@@ -114,16 +128,67 @@ class TradeExecutioner():
         contract_order: ContractOrderPair,
         condition: ExecutorCondition,
         skip_risk_gate: bool = False,
+        position_value_hint: Optional[float] = None,
     ) -> Observable[Trade]:
-        # Check trading filter (denylist/allowlist) if available
-        if not skip_risk_gate and getattr(self.trader, 'risk_gate', None) is not None:
-            instrument_result = self.trader.risk_gate.check_instrument(
-                symbol=contract_order.contract.symbol,
-                exchange=contract_order.contract.exchange or '',
-                sec_type=contract_order.contract.secType or '',
+        contract = contract_order.contract
+        order = contract_order.order
+
+        # skip_risk_gate stays in the signature for wire compatibility but is
+        # no longer trusted: whether gates apply is decided server-side by the
+        # exit-class predicate (does this order reduce the live position?),
+        # not by a client-supplied flag.
+        if skip_risk_gate:
+            logging.warning(
+                'place_order: skip_risk_gate=True is deprecated and IGNORED — '
+                'exit-class orders are detected server-side from the live broker position')
+
+        is_exit = self.trader.order_reduces_exposure(
+            contract, str(order.action), float(order.totalQuantity or 0))
+
+        # Hard attribute access — Trader.__init__ declares risk_gate = None,
+        # so a missing gate is a real None, and non-exit-class orders fail
+        # CLOSED against it rather than sailing through a getattr default.
+        gate = self.trader.risk_gate
+
+        if is_exit:
+            # Exit-class: never refusable by gates. Observability only.
+            if gate is not None:
+                try:
+                    instrument_result = gate.check_instrument(
+                        symbol=contract.symbol,
+                        exchange=contract.exchange or '',
+                        sec_type=contract.secType or '',
+                    )
+                    if not instrument_result.approved:
+                        logging.warning(
+                            'exit-class order %s %s %s would have been blocked by trading '
+                            'filter (%s) — exits are never gated',
+                            order.action, order.totalQuantity, contract.symbol,
+                            instrument_result.reason)
+                except Exception as ex:
+                    logging.warning('exit-class filter observability check errored: %s', ex)
+        else:
+            if gate is None:
+                logging.error(
+                    'risk gate unavailable — refusing exposure-increasing order %s %s %s '
+                    '(fail-closed)', order.action, order.totalQuantity, contract.symbol)
+                return rx.throw(
+                    trader_exception(
+                        trader=self.trader,
+                        exception_type=TraderException,
+                        message='risk gate unavailable — refusing exposure-increasing order '
+                                '(fail-closed; exit-class orders are exempt)'
+                    )
+                )
+
+            # Trading filter (denylist/allowlist)
+            instrument_result = gate.check_instrument(
+                symbol=contract.symbol,
+                exchange=contract.exchange or '',
+                sec_type=contract.secType or '',
             )
             if not instrument_result.approved:
-                self._log_event(EventType.RISK_GATE_REJECTED, contract_order.contract, contract_order.order)
+                self._log_event(EventType.RISK_GATE_REJECTED, contract, order)
                 logging.warning(f'trading filter rejected order: {instrument_result.reason}')
                 return rx.throw(
                     trader_exception(
@@ -133,22 +198,41 @@ class TradeExecutioner():
                     )
                 )
 
-        # Run through risk gate if available
-        if not skip_risk_gate and getattr(self.trader, 'risk_gate', None) is not None:
             from trader.trading.strategy import Signal
-            # Create a pseudo-signal for risk evaluation
+            # Create a pseudo-signal for risk evaluation. Its source_name must
+            # match what the ORDER_SUBMITTED event is stamped with (the order's
+            # orderRef) so the open-rate check queries the right bucket.
             signal = Signal(
-                source_name='manual',
-                action=Action.BUY if str(contract_order.order.action) == 'BUY' else Action.SELL,
+                source_name=(getattr(order, 'orderRef', '') or '').strip() or 'manual',
+                action=Action.BUY if str(order.action) == 'BUY' else Action.SELL,
                 probability=1.0,
                 risk=0.0,
             )
-            result = self.trader.risk_gate.evaluate(
+            # No hint from the caller but the order carries its own price —
+            # a limit order is always valuable for the concentration check.
+            if position_value_hint is None:
+                try:
+                    lmt = float(order.lmtPrice or 0)
+                    multiplier = float(contract.multiplier) if contract.multiplier else 1.0
+                    if lmt > 0:
+                        position_value_hint = abs(float(order.totalQuantity or 0)) * lmt * multiplier
+                except (TypeError, ValueError):
+                    pass
+
+            inputs = self.trader.gather_risk_inputs()
+            result = gate.evaluate(
                 signal=signal,
-                open_order_count=self.trader.book.get_open_order_count() if hasattr(self.trader, 'book') else 0,
+                open_order_count=inputs.open_order_count,
+                daily_pnl=inputs.daily_pnl,
+                portfolio_value=inputs.portfolio_value,
+                position_value=position_value_hint or 0.0,
+                daily_pnl_evaluable=inputs.daily_pnl_evaluable,
+                portfolio_value_evaluable=inputs.portfolio_value_evaluable,
+                position_value_evaluable=position_value_hint is not None,
+                sec_type=contract.secType or '',
             )
             if not result.approved:
-                self._log_event(EventType.RISK_GATE_REJECTED, contract_order.contract, contract_order.order)
+                self._log_event(EventType.RISK_GATE_REJECTED, contract, order)
                 logging.warning(f'risk gate rejected order: {result.reason}')
                 return rx.throw(
                     trader_exception(
@@ -171,7 +255,8 @@ class TradeExecutioner():
                 )
 
         logging.debug('placing order {}'.format(contract_order.order))
-        return await self.subscribe_place_order_direct(contract=contract_order.contract, order=contract_order.order)
+        return await self.subscribe_place_order_direct(
+            contract=contract_order.contract, order=contract_order.order, is_exit=is_exit)
 
     def place_basket(
         self,
@@ -220,19 +305,20 @@ class TradeExecutioner():
         order_price = 0.0
 
         if not quantity and equity_amount:
-            # assess if we should trade
+            # Size a BUY by what we'd pay (ask) and a SELL by what we'd
+            # receive (bid). Floors and refuses (ValueError) when the amount
+            # doesn't cover one whole share — never bumps to 1, which turned
+            # a small sized notional into an oversized full share.
             multiplier = float(contract.multiplier) if contract.multiplier else 1.0
-            quantity = equity_amount / (latest_tick.bid * multiplier)
-
-            if quantity < 1 and quantity > 0:
-                quantity = 1.0
-
-            # toddo round the quantity, but probably shouldn't do this given IB supports fractional shares.
-            quantity = round(quantity)
-
-        logging.debug('handle_order assessed quantity: {} on bid: {}'.format(
-            quantity, latest_tick.bid
-        ))
+            ref_price = latest_tick.ask if action == Action.BUY else latest_tick.bid
+            quantity = float(whole_shares_for_notional(equity_amount, ref_price, multiplier))
+            assert quantity * ref_price * multiplier <= equity_amount * 1.05, (
+                f'sized quantity {quantity} x {ref_price} x {multiplier} exceeds '
+                f'equity_amount {equity_amount}'
+            )
+            logging.debug('helper_create_order assessed quantity: {} on {} price: {}'.format(
+                quantity, 'ask' if action == Action.BUY else 'bid', ref_price
+            ))
 
         if limit_price:
             order_price = float(limit_price)

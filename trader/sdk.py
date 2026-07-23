@@ -410,6 +410,10 @@ class MMR:
             exchange=order_exchange,
             primaryExchange=primary_exchange,
             currency=sec.currency,
+            # Propagate the contract multiplier (OPT/FUT: e.g. '100') so notional
+            # sizing in approve() and the executioner divide by price × multiplier
+            # rather than the bare premium. Stocks/forex report '' → default.
+            multiplier=str(getattr(sec, 'multiplier', '') or ''),
         )
 
     # ------------------------------------------------------------------
@@ -1550,9 +1554,26 @@ class MMR:
                 # conversion (rate 1.0) when FX is unavailable or same-currency.
                 _cur = getattr(contract, 'currency', '') or proposal.currency or ''
                 _price_base = self._to_base(price, _cur, self._fx_rates())
-                qty = round(proposal.amount / (_price_base if _price_base > 0 else price))
-                if qty < 1:
-                    qty = 1
+                # Contract multiplier (OPT/FUT: e.g. 100) scales notional per
+                # contract — an option at $5 premium with multiplier 100 costs
+                # $500/contract, not $5. Without this, `amount` was divided by the
+                # bare premium and over-sized by the multiplier (100x). Stocks/forex
+                # report no multiplier → default 1.
+                _mult = float(getattr(contract, 'multiplier', None) or 1) or 1.0
+                from trader.trading.order_math import whole_shares_for_notional
+                try:
+                    qty = whole_shares_for_notional(
+                        proposal.amount, _price_base if _price_base > 0 else price,
+                        _mult)
+                except ValueError as ex:
+                    store.try_transition(proposal_id, 'APPROVED', 'FAILED')
+                    return SuccessFail.fail(
+                        error=(
+                            f'Proposal #{proposal_id}: amount {proposal.amount} at '
+                            f'price {price} yields no valid whole-share quantity ({ex})'
+                        ),
+                        exception=ex,
+                    )
 
             if qty is None or qty <= 0:
                 store.update_status(proposal_id, 'FAILED')
@@ -1842,6 +1863,46 @@ class MMR:
             'adjustments': adjustments,
         }
 
+    def _live_position_qty(self, con_id: int) -> float:
+        """Current signed broker position quantity for *con_id* (0 if flat/unknown)."""
+        if not con_id:
+            return 0.0
+        try:
+            pos_list = self._rpc.rpc(return_type=list[Position]).get_positions()
+        except Exception:
+            return 0.0
+        for p in pos_list or []:
+            if isinstance(p, (list, tuple)) and not hasattr(p, 'account'):
+                contract, position = p[1], p[2]
+            else:
+                contract, position = p.contract, p.position
+            con = self._extract_contract(contract)
+            if con.get('conId') == con_id:
+                return position or 0.0
+        return 0.0
+
+    def _await_grown_position(self, con_id: int, target_abs_qty: float,
+                              timeout: float = 20.0, interval: float = 1.0) -> bool:
+        """Poll the broker until the position magnitude reaches *target_abs_qty*.
+
+        A resize GROW delta is submitted as a market order that
+        ``place_order_simple`` resolves on submission, not fill. The re-created
+        protective must cover the grown quantity, but ``place_standalone_order``
+        refuses a quantity exceeding the live held position — so we must wait
+        for the fill to actually land before cancelling the old (smaller)
+        protective. Returns True once the position reflects the grown quantity,
+        False if the fill hasn't landed within the timeout (e.g. outside RTH the
+        market order may not fill for hours).
+        """
+        import time
+        deadline = time.monotonic() + timeout
+        while True:
+            if abs(self._live_position_qty(con_id)) >= target_abs_qty:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(interval)
+
     def execute_resize_plan(self, plan: dict) -> dict:
         """Execute a resize plan: cancel protective orders, place deltas, re-create protectives.
 
@@ -1933,6 +1994,30 @@ class MMR:
                     )
                     continue
             new_qty = abs(target_qty)
+
+            # GROW deltas (target magnitude > current) increase the position via
+            # a market order that place_order_simple resolves on SUBMISSION, not
+            # fill. Until the fill lands and the position event propagates, the
+            # broker still shows the OLD (smaller) quantity, and
+            # place_standalone_order's exit-class check refuses a protective whose
+            # quantity exceeds the held position. If we cancelled the old stop
+            # and then got refused, the grown position would be left NAKED. So
+            # wait (bounded) for the fill; if it doesn't confirm — outside RTH a
+            # market order may not fill for hours — leave the existing protectives
+            # IN PLACE (smaller-quantity protection is strictly safer than none)
+            # and flag for manual widening once the delta fills. Trims shrink the
+            # position and never enter this branch — their re-create is always
+            # <= held, so their path is unchanged.
+            if abs(target_qty) > abs(adj['current_qty']):
+                if not self._await_grown_position(adj.get('conId', 0), new_qty):
+                    held = abs(self._live_position_qty(adj.get('conId', 0)))
+                    results['warnings'].append(
+                        f'{symbol}: GREW toward {target_qty} but the delta had not filled '
+                        f'in time (likely outside RTH); existing protective orders LEFT IN '
+                        f'PLACE, still protecting the current {held:g}-share position — widen '
+                        f'to {new_qty} manually once the delta fills'
+                    )
+                    continue
 
             for order_info in associated:
                 oid = order_info['orderId']

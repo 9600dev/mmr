@@ -589,6 +589,23 @@ def build_parser() -> argparse.ArgumentParser:
     strat_inspect_p.add_argument('--strategy', default=None,
                                    help='Inspect a single strategy file (absolute or relative)')
 
+    # strategies gauntlet — the "no hash, no live" machine gate. Runs the
+    # import-allowlist scan, lookahead check, nasty-market battery, and PSR
+    # lookup against the EXACT source hash, and records the verdict. Deploy
+    # and enable refuse without a PASS record for the current file's hash.
+    strat_gauntlet_p = strat_sub.add_parser(
+        'gauntlet',
+        help='Run the pre-deploy gauntlet: imports, lookahead, nasty-market battery, PSR')
+    strat_gauntlet_p.add_argument('module_path',
+                                  help='Strategy module file (e.g. strategies/my_strategy.py)')
+    strat_gauntlet_p.add_argument('--class', dest='class_name', required=True,
+                                  help='Strategy class name')
+    strat_gauntlet_p.add_argument('--min-psr', dest='min_psr', type=float, default=None,
+                                  help='Enforce PSR >= F from the latest backtest of this exact '
+                                       'source hash (default: record-only, never fails on absence)')
+    strat_gauntlet_p.add_argument('--name', default=None,
+                                  help='Deployment name to record (default: class name)')
+
     # strategies create
     strat_create_p = strat_sub.add_parser('create', help='Create a strategy template file')
     strat_create_p.add_argument('name', help='Strategy name (e.g. my_strategy)')
@@ -604,6 +621,12 @@ def build_parser() -> argparse.ArgumentParser:
     strat_deploy_p.add_argument('--paper-only', action='store_true', default=False,
                                   help='Gate: refuse to load this strategy on a live trader_service. '
                                        'Use for untested/first-deploy strategies.')
+    strat_deploy_p.add_argument('--auto-execute', dest='auto_execute',
+                                  action='store_true', default=False,
+                                  help='Mark the strategy as auto-executing (can place orders). '
+                                       'A PASS gauntlet record for the exact source hash is REQUIRED '
+                                       'to deploy an auto_execute strategy; signal-only strategies '
+                                       '(the default) deploy with an advisory instead.')
     strat_deploy_p.add_argument('--module', default=None,
                                   help='Strategy module path (default: strategies/<name>.py). Set this '
                                        'when deploying the same strategy class under multiple names — '
@@ -3508,6 +3531,10 @@ def _handle_session(mmr: MMR, args: argparse.Namespace):
 def _handle_strategies(mmr: MMR, args: argparse.Namespace):
     action = getattr(args, 'strat_action', None)
     if action == 'enable':
+        refusal = _gauntlet_enable_refusal(args.name)
+        if refusal:
+            print_status(refusal, success=False)
+            return
         result = mmr.enable_strategy(args.name)
         if result.is_success():
             print_status(f'Enabled: {args.name}')
@@ -3547,6 +3574,8 @@ def _handle_strategies(mmr: MMR, args: argparse.Namespace):
         _handle_strategies_available(args)
     elif action == 'inspect':
         _handle_strategies_inspect(args)
+    elif action == 'gauntlet':
+        _handle_strategies_gauntlet(args)
     else:
         # Default: ask the running strategy_service what's actually loaded —
         # the local YAML is only the client's copy and can drift from the
@@ -4002,7 +4031,8 @@ def _handle_strategies_from_config():
         return
 
     with open(config_path, 'r') as f:
-        config = yaml.load(f, Loader=yaml.FullLoader) or {}
+        # safe_load refuses Python-object tags — YAML-injection hardening.
+        config = yaml.safe_load(f) or {}
 
     strategies = config.get('strategies', [])
     if not strategies:
@@ -4100,6 +4130,608 @@ class {class_name}(Strategy):
     print_status(f'Created strategy: {file_path} (class: {class_name})')
 
 
+# ------------------------------------------------------------------
+# Strategy gauntlet — the "no hash, no live" machine gate
+# ------------------------------------------------------------------
+#
+# A strategy source file must have a PASS gauntlet record for its EXACT
+# SHA-256 hash before `strategies deploy` / `strategies enable` will
+# accept it. There is deliberately no override flag — edit the file, run
+# the gauntlet again. StrategyRuntime.load_strategy carries the
+# authoritative server-side check for auto_execute strategies (the CLI
+# check alone is bypassable by hand-editing the YAML).
+
+# Imports a strategy is allowed to use. Everything else that isn't
+# explicitly denied is recorded as a warning (doesn't fail the stage).
+_GAUNTLET_ALLOWED_IMPORTS = frozenset({
+    '__future__',
+    'math', 'typing', 'dataclasses', 'datetime', 'enum', 'collections',
+    'abc', 'functools', 'itertools',
+    'numpy', 'pandas', 'scipy', 'numba', 'vectorbt', 'talib',
+    'trader.trading.strategy', 'trader.objects',
+})
+
+# Imports that always fail the gauntlet: network, process, filesystem and
+# interpreter escape hatches, plus the trading plumbing a strategy must
+# never reach around (order placement goes through the runtime, period).
+_GAUNTLET_DENIED_IMPORTS = (
+    'socket', 'subprocess', 'os', 'sys', 'requests', 'urllib', 'http',
+    'ib_async', 'trader.messaging', 'trader.sdk', 'importlib', 'ctypes',
+    'multiprocessing', 'threading', 'pickle', 'dill', 'shutil',
+)
+
+# Direct builtin calls that bypass the static import denylist entirely:
+# `__import__('os')`, `eval(...)`, `exec(...)`, `compile(...)`. S2/S3 import
+# and RUN the strategy in-process, so a side-effecting call here would
+# actually execute — S1 must catch these too, not just ast.Import nodes.
+_GAUNTLET_DENIED_CALLS = frozenset({'__import__', 'eval', 'exec', 'compile'})
+
+# Introspection builtins that can smuggle a denied import/attribute past the
+# denylist (`getattr(__builtins__, '__import__')(...)`). Denied only when they
+# target __builtins__ or a dunder name — ordinary attribute access is fine.
+_GAUNTLET_INTROSPECTION_CALLS = frozenset({'getattr', 'setattr', 'delattr'})
+
+# Attribute-form dynamic imports: `importlib.import_module(...)`,
+# `importlib.__import__(...)` (importlib itself is already a denied import,
+# but catch the call shape independently so an aliased/re-exported handle
+# still fails).
+_GAUNTLET_DENIED_CALL_ATTRS = frozenset({'import_module', '__import__'})
+
+
+def _gauntlet_db_path() -> str:
+    """DuckDB path for the gauntlet/backtest stores. Empty string when
+    unresolvable — callers treat that as 'gate cannot be verified' and
+    refuse (fail closed)."""
+    try:
+        from trader.container import Container
+        return Container.instance().config().get('duckdb_path', '') or ''
+    except Exception:
+        return ''
+
+
+def _gauntlet_match_rule(module: str, rule: str) -> bool:
+    return module == rule or module.startswith(rule + '.')
+
+
+def _gauntlet_is_dunder(name: str) -> bool:
+    return len(name) > 4 and name.startswith('__') and name.endswith('__')
+
+
+def _gauntlet_dynamic_call_problem(node) -> Optional[str]:
+    """Return a short label if this Call node is a dynamic-import /
+    interpreter-escape hatch that the import-node scan would miss, else
+    None. Covers `__import__/eval/exec/compile(...)`,
+    `importlib.import_module/__import__(...)`, and
+    `getattr/setattr/delattr(...)` targeting __builtins__ or a dunder."""
+    import ast
+
+    func = node.func
+    if isinstance(func, ast.Name):
+        if func.id in _GAUNTLET_DENIED_CALLS:
+            return f'{func.id}() call'
+        if func.id in _GAUNTLET_INTROSPECTION_CALLS:
+            for arg in node.args:
+                if isinstance(arg, ast.Name) and arg.id == '__builtins__':
+                    return f'{func.id}() targeting __builtins__'
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    if arg.value == '__builtins__' or _gauntlet_is_dunder(arg.value):
+                        return f'{func.id}() targeting {arg.value!r}'
+    elif isinstance(func, ast.Attribute):
+        if func.attr in _GAUNTLET_DENIED_CALL_ATTRS:
+            return f'.{func.attr}() dynamic import'
+    return None
+
+
+def _gauntlet_scan_imports(source: str) -> Dict[str, Any]:
+    """S1: STATIC advisory AST scan — NOT a security sandbox.
+
+    Denied imports and dynamic-import/escape-hatch calls fail with line
+    numbers; unknown-but-not-denied imports are warnings only. This is a
+    best-effort static check that catches the obvious ways a strategy can
+    reach the network / filesystem / interpreter (including the dynamic
+    forms `__import__`, `importlib.import_module`, `eval/exec/compile`, and
+    `getattr(__builtins__, ...)` that a plain ast.Import scan misses). It is
+    STATIC ONLY — S2/S3 still exec + run the strategy in THIS process, so a
+    sufficiently obfuscated payload can defeat it. True isolation (running
+    the untrusted module in a subprocess) is tranche 2."""
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as ex:
+        return {
+            'status': 'fail',
+            'denied': [],
+            'warnings': [],
+            'detail': f'source does not parse: {ex.msg} (line {ex.lineno})',
+            'advisory': 'S1 is a static advisory scan, not a security sandbox',
+        }
+
+    denied: List[Dict[str, Any]] = []
+    warnings: List[Dict[str, Any]] = []
+
+    def _classify(module: str, line: int) -> None:
+        if any(_gauntlet_match_rule(module, r) for r in _GAUNTLET_DENIED_IMPORTS):
+            denied.append({'module': module, 'line': line})
+        elif not any(_gauntlet_match_rule(module, r) for r in _GAUNTLET_ALLOWED_IMPORTS):
+            warnings.append({'module': module, 'line': line})
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                _classify(alias.name, node.lineno)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                # Relative import — can't resolve statically; warn.
+                warnings.append({
+                    'module': '.' * node.level + (node.module or ''),
+                    'line': node.lineno,
+                })
+            elif node.module:
+                _classify(node.module, node.lineno)
+        elif isinstance(node, ast.Call):
+            problem = _gauntlet_dynamic_call_problem(node)
+            if problem:
+                denied.append({'module': problem, 'line': node.lineno})
+
+    return {
+        'status': 'fail' if denied else 'pass',
+        'denied': denied,
+        'warnings': warnings,
+        'advisory': 'S1 is a static advisory scan, not a security sandbox',
+    }
+
+
+def _gauntlet_load_class(module_file: Path, class_name: str, code_hash: str):
+    """Import the strategy module (only after S1 passed) and return
+    ``(cls, None)`` or ``(None, error_message)``."""
+    import importlib.util
+
+    from trader.trading.strategy import Strategy
+
+    mod_name = f'_mmr_gauntlet_{code_hash[:12]}'
+    sys.modules.pop(mod_name, None)
+    try:
+        spec = importlib.util.spec_from_file_location(mod_name, str(module_file))
+        if not spec or not spec.loader:
+            return None, f'could not build an import spec for {module_file}'
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception as ex:
+            sys.modules.pop(mod_name, None)
+            return None, f'module import failed: {type(ex).__name__}: {ex}'
+    except Exception as ex:
+        return None, f'module import failed: {type(ex).__name__}: {ex}'
+
+    cls = getattr(module, class_name, None)
+    if cls is None:
+        return None, f'class {class_name!r} not found in {module_file}'
+    import inspect as _inspect
+    if not (_inspect.isclass(cls) and issubclass(cls, Strategy) and cls is not Strategy):
+        return None, f'{class_name!r} is not a Strategy subclass'
+    return cls, None
+
+
+def _gauntlet_new_instance(cls, frame=None):
+    """Instantiate + install a strategy with a minimal context (no storage,
+    no universe accessor) — the same shape the backtester uses."""
+    import datetime as _dt
+    import logging as _logging
+
+    from trader.objects import BarSize
+    from trader.trading.strategy import StrategyContext
+
+    bar_size = BarSize.Mins1
+    if frame is not None and len(frame.index) >= 2:
+        try:
+            if (frame.index[1] - frame.index[0]) >= _dt.timedelta(days=1):
+                bar_size = BarSize.Days1
+        except TypeError:
+            pass
+
+    instance = cls()
+    instance.install(StrategyContext(
+        name='gauntlet',
+        bar_size=bar_size,
+        conids=[0],
+        universe=None,
+        historical_days_prior=0,
+        paper_only=True,
+        storage=None,  # type: ignore[arg-type]
+        universe_accessor=None,  # type: ignore[arg-type]
+        logger=_logging.getLogger('gauntlet'),
+        class_name=cls.__name__,
+        params={},
+    ))
+    return instance
+
+
+def _gauntlet_check_lookahead(cls) -> Dict[str, Any]:
+    """S2: walk-forward consistency over the trending + choppy series.
+    Vacuous for on_prices-only strategies — recorded as not_evaluable,
+    which counts as pass-with-note, NOT fail."""
+    from trader.simulation import synthetic_markets
+    from trader.simulation.lookahead_check import LookaheadDetected, assert_no_lookahead
+    from trader.trading.strategy import Strategy
+
+    if cls.precompute is Strategy.precompute:
+        return {
+            'status': 'not_evaluable',
+            'note': 'on_prices-only strategy — precompute not implemented, '
+                    'lookahead check is vacuous',
+        }
+
+    any_state = False
+    for frame_name, frame in (
+        ('trending', synthetic_markets.ohlcv_trending()),
+        ('choppy', synthetic_markets.ohlcv_choppy()),
+    ):
+        instance = _gauntlet_new_instance(cls, frame)
+        try:
+            state = instance.precompute(frame)
+        except Exception as ex:
+            return {
+                'status': 'fail',
+                'frame': frame_name,
+                'detail': f'precompute raised {type(ex).__name__}: {ex}',
+            }
+        if not state:
+            continue
+        any_state = True
+        try:
+            assert_no_lookahead(instance, frame)
+        except LookaheadDetected as ex:
+            return {'status': 'fail', 'frame': frame_name, 'detail': str(ex)}
+        except Exception as ex:
+            return {
+                'status': 'fail',
+                'frame': frame_name,
+                'detail': f'lookahead check raised {type(ex).__name__}: {ex}',
+            }
+
+    if not any_state:
+        return {
+            'status': 'not_evaluable',
+            'note': 'precompute returned empty state on both series — '
+                    'nothing to audit',
+        }
+    return {'status': 'pass', 'frames': ['trending', 'choppy']}
+
+
+def _gauntlet_run_battery(cls) -> Dict[str, Any]:
+    """S3: run the strategy over every synthetic frame through the same
+    dispatch the backtester uses (precompute once, then on_bar per index —
+    the default on_bar falls back to on_prices over expanding windows).
+    Any exception or malformed Signal fails the stage."""
+    import numpy as np
+
+    from trader.objects import Action
+    from trader.simulation import synthetic_markets
+    from trader.trading.strategy import Signal, Strategy
+
+    fast_path = (cls.on_bar is not Strategy.on_bar
+                 or cls.precompute is not Strategy.precompute)
+
+    def _signal_problem(sig) -> Optional[str]:
+        if not isinstance(sig, Signal):
+            return f'returned {type(sig).__name__}, expected Signal or None'
+        if sig.action not in (Action.BUY, Action.SELL):
+            return f'malformed Signal: action {sig.action!r} not BUY/SELL'
+        try:
+            p = float(sig.probability)
+        except (TypeError, ValueError):
+            return f'malformed Signal: probability {sig.probability!r} is not a number'
+        if p != p or not (0.0 <= p <= 1.0):
+            return f'malformed Signal: probability {sig.probability!r} outside [0, 1]'
+        return None
+
+    frames_result: Dict[str, Dict[str, Any]] = {}
+    total_signals = 0
+    failed = False
+
+    for frame_name, frame in synthetic_markets.battery().items():
+        n = len(frame)
+        if fast_path:
+            indices = range(n)
+        else:
+            # on_prices fallback is O(N²) — sample indices for cost, always
+            # including the final bar.
+            indices = sorted(set(np.linspace(0, n - 1, num=min(n, 40), dtype=int).tolist()))
+        try:
+            instance = _gauntlet_new_instance(cls, frame)
+            state = instance.precompute(frame) or {}
+            signals = 0
+            problem = None
+            for idx in indices:
+                sig = instance.on_bar(frame, state, int(idx))
+                if sig is None:
+                    continue
+                problem = _signal_problem(sig)
+                if problem:
+                    problem = f'bar {idx}: {problem}'
+                    break
+                signals += 1
+            if problem:
+                frames_result[frame_name] = {'status': 'fail', 'detail': problem}
+                failed = True
+            else:
+                frames_result[frame_name] = {'status': 'pass', 'signals': signals}
+                total_signals += signals
+        except Exception as ex:
+            frames_result[frame_name] = {
+                'status': 'fail',
+                'detail': f'{type(ex).__name__}: {ex}',
+            }
+            failed = True
+
+    return {
+        'status': 'fail' if failed else 'pass',
+        'frames': frames_result,
+        'signals': total_signals,
+    }
+
+
+def _gauntlet_check_psr(code_hash: str, duckdb_path: str,
+                        min_psr: Optional[float]) -> Dict[str, Any]:
+    """S4: PSR of the latest backtest run for this exact source hash.
+    Record-only unless ``min_psr`` is given; never fails on absence."""
+    from types import SimpleNamespace
+
+    from trader.data.backtest_store import BacktestStore
+
+    result: Dict[str, Any] = {'min_psr': min_psr}
+    try:
+        store = BacktestStore(duckdb_path)
+        row = store.db.execute(
+            "SELECT id, trades_json, equity_curve_json, bar_size FROM backtest_runs "
+            "WHERE code_hash = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            [code_hash], fetch='one',
+        )
+    except Exception as ex:
+        result.update({
+            'status': 'not_evaluated',
+            'note': f'backtest store unavailable: {type(ex).__name__}: {ex}',
+        })
+        return result
+
+    if not row:
+        result.update({
+            'status': 'not_evaluated',
+            'note': 'no backtest run recorded for this code_hash',
+        })
+        return result
+
+    record = SimpleNamespace(trades_json=row[1], equity_curve_json=row[2], bar_size=row[3])
+    stats, reason = _compute_bt_stats(record)
+    result['run_id'] = row[0]
+    if stats.psr is None:
+        result.update({
+            'status': 'not_evaluated',
+            'note': reason or 'PSR not computable from the stored run',
+        })
+        return result
+
+    result['psr'] = stats.psr
+    if min_psr is None:
+        result.update({'status': 'pass', 'note': 'record-only (no --min-psr)'})
+    elif stats.psr >= min_psr:
+        result['status'] = 'pass'
+    else:
+        result.update({
+            'status': 'fail',
+            'note': f'PSR {stats.psr:.4f} < required {min_psr:.4f}',
+        })
+    return result
+
+
+def _gauntlet_run(module_file: Path, class_name: str, duckdb_path: str,
+                  min_psr: Optional[float] = None) -> Dict[str, Any]:
+    """Run all gauntlet stages against ``module_file`` and return
+    ``{'code_hash', 'verdict', 'checks'}``. Does not persist — the caller
+    records the result."""
+    from trader.data.backtest_store import compute_strategy_hash
+
+    code_hash = compute_strategy_hash(str(module_file))
+    if not code_hash:
+        raise ValueError(
+            f'cannot hash strategy source {module_file} — file unreadable'
+        )
+    source = module_file.read_text()
+
+    checks: Dict[str, Any] = {}
+    checks['s1_imports'] = _gauntlet_scan_imports(source)
+
+    if checks['s1_imports']['status'] != 'pass':
+        skipped = {
+            'status': 'not_evaluated',
+            'note': 'skipped: S1 denied imports — refusing to import the module',
+        }
+        checks['s2_lookahead'] = dict(skipped)
+        checks['s3_battery'] = dict(skipped)
+    else:
+        cls, err = _gauntlet_load_class(module_file, class_name, code_hash)
+        if err:
+            checks['s2_lookahead'] = {'status': 'fail', 'detail': err}
+            checks['s3_battery'] = {'status': 'fail', 'detail': err}
+        else:
+            checks['s2_lookahead'] = _gauntlet_check_lookahead(cls)
+            checks['s3_battery'] = _gauntlet_run_battery(cls)
+
+    checks['s4_psr'] = _gauntlet_check_psr(code_hash, duckdb_path, min_psr)
+
+    passed = (
+        checks['s1_imports']['status'] == 'pass'
+        and checks['s3_battery']['status'] == 'pass'
+        and checks['s2_lookahead']['status'] in ('pass', 'not_evaluable')
+        and checks['s4_psr']['status'] != 'fail'
+    )
+    return {
+        'code_hash': code_hash,
+        'verdict': 'PASS' if passed else 'FAIL',
+        'checks': checks,
+    }
+
+
+def _gauntlet_pass_refusal(module_file: Path, class_name: str,
+                           display_module: str) -> Optional[str]:
+    """None when the file's current hash has a PASS gauntlet record; else
+    the refusal message (which names the exact command to run). Any failure
+    to *verify* the gate refuses too — no hash, no live."""
+    from trader.data.backtest_store import compute_strategy_hash
+    from trader.data.gauntlet_store import GauntletStore
+
+    code_hash = compute_strategy_hash(str(module_file))
+    if not code_hash:
+        return f'cannot hash strategy source {module_file} (file unreadable)'
+
+    duckdb_path = _gauntlet_db_path()
+    if not duckdb_path:
+        return ('gauntlet store unavailable (duckdb_path not configured) — '
+                'no hash, no live')
+    try:
+        # Keyed on (hash, class): a PASS authorizes only the exact class it
+        # was run against, so a second untested class in the same file does
+        # not inherit the verdict.
+        if GauntletStore(duckdb_path).has_pass(code_hash, class_name):
+            return None
+    except Exception as ex:
+        return (f'gauntlet store error ({type(ex).__name__}: {ex}) — '
+                f'no hash, no live')
+
+    return (f'no PASS gauntlet record for {display_module} '
+            f'(source hash {code_hash[:12]}…). Run: '
+            f'mmr strategies gauntlet {display_module} --class {class_name}')
+
+
+def _gauntlet_enable_refusal(name: str) -> Optional[str]:
+    """Gate for `strategies enable`: the named strategy's current source
+    hash must hold a PASS gauntlet record. Returns the refusal message or
+    None. Anything unverifiable (missing YAML entry, missing module file)
+    refuses — enabling a strategy we can't hash is exactly the hole the
+    gauntlet closes."""
+    import yaml
+
+    config_path = Path('~/.config/mmr/strategy_runtime.yaml').expanduser()
+    if not config_path.exists():
+        return (f'enable refused: no strategy_runtime.yaml at {config_path} — '
+                f'cannot verify gauntlet status for {name!r}')
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f) or {}
+    entry = next(
+        (s for s in config.get('strategies', []) if s.get('name') == name), None)
+    if entry is None:
+        return (f'enable refused: strategy {name!r} not found in {config_path} — '
+                f'cannot verify gauntlet status')
+
+    module_path = entry.get('module') or f'strategies/{name}.py'
+    class_name = entry.get('class_name') or ''.join(
+        word.capitalize() for word in name.split('_'))
+    resolved = Path(_resolve_strategy_path(module_path))
+    if not resolved.exists():
+        return f'enable refused: strategy module not found: {module_path}'
+
+    refusal = _gauntlet_pass_refusal(resolved, class_name, module_path)
+    if not refusal:
+        return None
+
+    # Scope the REQUIREMENT to strategies that can actually place orders.
+    # A signal-only strategy (auto_execute:false) cannot trade, so a missing
+    # PASS is advisory friction with no safety benefit — enable it, but emit
+    # the gauntlet status as a warning so it's still visible.
+    if not bool(entry.get('auto_execute', False)):
+        print_status(f'gauntlet advisory (auto_execute:false, cannot place '
+                     f'orders): {refusal}', success=False)
+        return None
+
+    return f'enable refused: {refusal}'
+
+
+def _handle_strategies_gauntlet(args: argparse.Namespace):
+    """Run the gauntlet stages, persist the verdict keyed by source hash,
+    and render the per-stage results."""
+    from trader.data.gauntlet_store import GauntletRecord, GauntletStore
+
+    resolved = Path(_resolve_strategy_path(args.module_path))
+    if not resolved.exists():
+        print_status(f'strategy module not found: {args.module_path}', success=False)
+        return
+
+    duckdb_path = _gauntlet_db_path()
+    if not duckdb_path:
+        print_status('duckdb_path not configured — cannot record gauntlet runs',
+                     success=False)
+        return
+
+    try:
+        result = _gauntlet_run(resolved, args.class_name, duckdb_path,
+                               min_psr=getattr(args, 'min_psr', None))
+    except ValueError as ex:
+        print_status(str(ex), success=False)
+        return
+
+    store = GauntletStore(duckdb_path)
+    run_id = store.record(GauntletRecord(
+        strategy_name=getattr(args, 'name', None) or args.class_name,
+        module_path=str(resolved),
+        class_name=args.class_name,
+        code_hash=result['code_hash'],
+        verdict=result['verdict'],
+        checks=result['checks'],
+    ))
+
+    if _json_mode:
+        print(json.dumps({
+            'data': {
+                'run_id': run_id,
+                'verdict': result['verdict'],
+                'code_hash': result['code_hash'],
+                'checks': result['checks'],
+            },
+            'title': 'Strategy Gauntlet',
+        }, default=str))
+        return
+
+    from rich.table import Table as _RTable
+    tbl = _RTable(title=f'Gauntlet #{run_id} — {args.class_name} '
+                        f'({result["code_hash"][:12]}…)')
+    tbl.add_column('stage', style='bold', no_wrap=True)
+    tbl.add_column('status', no_wrap=True)
+    tbl.add_column('detail', overflow='fold')
+    _status_style = {
+        'pass': '[green]pass[/green]',
+        'fail': '[red]fail[/red]',
+        'not_evaluable': '[yellow]not_evaluable[/yellow]',
+        'not_evaluated': '[yellow]not_evaluated[/yellow]',
+    }
+    for stage, check in result['checks'].items():
+        status = check.get('status', '?')
+        detail_parts = []
+        for key in ('detail', 'note'):
+            if check.get(key):
+                detail_parts.append(str(check[key]))
+        if stage == 's1_imports':
+            for d in check.get('denied', []):
+                detail_parts.append(f"denied: {d['module']} (line {d['line']})")
+            for w in check.get('warnings', []):
+                detail_parts.append(f"unknown import: {w['module']} (line {w['line']})")
+        if stage == 's3_battery' and 'frames' in check:
+            for fname, fres in check['frames'].items():
+                if fres.get('status') == 'fail':
+                    detail_parts.append(f"{fname}: {fres.get('detail', '')}")
+        if stage == 's4_psr' and check.get('psr') is not None:
+            detail_parts.append(f"psr={check['psr']:.4f}")
+        tbl.add_row(stage, _status_style.get(status, status), '; '.join(detail_parts) or '—')
+    console.print(tbl)
+    if result['verdict'] == 'PASS':
+        print_status(f'Gauntlet PASS — hash {result["code_hash"][:12]}… may now be '
+                     f'deployed/enabled')
+    else:
+        print_status('Gauntlet FAIL — this source hash cannot be deployed or enabled',
+                     success=False)
+
+
 def _handle_strategy_deploy(args: argparse.Namespace):
     """Deploy a strategy to strategy_runtime.yaml.
 
@@ -4118,7 +4750,8 @@ def _handle_strategy_deploy(args: argparse.Namespace):
         config = {'strategies': []}
     else:
         with open(config_path, 'r') as f:
-            config = yaml.load(f, Loader=yaml.FullLoader) or {'strategies': []}
+            # safe_load refuses Python-object tags — YAML-injection hardening.
+            config = yaml.safe_load(f) or {'strategies': []}
 
     strategies = config.get('strategies', [])
 
@@ -4134,41 +4767,58 @@ def _handle_strategy_deploy(args: argparse.Namespace):
     # all pointing at the single source file.
     module_path = getattr(args, 'module', None) or f'strategies/{name}.py'
 
+    # The module file must exist and contain the class. A YAML entry
+    # pointing at a missing file (or a mistyped class) loads nothing and
+    # the strategy sits silently dead — refuse at deploy time instead.
+    import ast
+    strategy_file = Path(_resolve_strategy_path(module_path))
+    if not strategy_file.exists():
+        print_status(f'strategy module not found: {module_path} — deploy refused',
+                     success=False)
+        return
+    try:
+        tree = ast.parse(strategy_file.read_text())
+    except SyntaxError as ex:
+        print_status(f'strategy module {module_path} does not parse '
+                     f'(line {ex.lineno}: {ex.msg}) — deploy refused', success=False)
+        return
+    class_defs = {node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)}
+
     # Class name: use --class if given, else parse the module for the
     # first Strategy subclass, else CamelCase the name as last resort.
     class_name = getattr(args, 'class_name', None)
     if not class_name:
-        # Try common locations for the module file (project root and its
-        # parent, so invocations from subdirs resolve).
-        strategy_file = Path(module_path)
-        if not strategy_file.is_absolute() and not strategy_file.exists():
-            # Walk up from this file looking for the project root
-            cur = Path(__file__).resolve().parent
-            while cur != cur.parent:
-                candidate = cur / module_path
-                if candidate.exists():
-                    strategy_file = candidate
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                for base in node.bases:
+                    base_name = base.id if isinstance(base, ast.Name) else (
+                        base.attr if isinstance(base, ast.Attribute) else ''
+                    )
+                    if base_name == 'Strategy':
+                        class_name = node.name
+                        break
+                if class_name:
                     break
-                cur = cur.parent
-        if strategy_file.exists():
-            import ast
-            try:
-                tree = ast.parse(strategy_file.read_text())
-                for node in ast.walk(tree):
-                    if isinstance(node, ast.ClassDef):
-                        for base in node.bases:
-                            base_name = base.id if isinstance(base, ast.Name) else (
-                                base.attr if isinstance(base, ast.Attribute) else ''
-                            )
-                            if base_name == 'Strategy':
-                                class_name = node.name
-                                break
-                        if class_name:
-                            break
-            except Exception:
-                pass
     if not class_name:
         class_name = ''.join(word.capitalize() for word in name.split('_'))
+    if class_name not in class_defs:
+        print_status(f'class {class_name!r} not found in {module_path} — deploy refused',
+                     success=False)
+        return
+
+    # "No hash, no live": the current source hash must hold a PASS gauntlet
+    # record — but only for strategies that can actually trade. An
+    # auto_execute strategy without a PASS is refused (no override flag —
+    # run the gauntlet instead); a signal-only strategy deploys with an
+    # advisory, since it cannot place any order.
+    auto_execute = bool(getattr(args, 'auto_execute', False))
+    refusal = _gauntlet_pass_refusal(strategy_file, class_name, module_path)
+    if refusal:
+        if auto_execute:
+            print_status(f'deploy refused: {refusal}', success=False)
+            return
+        print_status(f'gauntlet advisory (auto_execute:false, cannot place '
+                     f'orders): {refusal}', success=False)
 
     # Params override: parse JSON, land in the YAML ``params:`` field.
     # strategy_runtime.py:387 already reads ``params=strategy_config.get('params', {})``
@@ -4194,6 +4844,8 @@ def _handle_strategy_deploy(args: argparse.Namespace):
     }
     if getattr(args, 'paper_only', False):
         entry['paper_only'] = True
+    if auto_execute:
+        entry['auto_execute'] = True
 
     if args.conids:
         entry['conids'] = args.conids
@@ -4317,7 +4969,8 @@ def _handle_strategy_undeploy(args: argparse.Namespace):
         return
 
     with open(config_path, 'r') as f:
-        config = yaml.load(f, Loader=yaml.FullLoader) or {'strategies': []}
+        # safe_load refuses Python-object tags — YAML-injection hardening.
+        config = yaml.safe_load(f) or {'strategies': []}
 
     strategies = config.get('strategies', [])
     original_count = len(strategies)
@@ -4780,7 +5433,8 @@ def _handle_strategy_backtest(args: argparse.Namespace):
         return
 
     with open(config_path, 'r') as f:
-        config = yaml.load(f, Loader=yaml.FullLoader) or {}
+        # safe_load refuses Python-object tags — YAML-injection hardening.
+        config = yaml.safe_load(f) or {}
 
     strategies = config.get('strategies', [])
     found = None

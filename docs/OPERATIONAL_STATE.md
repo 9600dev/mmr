@@ -33,6 +33,53 @@ to `kill -9` and let supervise recreate it; (2) after a trader_service-only
 restart the strategy_service reconcile loop re-subscribed market data on its
 own within ~4 min (tick flow resumed without touching strategy_service).
 
+## 2026-07-23 — tranche-1 safety upgrades landed in repo (NOT deployed)
+
+The safety tranche described in `docs/SAFETY_ROADMAP.md` is in the working
+tree only — **the running container is still on pre-tranche code**. Summary:
+exit-class trust boundary (gates apply only to exposure-increasing orders;
+exits never refusable; `skip_risk_gate` deprecated/ignored;
+`place_standalone_order` exit-class-only; fail-closed missing gate;
+tri-state risk checks; `risk_limits:` configurable in trader.yaml), order
+math (`whole_shares_for_notional` floor+refuse — the BRK.A-class bump bug —
+BUY sized by ask / SELL by bid), always-on restricted unpickler in the ZMQ
+layer, and the strategy gauntlet ("no hash, no live"; warn-only at load by
+default).
+
+**Deployment checklist** (in order, OUTSIDE market hours):
+
+1. `./docker.sh -B before_tranche1` — snapshot the DBs.
+2. `./docker.sh -s` to sync code, then restart **both** trader_service and
+   strategy_service (expect the SIGTERM wedge from the 07-23 note above —
+   escalate to `kill -9` and let supervise recreate).
+3. `mmr verify` (add `--expect-running N` for the armed roster count).
+4. Run the gauntlet **in-container** for every armed strategy
+   (`mmr strategies gauntlet <module> --class <Class>`). PASS records must
+   live in the container's DuckDB (`mmr_db_data` volume) — host-side runs
+   don't count for the in-container arm gate. Host smoke run 07-23:
+   ORB + Keltner **PASS**; SMICrossOver **FAILS S1** (imports `ib_async` —
+   must be fixed before it can ever arm again).
+5. Only after a clean warn-only session with zero gauntlet warnings for the
+   intended roster, consider `MMR_GAUNTLET_ENFORCE=1` (unverified
+   auto_execute strategies then load DISARMED — still able to close).
+
+**Expect in the first session's logs after deploy:**
+
+- Brief **open-refusals right after connect** while IB's PnL/account feeds
+  warm up: "daily PnL could not be read — refusing to open new exposure
+  (fail-closed)" and the NetLiquidation equivalent. By design; self-clears
+  in seconds; **closes are never affected**. Only escalate if refusals
+  persist past feed warm-up.
+- `skip_risk_gate=True is deprecated and IGNORED` warnings from legacy
+  callers (close-all still passes it) — harmless, closes are exit-class
+  exempt server-side now.
+- Gauntlet warn-only lines on strategy load until step 4-5 are done.
+
+**Known limitation:** `resize-positions --min-bound` (grow) BUY deltas are
+exposure-increasing and get refused under `require_proposal_approval: true`;
+trims are unaffected. Grow-resize needs its own reviewed path if ever
+needed (SAFETY_ROADMAP tranche 2).
+
 ## 2026-07-22 — live-semantics re-validation + protective stops
 
 **The 2026-07-17 verdicts below are SUPERSEDED.** Reading the live book

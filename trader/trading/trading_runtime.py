@@ -20,7 +20,7 @@ from trader.data.data_access import PortfolioSummary, SecurityDefinition, TickSt
 from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
-from trader.trading.risk_gate import RiskGate, RiskLimits
+from trader.trading.risk_gate import RiskGate, RiskInputs, RiskLimits
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
 from trader.messaging.clientserver import MessageBusServer, MultithreadedTopicPubSub, RPCClient, RPCServer
 from trader.objects import Action, ContractOrderPair, ExecutorCondition
@@ -33,6 +33,7 @@ from typing import cast, Dict, List, NamedTuple, Optional, Tuple, Union
 import asyncio
 import backoff
 import datetime as dt
+import math
 import reactivex as rx
 import reactivex.operators as ops
 import threading
@@ -88,11 +89,11 @@ class Trader():
         self.simulation: bool = simulation
         self.paper_trading = paper_trading
         # When True, `place_order_simple` (the direct buy/sell RPC path) is
-        # rejected unless the caller explicitly sets `skip_risk_gate=True`
-        # (close-all / liquidation). All actionable new trades must come
-        # in through `place_expressive_order`, which the approve() CLI /
-        # helper use after a proposal is reviewed. Defensive gate against
-        # LLM loops drifting off-plan and firing direct orders.
+        # rejected unless the order is exit-class (it reduces the live broker
+        # position — see order_reduces_exposure). All actionable new trades
+        # must come in through `place_expressive_order`, which the approve()
+        # CLI / helper use after a proposal is reviewed. Defensive gate
+        # against LLM loops drifting off-plan and firing direct orders.
         self.require_proposal_approval: bool = require_proposal_approval
         self.zmq_pubsub_server_address = zmq_pubsub_server_address
         self.zmq_pubsub_server_port = zmq_pubsub_server_port
@@ -133,6 +134,10 @@ class Trader():
         # The main event loop, captured on connect(). Used when IB callbacks
         # fire on threads other than the loop thread.
         self._main_loop: Optional[asyncio.AbstractEventLoop] = None
+        # Risk gate — constructed in connect() before the RPC server serves.
+        # Declared None here so gate consumers use hard attribute access and a
+        # missing gate fails CLOSED (non-exit-class orders refused), never open.
+        self.risk_gate: Optional[RiskGate] = None
         # takes care of execution of orders
         self.executioner: TradeExecutioner
         # a list of all the universes of stocks we have registered
@@ -281,7 +286,7 @@ class Trader():
 
             # initialize event store and risk gate
             self.event_store = EventStore(self.duckdb_path)
-            self.risk_gate = RiskGate(RiskLimits(), self.event_store)
+            self.risk_gate = RiskGate(RiskLimits.load(), self.event_store)
 
             # The order-lifecycle tracker itself is built in __init__ (so it
             # exists before the first connected_event runs); wire its event store
@@ -953,6 +958,170 @@ class Trader():
             'warningText': order_state.warningText,
         }
 
+    def _signed_position(self, conid: int) -> Optional[float]:
+        """Live broker position (signed) for ``conid`` in the pinned account.
+
+        Returns 0.0 for a conId we hold no position in, and None when the
+        position read itself failed — callers must treat None as "unknown",
+        which the exit-class predicate maps to "not an exit" (fail-closed:
+        an order we can't prove reduces exposure gets gated like an open).
+        """
+        try:
+            positions = self.get_positions()
+        except Exception as ex:
+            logging.warning('could not read broker positions for exit-class check: %s', ex)
+            return None
+        total = 0.0
+        for p in positions or []:
+            c = getattr(p, 'contract', None)
+            if c is not None and int(getattr(c, 'conId', 0) or 0) == conid:
+                total += float(getattr(p, 'position', 0.0) or 0.0)
+        return total
+
+    def _signed_position_by_symbol(self, symbol: str) -> Optional[float]:
+        """Live broker position (signed) summed across every row whose
+        contract symbol matches ``symbol``. Fallback for the exit-class
+        predicate when the order's conId doesn't resolve to a position row
+        (missing conId, cache lag, conId change). None on a failed read.
+        """
+        try:
+            positions = self.get_positions()
+        except Exception as ex:
+            logging.warning('could not read broker positions for symbol exit-class check: %s', ex)
+            return None
+        total = 0.0
+        for p in positions or []:
+            c = getattr(p, 'contract', None)
+            if c is not None and (getattr(c, 'symbol', '') or '') == symbol:
+                total += float(getattr(p, 'position', 0.0) or 0.0)
+        return total
+
+    def order_reduces_exposure(self, contract: Contract, action: str, quantity: float) -> bool:
+        """The single server-side EXIT-CLASS predicate: True iff placing
+        ``action quantity`` on ``contract`` reduces the live broker position
+        for its conId — a SELL against ANY net-long position, or a BUY against
+        ANY net-short. It is direction-aware, not size-clamped: you cannot
+        INCREASE a long by selling, so an oversized SELL of a held long (a
+        flip) is still exit-class and must never be refused as an open —
+        refusing an exit is worse than any limit. Callers that must not
+        OVERSELL (protective orders) clamp qty separately.
+
+        Only a SELL with no long (opening a short) or a BUY with no short is a
+        true open. No matching position or an unreadable portfolio returns
+        False (gated like an open, fail-closed). When the order's conId is
+        missing or its position row hasn't landed yet (cache lag right after a
+        fill, or a conId change), a same-symbol position is used as a fallback
+        — exit-class detection only (gate exemption), never contract
+        resolution.
+        """
+        try:
+            conid = int(getattr(contract, 'conId', 0) or 0)
+            qty = float(quantity or 0.0)
+        except (TypeError, ValueError):
+            return False
+        if qty <= 0 or not math.isfinite(qty):
+            return False
+        act = str(action).strip().upper()
+        if act not in ('BUY', 'SELL'):
+            return False
+        held = self._signed_position(conid) if conid > 0 else None
+        if held is None or held == 0.0:
+            symbol = (getattr(contract, 'symbol', '') or '').strip()
+            if symbol:
+                by_symbol = self._signed_position_by_symbol(symbol)
+                if by_symbol is not None and by_symbol != 0.0:
+                    held = by_symbol
+        if held is None:
+            return False
+        if act == 'SELL':
+            return held > 0
+        return held < 0
+
+    def _has_today_trading_activity(self) -> bool:
+        """True if the account holds any position OR booked any fill today.
+
+        Used to disambiguate an empty PnL cache: with activity present, an
+        empty cache means the feed hasn't warmed (fail-closed on opens); with
+        genuinely no activity, an empty cache is a real flat 0.0. An
+        unreadable state returns True (assume activity → fail-closed).
+        """
+        try:
+            if self.get_positions():
+                return True
+        except Exception as ex:
+            logging.warning('risk inputs: could not read positions for activity check: %s', ex)
+            return True
+        try:
+            midnight = dt.datetime.combine(dt.date.today(), dt.time.min)
+            return self.event_store.count_since(
+                since=midnight, event_type=EventType.ORDER_FILLED) > 0
+        except Exception as ex:
+            logging.warning('risk inputs: could not read fills for activity check: %s', ex)
+            return True
+
+    def gather_risk_inputs(self) -> RiskInputs:
+        """Read the account state the risk gate needs, marking per-field
+        evaluability — "read succeeded, value is 0" is distinct from "could
+        not read". Shared by every gate call site (executioner.place_order
+        and place_expressive_order) so daily-loss and concentration are
+        never silently no-op'd against defaults.
+        """
+        open_order_count = self.book.get_open_order_count() if hasattr(self, 'book') else 0
+
+        daily_pnl = 0.0
+        daily_pnl_evaluable = True
+        try:
+            pnl_items = list(self.get_pnl() or [])
+        except Exception as ex:
+            logging.warning('risk inputs: could not read daily PnL: %s', ex)
+            pnl_items = []
+            daily_pnl_evaluable = False
+
+        if daily_pnl_evaluable and not pnl_items:
+            # An empty PnLSingle cache is ambiguous: genuinely flat-with-no-
+            # activity (0.0 is the truth) vs the feed simply hasn't warmed yet
+            # after a mid-day restart (0.0 is a LIE — realized losses booked
+            # earlier are invisible). If the account holds positions or booked
+            # any fill today, the feed hasn't populated: treat daily_pnl as
+            # NOT-evaluable so the gate fails closed on opens until it warms,
+            # rather than approving blind to today's loss. Exits are unaffected.
+            if self._has_today_trading_activity():
+                daily_pnl_evaluable = False
+        elif daily_pnl_evaluable:
+            for p in pnl_items:
+                value = float(getattr(p, 'dailyPnL', 0.0) or 0.0)
+                if not math.isfinite(value):
+                    # IB hasn't delivered this position's PnL yet — the sum
+                    # would be a lie, not a zero.
+                    daily_pnl_evaluable = False
+                    daily_pnl = 0.0
+                    break
+                daily_pnl += value
+
+        portfolio_value = 0.0
+        portfolio_value_evaluable = False
+        try:
+            active_account = self.ib_account or (
+                (self.client.ib.managedAccounts() or [None])[0])
+            for v in self.client.ib.accountValues():
+                if v.tag != 'NetLiquidation' or v.currency == 'BASE':
+                    continue
+                if active_account and v.account and v.account != active_account:
+                    continue
+                portfolio_value = float(v.value)
+                portfolio_value_evaluable = True
+                break
+        except Exception as ex:
+            logging.warning('risk inputs: could not read NetLiquidation: %s', ex)
+
+        return RiskInputs(
+            open_order_count=open_order_count,
+            daily_pnl=daily_pnl,
+            daily_pnl_evaluable=daily_pnl_evaluable,
+            portfolio_value=portfolio_value,
+            portfolio_value_evaluable=portfolio_value_evaluable,
+        )
+
     @log_method
     async def place_expressive_order(
         self,
@@ -993,111 +1162,143 @@ class Trader():
                 return LimitOrder(lmtPrice=spec.limit_price, **common)
 
         # --- Pre-trade risk checks ---
+        #
+        # Exit-class orders (the entry action reduces the live broker position
+        # — e.g. an AutoExecutor close, a strategy's own exit after its
+        # protective stop was cancelled) are exempt from every gate: refusing
+        # an exit is worse than any limit. Opens keep filter + leverage + gate.
+        is_exit = self.order_reduces_exposure(contract, action, quantity)
 
-        # 0. Trading filter check (denylist/allowlist)
-        if getattr(self, 'risk_gate', None) is not None:
+        if is_exit:
+            if self.risk_gate is not None:
+                # Observability only — never refuse an exit.
+                try:
+                    instrument_result = self.risk_gate.check_instrument(
+                        symbol=contract.symbol, exchange=contract.exchange or '',
+                        sec_type=contract.secType or '',
+                    )
+                    if not instrument_result.approved:
+                        logging.warning(
+                            'exit-class order %s %s %s would have been blocked by trading '
+                            'filter (%s) — exits are never gated',
+                            action, quantity, contract.symbol, instrument_result.reason)
+                except Exception as ex:
+                    logging.warning('exit-class filter observability check errored: %s', ex)
+        else:
+            # 0. Fail closed: a non-exit-class order with no gate is refused.
+            if self.risk_gate is None:
+                return SuccessFail.fail(
+                    error='risk gate unavailable — refusing exposure-increasing order '
+                          '(fail-closed; exit-class orders are exempt)')
+
+            # 1. Trading filter check (denylist/allowlist)
             instrument_result = self.risk_gate.check_instrument(
                 symbol=contract.symbol, exchange=contract.exchange or '', sec_type=contract.secType or '',
             )
             if not instrument_result.approved:
                 return SuccessFail.fail(error=instrument_result.reason)
 
-        # Build a temporary entry order for margin simulation
-        probe_order = _build_entry(**common)
+            # Build a temporary entry order for margin simulation
+            probe_order = _build_entry(**common)
 
-        # 1. whatIfOrder margin check
-        margin_impact = None
-        try:
-            margin_impact = await self.check_order_margin(contract, probe_order)
-        except Exception as ex:
-            logging.warning(f'whatIfOrder failed, proceeding without margin check: {ex}')
-
-        # 2. Leverage limit check
-        if margin_impact and getattr(self, 'risk_gate', None) is not None:
-            # Scope NetLiquidation to the configured account. With a
-            # multi-account login, accountValues() returns rows for every
-            # managed account; picking the first NetLiquidation row blind
-            # could size the leverage check against the wrong (e.g. master
-            # aggregate) account. Pin to self.ib_account.
-            active_account = self.ib_account
-            if not active_account:
-                managed = self.client.ib.managedAccounts() or []
-                active_account = managed[0] if managed else None
-            net_liq = 0.0
-            for v in self.client.ib.accountValues():
-                if v.tag != 'NetLiquidation' or v.currency == 'BASE':
-                    continue
-                if active_account and v.account and v.account != active_account:
-                    continue
-                net_liq = float(v.value)
-                break
-
-            leverage_result = self.risk_gate.check_leverage(margin_impact, net_liq)
-            if not leverage_result.approved:
-                return SuccessFail.fail(error=leverage_result.reason)
-
-        # 3. Risk gate checks (open orders, daily loss, concentration)
-        if getattr(self, 'risk_gate', None) is not None:
-            from trader.trading.strategy import Signal
-            signal = Signal(
-                source_name='proposal',
-                action=Action.BUY if action == 'BUY' else Action.SELL,
-                probability=1.0,
-                risk=0.0,
-            )
-
-            # Count only *working* orders, not every order ever booked — else the
-            # limit trips permanently mid-session and blocks all trading.
-            open_order_count = (
-                self.book.get_open_order_count() if hasattr(self, 'book') else 0
-            )
-
-            # Feed the daily-loss and concentration limits the state they need —
-            # previously only open_order_count was passed, so those two limits were
-            # dead code. Best-effort; on any read failure they degrade to 0 (skip)
-            # rather than blocking the order.
-            daily_pnl = 0.0
+            # 2. whatIfOrder margin check
+            margin_impact = None
             try:
-                for p in (self.get_pnl() or []):
-                    daily_pnl += float(getattr(p, 'dailyPnL', 0.0) or 0.0)
+                margin_impact = await self.check_order_margin(contract, probe_order)
             except Exception as ex:
-                logging.warning('risk gate: could not read daily PnL: %s', ex)
+                logging.warning(f'whatIfOrder failed, proceeding without margin check: {ex}')
 
-            portfolio_value = 0.0
-            try:
-                active_account = self.ib_account or (
-                    (self.client.ib.managedAccounts() or [None])[0])
+            # 3. Leverage limit check
+            if margin_impact:
+                # Scope NetLiquidation to the configured account. With a
+                # multi-account login, accountValues() returns rows for every
+                # managed account; picking the first NetLiquidation row blind
+                # could size the leverage check against the wrong (e.g. master
+                # aggregate) account. Pin to self.ib_account.
+                active_account = self.ib_account
+                if not active_account:
+                    managed = self.client.ib.managedAccounts() or []
+                    active_account = managed[0] if managed else None
+                net_liq = 0.0
                 for v in self.client.ib.accountValues():
                     if v.tag != 'NetLiquidation' or v.currency == 'BASE':
                         continue
                     if active_account and v.account and v.account != active_account:
                         continue
-                    portfolio_value = float(v.value)
+                    net_liq = float(v.value)
                     break
-            except Exception as ex:
-                logging.warning('risk gate: could not read NetLiquidation: %s', ex)
 
-            # Position notional is only reliable without a price fetch for LIMIT
-            # orders; for market orders leave it 0 (concentration check skipped)
-            # rather than guessing and false-blocking.
+                leverage_result = self.risk_gate.check_leverage(margin_impact, net_liq)
+                if not leverage_result.approved:
+                    return SuccessFail.fail(error=leverage_result.reason)
+
+            # 4. Risk gate checks (open orders, daily loss, concentration)
+            from trader.trading.strategy import Signal
+            # source_name must match what ORDER_SUBMITTED is stamped with (the
+            # order's orderRef == algo_name; approve passes proposal.metadata
+            # ['strategy']) so the open-rate check queries the right bucket
+            # instead of a dead 'proposal' constant that never matches.
+            signal = Signal(
+                source_name=algo_name,
+                action=Action.BUY if action == 'BUY' else Action.SELL,
+                probability=1.0,
+                risk=0.0,
+            )
+
+            inputs = self.gather_risk_inputs()
+
+            try:
+                multiplier = float(contract.multiplier) if contract.multiplier else 1.0
+            except (TypeError, ValueError):
+                multiplier = 1.0
+
+            # Concentration needs a notional. LIMIT orders carry their own
+            # price; MARKET orders are valued off a snapshot so the check is
+            # evaluable (previously they silently skipped it). No usable
+            # price → not evaluable → the gate refuses the open.
             position_value = 0.0
+            position_value_evaluable = False
             if spec.order_type != 'MARKET' and spec.limit_price:
                 try:
-                    position_value = abs(float(quantity) * float(spec.limit_price))
+                    position_value = abs(float(quantity) * float(spec.limit_price)) * multiplier
+                    position_value_evaluable = True
                 except (TypeError, ValueError):
-                    position_value = 0.0
+                    pass
+            else:
+                try:
+                    tick = await self.client.get_snapshot(contract)
+                    for candidate in (
+                        tick.ask if action == 'BUY' else tick.bid,
+                        getattr(tick, 'last', None),
+                        getattr(tick, 'close', None),
+                    ):
+                        try:
+                            price = float(candidate)
+                        except (TypeError, ValueError):
+                            continue
+                        if math.isfinite(price) and price > 0:
+                            position_value = abs(float(quantity)) * price * multiplier
+                            position_value_evaluable = True
+                            break
+                except Exception as ex:
+                    logging.warning(
+                        'risk gate: no snapshot price to value market order: %s', ex)
 
             gate_result = self.risk_gate.evaluate(
                 signal=signal,
-                open_order_count=open_order_count,
-                daily_pnl=daily_pnl,
-                portfolio_value=portfolio_value,
+                open_order_count=inputs.open_order_count,
+                daily_pnl=inputs.daily_pnl,
+                portfolio_value=inputs.portfolio_value,
                 position_value=position_value,
+                daily_pnl_evaluable=inputs.daily_pnl_evaluable,
+                portfolio_value_evaluable=inputs.portfolio_value_evaluable,
+                position_value_evaluable=position_value_evaluable,
+                sec_type=contract.secType or '',
             )
             if not gate_result.approved:
                 return SuccessFail.fail(error=f'Risk gate: {gate_result.reason}')
 
-        async def _place_and_wait(c: Contract, o: Order) -> Optional[Trade]:
+        async def _place_and_wait(c: Contract, o: Order, leg_is_exit: bool = False) -> Optional[Trade]:
             """Place a single child order and await the IB ack. Returns the
             Trade object or None on failure (observer emitted on_error)."""
             event = asyncio.Event()
@@ -1107,7 +1308,7 @@ class Trader():
                 result['trade'] = trade
                 event.set()
 
-            obs = await self.executioner.subscribe_place_order_direct(c, o)
+            obs = await self.executioner.subscribe_place_order_direct(c, o, is_exit=leg_is_exit)
             obs.subscribe(Observer(
                 on_next=_on_next,
                 on_error=lambda e: event.set(),
@@ -1133,7 +1334,7 @@ class Trader():
                 entry = _build_entry(**common)
                 entry.transmit = False
 
-                entry_trade = await _place_and_wait(contract, entry)
+                entry_trade = await _place_and_wait(contract, entry, leg_is_exit=is_exit)
                 if entry_trade is None:
                     return SuccessFail.fail(error='Failed to place entry order')
 
@@ -1151,7 +1352,7 @@ class Trader():
                     tif=spec.tif,
                     outsideRth=spec.outside_rth,
                 )
-                tp_trade = await _place_and_wait(contract, tp)
+                tp_trade = await _place_and_wait(contract, tp, leg_is_exit=True)
                 if tp_trade is None:
                     # Roll back the staged entry — it was transmit=False so no
                     # market-side exposure yet; cancelling keeps the book
@@ -1174,7 +1375,7 @@ class Trader():
                     tif=spec.tif,
                     outsideRth=spec.outside_rth,
                 )
-                sl_trade = await _place_and_wait(contract, sl)
+                sl_trade = await _place_and_wait(contract, sl, leg_is_exit=True)
                 if sl_trade is None:
                     # Same as above: cancel TP + entry before the bracket is
                     # ever transmitted to the market.
@@ -1197,7 +1398,7 @@ class Trader():
                     entry_trade = trade
                     task.set()
 
-                observable = await self.executioner.subscribe_place_order_direct(contract, entry)
+                observable = await self.executioner.subscribe_place_order_direct(contract, entry, is_exit=is_exit)
                 observable.subscribe(Observer(on_next=on_entry_ts, on_error=lambda e: task.set(), on_completed=lambda: None))
                 await task.wait()
 
@@ -1230,7 +1431,7 @@ class Trader():
                     trail_trade = trade
                     trail_task.set()
 
-                trail_obs = await self.executioner.subscribe_place_order_direct(contract, trail)
+                trail_obs = await self.executioner.subscribe_place_order_direct(contract, trail, is_exit=True)
                 trail_obs.subscribe(Observer(on_next=on_trail, on_error=lambda e: trail_task.set(), on_completed=lambda: None))
                 await trail_task.wait()
                 if trail_trade is None:
@@ -1256,7 +1457,7 @@ class Trader():
                     entry_trade = trade
                     task.set()
 
-                observable = await self.executioner.subscribe_place_order_direct(contract, entry)
+                observable = await self.executioner.subscribe_place_order_direct(contract, entry, is_exit=is_exit)
                 observable.subscribe(Observer(on_next=on_entry_sl, on_error=lambda e: task.set(), on_completed=lambda: None))
                 await task.wait()
 
@@ -1285,7 +1486,7 @@ class Trader():
                     sl_trade = trade
                     sl_task.set()
 
-                sl_obs = await self.executioner.subscribe_place_order_direct(contract, sl)
+                sl_obs = await self.executioner.subscribe_place_order_direct(contract, sl, is_exit=True)
                 sl_obs.subscribe(Observer(on_next=on_sl_only, on_error=lambda e: sl_task.set(), on_completed=lambda: None))
                 await sl_task.wait()
                 if sl_trade is None:
@@ -1311,7 +1512,7 @@ class Trader():
                     entry_trade = trade
                     task.set()
 
-                observable = await self.executioner.subscribe_place_order_direct(contract, entry)
+                observable = await self.executioner.subscribe_place_order_direct(contract, entry, is_exit=is_exit)
                 observable.subscribe(Observer(on_next=on_entry_simple, on_error=lambda e: task.set(), on_completed=lambda: None))
                 await task.wait()
                 if entry_trade is None:
@@ -1361,8 +1562,41 @@ class Trader():
         ``order_ref`` stamps the order's orderRef — for auto-executor
         protective stops this is the strategy name, so a fired stop's fill
         is strategy-attributed in the event store like any other exit.
+
+        This path is exit-class ONLY: the order must reduce the live broker
+        position for its conId (a protective stop/trail/limit covering an
+        existing position). Anything else — a BUY with no short, an oversized
+        SELL — is an ungated exposure door and is refused. Deliberately no
+        risk-limit checks beyond that: protective orders must never be
+        refusable by limits.
         """
         try:
+            is_exit = self.order_reduces_exposure(contract, action, quantity)
+            conid = int(getattr(contract, 'conId', 0) or 0)
+            held = self._signed_position(conid) if conid > 0 else None
+            if not is_exit:
+                return SuccessFail.fail(
+                    error=(
+                        f'standalone orders are protective/exit-class only: '
+                        f'{action} {quantity} {getattr(contract, "symbol", "?")} '
+                        f'(conId {conid}) does not reduce the live broker position '
+                        f'({"unreadable" if held is None else held})'
+                    ))
+            # order_reduces_exposure now treats an oversize close as exit-class
+            # (a flip can't increase the same-direction exposure, so gates
+            # mustn't refuse it). A PROTECTIVE order, though, must never exceed
+            # the position it protects — an oversized leg would flip the book.
+            # Clamp explicitly here (the caller's own qty is meant to match the
+            # live position).
+            eps = 1e-9 * max(1.0, abs(held or 0.0))
+            if held is None or abs(float(quantity)) > abs(held) + eps:
+                return SuccessFail.fail(
+                    error=(
+                        f'standalone order quantity {quantity} exceeds the live '
+                        f'{getattr(contract, "symbol", "?")} position '
+                        f'({"unreadable" if held is None else held}) — a protective '
+                        f'leg must not exceed the position it protects'))
+
             if order_type == 'STP':
                 order = StopOrder(
                     action=action,
@@ -1411,7 +1645,7 @@ class Trader():
                 result_trade = trade
                 task.set()
 
-            observable = await self.executioner.subscribe_place_order_direct(contract, order)
+            observable = await self.executioner.subscribe_place_order_direct(contract, order, is_exit=True)
             observable.subscribe(Observer(on_next=on_next, on_error=lambda e: task.set(), on_completed=lambda: None))
             await task.wait()
 
@@ -1452,10 +1686,34 @@ class Trader():
             algo_name=algo_name,
             debug=debug
         )
+
+        # Position-value hint for the concentration check: quantity × the
+        # best available price (limit price, else the snapshot this path just
+        # fetched — ask for a BUY, bid for a SELL). None = no usable price,
+        # which the gate treats as not-evaluable and refuses opens on.
+        position_value_hint: Optional[float] = None
+        try:
+            multiplier = float(contract.multiplier) if contract.multiplier else 1.0
+        except (TypeError, ValueError):
+            multiplier = 1.0
+        for candidate in (
+            limit_price,
+            latest_tick.ask if action == Action.BUY else latest_tick.bid,
+        ):
+            try:
+                price = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(price) and price > 0:
+                position_value_hint = abs(
+                    float(contract_order.order.totalQuantity)) * price * multiplier
+                break
+
         return await self.executioner.place_order(
             contract_order=contract_order,
             condition=ExecutorCondition.SANITY_CHECK,
             skip_risk_gate=skip_risk_gate,
+            position_value_hint=position_value_hint,
         )
 
     @log_method

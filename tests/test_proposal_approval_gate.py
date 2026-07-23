@@ -1,8 +1,10 @@
 """Tests for the require_proposal_approval gate on place_order_simple.
 
-When the flag is on, direct buy/sell RPC calls must be rejected unless
-the caller explicitly marked this as a liquidation (``skip_risk_gate=True``).
-The approve() path uses place_expressive_order, which is not gated here.
+When the flag is on, direct buy/sell RPC calls that would INCREASE exposure
+must be rejected. Exit-class orders — those the trader itself verifies reduce
+the live broker position (closes, resize trims) — are exempt. The
+client-supplied ``skip_risk_gate`` flag is kept for wire compatibility but is
+ignored: the server asks the trader, never the client.
 """
 
 import asyncio
@@ -23,11 +25,17 @@ class _FakeContract:
 
 
 class _FakeTrader:
-    """Minimal Trader stand-in — only needs the gate flag and a
-    place_order_simple stub. Real Trader has dozens of attrs."""
-    def __init__(self, require_proposal_approval=False):
+    """Minimal Trader stand-in — only needs the gate flag, the exit-class
+    predicate, and a place_order_simple stub. Real Trader has dozens of attrs."""
+    def __init__(self, require_proposal_approval=False, is_exit=False):
         self.require_proposal_approval = require_proposal_approval
         self.place_order_simple_call_count = 0
+        self._is_exit = is_exit
+        self.exit_check_calls = []
+
+    def order_reduces_exposure(self, contract, action, quantity):
+        self.exit_check_calls.append((contract, action, quantity))
+        return self._is_exit
 
     async def place_order_simple(self, **kwargs):
         """If we get here, the gate let us through. Return an observable
@@ -57,10 +65,11 @@ async def test_gate_off_lets_direct_order_through():
 
 
 @pytest.mark.asyncio
-async def test_gate_on_rejects_direct_order():
-    """Gate on — direct buy/sell is refused before trader.place_order_simple
-    is even called. Error message names the proposal → approve fix."""
-    trader = _FakeTrader(require_proposal_approval=True)
+async def test_gate_on_rejects_direct_open():
+    """Gate on — a direct exposure-increasing order is refused before
+    trader.place_order_simple is even called. Error message names the
+    proposal → approve fix."""
+    trader = _FakeTrader(require_proposal_approval=True, is_exit=False)
     api = TraderServiceApi(trader)
 
     result = await api.place_order_simple(
@@ -78,17 +87,40 @@ async def test_gate_on_rejects_direct_order():
     # Error surface points at the fix.
     assert 'propose' in (result.error or '').lower()
     assert 'approve' in (result.error or '').lower()
+    # The server asked the trader (normalized action + quantity).
+    assert trader.exit_check_calls, 'exit-class predicate was never consulted'
+    _, action, quantity = trader.exit_check_calls[0]
+    assert action == 'BUY'
+    assert quantity == 10
 
 
 @pytest.mark.asyncio
-async def test_gate_on_skip_risk_gate_bypasses_for_liquidation():
-    """Gate on + skip_risk_gate=True is the liquidation escape hatch
-    (close-all, resize-positions). Must still work even when direct
-    trading is locked down."""
-    trader = _FakeTrader(require_proposal_approval=True)
+async def test_gate_on_exempts_exit_class_close():
+    """Gate on — an order the trader verifies is exit-class (a close) is
+    exempt: single `mmr close` and resize deltas work under
+    require_proposal_approval true, with no client flag needed."""
+    trader = _FakeTrader(require_proposal_approval=True, is_exit=True)
     api = TraderServiceApi(trader)
 
-    # close-all-style call: skip_risk_gate=True
+    await api.place_order_simple(
+        contract=_FakeContract(),
+        action='SELL',
+        equity_amount=None,
+        quantity=10,
+        limit_price=None,
+        market_order=True,
+    )
+    assert trader.place_order_simple_call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_close_all_still_works_because_closes_are_exit_class():
+    """Close-all passes skip_risk_gate=True on the wire (legacy). It keeps
+    working — but because its orders are exit-class, not because of the
+    flag."""
+    trader = _FakeTrader(require_proposal_approval=True, is_exit=True)
+    api = TraderServiceApi(trader)
+
     await api.place_order_simple(
         contract=_FakeContract(),
         action='SELL',
@@ -98,8 +130,69 @@ async def test_gate_on_skip_risk_gate_bypasses_for_liquidation():
         market_order=True,
         skip_risk_gate=True,
     )
-    # Gate did NOT reject — trader's real place_order_simple ran.
     assert trader.place_order_simple_call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_skip_risk_gate_flag_cannot_bypass_gate_for_opens():
+    """The client flag is no longer trusted: skip_risk_gate=True on a
+    non-exit-class order is still refused by the proposal gate."""
+    trader = _FakeTrader(require_proposal_approval=True, is_exit=False)
+    api = TraderServiceApi(trader)
+
+    result = await api.place_order_simple(
+        contract=_FakeContract(),
+        action='BUY',
+        equity_amount=None,
+        quantity=10,
+        limit_price=None,
+        market_order=True,
+        skip_risk_gate=True,
+    )
+    assert isinstance(result, SuccessFail)
+    assert not result.is_success()
+    assert trader.place_order_simple_call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_exit_check_failure_treated_as_open():
+    """If the exit-class check itself blows up, the order is treated as an
+    open (gated) — never fail-open."""
+    trader = _FakeTrader(require_proposal_approval=True)
+
+    def _boom(contract, action, quantity):
+        raise RuntimeError('positions unreadable')
+    trader.order_reduces_exposure = _boom
+    api = TraderServiceApi(trader)
+
+    result = await api.place_order_simple(
+        contract=_FakeContract(),
+        action='SELL',
+        equity_amount=None,
+        quantity=10,
+        limit_price=None,
+        market_order=True,
+    )
+    assert not result.is_success()
+    assert trader.place_order_simple_call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_invalid_action_refused_before_gate():
+    trader = _FakeTrader(require_proposal_approval=True, is_exit=True)
+    api = TraderServiceApi(trader)
+
+    result = await api.place_order_simple(
+        contract=_FakeContract(),
+        action='BYU',
+        equity_amount=None,
+        quantity=10,
+        limit_price=None,
+        market_order=True,
+    )
+    assert not result.is_success()
+    assert 'invalid action' in (result.error or '').lower()
+    assert trader.place_order_simple_call_count == 0
 
 
 def test_trader_constructor_accepts_flag():

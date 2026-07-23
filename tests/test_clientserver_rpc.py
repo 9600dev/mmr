@@ -11,16 +11,23 @@ import typing
 
 import pytest
 
+import dill
+import msgpack
+
 from trader.messaging.clientserver import (
     DillDeserializationError,
+    EXT_OBJECT,
     RPCClient,
     RPCError,
     RPCHandler,
     RPCServer,
     _convert_return_type,
     _reconstruct_rpc_exception,
+    ext_pack,
+    pack,
     rpcmethod,
     set_dill_whitelist,
+    unpack,
 )
 
 
@@ -160,6 +167,17 @@ class TestErrorReconstruction:
         )
         assert isinstance(exc, RPCError)  # not Strict, not ValueError
         assert exc.exc_type == 'Strict'
+
+    def test_dill_deserialization_error_reconstructs(self):
+        """A server that refuses an undeserializable payload replies with
+        exc_type='DillDeserializationError'; the client must reconstruct the
+        real type, not a generic RPCError."""
+        exc = _reconstruct_rpc_exception(
+            'DillDeserializationError', ('refusing global os.system',),
+            error_table=None,
+        )
+        assert isinstance(exc, DillDeserializationError)
+        assert 'os.system' in str(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -308,3 +326,158 @@ def test_rpc_round_trip_preserves_error_types():
                 loop.call_soon_threadsafe(server.close)
             loop.call_soon_threadsafe(loop.stop)
         t.join(timeout=3.0)
+
+
+# ---------------------------------------------------------------------------
+# Fail-silent fix: a rejected/undeserializable request must produce an error
+# REPLY (client sees an exception) instead of a dropped request (client hangs
+# to TimeoutError with no clue why).
+# ---------------------------------------------------------------------------
+
+def test_server_replies_error_on_undeserializable_request():
+    import threading
+    import time as _t
+
+    import zmq
+
+    port = _free_port()
+    ready = threading.Event()
+    server_obj = {}
+
+    def _run_server():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        server = RPCServer[_Service](
+            instance=_Service(),
+            zmq_rpc_server_address='tcp://127.0.0.1',
+            zmq_rpc_server_port=port,
+        )
+        server_obj['server'] = server
+        server_obj['loop'] = loop
+        loop.run_until_complete(server.serve())
+        ready.set()
+        try:
+            loop.run_forever()
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_run_server, daemon=True)
+    t.start()
+    assert ready.wait(timeout=3.0), 'server thread did not signal ready'
+    _t.sleep(0.1)
+
+    # Craft a request whose framing is valid msgpack (so req_id is recoverable)
+    # but whose args carry a poisoned EXT_OBJECT dill blob that the restricted
+    # unpickler refuses. os.system would run if the boundary let it.
+    class _Evil:
+        def __reduce__(self):
+            import os
+            return (os.system, ('echo pwned',))
+
+    ctx = zmq.Context()
+    sock = ctx.socket(zmq.DEALER)
+    sock.setsockopt(zmq.LINGER, 0)
+    sock.connect(f'tcp://127.0.0.1:{port}')
+    try:
+        req_id = 'poison-req-1'
+        poisoned = {
+            'method': 'echo',
+            'args': [msgpack.ExtType(EXT_OBJECT, dill.dumps(_Evil()))],
+            'kwargs': {},
+            'req_id': req_id,
+        }
+        wire = msgpack.packb(poisoned, default=ext_pack, use_bin_type=True)
+        sock.send_multipart([b'', wire])
+
+        poller = zmq.Poller()
+        poller.register(sock, zmq.POLLIN)
+        assert poller.poll(3000), 'server dropped the request silently (no reply)'
+        frames = sock.recv_multipart()
+        reply = unpack(frames[-1])
+        assert reply['req_id'] == req_id
+        assert reply['error'] is True
+        assert reply['exc_type'] == 'DillDeserializationError'
+        # The client-side reconstructor turns that into the real exception.
+        exc = _reconstruct_rpc_exception(reply['exc_type'], reply['exc_args'], None)
+        assert isinstance(exc, DillDeserializationError)
+    finally:
+        sock.close()
+        ctx.term()
+        loop = server_obj.get('loop')
+        if loop:
+            server = server_obj.get('server')
+            if server:
+                loop.call_soon_threadsafe(server.close)
+            loop.call_soon_threadsafe(loop.stop)
+        t.join(timeout=3.0)
+
+
+# ---------------------------------------------------------------------------
+# Fail-silent fix: one poisoned PubSub message must be dropped (logged at
+# ERROR) and the subscription must SURVIVE — good messages before and after
+# it are still delivered. Previously a single bad payload called on_error and
+# terminated every downstream ticker subscription.
+# ---------------------------------------------------------------------------
+
+def test_pubsub_subscription_survives_poisoned_message():
+    from trader.messaging.clientserver import TopicPubSub
+
+    port = _free_port()
+
+    async def _run():
+        received = []
+        errors = []
+        completed = []
+
+        pubsub = TopicPubSub(
+            zmq_pubsub_server_address='tcp://127.0.0.1',
+            zmq_pubsub_server_port=port,
+        )
+        subject = await pubsub.subscriber('t')
+        subject.subscribe(
+            on_next=received.append,
+            on_error=errors.append,
+            on_completed=lambda: completed.append(True),
+        )
+
+        import zmq
+        import zmq.asyncio
+        pub_ctx = zmq.asyncio.Context()
+        pub = pub_ctx.socket(zmq.PUB)
+        pub.bind(f'tcp://127.0.0.1:{port}')
+        # slow-joiner: let the SUB connection establish before publishing
+        await asyncio.sleep(0.3)
+
+        topic = b't'
+
+        class _Evil:
+            def __reduce__(self):
+                import os
+                return (os.system, ('echo pwned',))
+
+        # good, poison, good
+        await pub.send_multipart([topic, pack({'seq': 1})])
+        await asyncio.sleep(0.05)
+        await pub.send_multipart(
+            [topic, msgpack.packb(msgpack.ExtType(EXT_OBJECT, dill.dumps(_Evil())),
+                                  use_bin_type=True)])
+        await asyncio.sleep(0.05)
+        await pub.send_multipart([topic, pack({'seq': 2})])
+        await asyncio.sleep(0.3)
+
+        pubsub.subscriber_close()
+        pub.close()
+        pub_ctx.term()
+        if pubsub._sub_ctx:
+            pubsub._sub_ctx.term()
+        return received, errors, completed
+
+    received, errors, completed = asyncio.run(_run())
+
+    seqs = [m['seq'] for m in received if isinstance(m, dict) and 'seq' in m]
+    assert seqs == [1, 2], f'poisoned message broke delivery, got {seqs}'
+    assert not errors, 'subscription terminated with on_error on a poisoned message'
+    assert not completed, 'subscription completed early'

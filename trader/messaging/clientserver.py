@@ -14,6 +14,7 @@ import datetime as dt
 import dill
 import functools
 import inspect
+import io
 import msgpack
 import pandas as pd
 import pyarrow as pa
@@ -42,15 +43,23 @@ TSub = TypeVar('TSub')
 
 # dill.loads() can execute arbitrary Python on untrusted input. MMR's ZMQ
 # sockets bind to 127.0.0.1 by default, so the attack surface is same-host
-# processes, but we still want the option to lock this down in hardened
-# deployments.
+# processes, but a poisoned peer must never get code execution inside the
+# trading process. Three layers, innermost first:
 #
-# DILL_STRICT_MODE=1 in the environment disables the dill fallback entirely —
-# any unknown EXT_OBJECT payload raises instead of being deserialized.
+#   1. _RestrictedUnpickler — ALWAYS ON, the actual boundary. Every dill
+#      payload (EXT_OBJECT and the raw-dill legacy fallbacks) is loaded with
+#      a find_class module-prefix allowlist. find_class resolves globals
+#      BEFORE any REDUCE opcode can call them, so a hostile global
+#      (os.system, builtins.eval, dill._dill._create_function, ...) is
+#      refused before embedded code runs — unlike the top-level type check
+#      in layer 2, which only sees the object after the fact.
 #
-# _dill_type_whitelist is an optional registry callers can populate to restrict
-# what dill is allowed to reconstruct. If set, only objects whose type is
-# registered (by fully-qualified module:qualname) are accepted.
+#   2. _dill_type_whitelist — optional registry callers can populate to
+#      additionally restrict the TOP-LEVEL type of the loaded object (by
+#      fully-qualified module:qualname).
+#
+#   3. MMR_DILL_STRICT=1 in the environment disables the dill fallback
+#      entirely — any EXT_OBJECT payload raises instead of being loaded.
 import os as _os  # noqa: E402
 
 DILL_STRICT_MODE = _os.environ.get('MMR_DILL_STRICT', '').lower() in ('1', 'true', 'yes')
@@ -77,7 +86,210 @@ def set_dill_whitelist(types):
 
 
 class DillDeserializationError(RuntimeError):
-    """Raised when a dill payload is rejected by the active policy."""
+    """Raised when a wire payload is rejected by the deserialization policy
+    or cannot be decoded at all."""
+
+
+# Module prefixes a dill payload may reference. Derived by round-trip testing
+# the real wire types (Ticker/Trade/Contract on PubSub+RPC, SuccessFail,
+# Signal on the MessageBus, tz-aware datetimes, numpy/pandas scalars) — see
+# tests/test_serialization.py::TestDomainTypeRoundTrip.
+_DILL_ALLOWED_MODULE_PREFIXES: Tuple[str, ...] = (
+    'trader',
+    'ib_async',
+    'eventkit',
+    'numpy',
+    'pandas',
+    'datetime',
+    'zoneinfo',
+    'pytz',
+    'dateutil',
+    'decimal',
+    'fractions',
+    'collections',
+    'enum',
+    'dataclasses',
+    'uuid',
+    'copyreg',
+    '_codecs',
+)
+
+# Curated builtins. Notable omissions: eval, exec, compile, __import__, open,
+# getattr, setattr, delattr, vars, globals — the classic pickle-escape
+# gadgets. getattr IS required by legit payloads (ZoneInfo pickles via
+# getattr(cls, '_unpickle')) so it resolves to _guarded_getattr instead.
+_DILL_SAFE_BUILTINS = frozenset((
+    'bool', 'bytearray', 'bytes', 'complex', 'dict', 'float', 'frozenset',
+    'int', 'list', 'object', 'range', 'set', 'slice', 'str', 'tuple',
+    # exception types cross the wire inside SuccessFail.fail and RPC errors
+    'BaseException', 'Exception', 'ArithmeticError', 'AssertionError',
+    'AttributeError', 'BufferError', 'ConnectionError', 'EOFError',
+    'FileNotFoundError', 'IndexError', 'InterruptedError', 'KeyError',
+    'LookupError', 'MemoryError', 'NotImplementedError', 'OSError',
+    'OverflowError', 'PermissionError', 'RecursionError', 'RuntimeError',
+    'StopAsyncIteration', 'StopIteration', 'TimeoutError', 'TypeError',
+    'ValueError', 'ZeroDivisionError',
+))
+
+# Types dill._dill._load_type may resolve. Deliberately excludes CodeType,
+# FunctionType, MethodType, CellType, ModuleType, ... — resolving those lets
+# a pickle build and then call arbitrary code with plain REDUCE opcodes.
+_DILL_SAFE_LOADED_TYPES = frozenset((
+    type(None), type(NotImplemented), type(Ellipsis),
+    bool, bytearray, bytes, complex, dict, float, frozenset, int, list,
+    object, range, set, slice, str, tuple,
+))
+
+
+def _guarded_getattr(obj, name, *default):
+    # Dunder access is the escape hatch (cls.__globals__, obj.__class__,
+    # type.__subclasses__, ...); legit pickle use is non-dunder classmethod
+    # lookup like ZoneInfo._unpickle.
+    if name.startswith('__'):
+        raise DillDeserializationError(
+            f'refusing getattr({type(obj).__name__}, {name!r}) in dill payload: '
+            'dunder attribute access is not permitted')
+    return getattr(obj, name, *default)
+
+
+def _guarded_load_type(name):
+    loaded = dill._dill._load_type(name)
+    if isinstance(loaded, type) and (
+            issubclass(loaded, BaseException) or loaded in _DILL_SAFE_LOADED_TYPES):
+        return loaded
+    raise DillDeserializationError(
+        f'refusing dill._dill._load_type({name!r}) in dill payload')
+
+
+# Globals legit payloads need but that are too powerful to hand over as-is —
+# find_class resolves them to guarded stand-ins.
+_DILL_GLOBAL_SUBSTITUTIONS: Dict[Tuple[str, str], Callable] = {
+    ('builtins', 'getattr'): _guarded_getattr,
+    ('dill._dill', '_load_type'): _guarded_load_type,
+}
+
+# Explicit whitelist of the non-type reconstruction FUNCTIONS that pickling
+# genuinely needs. Module-prefix allowlisting (below) is the right test for the
+# CLASS of a reconstructed object — a type is inert until instantiated and the
+# REDUCE that follows merely builds an instance of it — but it is the WRONG
+# test for a REDUCE callable that is a plain FUNCTION: pandas.read_pickle,
+# pandas.read_parquet, numpy.load, os.system, builtins.eval and even
+# trader.messaging.RPCClient are all reachable under an allowed prefix, and
+# each runs code / has side effects the instant REDUCE calls it (read_pickle in
+# particular re-enters UNRESTRICTED stdlib pickle.load — a full sandbox escape).
+# So a payload may name a non-type callable ONLY if it is one of these
+# hand-audited, pure-data reconstruction helpers. Derived empirically by
+# collecting every (module, qualname) find_class actually sees while
+# round-tripping the real wire types — see
+# tests/test_serialization.py::TestDomainTypeRoundTrip.
+_DILL_ALLOWED_RECONSTRUCTORS: frozenset = frozenset((
+    ('copyreg', '_reconstructor'),
+    ('copyreg', '__newobj__'),
+    # dill's own pure-data builders (namedtuple classes, numpy arrays). The
+    # code-constructing ones (_create_function, _create_code, _create_type,
+    # _create_cell, _import_module, ...) are deliberately absent.
+    ('dill._dill', '_create_namedtuple'),
+    ('dill._dill', '_create_array'),
+    # numpy array/scalar rebuilders (pure data) + the byte-blob decoder pickle
+    # uses to carry raw array/string payloads.
+    ('numpy', '_reconstruct'),
+    ('numpy.core.multiarray', '_reconstruct'),
+    ('numpy.core.multiarray', 'scalar'),
+    ('numpy._core.multiarray', '_reconstruct'),
+    ('numpy._core.multiarray', 'scalar'),
+    ('_codecs', 'encode'),
+))
+
+# Types in an allowlisted package that are nonetheless refused: messaging
+# infrastructure whose construction has side effects (opens ZMQ contexts /
+# sockets, binds ports) and which is NEVER legitimate wire content. The
+# type-first rule would otherwise admit them because they're classes under the
+# `trader` prefix; a crafted `(RPCClient, args)` REDUCE would run __init__ and
+# stand up a live socket inside the trading process. Denied explicitly so an
+# operator sees a refusal instead of a resurrected client.
+_DILL_DENIED_GLOBALS: frozenset = frozenset((
+    ('trader.messaging.clientserver', 'RPCClient'),
+    ('trader.messaging.clientserver', 'RPCServer'),
+    ('trader.messaging.clientserver', 'MessageBusClient'),
+    ('trader.messaging.clientserver', 'MessageBusServer'),
+    ('trader.messaging.clientserver', 'TopicPubSub'),
+    ('trader.messaging.clientserver', 'MultithreadedTopicPubSub'),
+))
+
+# Memoizes ALLOWED (module, name) pairs only, so hot-path lookups skip the
+# resolve-and-typecheck gate while hostile garbage — which is never cached —
+# can't grow the dict unboundedly.
+_dill_allowed_cache: Dict[Tuple[str, str], bool] = {}
+
+
+def _dill_module_allowed(module: str) -> bool:
+    return any(
+        module == prefix or module.startswith(prefix + '.')
+        for prefix in _DILL_ALLOWED_MODULE_PREFIXES
+    )
+
+
+class _RestrictedUnpickler(dill.Unpickler):
+    """The deserialization boundary: find_class runs before any REDUCE opcode
+    can call a global, so refusing here means embedded code never executes.
+
+    The gate is TYPE-FIRST. Resolving the class of a reconstructed instance is
+    the legitimate case, so a resolved object is admitted when it is a class in
+    an allowlisted package. A non-type callable (a plain function) is admitted
+    only if it is one of the hand-audited pure-data reconstruction helpers —
+    every other function, EVEN under an allowed prefix, is refused, which is
+    what closes the pandas.read_pickle / numpy.load / RPCClient escape."""
+
+    def find_class(self, module, name):
+        key = (module, name)
+
+        # Powerful-but-needed globals resolve to guarded stand-ins. The
+        # substitution dict is itself the cache for these.
+        substitute = _DILL_GLOBAL_SUBSTITUTIONS.get(key)
+        if substitute is not None:
+            return substitute
+
+        # Hot path: only ALLOWED pairs are ever memoized (refusals never are),
+        # so a cache hit is always safe to resolve.
+        if key not in _dill_allowed_cache:
+            if not self._resolution_allowed(module, name):
+                raise DillDeserializationError(
+                    f'refusing to deserialize global {module}.{name}: '
+                    'not a permitted reconstruction target')
+            _dill_allowed_cache[key] = True
+
+        return super().find_class(module, name)
+
+    def _resolution_allowed(self, module: str, name: str) -> bool:
+        # Explicitly-denied infrastructure types (side-effectful construction,
+        # never legitimate wire content) — refused even though they're classes
+        # under an allowed prefix.
+        if (module, name) in _DILL_DENIED_GLOBALS:
+            return False
+        # Hand-audited pure-data reconstruction functions.
+        if (module, name) in _DILL_ALLOWED_RECONSTRUCTORS:
+            return True
+        # Safe builtins subset — every entry resolves to a data type or an
+        # exception type; the code-exec gadgets (eval/exec/open/__import__/...)
+        # are absent by omission.
+        if module == 'builtins':
+            return name in _DILL_SAFE_BUILTINS
+        # Everything else must resolve to a TYPE living in an allowlisted
+        # package. The module gate runs BEFORE resolution so an attacker-named
+        # module is never even imported. A type is inert (the REDUCE builds an
+        # instance); a plain function under the same prefix is a side-effecting
+        # callable and is refused here.
+        if not _dill_module_allowed(module):
+            return False
+        try:
+            obj = super().find_class(module, name)
+        except Exception:
+            return False
+        return isinstance(obj, type)
+
+
+def _restricted_dill_loads(data: bytes):
+    return _RestrictedUnpickler(io.BytesIO(data)).load()
 
 
 def _safe_dill_loads(data: bytes):
@@ -85,7 +297,7 @@ def _safe_dill_loads(data: bytes):
         raise DillDeserializationError(
             'dill deserialization is disabled (MMR_DILL_STRICT=1)'
         )
-    obj = dill.loads(data)
+    obj = _restricted_dill_loads(data)
     if _dill_type_whitelist is not None:
         name = f'{type(obj).__module__}.{type(obj).__qualname__}'
         if name not in _dill_type_whitelist:
@@ -173,6 +385,27 @@ def pack(obj) -> bytes:
 
 def unpack(data: bytes):
     return msgpack.unpackb(data, ext_hook=ext_unpack, raw=False, strict_map_key=False)
+
+
+def _decode_payload(data: bytes):
+    """Decode an inbound stream payload: msgpack-framed first, raw dill as the
+    legacy fallback for in-flight messages from older peers. Both routes land
+    in the restricted unpickler. Failures raise DillDeserializationError so
+    stream read loops can drop the one message loudly instead of tearing down
+    the whole subscription."""
+    try:
+        return unpack(data)
+    except DillDeserializationError:
+        raise
+    except Exception as msgpack_err:
+        try:
+            return _safe_dill_loads(data)
+        except DillDeserializationError:
+            raise
+        except Exception:
+            raise DillDeserializationError(
+                f'payload is neither valid msgpack nor an accepted dill blob: {msgpack_err}'
+            ) from msgpack_err
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +527,10 @@ _STDLIB_EXCEPTIONS: Dict[str, type] = {
         AssertionError, StopIteration,
     )
 }
+
+# The decode boundary's own error must survive the RPC wire so a client sees
+# WHY its request was refused instead of a generic RPCError.
+_STDLIB_EXCEPTIONS[DillDeserializationError.__name__] = DillDeserializationError
 
 
 class RPCError(RuntimeError):
@@ -498,7 +735,15 @@ class RPCServer(Generic[T]):
                 # pickled args. Offload to a thread so the serve loop
                 # immediately goes back to recv_multipart — other inbound
                 # requests aren't blocked behind one slow deserialization.
-                request = await asyncio.to_thread(unpack, frames[-1])
+                try:
+                    request = await asyncio.to_thread(unpack, frames[-1])
+                except Exception as ex:
+                    # A rejected/undeserializable request must produce an
+                    # error REPLY — dropping it silently leaves the client
+                    # hanging to TimeoutError with no clue why.
+                    logging.error(f'RPCServer: refusing request payload: {ex}')
+                    asyncio.create_task(self._reject_request(client_id, frames[-1], ex))
+                    continue
                 # request = {'method': 'dotted.name', 'args': [...], 'kwargs': {...}, 'req_id': uuid}
                 asyncio.create_task(self._handle_request(client_id, request))
             except zmq.ZMQError as e:
@@ -508,6 +753,32 @@ class RPCServer(Generic[T]):
                 break
             except Exception as e:
                 logging.exception(f"RPCServer unexpected error: {e}")
+
+    async def _reject_request(self, client_id: bytes, raw: bytes, exc: Exception):
+        # The payload didn't deserialize, so the req_id has to be recovered
+        # from the msgpack framing alone — ext types (where the poison lives)
+        # are replaced with placeholders; plain fields like req_id survive.
+        req_id = ''
+        try:
+            headers = msgpack.unpackb(
+                raw, ext_hook=lambda code, data: None, raw=False, strict_map_key=False)
+            if isinstance(headers, dict):
+                req_id = headers.get('req_id', '') or ''
+        except Exception:
+            # Framing itself is broken: there is no req_id to route the reply
+            # to — the client will discard it as stale and time out, but the
+            # refusal is at least logged loudly by the caller.
+            pass
+        response = {
+            'req_id': req_id,
+            'error': True,
+            'exc_type': type(exc).__name__,
+            'exc_args': (str(exc),),
+        }
+        try:
+            await self.socket.send_multipart([client_id, b'', pack(response)])
+        except Exception as ex:
+            logging.exception(f"RPCServer failed to send rejection response: {ex}")
 
     async def _handle_request(self, client_id: bytes, request: dict):
         method_name = request['method']
@@ -547,7 +818,19 @@ class RPCServer(Generic[T]):
             }
 
         try:
-            await self.socket.send_multipart([client_id, b'', pack(response)])
+            payload = pack(response)
+        except Exception as exc:
+            # A result that won't serialize must still produce an error reply,
+            # not a silent client-side timeout.
+            logging.exception(f"RPCServer failed to pack response for {method_name}: {exc}")
+            payload = pack({
+                'req_id': req_id,
+                'error': True,
+                'exc_type': type(exc).__name__,
+                'exc_args': (str(exc),),
+            })
+        try:
+            await self.socket.send_multipart([client_id, b'', payload])
         except Exception as exc:
             logging.exception(f"RPCServer failed to send response: {exc}")
 
@@ -827,6 +1110,11 @@ class MessageBusClient(Generic[T]):
                 yield await self.read()
             except zmq.ZMQError:
                 return
+            except DillDeserializationError as ex:
+                # One poisoned message must not tear down the whole signal
+                # subscription — log loudly and keep reading.
+                logging.error(f'MessageBusClient: dropping rejected message: {ex}')
+                continue
             except Exception as ex:
                 raise ex
 
@@ -872,12 +1160,7 @@ class MessageBusClient(Generic[T]):
 
         frames = await self.client.recv_multipart()
         # frames: [topic, val]
-        val = frames[-1]
-        try:
-            return unpack(val)
-        except Exception:
-            # Fall back to dill for backward compatibility with in-flight messages
-            return _safe_dill_loads(val)
+        return _decode_payload(frames[-1])
 
 
 # ---------------------------------------------------------------------------
@@ -933,9 +1216,13 @@ class TopicPubSub(Generic[T]):
                 if len(frames) >= 2:
                     payload = frames[1]
                     try:
-                        obj = unpack(payload)
-                    except Exception:
-                        obj = _safe_dill_loads(payload)
+                        obj = _decode_payload(payload)
+                    except DillDeserializationError as ex:
+                        # A poisoned message must not on_error the subject —
+                        # that would terminate every downstream ticker
+                        # subscription. Drop it loudly and keep reading.
+                        logging.error(f'TopicPubSub: dropping rejected message: {ex}')
+                        continue
                     self.handler.on_message(obj)
             except zmq.ZMQError:
                 break

@@ -155,7 +155,7 @@ async def test_bracket_rolls_back_when_tp_fails(monkeypatch):
         def __init__(self):
             self.calls = 0
 
-        async def subscribe_place_order_direct(self, contract, order):
+        async def subscribe_place_order_direct(self, contract, order, is_exit=False):
             self.calls += 1
             import reactivex as rx
             if self.calls == 1:
@@ -673,3 +673,400 @@ class TestReconnectTickerResubscription:
         t = self._trader()
         Trader._republish_ticker_subscriptions(t)
         assert t._published_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Exit-class predicate — the ONE server-side boundary: an order is exit-class
+# iff it reduces the live broker position for its conId. Everything else
+# (risk limits, fail-closed, proposal-approval) keys off this.
+# ---------------------------------------------------------------------------
+
+from collections import namedtuple as _namedtuple
+
+_FakePos = _namedtuple('Pos', ['contract', 'position'])
+
+
+def _trader_with_positions(positions):
+    t = _minimal_trader()
+    t.get_positions = lambda: positions
+    return t
+
+
+def _pos(conid, qty):
+    return _FakePos(contract=_FakeContract(conid), position=qty)
+
+
+class _ContractSym:
+    """A contract that also carries a symbol — for the exit-class symbol
+    fallback path (order_reduces_exposure)."""
+    def __init__(self, conId, symbol):
+        self.conId = conId
+        self.symbol = symbol
+
+
+class TestOrderReducesExposure:
+    def test_sell_partial_of_long_is_exit(self):
+        t = _trader_with_positions([_pos(1, 100.0)])
+        assert t.order_reduces_exposure(_FakeContract(1), 'SELL', 50) is True
+
+    def test_sell_full_long_is_exit(self):
+        t = _trader_with_positions([_pos(1, 100.0)])
+        assert t.order_reduces_exposure(_FakeContract(1), 'SELL', 100) is True
+
+    def test_oversized_sell_of_long_is_still_exit(self):
+        """A SELL against a held long is exit-class even when oversized — you
+        cannot INCREASE a long by selling, so refusing it as an open would
+        strand the exit. (Callers that must not oversell clamp separately.)"""
+        t = _trader_with_positions([_pos(1, 100.0)])
+        assert t.order_reduces_exposure(_FakeContract(1), 'SELL', 101) is True
+        assert t.order_reduces_exposure(_FakeContract(1), 'SELL', 150) is True
+
+    def test_buy_against_long_is_open(self):
+        t = _trader_with_positions([_pos(1, 100.0)])
+        assert t.order_reduces_exposure(_FakeContract(1), 'BUY', 10) is False
+
+    def test_buy_cover_of_short_is_exit(self):
+        t = _trader_with_positions([_pos(1, -100.0)])
+        assert t.order_reduces_exposure(_FakeContract(1), 'BUY', 50) is True
+        assert t.order_reduces_exposure(_FakeContract(1), 'BUY', 100) is True
+
+    def test_oversized_cover_of_short_is_still_exit(self):
+        """A BUY against a held short is exit-class even when oversized."""
+        t = _trader_with_positions([_pos(1, -100.0)])
+        assert t.order_reduces_exposure(_FakeContract(1), 'BUY', 101) is True
+        assert t.order_reduces_exposure(_FakeContract(1), 'BUY', 150) is True
+
+    def test_sell_against_short_is_open(self):
+        t = _trader_with_positions([_pos(1, -100.0)])
+        assert t.order_reduces_exposure(_FakeContract(1), 'SELL', 10) is False
+
+    def test_no_position_is_open(self):
+        t = _trader_with_positions([])
+        assert t.order_reduces_exposure(_FakeContract(1), 'SELL', 10) is False
+
+    def test_unknown_conid_is_open(self):
+        t = _trader_with_positions([_pos(2, 100.0)])
+        assert t.order_reduces_exposure(_FakeContract(1), 'SELL', 10) is False
+
+    def test_missing_conid_is_open(self):
+        t = _trader_with_positions([_pos(1, 100.0)])
+        assert t.order_reduces_exposure(_FakeContract(0), 'SELL', 10) is False
+
+    def test_positions_read_failure_is_open(self):
+        """An unreadable portfolio can never prove an order is a close —
+        fail closed: gate it like an open."""
+        t = _minimal_trader()
+
+        def _boom():
+            raise RuntimeError('IB down')
+        t.get_positions = _boom
+        assert t.order_reduces_exposure(_FakeContract(1), 'SELL', 10) is False
+
+    def test_zero_or_negative_quantity_is_open(self):
+        t = _trader_with_positions([_pos(1, 100.0)])
+        assert t.order_reduces_exposure(_FakeContract(1), 'SELL', 0) is False
+        assert t.order_reduces_exposure(_FakeContract(1), 'SELL', -5) is False
+        assert t.order_reduces_exposure(_FakeContract(1), 'SELL', None) is False
+
+    def test_garbage_action_is_open(self):
+        t = _trader_with_positions([_pos(1, 100.0)])
+        assert t.order_reduces_exposure(_FakeContract(1), 'BYU', 10) is False
+
+    def test_fractional_full_close_tolerates_float_noise(self):
+        held = 0.1 + 0.2  # 0.30000000000000004-style accumulation
+        t = _trader_with_positions([_pos(1, held)])
+        assert t.order_reduces_exposure(_FakeContract(1), 'SELL', 0.3) is True
+
+    def test_multiple_position_rows_same_conid_are_summed(self):
+        t = _trader_with_positions([_pos(1, 60.0), _pos(1, 40.0)])
+        assert t.order_reduces_exposure(_FakeContract(1), 'SELL', 100) is True
+        # Oversize of the summed long is still exit-class (flip), not an open.
+        assert t.order_reduces_exposure(_FakeContract(1), 'SELL', 101) is True
+
+    def test_missing_conid_sell_falls_back_to_same_symbol_long(self):
+        """conId briefly missing from the cache after a fill (or a conId
+        change): a SELL whose contract has no resolvable conId but a
+        same-symbol long exists is exit-class, not a gated open."""
+        held = _FakePos(contract=_ContractSym(conId=0, symbol='AMD'), position=100.0)
+        t = _trader_with_positions([held])
+        order_contract = _ContractSym(conId=0, symbol='AMD')
+        assert t.order_reduces_exposure(order_contract, 'SELL', 100) is True
+
+    def test_symbol_fallback_requires_matching_symbol(self):
+        """A different symbol must NOT match — precision preserved."""
+        held = _FakePos(contract=_ContractSym(conId=0, symbol='AMD'), position=100.0)
+        t = _trader_with_positions([held])
+        order_contract = _ContractSym(conId=0, symbol='NVDA')
+        assert t.order_reduces_exposure(order_contract, 'SELL', 100) is False
+
+
+# ---------------------------------------------------------------------------
+# gather_risk_inputs — tri-state: "read succeeded, value is 0" is distinct
+# from "could not read".
+# ---------------------------------------------------------------------------
+
+class _FakeAV:
+    def __init__(self, account, tag, value, currency):
+        self.account = account
+        self.tag = tag
+        self.value = value
+        self.currency = currency
+
+
+class _FakePnL:
+    def __init__(self, daily):
+        self.dailyPnL = daily
+
+
+class TestGatherRiskInputs:
+    def _trader(self, pnl=(), account_values=(), account='DU12345',
+                positions=(), fills_today=0):
+        t = _minimal_trader()
+        t.ib_account = account
+        t.book = MagicMock()
+        t.book.get_open_order_count = MagicMock(return_value=2)
+        t.get_pnl = lambda: list(pnl)
+        t.get_positions = lambda: list(positions)
+        t.event_store = MagicMock()
+        t.event_store.count_since = MagicMock(return_value=fills_today)
+        t.client = MagicMock()
+        t.client.ib.accountValues = MagicMock(return_value=list(account_values))
+        t.client.ib.managedAccounts = MagicMock(return_value=[account])
+        return t
+
+    def test_all_readable(self):
+        t = self._trader(
+            pnl=[_FakePnL(-100.0), _FakePnL(25.0)],
+            account_values=[_FakeAV('DU12345', 'NetLiquidation', '50000', 'CAD')],
+        )
+        inputs = t.gather_risk_inputs()
+        assert inputs.open_order_count == 2
+        assert inputs.daily_pnl == -75.0
+        assert inputs.daily_pnl_evaluable is True
+        assert inputs.portfolio_value == 50000.0
+        assert inputs.portfolio_value_evaluable is True
+
+    def test_empty_pnl_is_a_legitimate_zero(self):
+        t = self._trader(
+            account_values=[_FakeAV('DU12345', 'NetLiquidation', '50000', 'CAD')])
+        inputs = t.gather_risk_inputs()
+        assert inputs.daily_pnl == 0.0
+        assert inputs.daily_pnl_evaluable is True
+
+    def test_pnl_read_failure_not_evaluable(self):
+        t = self._trader(
+            account_values=[_FakeAV('DU12345', 'NetLiquidation', '50000', 'CAD')])
+
+        def _boom():
+            raise RuntimeError('no pnl')
+        t.get_pnl = _boom
+        inputs = t.gather_risk_inputs()
+        assert inputs.daily_pnl_evaluable is False
+
+    def test_nan_pnl_not_evaluable(self):
+        """IB streams nan until the PnL subscription warms — summing it would
+        be a lie, not a zero."""
+        t = self._trader(
+            pnl=[_FakePnL(float('nan'))],
+            account_values=[_FakeAV('DU12345', 'NetLiquidation', '50000', 'CAD')])
+        inputs = t.gather_risk_inputs()
+        assert inputs.daily_pnl_evaluable is False
+
+    def test_missing_net_liquidation_not_evaluable(self):
+        t = self._trader(account_values=[])
+        inputs = t.gather_risk_inputs()
+        assert inputs.portfolio_value_evaluable is False
+
+    def test_net_liquidation_scoped_to_pinned_account(self):
+        t = self._trader(account_values=[
+            _FakeAV('U_MASTER', 'NetLiquidation', '32000000', 'CAD'),
+            _FakeAV('DU12345', 'NetLiquidation', '17000', 'CAD'),
+        ])
+        inputs = t.gather_risk_inputs()
+        assert inputs.portfolio_value == 17000.0
+        assert inputs.portfolio_value_evaluable is True
+
+    def test_empty_pnl_with_todays_fills_is_not_evaluable(self):
+        """Mid-day restart, now-flat book, but a fill was booked today: the
+        empty PnL cache means the feed hasn't warmed, NOT a real 0.0. Must be
+        not-evaluable so the gate fails closed on opens (blind to the day's
+        realized loss otherwise)."""
+        t = self._trader(
+            account_values=[_FakeAV('DU12345', 'NetLiquidation', '50000', 'CAD')],
+            positions=(), fills_today=3)
+        inputs = t.gather_risk_inputs()
+        assert inputs.daily_pnl_evaluable is False
+
+    def test_empty_pnl_with_open_positions_is_not_evaluable(self):
+        """Positions held but the PnL feed hasn't populated → not-evaluable."""
+        t = self._trader(
+            account_values=[_FakeAV('DU12345', 'NetLiquidation', '50000', 'CAD')],
+            positions=[_pos(1, 100.0)], fills_today=0)
+        inputs = t.gather_risk_inputs()
+        assert inputs.daily_pnl_evaluable is False
+
+    def test_empty_pnl_genuinely_no_activity_is_evaluable_zero(self):
+        """Flat book, no fills today: an empty cache is a real 0.0 — evaluable
+        so a fresh session can still open."""
+        t = self._trader(
+            account_values=[_FakeAV('DU12345', 'NetLiquidation', '50000', 'CAD')],
+            positions=(), fills_today=0)
+        inputs = t.gather_risk_inputs()
+        assert inputs.daily_pnl == 0.0
+        assert inputs.daily_pnl_evaluable is True
+
+
+# ---------------------------------------------------------------------------
+# place_standalone_order — exit-class only. The protective-stop door must
+# not be usable to open exposure.
+# ---------------------------------------------------------------------------
+
+class _StandaloneExecutioner:
+    def __init__(self):
+        self.placed = []
+
+    async def subscribe_place_order_direct(self, contract, order, is_exit=False):
+        import reactivex as rx
+        self.placed.append((contract, order, is_exit))
+        fake_trade = MagicMock()
+        fake_trade.order = order
+        return rx.from_iterable([fake_trade])
+
+
+def _standalone_trader(positions):
+    t = _minimal_trader()
+    t.get_positions = lambda: positions
+    t.executioner = _StandaloneExecutioner()
+    return t
+
+
+class TestPlaceStandaloneOrderExitClassOnly:
+    @pytest.mark.asyncio
+    async def test_sell_stop_for_held_long_placed(self):
+        """The auto-executor disaster-stop shape: SELL STP covering a held
+        long, placed only when the broker position is visible."""
+        t = _standalone_trader([_pos(1, 100.0)])
+        result = await t.place_standalone_order(
+            contract=_FakeContract(1), action='SELL', quantity=100.0,
+            order_type='STP', aux_price=90.0, order_ref='my_strategy')
+        assert result.is_success()
+        assert len(t.executioner.placed) == 1
+        _, order, order_is_exit = t.executioner.placed[0]
+        assert order_is_exit is True  # standalone protective orders are exit-class
+        assert order.orderRef == 'my_strategy'
+        assert order.account == 'DU12345'
+
+    @pytest.mark.asyncio
+    async def test_buy_with_no_short_refused(self):
+        """The ungated exposure door: a standalone BUY with no short must be
+        refused, naming action/qty/position."""
+        t = _standalone_trader([_pos(1, 100.0)])
+        result = await t.place_standalone_order(
+            contract=_FakeContract(1), action='BUY', quantity=10.0,
+            order_type='LMT', limit_price=50.0)
+        assert not result.is_success()
+        assert 'BUY' in result.error
+        assert '10.0' in result.error
+        assert '100.0' in result.error
+        assert t.executioner.placed == []
+
+    @pytest.mark.asyncio
+    async def test_oversized_sell_refused(self):
+        t = _standalone_trader([_pos(1, 100.0)])
+        result = await t.place_standalone_order(
+            contract=_FakeContract(1), action='SELL', quantity=150.0,
+            order_type='STP', aux_price=90.0)
+        assert not result.is_success()
+        assert t.executioner.placed == []
+
+    @pytest.mark.asyncio
+    async def test_no_position_refused(self):
+        t = _standalone_trader([])
+        result = await t.place_standalone_order(
+            contract=_FakeContract(1), action='SELL', quantity=10.0,
+            order_type='STP', aux_price=90.0)
+        assert not result.is_success()
+        assert t.executioner.placed == []
+
+    @pytest.mark.asyncio
+    async def test_buy_stop_covering_short_placed(self):
+        t = _standalone_trader([_pos(1, -100.0)])
+        result = await t.place_standalone_order(
+            contract=_FakeContract(1), action='BUY', quantity=100.0,
+            order_type='STP', aux_price=110.0)
+        assert result.is_success()
+        assert len(t.executioner.placed) == 1
+
+    @pytest.mark.asyncio
+    async def test_resize_protective_recreation_shape_still_works(self):
+        """Resize re-creates a TRAIL at the (trimmed) new quantity — must
+        stay placeable."""
+        t = _standalone_trader([_pos(1, 80.0)])
+        result = await t.place_standalone_order(
+            contract=_FakeContract(1), action='SELL', quantity=80.0,
+            order_type='TRAIL', trailing_percent=2.0)
+        assert result.is_success()
+
+
+# ---------------------------------------------------------------------------
+# place_expressive_order — exit-class exemption (fixes AutoExecutor closes
+# being refused by a tripped daily-loss gate AFTER the protective stop was
+# cancelled) + fail-closed for opens with no gate.
+# ---------------------------------------------------------------------------
+
+class TestPlaceExpressiveOrderExitClass:
+    def _expressive_trader(self, positions, risk_gate):
+        t = _minimal_trader()
+        t.get_positions = lambda: positions
+        t.risk_gate = risk_gate
+        t.executioner = _StandaloneExecutioner()
+        t.client = MagicMock()
+        return t
+
+    @pytest.mark.asyncio
+    async def test_exit_class_close_bypasses_tripped_gate(self):
+        from trader.trading.risk_gate import RiskGateResult
+        from trader.trading.proposal import ExecutionSpec
+
+        class _TrippedGate:
+            def check_instrument(self, **kw):
+                return RiskGateResult(approved=False, reason='denylisted')
+
+            def check_leverage(self, *a, **kw):
+                raise AssertionError('leverage must not run for exit-class')
+
+            def evaluate(self, *a, **kw):
+                raise AssertionError('evaluate must not run for exit-class')
+
+        t = self._expressive_trader([_pos(7, 50.0)], _TrippedGate())
+        spec = ExecutionSpec(order_type='MARKET', exit_type='NONE')
+        result = await t.place_expressive_order(
+            contract=_FakeContract(7), action='SELL', quantity=50.0,
+            execution_spec=spec.to_dict(), algo_name='my_strategy')
+        assert result.is_success(), result.error
+        assert len(t.executioner.placed) == 1
+
+    @pytest.mark.asyncio
+    async def test_open_with_no_gate_refused_fail_closed(self):
+        from trader.trading.proposal import ExecutionSpec
+
+        t = self._expressive_trader([], risk_gate=None)
+        spec = ExecutionSpec(order_type='MARKET', exit_type='NONE')
+        result = await t.place_expressive_order(
+            contract=_FakeContract(7), action='BUY', quantity=50.0,
+            execution_spec=spec.to_dict())
+        assert not result.is_success()
+        assert 'risk gate unavailable' in result.error
+        assert t.executioner.placed == []
+
+    @pytest.mark.asyncio
+    async def test_close_with_no_gate_still_places(self):
+        from trader.trading.proposal import ExecutionSpec
+
+        t = self._expressive_trader([_pos(7, 50.0)], risk_gate=None)
+        spec = ExecutionSpec(order_type='MARKET', exit_type='NONE')
+        result = await t.place_expressive_order(
+            contract=_FakeContract(7), action='SELL', quantity=50.0,
+            execution_spec=spec.to_dict())
+        assert result.is_success(), result.error
+        assert len(t.executioner.placed) == 1

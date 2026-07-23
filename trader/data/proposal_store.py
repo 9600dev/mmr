@@ -6,9 +6,13 @@ import datetime as dt
 import json
 
 
-# Valid state transitions. Terminal states (EXECUTED, REJECTED, EXPIRED) cannot
-# transition further except to FAILED (which is also terminal). FAILED is allowed
-# from any non-terminal-or-FAILED state so the runtime can mark broken work.
+# Valid state transitions:
+#   PENDING  → APPROVED | REJECTED | EXPIRED | FAILED
+#   APPROVED → EXECUTED | FAILED | REJECTED
+# Terminal states (EXECUTED, REJECTED, EXPIRED, FAILED) admit NO further
+# transitions — including same-status no-ops — and their metadata is immutable.
+# This exact table is pinned by tests/invariants/test_proposal_machine.py; a
+# change here without changing that human-owned spec is a bug.
 _TERMINAL: Set[str] = {
     ProposalStatus.EXECUTED.value,
     ProposalStatus.REJECTED.value,
@@ -86,7 +90,19 @@ class ProposalStore:
         self.db.execute_atomic(_init)
 
     def add(self, proposal: TradeProposal) -> int:
-        """Add a proposal and return its assigned id."""
+        """Add a proposal and return its assigned id.
+
+        New proposals must be born PENDING — every other status is only
+        reachable through the state machine (update_status / try_transition).
+        Accepting an arbitrary initial status would let a caller mint an
+        already-APPROVED (or worse, EXECUTED) row that never passed through
+        the CAS claim that prevents double-execution.
+        """
+        if proposal.status != ProposalStatus.PENDING.value:
+            raise InvalidProposalTransition(
+                f'new proposals must have status PENDING, got {proposal.status!r} — '
+                f'other states are only reachable via update_status/try_transition'
+            )
         now = dt.datetime.now()
         execution_json = json.dumps(proposal.execution.to_dict())
         # Persist exchange/currency hints in metadata (avoids DB schema migration)
@@ -125,16 +141,31 @@ class ProposalStore:
         return self.db.execute_atomic(_insert)
 
     def update_metadata(self, proposal_id: int, extra: dict) -> None:
-        """Merge extra keys into an existing proposal's metadata. Atomic under the row lock."""
+        """Merge extra keys into an existing proposal's metadata. Atomic under the row lock.
+
+        Terminal rows (EXECUTED / REJECTED / EXPIRED / FAILED) are immutable —
+        including their metadata. No production path writes metadata after a
+        terminal transition (the propose() enrichment writes all happen while
+        the row is PENDING), so a post-terminal metadata write is a bug or a
+        tamper, and mutating the audit record of a completed trade is exactly
+        what terminal immutability exists to prevent. Raises
+        InvalidProposalTransition on a terminal row. A missing row is a no-op
+        (metadata enrichment is best-effort at the call sites).
+        """
         now = dt.datetime.now()
 
         def _merge(conn):
             row = conn.execute(
-                "SELECT metadata FROM trade_proposals WHERE id = ?",
+                "SELECT metadata, status FROM trade_proposals WHERE id = ?",
                 [proposal_id],
             ).fetchone()
             if not row:
                 return
+            if row[1] in _TERMINAL:
+                raise InvalidProposalTransition(
+                    f'proposal {proposal_id} is {row[1]!r} (terminal) — '
+                    f'metadata is immutable on terminal proposals'
+                )
             existing = json.loads(row[0]) if row[0] else {}
             merged = {**existing, **extra}
             conn.execute(
@@ -264,9 +295,24 @@ class ProposalStore:
             )
         return self._rows_to_proposals(rows or [])
 
-    def delete(self, id: int) -> bool:
-        """Delete a proposal by id. Returns True if a row was deleted."""
+    def delete(self, id: int, force: bool = False) -> bool:
+        """Delete a proposal by id. Returns True if the row no longer exists.
+
+        Terminal rows (EXECUTED / REJECTED / EXPIRED / FAILED) are the audit
+        trail of what was (or wasn't) traded — deleting one requires an
+        explicit ``force=True``; without it the call raises
+        InvalidProposalTransition. Non-terminal rows delete freely, and a
+        missing id is a successful no-op.
+        """
         def _delete(conn):
+            row = conn.execute(
+                "SELECT status FROM trade_proposals WHERE id = ?", [id]
+            ).fetchone()
+            if row and row[0] in _TERMINAL and not force:
+                raise InvalidProposalTransition(
+                    f'proposal {id} is {row[0]!r} (terminal) — deleting audit-trail '
+                    f'rows requires force=True'
+                )
             conn.execute("DELETE FROM trade_proposals WHERE id = ?", [id])
             result = conn.execute(
                 "SELECT COUNT(*) FROM trade_proposals WHERE id = ?", [id]

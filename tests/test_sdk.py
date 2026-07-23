@@ -1158,3 +1158,233 @@ class TestPortfolioSnapshotPropagatesFailures:
 
         with pytest.raises(TimeoutError):
             mmr.portfolio_snapshot()
+
+
+class TestApproveAmountConversion:
+    """approve() converts a dollar amount to whole shares via floor-and-refuse
+    (trader.trading.order_math) — the old round() + bump-to-1 silently turned
+    a too-small amount into a full share at inflated notional."""
+
+    def _make_mmr(self, mock_client, tmp_duckdb_path):
+        mmr = _make_mmr_with_mock(mock_client)
+        mmr._container.config.return_value = {'duckdb_path': tmp_duckdb_path}
+        return mmr
+
+    def _add_amount_proposal(self, tmp_duckdb_path, amount):
+        from trader.data.proposal_store import ProposalStore
+        from trader.trading.proposal import ExecutionSpec, TradeProposal
+        store = ProposalStore(tmp_duckdb_path)
+        pid = store.add(TradeProposal(
+            symbol='AMD', action='BUY', amount=amount,
+            execution=ExecutionSpec(order_type='MARKET'),
+        ))
+        return store, pid
+
+    def _wire_market(self, mock_client, last_price):
+        mock_client.rpc.return_value.resolve_symbol.return_value = [FakeSecurityDefinition()]
+        ticker = FakeTicker()
+        ticker.last = last_price
+        mock_client.rpc.return_value.get_snapshot.return_value = ticker
+        mock_client.rpc.return_value.get_fx_rates.return_value = {}
+
+    def test_amount_below_price_fails_proposal_never_bumps_to_one(self, tmp_duckdb_path):
+        """BRK.A-class regression: a $5000 amount on a $700k stock must FAIL
+        the proposal, never place a 1-share order."""
+        store, pid = self._add_amount_proposal(tmp_duckdb_path, amount=5000.0)
+
+        mock_client = _make_mock_rpc()
+        self._wire_market(mock_client, last_price=700_000.0)
+
+        mmr = self._make_mmr(mock_client, tmp_duckdb_path)
+        result = mmr.approve(pid)
+
+        assert result.success_fail == SuccessFailEnum.FAIL
+        assert '5000' in (result.error or '')
+        assert '700000' in (result.error or '')
+        assert store.get(pid).status == 'FAILED'
+        mock_client.rpc.return_value.place_expressive_order.assert_not_called()
+
+    def test_amount_conversion_floors_never_rounds_up(self, tmp_duckdb_path):
+        """$5000 at $140 is 35.71 shares: round() would order 36 ($5040 —
+        exceeding the sized notional); floor must order 35."""
+        store, pid = self._add_amount_proposal(tmp_duckdb_path, amount=5000.0)
+
+        mock_client = _make_mock_rpc()
+        self._wire_market(mock_client, last_price=140.0)
+        mock_client.rpc.return_value.place_expressive_order.return_value = (
+            SuccessFail.success(obj=[]))
+
+        mmr = self._make_mmr(mock_client, tmp_duckdb_path)
+        result = mmr.approve(pid)
+
+        assert result.success_fail == SuccessFailEnum.SUCCESS
+        placed = mock_client.rpc.return_value.place_expressive_order.call_args
+        assert placed.kwargs['quantity'] == 35.0
+        assert store.get(pid).status == 'EXECUTED'
+
+    def _add_opt_proposal(self, tmp_duckdb_path, amount):
+        from trader.data.proposal_store import ProposalStore
+        from trader.trading.proposal import ExecutionSpec, TradeProposal
+        store = ProposalStore(tmp_duckdb_path)
+        pid = store.add(TradeProposal(
+            symbol='AAPL', action='BUY', amount=amount, sec_type='OPT',
+            execution=ExecutionSpec(order_type='MARKET'),
+        ))
+        return store, pid
+
+    def _wire_opt_market(self, mock_client, premium, multiplier='100'):
+        sec = FakeSecurityDefinition(symbol='AAPL', secType='OPT')
+        sec.multiplier = multiplier
+        mock_client.rpc.return_value.resolve_symbol.return_value = [sec]
+        ticker = FakeTicker()
+        ticker.last = premium
+        mock_client.rpc.return_value.get_snapshot.return_value = ticker
+        mock_client.rpc.return_value.get_fx_rates.return_value = {}
+
+    def test_option_multiplier_prevents_100x_oversize(self, tmp_duckdb_path):
+        """An OPT at $5 premium with multiplier 100 costs $500/contract. A $300
+        amount cannot cover a single contract → the proposal must FAIL, never
+        place 60 contracts ($30k actual) by dividing $300 by the bare premium."""
+        store, pid = self._add_opt_proposal(tmp_duckdb_path, amount=300.0)
+
+        mock_client = _make_mock_rpc()
+        self._wire_opt_market(mock_client, premium=5.0, multiplier='100')
+
+        mmr = self._make_mmr(mock_client, tmp_duckdb_path)
+        result = mmr.approve(pid)
+
+        assert result.success_fail == SuccessFailEnum.FAIL
+        assert store.get(pid).status == 'FAILED'
+        mock_client.rpc.return_value.place_expressive_order.assert_not_called()
+
+    def test_option_multiplier_sizes_by_contract_notional(self, tmp_duckdb_path):
+        """$500 at a $5 premium × 100 multiplier is exactly 1 contract ($500),
+        not 100 contracts ($50k). Proves contracts × premium × multiplier <= amount."""
+        store, pid = self._add_opt_proposal(tmp_duckdb_path, amount=500.0)
+
+        mock_client = _make_mock_rpc()
+        self._wire_opt_market(mock_client, premium=5.0, multiplier='100')
+        mock_client.rpc.return_value.place_expressive_order.return_value = (
+            SuccessFail.success(obj=[]))
+
+        mmr = self._make_mmr(mock_client, tmp_duckdb_path)
+        result = mmr.approve(pid)
+
+        assert result.success_fail == SuccessFailEnum.SUCCESS
+        placed = mock_client.rpc.return_value.place_expressive_order.call_args
+        assert placed.kwargs['quantity'] == 1.0
+        assert store.get(pid).status == 'EXECUTED'
+
+    def test_stock_multiplier_one_unchanged(self, tmp_duckdb_path):
+        """Control: a stock (no multiplier) still sizes on bare price — $5000 at
+        $140 → 35 shares, identical to pre-multiplier behaviour."""
+        store, pid = self._add_amount_proposal(tmp_duckdb_path, amount=5000.0)
+
+        mock_client = _make_mock_rpc()
+        self._wire_market(mock_client, last_price=140.0)  # FakeSecurityDefinition has no multiplier
+        mock_client.rpc.return_value.place_expressive_order.return_value = (
+            SuccessFail.success(obj=[]))
+
+        mmr = self._make_mmr(mock_client, tmp_duckdb_path)
+        result = mmr.approve(pid)
+
+        assert result.success_fail == SuccessFailEnum.SUCCESS
+        placed = mock_client.rpc.return_value.place_expressive_order.call_args
+        assert placed.kwargs['quantity'] == 35.0
+
+
+class TestExecuteResizeGrowProtection:
+    """execute_resize_plan must never leave a GROWN position naked. A grow
+    (--min-bound) BUY delta resolves on submission, not fill; re-creating the
+    protective at the grown quantity before the fill lands is refused by
+    place_standalone_order's exit-class check (qty must not exceed the held
+    position). If the old stop were cancelled first, the position would be
+    naked. So an unconfirmed grow must LEAVE the old protective in place."""
+
+    def _grow_plan(self):
+        return {'adjustments': [{
+            'symbol': 'AMD', 'conId': 4391,
+            'current_qty': 100, 'target_qty': 150, 'delta_qty': 50, 'action': 'BUY',
+            'associated_orders': [{
+                'orderId': 7, 'orderType': 'STP', 'action': 'SELL',
+                'auxPrice': 140.0, 'lmtPrice': 0.0, 'trailingPercent': 0.0, 'tif': 'GTC',
+            }],
+        }]}
+
+    def _trim_plan(self):
+        return {'adjustments': [{
+            'symbol': 'AMD', 'conId': 4391,
+            'current_qty': 100, 'target_qty': 60, 'delta_qty': -40, 'action': 'SELL',
+            'associated_orders': [{
+                'orderId': 7, 'orderType': 'STP', 'action': 'SELL',
+                'auxPrice': 140.0, 'lmtPrice': 0.0, 'trailingPercent': 0.0, 'tif': 'GTC',
+            }],
+        }]}
+
+    def _wire(self, mock_client, held_qty):
+        # Delta market order resolves on SUBMISSION.
+        mock_client.rpc.return_value.place_order_simple.return_value = SuccessFail.success(obj=None)
+        # Real predicate: place_standalone_order refuses a protective larger than held.
+        def _standalone(*args, **kwargs):
+            if kwargs.get('quantity', 0) > held_qty:
+                return SuccessFail.fail(error='order would not reduce the live position')
+            return SuccessFail.success(obj=None)
+        mock_client.rpc.return_value.place_standalone_order.side_effect = _standalone
+        mock_client.rpc.return_value.cancel_order.return_value = SuccessFail.success()
+
+    def test_grow_unfilled_leaves_old_protective_uncancelled(self):
+        """Broker still shows the OLD (100) qty at re-create time — the delta
+        hasn't filled. The old STP must NOT be cancelled (no naked position)."""
+        mock_client = _make_mock_rpc()
+        self._wire(mock_client, held_qty=100)
+
+        mmr = _make_mmr_with_mock(mock_client)
+        mmr._contract_map['AMD'] = FakeContract(conId=4391, symbol='AMD')
+        # Fill never confirms within the poll window (e.g. outside RTH).
+        mmr._await_grown_position = MagicMock(return_value=False)
+        mmr._live_position_qty = MagicMock(return_value=100)
+        mmr.cancel = MagicMock()
+
+        results = mmr.execute_resize_plan(self._grow_plan())
+
+        # Old protective retained: cancel never called, no re-create attempted.
+        mmr.cancel.assert_not_called()
+        mock_client.rpc.return_value.place_standalone_order.assert_not_called()
+        assert any('LEFT IN' in w and 'PLACE' in w for w in results['warnings'])
+
+    def test_grow_confirmed_recreates_at_new_qty(self):
+        """Once the fill lands (position reflects 150), the normal cancel →
+        re-create at the grown quantity proceeds."""
+        mock_client = _make_mock_rpc()
+        self._wire(mock_client, held_qty=150)  # fill landed
+
+        mmr = _make_mmr_with_mock(mock_client)
+        mmr._contract_map['AMD'] = FakeContract(conId=4391, symbol='AMD')
+        mmr._await_grown_position = MagicMock(return_value=True)
+        mmr.cancel = MagicMock(return_value=SuccessFail.success())
+
+        results = mmr.execute_resize_plan(self._grow_plan())
+
+        mmr.cancel.assert_called_once_with(7)
+        placed = mock_client.rpc.return_value.place_standalone_order.call_args
+        assert placed.kwargs['quantity'] == 150
+        assert any('re-created' in s for s in results['successes'])
+
+    def test_trim_path_unchanged_no_grow_poll(self):
+        """A trim shrinks the position; it must not poll for a grow and must
+        cancel + re-create at the smaller quantity exactly as before."""
+        mock_client = _make_mock_rpc()
+        self._wire(mock_client, held_qty=100)
+
+        mmr = _make_mmr_with_mock(mock_client)
+        mmr._contract_map['AMD'] = FakeContract(conId=4391, symbol='AMD')
+        mmr._await_grown_position = MagicMock()
+        mmr.cancel = MagicMock(return_value=SuccessFail.success())
+
+        results = mmr.execute_resize_plan(self._trim_plan())
+
+        mmr._await_grown_position.assert_not_called()
+        mmr.cancel.assert_called_once_with(7)
+        placed = mock_client.rpc.return_value.place_standalone_order.call_args
+        assert placed.kwargs['quantity'] == 60
+        assert any('re-created' in s for s in results['successes'])

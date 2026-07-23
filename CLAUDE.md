@@ -5,7 +5,10 @@
 > [`docs/OPERATIONAL_STATE.md`](docs/OPERATIONAL_STATE.md) — read it first when
 > resuming operational work. Code backlog is in `docs/AUDIT_ROADMAP.md`.
 > The live-session operating loop (monitors, pulse lines, escalation policy,
-> triage order) is [`docs/MONITORING.md`](docs/MONITORING.md).
+> triage order) is [`docs/MONITORING.md`](docs/MONITORING.md). The staged
+> safety-hardening plan (shipped tranche 1: exit-class boundary, order math,
+> restricted unpickler, gauntlet; tranches 2-3 designed) is
+> [`docs/SAFETY_ROADMAP.md`](docs/SAFETY_ROADMAP.md).
 
 ## Project Overview
 
@@ -61,13 +64,13 @@ pycron/pycron.py ──► Cron scheduler (db_backup, data_refresh_*) — servic
 
 The reason PubSub and MessageBus are separate (despite overlap) is efficiency: ZMQ's native PUB/SUB does topic filtering in the kernel/socket layer with zero server-side bookkeeping, which is ideal for high-frequency ticker data. The MessageBus trades that efficiency for per-client routing control, which strategy signals need but tickers don't.
 
-**Serialization**: All ZMQ messages use msgpack with custom ExtType handlers for datetime, date, time, timedelta, pandas DataFrames (via PyArrow IPC), and a dill fallback for arbitrary Python objects. Defined in `clientserver.py` (`ext_pack`/`ext_unpack`). Because `dill.loads` can execute arbitrary code, the fallback is policy-gated: set `MMR_DILL_STRICT=1` in the environment to refuse all `EXT_OBJECT` payloads, or call `set_dill_whitelist([Type1, Type2, ...])` to allow only specific classes.
+**Serialization**: All ZMQ messages use msgpack with custom ExtType handlers for datetime, date, time, timedelta, pandas DataFrames (via PyArrow IPC), and a dill fallback for arbitrary Python objects. Defined in `clientserver.py` (`ext_pack`/`ext_unpack`). Because `dill.loads` can execute arbitrary code, every dill payload (EXT_OBJECT and the raw-dill legacy fallback) goes through a **restricted unpickler that is always on**: `_RestrictedUnpickler.find_class` enforces a module-prefix allowlist (`trader`, `ib_async`, `numpy`, `pandas`, `datetime`, … plus curated builtins; `getattr`/`_load_type` resolve to guarded stand-ins) *before* any REDUCE opcode can call a global, so gadget globals (`os.system`, `builtins.eval`, `dill._dill._create_function`) are refused before embedded code runs. Poisoned payloads surface as structured `DillDeserializationError`s — an undeserializable RPC request gets an error reply (not a client timeout), and PubSub/MessageBus read loops drop the one bad message loudly instead of tearing down the subscription. Outer layers unchanged: `MMR_DILL_STRICT=1` refuses all `EXT_OBJECT` payloads; `set_dill_whitelist([Type1, ...])` additionally restricts the top-level loaded type.
 
 **Storage (DuckDB)**: `trader/data/duckdb_store.py` wraps every query in a short-lived connection held under a per-database lock (`execute_atomic` opens, runs, closes atomically; `execute(query, params, fetch='all'|'one'|'df'|'none')` is the common-case wrapper). This lets multiple services share the same database file without leaking connections or tearing rows across concurrent writers. Two tables: `tick_data` (time-series OHLCV) and `object_store` (dill-serialized blobs). The OHLCV `write()` upsert filters its DELETE by `bar_size` as well as `symbol + date range` — without that filter a wide 1-min write (potentially expanded by `write_resolve_overlap` merging in years of pre-existing rows) would clobber every daily bar for the same conid in that range. The DuckDB live file lives in a named volume (`mmr_db_data`) rather than a host bind mount — on macOS Docker Desktop, VirtioFS has quirky mmap/fsync semantics for write-heavy single-file DBs. Use `./docker.sh -B [name]` to snapshot DB files out to the host bind-mount backup dir.
 
 **Event store**: `trader/data/event_store.py` records trading events (signals, orders, fills, rejections) in DuckDB for audit trail and risk gate lookback. All writes and queries use the atomic `DuckDBConnection.execute`/`execute_atomic` APIs — earlier versions leaked connections on the hot path.
 
-**Risk gate**: `trader/trading/risk_gate.py` enforces pre-trade risk limits (max position size, daily loss, open orders, signal rate) by querying the event store.
+**Risk gate**: `trader/trading/risk_gate.py` enforces pre-trade risk limits (max position size, daily loss, open orders, order rate — the rate check counts `ORDER_SUBMITTED` events in the event store). **Gates apply only to exposure-increasing orders.** The server-side predicate `Trader.order_reduces_exposure()` classifies each order against the live broker position; exit-class orders (SELL ≤ held long, BUY cover ≤ |held short|) are **never refusable** — they skip the filter, leverage check, risk gate, and `require_proposal_approval` (the filter runs observability-only on exits). The client-supplied `skip_risk_gate` flag is **deprecated and ignored** (wire-compat only, logs a warning). Checks are tri-state (`pass`/`fail`/`skipped:<reason>` in `RiskGateResult.checks`): a critical input that could not be read (daily PnL, NetLiquidation, no price to value the order — see `RiskInputs` `*_evaluable` flags) **refuses the open** fail-closed rather than silently skipping the check; a missing gate object also refuses opens (exits unaffected in both cases — expect brief open-refusals right after connect while IB account feeds warm up). Limits load from a `risk_limits:` mapping in `trader.yaml` via `RiskLimits.load()` (missing = defaults; unknown key/malformed value raises).
 
 **Position sizing**: `trader/trading/position_sizing.py` computes position sizes based on confidence, risk level, ATR volatility, portfolio state, and liquidity (ADV, spread). The sizing pipeline is: `base_position × risk_multiplier × confidence_scale × volatility_adjustment`. Volatile stocks (high ATR%) automatically get smaller positions; stable stocks get larger ones. Configured via `config_defaults/position_sizing.yaml`. Used automatically by `propose` when no quantity/amount is specified.
 
@@ -77,9 +80,9 @@ The reason PubSub and MessageBus are separate (despite overlap) is efficiency: Z
 
 **Trading filter**: `trader/trading/trading_filter.py` enforces symbol/exchange denylist/allowlist rules. Checked by the executioner and risk gate before any order placement.
 
-**Portfolio resizing**: `trader/sdk.py` provides `compute_resize_deltas()` (pure function) and `compute_resize_plan()`/`execute_resize_plan()` (SDK methods) for proportionally scaling all positions to fit within a target portfolio value. The resize workflow: (1) compute scale factor from max/min bounds, (2) find associated protective orders (stops, trailing stops, take-profits) for each position, (3) cancel protective orders, (4) place market orders for position deltas, (5) re-create protective orders at new quantities preserving original prices. Exposed via `resize-positions` CLI command. The `place_standalone_order()` RPC method on `trading_runtime.py` supports placing standalone STP/TRAIL/LMT orders for existing positions (used to re-create protectives after resizing).
+**Portfolio resizing**: `trader/sdk.py` provides `compute_resize_deltas()` (pure function) and `compute_resize_plan()`/`execute_resize_plan()` (SDK methods) for proportionally scaling all positions to fit within a target portfolio value. The resize workflow: (1) compute scale factor from max/min bounds, (2) find associated protective orders (stops, trailing stops, take-profits) for each position, (3) cancel protective orders, (4) place market orders for position deltas, (5) re-create protective orders at new quantities preserving original prices. Exposed via `resize-positions` CLI command. The `place_standalone_order()` RPC method on `trading_runtime.py` supports placing standalone STP/TRAIL/LMT orders for existing positions (used to re-create protectives after resizing) — it is **exit-class only**: the order must reduce the live broker position, anything else is refused (it was an ungated exposure door). Note: resize *trims* are exit-class and never gated, but resize *grows* (`--min-bound` BUY deltas) are exposure-increasing and get refused under `require_proposal_approval: true`; grow-resize needs its own reviewed path if ever needed (see `docs/SAFETY_ROADMAP.md`).
 
-**Signal auto-execution** (`trader/strategy/auto_executor.py`): strategies with `auto_execute: true` have their signals executed automatically. The runtime hands each signal (plus a per-bar time-exit check) to an `AutoExecutor` worker thread, which routes through the proposal pipeline (`sdk.MMR.propose` → `approve`), so auto-trades get position sizing (confidence/ATR/liquidity), FX-correct quantities, the proposal audit trail, and the server-side trading filter + risk gate. Semantics are **long-only** — by default single-lot: BUY opens one sized position per (strategy, conid), SELL closes the executor-attributed quantity (clamped to the live broker position — a manual position in the same instrument is never touched), SELL-when-flat is a no-op. Strategies may opt into **bounded pyramiding** via `pyramid_max_adds: N` in strategy_runtime.yaml (default 0 = single-lot): up to N fixed-size adds after the initial entry (stack tops out at N+1 lots), stale-bar/cooldown/double-arm gates apply to adds, time-exit rules are latest-BUY-wins (matching the backtester), the protective stop is cancelled and re-placed to cover the whole stack on every add, and SELL closes the entire stack. Single-lot matches the backtester's `execution_mode='live'`; pyramiding matches `'pyramid_fixed'` with `--pyramid-max-adds N` (NOT the legacy default `'accumulate'`, which also compounds sizing — validate deployment candidates under the mode you deploy). `Signal.close_by_time`/`max_hold_bars` time exits are honored live, evaluated against **bar timestamps** (not wall clock) exactly like the backtester. State (attribution + per-bar execution dedup) persists in DuckDB (`auto_exec_positions`, `auto_exec_bar_log`) and survives restarts; a first-work reconcile marks positions closed externally when the broker disagrees. Safety rails: `MMR_AUTO_EXECUTE_DISABLED=1` kill switch, a **live double-arm** — real-money auto-execution requires BOTH `trading_mode: live` AND `MMR_AUTO_EXECUTE_LIVE=1` (strict `'1'`, code default DISARMED; a single `--live` flag flip can never arm the book by itself; un-armed live opens are refused-and-logged so the first live session records what WOULD have traded; closes are never gated so disarming can't strand positions) — plus RUNNING-state + `paper_only` guards, per-bar dedup, 300s per-(strategy, conid) cooldown (never applied to closes), a conId precision round-trip check that refuses to trade stale identifiers, and a **stale-bar gate** — a BUY is refused when the signal bar's age exceeds `MMR_STALE_BAR_MULTIPLE` (default 3) × the strategy's bar size (a bar much older than its interval means a stalled feed or reconnect flush; opening at current market off it is trading on garbage). The gate never applies to closes — refusing an exit is worse than a stale exit. Every attributed open also gets a **broker-side disaster stop**: a GTC STP SELL at `MMR_PROTECTIVE_STOP_PCT` (default 8%) below entry, placed after the open and self-healed on every bar if placement failed or the position predates the feature. It is deliberately wide — strategy exits fire long before it; it exists because it's the only protection that survives a dead feed / dead strategy_service while holding (the stale-bar gate only guards opens). The executor cancels it before closing (a cancel that fails because the stop already fired degrades the close to CLOSED_EXTERNALLY instead of overselling), reconcile cancels orphans, and the stop carries the strategy's `orderRef` so a fired stop's fill is ledger-attributed like any other exit. Set `MMR_PROTECTIVE_STOP_PCT=0` to disable. Every executed order carries the strategy name in its `orderRef` (approve derives it from `proposal.metadata['strategy']`), so fills in the event store are attributable per strategy — `mmr strategies pnl` pairs them long-only into realized PnL per strategy (the live-vs-backtest ledger). Fills executed under a since-fixed bug can be annotated out of the ledger: `mmr strategies fills` lists fill event ids, `mmr strategies exclude-fill <ids> --reason "..."` removes them from PnL (annotate BOTH sides of a round trip), `include-fill` restores.
+**Signal auto-execution** (`trader/strategy/auto_executor.py`): strategies with `auto_execute: true` have their signals executed automatically. The runtime hands each signal (plus a per-bar time-exit check) to an `AutoExecutor` worker thread, which routes through the proposal pipeline (`sdk.MMR.propose` → `approve`), so auto-trades get position sizing (confidence/ATR/liquidity), FX-correct quantities, the proposal audit trail, and the server-side trading filter + risk gate. Semantics are **long-only** — by default single-lot: BUY opens one sized position per (strategy, conid), SELL closes the executor-attributed quantity (clamped to the live broker position — a manual position in the same instrument is never touched), SELL-when-flat is a no-op. Strategies may opt into **bounded pyramiding** via `pyramid_max_adds: N` in strategy_runtime.yaml (default 0 = single-lot): up to N fixed-size adds after the initial entry (stack tops out at N+1 lots), stale-bar/cooldown/double-arm gates apply to adds, time-exit rules are latest-BUY-wins (matching the backtester), the protective stop is cancelled and re-placed to cover the whole stack on every add, and SELL closes the entire stack. Single-lot matches the backtester's `execution_mode='live'`; pyramiding matches `'pyramid_fixed'` with `--pyramid-max-adds N` (NOT the legacy default `'accumulate'`, which also compounds sizing — validate deployment candidates under the mode you deploy). `Signal.close_by_time`/`max_hold_bars` time exits are honored live, evaluated against **bar timestamps** (not wall clock) exactly like the backtester. State (attribution + per-bar execution dedup) persists in DuckDB (`auto_exec_positions`, `auto_exec_bar_log`) and survives restarts; a first-work reconcile marks positions closed externally when the broker disagrees. Safety rails: `MMR_AUTO_EXECUTE_DISABLED=1` kill switch, a **live double-arm** — real-money auto-execution requires BOTH `trading_mode: live` AND `MMR_AUTO_EXECUTE_LIVE=1` (strict `'1'`, code default DISARMED; a single `--live` flag flip can never arm the book by itself; un-armed live opens are refused-and-logged so the first live session records what WOULD have traded; closes are never gated so disarming can't strand positions) — plus RUNNING-state + `paper_only` guards, per-bar dedup, 300s per-(strategy, conid) cooldown (never applied to closes), a conId precision round-trip check that refuses to trade stale identifiers, and a **stale-bar gate** — a BUY is refused when the signal bar's age exceeds `MMR_STALE_BAR_MULTIPLE` (default 3) × the strategy's bar size (a bar much older than its interval means a stalled feed or reconnect flush; opening at current market off it is trading on garbage). The gate never applies to closes — refusing an exit is worse than a stale exit. Every attributed open also gets a **broker-side disaster stop**: a GTC STP SELL at `MMR_PROTECTIVE_STOP_PCT` (default 8%) below entry, placed after the open and self-healed on every bar if placement failed or the position predates the feature. It is deliberately wide — strategy exits fire long before it; it exists because it's the only protection that survives a dead feed / dead strategy_service while holding (the stale-bar gate only guards opens). The executor cancels it before closing (a cancel that fails because the stop already fired degrades the close to CLOSED_EXTERNALLY instead of overselling), reconcile cancels orphans, and the stop carries the strategy's `orderRef` so a fired stop's fill is ledger-attributed like any other exit. Set `MMR_PROTECTIVE_STOP_PCT=0` to disable. Every executed order carries the strategy name in its `orderRef` (approve derives it from `proposal.metadata['strategy']`), so fills in the event store are attributable per strategy — `mmr strategies pnl` pairs them long-only into realized PnL per strategy (the live-vs-backtest ledger). Fills executed under a since-fixed bug can be annotated out of the ledger: `mmr strategies fills` lists fill event ids, `mmr strategies exclude-fill <ids> --reason "..."` removes them from PnL (annotate BOTH sides of a round trip), `include-fill` restores. Executor *exits* are exit-class server-side (`order_reduces_exposure`) — never refusable by the risk gate, filter, or approval requirement. Arming is additionally gated by the **gauntlet** ("no hash, no live"): an `auto_execute` strategy's exact source SHA-256 must hold a PASS record in `gauntlet_runs` (`mmr strategies gauntlet <module> --class <Class>`); `strategies deploy`/`enable` refuse without it (no override — edit the file, re-run), and `StrategyRuntime.load_strategy` carries the authoritative check: warn-only by default, `MMR_GAUNTLET_ENFORCE=1` loads unverified strategies DISARMED (still able to close, never open).
 
 **Strategy reconciliation**: The strategy_service runs a reconciliation loop every 30 seconds (`strategy_runtime.py:_reconcile()`). It re-reads the portfolio universe from DuckDB and re-subscribes strategies to any new instruments (idempotent — `subscribe()` skips already-subscribed conIds). It also checks the YAML config file's modification time and loads any newly added strategies. This means: (1) an empty portfolio at startup automatically picks up positions as they're added via trades, (2) new strategies deployed to the YAML are loaded without restarting the service, (3) the `reload_strategies` RPC method triggers immediate reconciliation without waiting for the 30-second cycle. Note: modifying an existing strategy's config (changing conIds or bar_size) still requires a service restart. If the YAML is mid-write when reconcile reads it, the parse error is caught and the mtime is *not* advanced, so the reload retries on the next tick instead of silently leaving zombie strategies loaded. Strategy modules are loaded with `yaml.safe_load` (no Python-object tags) and path-sandboxed to `strategies_directory` (absolute paths or `../` traversal are rejected). Each strategy gets a unique `sys.modules` key derived from its `name` so two strategies that share a filename don't clobber each other and a reload actually re-imports the new source.
 
@@ -152,6 +155,7 @@ mmr/
 │   │   ├── data_access.py     # TickData, DictData, TickStorage, SecurityDefinition
 │   │   ├── event_store.py     # EventStore — trading event audit trail (DuckDB)
 │   │   ├── backtest_store.py  # BacktestStore + SweepStore — run history + parent sweep metadata
+│   │   ├── gauntlet_store.py  # GauntletStore — gauntlet verdicts keyed by source SHA-256 ("no hash, no live")
 │   │   ├── proposal_store.py  # ProposalStore — trade proposal storage (DuckDB)
 │   │   ├── position_groups.py # PositionGroupStore — named groups with allocation budgets (DuckDB)
 │   │   ├── universe.py        # Universe, UniverseAccessor
@@ -171,6 +175,7 @@ mmr/
 │   │   ├── executioner.py     # TradeExecutioner
 │   │   ├── book.py            # BookSubject (reactive order book)
 │   │   ├── portfolio.py       # Portfolio positions
+│   │   ├── order_math.py      # whole_shares_for_notional — the single amount→shares conversion (floor + refuse)
 │   │   ├── order_validator.py
 │   │   ├── risk_gate.py       # RiskGate — pre-trade risk limit enforcement
 │   │   ├── position_sizing.py # PositionSizer — confidence/risk/volatility/liquidity-aware sizing
@@ -184,7 +189,8 @@ mmr/
 │   │   ├── historical_simulator.py
 │   │   ├── backtester.py      # Backtester — replay historical data through strategies
 │   │   ├── backtest_stats.py  # PSR, t-test, bootstrap CI, skew/kurt, MC streak — "is this real?"
-│   │   └── lookahead_check.py # assert_no_lookahead walk-forward consistency check
+│   │   ├── lookahead_check.py # assert_no_lookahead walk-forward consistency check
+│   │   └── synthetic_markets.py # Seeded nasty-market OHLCV generators (gauntlet battery + conftest fixtures)
 │   └── tools/                 # Importable scripts (moved from scripts/)
 │       ├── idea_scanner.py    # IdeaScanner (Massive) + IBIdeaScanner (IB international)
 │       ├── depth_chart.py     # Market depth chart (PNG) + Rich table rendering
@@ -208,6 +214,7 @@ mmr/
 │
 ├── tests/                     # Test suite (pytest)
 │   ├── conftest.py            # Shared fixtures (DuckDB, strategies, OHLCV data)
+│   ├── invariants/            # Human-owned safety-property spec (agents may not weaken — see Testing)
 │   ├── test_backtester.py
 │   ├── test_book.py
 │   ├── test_config.py
@@ -318,6 +325,8 @@ strategies                   # List strategies
 strategies enable my_strat   # Enable a strategy
 strategies reload            # Reload strategies from YAML + re-subscribe (immediate reconciliation)
 strategies inspect           # AST scan: class name, mode (precompute/on_prices), tunable params with defaults
+strategies gauntlet strategies/orb.py --class OpeningRangeBreakout  # Pre-deploy gauntlet: import allowlist, lookahead, nasty-market battery, PSR (records PASS/FAIL by source hash)
+strategies gauntlet strategies/orb.py --class OpeningRangeBreakout --min-psr 0.7  # Also enforce PSR from the latest backtest of this exact hash
 backtest -s strategies/keltner_breakout.py --class KeltnerBreakout --conids 756733
 backtest -s ... --params '{"EMA_PERIOD": 15, "BAND_MULT": 2.5}'   # JSON param overrides
 backtest -s ... --param EMA_PERIOD=15 --param BAND_MULT=2.5       # repeatable KEY=VALUE form
@@ -508,7 +517,7 @@ When explicit tickers are provided with `--location`, the `min_change_pct`/`max_
 
 User configs live in `~/.config/mmr/`. On first run, bundled defaults from `config_defaults/` are copied there automatically (`container.ensure_config_dir()`). The `TRADER_CONFIG` env var overrides the config file path.
 
-**`~/.config/mmr/trader.yaml`**: IB connection (address, port, client IDs, account), DuckDB path, ZMQ port assignments. Env vars override config values (uppercased param name). Two CLI-only knobs the Container doesn't otherwise know about:
+**`~/.config/mmr/trader.yaml`**: IB connection (address, port, client IDs, account), DuckDB path, ZMQ port assignments. Env vars override config values (uppercased param name). An optional `risk_limits:` mapping tunes the pre-trade risk gate (`max_position_size_pct`, `max_daily_loss`, `max_open_orders`, `max_signals_per_hour`, `max_leverage`, `min_margin_cushion` — see `RiskLimits` in `trader/trading/risk_gate.py`); omitted = code defaults, an unknown key or malformed value raises at startup. Two CLI-only knobs the Container doesn't otherwise know about:
 - `default_data_source` (default `twelvedata`) — sets the default for every `--source` arg on CLI commands where the value is in that command's choice set (history download, snapshot, watch, financials, fx, movers, ideas). News/propose are unaffected (they don't accept those values). Override per-shell with `MMR_DEFAULT_DATA_SOURCE`.
 - `equity_decimation` (default `daily`) — sets how aggressively backtest persist downsamples `equity_curve_json` before storing. `daily` resamples to last-value-per-day (~17 KB/run vs ~9.9 MB for raw 1-min); `none` keeps everything; an integer N uniform-samples to N points. The blob feeds PSR + Sharpe-CI (both n≥30 minima), so daily decimation is statistically lossless. Override per-shell with `MMR_EQUITY_DECIMATION`.
 
@@ -567,7 +576,7 @@ Python >= 3.12. Install: `pip install -e .` or `pip install -r requirements.txt`
 
 ## Testing
 
-Tests use pytest with shared fixtures in `tests/conftest.py`. All tests are unit tests that use temporary DuckDB databases (no IB connection required). The suite currently runs **1363 tests in ~1.5-2.5 min** with zero failures (run it in the `mmr` conda env — `~/miniforge3/envs/mmr/bin/python3` — other envs lack `twelvedata` and error at collection):
+Tests use pytest with shared fixtures in `tests/conftest.py`. All tests are unit tests that use temporary DuckDB databases (no IB connection required). The full suite runs in a few minutes with zero failures (run it in the `mmr` conda env — `~/miniforge3/envs/mmr/bin/python3` — other envs lack `twelvedata` and error at collection):
 
 ```bash
 ~/miniforge3/envs/mmr/bin/python3 -m pytest tests/ --timeout=30 -q --ignore=tests/test_ibrx_async.py
@@ -581,9 +590,13 @@ Fixtures include edge-case OHLCV shapes (`ohlcv_with_gaps`, `ohlcv_high_volatili
 
 Key behaviour-focused test files:
 
-- `test_clientserver_rpc.py` — RPC error-type preservation, dill whitelist/strict-mode policy, in-process round-trip with a threaded server
-- `test_trading_runtime.py` — PnL subscription lock, off-loop portfolio routing, bracket-order rollback
-- `test_executioner.py` — trading filter + risk gate rejection paths, `skip_risk_gate` bypass, IB account mismatch
+- `test_clientserver_rpc.py` — RPC error-type preservation, dill whitelist/strict-mode policy, in-process round-trip with a threaded server, error replies for refused payloads
+- `test_serialization_security.py` — restricted-unpickler boundary: gadget globals refused, guarded getattr/_load_type, legit domain payloads survive
+- `test_trading_runtime.py` — PnL subscription lock, off-loop portfolio routing, bracket-order rollback, exit-class predicate (`order_reduces_exposure`), fail-closed missing gate, `place_standalone_order` exit-class refusal
+- `test_executioner.py` — trading filter + risk gate rejection paths, `skip_risk_gate` ignored (deprecation), exit-class exemption, IB account mismatch
+- `test_risk_gate.py` — tri-state checks, not-evaluable inputs refuse opens, `ORDER_SUBMITTED` rate counting, `RiskLimits.load` validation
+- `test_order_math.py` — `whole_shares_for_notional` floor/refuse postconditions, float-boundary step-down, multiplier handling
+- `test_gauntlet.py` — gauntlet stages (import allowlist, lookahead, battery, PSR), hash-keyed store, deploy/enable/arm refusals
 - `test_strategy_runtime_reconcile.py` — load-strategy sandbox (absolute-path + traversal rejection, `sys.modules` collision), config-reload resilience (`yaml.safe_load`, partial-write mtime handling)
 - `test_propose_approve_integration.py` — end-to-end propose → approve → execute, failure-path transitions to `FAILED`, state-machine enforcement
 - `test_backtester.py::test_no_lookahead_fill_at_next_bar_open` — hand-crafted bars that prove `next_open` fills come from bar t+1's open
@@ -594,6 +607,8 @@ Key behaviour-focused test files:
 - `test_portfolio_risk.py::TestSignedExposure` — hedged vs stacked correlation clusters, long/short exposure breakdown
 - `test_duckdb_store.py::TestConcurrentAccess` — multi-thread write serialization
 - `test_container.py::TestContainerHardening` — missing-param diagnostics, env-var coercion, YAML safety
+
+**`tests/invariants/` is the human-owned safety spec.** It states the safety properties as executable tests (exit-class orders never refused, gates fail closed, share conversion never exceeds the sized notional, unpickler refuses gadget globals, no-PASS strategies can't arm). Policy: **agents may not weaken, loosen, or delete a property to make an implementation pass** — a red invariant means the implementation is wrong, unless a human explicitly revises the spec. Counterexamples found in the field become pinned regression tests in this suite before their fix lands, and stay forever.
 
 Some test files have import errors due to missing optional dependencies (`aioreactive`) — these are pre-existing and can be ignored: `test_aiorx.py`, `test_aiozmq_simple.py`, `test_disposable.py`, `test_mmr_client.py`, `test_mmr_server.py`, `test_perf2.py`, `test_performance.py`.
 
@@ -699,8 +714,12 @@ mmr backtests show 42                       # full detail (summary + statistical
 cat ~/.local/share/mmr/reports/sweep_*.md   # morning digest
 ```
 
-**Step 5: Deploy to paper trading** (no service needed — writes to config)
+**Step 5: Run the gauntlet, then deploy to paper trading** (no service needed — writes to config)
 ```bash
+# "No hash, no live": deploy/enable refuse unless the file's exact source
+# SHA-256 holds a PASS gauntlet record. No override flag — fix the file and
+# re-run. Any source edit changes the hash and requires a re-run.
+mmr strategies gauntlet strategies/my_strategy.py --class MyStrategy
 mmr strategies deploy my_strategy --conids 265598 --paper
 # strategy_service auto-detects the YAML change within 30s, or force with:
 mmr strategies reload
@@ -774,7 +793,7 @@ mmr reject 42 --reason "Group over budget"  # Reject with reason
 - `data summary`, `data query`, `data download`, `data refresh`, `data status`
 - `backtest` / `bt`, `bt-sweep`, `sweep run/list/show`
 - `backtests list/show/compare/confidence/archive/unarchive/delete`
-- `strategies create`, `strategies deploy`, `strategies undeploy`, `strategies inspect`
+- `strategies create`, `strategies deploy`, `strategies undeploy`, `strategies inspect`, `strategies gauntlet`
 - `strategies signals`, `strategies backtest`
 - `universe list`, `universe show`, `universe create`, `universe delete`, `universe remove`, `universe import`
 - `propose`, `proposals`, `reject`

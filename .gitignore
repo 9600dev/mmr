@@ -27,3 +27,4 @@ scratch/
 config_defaults/local_*
 
 notebooks/
+.hypothesis/

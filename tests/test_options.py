@@ -443,7 +443,8 @@ class TestExecutionerMultiplier:
         return executioner
 
     def test_stock_multiplier_default(self):
-        """Stock contracts have empty multiplier, should use 1.0."""
+        """Stock contracts have empty multiplier, should use 1.0. BUYs are
+        sized by the ask (what we'd pay) and floored — never rounded up."""
         from trader.objects import Action
 
         executioner = self._make_executioner()
@@ -467,11 +468,12 @@ class TestExecutionerMultiplier:
             stop_loss_percentage=0.0,
             algo_name='test',
         )
-        # 1000 / (100 * 1.0) = 10 shares
-        assert result.order.totalQuantity == 10.0
+        # 1000 / (100.5 ask * 1.0) = 9.95 → floors to 9 shares
+        assert result.order.totalQuantity == 9.0
 
     def test_option_multiplier_100(self):
-        """Option contracts have multiplier=100, so equity_amount / (bid * 100)."""
+        """Option contracts have multiplier=100, so a BUY sizes as
+        equity_amount / (ask * 100), floored."""
         from trader.objects import Action
 
         executioner = self._make_executioner()
@@ -495,11 +497,15 @@ class TestExecutionerMultiplier:
             stop_loss_percentage=0.0,
             algo_name='test',
         )
-        # 3000 / (3.0 * 100) = 10 contracts
-        assert result.order.totalQuantity == 10.0
+        # 3000 / (3.5 ask * 100) = 8.57 → floors to 8 contracts
+        assert result.order.totalQuantity == 8.0
+        # postcondition: notional within the sized amount
+        assert 8 * 3.5 * 100 <= 3000.0
 
     def test_option_multiplier_small_amount(self):
-        """If equity_amount yields < 1 contract, should round up to 1."""
+        """If equity_amount doesn't cover one whole contract, refuse
+        (ValueError from whole_shares_for_notional) — never bump to 1,
+        which would exceed the sized notional."""
         from trader.objects import Action
 
         executioner = self._make_executioner()
@@ -512,18 +518,18 @@ class TestExecutionerMultiplier:
         ticker.bid = 5.0
         ticker.ask = 5.5
 
-        result = executioner.helper_create_order(
-            contract=contract,
-            action=Action.BUY,
-            latest_tick=ticker,
-            equity_amount=200.0,  # 200 / (5 * 100) = 0.4 → rounds to 1
-            quantity=None,
-            limit_price=None,
-            market_order=True,
-            stop_loss_percentage=0.0,
-            algo_name='test',
-        )
-        assert result.order.totalQuantity == 1.0
+        with pytest.raises(ValueError, match='200'):
+            executioner.helper_create_order(
+                contract=contract,
+                action=Action.BUY,
+                latest_tick=ticker,
+                equity_amount=200.0,  # 200 / (5.5 * 100) = 0.36 → refused
+                quantity=None,
+                limit_price=None,
+                market_order=True,
+                stop_loss_percentage=0.0,
+                algo_name='test',
+            )
 
     def test_explicit_quantity_ignores_multiplier(self):
         """When quantity is passed directly, multiplier should not affect it."""

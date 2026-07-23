@@ -665,6 +665,54 @@ class StrategyRuntime():
         for security in universe.security_definitions:
             self.subscribe(strategy, SecurityDefinition.to_contract(security))
 
+    def _gauntlet_allows_arming(self, name: str, filepath: str, class_name: str) -> bool:
+        """'No hash, no live' arm gate for auto_execute strategies: the
+        current source hash must hold a PASS gauntlet record.
+
+        Default is warn-only (the strategy still arms) so the live roster
+        doesn't silently disarm on a restart before gauntlet records exist
+        in this host's DB. Set ``MMR_GAUNTLET_ENFORCE=1`` (strict '1') to
+        refuse arming — the strategy then loads DISARMED (auto_execute
+        off), which keeps the executor able to close attributed positions
+        but never open new ones.
+        """
+        from trader.data.backtest_store import compute_strategy_hash
+        from trader.data.gauntlet_store import GauntletStore
+
+        enforce = os.environ.get('MMR_GAUNTLET_ENFORCE', '') == '1'
+        code_hash = compute_strategy_hash(filepath)
+        problem = ''
+        last_pass_hash = None
+        if not code_hash:
+            problem = f'source {filepath!r} could not be hashed'
+        else:
+            duckdb_path = getattr(self, 'duckdb_path', '') or ''
+            if not duckdb_path:
+                problem = 'gauntlet store unavailable (no duckdb_path)'
+            else:
+                try:
+                    store = GauntletStore(duckdb_path)
+                    if store.has_pass(code_hash):
+                        return True
+                    latest = store.latest_pass_for_class(class_name)
+                    last_pass_hash = latest.code_hash if latest else None
+                    problem = 'no PASS gauntlet record for current hash'
+                except Exception as ex:
+                    problem = f'gauntlet store error: {type(ex).__name__}: {ex}'
+
+        hash_pair = (f'current={code_hash or "<unhashable>"} '
+                     f'last_pass={last_pass_hash or "<none>"}')
+        hint = f'run: mmr strategies gauntlet {filepath} --class {class_name}'
+        if enforce:
+            logging.error(
+                'refusing to arm auto_execute strategy %s: %s (%s) — loading '
+                'DISARMED; %s', name, problem, hash_pair, hint)
+            return False
+        logging.warning(
+            'auto_execute strategy %s has no gauntlet PASS: %s (%s) — arming '
+            'anyway (MMR_GAUNTLET_ENFORCE unset); %s', name, problem, hash_pair, hint)
+        return True
+
     def load_strategy(
         self,
         name: str,
@@ -702,7 +750,7 @@ class StrategyRuntime():
 
         strategies_dir = os.path.abspath(os.path.expanduser(self.strategies_directory))
 
-        def load_class_from_file(filename, classname):
+        def resolve_module_path(filename) -> str:
             # Reject absolute paths and path traversal. Strategy modules must
             # live under ``strategies_directory`` — otherwise a malicious YAML
             # could load any .py on disk.
@@ -724,7 +772,9 @@ class StrategyRuntime():
 
             if not os.path.exists(filepath):
                 raise FileNotFoundError(f'strategy module not found: {filepath}')
+            return filepath
 
+        def load_class_from_file(filepath, classname):
             # Namespace the module key by the strategy NAME (unique) rather
             # than the filename, so two strategies with the same basename
             # (e.g. strategies/a/ma.py and strategies/b/ma.py) don't clobber
@@ -745,7 +795,15 @@ class StrategyRuntime():
             return getattr(module, classname, None)
 
         try:
-            class_object = load_class_from_file(module, class_name)
+            filepath = resolve_module_path(module)
+            # Gauntlet arm gate ("no hash, no live"): auto_execute needs a
+            # PASS gauntlet record for the exact current source hash. The
+            # CLI enforces this at deploy/enable, but the YAML can be
+            # hand-edited and reconcile re-reads it — this is the
+            # authoritative check.
+            if auto_execute and not self._gauntlet_allows_arming(name, filepath, class_name):
+                auto_execute = False
+            class_object = load_class_from_file(filepath, class_name)
             if not class_object:
                 return
 

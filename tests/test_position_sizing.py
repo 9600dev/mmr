@@ -1219,3 +1219,75 @@ class TestComputeResizeDeltas:
         tsla = next(a for a in adjs if a['symbol'] == 'TSLA')
         assert tsla['action'] == 'BUY'  # covering shorts
         assert tsla['delta_qty'] == 25  # -50 → -25, delta = +25
+
+
+class TestSpreadPenaltyDefects:
+    """Regression tests for two verified crashes/escapes in the spread penalty."""
+
+    def test_zero_threshold_disables_penalty(self):
+        """threshold == 0 must disable the penalty, not ZeroDivisionError."""
+        cfg = PositionSizingConfig(
+            base_position_usd=5000.0,
+            spread_penalty_threshold=0.0,
+        )
+        liq = LiquidityInfo(bid=100.0, ask=102.0)  # ~2% spread
+        sizer = PositionSizer(cfg)
+        result = sizer.compute(confidence=1.0, liquidity=liq)
+        assert result.amount_usd == 5000.0
+        assert result.capped_by != 'spread_penalty'
+
+    def test_negative_threshold_disables_penalty(self):
+        cfg = PositionSizingConfig(
+            base_position_usd=5000.0,
+            spread_penalty_threshold=-0.005,
+        )
+        liq = LiquidityInfo(bid=100.0, ask=102.0)
+        sizer = PositionSizer(cfg)
+        result = sizer.compute(confidence=1.0, liquidity=liq)
+        assert result.amount_usd == 5000.0
+        assert result.capped_by != 'spread_penalty'
+
+    def test_factor_above_one_cannot_go_negative(self):
+        """spread_penalty_factor > 1 could make reduction negative — the size
+        must clamp to 0, never a negative amount escaping the clamps."""
+        cfg = PositionSizingConfig(
+            base_position_usd=5000.0,
+            spread_penalty_threshold=0.005,
+            spread_penalty_factor=2.0,
+        )
+        # ~9.5% spread → ratio ~19 → penalty capped at 2.0 → reduction -1.0
+        liq = LiquidityInfo(bid=100.0, ask=110.0)
+        sizer = PositionSizer(cfg)
+        result = sizer.compute(confidence=1.0, liquidity=liq)
+        assert result.amount_usd == 0.0
+        assert result.quantity == 0
+
+    def test_factor_above_one_small_positive_hits_min_refusal(self):
+        """A post-penalty size that lands below min_position_usd is refused by
+        the existing below-minimum logic, not passed through."""
+        cfg = PositionSizingConfig(
+            base_position_usd=2000.0,
+            min_position_usd=500.0,
+            spread_penalty_threshold=0.005,
+            spread_penalty_factor=2.0,
+        )
+        # spread 0.70 on mid 100.35 → ~0.6975% → ratio ~1.395 → penalty ~0.79
+        # → sized ~$420, below the $500 minimum
+        liq = LiquidityInfo(bid=100.0, ask=100.70)
+        sizer = PositionSizer(cfg)
+        result = sizer.compute(confidence=1.0, liquidity=liq)
+        assert result.amount_usd == 0.0
+        assert result.capped_by == 'below_minimum_after_constraints'
+
+    def test_factor_at_most_one_unchanged(self):
+        """Existing behavior with factor <= 1 must be numerically unchanged."""
+        cfg = PositionSizingConfig(
+            base_position_usd=5000.0,
+            spread_penalty_threshold=0.005,
+            spread_penalty_factor=0.5,
+        )
+        liq = LiquidityInfo(bid=100.0, ask=102.0)  # ~2% spread → penalty capped 0.5
+        sizer = PositionSizer(cfg)
+        result = sizer.compute(confidence=1.0, liquidity=liq)
+        assert result.amount_usd == 2500.0
+        assert result.capped_by == 'spread_penalty'

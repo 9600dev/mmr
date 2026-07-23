@@ -74,6 +74,7 @@ test = [
     "pytest-asyncio>=0.23",
     "pytest-mock>=3.12",
     "pytest-timeout>=2.3",
+    "hypothesis>=6.100",
 ]
 streaming = [
     "websocket-client>=1.8",

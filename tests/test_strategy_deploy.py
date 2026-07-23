@@ -221,13 +221,15 @@ import json
 import yaml
 from pathlib import Path
 
+from trader.data.backtest_store import compute_strategy_hash
+from trader.data.gauntlet_store import GauntletRecord, GauntletStore
 from trader.mmr_cli import _handle_strategy_deploy
 
 
 def _deploy_ns(**kw) -> argparse.Namespace:
     defaults = dict(
         name='test_strat',
-        conids=[12345],
+        conids=None,
         universe=None,
         bar_size='1 min',
         days=90,
@@ -259,13 +261,60 @@ def tmp_home(tmp_path, monkeypatch):
     return tmp_path
 
 
+# Deploy now enforces the gauntlet gate ("no hash, no live"): the module
+# file must exist, contain the class, and its exact SHA-256 must hold a
+# PASS gauntlet record. The fixtures below are scaffolding (same idiom as
+# test_gauntlet.py) so the tests can keep exercising their real subjects
+# — params round-trip, path selection, duplicate refusal, module override.
+
+_DEPLOYABLE_STRATEGY = """
+from trader.trading.strategy import Strategy, Signal
+from trader.objects import Action
+
+class {class_name}(Strategy):
+    def on_prices(self, prices):
+        return None
+"""
+
+
+@pytest.fixture
+def gauntlet_db(monkeypatch, tmp_duckdb_path):
+    import trader.mmr_cli as cli
+    monkeypatch.setattr(cli, '_gauntlet_db_path', lambda: tmp_duckdb_path)
+    return tmp_duckdb_path
+
+
+def _passed_module(tmp_path: Path, gauntlet_db: str,
+                   class_name: str = 'TestStrat',
+                   filename: str = 'test_strat.py') -> Path:
+    """Write a real strategy module and seed a PASS gauntlet record for
+    its exact source hash so deploy's gate is satisfied."""
+    mods = tmp_path / 'mods'
+    mods.mkdir(parents=True, exist_ok=True)
+    path = mods / filename
+    path.write_text(_DEPLOYABLE_STRATEGY.format(class_name=class_name))
+    code_hash = compute_strategy_hash(str(path))
+    assert code_hash
+    GauntletStore(gauntlet_db).record(GauntletRecord(
+        strategy_name=class_name,
+        module_path=str(path),
+        class_name=class_name,
+        code_hash=code_hash,
+        verdict='PASS',
+        checks={'s1_imports': {'status': 'pass'}},
+    ))
+    return path
+
+
 class TestDeployParamsFlag:
     """The observed failure mode: helper had no --params, so the LLM
     hand-wrote YAML and missed the config path. Lock in the fix."""
 
-    def test_params_json_written_to_yaml_params_field(self, tmp_home):
+    def test_params_json_written_to_yaml_params_field(self, tmp_home, gauntlet_db, tmp_path):
+        f = _passed_module(tmp_path, gauntlet_db)
         args = _deploy_ns(
             name='orb_gld',
+            module=str(f),
             params=json.dumps({'RANGE_MINUTES': 45, 'VOLUME_MULT': 1.3}),
         )
         _handle_strategy_deploy(args)
@@ -275,21 +324,25 @@ class TestDeployParamsFlag:
         # strategy_runtime.py:387 reads params=strategy_config.get('params', {})
         assert e[0]['params'] == {'RANGE_MINUTES': 45, 'VOLUME_MULT': 1.3}
 
-    def test_no_params_omits_field(self, tmp_home):
-        _handle_strategy_deploy(_deploy_ns(name='plain', params=None))
+    def test_no_params_omits_field(self, tmp_home, gauntlet_db, tmp_path):
+        f = _passed_module(tmp_path, gauntlet_db)
+        _handle_strategy_deploy(_deploy_ns(name='plain', module=str(f), params=None))
         cfg = _read_deployed(tmp_home)
         e = [s for s in cfg['strategies'] if s['name'] == 'plain'][0]
         assert 'params' not in e
 
-    def test_malformed_params_refuses(self, tmp_home):
-        """Bad JSON must error, not write junk into YAML."""
-        _handle_strategy_deploy(_deploy_ns(name='bad', params='{not valid}'))
+    def test_malformed_params_refuses(self, tmp_home, gauntlet_db, tmp_path):
+        """Bad JSON must error, not write junk into YAML. The module file
+        and PASS record exist so the refusal under test is the params one."""
+        f = _passed_module(tmp_path, gauntlet_db)
+        _handle_strategy_deploy(_deploy_ns(name='bad', module=str(f), params='{not valid}'))
         cfg = _read_deployed(tmp_home)
         assert [s for s in cfg['strategies'] if s['name'] == 'bad'] == []
 
-    def test_params_non_object_refuses(self, tmp_home):
+    def test_params_non_object_refuses(self, tmp_home, gauntlet_db, tmp_path):
         """--params must be a JSON object, not a list/scalar."""
-        _handle_strategy_deploy(_deploy_ns(name='list', params='[1,2,3]'))
+        f = _passed_module(tmp_path, gauntlet_db)
+        _handle_strategy_deploy(_deploy_ns(name='list', module=str(f), params='[1,2,3]'))
         cfg = _read_deployed(tmp_home)
         assert [s for s in cfg['strategies'] if s['name'] == 'list'] == []
 
@@ -298,25 +351,31 @@ class TestDeployModuleOverride:
     """--module + --class let one strategy class back multiple deployment
     names (orb_gld / orb_googl / orb_xlk all → opening_range_breakout.py)."""
 
-    def test_module_override_persists(self, tmp_home):
+    def test_module_override_persists(self, tmp_home, gauntlet_db, tmp_path):
+        f = _passed_module(tmp_path, gauntlet_db,
+                           class_name='OpeningRangeBreakout',
+                           filename='opening_range_breakout.py')
         _handle_strategy_deploy(_deploy_ns(
             name='orb_gld',
-            module='strategies/opening_range_breakout.py',
+            module=str(f),
             class_name='OpeningRangeBreakout',
         ))
         cfg = _read_deployed(tmp_home)
         e = [s for s in cfg['strategies'] if s['name'] == 'orb_gld'][0]
-        assert e['module'] == 'strategies/opening_range_breakout.py'
+        assert e['module'] == str(f)
         assert e['class_name'] == 'OpeningRangeBreakout'
 
-    def test_multiple_deployments_same_module(self, tmp_home):
+    def test_multiple_deployments_same_module(self, tmp_home, gauntlet_db, tmp_path):
         """Three names, one strategy class. This is the ORB sweep-winner
-        pattern the LLM was trying (and failing) to set up."""
-        for sym, cid in (('gld', 51529211), ('googl', 208813719), ('xlk', 4215230)):
+        pattern the LLM was trying (and failing) to set up. One PASS on
+        the shared source file unlocks all three deployments."""
+        f = _passed_module(tmp_path, gauntlet_db,
+                           class_name='OpeningRangeBreakout',
+                           filename='opening_range_breakout.py')
+        for sym in ('gld', 'googl', 'xlk'):
             _handle_strategy_deploy(_deploy_ns(
                 name=f'orb_{sym}',
-                conids=[cid],
-                module='strategies/opening_range_breakout.py',
+                module=str(f),
                 class_name='OpeningRangeBreakout',
                 params=json.dumps({'RANGE_MINUTES': 45, 'VOLUME_MULT': 1.3}),
             ))
@@ -325,7 +384,7 @@ class TestDeployModuleOverride:
         assert 'orb_gld' in names and 'orb_googl' in names and 'orb_xlk' in names
         modules = {s['name']: s['module'] for s in cfg['strategies']}
         assert all(
-            modules[n] == 'strategies/opening_range_breakout.py'
+            modules[n] == str(f)
             for n in ('orb_gld', 'orb_googl', 'orb_xlk')
         )
 
@@ -335,13 +394,15 @@ class TestDeployPath:
     ``~/.config/mmr/strategy_runtime.yaml`` — not the project's
     bundled ``config_defaults/`` template."""
 
-    def test_default_path_is_user_config(self, tmp_home):
-        _handle_strategy_deploy(_deploy_ns(name='pathcheck'))
+    def test_default_path_is_user_config(self, tmp_home, gauntlet_db, tmp_path):
+        f = _passed_module(tmp_path, gauntlet_db)
+        _handle_strategy_deploy(_deploy_ns(name='pathcheck', module=str(f)))
         assert (tmp_home / '.config' / 'mmr' / 'strategy_runtime.yaml').exists()
 
-    def test_duplicate_name_refused(self, tmp_home):
-        _handle_strategy_deploy(_deploy_ns(name='x'))
-        _handle_strategy_deploy(_deploy_ns(name='x'))
+    def test_duplicate_name_refused(self, tmp_home, gauntlet_db, tmp_path):
+        f = _passed_module(tmp_path, gauntlet_db)
+        _handle_strategy_deploy(_deploy_ns(name='x', module=str(f)))
+        _handle_strategy_deploy(_deploy_ns(name='x', module=str(f)))
         cfg = _read_deployed(tmp_home)
         assert len([s for s in cfg['strategies'] if s['name'] == 'x']) == 1
 
