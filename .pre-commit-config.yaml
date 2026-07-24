@@ -1,0 +1,38 @@
+# Pre-commit hooks — the local enforcement point (this repo has no CI).
+# Install once:  uv run pre-commit install
+# Run manually:  uv run pre-commit run --all-files
+#
+# These make the safe path the lazy path: the kernel stays type-clean and the
+# human-owned invariants spec can't be silently weakened alongside the code it
+# checks. Both hooks are dev-only and never enter the container.
+repos:
+  - repo: local
+    hooks:
+      - id: invariants-guard
+        name: spec-protection guard (tests/invariants is human-owned)
+        entry: python3 scripts/invariants_guard.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: ty-gate
+        name: ty type-check gate (kernel, no new diagnostics beyond baseline)
+        entry: uv run python scripts/ty_gate.py
+        language: system
+        pass_filenames: false
+        files: ^trader/trading/.*\.py$
+
+      # CrossHair symbolic-execution over the deal-contracted pure kernel.
+      # MANUAL stage only: CrossHair spends tens of seconds per function via z3,
+      # so it must NOT run on every commit. It is wired here so it is a
+      # first-class, discoverable gate — run it after touching a contracted
+      # function (order_math / position_sizing pure helpers / proposal
+      # transitions), and in any nightly/CI job:
+      #     uv run pre-commit run crosshair-check --hook-stage manual
+      # or directly:  uv run python scripts/crosshair_check.py
+      - id: crosshair-check
+        name: crosshair symbolic check (deal contracts on the pure kernel)
+        entry: uv run python scripts/crosshair_check.py
+        language: system
+        pass_filenames: false
+        stages: [manual]

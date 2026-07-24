@@ -1,0 +1,21 @@
+{
+  "trader/data/backtest_store.py\terror[invalid-type-form]": 2,
+  "trader/data/data_access.py\terror[invalid-method-override]": 2,
+  "trader/data/data_access.py\terror[unresolved-attribute]": 1,
+  "trader/data/data_access.py\twarning[redundant-cast]": 6,
+  "trader/data/data_access.py\twarning[unused-type-ignore-comment]": 5,
+  "trader/data/db_backup.py\twarning[deprecated]": 1,
+  "trader/data/duckdb_store.py\terror[invalid-return-type]": 2,
+  "trader/data/market_data.py\terror[invalid-argument-type]": 2,
+  "trader/data/market_data.py\terror[missing-argument]": 1,
+  "trader/data/market_data.py\twarning[unused-type-ignore-comment]": 1,
+  "trader/data/store.py\terror[empty-body]": 5,
+  "trader/data/universe.py\terror[invalid-argument-type]": 12,
+  "trader/data/universe.py\terror[invalid-return-type]": 1,
+  "trader/simulation/backtest_stats.py\terror[invalid-argument-type]": 1,
+  "trader/simulation/backtester.py\terror[invalid-assignment]": 1,
+  "trader/simulation/backtester.py\terror[unresolved-attribute]": 2,
+  "trader/simulation/historical_simulator.py\terror[invalid-argument-type]": 1,
+  "trader/simulation/historical_simulator.py\terror[invalid-parameter-default]": 1,
+  "trader/simulation/historical_simulator.py\terror[unresolved-attribute]": 2
+}

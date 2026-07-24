@@ -28,3 +28,8 @@ config_defaults/local_*
 
 notebooks/
 .hypothesis/
+
+# mutmut mutation-testing sandbox (scripts/run_mutation.sh) — a regenerable copy
+# of the source tree with mutants applied; never committed.
+mutants/
+.mutmut-cache

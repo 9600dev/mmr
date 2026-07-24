@@ -62,12 +62,17 @@ dependencies = [
     "vectorbt>=0.28",
     "massive>=2.2.0",
     "twelvedata[pandas]>=1.3",
+    "pydantic>=2.13.4",
+    "deal>=4.24.6",
 ]
 
 [project.optional-dependencies]
 dev = [
     "mypy>=1.8",
     "isort>=5.13",
+    "ty==0.0.63",  # pre-1.0 preview: exact-pin so type-check results are reproducible
+    "pre-commit>=4.6.1",
+    "crosshair-tool>=0.0.109",  # symbolic-execution checker for deal contracts (dev-only)
 ]
 test = [
     "pytest>=8.0",
@@ -104,3 +109,57 @@ force_alphabetical_sort = true
 from_first = false
 line_length = 110
 lines_after_imports = 2
+
+# ty (Astral) — dev-only static type checker, run via `uv run ty check`.
+# Pinned in the dev extra (pre-1.0 preview). The kernel (trader/trading/) is
+# the enforced scope; scripts/ty_gate.py gates on "no diagnostics beyond the
+# recorded baseline" so new code must type-check while the pre-existing set is
+# burned down per-file. The rest of the tree is checked but not gated yet.
+[tool.ty.environment]
+python-version = "3.12"
+root = ["."]
+
+# mutmut (dev-only) — mutation testing that "verifies the verifier": it mutates
+# the pure safety kernel and checks the kernel test suite (esp. tests/invariants/)
+# actually catches the change. Run via scripts/run_mutation.sh (see that file).
+# Scope is kept TIGHT (mutation re-runs tests per mutant) to the four
+# safety-critical modules: the pure cores order_math + proposal_transitions
+# first, then position_sizing + risk_gate. source_paths copies the whole
+# `trader` package into mutants/ so non-mutated imports still resolve to the
+# mutated tree; only_mutate restricts which files actually get mutants.
+# NOTE: mutmut 3.x runs pytest IN-PROCESS, so it must be invoked with the
+# canonical env interpreter (~/miniforge3/envs/mmr/bin/python3 -m mutmut) — the
+# tests then run under exactly that interpreter. mutmut is not a runtime dep;
+# install it into the test env only (pip install mutmut==3.6.0).
+[tool.mutmut]
+source_paths = ["trader"]
+# Copied into mutants/ and loaded via -p below: a Hypothesis harness shim that
+# suppresses the differing_executors health check mutmut's two-session model
+# provokes (see _mutmut_hyp.py). Inert for the normal test suite.
+also_copy = ["_mutmut_hyp.py"]
+pytest_add_cli_args = ["-p", "_mutmut_hyp"]
+only_mutate = [
+    "trader/trading/order_math.py",
+    "trader/data/proposal_transitions.py",
+    "trader/trading/position_sizing.py",
+    "trader/trading/risk_gate.py",
+]
+# The fast, deterministic oracle: the invariants spec + the focused kernel unit
+# tests + the deal-contract tests. mutmut maps each mutant to the covering
+# subset and runs only those, so a wide selection here is cheap per mutant.
+pytest_add_cli_args_test_selection = [
+    # NB: tests/invariants/test_approved_order.py is deliberately excluded — it
+    # shells out to `ty`/uv to assert the type-gate rejects gate-skipping calls,
+    # which is slow, environment-dependent, and unrelated to the pure math
+    # kernels mutated here. The ty gate is verified separately (scripts/ty_gate.py).
+    "tests/invariants/test_gate_properties.py",
+    "tests/invariants/test_order_notional.py",
+    "tests/invariants/test_proposal_machine.py",
+    "tests/invariants/test_sizing_properties.py",
+    "tests/test_order_math.py",
+    "tests/test_position_sizing.py",
+    "tests/test_proposal_store.py",
+    "tests/test_risk_gate.py",
+    "tests/test_deal_contracts.py",
+    "tests/test_mutation_kills.py",
+]
