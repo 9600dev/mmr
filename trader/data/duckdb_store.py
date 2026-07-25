@@ -3,12 +3,64 @@ import dill
 import duckdb
 import os
 import pandas as pd
+import sys
 import threading
 
 from pathlib import Path
 from typing import Any, Optional
 
 from trader.data.store import DataStore, ObjectStore
+
+
+# Marker file written by `docker.sh up()` into the HOST data directory. Inside
+# the container that same directory IS the mmr_db_data named volume, so the
+# marker is invisible there — which is precisely the discriminator we need:
+# present  => this path is the host-side shadow, the live DB is in the container
+# absent   => normal (in-container, or a non-Docker install where host IS live)
+SHADOWED_DB_MARKER = '.db_in_container_volume'
+
+
+class ShadowedDatabaseError(RuntimeError):
+    """Opening a DuckDB that a container volume shadows.
+
+    `trader.yaml` gives one path (`~/.local/share/mmr/data/mmr.duckdb`) which
+    resolves to DIFFERENT files on the host and in the container, because
+    docker-compose overlays `data/` with the mmr_db_data volume. Host-side reads
+    therefore hit a near-empty stub and DuckDB happily creates it on open, so
+    `mmr backtests` returned `{"data": []}` and `mmr status` reported a
+    pending_proposals count from the wrong database — silent wrong answers,
+    which this codebase treats as worse than no answer.
+    """
+
+
+_shadow_warned: set[str] = set()
+
+
+def _assert_not_shadowed(db_path: str) -> None:
+    marker = os.path.join(os.path.dirname(os.path.abspath(db_path)), SHADOWED_DB_MARKER)
+    if not os.path.exists(marker):
+        return
+    if os.environ.get('MMR_ALLOW_HOST_DB') == '1':
+        # Deliberate host-side use (e.g. backtesting against separately
+        # downloaded data). Still say so once — loudly, on stderr, so it can't
+        # be mistaken for the live DB.
+        if db_path not in _shadow_warned:
+            _shadow_warned.add(db_path)
+            print(
+                f'WARNING: MMR_ALLOW_HOST_DB=1 — using host-side {db_path}, which is '
+                'NOT the live database the services read.',
+                file=sys.stderr,
+            )
+        return
+    raise ShadowedDatabaseError(
+        f'{db_path} is not the live database.\n'
+        f'This directory is shadowed by the Docker volume mmr_db_data, so the DuckDB '
+        f'the services actually read lives INSIDE the container. Reading it here '
+        f'returns empty results rather than an error, which is why this refuses.\n'
+        f'  interactive:  ./docker.sh -e   then run mmr in the container\n'
+        f'  one-shot:     docker exec -u trader -w /home/trader/mmr mmr-mmr-1 mmr <command>\n'
+        f'  host DB anyway (separate data, not the live book): MMR_ALLOW_HOST_DB=1'
+    )
 
 
 class DuckDBConnection:
@@ -25,6 +77,10 @@ class DuckDBConnection:
     _class_lock = threading.Lock()
 
     def __init__(self, db_path: str):
+        # Refuse the host-side shadow BEFORE creating directories or letting
+        # DuckDB create a stub file on open — the earliest point at which a
+        # wrong-database read can still be turned into a loud failure.
+        _assert_not_shadowed(db_path)
         self.db_path = db_path
         self._lock = threading.Lock()
         # Ensure directory exists

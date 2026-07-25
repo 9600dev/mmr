@@ -8,6 +8,50 @@ Update the date + relevant sections when the running config changes.
 
 ---
 
+## 2026-07-24 (latest) — host-side `mmr` was reading an empty decoy DB
+
+Found while confirming `mmr verify` works from the host (it does — all 7 checks,
+incl. the live IB round-trip, so `-g` now runs it from there). `trader.yaml` has
+one `duckdb_path`, and `~/.config/mmr` is bind-mounted, but compose overlays
+`data/` with the `mmr_db_data` volume — so the same path string resolved to:
+
+| | `mmr.duckdb` | `mmr_history.duckdb` |
+|---|---|---|
+| host | 536 KB (empty stub) | 274 KB (empty stub) |
+| container (volume) | **517 MB** | **4.44 GB** |
+
+Both host files had every table at 0 rows. DuckDB *creates* the file on open, so
+host runs manufactured the decoy — the 274 KB one was created by a host-side
+`mmr data summary` at 19:17 that same evening. Host `mmr backtests` returned
+`{"data": []}`, and host `mmr status` reported `pending_proposals` from the wrong
+database. Silent wrong answers, which "fail loudly" forbids. Worst case:
+`propose` on the host writes to the stub, `approve` reads it back and places a
+real order via RPC — the fill lands in the container's event store while the
+proposal justifying it lives where no service can see it.
+
+Fixed: `docker.sh up()` writes `.db_in_container_volume` into the HOST data dir.
+It is invisible inside the container (the volume covers that directory), which is
+what makes it a reliable discriminator rather than a guess about "am I in a
+container". `DuckDBConnection.__init__` raises `ShadowedDatabaseError` when
+opening a DB beside that marker, BEFORE DuckDB can create a stub. Escape hatch
+`MMR_ALLOW_HOST_DB=1` (must be exactly `1`) for deliberate host-side data, which
+warns loudly on stderr. A non-Docker install never gets the marker.
+
+Blast radius checked: `verify` and `portfolio` never open DuckDB, so `-g` is
+unaffected. `status` does (that is where `pending_proposals` comes from) but
+already wrapped that read in `try/except`, so it now omits the field instead of
+printing a wrong count. Container-side commands are untouched. Deleted both
+decoy files. 1882 tests pass — and none of them was quietly using the real DB,
+or the marker would have broken them.
+
+Caveat: the error renders as a message and still exits 0, per CLI convention
+(every command handler does `except Exception -> print_status(success=False);
+return`). `--json` gives `{"success": false, "message": "ShadowedDatabaseError:
+..."}`. Only `verify` asserts with a non-zero exit. Changing that convention
+CLI-wide is a separate decision.
+
+---
+
 ## 2026-07-24 (later still) — `docker.sh -c` would have deleted the trading DB
 
 Chasing the long-standing compose warning `volume "mmr_mmr_db_data" already

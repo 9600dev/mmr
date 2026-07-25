@@ -836,6 +836,8 @@ mmr reject 42 --reason "Group over budget"  # Reject with reason
 - `group list`, `group create`, `group delete`, `group show`, `group add`, `group remove`, `group set`
 - `session`
 
+**Host vs container (important if you run `mmr` from the host):** `trader.yaml` has ONE `duckdb_path` (`~/.local/share/mmr/data/mmr.duckdb`), and that config file is bind-mounted — but compose overlays `data/` with the `mmr_db_data` volume, so the same path string resolves to a **different file** on the host than in the container. RPC-backed commands (`status`, `portfolio`, `orders`, `verify`, `buy`/`sell`, `approve`, `snapshot`) work correctly from the host because the ZMQ ports are mapped to 127.0.0.1. DuckDB-backed commands (`backtests`, `sweep`, `data *`, `proposals`, `universe`, `group`, `session`) would read a host-side stub — and DuckDB *creates* it on open, so they used to return `{"data": []}` rather than failing. `docker.sh up()` now writes a `.db_in_container_volume` marker into the host data dir (invisible inside the container, since the volume covers it) and `DuckDBConnection.__init__` raises `ShadowedDatabaseError` when it opens a DB next to that marker. Run DB-backed commands in the container (`./docker.sh -e`), or set `MMR_ALLOW_HOST_DB=1` to deliberately use a separate host-side database. `status` degrades gracefully (it drops the `pending_proposals` field rather than reporting it from the wrong DB). Note the errors render as messages and still exit 0, per CLI convention — `verify` is the one command that asserts with a non-zero exit.
+
 **Requires trader_service**:
 - `portfolio`, `positions`, `orders`, `trades`, `account`, `status`
 - `buy`, `sell`, `cancel`, `cancel-all`, `close`

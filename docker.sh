@@ -571,6 +571,33 @@ up() {
         echo "Failed to create/verify volume $MMR_DB_VOLUME" >&2
         exit 1
     }
+    # Mark the HOST data dir as shadowed. compose overlays this directory with the
+    # mmr_db_data volume, so trader.yaml's single `duckdb_path` resolves to a
+    # DIFFERENT file here than it does in the container — and DuckDB silently
+    # CREATES the host one on open, so host-side `mmr backtests` answered
+    # `{"data": []}` instead of failing. This marker is invisible inside the
+    # container (the volume covers it), which is what makes it a reliable
+    # discriminator; trader/data/duckdb_store.py refuses to open a DB next to it.
+    mkdir -p "$MMR_DATA_DIR/data"
+    cat > "$MMR_DATA_DIR/data/.db_in_container_volume" <<'MARKER'
+This directory is shadowed by the Docker named volume `mmr_db_data`.
+
+The DuckDB files the MMR services actually read/write live INSIDE the container
+at /home/trader/.local/share/mmr/data/ (the volume), NOT here. Any *.duckdb in
+this host directory is an empty stub that DuckDB created on open.
+
+trader/data/duckdb_store.py refuses to open a database next to this marker and
+raises ShadowedDatabaseError, so a host-side DB command fails loudly instead of
+returning empty results. Run DB-backed commands in the container:
+
+    ./docker.sh -e      # then: mmr backtests / mmr proposals / ...
+
+RPC-backed commands (status, portfolio, orders, verify, buy/sell, approve) work
+fine from the host — the ZMQ ports are mapped to 127.0.0.1.
+
+Set MMR_ALLOW_HOST_DB=1 to deliberately use a host-side database anyway.
+Delete this file if you stop using the container (non-Docker install).
+MARKER
     # Disaster-recovery: if the DB volume is empty (lost / reset / fresh machine),
     # seed it from the newest host backup BEFORE the services start. No-op when the
     # volume already has data.

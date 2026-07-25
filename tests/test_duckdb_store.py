@@ -4,7 +4,13 @@ import pandas as pd
 import numpy as np
 
 from unittest.mock import MagicMock, patch
-from trader.data.duckdb_store import DuckDBDataStore, DuckDBObjectStore
+from trader.data.duckdb_store import (
+    SHADOWED_DB_MARKER,
+    DuckDBConnection,
+    DuckDBDataStore,
+    DuckDBObjectStore,
+    ShadowedDatabaseError,
+)
 from trader.sdk import MMR
 
 
@@ -341,3 +347,61 @@ class TestConcurrentAccess:
         assert errors == []
         # Only 8 rows regardless of how many times we wrote
         assert len(store.read('AAPL')) == 8
+
+
+class TestShadowedHostDatabase:
+    """Host-vs-container DB shadowing must fail loudly, not return empty.
+
+    docker-compose overlays ~/.local/share/mmr/data with the mmr_db_data volume,
+    so trader.yaml's single duckdb_path resolves to different files on the host
+    and in the container. DuckDB creates the host one on open, so host-side
+    reads silently returned zero rows (`mmr backtests` -> {"data": []}) and
+    `mmr status` reported pending_proposals from the wrong database.
+    """
+
+    def test_opens_normally_without_the_marker(self, tmp_path):
+        conn = DuckDBConnection(str(tmp_path / 'ok.duckdb'))
+        assert conn.db_path.endswith('ok.duckdb')
+
+    def test_refuses_to_open_beside_the_marker(self, tmp_path):
+        (tmp_path / SHADOWED_DB_MARKER).write_text('shadowed')
+        with pytest.raises(ShadowedDatabaseError):
+            DuckDBConnection(str(tmp_path / 'stub.duckdb'))
+
+    def test_refusal_does_not_create_a_stub_file(self, tmp_path):
+        """The whole failure mode is DuckDB creating an empty file on open."""
+        (tmp_path / SHADOWED_DB_MARKER).write_text('shadowed')
+        db = tmp_path / 'stub.duckdb'
+        with pytest.raises(ShadowedDatabaseError):
+            DuckDBConnection(str(db))
+        assert not db.exists()
+
+    def test_error_message_says_how_to_fix_it(self, tmp_path):
+        (tmp_path / SHADOWED_DB_MARKER).write_text('shadowed')
+        with pytest.raises(ShadowedDatabaseError) as exc:
+            DuckDBConnection(str(tmp_path / 'stub.duckdb'))
+        msg = str(exc.value)
+        assert 'docker.sh -e' in msg
+        assert 'MMR_ALLOW_HOST_DB=1' in msg
+
+    def test_env_override_allows_deliberate_host_use(self, tmp_path, monkeypatch, capsys):
+        (tmp_path / SHADOWED_DB_MARKER).write_text('shadowed')
+        monkeypatch.setenv('MMR_ALLOW_HOST_DB', '1')
+        conn = DuckDBConnection(str(tmp_path / 'deliberate.duckdb'))
+        assert conn.db_path.endswith('deliberate.duckdb')
+        assert 'MMR_ALLOW_HOST_DB=1' in capsys.readouterr().err
+
+    def test_override_must_be_exactly_1(self, tmp_path, monkeypatch):
+        """Fail closed on a fat-fingered value rather than honouring 'true'."""
+        (tmp_path / SHADOWED_DB_MARKER).write_text('shadowed')
+        monkeypatch.setenv('MMR_ALLOW_HOST_DB', 'true')
+        with pytest.raises(ShadowedDatabaseError):
+            DuckDBConnection(str(tmp_path / 'stub.duckdb'))
+
+    def test_marker_in_a_different_directory_is_ignored(self, tmp_path):
+        """Only the DB's own directory counts — no walking up the tree."""
+        (tmp_path / SHADOWED_DB_MARKER).write_text('shadowed')
+        sub = tmp_path / 'elsewhere'
+        sub.mkdir()
+        conn = DuckDBConnection(str(sub / 'fine.duckdb'))
+        assert conn.db_path.endswith('fine.duckdb')
