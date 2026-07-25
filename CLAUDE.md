@@ -561,8 +561,22 @@ in `logging_helper.py`) — it rotates in place so triage has a single
 cross-session file. It was `/tmp/debug.log` until 2026-07-24; the move puts it
 on the host bind mount (tailable without exec'ing in) and out of reach of the
 uid split that made it unwritable. Note: EVERY process that loads the logging
-config (each CLI run, pytest) creates its own empty session-stamped file set —
-the monitor scripts resolve the newest *non-empty* file for this reason.
+config (each CLI run) creates its own session-stamped file set — the monitor
+scripts resolve the newest *non-empty* file for this reason.
+
+**`MMR_LOG_DIR` overrides the log directory** (default
+`~/.local/share/mmr/logs`). `tests/conftest.py` sets it to
+`$TMPDIR/mmr-pytest-logs` so a host `pytest` run cannot write into the live
+operational dir: that dir is the container bind-mount *source*, and because the
+tests assert on strings like `STALE exit claim` and `placement refused`, grepping
+the operational logs used to surface test noise indistinguishable from real
+trading events. Handler paths come from `logging.yaml` as absolute paths under
+the default dir, so the override *rewrites* them (`_redirect_if_overridden`)
+rather than merely relocating the constant — setting `MMR_LOG_DIR` alone would
+otherwise redirect nothing. It must be set **before** any `trader` import (the
+constant is read at `logging_helper` import time). The container never sets it,
+so its behaviour is unchanged. Note this is NOT `AUDIT_ROADMAP` G7 (tests
+dialling the live RPC port), which is a separate, more serious issue.
 
 A handler whose file can't be opened is now **dropped individually**
 (`_drop_unwritable_handlers`) instead of taking the whole config down to
