@@ -87,5 +87,15 @@ RUN mkdir -p /home/trader/.config/mmr \
 
 RUN chmod +x /home/trader/mmr/scripts/docker-entrypoint.sh
 
+# Drop back to trader for the ENTRYPOINT. The preceding `USER root` blocks
+# exist only to write files into /home/trader at build time; without this
+# line the entrypoint — and therefore start_mmr.sh and every service — ran
+# as root, while `docker.sh -e` execs in as trader. That uid split meant
+# root-owned log files the CLI could not open, which took down the CLI's
+# whole logging config (see _drop_unwritable_handlers). Nothing in
+# start_mmr.sh or container_healthcheck.sh needs root, and the DuckDB files
+# in the mmr_db_data volume are already trader-owned.
+USER trader
+
 WORKDIR /home/trader
 ENTRYPOINT ["/home/trader/mmr/scripts/docker-entrypoint.sh"]

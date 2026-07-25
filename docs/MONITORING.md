@@ -48,7 +48,8 @@ follow the newest session file and switch automatically after a restart.
 | IB connectivity (1100/1102/2110/2157), farm status, reconnects | `trader_service_<ts>.log` (incl. the `ibreactivex` logger) |
 | trader pulse (`pulse ib_connected=…`) | `trader_service_<ts>.log` |
 | all ERROR+ from any named logger | `errors.log` (plus the service file) |
-| ib_async internals (incl. G5's harmless `KeyError: 81` decoder noise) | console + `/tmp/debug.log` only |
+| ib_async internals (incl. G5's harmless `KeyError: 81` decoder noise) | console + `logs/debug.log` only |
+| everything, all levels, one cross-session file | `logs/debug.log` (not session-stamped; rotates in place) |
 
 ## The pulse (why silence is a signal)
 

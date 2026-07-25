@@ -546,11 +546,21 @@ via the `auto_executor` logger, BUY/SELL signals, the strategy pulse) land
 in `strategy_service_<ts>.log`; IB connectivity (`ibreactivex`
 farm/upstream lines, the trader pulse) lands in `trader_service_<ts>.log`.
 Loggers ALSO propagate to root (deliberate — `propagate: yes` in
-logging.yaml): console, `trader_<ts>.log` at INFO+, and `/tmp/debug.log` as
-the complete single-file triage log; pytest's caplog depends on this
-propagation too. Note: EVERY process that loads the logging config (each
-CLI run, pytest) creates its own empty session-stamped file set — the
-monitor scripts resolve the newest *non-empty* file for this reason.
+logging.yaml): console, `trader_<ts>.log` at INFO+, and
+`~/.local/share/mmr/logs/debug.log` as the complete single-file triage log;
+pytest's caplog depends on this propagation too. `debug.log` is the one file
+in that directory that is deliberately NOT session-stamped (`_UNSTAMPED_LOGS`
+in `logging_helper.py`) — it rotates in place so triage has a single
+cross-session file. It was `/tmp/debug.log` until 2026-07-24; the move puts it
+on the host bind mount (tailable without exec'ing in) and out of reach of the
+uid split that made it unwritable. Note: EVERY process that loads the logging
+config (each CLI run, pytest) creates its own empty session-stamped file set —
+the monitor scripts resolve the newest *non-empty* file for this reason.
+
+A handler whose file can't be opened is now **dropped individually**
+(`_drop_unwritable_handlers`) instead of taking the whole config down to
+`logging.basicConfig` — one unwritable path used to silently cost you the
+console handler and every service log with it.
 
 **Heartbeat pulses:** both services emit a 30s INFO `pulse ...` line
 (strategy side: `strategies=N/N ticks_60s=[conid:n,...] bar_age_s=[...]

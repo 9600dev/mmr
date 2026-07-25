@@ -14,6 +14,14 @@ formatters:
     error:
         format: "%(asctime)s %(levelname)s <PID %(process)d:%(processName)s> %(name)s.%(funcName)s(): %(message)s"
 
+# NOTE on `delay: true` (on every RotatingFileHandler below): without it the
+# handler creates its file at config time, so EVERY process that loads this
+# config — each `mmr` CLI run, each 60s container healthcheck, each pytest
+# session — left behind a full set of empty session-stamped files. That had
+# accumulated to 41,044 empty files (of 43,462) by 2026-07-24, which the
+# monitor scripts have to scan past to find the newest *non-empty* log.
+# With delay, the file is created on first actual write, so a process that
+# logs nothing to a given handler leaves nothing behind.
 handlers:
     console:
         class: logging.StreamHandler
@@ -37,6 +45,7 @@ handlers:
         maxBytes: 10485760 # 10MB
         backupCount: 20
         encoding: utf8
+        delay: true
 
     strategy_service_handler:
         class: logging.handlers.RotatingFileHandler
@@ -46,6 +55,7 @@ handlers:
         maxBytes: 10485760 # 10MB
         backupCount: 20
         encoding: utf8
+        delay: true
 
     data_service_handler:
         class: logging.handlers.RotatingFileHandler
@@ -55,6 +65,7 @@ handlers:
         maxBytes: 10485760 # 10MB
         backupCount: 20
         encoding: utf8
+        delay: true
 
     file_handler:
         class: logging.handlers.RotatingFileHandler
@@ -64,6 +75,7 @@ handlers:
         maxBytes: 10485760 # 10MB
         backupCount: 20
         encoding: utf8
+        delay: true
 
     error_file_handler:
         class: logging.handlers.RotatingFileHandler
@@ -73,15 +85,31 @@ handlers:
         maxBytes: 10485760 # 10MB
         backupCount: 20
         encoding: utf8
+        delay: true
 
+    # The one log that is NOT session-stamped (see _UNSTAMPED_LOGS in
+    # trader/common/logging_helper.py): a single rotating file spanning
+    # sessions, so triage has one place to look. Lives in the bind-mounted
+    # logs dir — host-tailable, and writable by whatever uid the services
+    # run as (it was /tmp/debug.log, which root-owned services made
+    # unwritable for `mmr` CLI runs under uid trader).
+    #
+    # Rotation caveat: RotatingFileHandler is NOT multi-process safe, and this
+    # is the one file every process shares (4 services + pycron + every CLI
+    # run, and since the move off /tmp, host-side runs too — same bind mount).
+    # When one process rolls the file the others keep writing to the renamed
+    # inode until they roll too, so lines can land in debug.log.1. Harmless for
+    # triage, but the mitigation is to roll RARELY: 64MB x 3 keeps the same
+    # ~200MB ceiling as the old 10MB x 20 while rotating ~6x less often.
     debug_file_handler:
         class: logging.handlers.RotatingFileHandler
         level: DEBUG
         formatter: standard
-        filename: /tmp/debug.log
-        maxBytes: 10485760 # 10MB
-        backupCount: 20
+        filename: ~/.local/share/mmr/logs/debug.log
+        maxBytes: 67108864 # 64MB
+        backupCount: 3
         encoding: utf8
+        delay: true
 
 root:
     level: NOTSET
@@ -108,9 +136,9 @@ loggers:
         propagate: no
     # NOTE on `propagate: yes` (deliberate, was a silent `propogate` typo for
     # years): service loggers write their own file AND propagate to root
-    # (console via rich_console, trader.log at INFO+, /tmp/debug.log at DEBUG,
+    # (console via rich_console, trader.log at INFO+, logs/debug.log at DEBUG,
     # errors.log — the last doubles with the logger's own error_file_handler,
-    # accepted). Propagation is load-bearing: /tmp/debug.log stays a complete
+    # accepted). Propagation is load-bearing: logs/debug.log stays a complete
     # single-file triage log, and pytest's caplog captures via root. The
     # monitors don't depend on it either way — they read the service files.
     data_service:

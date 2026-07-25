@@ -21,6 +21,12 @@ _session_timestamp = dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
 MMR_LOG_DIR = os.path.expanduser('~/.local/share/mmr/logs')
 
+# Logs that live in MMR_LOG_DIR but must NOT be session-stamped. debug.log is
+# the single complete cross-session triage file (see docs/MONITORING.md) — a
+# per-process timestamp would fragment it into thousands of partial files,
+# which is exactly what it exists to avoid.
+_UNSTAMPED_LOGS = frozenset({'debug.log'})
+
 
 def _stamp_log_filenames(config: dict) -> dict:
     """Expand ~ in log paths, ensure directory exists, and inject session timestamp."""
@@ -31,13 +37,57 @@ def _stamp_log_filenames(config: dict) -> dict:
         # Expand ~ to home directory
         filename = os.path.expanduser(filename)
         # Add session timestamp to log files in the mmr log directory
-        if filename.endswith('.log') and MMR_LOG_DIR in filename:
+        if (filename.endswith('.log')
+                and MMR_LOG_DIR in filename
+                and os.path.basename(filename) not in _UNSTAMPED_LOGS):
             base = filename[:-4]
             filename = f'{base}_{_session_timestamp}.log'
         handler_config['filename'] = filename
     # Ensure log directory exists
     os.makedirs(MMR_LOG_DIR, exist_ok=True)
     return config
+
+
+def _drop_unwritable_handlers(config: dict) -> List[str]:
+    """Drop file handlers whose target can't be opened, return their names.
+
+    dictConfig raises on the FIRST unopenable handler, and the caller's only
+    recourse is basicConfig() — so one unwritable path used to silently take
+    down the entire logging config (console, service logs, errors.log) with
+    it. That is exactly what happened when the services ran as root and left
+    a root-owned debug log that `mmr` CLI runs (uid trader) could not open.
+    Degrade per-handler instead: the rest of the config still applies.
+    """
+    dropped: List[str] = []
+    for name, handler_config in list(config.get('handlers', {}).items()):
+        filename = handler_config.get('filename', '')
+        if not filename:
+            continue
+        try:
+            parent = os.path.dirname(filename) or '.'
+            os.makedirs(parent, exist_ok=True)
+            if os.path.exists(filename):
+                # Authoritative check — this is the access the handler takes.
+                with open(filename, 'a', encoding='utf8'):
+                    pass
+            elif not os.access(parent, os.W_OK | os.X_OK):
+                raise PermissionError(13, 'Permission denied', parent)
+            # Deliberately does NOT create a missing file: the handler owns
+            # that decision (and may be configured with delay: true).
+        except OSError as e:
+            dropped.append(name)
+            del config['handlers'][name]
+            print(f'logging: handler {name!r} disabled — cannot write {filename}: {e}')
+
+    if dropped:
+        # Purge the dropped names from every handler list, or dictConfig
+        # fails again on the dangling reference.
+        sections = [config.get('root', {})] + list(config.get('loggers', {}).values())
+        for section in sections:
+            handlers = section.get('handlers')
+            if handlers:
+                section['handlers'] = [h for h in handlers if h not in dropped]
+    return dropped
 
 
 class LogLevels(IntEnum):
@@ -94,6 +144,7 @@ def setup_logging(default_path='',
             try:
                 config = yaml.safe_load(f.read())
                 _stamp_log_filenames(config)
+                _drop_unwritable_handlers(config)
                 logging.config.dictConfig(config)
             except Exception as e:
                 print(e)

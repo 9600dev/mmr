@@ -14,7 +14,7 @@
 #     pulse that STOPS APPEARING for >2 intervals means the service is
 #     wedged (that absence, not an error line, was the G3 failure mode).
 #   - G5's ib_async decoder KeyError traceback never lands in this file
-#     (ib_async loggers route to console/debug.log only) — no exclusion
+#     (ib_async loggers route to console + logs/debug.log only) — no exclusion
 #     needed here; if you monitor docker logs instead, exclude 'KeyError: 81'.
 #
 # Works from host or container (bind-mounted log dir). Re-arm after any
