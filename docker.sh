@@ -579,7 +579,11 @@ up() {
     # container (the volume covers it), which is what makes it a reliable
     # discriminator; trader/data/duckdb_store.py refuses to open a DB next to it.
     mkdir -p "$MMR_DATA_DIR/data"
-    cat > "$MMR_DATA_DIR/data/.db_in_container_volume" <<'MARKER'
+    # `>|` not `>`: this script runs under `set -o noclobber`, so a plain `>`
+    # REFUSES to overwrite an existing file — which, combined with errexit, meant
+    # the second `-g` aborted `up()` before compose ever ran and left the stack
+    # down. Rewriting each time keeps the text current if this marker changes.
+    cat >| "$MMR_DATA_DIR/data/.db_in_container_volume" <<'MARKER'
 This directory is shadowed by the Docker named volume `mmr_db_data`.
 
 The DuckDB files the MMR services actually read/write live INSIDE the container
