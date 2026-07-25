@@ -181,7 +181,7 @@ async def test_bracket_rolls_back_when_tp_fails(monkeypatch):
             return RiskGateResult(approved=True)
 
         def evaluate(self, *a, **kw):
-            return RiskGateResult(approved=True)
+            return RiskGateResult(approved=True, checks={'max_open_orders': 'pass', 'daily_loss': 'pass', 'concentration': 'pass', 'order_rate': 'pass'})
 
     trader.risk_gate = _ApproveAll()
     trader.check_order_margin = MagicMock(side_effect=Exception('skip margin'))

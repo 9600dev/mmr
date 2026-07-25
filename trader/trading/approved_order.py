@@ -114,10 +114,27 @@ def mint_approved_order(
     is_exit: bool,
     checks: dict[str, str] | None = None,
 ) -> ApprovedOrder:
-    """The sanctioned constructor. Callable only from code that has completed
-    the gate/exit-class decision for ``(contract, order)`` and reached its
-    APPROVE branch. Refusing paths never call this, so they can never obtain a
-    token to hand the placement chokepoint.
+    """The sanctioned constructor, for code that has completed the gate /
+    exit-class decision for ``(contract, order)`` and reached its APPROVE branch.
+
+    Minting itself performs NO verification, so on its own the type only ever
+    proved "somebody called mint" — not "the gate ran". A new code path could
+    mint without gating and the type-checker would be perfectly happy, which made
+    the capability a convention wearing a type's clothes.
+
+    Minting stays permissive BY DESIGN — tests/invariants/test_approved_order.py
+    pins that a token may be constructed with an empty checks record, and that
+    property is human-owned. The authorization evidence is instead enforced
+    where the token is SPENT: ``TradeExecutioner.subscribe_place_order_direct``
+    refuses a non-exit token that carries no passing gate record. Validating at
+    the consumption point is also the better boundary — it covers every future
+    mint site automatically, including ones nobody remembered to audit.
+
+    NOT verified anywhere, deliberately: that ``is_exit`` matches the live
+    position. Corroborating it needs a position read, and ``enforce_approver_tier``
+    documents why a second read on this path is unsafe — it can race and mis-gate
+    a genuine exit. ``is_exit`` is checked at its SOURCE instead, in
+    ``trader.trading.exit_class``.
     """
     return ApprovedOrder(
         _MINT_KEY,

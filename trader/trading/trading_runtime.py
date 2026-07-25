@@ -21,6 +21,7 @@ from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
 from trader.trading.approved_order import mint_approved_order
+from trader.trading.exit_class import reduces_exposure
 from trader.trading.risk_gate import RiskGate, RiskInputs, RiskLimits
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
 from trader.messaging.clientserver import MessageBusServer, MultithreadedTopicPubSub, RPCClient, RPCServer
@@ -1090,9 +1091,11 @@ class Trader():
                     held = by_symbol
         if held is None:
             return False
-        if act == 'SELL':
-            return held > 0
-        return held < 0
+        # The DECISION itself lives in the pure, deal-contracted, mutation- and
+        # CrossHair-checked kernel (trader.trading.exit_class). This method's
+        # remaining job is resolving `held` from the live portfolio; the
+        # direction rule is verified there, where the toolchain can see it.
+        return reduces_exposure(act, held, qty)
 
     def _opening_exposure_quantity(
         self, contract: Contract, action: str, quantity: float

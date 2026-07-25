@@ -36,7 +36,7 @@ class _ApproveAll:
         return RiskGateResult(approved=True)
 
     def evaluate(self, *a, **kw):
-        return RiskGateResult(approved=True)
+        return RiskGateResult(approved=True, checks={'max_open_orders': 'pass', 'daily_loss': 'pass', 'concentration': 'pass', 'order_rate': 'pass'})
 
 
 class _StubExecutioner:

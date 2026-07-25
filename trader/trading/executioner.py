@@ -88,6 +88,31 @@ class TradeExecutioner():
         order = approved.order
         is_exit = approved.is_exit
 
+        # Spend-time authorization check. The token's TYPE only proves someone
+        # called mint(); mint deliberately does not validate (a human-owned
+        # invariant pins that a token may be constructed with an empty record).
+        # So the evidence is demanded HERE, where the token is spent and where
+        # it actually matters — which also covers every future mint site
+        # automatically, including ones nobody remembered to audit.
+        #
+        # An exposure-INCREASING order must carry the tri-state gate record that
+        # approved it: non-empty, with no check left in the 'fail' state. Exits
+        # are exempt by design — they are never gate-refusable, so they
+        # legitimately arrive with an empty record.
+        if not is_exit:
+            recorded = approved.checks or {}
+            failed = sorted(k for k, v in recorded.items()
+                            if str(v).split(':', 1)[0] == 'fail')
+            if not recorded or failed:
+                why = (f'failed checks {failed}' if failed
+                       else 'no gate record (checks was empty)')
+                logging.error(
+                    'placement refused: exposure-increasing order with %s — %r', why, approved)
+                return rx.throw(ValueError(
+                    f'placement refused: exposure-increasing order reached the IB '
+                    f'chokepoint with {why}. Only the APPROVE branch of the risk '
+                    f'gate may place an opening order.'))
+
         def trader_exception_helper(ex):
             return rx.throw(
                 exception=trader_exception(self.trader, exception_type=TraderException, message='place_order()', inner=ex)
@@ -269,9 +294,12 @@ class TradeExecutioner():
 
         # Server-side notional-tier approver gate (Phase 2), unified with the
         # approve() path. Called unconditionally: it no-ops when the feature is
-        # off and for pure exits, so it is safe on every direct order — but it
-        # DOES gate an above-threshold open (and a flip's net-new remainder)
-        # that arrived through the direct buy/sell path without a valid key.
+        # off and for ALL exit-class orders, so it is safe on every direct order —
+        # but it DOES gate an above-threshold pure open that arrived through the
+        # direct buy/sell path without a valid key. NOTE: it does NOT gate a
+        # flip's net-new remainder — enforce_approver_tier exempts anything
+        # order_reduces_exposure calls a reduction, flips included (documented
+        # residual, see SAFETY_ROADMAP). This comment used to claim otherwise.
         tier_error = await self.trader.enforce_approver_tier(
             contract, str(order.action), float(order.totalQuantity or 0),
             str(getattr(order, 'orderType', '') or ''),

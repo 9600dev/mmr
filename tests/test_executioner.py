@@ -13,6 +13,14 @@ import pytest
 import reactivex as rx
 
 from trader.trading.approved_order import mint_approved_order
+
+# A faithful gate record for tests that mint an OPENING token and hand it
+# straight to the chokepoint (bypassing place_order, hence the gate). The
+# chokepoint refuses an exposure-increasing order carrying no gate record, so a
+# fixture standing in for "an approved open" must look like one — the real
+# RiskGate always records the tri-state per check on approval.
+_APPROVED_CHECKS = {'max_open_orders': 'pass', 'daily_loss': 'pass',
+                    'concentration': 'pass', 'order_rate': 'pass'}
 from trader.trading.executioner import TradeExecutioner
 from trader.trading.risk_gate import RiskGateResult, RiskInputs
 from trader.objects import Action, ContractOrderPair, ExecutorCondition
@@ -87,7 +95,7 @@ class _ApproveAllGate:
         return RiskGateResult(approved=True)
 
     def evaluate(self, **kw):
-        return RiskGateResult(approved=True)
+        return RiskGateResult(approved=True, checks={'max_open_orders': 'pass', 'daily_loss': 'pass', 'concentration': 'pass', 'order_rate': 'pass'})
 
 
 class _RejectEvaluateGate(_ApproveAllGate):
@@ -150,7 +158,7 @@ async def test_evaluate_receives_full_inputs_and_price_hint():
     class _Gate(_ApproveAllGate):
         def evaluate(self, **kw):
             captured.update(kw)
-            return RiskGateResult(approved=True)
+            return RiskGateResult(approved=True, checks={'max_open_orders': 'pass', 'daily_loss': 'pass', 'concentration': 'pass', 'order_rate': 'pass'})
 
     inputs = _inputs(open_order_count=3, daily_pnl=-42.0, portfolio_value=55_000.0)
     ex, trader = _make_executioner_with_trader(risk_gate=_Gate(), inputs=inputs)
@@ -176,7 +184,7 @@ async def test_limit_price_backfills_position_value_hint():
     class _Gate(_ApproveAllGate):
         def evaluate(self, **kw):
             captured.update(kw)
-            return RiskGateResult(approved=True)
+            return RiskGateResult(approved=True, checks={'max_open_orders': 'pass', 'daily_loss': 'pass', 'concentration': 'pass', 'order_rate': 'pass'})
 
     ex, trader = _make_executioner_with_trader(risk_gate=_Gate())
     pair = ContractOrderPair(contract=_Contract(), order=_Order(lmt_price=100))
@@ -193,7 +201,7 @@ async def test_account_mismatch_rejected():
 
     bad_order = _Order(account='DU_OTHER')
     observable = await ex.subscribe_place_order_direct(
-        mint_approved_order(_Contract(), bad_order, is_exit=False))
+        mint_approved_order(_Contract(), bad_order, is_exit=False, checks=_APPROVED_CHECKS))
     errors = []
     observable.subscribe(on_next=lambda _: None, on_error=errors.append)
     assert len(errors) == 1
@@ -210,7 +218,7 @@ async def test_blank_order_account_rejected():
 
     blank = _Order(account='')
     observable = await ex.subscribe_place_order_direct(
-        mint_approved_order(_Contract(), blank, is_exit=False))
+        mint_approved_order(_Contract(), blank, is_exit=False, checks=_APPROVED_CHECKS))
     errors = []
     observable.subscribe(on_next=lambda _: None, on_error=errors.append)
     assert len(errors) == 1
@@ -226,7 +234,7 @@ async def test_blank_configured_account_rejected():
 
     order = _Order(account='')
     observable = await ex.subscribe_place_order_direct(
-        mint_approved_order(_Contract(), order, is_exit=False))
+        mint_approved_order(_Contract(), order, is_exit=False, checks=_APPROVED_CHECKS))
     errors = []
     observable.subscribe(on_next=lambda _: None, on_error=errors.append)
     assert len(errors) == 1
@@ -355,7 +363,7 @@ async def test_order_submitted_stamped_with_orderref_not_manual():
 
     order = _OrderRef(order_ref='keltner_breakout')
     await ex.subscribe_place_order_direct(
-        mint_approved_order(_Contract(), order, is_exit=False))
+        mint_approved_order(_Contract(), order, is_exit=False, checks=_APPROVED_CHECKS))
 
     from trader.data.event_store import EventType
     submitted = [e for e in appended if e.event_type == EventType.ORDER_SUBMITTED]
@@ -390,7 +398,7 @@ async def test_blank_orderref_falls_back_to_manual():
 
     order = _OrderRef(order_ref='')
     await ex.subscribe_place_order_direct(
-        mint_approved_order(_Contract(), order, is_exit=False))
+        mint_approved_order(_Contract(), order, is_exit=False, checks=_APPROVED_CHECKS))
 
     from trader.data.event_store import EventType
     submitted = [e for e in appended if e.event_type == EventType.ORDER_SUBMITTED]
@@ -407,7 +415,7 @@ async def test_pseudo_signal_source_matches_orderref_and_sec_type_passed():
     class _Gate(_ApproveAllGate):
         def evaluate(self, **kw):
             captured.update(kw)
-            return RiskGateResult(approved=True)
+            return RiskGateResult(approved=True, checks={'max_open_orders': 'pass', 'daily_loss': 'pass', 'concentration': 'pass', 'order_rate': 'pass'})
 
     ex, trader = _make_executioner_with_trader(risk_gate=_Gate())
     order = _OrderRef(order_ref='orb_strategy')
@@ -564,3 +572,59 @@ class TestHelperCreateOrderSizing:
         assert pair.order.totalQuantity == 8
         # postcondition: notional within the sized amount
         assert 8 * 3.5 * 100 <= 3000.0
+
+
+@pytest.mark.asyncio
+async def test_chokepoint_refuses_ungated_opening_token():
+    """An exposure-increasing token carrying NO gate record never reaches IB.
+
+    The capability token's type only proves someone called mint(); mint itself
+    deliberately does not validate (a human-owned invariant pins that a token may
+    be constructed with an empty record). So the evidence is demanded where the
+    token is SPENT. Without this, any present or future mint site could place an
+    opening order that no gate ever approved, and both `ty` and the type system
+    would be perfectly happy.
+    """
+    ex, trader = _make_executioner_with_trader(risk_gate=_ApproveAllGate())
+    order = _Order()
+    order.account = 'DU1'
+
+    observable = await ex.subscribe_place_order_direct(
+        mint_approved_order(_Contract(), order, is_exit=False))  # no checks
+
+    errors = []
+    observable.subscribe(on_error=errors.append)
+    assert trader.client.subscribe_place_order.call_count == 0, 'ungated open reached IB'
+    assert errors and 'placement refused' in str(errors[0])
+
+
+@pytest.mark.asyncio
+async def test_chokepoint_refuses_opening_token_with_a_failed_check():
+    """A token minted with a FAILED check is refused too — a record that exists
+    is not the same as a record that passed."""
+    ex, trader = _make_executioner_with_trader(risk_gate=_ApproveAllGate())
+    order = _Order()
+    order.account = 'DU1'
+
+    observable = await ex.subscribe_place_order_direct(
+        mint_approved_order(_Contract(), order, is_exit=False,
+                            checks={'daily_loss': 'fail', 'concentration': 'pass'}))
+
+    errors = []
+    observable.subscribe(on_error=errors.append)
+    assert trader.client.subscribe_place_order.call_count == 0
+    assert errors and 'daily_loss' in str(errors[0])
+
+
+@pytest.mark.asyncio
+async def test_chokepoint_allows_exit_token_with_empty_record():
+    """Exits are exempt: they are never gate-refusable, so an empty record is
+    legitimate and must still place. Refusing an exit is the worse failure."""
+    ex, trader = _make_executioner_with_trader(risk_gate=_ApproveAllGate())
+    order = _Order()
+    order.account = 'DU1'
+
+    await ex.subscribe_place_order_direct(
+        mint_approved_order(_Contract(), order, is_exit=True))
+
+    assert trader.client.subscribe_place_order.call_count == 1

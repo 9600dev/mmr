@@ -726,7 +726,7 @@ class TestAutoExecutorApproverTier:
         class _ApproveAll:
             def check_instrument(self, **kw): return RiskGateResult(approved=True)
             def check_leverage(self, *a, **kw): return RiskGateResult(approved=True)
-            def evaluate(self, *a, **kw): return RiskGateResult(approved=True)
+            def evaluate(self, *a, **kw): return RiskGateResult(approved=True, checks={'max_open_orders': 'pass', 'daily_loss': 'pass', 'concentration': 'pass', 'order_rate': 'pass'})
 
         class _Exec:
             def __init__(self): self.calls = 0

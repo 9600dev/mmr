@@ -141,6 +141,14 @@ pytest_add_cli_args = ["-p", "_mutmut_hyp"]
 only_mutate = [
     "trader/trading/order_math.py",
     "trader/data/proposal_transitions.py",
+    # The exit-class decision: a True answer disables the trading filter, the
+    # leverage check, the risk gate, require_proposal_approval AND the approver
+    # tier at once, so it is the highest-consequence boolean in the system. It
+    # lived inline in trading_runtime.py (outside this scope) and was mocked in
+    # the invariants spec, so a targeted backdoor -- `if qty > 1000: return True`,
+    # permitting unlimited naked shorts through every gate -- survived all 1882
+    # tests. Extracted to a pure module precisely so it lands here.
+    "trader/trading/exit_class.py",
     "trader/trading/position_sizing.py",
     "trader/trading/risk_gate.py",
 ]
@@ -152,6 +160,7 @@ pytest_add_cli_args_test_selection = [
     # shells out to `ty`/uv to assert the type-gate rejects gate-skipping calls,
     # which is slow, environment-dependent, and unrelated to the pure math
     # kernels mutated here. The ty gate is verified separately (scripts/ty_gate.py).
+    "tests/invariants/test_exit_class.py",
     "tests/invariants/test_gate_properties.py",
     "tests/invariants/test_order_notional.py",
     "tests/invariants/test_proposal_machine.py",
