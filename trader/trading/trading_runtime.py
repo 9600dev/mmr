@@ -1434,11 +1434,21 @@ class Trader():
             probe_order = _build_entry(**common)
 
             # 2. whatIfOrder margin check
+            # Tri-state record for the margin/leverage dimension, merged into the
+            # gate's checks below. Without this a whatIfOrder failure produced a
+            # clean-looking approval with NOTHING recording that the leverage
+            # limit was never applied — the audit trail could not distinguish
+            # "checked and fine" from "never checked".
+            leverage_checks: Dict[str, str] = {}
             margin_impact = None
             try:
                 margin_impact = await self.check_order_margin(contract, probe_order)
             except Exception as ex:
                 logging.warning(f'whatIfOrder failed, proceeding without margin check: {ex}')
+                leverage_checks = {
+                    'leverage': 'skipped:margin-not-evaluable',
+                    'margin_cushion': 'skipped:margin-not-evaluable',
+                }
 
             # 3. Leverage limit check
             if margin_impact:
@@ -1461,8 +1471,15 @@ class Trader():
                     break
 
                 leverage_result = self.risk_gate.check_leverage(margin_impact, net_liq)
+                leverage_checks = dict(leverage_result.checks or {})
                 if not leverage_result.approved:
                     return SuccessFail.fail(error=leverage_result.reason)
+            elif not leverage_checks:
+                # margin_impact was falsy but no exception fired (e.g. {}).
+                leverage_checks = {
+                    'leverage': 'skipped:no-margin-data',
+                    'margin_cushion': 'skipped:no-margin-data',
+                }
 
             # 4. Risk gate checks (open orders, daily loss, concentration)
             from trader.trading.strategy import Signal
@@ -1530,7 +1547,11 @@ class Trader():
             )
             if not gate_result.approved:
                 return SuccessFail.fail(error=f'Risk gate: {gate_result.reason}')
-            entry_checks = gate_result.checks
+            # New dict, not gate_result.checks by reference — mutating that would
+            # rewrite the gate's own record. The leverage entries ride along so
+            # the token minted below carries the full picture, including any
+            # dimension that was skipped rather than passed.
+            entry_checks = {**gate_result.checks, **leverage_checks}
 
             # 5. Server-side notional-tier approver gate (Phase 2). Delegated to
             # the single, unified enforcement point on the Trader — it values

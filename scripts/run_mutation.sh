@@ -66,16 +66,25 @@
 #       was added to the ORACLE selection in pyproject.toml — adding the spec file
 #       alone changed nothing, the drift tests/test_verification_wiring.py now catches.
 #
-#   xǁRiskGateǁcheck_leverage__mutmut_12  (`get('equityWithLoanAfter', 0)` -> None)
-#   xǁRiskGateǁcheck_leverage__mutmut_14  (`get('equityWithLoanAfter', )`  -> None)
+#   xǁRiskGateǁcheck_leverage__mutmut_13  (`get('equityWithLoanAfter', 0)` -> None)
+#   xǁRiskGateǁcheck_leverage__mutmut_15  (`get('equityWithLoanAfter', )`  -> None)
+#       (were 12/14 before check_leverage grew its tri-state record — mutant
+#       NUMBERS shift whenever the function changes, so match on the DIFF, not
+#       the index, when re-deriving this ledger.)
 #       risk_gate.py, 2026-07-25. Same mutant twice. `equity_after` is only ever
 #       consumed by `if equity_after:`, and 0 and None are both falsy, so the
 #       cushion branch is skipped identically. The arithmetic that could tell them
 #       apart — `(equity_after - init_margin_after)` — sits INSIDE that guard and
 #       is unreachable when the value is falsy. TRUE EQUIVALENTS.
 #       (Re-derive if equity_after is ever read outside the truthiness guard.)
-#       The other three check_leverage survivors (9, 21, 32) were REAL test gaps,
-#       not equivalents — see TestCheckLeverageMissingData in tests/test_risk_gate.py.
+#       The other three original check_leverage survivors (9, 21, 32) were REAL
+#       test gaps, not equivalents — see TestCheckLeverageMissingData in
+#       tests/test_risk_gate.py. Adding the tri-state record then produced SEVEN
+#       new survivors in the cushion-FAIL branch alone (key, value and the
+#       checks= argument could all be corrupted or dropped unnoticed), because I
+#       asserted the leverage-fail record and not its cushion twin. Killed by
+#       test_a_cushion_refusal_records_the_cushion_dimension. Lesson: adding an
+#       observability record adds mutable surface — assert EVERY branch of it.
 #
 # Usage:
 #   scripts/run_mutation.sh            # all 4 modules, then per-module score

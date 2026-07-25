@@ -446,6 +446,59 @@ class TestCheckLeverageMissingData:
         assert result.approved is False, 'cushion branch was skipped for a positive net_liq'
         assert 'cushion' in (result.reason or '')
 
+    def test_skipped_leverage_is_RECORDED_not_silent(self, event_store):
+        """The point of option B: outcomes unchanged, but a skip is now visible.
+
+        Previously an absent initMarginAfter returned a bare approval and the
+        audit trail could not distinguish 'leverage checked and fine' from
+        'leverage never checked'."""
+        gate = self._gate(event_store)
+        result = gate.check_leverage({}, net_liquidation=1_000_000.0)
+        assert result.approved is True
+        assert result.checks['leverage'] == 'skipped:no-margin-data'
+        assert result.checks['margin_cushion'] == 'skipped:no-equity-data'
+
+    def test_non_positive_net_liq_records_why_both_branches_were_skipped(self, event_store):
+        gate = self._gate(event_store)
+        result = gate.check_leverage(
+            {'initMarginAfter': 1.0, 'equityWithLoanAfter': 1.0}, net_liquidation=0.0)
+        assert result.approved is True
+        assert result.checks == {
+            'leverage': 'skipped:net-liq-not-evaluable',
+            'margin_cushion': 'skipped:net-liq-not-evaluable',
+        }
+
+    def test_passing_checks_are_recorded_as_pass(self, event_store):
+        gate = self._gate(event_store, max_leverage=2.0, min_margin_cushion=0.1)
+        result = gate.check_leverage(
+            {'initMarginAfter': 150_000, 'equityWithLoanAfter': 180_000},
+            net_liquidation=100_000)
+        assert result.approved is True
+        assert result.checks == {'leverage': 'pass', 'margin_cushion': 'pass'}
+
+    def test_a_refusal_records_which_dimension_failed(self, event_store):
+        gate = self._gate(event_store, max_leverage=2.0)
+        result = gate.check_leverage(
+            {'initMarginAfter': 900_000.0, 'equityWithLoanAfter': 1_000_000.0},
+            net_liquidation=100_000.0)
+        assert result.approved is False
+        assert result.checks['leverage'] == 'fail'
+
+    def test_a_cushion_refusal_records_the_cushion_dimension(self, event_store):
+        """The cushion-fail branch records its own dimension.
+
+        Added because mutation testing showed SEVEN survivors in exactly this
+        branch (73-77, 80, 83): the key, the value and the checks= argument
+        could all be corrupted or dropped and no test noticed. The leverage-fail
+        record was asserted; its cushion twin was not — a gap I introduced by
+        adding the record and only asserting one half of it."""
+        gate = self._gate(event_store, max_leverage=2.0, min_margin_cushion=0.1)
+        result = gate.check_leverage(
+            {'initMarginAfter': 1.0, 'equityWithLoanAfter': 1.0}, net_liquidation=1.0)
+        assert result.approved is False
+        assert 'cushion' in (result.reason or '')
+        assert result.checks == {'leverage': 'pass', 'margin_cushion': 'fail'}
+
     def test_empty_margin_impact_approves_silently(self, event_store):
         """whatIfOrder returning {} — the shape closest to a real IB failure."""
         gate = self._gate(event_store, max_leverage=0.001, min_margin_cushion=0.99)
