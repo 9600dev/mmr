@@ -37,3 +37,9 @@ notebooks/
 # of the source tree with mutants applied; never committed.
 mutants/
 .mutmut-cache
+
+# Operational state: live positions, stop levels, account state, and the
+# strategy roster (symbols/conIds/PFs/tuned params). Untracked deliberately —
+# 9600dev/mmr is PUBLIC and this file is the book's alpha plus its open risk.
+# Kept on disk as the working reference; see docs/OPERATIONAL_STATE.README.md.
+docs/OPERATIONAL_STATE.md

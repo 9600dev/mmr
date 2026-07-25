@@ -2,8 +2,12 @@
 
 > **Current deployed/running state** (armed strategies, backtest findings, data
 > coverage, backups, restart policy, Monday plan) lives in
-> [`docs/OPERATIONAL_STATE.md`](docs/OPERATIONAL_STATE.md) — read it first when
-> resuming operational work. Code backlog is in `docs/AUDIT_ROADMAP.md`.
+> `docs/OPERATIONAL_STATE.md` — read it first when resuming operational work.
+> That file is **gitignored and local-only**: it records live positions, stop
+> levels, account state, and the strategy roster (symbols/conIds/PFs/tuned
+> params), and this repo is public. It will not exist in a fresh clone — see
+> [`docs/OPERATIONAL_STATE.README.md`](docs/OPERATIONAL_STATE.README.md).
+> Code backlog is in `docs/AUDIT_ROADMAP.md`.
 > The live-session operating loop (monitors, pulse lines, escalation policy,
 > triage order) is [`docs/MONITORING.md`](docs/MONITORING.md). The staged
 > safety-hardening plan (shipped tranche 1: exit-class boundary, order math,
