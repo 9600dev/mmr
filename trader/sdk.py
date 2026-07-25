@@ -28,6 +28,7 @@ import asyncio
 import dataclasses
 import datetime as dt
 import logging
+import os
 import pandas as pd
 import threading
 import zmq
@@ -725,6 +726,7 @@ class MMR:
         sec_type: str = 'STK',
         exchange: str = '',
         currency: str = '',
+        approver_key: Optional[str] = None,
     ) -> SuccessFail:
         if not market and limit_price is None:
             raise ValueError("Specify market=True or provide a limit_price")
@@ -737,6 +739,14 @@ class MMR:
             contract = self._resolve_contract(symbol, sec_type=sec_type,
                                               exchange=exchange, currency=currency)
 
+        # Out-of-band approver key for the server-side notional tier. Same
+        # resolution as approve(): explicit arg wins, else the MMR_APPROVER_KEY
+        # process env; an above-threshold direct OPEN is refused server-side
+        # without it (exits and below-threshold opens never need it).
+        resolved_approver_key = (
+            approver_key if approver_key is not None
+            else os.environ.get('MMR_APPROVER_KEY')) or ''
+
         return consume(
             self._rpc.rpc(return_type=SuccessFail[Trade]).place_order_simple(
                 contract=contract,
@@ -747,6 +757,7 @@ class MMR:
                 market_order=market,
                 stop_loss_percentage=stop_loss_percentage,
                 debug=debug,
+                approver_key=resolved_approver_key,
             )
         )
 
@@ -762,12 +773,13 @@ class MMR:
         sec_type: str = 'STK',
         exchange: str = '',
         currency: str = '',
+        approver_key: Optional[str] = None,
     ) -> SuccessFail:
         """Place a buy order."""
         return self._place_order(
             symbol, 'BUY', amount, quantity, limit_price, market,
             stop_loss_percentage, debug, sec_type=sec_type,
-            exchange=exchange, currency=currency,
+            exchange=exchange, currency=currency, approver_key=approver_key,
         )
 
     def sell(
@@ -782,12 +794,13 @@ class MMR:
         sec_type: str = 'STK',
         exchange: str = '',
         currency: str = '',
+        approver_key: Optional[str] = None,
     ) -> SuccessFail:
         """Place a sell order."""
         return self._place_order(
             symbol, 'SELL', amount, quantity, limit_price, market,
             stop_loss_percentage, debug, sec_type=sec_type,
-            exchange=exchange, currency=currency,
+            exchange=exchange, currency=currency, approver_key=approver_key,
         )
 
     def cancel(self, order_id: int) -> SuccessFail:
@@ -1486,6 +1499,47 @@ class MMR:
             detail['leverage_estimated'] = leverage.get('estimated_leverage')
             detail['uses_margin'] = leverage.get('uses_margin', False)
 
+        # ---- Phase 2 trusted/untrusted surface split ----------------------
+        # The flat keys above stay for back-compat. These sub-dicts group the
+        # SAME data by trust so an approver (human or fresh-context agent) can
+        # visually separate server-recomputed facts from proposer-supplied
+        # text. TRUSTED = re-resolved/re-priced/re-sized at approval time
+        # (approve() re-resolves the contract, re-prices, re-sizes) — the only
+        # fields the approval DECISION keys on. UNTRUSTED = proposer-controlled:
+        # reasoning, thesis, source, and the ENTIRE metadata dict (metadata is
+        # passed straight from the caller; even metadata['snapshot'] /
+        # 'leverage_estimate' / 'sizing_result' are only conditionally written
+        # and must not be acted on as instruction). The FRESH portfolio-risk
+        # report and whatIf leverage the approver should consult are recomputed
+        # at approval, not stored here.
+        detail['trusted'] = {
+            'symbol': p.symbol,
+            'action': p.action,
+            'quantity': p.quantity,
+            'amount': p.amount,
+            'sec_type': p.sec_type,
+            'exchange': getattr(p, 'exchange', None),
+            'currency': getattr(p, 'currency', None),
+            'order_type': p.execution.order_type,
+            'limit_price': p.execution.limit_price,
+            'exit_type': p.execution.exit_type,
+            'take_profit_price': p.execution.take_profit_price,
+            'stop_loss_price': p.execution.stop_loss_price,
+            'trailing_stop_percent': p.execution.trailing_stop_percent,
+            'trailing_stop_amount': p.execution.trailing_stop_amount,
+            'tif': p.execution.tif,
+            'outside_rth': p.execution.outside_rth,
+            'good_till_date': p.execution.good_till_date,
+            'group': p.group,
+            'status': p.status,
+        }
+        detail['untrusted'] = {
+            'reasoning': p.reasoning,
+            'thesis': p.thesis,
+            'source': p.source,
+            'metadata': p.metadata,
+        }
+
         return detail
 
     def reject(self, proposal_id: int, reason: str = '') -> bool:
@@ -1498,8 +1552,17 @@ class MMR:
         return self._proposal_store().try_transition(
             proposal_id, 'PENDING', 'REJECTED', rejection_reason=reason)
 
-    def approve(self, proposal_id: int) -> SuccessFail:
-        """Approve and execute a proposal. REQUIRES trader_service."""
+    def approve(self, proposal_id: int, approver_key: Optional[str] = None) -> SuccessFail:
+        """Approve and execute a proposal. REQUIRES trader_service.
+
+        ``approver_key`` is the out-of-band secret for the server-side notional
+        tier (Phase 2). It is forwarded to ``place_expressive_order`` and only
+        matters when the trader_service has a non-zero
+        ``approver_required_above_usd`` AND the server-recomputed order notional
+        exceeds it. When None, it falls back to the ``MMR_APPROVER_KEY`` env var
+        (the canonical source), then to '' (feature-off / below-threshold path).
+        The auto-executor never sets it and stays below threshold, so it is
+        unaffected."""
         from trader.trading.proposal import ProposalStatus
 
         store = self._proposal_store()
@@ -1592,6 +1655,9 @@ class MMR:
             # fills are attributable per strategy (`mmr strategies pnl`,
             # live-vs-backtest comparison). Manual proposals stay 'proposal'.
             algo_name = str(proposal.metadata.get('strategy') or 'proposal')
+            resolved_approver_key = (
+                approver_key if approver_key is not None
+                else os.environ.get('MMR_APPROVER_KEY')) or ''
             try:
                 result = consume(
                     self._rpc.rpc(return_type=SuccessFail[list[Trade]]).place_expressive_order(
@@ -1600,6 +1666,7 @@ class MMR:
                         quantity=float(qty),
                         execution_spec=proposal.execution.to_dict(),
                         algo_name=algo_name,
+                        approver_key=resolved_approver_key,
                     )
                 )
             except TimeoutError as ex:

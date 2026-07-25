@@ -155,7 +155,7 @@ async def test_bracket_rolls_back_when_tp_fails(monkeypatch):
         def __init__(self):
             self.calls = 0
 
-        async def subscribe_place_order_direct(self, contract, order, is_exit=False):
+        async def subscribe_place_order_direct(self, approved):
             self.calls += 1
             import reactivex as rx
             if self.calls == 1:
@@ -925,11 +925,13 @@ class _StandaloneExecutioner:
     def __init__(self):
         self.placed = []
 
-    async def subscribe_place_order_direct(self, contract, order, is_exit=False):
+    async def subscribe_place_order_direct(self, approved):
         import reactivex as rx
-        self.placed.append((contract, order, is_exit))
+        # The sink now takes an ApprovedOrder capability token; unpack it so the
+        # existing assertions on (contract, order, is_exit) keep working.
+        self.placed.append((approved.contract, approved.order, approved.is_exit))
         fake_trade = MagicMock()
-        fake_trade.order = order
+        fake_trade.order = approved.order
         return rx.from_iterable([fake_trade])
 
 

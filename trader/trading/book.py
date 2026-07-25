@@ -9,7 +9,7 @@ from trader.objects import TradeLogSimple
 
 logging = setup_logging(module_name='book')
 
-from typing import cast, Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 
 class BookSubject(EventSubject[Union[Trade, Order]]):
@@ -25,14 +25,12 @@ class BookSubject(EventSubject[Union[Trade, Order]]):
         logging.debug('updating trade book with {}'.format(order))
 
         if type(order) is Trade:
-            order = cast(Trade, order)
             if order.order.orderId not in self.trades: self.trades[order.order.orderId] = []
             if order.order.orderId not in self.orders: self.orders[order.order.orderId] = []
             self.trades[order.order.orderId] = [order] + self.trades[order.order.orderId]
             self.orders[order.order.orderId] = [order.order] + self.orders[order.order.orderId]
 
         if type(order) is Order:
-            order = cast(Order, order)
             if order.orderId not in self.orders: self.orders[order.orderId] = []
             self.orders[order.orderId] = [order] + self.orders[order.orderId]
 
@@ -112,7 +110,8 @@ class BookSubject(EventSubject[Union[Trade, Order]]):
                     clientId=last_trade.order.clientId,
                     action=last_trade.order.action,
                     totalQuantity=last_trade.order.totalQuantity,
-                    lmtPrice=last_trade.order.lmtPrice,
+                    # ib_async stub-types Order.lmtPrice as int|float|Decimal|None; at runtime it is a float (UNSET_DOUBLE default).
+                    lmtPrice=last_trade.order.lmtPrice,  # ty: ignore[invalid-argument-type]
                     orderRef=last_trade.order.orderRef,
                 ))
 

@@ -26,6 +26,37 @@ trading_mode: paper
 # the loop. Off by default so paper / manual workflows aren't disturbed.
 require_proposal_approval: false
 
+# Server-side notional tier (Phase 2 proposer/approver split).
+# When approver_required_above_usd > 0, an exposure-INCREASING order whose
+# SERVER-RECOMPUTED notional exceeds this threshold requires a matching
+# approver_key (constant-time compared) before trader_service will place it.
+# The tier now covers EVERY exposure-increasing server path — both the
+# approve() proposal flow AND the direct buy/sell path (place_order_simple /
+# executioner) — enforced in one place (Trader.enforce_approver_tier). It
+# values a PURE open at max(client limit, live snapshot), so a proposer cannot
+# forge the valuation downward with a lowball marketable limit. It fails CLOSED
+# when the notional can't be valued (no usable price).
+# 0 (default) => feature OFF, byte-identical to prior behaviour.
+# Exit-class orders (any order_reduces_exposure order — closes AND an oversized
+# "flip" that crosses zero) are EXEMPT and never gated (roadmap principle 2 —
+# a reduction is never blocked by an approval requirement). A flip's net-new
+# opening remainder is a documented residual (SAFETY_ROADMAP), closed by
+# turnover caps / order-splitting, not by refusing the reduction. Concretely: a
+# close never needs a key. The auto-executor is kept BELOW the threshold by
+# position sizing, so it carries no key and is unaffected: set the threshold
+# ABOVE the auto-executor's max sized notional (see position_sizing.yaml
+# max_position_usd).
+approver_required_above_usd: 0
+
+# The approver key's canonical source is the MMR_APPROVER_KEY process env var,
+# which WINS over this YAML value. Deliver it OUT OF BAND — a typed
+# `mmr approve --approver-key ...` or a services-only secrets.env / child-env
+# export. Do NOT put it in docker-compose `environment:`, .mmr_env, or
+# ~/.config (all leak to a docker-exec / same-container proposer). Empty
+# (default) => no key configured; with the threshold on, all above-threshold
+# opens are refused.
+approver_key: ''
+
 # Interactive Brokers connection
 # Set both accounts — trading_mode picks the active one.
 # IB_ACCOUNT env var overrides the auto-selected account.

@@ -75,7 +75,8 @@ class RiskLimits:
                 logging.error(
                     '%s: risk_limits.%s has malformed value %r (%s) — using default %r',
                     filepath, key, value, ex, known[key])
-        return RiskLimits(**kwargs)
+        # **kwargs is dynamically built from validated RiskLimits fields; ty can't track the dict-value types through the unpack.
+        return RiskLimits(**kwargs)  # ty: ignore[invalid-argument-type]
 
 
 @dataclass(frozen=True)

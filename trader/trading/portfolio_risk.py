@@ -1,10 +1,18 @@
 """Portfolio risk analysis — concentration, correlation, group budgets, and warnings."""
 
 from dataclasses import asdict, dataclass, field
-from typing import Dict, List, Optional  # noqa: F401
+from typing import Dict, List, Optional, TypedDict  # noqa: F401
 
 import logging
 import math
+
+
+class _PosRecord(TypedDict):
+    """Normalized per-position record used throughout ``analyze``."""
+    symbol: str
+    value: float
+    signed_value: float
+    is_short: bool
 
 
 @dataclass
@@ -71,7 +79,7 @@ class PortfolioRiskAnalyzer:
         # are negative) so hedged books are correctly identified, and track the
         # absolute value separately for concentration/HHI (which are gross
         # exposure measures).
-        pos_data = []
+        pos_data: List[_PosRecord] = []
         for p in positions:
             symbol = p.get('symbol', '')
             signed = float(p.get('marketValue', p.get('mktValue', 0)) or 0)

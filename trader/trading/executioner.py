@@ -19,6 +19,7 @@ from trader.common.logging_helper import get_callstack, log_method, setup_loggin
 from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.data.universe import Universe, UniverseAccessor
 from trader.objects import Action, Basket, ContractOrderPair, ExecutorCondition
+from trader.trading.approved_order import ApprovedOrder, mint_approved_order
 from trader.trading.order_math import whole_shares_for_notional
 from trader.trading.order_validator import OrderValidator
 from trader.trading.risk_gate import RiskGate, RiskGateResult
@@ -77,10 +78,16 @@ class TradeExecutioner():
 
     async def subscribe_place_order_direct(
         self,
-        contract: Contract,
-        order: Order,
-        is_exit: bool = False,
+        approved: ApprovedOrder,
     ) -> Observable[Trade]:
+        # The single IB placement chokepoint. It accepts ONLY an ApprovedOrder
+        # capability token — a code path that never reached the gate cannot
+        # construct this argument (the token is mint-only; see approved_order).
+        # Account-pinning below is unchanged.
+        contract = approved.contract
+        order = approved.order
+        is_exit = approved.is_exit
+
         def trader_exception_helper(ex):
             return rx.throw(
                 exception=trader_exception(self.trader, exception_type=TraderException, message='place_order()', inner=ex)
@@ -129,9 +136,14 @@ class TradeExecutioner():
         condition: ExecutorCondition,
         skip_risk_gate: bool = False,
         position_value_hint: Optional[float] = None,
+        approver_key: str = '',
     ) -> Observable[Trade]:
         contract = contract_order.contract
         order = contract_order.order
+
+        # The tri-state gate record carried into the minted token for
+        # observability. Exit-class and non-gated paths leave it empty.
+        gate_checks: dict = {}
 
         # skip_risk_gate stays in the signature for wire compatibility but is
         # no longer trusted: whether gates apply is decided server-side by the
@@ -241,6 +253,7 @@ class TradeExecutioner():
                         message=f'risk gate rejected: {result.reason}'
                     )
                 )
+            gate_checks = result.checks
 
         if condition == condition.SANITY_CHECK:
             logging.debug('sanity_check_order for {}'.format(contract_order))
@@ -254,9 +267,33 @@ class TradeExecutioner():
                     )
                 )
 
+        # Server-side notional-tier approver gate (Phase 2), unified with the
+        # approve() path. Called unconditionally: it no-ops when the feature is
+        # off and for pure exits, so it is safe on every direct order — but it
+        # DOES gate an above-threshold open (and a flip's net-new remainder)
+        # that arrived through the direct buy/sell path without a valid key.
+        tier_error = await self.trader.enforce_approver_tier(
+            contract, str(order.action), float(order.totalQuantity or 0),
+            str(getattr(order, 'orderType', '') or ''),
+            getattr(order, 'lmtPrice', 0.0), approver_key)
+        if tier_error:
+            self._log_event(EventType.RISK_GATE_REJECTED, contract, order)
+            logging.warning('approver tier rejected order: %s', tier_error)
+            return rx.throw(
+                trader_exception(
+                    trader=self.trader,
+                    exception_type=TraderException,
+                    message=tier_error,
+                )
+            )
+
         logging.debug('placing order {}'.format(contract_order.order))
-        return await self.subscribe_place_order_direct(
-            contract=contract_order.contract, order=contract_order.order, is_exit=is_exit)
+        # Gate passed (or exit-class exempt): mint the capability token and
+        # hand it to the sink. This is the ONLY mint on the direct path.
+        approved = mint_approved_order(
+            contract_order.contract, contract_order.order,
+            is_exit=is_exit, checks=gate_checks)
+        return await self.subscribe_place_order_direct(approved)
 
     def place_basket(
         self,

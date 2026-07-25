@@ -20,6 +20,7 @@ from trader.data.data_access import PortfolioSummary, SecurityDefinition, TickSt
 from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
+from trader.trading.approved_order import mint_approved_order
 from trader.trading.risk_gate import RiskGate, RiskInputs, RiskLimits
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
 from trader.messaging.clientserver import MessageBusServer, MultithreadedTopicPubSub, RPCClient, RPCServer
@@ -33,7 +34,9 @@ from typing import cast, Dict, List, NamedTuple, Optional, Tuple, Union
 import asyncio
 import backoff
 import datetime as dt
+import hmac
 import math
+import os
 import reactivex as rx
 import reactivex.operators as ops
 import threading
@@ -78,7 +81,9 @@ class Trader():
                  history_duckdb_path: str = '',
                  paper_trading: bool = False,
                  simulation: bool = False,
-                 require_proposal_approval: bool = False):
+                 require_proposal_approval: bool = False,
+                 approver_required_above_usd: float = 0.0,
+                 approver_key: str = ''):
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
         self.trading_runtime_ib_client_id = trading_runtime_ib_client_id
@@ -95,6 +100,21 @@ class Trader():
         # CLI / helper use after a proposal is reviewed. Defensive gate
         # against LLM loops drifting off-plan and firing direct orders.
         self.require_proposal_approval: bool = require_proposal_approval
+        # Server-side notional tier (Phase 2 proposer/approver split). When
+        # approver_required_above_usd > 0, an exposure-INCREASING order whose
+        # SERVER-RECOMPUTED notional exceeds the threshold requires a matching
+        # approver_key (constant-time compared). 0 => feature OFF (default,
+        # byte-identical to prior behaviour). The auto-executor is kept BELOW
+        # the threshold by position sizing, so it carries no key and is
+        # unaffected. Exit-class orders NEVER hit this gate — a close must
+        # never need a key. The secret's canonical source is the process env
+        # (MMR_APPROVER_KEY) which wins over YAML — YAML / .config / compose
+        # env leak to a same-container proposer, so the operator delivers the
+        # key out of band (a typed --approver-key or a services-only
+        # secrets.env), never on a surface the proposer can read.
+        self.approver_required_above_usd: float = approver_required_above_usd
+        _env_key = os.environ.get('MMR_APPROVER_KEY')
+        self.approver_key: str = _env_key if _env_key is not None else (approver_key or '')
         self.zmq_pubsub_server_address = zmq_pubsub_server_address
         self.zmq_pubsub_server_port = zmq_pubsub_server_port
         self.zmq_rpc_server_address = zmq_rpc_server_address
@@ -296,6 +316,43 @@ class Trader():
             # load trading filters (allowlist/denylist)
             from trader.trading.trading_filter import TradingFilter
             self.risk_gate.trading_filter = TradingFilter.load()
+
+            # Server-side notional-tier startup diagnostics (Phase 2). Announce
+            # the active threshold and flag the operational footgun where the
+            # position sizer's own cap could size an auto-executor trade ABOVE
+            # the threshold (which would then be refused for lack of a key).
+            if self.approver_required_above_usd > 0:
+                logging.info(
+                    'approver notional tier ACTIVE: opens above $%.2f require an '
+                    'approver key (key source: %s; exits always exempt)',
+                    self.approver_required_above_usd,
+                    'env MMR_APPROVER_KEY' if os.environ.get('MMR_APPROVER_KEY') is not None
+                    else ('yaml' if self.approver_key else 'UNSET — all above-threshold opens will be refused'))
+                # The tier now gates ALL exposure-increasing server paths
+                # (approve AND direct buy/sell). Flag the split when the
+                # proposer/approver separation isn't also enforced: a single
+                # context can then both size the open and supply the key, which
+                # the notional tier alone can't prevent.
+                if not self.require_proposal_approval:
+                    logging.warning(
+                        'approver notional tier is ACTIVE but require_proposal_approval '
+                        'is OFF — the direct buy/sell order path is tier-gated, yet the '
+                        'proposer/approver split is NOT enforced. A large open is refused '
+                        'without a key on every path, but nothing stops one context from '
+                        'both proposing and supplying the key. Set require_proposal_approval: '
+                        'true to enforce the split.')
+                try:
+                    from trader.trading.position_sizing import PositionSizingConfig
+                    _sizing_max = PositionSizingConfig.load().max_position_usd
+                    if _sizing_max > self.approver_required_above_usd:
+                        logging.warning(
+                            'position sizing max_position_usd ($%.2f) EXCEEDS the approver '
+                            'threshold ($%.2f) — an auto-executor trade sized above the '
+                            'threshold would be refused (no key). Set the threshold ABOVE '
+                            'the auto-executor max sized notional.',
+                            _sizing_max, self.approver_required_above_usd)
+                except Exception as ex:
+                    logging.warning('could not load position sizing config for approver-tier check: %s', ex)
 
             # fire up the executioner
             self.executioner = TradeExecutioner()
@@ -1037,6 +1094,172 @@ class Trader():
             return held > 0
         return held < 0
 
+    def _opening_exposure_quantity(
+        self, contract: Contract, action: str, quantity: float
+    ) -> float:
+        """The portion of ``action quantity`` on ``contract`` that opens
+        NET-NEW exposure — the only quantity the approver notional tier gates.
+
+        Mirrors ``order_reduces_exposure``'s direction-aware classification:
+          * 0.0 for a pure exit (a SELL fully within a held long, a BUY fully
+            within a held short) — never gated;
+          * the FULL qty for a true open (a SELL with no long, a BUY with no
+            short) — an added position;
+          * the REMAINDER ``max(0, qty - |held opposing|)`` for a flip that
+            crosses zero (e.g. SELL 30 against a +10 long opens a 20-short) —
+            only the net-new side is gated.
+
+        FAIL-CLOSED (treat the FULL qty as opening): an unreadable position, an
+        unknown/blank conId with no same-symbol fallback, or a non-BUY/SELL
+        action. Uses ``_signed_position`` and the ``_signed_position_by_symbol``
+        fallback exactly like ``order_reduces_exposure``.
+        """
+        try:
+            conid = int(getattr(contract, 'conId', 0) or 0)
+            qty = float(quantity or 0.0)
+        except (TypeError, ValueError):
+            try:
+                return abs(float(quantity or 0.0))
+            except (TypeError, ValueError):
+                return 0.0
+        if qty <= 0 or not math.isfinite(qty):
+            return 0.0
+        act = str(action).strip().upper()
+        if act not in ('BUY', 'SELL'):
+            return qty  # fail-closed: unknown action → treat as opening
+        held = self._signed_position(conid) if conid > 0 else None
+        if held is None or held == 0.0:
+            symbol = (getattr(contract, 'symbol', '') or '').strip()
+            if symbol:
+                by_symbol = self._signed_position_by_symbol(symbol)
+                if by_symbol is not None and by_symbol != 0.0:
+                    held = by_symbol
+        if held is None:
+            return qty  # fail-closed: unreadable position → treat as opening
+        if act == 'SELL':
+            # Only a long is reduced by a SELL. No long → full open (short);
+            # a long → exit up to |held|, the remainder flips short (opening).
+            return qty if held <= 0 else max(0.0, qty - abs(held))
+        # BUY: only a short is reduced. No short → full open (long); a short →
+        # exit up to |held|, the remainder flips long (opening).
+        return qty if held >= 0 else max(0.0, qty - abs(held))
+
+    async def _tier_notional(
+        self, contract: Contract, action: str, quantity: float,
+        order_type: str, limit_price: Optional[float],
+    ) -> Tuple[float, bool]:
+        """The NON-FORGEABLE notional for the approver tier and whether it is
+        evaluable, as ``(notional, evaluable)``.
+
+        The valuation price is anchored on a LIVE marketable snapshot
+        (``get_snapshot`` — ask for a BUY, bid for a SELL, falling back to
+        last/close; finite and > 0). A client-supplied ``limit_price`` is
+        parsed only for non-MARKET orders and only when finite > 0. The price
+        used is ``max(snapshot, limit)`` when both exist (a proposer can push
+        it UP but never DOWN), the snapshot alone when there is no usable limit,
+        and — critically — when there is NO snapshot the notional is NOT
+        evaluable (``(0.0, False)``): a bare client limit is never trusted
+        downward for the tier.
+        """
+        try:
+            multiplier = float(contract.multiplier) if contract.multiplier else 1.0
+        except (TypeError, ValueError):
+            multiplier = 1.0
+
+        act = str(action).strip().upper()
+        snapshot_price: Optional[float] = None
+        try:
+            tick = await self.client.get_snapshot(contract)
+            for candidate in (
+                tick.ask if act == 'BUY' else tick.bid,
+                getattr(tick, 'last', None),
+                getattr(tick, 'close', None),
+            ):
+                try:
+                    # candidate may be None (ask/bid/last/close unset); the
+                    # TypeError from float(None) is caught below — ty can't see
+                    # the guard (same pattern as the concentration snapshot loop).
+                    price = float(candidate)  # ty: ignore[invalid-argument-type]
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(price) and price > 0:
+                    snapshot_price = price
+                    break
+        except Exception as ex:
+            logging.warning(
+                'approver tier: no snapshot price to value order: %s', ex)
+
+        limit_val: Optional[float] = None
+        if str(order_type).strip().upper() != 'MARKET':
+            try:
+                # limit_price is Optional; float(None) → TypeError, caught below.
+                lp = float(limit_price)  # ty: ignore[invalid-argument-type]
+                if math.isfinite(lp) and lp > 0:
+                    limit_val = lp
+            except (TypeError, ValueError):
+                pass
+
+        if snapshot_price is None:
+            # NOT evaluable — never trust a bare client limit downward.
+            return (0.0, False)
+        price = max(snapshot_price, limit_val) if limit_val is not None else snapshot_price
+        notional = abs(float(quantity)) * price * multiplier
+        return (notional, True)
+
+    async def enforce_approver_tier(
+        self, contract: Contract, action: str, quantity: float,
+        order_type: str, limit_price: Optional[float], approver_key: str,
+    ) -> Optional[str]:
+        """The single server-side approver notional-tier enforcement point.
+        Returns an error string to REFUSE the order, else ``None``.
+
+        Safe to call UNCONDITIONALLY on any order path: the feature is OFF when
+        ``approver_required_above_usd <= 0`` (byte-identical to prior
+        behaviour), and any EXIT-CLASS order (``order_reduces_exposure`` — a
+        reduction of the live position, flips included) is NEVER gated
+        (preserving "exits never refused"). Only a pure open is gated: above the
+        threshold it requires a constant-time-matching, non-empty configured
+        approver key. The valuation is the SERVER-RECOMPUTED notional
+        (``_tier_notional`` prices at ``max(limit, live snapshot)``, never below
+        the live market) — a proposer cannot forge it downward with a lowball
+        limit.
+        """
+        threshold = getattr(self, 'approver_required_above_usd', 0.0) or 0.0
+        if threshold <= 0:
+            return None  # feature OFF
+        # Exit-class orders — a SELL against ANY held long, a BUY against ANY
+        # held short, INCLUDING an oversized "flip" that crosses zero — are
+        # NEVER gated, using the same server-side classifier the rest of the
+        # system trusts (order_reduces_exposure). Two reasons this, not an
+        # opening-remainder computation: (1) roadmap principle 2 — an order that
+        # reduces the live position must never be blocked by an approval
+        # requirement, and refusing an atomic flip refuses its embedded exit;
+        # (2) a second position read here could race and gate a GENUINE exit on
+        # a momentary unreadable position. The pure exit (SELL <= held) is
+        # always available; a flip's net-new opening remainder is a documented
+        # residual (SAFETY_ROADMAP), closed by turnover caps / order-splitting,
+        # never by refusing a reduction.
+        if self.order_reduces_exposure(contract, action, quantity):
+            return None
+        notional, evaluable = await self._tier_notional(
+            contract, action, quantity, order_type, limit_price)
+        if not evaluable:
+            return (
+                'approver notional tier is active but the order notional '
+                'could not be valued (no usable price) — refusing the open '
+                '(fail-closed on exposure). Threshold '
+                f'${threshold:,.2f}.')
+        if notional > threshold:
+            supplied = str(approver_key or '')
+            expected = str(getattr(self, 'approver_key', '') or '')
+            if not expected or not hmac.compare_digest(supplied, expected):
+                return (
+                    f'order notional ${notional:,.2f} exceeds the approver '
+                    f'threshold ${threshold:,.2f}: a valid '
+                    'approver key is required and none/an incorrect one was '
+                    'supplied. No order placed.')
+        return None
+
     def _has_today_trading_activity(self) -> bool:
         """True if the account holds any position OR booked any fill today.
 
@@ -1130,6 +1353,7 @@ class Trader():
         quantity: float,
         execution_spec: dict,
         algo_name: str = 'proposal',
+        approver_key: str = '',
     ) -> SuccessFail:
         """Place an order with full execution specification (brackets, trailing stops, etc.)."""
         from trader.trading.proposal import ExecutionSpec
@@ -1159,7 +1383,8 @@ class Trader():
             if spec.order_type == 'MARKET':
                 return MarketOrder(**common)
             else:
-                return LimitOrder(lmtPrice=spec.limit_price, **common)
+                # spec.validate() (above) guarantees limit_price is non-None for LIMIT orders; ib_async stub-types lmtPrice as int|float.
+                return LimitOrder(lmtPrice=spec.limit_price, **common)  # ty: ignore[invalid-argument-type]
 
         # --- Pre-trade risk checks ---
         #
@@ -1168,6 +1393,10 @@ class Trader():
         # protective stop was cancelled) are exempt from every gate: refusing
         # an exit is worse than any limit. Opens keep filter + leverage + gate.
         is_exit = self.order_reduces_exposure(contract, action, quantity)
+
+        # Tri-state gate record carried into the entry leg's minted token
+        # (empty for exit-class entries and for protective children).
+        entry_checks: dict = {}
 
         if is_exit:
             if self.risk_gate is not None:
@@ -1273,7 +1502,8 @@ class Trader():
                         getattr(tick, 'close', None),
                     ):
                         try:
-                            price = float(candidate)
+                            # Defensive coercion of a possibly-None/Any tick field; the except handles non-numeric candidates.
+                            price = float(candidate)  # ty: ignore[invalid-argument-type]
                         except (TypeError, ValueError):
                             continue
                         if math.isfinite(price) and price > 0:
@@ -1297,8 +1527,25 @@ class Trader():
             )
             if not gate_result.approved:
                 return SuccessFail.fail(error=f'Risk gate: {gate_result.reason}')
+            entry_checks = gate_result.checks
 
-        async def _place_and_wait(c: Contract, o: Order, leg_is_exit: bool = False) -> Optional[Trade]:
+            # 5. Server-side notional-tier approver gate (Phase 2). Delegated to
+            # the single, unified enforcement point on the Trader — it values
+            # the OPENING portion at max(client-limit, live snapshot) (a
+            # proposer can't forge it downward), fails CLOSED when the notional
+            # can't be valued, and NEVER gates a pure exit. Called here inside
+            # the open branch (exits routed away above by is_exit); the direct
+            # order path calls the same method unconditionally.
+            tier_error = await self.enforce_approver_tier(
+                contract, action, quantity,
+                spec.order_type, spec.limit_price, approver_key)
+            if tier_error is not None:
+                return SuccessFail.fail(error=tier_error)
+
+        async def _place_and_wait(
+            c: Contract, o: Order, leg_is_exit: bool = False,
+            leg_checks: Optional[dict] = None,
+        ) -> Optional[Trade]:
             """Place a single child order and await the IB ack. Returns the
             Trade object or None on failure (observer emitted on_error)."""
             event = asyncio.Event()
@@ -1308,7 +1555,9 @@ class Trader():
                 result['trade'] = trade
                 event.set()
 
-            obs = await self.executioner.subscribe_place_order_direct(c, o, is_exit=leg_is_exit)
+            approved = mint_approved_order(
+                c, o, is_exit=leg_is_exit, checks=leg_checks or {})
+            obs = await self.executioner.subscribe_place_order_direct(approved)
             obs.subscribe(Observer(
                 on_next=_on_next,
                 on_error=lambda e: event.set(),
@@ -1334,7 +1583,8 @@ class Trader():
                 entry = _build_entry(**common)
                 entry.transmit = False
 
-                entry_trade = await _place_and_wait(contract, entry, leg_is_exit=is_exit)
+                entry_trade = await _place_and_wait(
+                    contract, entry, leg_is_exit=is_exit, leg_checks=entry_checks)
                 if entry_trade is None:
                     return SuccessFail.fail(error='Failed to place entry order')
 
@@ -1345,7 +1595,8 @@ class Trader():
                 tp = LimitOrder(
                     action=reverse_action,
                     totalQuantity=quantity,
-                    lmtPrice=spec.take_profit_price,
+                    # spec.validate() guarantees take_profit_price is non-None for BRACKET exits; ib_async stub-types lmtPrice as int|float.
+                    lmtPrice=spec.take_profit_price,  # ty: ignore[invalid-argument-type]
                     parentId=parent_id,
                     transmit=False,
                     account=self.ib_account,
@@ -1368,7 +1619,8 @@ class Trader():
                 sl = StopOrder(
                     action=reverse_action,
                     totalQuantity=quantity,
-                    stopPrice=spec.stop_loss_price,
+                    # spec.validate() guarantees stop_loss_price is non-None for BRACKET exits; ib_async stub-types stopPrice as int|float.
+                    stopPrice=spec.stop_loss_price,  # ty: ignore[invalid-argument-type]
                     parentId=parent_id,
                     transmit=True,
                     account=self.ib_account,
@@ -1398,7 +1650,8 @@ class Trader():
                     entry_trade = trade
                     task.set()
 
-                observable = await self.executioner.subscribe_place_order_direct(contract, entry, is_exit=is_exit)
+                observable = await self.executioner.subscribe_place_order_direct(
+                    mint_approved_order(contract, entry, is_exit=is_exit, checks=entry_checks))
                 observable.subscribe(Observer(on_next=on_entry_ts, on_error=lambda e: task.set(), on_completed=lambda: None))
                 await task.wait()
 
@@ -1431,7 +1684,8 @@ class Trader():
                     trail_trade = trade
                     trail_task.set()
 
-                trail_obs = await self.executioner.subscribe_place_order_direct(contract, trail, is_exit=True)
+                trail_obs = await self.executioner.subscribe_place_order_direct(
+                    mint_approved_order(contract, trail, is_exit=True))
                 trail_obs.subscribe(Observer(on_next=on_trail, on_error=lambda e: trail_task.set(), on_completed=lambda: None))
                 await trail_task.wait()
                 if trail_trade is None:
@@ -1457,7 +1711,8 @@ class Trader():
                     entry_trade = trade
                     task.set()
 
-                observable = await self.executioner.subscribe_place_order_direct(contract, entry, is_exit=is_exit)
+                observable = await self.executioner.subscribe_place_order_direct(
+                    mint_approved_order(contract, entry, is_exit=is_exit, checks=entry_checks))
                 observable.subscribe(Observer(on_next=on_entry_sl, on_error=lambda e: task.set(), on_completed=lambda: None))
                 await task.wait()
 
@@ -1470,7 +1725,8 @@ class Trader():
                 sl = StopOrder(
                     action=reverse_action,
                     totalQuantity=quantity,
-                    stopPrice=spec.stop_loss_price,
+                    # spec.validate() guarantees stop_loss_price is non-None for STOP_LOSS exits; ib_async stub-types stopPrice as int|float.
+                    stopPrice=spec.stop_loss_price,  # ty: ignore[invalid-argument-type]
                     parentId=parent_id,
                     transmit=True,
                     account=self.ib_account,
@@ -1486,7 +1742,8 @@ class Trader():
                     sl_trade = trade
                     sl_task.set()
 
-                sl_obs = await self.executioner.subscribe_place_order_direct(contract, sl, is_exit=True)
+                sl_obs = await self.executioner.subscribe_place_order_direct(
+                    mint_approved_order(contract, sl, is_exit=True))
                 sl_obs.subscribe(Observer(on_next=on_sl_only, on_error=lambda e: sl_task.set(), on_completed=lambda: None))
                 await sl_task.wait()
                 if sl_trade is None:
@@ -1512,7 +1769,8 @@ class Trader():
                     entry_trade = trade
                     task.set()
 
-                observable = await self.executioner.subscribe_place_order_direct(contract, entry, is_exit=is_exit)
+                observable = await self.executioner.subscribe_place_order_direct(
+                    mint_approved_order(contract, entry, is_exit=is_exit, checks=entry_checks))
                 observable.subscribe(Observer(on_next=on_entry_simple, on_error=lambda e: task.set(), on_completed=lambda: None))
                 await task.wait()
                 if entry_trade is None:
@@ -1645,7 +1903,10 @@ class Trader():
                 result_trade = trade
                 task.set()
 
-            observable = await self.executioner.subscribe_place_order_direct(contract, order, is_exit=True)
+            # Standalone orders are exit-class ONLY (validated above): mint a
+            # protective-child token. No gate ran, so checks are empty.
+            observable = await self.executioner.subscribe_place_order_direct(
+                mint_approved_order(contract, order, is_exit=True))
             observable.subscribe(Observer(on_next=on_next, on_error=lambda e: task.set(), on_completed=lambda: None))
             await task.wait()
 
@@ -1671,6 +1932,7 @@ class Trader():
         algo_name: str = 'global',
         debug: bool = False,
         skip_risk_gate: bool = False,
+        approver_key: str = '',
     ) -> Observable[Trade]:
         latest_tick: Ticker = await self.client.get_snapshot(contract)
 
@@ -1701,7 +1963,8 @@ class Trader():
             latest_tick.ask if action == Action.BUY else latest_tick.bid,
         ):
             try:
-                price = float(candidate)
+                # Defensive coercion of a possibly-None limit_price / Any tick field; the except handles non-numeric candidates.
+                price = float(candidate)  # ty: ignore[invalid-argument-type]
             except (TypeError, ValueError):
                 continue
             if math.isfinite(price) and price > 0:
@@ -1714,6 +1977,7 @@ class Trader():
             condition=ExecutorCondition.SANITY_CHECK,
             skip_risk_gate=skip_risk_gate,
             position_value_hint=position_value_hint,
+            approver_key=approver_key,
         )
 
     @log_method

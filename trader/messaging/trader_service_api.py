@@ -73,6 +73,7 @@ class TraderServiceApi(RPCHandler):
         algo_name: str = 'global',
         debug: bool = False,
         skip_risk_gate: bool = False,
+        approver_key: str = '',
     ) -> SuccessFail[Trade]:
         # todo: we'll have to make the cli async so we can subscribe to the trade
         # changes as orders get hit etc
@@ -153,6 +154,7 @@ class TraderServiceApi(RPCHandler):
             algo_name=algo_name,
             debug=debug,
             skip_risk_gate=skip_risk_gate,
+            approver_key=approver_key,
         )
         observable.subscribe(observer)
 
@@ -317,6 +319,7 @@ class TraderServiceApi(RPCHandler):
         quantity: float,
         execution_spec: dict,
         algo_name: str = 'proposal',
+        approver_key: str = '',
     ) -> SuccessFail[list[Trade]]:
         """Place an order with full execution specification (brackets, trailing stops, etc.)."""
         result = await self.trader.place_expressive_order(
@@ -325,6 +328,7 @@ class TraderServiceApi(RPCHandler):
             quantity=quantity,
             execution_spec=execution_spec,
             algo_name=algo_name,
+            approver_key=approver_key,
         )
         return result
 

@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import reactivex as rx
 
+from trader.trading.approved_order import mint_approved_order
 from trader.trading.executioner import TradeExecutioner
 from trader.trading.risk_gate import RiskGateResult, RiskInputs
 from trader.objects import Action, ContractOrderPair, ExecutorCondition
@@ -47,6 +48,10 @@ def _make_executioner_with_trader(risk_gate=None, book_orders=None, ib_account='
     trader.client.get_snapshot = AsyncMock(return_value=MagicMock(bid=100, ask=101))
     trader.risk_gate = risk_gate
     trader.order_reduces_exposure = MagicMock(return_value=is_exit)
+    # The approver notional tier is a separate collaborator on the real Trader;
+    # these executioner tests are not about the tier, so it no-ops here (the
+    # real method returns None for exits and when the feature is off).
+    trader.enforce_approver_tier = AsyncMock(return_value=None)
     trader.gather_risk_inputs = MagicMock(return_value=inputs or _inputs())
     ex = TradeExecutioner()
     ex.connect(trader)
@@ -187,7 +192,8 @@ async def test_account_mismatch_rejected():
     ex, trader = _make_executioner_with_trader(ib_account='DU1')
 
     bad_order = _Order(account='DU_OTHER')
-    observable = await ex.subscribe_place_order_direct(_Contract(), bad_order)
+    observable = await ex.subscribe_place_order_direct(
+        mint_approved_order(_Contract(), bad_order, is_exit=False))
     errors = []
     observable.subscribe(on_next=lambda _: None, on_error=errors.append)
     assert len(errors) == 1
@@ -203,7 +209,8 @@ async def test_blank_order_account_rejected():
     ex, trader = _make_executioner_with_trader(ib_account='U26774889')
 
     blank = _Order(account='')
-    observable = await ex.subscribe_place_order_direct(_Contract(), blank)
+    observable = await ex.subscribe_place_order_direct(
+        mint_approved_order(_Contract(), blank, is_exit=False))
     errors = []
     observable.subscribe(on_next=lambda _: None, on_error=errors.append)
     assert len(errors) == 1
@@ -218,7 +225,8 @@ async def test_blank_configured_account_rejected():
     ex, trader = _make_executioner_with_trader(ib_account='')
 
     order = _Order(account='')
-    observable = await ex.subscribe_place_order_direct(_Contract(), order)
+    observable = await ex.subscribe_place_order_direct(
+        mint_approved_order(_Contract(), order, is_exit=False))
     errors = []
     observable.subscribe(on_next=lambda _: None, on_error=errors.append)
     assert len(errors) == 1
@@ -346,7 +354,8 @@ async def test_order_submitted_stamped_with_orderref_not_manual():
     trader.event_store.append = lambda ev: appended.append(ev)
 
     order = _OrderRef(order_ref='keltner_breakout')
-    await ex.subscribe_place_order_direct(_Contract(), order)
+    await ex.subscribe_place_order_direct(
+        mint_approved_order(_Contract(), order, is_exit=False))
 
     from trader.data.event_store import EventType
     submitted = [e for e in appended if e.event_type == EventType.ORDER_SUBMITTED]
@@ -364,7 +373,8 @@ async def test_exit_class_order_submitted_is_marked():
     trader.event_store.append = lambda ev: appended.append(ev)
 
     order = _OrderRef(action='SELL', order_ref='keltner_breakout')
-    await ex.subscribe_place_order_direct(_Contract(), order, is_exit=True)
+    await ex.subscribe_place_order_direct(
+        mint_approved_order(_Contract(), order, is_exit=True))
 
     from trader.data.event_store import EventType
     submitted = [e for e in appended if e.event_type == EventType.ORDER_SUBMITTED]
@@ -379,7 +389,8 @@ async def test_blank_orderref_falls_back_to_manual():
     trader.event_store.append = lambda ev: appended.append(ev)
 
     order = _OrderRef(order_ref='')
-    await ex.subscribe_place_order_direct(_Contract(), order)
+    await ex.subscribe_place_order_direct(
+        mint_approved_order(_Contract(), order, is_exit=False))
 
     from trader.data.event_store import EventType
     submitted = [e for e in appended if e.event_type == EventType.ORDER_SUBMITTED]
@@ -405,6 +416,76 @@ async def test_pseudo_signal_source_matches_orderref_and_sec_type_passed():
     await ex.place_order(pair, condition=ExecutorCondition.NO_CHECKS)
     assert captured['signal'].source_name == 'orb_strategy'
     assert captured['sec_type'] == 'CASH'
+
+
+# ---------------------------------------------------------------------------
+# ApprovedOrder capability token — place_order mints exactly one token on the
+# APPROVE branch and hands it to the sink; a refusal mints none.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_place_order_mints_token_carrying_gate_checks():
+    """On approve, place_order mints a token whose is_exit reflects the
+    server-side classification and whose checks carry the gate's tri-state
+    record — then hands THAT to the sink (nothing else reaches IB)."""
+    class _Gate(_ApproveAllGate):
+        def evaluate(self, **kw):
+            return RiskGateResult(approved=True,
+                                  checks={'daily_loss': 'pass', 'concentration': 'skipped:no-price'})
+
+    ex, trader = _make_executioner_with_trader(risk_gate=_Gate())
+    captured = {}
+
+    from trader.trading.approved_order import ApprovedOrder
+
+    async def _spy(approved):
+        captured['token'] = approved
+        return rx.from_iterable([MagicMock()])
+    ex.subscribe_place_order_direct = _spy  # type: ignore[method-assign]
+
+    pair = ContractOrderPair(contract=_Contract(), order=_Order())
+    await ex.place_order(pair, condition=ExecutorCondition.NO_CHECKS)
+
+    tok = captured['token']
+    assert isinstance(tok, ApprovedOrder)
+    assert tok.is_exit is False
+    assert tok.checks == {'daily_loss': 'pass', 'concentration': 'skipped:no-price'}
+
+
+@pytest.mark.asyncio
+async def test_place_order_exit_class_mints_exit_token():
+    """An exit-class order mints a token with is_exit=True (and no gate ran, so
+    checks are empty)."""
+    ex, trader = _make_executioner_with_trader(risk_gate=_BoomGate(), is_exit=True)
+    captured = {}
+
+    async def _spy(approved):
+        captured['token'] = approved
+        return rx.from_iterable([MagicMock()])
+    ex.subscribe_place_order_direct = _spy  # type: ignore[method-assign]
+
+    pair = ContractOrderPair(contract=_Contract(), order=_Order(action='SELL'))
+    await ex.place_order(pair, condition=ExecutorCondition.NO_CHECKS)
+
+    assert captured['token'].is_exit is True
+    assert captured['token'].checks == {}
+
+
+@pytest.mark.asyncio
+async def test_refused_order_mints_no_token():
+    """A gate refusal mints no token — the sink is never reached, so no
+    placement is possible for an order that failed the gate."""
+    ex, trader = _make_executioner_with_trader(risk_gate=_RejectEvaluateGate())
+    minted = []
+
+    async def _spy(approved):
+        minted.append(approved)
+        return rx.from_iterable([MagicMock()])
+    ex.subscribe_place_order_direct = _spy  # type: ignore[method-assign]
+
+    pair = ContractOrderPair(contract=_Contract(), order=_Order())
+    await ex.place_order(pair, condition=ExecutorCondition.NO_CHECKS)
+    assert minted == []
 
 
 # ---------------------------------------------------------------------------
