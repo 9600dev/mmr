@@ -37,9 +37,48 @@ add a new runtime failure mode (and break the duck-typed test idiom).
 """
 from __future__ import annotations
 
+import enum
+
 from ib_async import Contract, Order
 
+# Deliberately NOT extended when ExitReason was added: tests/invariants/
+# test_approved_order.py pins this export surface to exactly these two names, and
+# that property is human-owned. ExitReason is imported by name where needed —
+# __all__ only governs `import *`, so nothing is lost by respecting the pin.
 __all__ = ['ApprovedOrder', 'mint_approved_order']
+
+
+class ExitReason(enum.Enum):
+    """WHY a token claims to be exit-class.
+
+    ``is_exit=True`` exempts an order from the gate-record requirement at the
+    placement chokepoint, so it is the one field a caller can get wrong in a way
+    that puts an ungated order on the wire. It cannot be verified by re-reading
+    the position, because that is only valid for SOME exits — see below. So it is
+    at least made ATTRIBUTABLE: every claim names the rule that justifies it, a
+    new mint site cannot pass a bare bool (tests/test_exit_reason_wiring.py
+    fails), and the chokepoint checks the one category that is checkable.
+    """
+
+    POSITION_CLASSIFIED = 'position_classified'
+    """``Trader.order_reduces_exposure`` said so against the LIVE position.
+    Corroboratable: the chokepoint re-asks the predicate and logs loudly on
+    disagreement (which means the position moved between classification and
+    placement). Observability only — it never refuses, because refusing an exit
+    is worse than the stale classification it would be protecting against."""
+
+    PROTECTIVE_CHILD = 'protective_child'
+    """A bracket/protective leg (take-profit, stop-loss, trailing stop) attached
+    to an entry. Exit-class BY CONSTRUCTION, not by position: the entry is staged
+    with ``transmit=False`` and has not filled, so the position legitimately does
+    not exist yet and ``order_reduces_exposure`` would correctly answer False.
+    NOT corroboratable — asking the predicate here would refuse every bracket's
+    protection, or (observability-only) alarm on every single bracket."""
+
+    VALIDATED_STANDALONE = 'validated_standalone'
+    """``Trader.place_standalone_order``, which validates exit-class itself
+    before minting and refuses anything else (it was once an ungated exposure
+    door). The validation is the caller's, immediately upstream of the mint."""
 
 # Module-private sentinel. NEVER exported (absent from __all__) and never
 # passed out of this module: it is the only key that unlocks construction.
@@ -61,8 +100,9 @@ class ApprovedOrder:
     order: Order
     is_exit: bool
     checks: dict[str, str]
+    exit_reason: ExitReason | None
 
-    __slots__ = ('contract', 'order', 'is_exit', 'checks')
+    __slots__ = ('contract', 'order', 'is_exit', 'checks', 'exit_reason')
 
     def __init__(
         self,
@@ -73,6 +113,7 @@ class ApprovedOrder:
         order: Order,
         is_exit: bool = False,
         checks: dict[str, str] | None = None,
+        exit_reason: ExitReason | None = None,
     ) -> None:
         # Positional-only, sentinel-guarded. Accidental/direct construction
         # (``ApprovedOrder(contract=..., order=...)`` or with a wrong first
@@ -85,6 +126,7 @@ class ApprovedOrder:
         object.__setattr__(self, 'order', order)
         object.__setattr__(self, 'is_exit', is_exit)
         object.__setattr__(self, 'checks', {} if checks is None else checks)
+        object.__setattr__(self, 'exit_reason', exit_reason)
 
     # --- frozen: a leg's authorization decision cannot be mutated post-mint ---
     def __setattr__(self, name: str, value: object) -> None:
@@ -103,7 +145,10 @@ class ApprovedOrder:
         sym = getattr(self.contract, 'symbol', '?')
         act = getattr(self.order, 'action', '?')
         qty = getattr(self.order, 'totalQuantity', '?')
-        kind = 'exit' if self.is_exit else 'open'
+        if self.is_exit:
+            kind = f'exit:{self.exit_reason.value if self.exit_reason else "UNATTRIBUTED"}'
+        else:
+            kind = 'open'
         return f'ApprovedOrder({act} {qty} {sym}, {kind})'
 
 
@@ -113,6 +158,7 @@ def mint_approved_order(
     *,
     is_exit: bool,
     checks: dict[str, str] | None = None,
+    exit_reason: ExitReason | None = None,
 ) -> ApprovedOrder:
     """The sanctioned constructor, for code that has completed the gate /
     exit-class decision for ``(contract, order)`` and reached its APPROVE branch.
@@ -142,4 +188,5 @@ def mint_approved_order(
         order=order,
         is_exit=is_exit,
         checks=checks,
+        exit_reason=exit_reason,
     )

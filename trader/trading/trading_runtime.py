@@ -20,7 +20,7 @@ from trader.data.data_access import PortfolioSummary, SecurityDefinition, TickSt
 from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
-from trader.trading.approved_order import mint_approved_order
+from trader.trading.approved_order import ExitReason, mint_approved_order
 from trader.trading.exit_class import reduces_exposure
 from trader.trading.risk_gate import RiskGate, RiskInputs, RiskLimits
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
@@ -1548,6 +1548,7 @@ class Trader():
         async def _place_and_wait(
             c: Contract, o: Order, leg_is_exit: bool = False,
             leg_checks: Optional[dict] = None,
+            leg_reason: ExitReason = ExitReason.PROTECTIVE_CHILD,
         ) -> Optional[Trade]:
             """Place a single child order and await the IB ack. Returns the
             Trade object or None on failure (observer emitted on_error)."""
@@ -1558,8 +1559,14 @@ class Trader():
                 result['trade'] = trade
                 event.set()
 
+            # leg_reason defaults to PROTECTIVE_CHILD because the TP/SL legs are
+            # the callers passing leg_is_exit=True; the entry leg overrides it with
+            # the predicate's verdict. A protective leg is exit-class by
+            # CONSTRUCTION — its entry is staged transmit=False and has not filled,
+            # so there is no position to classify against yet.
             approved = mint_approved_order(
-                c, o, is_exit=leg_is_exit, checks=leg_checks or {})
+                c, o, is_exit=leg_is_exit, checks=leg_checks or {},
+                exit_reason=leg_reason)
             obs = await self.executioner.subscribe_place_order_direct(approved)
             obs.subscribe(Observer(
                 on_next=_on_next,
@@ -1587,7 +1594,8 @@ class Trader():
                 entry.transmit = False
 
                 entry_trade = await _place_and_wait(
-                    contract, entry, leg_is_exit=is_exit, leg_checks=entry_checks)
+                    contract, entry, leg_is_exit=is_exit, leg_checks=entry_checks,
+                    leg_reason=ExitReason.POSITION_CLASSIFIED)
                 if entry_trade is None:
                     return SuccessFail.fail(error='Failed to place entry order')
 
@@ -1654,7 +1662,8 @@ class Trader():
                     task.set()
 
                 observable = await self.executioner.subscribe_place_order_direct(
-                    mint_approved_order(contract, entry, is_exit=is_exit, checks=entry_checks))
+                    mint_approved_order(contract, entry, is_exit=is_exit, checks=entry_checks,
+                                            exit_reason=ExitReason.POSITION_CLASSIFIED))
                 observable.subscribe(Observer(on_next=on_entry_ts, on_error=lambda e: task.set(), on_completed=lambda: None))
                 await task.wait()
 
@@ -1688,7 +1697,8 @@ class Trader():
                     trail_task.set()
 
                 trail_obs = await self.executioner.subscribe_place_order_direct(
-                    mint_approved_order(contract, trail, is_exit=True))
+                    mint_approved_order(contract, trail, is_exit=True,
+                                            exit_reason=ExitReason.PROTECTIVE_CHILD))
                 trail_obs.subscribe(Observer(on_next=on_trail, on_error=lambda e: trail_task.set(), on_completed=lambda: None))
                 await trail_task.wait()
                 if trail_trade is None:
@@ -1715,7 +1725,8 @@ class Trader():
                     task.set()
 
                 observable = await self.executioner.subscribe_place_order_direct(
-                    mint_approved_order(contract, entry, is_exit=is_exit, checks=entry_checks))
+                    mint_approved_order(contract, entry, is_exit=is_exit, checks=entry_checks,
+                                            exit_reason=ExitReason.POSITION_CLASSIFIED))
                 observable.subscribe(Observer(on_next=on_entry_sl, on_error=lambda e: task.set(), on_completed=lambda: None))
                 await task.wait()
 
@@ -1746,7 +1757,8 @@ class Trader():
                     sl_task.set()
 
                 sl_obs = await self.executioner.subscribe_place_order_direct(
-                    mint_approved_order(contract, sl, is_exit=True))
+                    mint_approved_order(contract, sl, is_exit=True,
+                                         exit_reason=ExitReason.PROTECTIVE_CHILD))
                 sl_obs.subscribe(Observer(on_next=on_sl_only, on_error=lambda e: sl_task.set(), on_completed=lambda: None))
                 await sl_task.wait()
                 if sl_trade is None:
@@ -1773,7 +1785,8 @@ class Trader():
                     task.set()
 
                 observable = await self.executioner.subscribe_place_order_direct(
-                    mint_approved_order(contract, entry, is_exit=is_exit, checks=entry_checks))
+                    mint_approved_order(contract, entry, is_exit=is_exit, checks=entry_checks,
+                                            exit_reason=ExitReason.POSITION_CLASSIFIED))
                 observable.subscribe(Observer(on_next=on_entry_simple, on_error=lambda e: task.set(), on_completed=lambda: None))
                 await task.wait()
                 if entry_trade is None:
@@ -1909,7 +1922,8 @@ class Trader():
             # Standalone orders are exit-class ONLY (validated above): mint a
             # protective-child token. No gate ran, so checks are empty.
             observable = await self.executioner.subscribe_place_order_direct(
-                mint_approved_order(contract, order, is_exit=True))
+                mint_approved_order(contract, order, is_exit=True,
+                        exit_reason=ExitReason.VALIDATED_STANDALONE))
             observable.subscribe(Observer(on_next=on_next, on_error=lambda e: task.set(), on_completed=lambda: None))
             await task.wait()
 

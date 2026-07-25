@@ -19,7 +19,7 @@ from trader.common.logging_helper import get_callstack, log_method, setup_loggin
 from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.data.universe import Universe, UniverseAccessor
 from trader.objects import Action, Basket, ContractOrderPair, ExecutorCondition
-from trader.trading.approved_order import ApprovedOrder, mint_approved_order
+from trader.trading.approved_order import ApprovedOrder, ExitReason, mint_approved_order
 from trader.trading.order_math import whole_shares_for_notional
 from trader.trading.order_validator import OrderValidator
 from trader.trading.risk_gate import RiskGate, RiskGateResult
@@ -99,6 +99,37 @@ class TradeExecutioner():
         # approved it: non-empty, with no check left in the 'fail' state. Exits
         # are exempt by design — they are never gate-refusable, so they
         # legitimately arrive with an empty record.
+        # An exit exemption must say WHICH rule justifies it. The claim cannot be
+        # verified wholesale — PROTECTIVE_CHILD legs are exit-class by
+        # construction and their position does not exist yet — but the
+        # POSITION_CLASSIFIED category is checkable, so it is checked.
+        #
+        # OBSERVABILITY ONLY, deliberately: a mismatch means the position moved
+        # between classification and placement, and refusing an exit is worse
+        # than acting on a stale classification. This logs and records; it never
+        # blocks. (Refusing here would also re-introduce exactly the read-race
+        # that enforce_approver_tier documents as its reason not to re-check.)
+        if is_exit:
+            reason = approved.exit_reason
+            if reason is None:
+                logging.error(
+                    'UNATTRIBUTED exit exemption reached the chokepoint — no ExitReason '
+                    'on %r. Gates were skipped without a stated justification.', approved)
+            elif reason is ExitReason.POSITION_CLASSIFIED:
+                try:
+                    still_exit = self.trader.order_reduces_exposure(
+                        contract, str(order.action), float(order.totalQuantity or 0))
+                except Exception as ex:      # a failed re-read must not block an exit
+                    logging.warning('could not corroborate exit claim for %r: %s', approved, ex)
+                else:
+                    if not still_exit:
+                        logging.error(
+                            'STALE exit claim: %r was minted POSITION_CLASSIFIED but the '
+                            'live position no longer makes it a reduction — placing anyway '
+                            '(an exit is never refused). Position likely moved between '
+                            'classification and placement.', approved)
+                        self._log_event(EventType.RISK_GATE_REJECTED, contract, order)
+
         if not is_exit:
             recorded = approved.checks or {}
             failed = sorted(k for k, v in recorded.items()
@@ -320,7 +351,8 @@ class TradeExecutioner():
         # hand it to the sink. This is the ONLY mint on the direct path.
         approved = mint_approved_order(
             contract_order.contract, contract_order.order,
-            is_exit=is_exit, checks=gate_checks)
+            is_exit=is_exit, checks=gate_checks,
+            exit_reason=ExitReason.POSITION_CLASSIFIED)
         return await self.subscribe_place_order_direct(approved)
 
     def place_basket(

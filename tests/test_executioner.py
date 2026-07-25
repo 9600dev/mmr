@@ -1,3 +1,4 @@
+import logging
 """Targeted tests for TradeExecutioner. Exercises the risk-gate and trading-
 filter gating paths that sit between a raw order request and the IB place_order
 call. A full IB round-trip is out of scope; we stub the ib_async boundary.
@@ -628,3 +629,79 @@ async def test_chokepoint_allows_exit_token_with_empty_record():
         mint_approved_order(_Contract(), order, is_exit=True))
 
     assert trader.client.subscribe_place_order.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_position_classified_exit_is_logged_but_still_placed(caplog):
+    """A POSITION_CLASSIFIED exit whose position has since moved is corroborated,
+    logged loudly — and PLACED anyway. Refusing an exit is worse than acting on a
+    stale classification, and refusing here would re-introduce the read-race that
+    enforce_approver_tier documents as its reason not to re-check."""
+    from trader.trading.approved_order import ExitReason
+    ex, trader = _make_executioner_with_trader(risk_gate=_ApproveAllGate())
+    trader.order_reduces_exposure = MagicMock(return_value=False)  # position moved
+    order = _Order()
+    order.account = 'DU1'
+
+    with caplog.at_level(logging.ERROR):
+        await ex.subscribe_place_order_direct(
+            mint_approved_order(_Contract(), order, is_exit=True,
+                                exit_reason=ExitReason.POSITION_CLASSIFIED))
+
+    assert trader.client.subscribe_place_order.call_count == 1, 'an exit was refused'
+    assert 'STALE exit claim' in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_protective_child_is_not_corroborated(caplog):
+    """A bracket leg is exit-class BY CONSTRUCTION — its entry is staged and has
+    not filled, so no position exists. Corroborating it would alarm on every
+    single bracket, so the predicate must not even be consulted."""
+    from trader.trading.approved_order import ExitReason
+    ex, trader = _make_executioner_with_trader(risk_gate=_ApproveAllGate())
+    trader.order_reduces_exposure = MagicMock(return_value=False)  # no position yet
+    order = _Order()
+    order.account = 'DU1'
+
+    with caplog.at_level(logging.ERROR):
+        await ex.subscribe_place_order_direct(
+            mint_approved_order(_Contract(), order, is_exit=True,
+                                exit_reason=ExitReason.PROTECTIVE_CHILD))
+
+    assert trader.client.subscribe_place_order.call_count == 1
+    assert 'STALE exit claim' not in caplog.text
+    trader.order_reduces_exposure.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unattributed_exit_exemption_is_logged(caplog):
+    """An exit with no ExitReason skipped the gate-record check without stating
+    why. Placed (never refuse an exit) but recorded as unattributed."""
+    ex, trader = _make_executioner_with_trader(risk_gate=_ApproveAllGate())
+    order = _Order()
+    order.account = 'DU1'
+
+    with caplog.at_level(logging.ERROR):
+        await ex.subscribe_place_order_direct(
+            mint_approved_order(_Contract(), order, is_exit=True))
+
+    assert trader.client.subscribe_place_order.call_count == 1
+    assert 'UNATTRIBUTED exit exemption' in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_corroboration_failure_does_not_block_the_exit(caplog):
+    """If the position re-read itself raises, the exit still places."""
+    from trader.trading.approved_order import ExitReason
+    ex, trader = _make_executioner_with_trader(risk_gate=_ApproveAllGate())
+    trader.order_reduces_exposure = MagicMock(side_effect=RuntimeError('portfolio unreadable'))
+    order = _Order()
+    order.account = 'DU1'
+
+    with caplog.at_level(logging.WARNING):
+        await ex.subscribe_place_order_direct(
+            mint_approved_order(_Contract(), order, is_exit=True,
+                                exit_reason=ExitReason.POSITION_CLASSIFIED))
+
+    assert trader.client.subscribe_place_order.call_count == 1
+    assert 'could not corroborate' in caplog.text
