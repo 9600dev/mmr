@@ -27,7 +27,11 @@ repos:
         # commits able to break it. The gate itself checks all scopes; this
         # filter only decides when it RUNS, so it must be at least as wide.
         # Baselines/gate script included so a baseline edit is re-validated.
-        files: ^(trader/(trading|data|simulation)/.*\.py|scripts/ty_gate\.py|scripts/ty_baseline.*\.json)$
+        # trader/strategy/ is matched whole (not just the two gated files) so a
+        # NEW module there triggers the gate and the wiring test that demands it
+        # be assigned a scope. Over-triggering is free — the gate decides what
+        # it actually checks; under-triggering is how coverage rots.
+        files: ^(trader/(trading|data|simulation|strategy)/.*\.py|trader/sdk\.py|scripts/ty_gate\.py|scripts/ty_baseline.*\.json)$
 
       # CrossHair symbolic-execution over the deal-contracted pure kernel.
       # MANUAL stage only: CrossHair spends tens of seconds per function via z3,

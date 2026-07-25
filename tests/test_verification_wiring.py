@@ -140,3 +140,48 @@ class TestMutationOracleIncludesTheSpec:
     def test_oracle_has_no_dangling_entries(self):
         missing = {f for f in _mutation_oracle() if not (REPO / f).exists()}
         assert not missing, f'oracle references nonexistent test files: {sorted(missing)}'
+
+
+def _ty_scopes() -> dict[str, list[str]]:
+    """SCOPES read from the real gate module, not re-parsed by hand."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'ty_gate', REPO / 'scripts' / 'ty_gate.py')
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return {name: list(scope['dirs']) for name, scope in mod.SCOPES.items()}
+
+
+# Modules that place orders, run strategies, or front the trading API. Every one
+# must sit in SOME ty scope. Listed as directories so a NEW file appearing in one
+# fails this test until someone assigns it a scope — the alternative is a module
+# quietly joining the trading path with zero type coverage, which is exactly how
+# auto_executor.py (1052 lines, places the live orders), strategy_runtime.py and
+# sdk.py sat unchecked until 2026-07-24.
+_MUST_BE_TYPE_CHECKED = ['trader/trading', 'trader/strategy']
+
+
+class TestTradingPathIsTypeChecked:
+    def test_every_trading_path_module_is_in_a_ty_scope(self):
+        covered: list[str] = [d for dirs in _ty_scopes().values() for d in dirs]
+
+        def is_covered(rel: str) -> bool:
+            return any(rel == c or rel.startswith(c.rstrip('/') + '/') for c in covered)
+
+        uncovered = sorted(
+            str(p.relative_to(REPO))
+            for root in _MUST_BE_TYPE_CHECKED
+            for p in (REPO / root).rglob('*.py')
+            if not p.name.startswith('__')
+            and not is_covered(str(p.relative_to(REPO)))
+        )
+        assert not uncovered, (
+            'these trading-path modules are in NO ty scope — add them to SCOPES in '
+            f'scripts/ty_gate.py (kernel if clean, advisory otherwise): {uncovered}'
+        )
+
+    def test_auto_executor_is_in_the_kernel_scope_at_zero(self):
+        """It places the live orders and is type-clean; it must be held at zero,
+        not baselined, so a new diagnostic there fails the gate."""
+        assert 'trader/strategy/auto_executor.py' in _ty_scopes()['kernel']

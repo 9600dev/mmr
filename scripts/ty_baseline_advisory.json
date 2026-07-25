@@ -12,10 +12,16 @@
   "trader/data/store.py\terror[empty-body]": 5,
   "trader/data/universe.py\terror[invalid-argument-type]": 12,
   "trader/data/universe.py\terror[invalid-return-type]": 1,
+  "trader/sdk.py\terror[invalid-argument-type]": 3,
+  "trader/sdk.py\terror[not-subscriptable]": 1,
+  "trader/sdk.py\terror[unresolved-attribute]": 33,
+  "trader/sdk.py\terror[unsupported-operator]": 3,
   "trader/simulation/backtest_stats.py\terror[invalid-argument-type]": 1,
   "trader/simulation/backtester.py\terror[invalid-assignment]": 1,
   "trader/simulation/backtester.py\terror[unresolved-attribute]": 2,
   "trader/simulation/historical_simulator.py\terror[invalid-argument-type]": 1,
   "trader/simulation/historical_simulator.py\terror[invalid-parameter-default]": 1,
-  "trader/simulation/historical_simulator.py\terror[unresolved-attribute]": 2
+  "trader/simulation/historical_simulator.py\terror[unresolved-attribute]": 2,
+  "trader/strategy/strategy_runtime.py\terror[invalid-argument-type]": 4,
+  "trader/strategy/strategy_runtime.py\terror[unresolved-attribute]": 3
 }

@@ -42,11 +42,23 @@ LINE_RE = re.compile(r"^(?P<file>[^:]+):\d+:\d+: (?P<sev>error|warning)\[(?P<rul
 # whose existing diagnostics are baselined but never allowed to grow.
 SCOPES: dict[str, dict[str, object]] = {
     "kernel": {
-        "dirs": ["trader/trading/"],
+        # auto_executor.py is the code that actually places live orders, and it
+        # is ALREADY type-clean — so it belongs at zero with the rest of the
+        # kernel rather than baselined. Named as a file, not trader/strategy/,
+        # because its sibling strategy_runtime.py carries pre-existing
+        # diagnostics and would break the zero. A NEW file under
+        # trader/strategy/ is therefore not automatically covered;
+        # tests/test_verification_wiring.py fails if one appears uncovered.
+        "dirs": ["trader/trading/", "trader/strategy/auto_executor.py"],
         "baseline": REPO / "scripts" / "ty_baseline.json",
     },
     "advisory": {
-        "dirs": ["trader/data/", "trader/simulation/"],
+        # strategy_runtime.py (loads/runs strategies) and sdk.py (every CLI and
+        # LLM-loop entry point) were previously in NO scope at all, i.e. 5.6k
+        # lines of trading-path code with zero type coverage. Baselined here so
+        # the count can only ratchet down.
+        "dirs": ["trader/data/", "trader/simulation/",
+                 "trader/strategy/strategy_runtime.py", "trader/sdk.py"],
         "baseline": REPO / "scripts" / "ty_baseline_advisory.json",
     },
 }
