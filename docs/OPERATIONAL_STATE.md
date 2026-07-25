@@ -4,7 +4,44 @@ Living snapshot of the **deployed/running** state (config, strategies, data, inf
 and the reasoning behind it. Distinct from `AUDIT_ROADMAP.md` (code backlog).
 Update the date + relevant sections when the running config changes.
 
-**Last updated: 2026-07-23 (Wed morning) — paper trading, account `DUM422056`. STACK IS UP (healthy) and trading autonomously.**
+**Last updated: 2026-07-24 (Fri evening) — paper trading, account `DUM422056`. STACK IS UP (healthy) on the tranche-1+2 image and trading autonomously.**
+
+---
+
+## 2026-07-24 — tranches 1+2 DEPLOYED (image rebuild + container recreate)
+
+Deployed commits `f5e8874..233e074`: tranche-1 safety (exit-class boundary,
+order math, restricted unpickler, gauntlet), the verification toolchain, and
+tranche 2 (ApprovedOrder placement token, proposer/approver split
+**defaults-OFF**, strategy manifest, deal contracts on the pure kernel).
+
+- **Image rebuild was mandatory and nearly wasn't enough**: the Dockerfile
+  installs deps from `requirements.txt` then `pip install --no-deps`, so the
+  pyproject-only `deal` dep was missing from the first rebuild (services would
+  have died at import). Fixed in `233e074` (deal + pydantic pinned in
+  requirements.txt). Lesson: adding a runtime dep needs BOTH pyproject and
+  requirements.txt.
+- Deploy path: `docker.sh -B before_tranche2` → rebuild → import-test the
+  image → `docker compose up -d mmr` (recreates ONLY the mmr container; the
+  gateway was left alone — `docker.sh -u`/`up()` would have restarted it).
+  Config/roster survive recreate (`~/.config/mmr` is a host bind mount).
+- Verified 18:01-18:05 PDT Fri (markets closed, pre-IB-maintenance):
+  `mmr verify --expect-running 5` **PASS** (live IB round-trip), both pulses
+  flowing, errors log empty, positions (WDS 75, GOOGL 1) + GTC stops intact,
+  `auto_exec_open=2` matches broker, approver tier confirmed silent (OFF).
+- **In-container gauntlet PASS** for the armed roster: OpeningRangeBreakout
+  (`df7bf571…`, covers orb_pltr/wds/googl) and VwapReclaim (`18aa5e96…`,
+  vwap_reclaim_cat), runs #3/#4 in the container's gauntlet_runs.
+- **WATCH — WDS stop under-covers the stack**: attributed quantity is 75 but
+  the protective stop (order 203) is SELL **37** STP 29.56 — the adds landed
+  during the 07-22/23 broken-protective-RPC window. The per-bar self-heal
+  only fixes a MISSING stop (recorded `protective_order_id` short-circuits
+  it), so this does NOT fix itself until the next pyramid add or close.
+  Operator options before the ASX open (Sun 17:00 PDT): cancel order 203 AND
+  clear the row's `protective_order_id` in `auto_exec_positions`, letting the
+  first bar's self-heal place a full-stack stop through the executor's own
+  path (do both or neither — a half-fix desyncs the close path); or accept
+  37/75 coverage until the stack next changes.
 
 ---
 
