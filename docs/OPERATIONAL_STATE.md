@@ -32,16 +32,21 @@ tranche 2 (ApprovedOrder placement token, proposer/approver split
 - **In-container gauntlet PASS** for the armed roster: OpeningRangeBreakout
   (`df7bf571…`, covers orb_pltr/wds/googl) and VwapReclaim (`18aa5e96…`,
   vwap_reclaim_cat), runs #3/#4 in the container's gauntlet_runs.
-- **WATCH — WDS stop under-covers the stack**: attributed quantity is 75 but
-  the protective stop (order 203) is SELL **37** STP 29.56 — the adds landed
-  during the 07-22/23 broken-protective-RPC window. The per-bar self-heal
-  only fixes a MISSING stop (recorded `protective_order_id` short-circuits
-  it), so this does NOT fix itself until the next pyramid add or close.
-  Operator options before the ASX open (Sun 17:00 PDT): cancel order 203 AND
-  clear the row's `protective_order_id` in `auto_exec_positions`, letting the
-  first bar's self-heal place a full-stack stop through the executor's own
-  path (do both or neither — a half-fix desyncs the close path); or accept
-  37/75 coverage until the stack next changes.
+- **WDS stop under-covered the stack (FIXED Fri ~18:15 PDT, verify Sunday)**:
+  attributed quantity 75 (2 lots) but the protective stop (order 203) was
+  SELL **37** STP 29.56 — the add landed during the 07-22/23
+  broken-protective-RPC window, and the per-bar self-heal only fixes a
+  MISSING stop (a recorded `protective_order_id` short-circuits it), so it
+  would never have self-corrected. Fix applied via the executor's own
+  machinery: cancelled order 203 at the broker, then cleared the row's
+  `protective_order_id` in `auto_exec_positions` (in that order — market
+  closed, so no double-place race; `open_position` reads the DB per call, no
+  restart needed). **Expect on the first WDS bar after the ASX open (Sun
+  17:00 PDT): a WARNING line `auto-executor: protective stop for orb_wds
+  conId 564155292 — SELL 75.0 STP 29.88 GTC` (8% below blended avgCost
+  32.48) and `open_orders=3` in the trader pulse.** If that line hasn't
+  appeared by a few bars after the open, the placement is failing — check
+  `protective stop error` / `placement failed` in the strategy log.
 
 ---
 
