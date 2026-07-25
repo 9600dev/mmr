@@ -1203,7 +1203,7 @@ class StrategyRuntime():
                                 security=security_definitions[0],
                                 bar_size=strategy.bar_size,
                                 historical_days=historical_days,
-                                strategy_name=strategy.name,
+                                strategy_name=strategy.name or 'unknown',
                             )
                         except IBConnectivityError:
                             raise
@@ -1221,7 +1221,7 @@ class StrategyRuntime():
                             security=sd,
                             bar_size=strategy.bar_size,
                             historical_days=historical_days,
-                            strategy_name=strategy.name,
+                            strategy_name=strategy.name or 'unknown',
                         )
                     except IBConnectivityError:
                         raise
