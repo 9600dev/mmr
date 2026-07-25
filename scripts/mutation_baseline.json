@@ -1,0 +1,35 @@
+{
+  "note": "Per-module mutation SCORE floor. Regenerate with scripts/run_mutation.sh baseline after a human-reviewed change. Scores are keyed on the module, not mutant ids, which renumber.",
+  "modules": {
+    "trader/data/proposal_transitions.py": {
+      "killed": 8,
+      "survived": 0,
+      "timeout": 0,
+      "score": 1.0
+    },
+    "trader/trading/exit_class.py": {
+      "killed": 29,
+      "survived": 2,
+      "timeout": 0,
+      "score": 0.935484
+    },
+    "trader/trading/order_math.py": {
+      "killed": 56,
+      "survived": 3,
+      "timeout": 2,
+      "score": 0.95082
+    },
+    "trader/trading/position_sizing.py": {
+      "killed": 395,
+      "survived": 162,
+      "timeout": 0,
+      "score": 0.709156
+    },
+    "trader/trading/risk_gate.py": {
+      "killed": 294,
+      "survived": 16,
+      "timeout": 0,
+      "score": 0.948387
+    }
+  }
+}

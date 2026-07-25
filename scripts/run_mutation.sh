@@ -16,13 +16,20 @@
 # interpreter (which then IS the test interpreter). Install once with:
 #     ~/miniforge3/envs/mmr/bin/python3 -m pip install mutmut==3.6.0
 #
-# Recorded baseline (2026-07-23, mutmut 3.6.0, canonical mmr env). Score is
-# killed / (killed + survived); timeouts are detected (a hang the suite caught).
-# NOTE this baseline is a COMMENT, not a machine-checked artifact (unlike the ty
-# gate's JSON baselines) — nothing detects drift. It already drifted once: a
-# 2026-07-24 re-run of `cores` gave order_math 56 killed / 3 survived / 2
-# timeouts (94.9%), i.e. one mutant moved killed -> timeout in a day. Re-derive
-# before trusting these numbers; treat them as an order-of-magnitude reference.
+# The baseline is now a MACHINE-CHECKED artifact: scripts/mutation_baseline.json,
+# compared by `run_mutation.sh check` (non-zero on regression), re-recorded by
+# `run_mutation.sh baseline`. It used to be this comment block, which nothing
+# verified and which was stale within a day. The numbers below are kept only as
+# a human-readable orientation — the JSON is the source of truth.
+#
+# The GATE score counts timeouts as CAUGHT: (killed+timeout)/(killed+timeout+
+# survived). A timed-out mutant made the suite hang, which is a detected
+# difference, and mutmut's killed-vs-timeout split is timing-dependent —
+# order_math was seen moving 57/1 -> 56/2 with no code change while killed+
+# timeout stayed at 58. Excluding timeouts made the score wobble ~0.1% between
+# identical runs, which in a gate means spurious failures and then a gate nobody
+# trusts. The printed TABLE still shows raw killed/(killed+survived) so the
+# timeout column stays visible.
 #   proposal_transitions.py    8 killed /  0 survived            = 100.0%
 #   order_math.py             57 killed /  3 survived / 1 timeout =  95.0%   (3 survivors = documented equivalents, see below)
 #   position_sizing.py       395 killed / 162 survived           =  70.9%   (survivors: reasoning/warning text + session_summary report + boundary/degenerate/defense-in-depth equivalents)
@@ -137,6 +144,8 @@
 #   scripts/run_mutation.sh cores      # only the fast pure cores (order_math + proposal_transitions)
 #   scripts/run_mutation.sh score      # just re-print the score from the last run
 #   scripts/run_mutation.sh survivors  # per-module score + list surviving mutant keys
+#   scripts/run_mutation.sh check      # compare last run to the recorded baseline (non-zero on regression)
+#   scripts/run_mutation.sh baseline   # full pass, then RE-RECORD the baseline (human-reviewed)
 set -euo pipefail
 
 PY="${MMR_PY:-$HOME/miniforge3/envs/mmr/bin/python3}"
@@ -157,11 +166,28 @@ case "${1:-all}" in
   score)
     "$PY" scripts/mutation_score.py
     ;;
+  check)
+    # Compare the LAST run against scripts/mutation_baseline.json. Non-zero if a
+    # module's score dropped, if a baselined module was not exercised (a partial
+    # run must not satisfy the gate), or if the baseline/mutation data is missing
+    # — fail closed, the lesson from the ty gate reporting OK when it never ran.
+    "$PY" scripts/mutation_score.py --check
+    ;;
+  baseline)
+    # Re-record the score floor. A HUMAN-REVIEWED act: only after confirming each
+    # surviving mutant is a documented equivalent (see the ledger above) or has a
+    # test added. Run a FULL pass first — baselining a partial run bakes in
+    # unmeasured modules.
+    rm -rf mutants
+    "$PY" scripts/run_mutation.py run
+    "$PY" scripts/mutation_score.py
+    "$PY" scripts/mutation_score.py --update
+    ;;
   survivors)
     "$PY" scripts/mutation_score.py --survivors
     ;;
   *)
-    echo "usage: $0 [all|cores|score|survivors]" >&2
+    echo "usage: $0 [all|cores|score|survivors|check|baseline]" >&2
     exit 2
     ;;
 esac
