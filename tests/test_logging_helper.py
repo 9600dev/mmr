@@ -197,3 +197,46 @@ class TestShippedConfig:
     def test_shipped_config_is_loadable(self, shipped):
         _stamp_log_filenames(shipped)
         assert _drop_unwritable_handlers(shipped) == []
+
+
+class TestOperationalLogDirIsolation:
+    """Test logging must never land in the live operational log directory.
+
+    The host and the container share ~/.local/share/mmr/logs (it is the
+    bind-mount source). A host pytest run therefore wrote hundreds of files
+    beside real service logs, and since these tests assert on strings like
+    'STALE exit claim' and 'placement refused', grepping the operational logs
+    surfaced test output indistinguishable from live trading events.
+    """
+
+    def test_log_dir_is_redirected_during_tests(self):
+        """Proves tests/conftest.py set MMR_LOG_DIR before trader was imported.
+        If this fails, test logs are going into the live directory again."""
+        from trader.common import logging_helper as lh
+        assert lh.MMR_LOG_DIR != lh._DEFAULT_LOG_DIR, (
+            'MMR_LOG_DIR was not redirected — pytest is writing into the live '
+            f'operational log dir ({lh._DEFAULT_LOG_DIR}). conftest.py must set '
+            'MMR_LOG_DIR before importing trader.'
+        )
+
+    def test_configured_paths_are_rewritten_into_the_override(self):
+        """The handler filenames come from logging.yaml as absolute paths under
+        the DEFAULT dir, so redirection needs an explicit rewrite — setting the
+        constant alone would redirect nothing."""
+        from trader.common import logging_helper as lh
+        config = {'handlers': {
+            'dbg': {'filename': '~/.local/share/mmr/logs/debug.log'},
+            'svc': {'filename': '~/.local/share/mmr/logs/trader_service.log'},
+        }}
+        lh._stamp_log_filenames(config)
+        for name in ('dbg', 'svc'):
+            got = config['handlers'][name]['filename']
+            assert got.startswith(lh.MMR_LOG_DIR), f'{name} not redirected: {got}'
+            assert not got.startswith(lh._DEFAULT_LOG_DIR), f'{name} still live: {got}'
+
+    def test_paths_outside_the_default_dir_are_untouched(self):
+        config = {'handlers': {'other': {'filename': '/var/log/something.log'}}}
+        lh_config = dict(config)
+        from trader.common import logging_helper as lh
+        lh._stamp_log_filenames(lh_config)
+        assert lh_config['handlers']['other']['filename'] == '/var/log/something.log'

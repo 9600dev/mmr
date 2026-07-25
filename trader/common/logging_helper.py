@@ -19,7 +19,33 @@ import yaml
 _session_timestamp = dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
 
-MMR_LOG_DIR = os.path.expanduser('~/.local/share/mmr/logs')
+# The operational log directory: bind-mounted into the container, tailed by the
+# monitors, and the single place `mmr verify` / triage looks.
+_DEFAULT_LOG_DIR = os.path.expanduser('~/.local/share/mmr/logs')
+
+# Overridable so a NON-operational process can be kept out of it. The host and
+# the container share this directory (it is the bind-mount source), so a host
+# pytest run wrote its output alongside live-service logs — hundreds of files,
+# and test fixtures that deliberately contain strings like 'STALE exit claim'
+# and 'placement refused'. Grepping the operational logs then turned up test
+# noise indistinguishable at a glance from real trading events (AUDIT_ROADMAP
+# G7). tests/conftest.py sets this to a temp dir; the container never sets it.
+MMR_LOG_DIR = os.path.abspath(
+    os.path.expanduser(os.environ.get('MMR_LOG_DIR') or _DEFAULT_LOG_DIR))
+
+
+def _redirect_if_overridden(filename: str) -> str:
+    """Map a configured log path under the DEFAULT dir into MMR_LOG_DIR.
+
+    The handler filenames come from logging.yaml (e.g.
+    ``~/.local/share/mmr/logs/debug.log``), not from MMR_LOG_DIR — so pointing
+    the constant elsewhere would redirect nothing without this rewrite.
+    """
+    if MMR_LOG_DIR == _DEFAULT_LOG_DIR:
+        return filename
+    if filename == _DEFAULT_LOG_DIR or filename.startswith(_DEFAULT_LOG_DIR + os.sep):
+        return os.path.join(MMR_LOG_DIR, os.path.relpath(filename, _DEFAULT_LOG_DIR))
+    return filename
 
 # Logs that live in MMR_LOG_DIR but must NOT be session-stamped. debug.log is
 # the single complete cross-session triage file (see docs/MONITORING.md) — a
@@ -34,8 +60,9 @@ def _stamp_log_filenames(config: dict) -> dict:
         filename = handler_config.get('filename', '')
         if not filename:
             continue
-        # Expand ~ to home directory
-        filename = os.path.expanduser(filename)
+        # Expand ~ to home directory, then honour an MMR_LOG_DIR override so a
+        # non-operational process (pytest) cannot write into the live log dir.
+        filename = _redirect_if_overridden(os.path.expanduser(filename))
         # Add session timestamp to log files in the mmr log directory
         if (filename.endswith('.log')
                 and MMR_LOG_DIR in filename

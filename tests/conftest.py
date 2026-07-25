@@ -2,7 +2,18 @@ import datetime as dt
 import logging
 import os
 import sys
+import tempfile
 from uuid import uuid4
+
+# Keep test logging OUT of the live operational log directory. That directory is
+# the container bind-mount source, so a host pytest run used to write its output
+# next to real service logs — and because these tests deliberately assert on
+# strings like 'STALE exit claim' and 'placement refused', grepping the
+# operational logs surfaced test noise that looked exactly like trading events
+# (AUDIT_ROADMAP G7). MUST be set before any `trader` import: MMR_LOG_DIR is read
+# at logging_helper import time. setdefault so an explicit override still wins.
+os.environ.setdefault(
+    'MMR_LOG_DIR', os.path.join(tempfile.gettempdir(), 'mmr-pytest-logs'))
 
 import numpy as np
 import pandas as pd
