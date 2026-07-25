@@ -4,7 +4,50 @@ Living snapshot of the **deployed/running** state (config, strategies, data, inf
 and the reasoning behind it. Distinct from `AUDIT_ROADMAP.md` (code backlog).
 Update the date + relevant sections when the running config changes.
 
-**Last updated: 2026-07-24 (Fri evening) — paper trading, account `DUM422056`. STACK IS UP (healthy) on the tranche-1+2 image and trading autonomously.**
+**Last updated: 2026-07-24 (Fri evening) — paper trading, account `DUM422056`. STACK IS UP (healthy) on the container-uid-fix image and trading autonomously.**
+
+---
+
+## 2026-07-24 (later) — services no longer run as root (image rebuild + 2 recreates)
+
+Deployed commit `8be59f1`. The Dockerfile's last `USER` directive was `root`
+(added to write `.bash_profile`, never switched back), so the entrypoint,
+`start_mmr.sh` and **every service ran as uid 0** while `docker.sh -e/-g` execs
+in as `trader`. Services created `/tmp/debug.log` root-owned; every `mmr` CLI
+run then failed to open it, and because `dictConfig` raises on the first
+unopenable handler with only `basicConfig()` as a fallback, each CLI run
+silently lost its rich console, `trader_<ts>.log` AND `errors_<ts>.log`.
+CLI-side errors were being written nowhere.
+
+- **Now**: `USER trader` before `ENTRYPOINT` (PID 1 = uid 1000 verified).
+  Nothing in `start_mmr.sh` / `container_healthcheck.sh` needs root, and the
+  DuckDB files in `mmr_db_data` were already `trader`-owned.
+- `debug.log` moved `/tmp` → `~/.local/share/mmr/logs/debug.log` — on the bind
+  mount, so it is now **host-tailable without exec'ing in**. Deliberately not
+  session-stamped (`_UNSTAMPED_LOGS`); rotation relaxed to 64MB × 3 because
+  `RotatingFileHandler` is not multi-process safe and this is the one file
+  every process (now including host-side runs) shares. Interleaving gaps
+  during triage → check `debug.log.1`.
+- Logging now degrades **per handler** (`_drop_unwritable_handlers`) instead of
+  discarding the whole config on one unwritable path.
+- `delay: true` on every rotating handler. Without it every process that loaded
+  the config (each CLI run, each 60s healthcheck ≈ 7,200 files/day) left a full
+  set of empty session-stamped files: **41,044 of 43,462** files in the log dir
+  were empty, which the monitors scan past to find the newest non-empty log.
+  Pruned to 3,207 (kept the launchd watchdog's empty log — it is held open).
+  Verified: 3 CLI runs now create 0 files (was 15).
+- Deploy path (same shape as the tranche-2 deploy): rebuild →
+  `docker compose up -d --force-recreate --no-deps mmr`. **ib-gateway never
+  restarted** (no relogin risk); `~/.config/mmr` bind mount preserved the
+  roster. Markets closed (21:59 ET Fri; ASX into Sat).
+- Verified after each recreate: `mmr verify` **PASS** (live IB round-trip),
+  4/4 armed strategies RUNNING, positions (WDS 75, GOOGL 1) and both GTC
+  protective stops (`#227` GOOGL @ 296.56, `#245` WDS @ 75 sh / 29.88)
+  byte-identical across both recreations. 1875 tests pass; pre-commit gates
+  pass. Post-change snapshot: `docker.sh -B post_uid_fix`.
+- Re-tested the two `docker.sh` paths that `exec` without `-u` and therefore
+  changed uid: `-B` (backup, compacts 517MB→261MB / 4.4GB→1.8GB) and `-s`
+  (rsync code sync) — both work as `trader`.
 
 ---
 
