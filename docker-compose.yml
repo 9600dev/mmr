@@ -146,5 +146,20 @@ services:
       - ${HOME}/.config/mmr:/home/trader/.config/mmr
 
 volumes:
+  # `external: true` is load-bearing, not cosmetic. Compose removes volumes it
+  # considers part of the project on `down --volumes` — which is exactly what
+  # `docker.sh -c` runs — and it did so even for this volume while it carried no
+  # compose labels (verified empirically 2026-07-24: "Volume ... Removed"). That
+  # is the live trading DB: ~520 MB mmr.duckdb + ~4.4 GB mmr_history.duckdb.
+  # Declaring it external makes compose refuse to delete it, and silences the
+  # "already exists but was not created by Docker Compose" warning.
+  #
+  # Trade-off: compose will NOT create an external volume either, so
+  # `docker.sh up()` runs an idempotent `volume create` before compose. Creating
+  # it by hand also works: `docker volume create mmr_mmr_db_data`.
+  # The literal name is intentional (no ${} indirection — pointing this at the
+  # wrong volume silently swaps the database out from under the services).
   mmr_db_data:
+    external: true
+    name: mmr_mmr_db_data
 

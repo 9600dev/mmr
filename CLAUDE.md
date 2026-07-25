@@ -261,7 +261,7 @@ Storage layout (host paths):
 - `~/.local/share/mmr/logs/` — bind mount; tail-able from the host
 - `~/.local/share/mmr/tws_settings/` — bind mount; IB session state
 - `~/.local/share/mmr/backups/` — bind mount; `docker.sh -B` writes here
-- DuckDB files (`mmr.duckdb`, `mmr_history.duckdb`) live in the **`mmr_db_data` named volume** (not bind-mounted) — native ext4 is faster + safer than VirtioFS for write-heavy single-file DBs. Snapshot to host with `./docker.sh -B [name]`.
+- DuckDB files (`mmr.duckdb`, `mmr_history.duckdb`) live in the **`mmr_db_data` named volume** (not bind-mounted) — native ext4 is faster + safer than VirtioFS for write-heavy single-file DBs. Snapshot to host with `./docker.sh -B [name]`. The volume is declared **`external: true`** (real name `mmr_mmr_db_data`) — that is a safety property, not cosmetics: `docker compose down --volumes` (which `docker.sh -c` runs) *does* delete a non-external volume of that name, verified empirically, and that volume is the live trading DB. External means compose refuses to delete it — and also refuses to create it, so `up()` runs an idempotent `docker volume create` first or a fresh machine fails with "external volume not found". Only `-f` removes it, behind a typed `DELETE` confirmation.
 
 ## Build & Run
 
@@ -274,7 +274,8 @@ Storage layout (host paths):
 ./docker.sh -s              # Sync code to running container
 ./docker.sh -e              # Exec into container
 ./docker.sh -l              # Tail logs
-./docker.sh -c              # Clean all images/volumes
+./docker.sh -c              # Clean images + containers (DuckDB volume SURVIVES — it's external)
+./docker.sh -f              # Force clean: + build cache, host data, DuckDB volume (prompts)
 ./docker.sh -B              # Backup DuckDB files (auto-timestamped subdir)
 ./docker.sh -B before_run   # Backup with a custom name
 

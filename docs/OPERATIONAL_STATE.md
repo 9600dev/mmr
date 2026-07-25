@@ -8,6 +8,39 @@ Update the date + relevant sections when the running config changes.
 
 ---
 
+## 2026-07-24 (later still) — `docker.sh -c` would have deleted the trading DB
+
+Chasing the long-standing compose warning `volume "mmr_mmr_db_data" already
+exists but was not created by Docker Compose` turned up a live hazard, not a
+cosmetic gripe. The volume carries **no compose labels** (`Labels: null`,
+created 06-28 — `docker run -v <name>:...` auto-creates unlabelled volumes, and
+`docker.sh` has three such paths that name it outside compose, incl.
+`seed_db_if_empty`'s probe which runs *before* `compose up`).
+
+Verified empirically in a throwaway project (never against the real volume):
+an unlabelled volume **IS** removed by `docker compose down --rmi all
+--volumes` — printed `Volume voltest_vt_data Removed`. That is the exact
+command `docker.sh -c` runs, whose help text claimed only "remove all images
+and containers". So `-c` would have silently destroyed ~520 MB `mmr.duckdb` +
+~4.4 GB `mmr_history.duckdb`, recoverable only back to the last `-B` backup
+via `seed_db_if_empty`.
+
+Fixed: the volume is now `external: true` with an explicit `name:` in
+docker-compose.yml. Same throwaway test confirms external survives that
+command with data intact. Because compose also refuses to *create* an external
+volume (confirmed: `external volume "..." not found`), `up()` now runs an
+idempotent `$RUNTIME volume create` before `seed_db_if_empty` — which cannot be
+relied on for this, as its early-return paths skip the probe when no backup
+exists. Volume name now lives in one place (`MMR_DB_VOLUME`) instead of three.
+
+`-c` is now truly images+containers (verified with `down --rmi all --volumes
+--dry-run` against the real file: no `Volume ... Removed` line). `-f` gained an
+explicit DB-volume wipe inside its existing typed-`DELETE` prompt, so a true
+reset is still possible — and `MMR_FORCE_CLEAN_KEEP_DATA=1` now protects the
+volume too. Help text corrected for both flags.
+
+---
+
 ## 2026-07-24 (later) — services no longer run as root (image rebuild + 2 recreates)
 
 Deployed commit `8be59f1`. The Dockerfile's last `USER` directive was `root`

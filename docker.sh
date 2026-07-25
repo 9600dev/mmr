@@ -138,6 +138,13 @@ fi
 # sweep, backtest run, downloaded history bar, and IB session.
 MMR_DATA_DIR="${HOME}/.local/share/mmr"
 
+# The named volume holding the live DuckDB files (mmr.duckdb, mmr_history.duckdb).
+# MUST match the `name:` under `volumes:` in docker-compose.yml, which declares it
+# `external: true` so `docker compose down --volumes` can NEVER delete it — proven
+# necessary: an unlabelled volume of this name IS removed by that command, which is
+# what `-c` runs. Only force_clean() removes it, behind a typed confirmation.
+MMR_DB_VOLUME="mmr_mmr_db_data"
+
 _human_size() {
     # Cross-platform (macOS/Linux) human-readable size for one path.
     # macOS's `du -h` doesn't have a `-d` flag with the same semantics as GNU,
@@ -334,8 +341,10 @@ echo_usage() {
     echo "  -u (up: start all containers — IB Gateway + MMR)"
     echo "  -i (ib-only: start only IB Gateway for local development)"
     echo "  -d (down: stop and remove all containers)"
-    echo "  -c (clean: remove all images and containers)"
+    echo "  -c (clean: remove all images and containers — the DuckDB volume"
+    echo "      SURVIVES; it is declared external in docker-compose.yml)"
     echo "  -f (force clean: images + containers + build cache + HOST DATA"
+    echo "      + the DuckDB volume"
     echo "      — prompts for confirmation before wiping sweeps/backtests/history;"
     echo "      set MMR_FORCE_CLEAN_KEEP_DATA=1 to skip the data wipe)"
     echo "  -s (sync code to running MMR container)"
@@ -549,6 +558,16 @@ up() {
     # can't recover from the stuck-dependent state described in
     # `_remove_mmr_dependents`.
     _remove_mmr_dependents
+    # docker-compose.yml declares the DB volume `external: true` (so `down
+    # --volumes` can't destroy it), and compose refuses to CREATE an external
+    # volume — so ensure it exists first or `up` fails with "external volume not
+    # found" on a fresh machine. Idempotent: a no-op when it already exists, and
+    # it must run before seed_db_if_empty, whose early-return paths mean it
+    # cannot be relied on to create the volume.
+    $RUNTIME volume create "$MMR_DB_VOLUME" >/dev/null || {
+        echo "Failed to create/verify volume $MMR_DB_VOLUME" >&2
+        exit 1
+    }
     # Disaster-recovery: if the DB volume is empty (lost / reset / fresh machine),
     # seed it from the newest host backup BEFORE the services start. No-op when the
     # volume already has data.
@@ -694,7 +713,7 @@ backup() {
     mkdir -p "$dest_host"
     echo "Container not running — plain-copy snapshot to $dest_host/"
     $RUNTIME run --rm \
-        -v mmr_mmr_db_data:/src:ro \
+        -v "$MMR_DB_VOLUME":/src:ro \
         -v "$dest_host":/dst \
         alpine sh -c 'cp -v /src/*.duckdb /dst/ 2>&1; ls -lh /dst/'
     echo "Backup complete: $dest_host/"
@@ -705,7 +724,7 @@ backup() {
 # whatever the image happened to seed — the "stale seed" trap. Never overwrites a
 # volume that already has data; no-ops when there's no latest backup.
 seed_db_if_empty() {
-    local vol="mmr_mmr_db_data"
+    local vol="$MMR_DB_VOLUME"
     local latest_link="$HOME/.local/share/mmr/backups/latest"
     local latest
     latest=$(cd -P "$latest_link" 2>/dev/null && pwd) || return 0
@@ -745,32 +764,68 @@ force_clean() {
     # lets CI/automation keep the "build-cache-only" behaviour if needed.
     if [ "${MMR_FORCE_CLEAN_KEEP_DATA:-0}" = "1" ]; then
         echo "MMR_FORCE_CLEAN_KEEP_DATA=1 — keeping host data at $MMR_DATA_DIR"
+        echo "                              and the DuckDB volume $MMR_DB_VOLUME"
         return
     fi
-    if [ ! -d "$MMR_DATA_DIR" ]; then
+
+    # The live DuckDBs are in the external named volume, NOT under $MMR_DATA_DIR,
+    # so `clean` can no longer take them (that is the point of `external: true`).
+    # force-clean is the one path that removes them, and it must be as explicit as
+    # the host-data wipe — this is the live trading database.
+    local db_present=0
+    if $RUNTIME volume inspect "$MMR_DB_VOLUME" >/dev/null 2>&1; then
+        db_present=1
+    fi
+    if [ ! -d "$MMR_DATA_DIR" ] && [ "$db_present" = "0" ]; then
         return
     fi
+
     echo ""
     echo "=============================================================="
-    echo "  WIPE HOST DATA?"
+    echo "  WIPE HOST DATA + TRADING DATABASE?"
     echo "=============================================================="
-    echo "  This will DELETE all sweeps, backtest runs, proposals,"
-    echo "  universes, downloaded OHLCV history, IB session state, and"
-    echo "  logs at:"
-    echo ""
-    echo "    $MMR_DATA_DIR  ($(_human_size "$MMR_DATA_DIR"))"
-    echo ""
+    if [ -d "$MMR_DATA_DIR" ]; then
+        echo "  Host data — sweeps, backtest runs, proposals, universes,"
+        echo "  downloaded OHLCV history, IB session state, logs, AND the"
+        echo "  DB backups that disaster-recovery seeds from:"
+        echo ""
+        echo "    $MMR_DATA_DIR  ($(_human_size "$MMR_DATA_DIR"))"
+        echo ""
+    fi
+    if [ "$db_present" = "1" ]; then
+        echo "  The LIVE DuckDB volume (mmr.duckdb + mmr_history.duckdb):"
+        echo ""
+        echo "    volume $MMR_DB_VOLUME"
+        echo ""
+    fi
     echo "  This is NOT recoverable. Container images + build cache are"
-    echo "  already gone at this point; skipping now leaves only the"
-    echo "  data behind for a fresh rebuild on next start."
+    echo "  already gone at this point; skipping now leaves the data and"
+    echo "  the database behind for a fresh rebuild on next start."
+    echo ""
+    echo "  Take a snapshot first with './docker.sh -B <name>' if unsure."
     echo ""
     read -p "Type 'DELETE' to confirm (anything else aborts): " confirm
     if [ "$confirm" = "DELETE" ]; then
-        echo "Removing $MMR_DATA_DIR..."
-        rm -rf "$MMR_DATA_DIR"
-        echo "Host data wiped."
+        if [ -d "$MMR_DATA_DIR" ]; then
+            echo "Removing $MMR_DATA_DIR..."
+            rm -rf "$MMR_DATA_DIR"
+            echo "Host data wiped."
+        fi
+        if [ "$db_present" = "1" ]; then
+            echo "Removing volume $MMR_DB_VOLUME..."
+            # Containers are already down at this point (clean ran first); if one
+            # somehow still holds the volume, report it rather than dying under
+            # errexit and skipping the summary.
+            if $RUNTIME volume rm "$MMR_DB_VOLUME" >/dev/null 2>&1; then
+                echo "DuckDB volume wiped."
+            else
+                echo "Could not remove $MMR_DB_VOLUME (still in use?) — remove it" >&2
+                echo "manually with: $RUNTIME volume rm $MMR_DB_VOLUME" >&2
+            fi
+        fi
     else
-        echo "Keeping host data. (Tip: MMR_FORCE_CLEAN_KEEP_DATA=1 skips this prompt.)"
+        echo "Keeping host data + DuckDB volume."
+        echo "(Tip: MMR_FORCE_CLEAN_KEEP_DATA=1 skips this prompt.)"
     fi
 }
 
