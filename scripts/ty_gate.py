@@ -52,17 +52,57 @@ SCOPES: dict[str, dict[str, object]] = {
 }
 
 
+class GateError(RuntimeError):
+    """The gate could not be evaluated. Never silently treated as a pass."""
+
+
+# `ty` ends a concise run with one of these. Their ABSENCE means we are not
+# looking at a completed scan, however parseable the rest of the output looked.
+_SUMMARY_RE = re.compile(r"^(All checks passed!|Found \d+ diagnostics?)$")
+
+
 def collect(dirs: list[str]) -> collections.Counter[str]:
-    proc = subprocess.run(
-        ["uv", "run", "ty", "check", *dirs, "--output-format", "concise", "--exit-zero"],
-        cwd=REPO, capture_output=True, text=True,
-    )
+    """Diagnostics per signature, or raise GateError if the scan didn't happen.
+
+    FAIL CLOSED. This used to `return counts` unconditionally: because the
+    parse simply finds nothing when `ty` is missing / crashes / renames a flag /
+    changes its output format, a totally broken toolchain produced zero
+    diagnostics, zero regressions, and a cheerful "ty gate OK" with exit 0 — on
+    the repo's ONLY enforcement point. It also then reported the whole baseline
+    as "fewer than baseline — consider --update", inviting a human to overwrite
+    the baseline with nothing and destroy the ratchet permanently.
+    """
+    try:
+        proc = subprocess.run(
+            ["uv", "run", "ty", "check", *dirs, "--output-format", "concise", "--exit-zero"],
+            cwd=REPO, capture_output=True, text=True,
+        )
+    except OSError as e:
+        raise GateError(f"could not execute ty for {', '.join(dirs)}: {e}") from e
+
     out = proc.stdout + proc.stderr
+    # --exit-zero means diagnostics do NOT set a non-zero status, so any
+    # non-zero return is a tool/invocation failure, not a finding.
+    if proc.returncode != 0:
+        raise GateError(
+            f"ty exited {proc.returncode} for {', '.join(dirs)} (with --exit-zero, "
+            f"that means the tool failed, not that it found problems):\n{out.strip()}"
+        )
+
     counts: collections.Counter[str] = collections.Counter()
     for line in out.splitlines():
         m = LINE_RE.match(line.strip())
         if m:
             counts[f"{m['file']}\t{m['sev']}[{m['rule']}]"] += 1
+
+    # A completed scan always prints a summary line. Without one we cannot tell
+    # "clean" from "never ran" — and those must not look the same.
+    if not any(_SUMMARY_RE.match(ln.strip()) for ln in out.splitlines()):
+        raise GateError(
+            f"ty produced no recognisable summary line for {', '.join(dirs)} — "
+            f"cannot distinguish a clean scan from a scan that never happened. "
+            f"Output was:\n{out.strip() or '(empty)'}"
+        )
     return counts
 
 
@@ -82,7 +122,14 @@ def main() -> int:
     for name, scope in SCOPES.items():
         dirs = scope["dirs"]  # type: ignore[assignment]
         baseline_path = scope["baseline"]  # type: ignore[assignment]
-        current = collect(dirs)
+        try:
+            current = collect(dirs)
+        except GateError as e:
+            # An unevaluable gate is a FAILED gate — including under --update,
+            # where treating it as "zero diagnostics" would write an empty
+            # baseline over a real one.
+            print(f"ty gate FAILED [{name}] — could not evaluate:\n  {e}", file=sys.stderr)
+            return 1
         total += sum(current.values())
 
         if args.update:

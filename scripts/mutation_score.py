@@ -26,7 +26,7 @@ _COLS = ["killed", "survived", "timeout", "suspicious", "no tests", "skipped",
          "caught by type check", "not checked"]
 
 
-def collect() -> dict[str, dict[str, int]]:
+def collect() -> tuple[dict[str, dict[str, int]], dict[str, list[str]]]:
     per_module: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     survivors: dict[str, list[str]] = defaultdict(list)
     for path in walk_mutatable_files():
@@ -75,6 +75,20 @@ def main() -> int:
     tscore = f"{tk / (tk + ts) * 100:.1f}%" if (tk + ts) else "  n/a"
     trow += f"{tscore:>9}"
     print(trow)
+
+    # The score's denominator is killed+survived, so mutants that were never
+    # EXERCISED silently vanish from it. A partial run (e.g. `run_mutation.sh
+    # cores`) therefore printed a confident "TOTAL 95.5%" while 817 of 884
+    # mutants had not been run — a number a reader would reasonably mistake for
+    # full-kernel coverage. Say so explicitly rather than flattering the run.
+    unchecked = tot.get("not checked", 0)
+    if unchecked:
+        exercised = tk + ts + tot.get("timeout", 0) + tot.get("suspicious", 0)
+        print()
+        print(f"INCOMPLETE RUN: {unchecked} mutant(s) were generated but NOT executed "
+              f"({exercised} exercised). The score above covers only what ran —")
+        print("it is NOT a whole-kernel figure. Modules showing 'n/a' were not measured "
+              "at all. Use `run_mutation.sh all` for a full pass.")
 
     if args.survivors:
         print("\nsurvivors:")

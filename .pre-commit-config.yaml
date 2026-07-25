@@ -16,11 +16,18 @@ repos:
         always_run: true
 
       - id: ty-gate
-        name: ty type-check gate (kernel, no new diagnostics beyond baseline)
+        name: ty type-check gate (kernel + advisory, no new diagnostics beyond baseline)
         entry: uv run python scripts/ty_gate.py
         language: system
         pass_filenames: false
-        files: ^trader/trading/.*\.py$
+        # Must cover EVERY gated scope, not just the kernel. This was
+        # ^trader/trading/.*\.py$, so a commit touching only trader/data/ or
+        # trader/simulation/ skipped the hook entirely — meaning the advisory
+        # "can only ratchet down" guarantee was unenforced on precisely the
+        # commits able to break it. The gate itself checks all scopes; this
+        # filter only decides when it RUNS, so it must be at least as wide.
+        # Baselines/gate script included so a baseline edit is re-validated.
+        files: ^(trader/(trading|data|simulation)/.*\.py|scripts/ty_gate\.py|scripts/ty_baseline.*\.json)$
 
       # CrossHair symbolic-execution over the deal-contracted pure kernel.
       # MANUAL stage only: CrossHair spends tens of seconds per function via z3,

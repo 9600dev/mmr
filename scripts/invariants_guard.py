@@ -11,6 +11,14 @@ commit.
 Allowed together: invariants + docs/tests-config. Refused: invariants + any
 trader/** implementation. Override for a genuine paired change (rare, and it
 should be a deliberate human act) with:  ALLOW_INVARIANTS_IMPL=1 git commit ...
+
+SCOPE, honestly stated: this is review hygiene, not a security control. It
+enforces exactly one thing — spec and implementation do not move in the SAME
+commit — so the spec change is reviewable on its own. It does not stop two
+sequential commits, it does not survive `git commit --no-verify`, and
+ALLOW_INVARIANTS_IMPL is settable by anything that can run git. Its value is
+that weakening a property becomes a separate, visible, reviewable act rather
+than a line buried in an implementation diff.
 """
 from __future__ import annotations
 
@@ -23,8 +31,13 @@ IMPL_PREFIX = "trader/"
 
 
 def staged_files() -> list[str]:
+    # ACMRD — the D matters. With the previous ACMR filter a staged DELETION was
+    # invisible, so `git rm tests/invariants/test_x.py` plus an implementation
+    # change sailed through: the single most direct way to weaken the spec was
+    # the one the guard could not see, even though the policy names deletion
+    # explicitly ("agents may not weaken, loosen, or DELETE a property").
     out = subprocess.run(
-        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD"],
         capture_output=True, text=True, check=True,
     ).stdout
     return [ln.strip() for ln in out.splitlines() if ln.strip()]

@@ -4,12 +4,17 @@
 CrossHair reads the ``deal`` ``@pre`` / ``@post`` / ``@ensure`` / ``@raises``
 contracts on a function and tries to find a concrete input that satisfies the
 preconditions yet violates a postcondition (or raises an undeclared exception).
-On these small, referentially-transparent kernel helpers it is strictly
-stronger than Hypothesis's random sampling: it explores execution paths
-symbolically via the z3 SMT solver, so it reaches the pathological float
-corners (denormal underflow, inf) that sampling almost never hits. This is how
-we found the ``price * multiplier`` underflow → ``ZeroDivisionError`` in
+On these small, referentially-transparent kernel helpers it explores far more of
+the input space than Hypothesis's random sampling: it walks execution paths
+symbolically via the z3 SMT solver, so it reaches the pathological float corners
+(denormal underflow, inf) that sampling almost never hits. This is how we found
+the ``price * multiplier`` underflow → ``ZeroDivisionError`` in
 ``_floor_shares_for_notional``.
+
+It is NOT a proof. Each condition runs under ``--per_condition_timeout``, so a
+clean result means "no counterexample found within the budget", not "no
+counterexample exists" — paths can be left unexplored when the solver runs out
+of time. Stronger than sampling on this code; weaker than verification.
 
 TARGETS are only the genuinely pure, contracted functions. The stateful
 entry points — ``PositionSizer.compute`` (reads config + portfolio/liquidity
@@ -39,6 +44,7 @@ import sys
 # The deal-contracted pure kernel functions, in kernel order. Keep in sync with
 # the @deal decorators in the source modules (and the tests that exercise them).
 TARGETS = [
+    "trader.trading.exit_class.reduces_exposure",
     "trader.trading.order_math.whole_shares_for_notional",
     "trader.trading.order_math._floor_shares_for_notional",
     "trader.trading.position_sizing._confidence_scale",
