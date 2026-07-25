@@ -353,3 +353,100 @@ class TestLeverageCheck:
         """Empty margin impact dict → approved (no data to check)."""
         result = risk_gate.check_leverage({}, net_liquidation=100000)
         assert result.approved is True
+
+
+class TestCheckLeverageMissingData:
+    """The leverage check's behaviour when margin data is absent or degenerate.
+
+    Mutation testing found five survivors clustered here (check_leverage mutants
+    9, 12, 14, 21, 32) — every one a change to a missing-key default or a guard
+    boundary. Nothing exercised those paths, so the check's behaviour with
+    unreadable inputs was entirely unspecified.
+
+    It matters because the answer is SILENTLY APPROVE: absent margin keys or a
+    non-positive NetLiquidation skip both branches and return approved, with
+    nothing recorded to say the leverage limit was never applied. These tests
+    pin that behaviour so it cannot drift unnoticed; whether it SHOULD be
+    fail-closed (as evaluate() is for its own inputs) is a separate policy
+    decision, deliberately not pre-empted here.
+    """
+
+    def _gate(self, event_store, max_leverage=2.0, min_margin_cushion=0.1):
+        return RiskGate(
+            limits=RiskLimits(max_leverage=max_leverage, min_margin_cushion=min_margin_cushion),
+            event_store=event_store,
+        )
+
+    def test_missing_init_margin_key_skips_the_leverage_branch(self, event_store):
+        """Kills mutant 9 (default 0 -> 1): with the key absent the branch must
+        not run at all, regardless of how breachy net_liq would make it look."""
+        gate = self._gate(event_store, max_leverage=0.001)   # any real check would refuse
+        result = gate.check_leverage({'equityWithLoanAfter': 0}, net_liquidation=1_000_000.0)
+        assert result.approved is True
+
+    def test_missing_equity_key_skips_the_cushion_branch(self, event_store):
+        """Kills mutants 12/14 (default 0 -> None / omitted)."""
+        gate = self._gate(event_store, min_margin_cushion=0.99)  # any real check would refuse
+        result = gate.check_leverage({'initMarginAfter': 1.0}, net_liquidation=1_000_000.0)
+        assert result.approved is True
+
+    def test_leverage_is_enforced_when_both_keys_are_present(self, event_store):
+        """The control: with data present the limit really does bite."""
+        gate = self._gate(event_store, max_leverage=2.0)
+        result = gate.check_leverage(
+            {'initMarginAfter': 900_000.0, 'equityWithLoanAfter': 1_000_000.0},
+            net_liquidation=100_000.0)
+        assert result.approved is False
+        assert 'leverage' in (result.reason or '')
+
+    @pytest.mark.parametrize('net_liq', [0.0, -1.0, -100_000.0])
+    def test_non_positive_net_liquidation_skips_every_branch(self, event_store, net_liq):
+        """An unreadable/zero NetLiquidation silently approves — the fail-OPEN
+        that evaluate() explicitly refuses for its own inputs."""
+        gate = self._gate(event_store, max_leverage=0.001, min_margin_cushion=0.99)
+        result = gate.check_leverage(
+            {'initMarginAfter': 999_999.0, 'equityWithLoanAfter': 1.0},
+            net_liquidation=net_liq)
+        assert result.approved is True
+
+    @pytest.mark.parametrize('net_liq', [0.5, 1.0])
+    def test_net_liquidation_between_zero_and_one_is_still_checked(self, event_store, net_liq):
+        """Kills mutants 21/32 (`> 0` -> `> 1`). A sub-$1 account is degenerate
+        but the guard is `> 0`, so the branch must still run — the mutants make
+        it silently skip for 0 < net_liq <= 1."""
+        gate = self._gate(event_store, max_leverage=2.0)
+        result = gate.check_leverage(
+            {'initMarginAfter': 100.0, 'equityWithLoanAfter': 100.0},
+            net_liquidation=net_liq)
+        assert result.approved is False, 'leverage branch was skipped for a positive net_liq'
+        assert 'leverage' in (result.reason or '')
+
+    def test_absent_init_margin_must_not_be_treated_as_a_real_value(self, event_store):
+        """Kills mutant 9 (`get('initMarginAfter', 0)` -> default 1).
+
+        Chosen so the two differ: with net_liq=1.0 and a 0.5x limit, a default of
+        1 computes 1/1.0 = 1.0x and REFUSES, while the real default of 0 skips the
+        branch and approves. My first attempt at this test used a large net_liq,
+        where the injected 1 produced a ~0 leverage that passed anyway — both
+        approved, and the mutant survived. A missing key must mean 'no data',
+        never a synthetic value that can trip or satisfy a limit."""
+        gate = self._gate(event_store, max_leverage=0.5)
+        result = gate.check_leverage({'equityWithLoanAfter': 0}, net_liquidation=1.0)
+        assert result.approved is True
+
+    def test_cushion_branch_runs_for_any_positive_net_liquidation(self, event_store):
+        """Kills mutant 32 (cushion guard `> 0` -> `> 1`).
+
+        Needs the LEVERAGE branch to pass while the CUSHION branch bites, at
+        0 < net_liq <= 1 — my earlier case refused on leverage first and never
+        reached the cushion guard at all."""
+        gate = self._gate(event_store, max_leverage=2.0, min_margin_cushion=0.1)
+        result = gate.check_leverage(
+            {'initMarginAfter': 1.0, 'equityWithLoanAfter': 1.0}, net_liquidation=1.0)
+        assert result.approved is False, 'cushion branch was skipped for a positive net_liq'
+        assert 'cushion' in (result.reason or '')
+
+    def test_empty_margin_impact_approves_silently(self, event_store):
+        """whatIfOrder returning {} — the shape closest to a real IB failure."""
+        gate = self._gate(event_store, max_leverage=0.001, min_margin_cushion=0.99)
+        assert gate.check_leverage({}, net_liquidation=1_000_000.0).approved is True

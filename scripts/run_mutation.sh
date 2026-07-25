@@ -62,10 +62,20 @@
 #       False`) makes that state unreachable at the comparison. -0.0 == 0.0 in
 #       Python, so a negative zero is filtered too. TRUE EQUIVALENTS.
 #       (Re-derive if the flat-position guard is ever relaxed.)
-#       exit_class went 61.3% -> 93.5% once tests/invariants/test_exit_class.py
-#       was added to the ORACLE selection in pyproject.toml — adding the file
-#       alone changed nothing, which is the drift that
-#       tests/test_verification_wiring.py now fails on.
+#       NB exit_class went 61.3% -> 93.5% only once tests/invariants/test_exit_class.py
+#       was added to the ORACLE selection in pyproject.toml — adding the spec file
+#       alone changed nothing, the drift tests/test_verification_wiring.py now catches.
+#
+#   xǁRiskGateǁcheck_leverage__mutmut_12  (`get('equityWithLoanAfter', 0)` -> None)
+#   xǁRiskGateǁcheck_leverage__mutmut_14  (`get('equityWithLoanAfter', )`  -> None)
+#       risk_gate.py, 2026-07-25. Same mutant twice. `equity_after` is only ever
+#       consumed by `if equity_after:`, and 0 and None are both falsy, so the
+#       cushion branch is skipped identically. The arithmetic that could tell them
+#       apart — `(equity_after - init_margin_after)` — sits INSIDE that guard and
+#       is unreachable when the value is falsy. TRUE EQUIVALENTS.
+#       (Re-derive if equity_after is ever read outside the truthiness guard.)
+#       The other three check_leverage survivors (9, 21, 32) were REAL test gaps,
+#       not equivalents — see TestCheckLeverageMissingData in tests/test_risk_gate.py.
 #
 # Usage:
 #   scripts/run_mutation.sh            # all 4 modules, then per-module score
