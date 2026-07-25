@@ -1291,3 +1291,62 @@ class TestSpreadPenaltyDefects:
         result = sizer.compute(confidence=1.0, liquidity=liq)
         assert result.amount_usd == 2500.0
         assert result.capped_by == 'spread_penalty'
+
+
+class TestSizingWithUnreadableNetLiquidation:
+    """The sizer's percentage caps do not apply when net_liquidation is 0.
+
+    Found by widening the mutation-driven input space into the degenerate region
+    the invariants spec never generates (its strategies start net_liq at 10,000
+    and price at 1.0, so every `> 0` guard is indistinguishable from `> 1`).
+
+    At net_liquidation == 0 the base-sizing guard `state.net_liquidation > 0` is
+    skipped, the percentage cap computes to 0, and compute() returns the default
+    amount anyway — the only input where the amount exceeds max_position_pct.
+    Reachable right after connect, before IB's account feed populates.
+
+    Pinned as CURRENT behaviour, not endorsed: it is backstopped downstream (the
+    risk gate refuses the open whether net-liq is flagged unreadable or reads as
+    zero — see test_gate_refuses_either_way below), so it produces a wrong number
+    that nothing acts on rather than a bad trade.
+    """
+
+    def test_zero_net_liquidation_bypasses_the_percentage_cap(self):
+        cfg = PositionSizingConfig()
+        state = PortfolioState(net_liquidation=0.0, gross_position_value=0.0,
+                               available_funds=0.0, daily_pnl=0.0,
+                               position_count=0, pending_proposal_value=0.0)
+        result = PositionSizer(cfg).compute(
+            confidence=0.8, portfolio_state=state, price=100.0)
+        assert result.amount_usd > 0.0
+        assert result.amount_usd > 0.0 * cfg.max_position_pct, (
+            'documents the gap: the pct cap is 0 here and the amount exceeds it')
+
+    def test_a_small_but_positive_account_IS_capped(self):
+        """The contrast that shows this is specifically a zero-guard problem,
+        not a broken cap: a tiny real account is handled correctly."""
+        cfg = PositionSizingConfig()
+        state = PortfolioState(net_liquidation=10_000.0, gross_position_value=0.0,
+                               available_funds=10_000.0, daily_pnl=0.0,
+                               position_count=0, pending_proposal_value=0.0)
+        result = PositionSizer(cfg).compute(
+            confidence=0.8, portfolio_state=state, price=100.0)
+        assert result.amount_usd <= 10_000.0 * cfg.max_position_pct + 0.01
+        assert result.capped_by == 'max_position_pct'
+
+    def test_gate_refuses_either_way(self, tmp_path):
+        """The backstop that keeps the above from being a live risk."""
+        from trader.data.event_store import EventStore
+        from trader.trading.risk_gate import RiskGate, RiskLimits
+        from trader.trading.strategy import Signal
+        from trader.objects import Action
+        gate = RiskGate(limits=RiskLimits(),
+                        event_store=EventStore(str(tmp_path / 'e.duckdb')))
+        signal = Signal(source_name='s', action=Action.BUY, probability=0.8,
+                        risk=0.2, conid=1)
+        unreadable = gate.evaluate(signal, portfolio_value=0.0, position_value=4300.0,
+                                   portfolio_value_evaluable=False)
+        readable_zero = gate.evaluate(signal, portfolio_value=0.0, position_value=4300.0,
+                                      portfolio_value_evaluable=True)
+        assert unreadable.approved is False
+        assert readable_zero.approved is False

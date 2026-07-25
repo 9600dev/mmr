@@ -107,6 +107,31 @@
 #       the full explanation. Not worth brittle exact-match tests.
 #     * evaluate 188 — `logging.debug(f'...')` -> `logging.debug(None)`. Cosmetic.
 #
+#   position_sizing.py SURVIVOR CLASSIFICATION (2026-07-25, 396/161 = 71.1%).
+#   All 161 classified by whether they can change the SIZED AMOUNT — the only
+#   safety-relevant output (amount_usd / quantity):
+#     * 85 in session_summary() — a reporting method; cannot affect a size.
+#     * 6 reasoning/warning TEXT mutants — cannot affect a size.
+#     * 70 on the size path, and they are almost entirely `> 0` GUARD boundary
+#       mutants (`net_liquidation > 0`, `price > 0`, `avg_daily_volume > 0` ->
+#       `> 1`). They survive for ONE structural reason, worth knowing before
+#       anyone tries to kill them individually: tests/invariants/
+#       test_sizing_properties.py has good properties but its input strategies
+#       never generate the degenerate region — net_liq starts at 10,000 and
+#       price at 1.0, so `> 0` and `> 1` can never disagree. Widening those
+#       strategies would kill most of the 70 at once; writing 70 boundary tests
+#       would be the wrong tool.
+#       CAUTION before widening: probing that region found a real behavioural
+#       edge — at net_liquidation == 0 the percentage cap is bypassed and
+#       compute() returns the default amount (~$4,300 at confidence 0.8) against
+#       a cap of $0. It is the ONLY input where the amount exceeds
+#       max_position_pct; a small-but-positive account is capped correctly. It
+#       is backstopped (the risk gate refuses the open whether net-liq is flagged
+#       unreadable or reads as zero), so it is a wrong number nothing acts on.
+#       Pinned in tests/test_position_sizing.py::TestSizingWithUnreadableNet-
+#       Liquidation. Widening the spec's strategies therefore needs that
+#       behaviour decided FIRST, or the widened property goes red on day one.
+#
 # Usage:
 #   scripts/run_mutation.sh            # all 4 modules, then per-module score
 #   scripts/run_mutation.sh cores      # only the fast pure cores (order_math + proposal_transitions)
