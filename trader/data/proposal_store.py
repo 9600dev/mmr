@@ -1,42 +1,30 @@
 from trader.data.duckdb_store import DuckDBConnection
+from trader.data.proposal_transitions import (
+    _ALLOWED_TRANSITIONS,
+    _TERMINAL,
+    is_known_status,
+    is_valid_transition,
+)
 from trader.trading.proposal import ExecutionSpec, ProposalStatus, TradeProposal
-from typing import List, Optional, Set
+from typing import List, Optional
 
 import datetime as dt
 import json
 
 
-# Valid state transitions:
+# The proposal state machine (transition table + pure validity predicates) lives
+# in trader.data.proposal_transitions — a dependency-light module CrossHair can
+# import and symbolically verify without the duckdb/dill import chain. It is
+# re-exported here so this module's public surface is unchanged:
 #   PENDING  → APPROVED | REJECTED | EXPIRED | FAILED
 #   APPROVED → EXECUTED | FAILED | REJECTED
-# Terminal states (EXECUTED, REJECTED, EXPIRED, FAILED) admit NO further
-# transitions — including same-status no-ops — and their metadata is immutable.
-# This exact table is pinned by tests/invariants/test_proposal_machine.py; a
-# change here without changing that human-owned spec is a bug.
-_TERMINAL: Set[str] = {
-    ProposalStatus.EXECUTED.value,
-    ProposalStatus.REJECTED.value,
-    ProposalStatus.EXPIRED.value,
-    ProposalStatus.FAILED.value,
-}
-
-_ALLOWED_TRANSITIONS = {
-    ProposalStatus.PENDING.value: {
-        ProposalStatus.APPROVED.value,
-        ProposalStatus.REJECTED.value,
-        ProposalStatus.EXPIRED.value,
-        ProposalStatus.FAILED.value,
-    },
-    ProposalStatus.APPROVED.value: {
-        ProposalStatus.EXECUTED.value,
-        ProposalStatus.FAILED.value,
-        ProposalStatus.REJECTED.value,
-    },
-    ProposalStatus.EXECUTED.value: set(),
-    ProposalStatus.REJECTED.value: set(),
-    ProposalStatus.EXPIRED.value: set(),
-    ProposalStatus.FAILED.value: set(),
-}
+# Terminal states admit NO further transitions and their metadata is immutable.
+__all__ = [
+    'ProposalStore',
+    'InvalidProposalTransition',
+    'is_known_status',
+    'is_valid_transition',
+]
 
 
 class InvalidProposalTransition(ValueError):
@@ -188,7 +176,7 @@ class ProposalStore:
         that genuinely want to re-mark a terminal proposal must explicitly delete
         and recreate it.
         """
-        if status not in _ALLOWED_TRANSITIONS and status not in _TERMINAL:
+        if not is_known_status(status):
             raise InvalidProposalTransition(
                 f'unknown proposal status: {status!r}'
             )
@@ -212,8 +200,7 @@ class ProposalStore:
                 raise InvalidProposalTransition(
                     f'proposal {id} is already {current!r}; refusing no-op transition'
                 )
-            allowed = _ALLOWED_TRANSITIONS.get(current, set())
-            if status not in allowed:
+            if not is_valid_transition(current, status):
                 raise InvalidProposalTransition(
                     f'cannot transition proposal {id} from {current!r} to {status!r}'
                 )
@@ -244,10 +231,9 @@ class ProposalStore:
         (already claimed, terminal, or missing). Use this — not get()+update_status
         — whenever the transition guards a side effect like placing a live order.
         """
-        if to_status not in _ALLOWED_TRANSITIONS and to_status not in _TERMINAL:
+        if not is_known_status(to_status):
             raise InvalidProposalTransition(f'unknown proposal status: {to_status!r}')
-        allowed = _ALLOWED_TRANSITIONS.get(from_status, set())
-        if to_status not in allowed:
+        if not is_valid_transition(from_status, to_status):
             raise InvalidProposalTransition(
                 f'cannot transition proposal {id} from {from_status!r} to {to_status!r}'
             )

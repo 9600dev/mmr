@@ -1,9 +1,23 @@
-"""Position sizing — portfolio-aware sizing with hard limits and risk appetite."""
+"""Position sizing — portfolio-aware sizing with hard limits and risk appetite.
 
+The full ``PositionSizer.compute`` pipeline reads config + portfolio/liquidity
+state and threads a human-readable reasoning string through many branches, so
+it is not a clean target for a single contract. Instead the genuinely pure,
+referentially-transparent sub-steps are factored into module-level helpers
+(``_confidence_scale``, ``_volatility_multiplier``, ``compute_atr``) that carry
+``deal`` contracts and are symbolically checked by CrossHair. Each encodes a
+"result stays inside its documented band" invariant (confidence scale in
+[min_scale, 1], volatility multiplier in [vol_scale_min, vol_scale_max], ATR
+non-negative), which is exactly the "result >= 0 / result <= active cap" shape
+the sizing safety story depends on.
+"""
+
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+import deal
 import yaml
 
 
@@ -14,6 +28,37 @@ RISK_MULTIPLIERS = {
     'moderate': 1.0,
     'aggressive': 1.5,
 }
+
+
+@deal.pure
+@deal.pre(lambda min_confidence_scale, confidence: 0.0 <= min_confidence_scale <= 1.0)
+@deal.ensure(lambda _: _.min_confidence_scale - 1e-9 <= _.result <= 1.0 + 1e-9)
+def _confidence_scale(min_confidence_scale: float, confidence: float) -> float:
+    """Linear confidence→scale map used by the sizer (step 2).
+
+    ``confidence`` is clamped to [0, 1], then scaled so scale=min at
+    confidence 0 and scale=1 at confidence 1. Result is bounded to
+    [min_confidence_scale, 1] — the documented band — so it can only shrink,
+    never inflate, the base size.
+    """
+    confidence = max(0.0, min(1.0, confidence))
+    return min_confidence_scale + (1.0 - min_confidence_scale) * confidence
+
+
+@deal.pure
+@deal.pre(lambda reference_atr_pct, atr_pct, vol_scale_min, vol_scale_max: reference_atr_pct > 0 and atr_pct > 0 and 0 < vol_scale_min <= vol_scale_max)  # noqa: E501
+@deal.ensure(lambda _: _.vol_scale_min - 1e-9 <= _.result <= _.vol_scale_max + 1e-9)
+def _volatility_multiplier(reference_atr_pct: float, atr_pct: float,
+                           vol_scale_min: float, vol_scale_max: float) -> float:
+    """Inverse-ATR volatility multiplier (sizer step 2b).
+
+    Higher ATR% → smaller multiplier. The raw ratio is clamped to
+    [vol_scale_min, vol_scale_max], so the result never escapes that band —
+    a volatile stock is always sized down, a stable one up, within the caps.
+    """
+    floor = reference_atr_pct * 0.25
+    vol_multiplier = reference_atr_pct / max(atr_pct, floor)
+    return max(vol_scale_min, min(vol_scale_max, vol_multiplier))
 
 
 @dataclass
@@ -28,25 +73,30 @@ class VolatilityInfo:
         return self.atr / self.price if self.price > 0 and self.atr > 0 else 0.0
 
 
+@deal.has()  # side-effect free (reads only its list arguments)
+@deal.pre(lambda highs, lows, closes, period=14: period >= 1)
+@deal.ensure(lambda _: _.result is None or _.result >= 0.0)
 def compute_atr(highs: List[float], lows: List[float], closes: List[float],
                 period: int = 14) -> Optional[float]:
     """Compute Average True Range (ATR) from OHLC data.
 
     TR = max(H-L, |H-prevC|, |L-prevC|), then SMA over period.
-    Returns None if insufficient data.
+    Returns None if insufficient data. Precondition: period >= 1 (the SMA
+    divides by it). Postcondition: None, or a non-negative ATR (it is a mean
+    of non-negative true ranges).
     """
-    import math
-
     n = len(highs)
     if len(lows) != n or len(closes) != n:
         return None
 
-    # Drop bars with a missing/NaN H, L or C. A single NaN (e.g. an injected
-    # null-day marker for a holiday) otherwise propagates through max()/sum() and
-    # makes the whole ATR NaN — which silently disabled volatility-aware sizing
-    # for any symbol whose history had even one gap bar.
+    # Drop bars with a missing/non-finite H, L or C. A single NaN (e.g. an
+    # injected null-day marker for a holiday) — or a ±inf price — otherwise
+    # propagates through subtraction/max()/sum() (inf - inf = NaN) and makes the
+    # whole ATR NaN, which silently disabled volatility-aware sizing for any
+    # symbol whose history had even one gap bar. Non-finite is non-finite: drop
+    # it. (This keeps the postcondition — a non-negative ATR — universally true.)
     def _bad(x) -> bool:
-        return x is None or (isinstance(x, float) and math.isnan(x))
+        return x is None or (isinstance(x, float) and not math.isfinite(x))
 
     triples = [(h, l, c) for h, l, c in zip(highs, lows, closes)
                if not (_bad(h) or _bad(l) or _bad(c))]
@@ -268,7 +318,7 @@ class PositionSizer:
 
         # 2. Scale by confidence
         confidence = max(0.0, min(1.0, confidence))
-        scale = cfg.min_confidence_scale + (1.0 - cfg.min_confidence_scale) * confidence
+        scale = _confidence_scale(cfg.min_confidence_scale, confidence)
         sized = raw * scale
 
         if cfg.base_position_pct > 0 and state.net_liquidation > 0:
@@ -282,10 +332,10 @@ class PositionSizer:
         # 2b. Volatility adjustment — inverse ATR scaling
         vol = volatility
         if cfg.volatility_adjustment and vol and vol.atr_pct > 0:
-            # Higher ATR% → smaller multiplier (more volatile = fewer shares)
-            floor = cfg.reference_atr_pct * 0.25
-            vol_multiplier = cfg.reference_atr_pct / max(vol.atr_pct, floor)
-            vol_multiplier = max(cfg.vol_scale_min, min(cfg.vol_scale_max, vol_multiplier))
+            # Higher ATR% → smaller multiplier (more volatile = fewer shares).
+            # Pure, contracted: result is clamped to [vol_scale_min, vol_scale_max].
+            vol_multiplier = _volatility_multiplier(
+                cfg.reference_atr_pct, vol.atr_pct, cfg.vol_scale_min, cfg.vol_scale_max)
             sized *= vol_multiplier
             parts.append(f'vol ATR {vol.atr_pct:.2%} (mult {vol_multiplier:.2f}x)')
         elif cfg.volatility_adjustment and (vol is None or vol.atr_pct == 0):
