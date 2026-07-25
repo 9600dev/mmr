@@ -86,6 +86,27 @@
 #       test_a_cushion_refusal_records_the_cushion_dimension. Lesson: adding an
 #       observability record adds mutable surface — assert EVERY branch of it.
 #
+#   risk_gate.py RESIDUAL CLASSES (2026-07-25, after 85.3% -> 94.8%, 294/16).
+#   Every remaining survivor is classified; none is an unexamined gap:
+#     * xǁRiskGateǁ__init____mutmut_3 — `trading_filter = None` -> `""`. Only ever
+#       read via `if not self.trading_filter:`; both falsy. TRUE EQUIVALENT.
+#     * check_leverage 13/15 — see above.
+#     * 6 DEFAULT-ARGUMENT mutants (evaluate 1/2/3/8, check_instrument 1/2):
+#       they mutate parameter DEFAULTS. Both production callers (trading_runtime,
+#       executioner) pass every argument explicitly, so the defaults are
+#       unreachable in production. Killing them properly means removing the
+#       defaults (or flipping *_evaluable to fail-closed) — MEASURED: that breaks
+#       26 existing tests, for a benefit that only accrues against a future
+#       caller who omits an argument. Recorded as a deliberate residual, not an
+#       oversight. Revisit if a third caller of RiskGate.evaluate ever appears.
+#     * 6 STRING mutants wrapping a reason in XX...XX (evaluate 41/44/88/91/
+#       106/108). The contract-bearing substrings ARE asserted
+#       (test_fail_closed_refusals_say_they_are_fail_closed), which killed the
+#       case-flip variants; XX-wrapping preserves every substring, so only an
+#       exact-text assertion would catch it. Cosmetic: the operator still reads
+#       the full explanation. Not worth brittle exact-match tests.
+#     * evaluate 188 — `logging.debug(f'...')` -> `logging.debug(None)`. Cosmetic.
+#
 # Usage:
 #   scripts/run_mutation.sh            # all 4 modules, then per-module score
 #   scripts/run_mutation.sh cores      # only the fast pure cores (order_math + proposal_transitions)

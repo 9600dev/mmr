@@ -503,3 +503,129 @@ class TestCheckLeverageMissingData:
         """whatIfOrder returning {} — the shape closest to a real IB failure."""
         gate = self._gate(event_store, max_leverage=0.001, min_margin_cushion=0.99)
         assert gate.check_leverage({}, net_liquidation=1_000_000.0).approved is True
+
+
+class TestEvaluateUnassertedSurface:
+    """Mutation gaps in evaluate() — the gate's actual decision function.
+
+    31 survivors sat here unexamined. These cover the three groups that matter:
+    the tri-state record on the REFUSAL branches (now load-bearing — the
+    placement chokepoint refuses an opening order whose record is empty or
+    contains a 'fail'), the rate-limit lookback WINDOW, and the concentration
+    boundaries. The remaining survivors are reason-string case/text mutants and
+    a logging call; the fail-closed contract in those messages is pinned below
+    by substring, the rest are cosmetic.
+    """
+
+    def test_max_open_orders_refusal_records_its_dimension(self, event_store):
+        """Kills the max_open_orders key mutants (12, 13)."""
+        gate = RiskGate(limits=RiskLimits(max_open_orders=1), event_store=event_store)
+        result = gate.evaluate(_make_signal(), open_order_count=5,
+                               portfolio_value=100_000.0, position_value=100.0)
+        assert result.approved is False
+        assert result.checks == {'max_open_orders': 'fail'}
+
+    def test_daily_loss_refusal_records_its_dimension_and_carries_the_record(self, event_store):
+        """Kills the daily_loss key/value mutants (48-52) and the two that drop
+        the record entirely (55: checks=None, 58: the kwarg removed).
+
+        The record is not cosmetic: subscribe_place_order_direct refuses an
+        exposure-increasing order whose checks are empty or contain a 'fail', so
+        a dropped record changes what the chokepoint can see."""
+        gate = RiskGate(limits=RiskLimits(max_daily_loss=100.0), event_store=event_store)
+        result = gate.evaluate(_make_signal(), daily_pnl=-500.0,
+                               portfolio_value=100_000.0, position_value=100.0)
+        assert result.approved is False
+        assert result.checks == {'max_open_orders': 'pass', 'daily_loss': 'fail'}
+
+    def test_fail_closed_refusals_say_they_are_fail_closed(self, event_store):
+        """The refusal message is the only explanation an operator gets. Pins
+        the contract-bearing substrings of both fail-closed paths (kills the
+        case/text mutants on those two reasons: 41-45, 88-92, 106-109)."""
+        gate = RiskGate(limits=RiskLimits(), event_store=event_store)
+
+        unreadable_pnl = gate.evaluate(_make_signal(), daily_pnl_evaluable=False)
+        assert unreadable_pnl.approved is False
+        assert 'daily PnL could not be read' in unreadable_pnl.reason
+        assert 'fail-closed' in unreadable_pnl.reason
+
+        unreadable_nav = gate.evaluate(_make_signal(), portfolio_value_evaluable=False)
+        assert unreadable_nav.approved is False
+        assert 'NetLiquidation' in unreadable_nav.reason
+        assert 'fail-closed' in unreadable_nav.reason
+
+        no_price = gate.evaluate(_make_signal(), position_value_evaluable=False)
+        assert no_price.approved is False
+        assert 'no price available' in no_price.reason
+        assert 'fail-closed' in no_price.reason
+
+    def test_rate_limit_window_is_one_hour_not_longer(self, event_store):
+        """Kills mutant 154 (`timedelta(hours=1)` -> `hours=2`).
+
+        Nothing asserted the WINDOW of the rate limiter — only that it counts.
+        A 90-minute-old submission must fall OUTSIDE the hour and therefore not
+        count; under a 2-hour window it would, and the order would be refused."""
+        event_store.append(TradingEvent(
+            event_type=EventType.ORDER_SUBMITTED,
+            timestamp=dt.datetime.now() - dt.timedelta(minutes=90),
+            strategy_name='test_strat',
+            conid=4391,
+        ))
+        gate = RiskGate(limits=RiskLimits(max_signals_per_hour=1), event_store=event_store)
+        result = gate.evaluate(_make_signal(), portfolio_value=100_000.0, position_value=100.0)
+        assert result.approved is True, 'a 90-minute-old order counted inside the 1h window'
+        assert result.checks['order_rate'] == 'pass'
+
+    def test_a_sub_unit_position_value_is_still_concentration_checked(self, event_store):
+        """Kills mutant 111 (`position_value > 0` -> `> 1`). A fractional
+        position value must still be evaluated, not silently skipped."""
+        gate = RiskGate(limits=RiskLimits(max_position_size_pct=0.10), event_store=event_store)
+        result = gate.evaluate(_make_signal(), portfolio_value=100.0, position_value=0.5)
+        assert result.approved is True
+        assert result.checks['concentration'] == 'pass', 'concentration was never evaluated'
+
+    def test_a_sub_unit_portfolio_value_is_not_treated_as_zero(self, event_store):
+        """Kills mutant 113 (`portfolio_value <= 0` -> `<= 1`). A tiny but
+        POSITIVE portfolio must go through the ratio, not the degenerate branch:
+        0.05/1.0 = 5% is within a 10% cap and must approve."""
+        gate = RiskGate(limits=RiskLimits(max_position_size_pct=0.10), event_store=event_store)
+        result = gate.evaluate(_make_signal(), portfolio_value=1.0, position_value=0.05)
+        assert result.approved is True, 'a positive sub-$1 portfolio hit the degenerate branch'
+        assert result.checks['concentration'] == 'pass'
+
+
+class TestCheckInstrumentForwardsEveryField:
+    """check_instrument must pass exchange AND sec_type through to the filter.
+
+    Mutation found four survivors here (8, 9, 11, 12) that drop or null those
+    arguments. Nothing verified the forwarding, so an exchange-based or
+    sec_type-based denylist rule could silently stop applying while every
+    symbol-based test kept passing — the filter would look enforced and be
+    half-blind.
+    """
+
+    def test_exchange_denylist_reaches_the_filter(self, event_store):
+        """Kills mutants 8 and 11 (exchange -> None / dropped)."""
+        from trader.trading.trading_filter import TradingFilter
+        gate = RiskGate(limits=RiskLimits(), event_store=event_store)
+        gate.trading_filter = TradingFilter(deny_exchanges=['ASX'])
+
+        denied = gate.check_instrument(symbol='BHP', exchange='ASX', sec_type='STK')
+        assert denied.approved is False, 'exchange never reached the filter'
+        assert 'ASX' in (denied.reason or '')
+
+        allowed = gate.check_instrument(symbol='AMD', exchange='NASDAQ', sec_type='STK')
+        assert allowed.approved is True
+
+    def test_sec_type_denylist_reaches_the_filter(self, event_store):
+        """Kills mutants 9 and 12 (sec_type -> None / dropped)."""
+        from trader.trading.trading_filter import TradingFilter
+        gate = RiskGate(limits=RiskLimits(), event_store=event_store)
+        gate.trading_filter = TradingFilter(deny_sec_types=['CASH'])
+
+        denied = gate.check_instrument(symbol='EUR', exchange='IDEALPRO', sec_type='CASH')
+        assert denied.approved is False, 'sec_type never reached the filter'
+        assert 'CASH' in (denied.reason or '')
+
+        allowed = gate.check_instrument(symbol='AMD', exchange='NASDAQ', sec_type='STK')
+        assert allowed.approved is True
