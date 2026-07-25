@@ -33,6 +33,38 @@ to `kill -9` and let supervise recreate it; (2) after a trader_service-only
 restart the strategy_service reconcile loop re-subscribed market data on its
 own within ~4 min (tick flow resumed without touching strategy_service).
 
+## 2026-07-23 — Phase 2 proposer/approver split landed in repo (NOT deployed, defaults OFF)
+
+The Phase 2 split (`docs/SAFETY_ROADMAP.md` → Tranche 2 Phase 2) is in the
+working tree, **all knobs default OFF/operator** — no behaviour change on
+deploy until an operator opts in. Three pieces: a server-side **notional
+tier**, a **trusted/untrusted** proposal surface, and the **`MMR_ROLE`**
+capability gate.
+
+**Deploy note — enabling the notional tier (when ready, live):**
+
+1. Pick a threshold ABOVE the auto-executor's max sized notional. That max is
+   `position_sizing.yaml max_position_usd` (currently $25k default) bounded by
+   `max_position_pct` × net-liq — set `approver_required_above_usd` above
+   whichever binds, or the auto-executor's own sized opens would be refused
+   for lack of a key. trader_service logs a WARNING at startup if
+   `max_position_usd` exceeds the threshold — heed it.
+2. Deliver `MMR_APPROVER_KEY` **out of band**: a services-only `secrets.env`
+   sourced by trader_service's child env, or type `mmr approve --approver-key
+   ...` at approval. **Never** put it in `docker-compose.yml environment:`,
+   `.mmr_env`, or `~/.config/mmr/` — all readable by a `docker exec` proposer.
+   The env var WINS over `approver_key:` in trader.yaml.
+3. Above-threshold opens then need the key; **exits never need it** (a close
+   is exit-class and skips the tier entirely). The auto-executor, kept below
+   threshold, is unaffected and carries no key.
+
+**Caveat (Phase 2b, not built):** while the proposing agent and the approver
+share one container, the split raises the bar but is not a hard boundary — a
+`docker exec` proposer can still reach `mmr approve`. True severing needs the
+proposer in an isolated context that lacks both the approve surface and the
+key. Until then, `MMR_ROLE=proposer` on the proposing context is the legibility
+layer (removes buy/sell/approve/resize/strategy-control from its surface).
+
 ## 2026-07-23 — tranche-1 safety upgrades landed in repo (NOT deployed)
 
 The safety tranche described in `docs/SAFETY_ROADMAP.md` is in the working
