@@ -19,7 +19,9 @@ from trader.strategy.auto_executor import (
     AutoExecutor,
     AutoExecutionError,
     BarWork,
+    Directive,
     SignalWork,
+    check_manifest,
     check_time_exit,
     decide_signal,
 )
@@ -697,3 +699,251 @@ class TestDisarmedCloseNotStranded:
         d = decide(make_work(action=Action.SELL, auto_execute=False),
                    held_qty=18.0, kill_switch=True)
         assert d.kind == 'skip' and 'kill switch' in d.reason
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 approver notional tier vs. the auto-executor (operational contract)
+# ---------------------------------------------------------------------------
+#
+# The auto-executor routes opens through propose -> approve ->
+# place_expressive_order with algo_name=<strategy> and NO approver_key. The
+# design keeps its sized notional BELOW the operator threshold, so it carries
+# no credential and is unaffected. These tests exercise place_expressive_order
+# directly with an auto-exec-shaped call:
+#   * feature ON, threshold ABOVE the sized notional, no MMR_APPROVER_KEY in
+#     env -> the open executes (auto-executor lifecycle is sacred);
+#   * an above-threshold (mis-sized) auto open IS refused — documenting the
+#     operational requirement to set the threshold above the auto max notional.
+
+class TestAutoExecutorApproverTier:
+    def _stub_trader(self, threshold):
+        import threading
+        from unittest.mock import AsyncMock, MagicMock
+        import reactivex as rx
+        from trader.trading.risk_gate import RiskGateResult, RiskInputs
+        from trader.trading.trading_runtime import Trader
+
+        class _ApproveAll:
+            def check_instrument(self, **kw): return RiskGateResult(approved=True)
+            def check_leverage(self, *a, **kw): return RiskGateResult(approved=True)
+            def evaluate(self, *a, **kw): return RiskGateResult(approved=True)
+
+        class _Exec:
+            def __init__(self): self.calls = 0
+            async def subscribe_place_order_direct(self, approved):
+                self.calls += 1
+                ft = MagicMock(); ft.order = MagicMock(); ft.order.orderId = 1
+                return rx.from_iterable([ft])
+
+        class _Tick:
+            ask = bid = last = close = 100.0
+
+        t = object.__new__(Trader)
+        t.pnl_subscriptions = {}
+        t._pnl_subscriptions_lock = threading.Lock()
+        t._main_loop = None
+        t.disposables = []
+        t.ib_account = 'DU12345'
+        t.approver_required_above_usd = threshold
+        # No key configured server-side either — the point is that below-threshold
+        # auto opens never consult it.
+        t.approver_key = ''
+        t.order_tracker = None
+        t.order_reduces_exposure = MagicMock(return_value=False)
+        t.risk_gate = _ApproveAll()
+        t.check_order_margin = AsyncMock(side_effect=Exception('skip'))
+        t.gather_risk_inputs = MagicMock(return_value=RiskInputs(
+            open_order_count=0, daily_pnl=0.0, daily_pnl_evaluable=True,
+            portfolio_value=1e7, portfolio_value_evaluable=True))
+        client = MagicMock()
+        client.get_snapshot = AsyncMock(return_value=_Tick())
+        t.client = client
+        t.executioner = _Exec()
+        return t
+
+    def _contract(self):
+        from ib_async.contract import Contract
+        c = Contract(); c.symbol = 'PLTR'; c.exchange = 'NASDAQ'
+        c.secType = 'STK'; c.conId = 4391
+        return c
+
+    def _spec(self):
+        from trader.trading.proposal import ExecutionSpec
+        return ExecutionSpec(order_type='MARKET', exit_type='NONE').to_dict()
+
+    def test_below_threshold_auto_open_executes_without_key(self, monkeypatch):
+        import asyncio
+        from trader.common.reactivex import SuccessFailEnum
+        monkeypatch.delenv('MMR_APPROVER_KEY', raising=False)
+        # Sized notional 20 * 100 = $2000, threshold $5000 (above it).
+        t = self._stub_trader(5000.0)
+        result = asyncio.run(t.place_expressive_order(
+            self._contract(), 'BUY', 20, self._spec(),
+            algo_name='pltr_orb'))  # note: no approver_key passed at all
+        assert result.success_fail == SuccessFailEnum.SUCCESS
+        assert t.executioner.calls == 1
+
+    def test_above_threshold_mis_sized_auto_open_refused(self, monkeypatch):
+        import asyncio
+        from trader.common.reactivex import SuccessFailEnum
+        monkeypatch.delenv('MMR_APPROVER_KEY', raising=False)
+        # Mis-sized: 100 * 100 = $10000 > $5000 threshold. Refused (no key).
+        t = self._stub_trader(5000.0)
+        result = asyncio.run(t.place_expressive_order(
+            self._contract(), 'BUY', 100, self._spec(),
+            algo_name='pltr_orb'))
+        assert result.success_fail == SuccessFailEnum.FAIL
+        assert t.executioner.calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Strategy manifest — pure check_manifest gate (opens only)
+# ---------------------------------------------------------------------------
+
+_OPEN = Directive('open', 'BUY while flat', quantity=None)
+
+
+class TestCheckManifestUniverse:
+    def test_conid_in_allowed_passes(self):
+        w = make_work(conid=1111, manifest_allowed_conids=[1111, 2222])
+        assert check_manifest(w, _OPEN, opens_today=0, opens_hour=0) is None
+
+    def test_conid_outside_allowed_refused(self):
+        w = make_work(conid=9999, manifest_allowed_conids=[1111, 2222])
+        d = check_manifest(w, _OPEN, opens_today=0, opens_hour=0)
+        assert d is not None and d.kind == 'refused'
+        assert '9999' in d.reason and 'allowed_conids' in d.reason
+
+    def test_allowed_none_is_unchecked(self):
+        w = make_work(conid=9999, manifest_allowed_conids=None)
+        assert check_manifest(w, _OPEN, opens_today=0, opens_hour=0) is None
+
+    def test_empty_allowed_list_refuses_everything(self):
+        # An explicit empty whitelist means "trade nothing" — a deliberate,
+        # not-None declaration, distinct from None (unchecked).
+        w = make_work(conid=1111, manifest_allowed_conids=[])
+        d = check_manifest(w, _OPEN, opens_today=0, opens_hour=0)
+        assert d is not None and d.kind == 'refused'
+
+
+class TestCheckManifestTurnover:
+    def test_under_daily_cap_passes(self):
+        w = make_work(manifest_max_opens_per_day=3)
+        assert check_manifest(w, _OPEN, opens_today=2, opens_hour=0) is None
+
+    def test_at_daily_cap_refused(self):
+        w = make_work(manifest_max_opens_per_day=3)
+        d = check_manifest(w, _OPEN, opens_today=3, opens_hour=0)
+        assert d is not None and d.kind == 'refused'
+        assert 'per_day' in d.reason
+
+    def test_over_daily_cap_refused(self):
+        w = make_work(manifest_max_opens_per_day=3)
+        d = check_manifest(w, _OPEN, opens_today=5, opens_hour=0)
+        assert d is not None and d.kind == 'refused'
+
+    def test_hourly_cap_binds_independently(self):
+        w = make_work(manifest_max_opens_per_day=100, manifest_max_opens_per_hour=2)
+        # Under daily but at hourly => refused.
+        d = check_manifest(w, _OPEN, opens_today=5, opens_hour=2)
+        assert d is not None and 'per_hour' in d.reason
+
+    def test_none_caps_unchecked(self):
+        w = make_work(manifest_max_opens_per_day=None, manifest_max_opens_per_hour=None)
+        assert check_manifest(w, _OPEN, opens_today=999, opens_hour=999) is None
+
+    def test_pyramid_add_open_counts_toward_turnover(self):
+        # A pyramid add is an 'open' directive; the gate treats it identically
+        # to a fresh open (both increase exposure), so a full daily count
+        # refuses the add.
+        add = Directive('open', 'pyramid add (lot 2)', quantity=None)
+        w = make_work(pyramid_max_adds=3, manifest_max_opens_per_day=2)
+        assert check_manifest(w, add, opens_today=1, opens_hour=0) is None
+        d = check_manifest(w, add, opens_today=2, opens_hour=0)
+        assert d is not None and d.kind == 'refused'
+
+
+class TestCheckManifestDirection:
+    def test_long_declaration_allows_long_open(self):
+        w = make_work(action=Action.BUY, manifest_direction='long')
+        assert check_manifest(w, _OPEN, opens_today=0, opens_hour=0) is None
+
+    def test_long_declaration_refuses_synthetic_short_open(self):
+        # Today unreachable (decide_signal never emits an 'open' for SELL);
+        # synthesise the future short-path regression and prove the gate
+        # catches it.
+        short_open = Directive('open', 'SHORT entry (hypothetical)', quantity=None)
+        w = make_work(action=Action.SELL, manifest_direction='long')
+        d = check_manifest(w, short_open, opens_today=0, opens_hour=0)
+        assert d is not None and d.kind == 'refused'
+        assert d.reason.startswith('manifest: direction')
+
+    def test_direction_none_does_not_refuse_short_open(self):
+        short_open = Directive('open', 'SHORT entry (hypothetical)', quantity=None)
+        w = make_work(action=Action.SELL, manifest_direction=None)
+        assert check_manifest(w, short_open, opens_today=0, opens_hour=0) is None
+
+
+class TestCountOpensSince:
+    def test_counts_only_open_decisions(self, state):
+        now = dt.datetime.now()
+        since = now - dt.timedelta(hours=24)
+        state.log_decision('s1', 1, TS, 'BUY', 'open', 'proposal #1')
+        state.log_decision('s1', 1, TS, 'BUY', 'skip', 'cooldown')
+        state.log_decision('s1', 1, TS, 'SELL', 'close', 'proposal #2')
+        state.log_decision('s1', 1, TS, 'BUY', 'refused', 'manifest')
+        state.log_decision('s1', 1, TS, 'BUY', 'open', 'proposal #3')
+        assert state.count_opens_since('s1', since) == 2
+        # Other strategies don't count.
+        assert state.count_opens_since('s2', since) == 0
+
+    def test_window_excludes_old_opens(self, state):
+        # Force an old 'created' timestamp by writing directly.
+        old = dt.datetime.now() - dt.timedelta(hours=48)
+        state.db.execute(
+            "INSERT INTO auto_exec_bar_log VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ['s1', 1, TS.to_pydatetime(), 'BUY', 'open', 'old', old])
+        state.log_decision('s1', 1, TS, 'BUY', 'open', 'recent')
+        since = dt.datetime.now() - dt.timedelta(hours=24)
+        assert state.count_opens_since('s1', since) == 1
+
+
+class TestManifestPipelineOpen:
+    """End-to-end through _process_signal — a refused open places NO order but
+    logs a 'refused' decision; an allowed open proceeds normally."""
+
+    def test_out_of_universe_open_refused_no_order(self, executor):
+        ex, sdk = executor
+        ex._process_signal(make_work(conid=1111, manifest_allowed_conids=[2222]))
+        assert sdk.propose_calls == []  # no order placed
+        assert ex.state.open_position('orb_test', 1111) is None
+
+    def test_in_universe_open_proceeds(self, executor):
+        ex, sdk = executor
+        ex._process_signal(make_work(conid=1111, manifest_allowed_conids=[1111]))
+        assert len(sdk.propose_calls) == 1
+        assert ex.state.open_position('orb_test', 1111) is not None
+
+    def test_turnover_cap_refuses_after_limit(self, executor):
+        ex, sdk = executor
+        ex.cooldown_seconds = 0.0
+        # cap of 1 open/day: first opens, close, then a second open on a new
+        # bar is refused (one 'open' already logged in the rolling window).
+        ex._process_signal(make_work(manifest_max_opens_per_day=1))
+        assert len(sdk.propose_calls) == 1
+        ex._process_signal(make_work(action=Action.SELL,
+                                     bar_ts=TS + pd.Timedelta(minutes=5),
+                                     manifest_max_opens_per_day=1))
+        # close placed (exits are never manifest-checked)
+        assert len(sdk.propose_calls) == 2
+        # second open refused by the daily cap
+        ex._process_signal(make_work(bar_ts=TS + pd.Timedelta(minutes=10),
+                                     manifest_max_opens_per_day=1))
+        opens = [c for c in sdk.propose_calls if c['action'] == 'BUY']
+        assert len(opens) == 1  # the second open never fired
+
+    def test_no_manifest_is_noop_fast_path(self, executor):
+        ex, sdk = executor
+        # No manifest fields => _manifest_gate returns None without a DB query.
+        ex._process_signal(make_work())
+        assert len(sdk.propose_calls) == 1

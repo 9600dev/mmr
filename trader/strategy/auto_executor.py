@@ -96,6 +96,14 @@ class SignalWork:
     # the initial entry, so a stack tops out at N+1 fixed-size lots. Set per
     # strategy via ``pyramid_max_adds`` in strategy_runtime.yaml.
     pyramid_max_adds: int = 0
+    # Strategy manifest primitives (see StrategyContext / check_manifest).
+    # All None => no declared envelope => unchecked (backward-compatible).
+    # These are enforced OPENS ONLY, in _process_signal's open branch, so a
+    # declared envelope can never block a close, skip, or time-exit.
+    manifest_allowed_conids: Optional[list] = None
+    manifest_direction: Optional[str] = None
+    manifest_max_opens_per_day: Optional[int] = None
+    manifest_max_opens_per_hour: Optional[int] = None
 
 
 def bar_age_seconds(bar_ts, now_utc: Optional[dt.datetime] = None) -> Optional[float]:
@@ -238,6 +246,65 @@ def check_time_exit(
     return None
 
 
+def check_manifest(
+    work: SignalWork,
+    directive: Directive,
+    opens_today: int,
+    opens_hour: int,
+) -> Optional[Directive]:
+    """Manifest-envelope gate. **Pure** — turnover counts are passed in, no I/O.
+
+    Returns ``None`` to allow the directive, or a ``Directive('refused', ...)``
+    to refuse it. The caller invokes this ONLY for ``directive.kind == 'open'``
+    (``_process_signal``'s open branch), so closes, skips, and the time-exit
+    path never reach it — a declared envelope is structurally incapable of
+    blocking an exit. Any manifest field left ``None`` is unchecked, so a
+    strategy with no manifest is byte-identical to today.
+
+    Rules (opens only):
+      * **Universe** — the executor trades ``work.conid`` (the subscribed
+        dispatch conId). If ``allowed_conids`` is declared and does not include
+        it, the instrument is watched but not tradeable ⇒ refuse.
+      * **Direction** — a ``'long'`` declaration on the long-only executor.
+        Today an ``'open'`` directive is always a long (BUY) open —
+        ``decide_signal`` has no short-open path — so this branch is
+        unreachable now; it exists to catch a FUTURE short-path regression
+        (an ``'open'`` synthesised from a SELL) under a ``'long'`` declaration.
+      * **Turnover** — ``opens_today`` / ``opens_hour`` are the counts of PAST
+        exposure-increasing orders (opens + pyramid adds, never closes) in the
+        rolling windows; the cap binds when the count already reached the
+        declared limit.
+    """
+    allowed = work.manifest_allowed_conids
+    if allowed is not None and work.conid not in allowed:
+        return Directive(
+            'refused',
+            f'manifest: conId {work.conid} not in allowed_conids {sorted(allowed)}')
+
+    if (work.manifest_direction == 'long'
+            and directive.kind == 'open' and work.action == Action.SELL):
+        return Directive(
+            'refused',
+            'manifest: direction=long but this open is a short-open (SELL) — '
+            'refusing (long-only invariant; a short path should never reach here)')
+
+    if (work.manifest_max_opens_per_day is not None
+            and opens_today >= work.manifest_max_opens_per_day):
+        return Directive(
+            'refused',
+            f'manifest: max_opening_orders_per_day {work.manifest_max_opens_per_day} '
+            f'reached ({opens_today} opens in last 24h)')
+
+    if (work.manifest_max_opens_per_hour is not None
+            and opens_hour >= work.manifest_max_opens_per_hour):
+        return Directive(
+            'refused',
+            f'manifest: max_opening_orders_per_hour {work.manifest_max_opens_per_hour} '
+            f'reached ({opens_hour} opens in last hour)')
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Persistent state — position attribution + per-bar execution dedup.
 # ---------------------------------------------------------------------------
@@ -305,6 +372,21 @@ class AutoExecState:
         self.db.execute(
             "INSERT INTO auto_exec_bar_log VALUES (?, ?, ?, ?, ?, ?, ?)",
             [strategy, conid, _naive(bar_ts), action, decision, reason, dt.datetime.now()])
+
+    def count_opens_since(self, strategy: str, since: dt.datetime) -> int:
+        """Count exposure-INCREASING orders for a strategy since ``since``.
+
+        ``_execute_open`` logs ``decision='open'`` for BOTH a fresh open and a
+        pyramid add (and NEVER for a close, skip, or refusal), so this counts
+        exactly the manifest's turnover unit — opens + adds, never exits.
+        Keyed on the ``created`` wall-clock column (not the bar timestamp), so
+        the manifest's rolling window is a real elapsed-time window and is
+        restart-safe (it persists across process restarts with the log)."""
+        row = self.db.execute(
+            "SELECT COUNT(*) FROM auto_exec_bar_log "
+            "WHERE strategy=? AND decision='open' AND created >= ?",
+            [strategy, since], fetch='one')
+        return int(row[0]) if row else 0
 
     # -- position attribution --------------------------------------------------
 
@@ -624,6 +706,25 @@ class AutoExecutor:
 
         try:
             if directive.kind == 'open':
+                # Manifest envelope — OPENS ONLY. Checked here, inside the open
+                # branch and BEFORE any propose, so the close/skip/time-exit
+                # paths are structurally exempt (an envelope can never block an
+                # exit). A refusal places no order.
+                refusal = self._manifest_gate(work, directive)
+                if refusal is not None:
+                    # Direction refusals are a regression signal (an
+                    # unexpected short path appeared) — loud ERROR. Universe /
+                    # turnover refusals are ordinary policy — WARNING. Both
+                    # write decision='refused' to the audit log and propose
+                    # nothing (mirrors the deliberate-refusal path below).
+                    log = (logging.error
+                           if refusal.reason.startswith('manifest: direction')
+                           else logging.warning)
+                    log('auto-executor: %s conId %s %s — %s',
+                        work.strategy_name, work.conid, work.action, refusal.reason)
+                    self.state.log_decision(work.strategy_name, work.conid, work.bar_ts,
+                                            str(work.action), 'refused', refusal.reason)
+                    return
                 self._execute_open(work, directive)
             elif directive.kind == 'close':
                 self._execute_close(work.strategy_name, work.conid, work.bar_ts,
@@ -636,6 +737,30 @@ class AutoExecutor:
                           work.strategy_name, work.conid, ex)
             self.state.log_decision(work.strategy_name, work.conid, work.bar_ts,
                                     str(work.action), 'refused', str(ex))
+
+    def _manifest_gate(self, work: SignalWork, directive: Directive) -> Optional[Directive]:
+        """Run the pure ``check_manifest`` gate, supplying the rolling-window
+        turnover counts it needs. Fast no-op (no DB read) when the strategy
+        declared no manifest — this keeps the no-manifest path byte-identical.
+
+        The per-day window is a ROLLING 24h (``now - 24h``), not a session/
+        calendar day: it needs no session-boundary bookkeeping and survives a
+        restart because the counts come straight from the persisted bar log."""
+        if (work.manifest_allowed_conids is None
+                and work.manifest_direction is None
+                and work.manifest_max_opens_per_day is None
+                and work.manifest_max_opens_per_hour is None):
+            return None
+        now = dt.datetime.now()
+        opens_today = 0
+        opens_hour = 0
+        if work.manifest_max_opens_per_day is not None:
+            opens_today = self.state.count_opens_since(
+                work.strategy_name, now - dt.timedelta(hours=24))
+        if work.manifest_max_opens_per_hour is not None:
+            opens_hour = self.state.count_opens_since(
+                work.strategy_name, now - dt.timedelta(hours=1))
+        return check_manifest(work, directive, opens_today, opens_hour)
 
     def _execute_open(self, work: SignalWork, directive: Directive):
         ident = self._resolve_exact(work.conid)

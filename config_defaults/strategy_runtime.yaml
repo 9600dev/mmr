@@ -69,3 +69,37 @@ strategies:
     class_name: VwapReclaim
     params:
       MIN_DIP_PCT: 0.3
+
+  # ---- Strategy manifest (OPTIONAL) — commented example, not a live strategy ----
+  #
+  # A `manifest:` block declares a strategy's trading envelope. It is validated
+  # at load time (a bad manifest loads the strategy DISARMED, with a loud ERROR)
+  # and enforced by the auto-executor on OPENS ONLY — it can never block a
+  # close, a skip, or a time-exit. Every field is optional; omit the whole
+  # block (or any field) to leave that dimension unchecked. A strategy with no
+  # manifest behaves exactly as before.
+  #
+  # - name: orb_example
+  #   description: ORB with a declared envelope
+  #   conids: [51529211, 208813719]     # subscribes to (watches) both
+  #   bar_size: '1 min'
+  #   historical_days_prior: 90
+  #   module: strategies/opening_range_breakout.py
+  #   class_name: OpeningRangeBreakout
+  #   params:
+  #     RANGE_MINUTES: 45
+  #     VOLUME_MULT: 1.3
+  #   manifest:
+  #     # Trade-universe whitelist. null (or omit) => the subscription set
+  #     # (today's behaviour). Here it watches two conIds but only opens on one
+  #     # — the other is watched-but-not-traded. Every listed conId MUST be in
+  #     # the subscription set or the strategy loads disarmed.
+  #     allowed_conids: [51529211]
+  #     # 'long' is the only honourable value on the long-only executor;
+  #     # 'short'/'both' disarm the strategy. null => unchecked.
+  #     direction: long
+  #     # Rolling-window turnover caps on exposure-INCREASING orders (opens +
+  #     # pyramid adds, never closes). Positive int or null. per_day uses a
+  #     # rolling 24h window; per_hour is an optional finer cap.
+  #     max_opening_orders_per_day: 6
+  #     max_opening_orders_per_hour: 2

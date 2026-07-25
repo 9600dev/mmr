@@ -216,6 +216,103 @@ class TestConfigLoader:
         assert rt.strategy_implementations == []
 
 
+class TestManifestLoad:
+    """Load-time validation of the optional `manifest:` block. A valid manifest
+    lands its primitives on the StrategyContext; a bad one loads the strategy
+    DISARMED (auto_execute stripped) with an ERROR, never silently unchecked;
+    an absent manifest leaves every field None and arms exactly as today."""
+
+    def _load(self, tmp_path, *, manifest, conids=(1, 2), auto_execute=True):
+        strategies = tmp_path / 'strategies'
+        _write_strategy(strategies, 'mystrat', _VALID_STRATEGY_BODY)
+        rt = _make_runtime(tmp_path, strategies, paper_trading=True)
+        rt.load_strategy(
+            name='m_strat', bar_size_str='1 min', conids=list(conids),
+            universe=None, historical_days_prior=0,
+            module=str(strategies / 'mystrat.py'), class_name='V1',
+            description='', auto_execute=auto_execute, manifest=manifest,
+        )
+        loaded = [s for s in rt.strategy_implementations if s.name == 'm_strat']
+        return loaded[0] if loaded else None
+
+    def test_absent_manifest_all_fields_none_and_arms(self, tmp_path):
+        s = self._load(tmp_path, manifest=None)
+        assert s is not None
+        ctx = s._context
+        assert ctx.manifest_allowed_conids is None
+        assert ctx.manifest_direction is None
+        assert ctx.manifest_max_opens_per_day is None
+        assert ctx.manifest_max_opens_per_hour is None
+        assert ctx.auto_execute is True  # armed exactly as before
+
+    def test_valid_manifest_lands_on_context(self, tmp_path):
+        s = self._load(tmp_path, conids=(1, 2), manifest={
+            'allowed_conids': [1],            # subset of subscription {1,2}
+            'direction': 'long',
+            'max_opening_orders_per_day': 6,
+            'max_opening_orders_per_hour': 2,
+        })
+        ctx = s._context
+        assert ctx.manifest_allowed_conids == [1]
+        assert ctx.manifest_direction == 'long'
+        assert ctx.manifest_max_opens_per_day == 6
+        assert ctx.manifest_max_opens_per_hour == 2
+        assert ctx.auto_execute is True
+
+    def test_allowed_conids_not_subset_disarms(self, tmp_path, caplog):
+        import logging as stdlib_logging
+        with caplog.at_level(stdlib_logging.ERROR):
+            s = self._load(tmp_path, conids=(1,), manifest={'allowed_conids': [1, 999]})
+        assert s is not None                          # still loaded
+        assert s._context.auto_execute is False       # but DISARMED
+        assert s._context.manifest_allowed_conids is None  # manifest ignored
+        assert any('manifest' in r.message and '999' in r.message for r in caplog.records)
+
+    def test_allowed_conids_wrong_type_disarms(self, tmp_path, caplog):
+        import logging as stdlib_logging
+        with caplog.at_level(stdlib_logging.ERROR):
+            s = self._load(tmp_path, manifest={'allowed_conids': 'AAPL'})
+        assert s._context.auto_execute is False
+        assert any('allowed_conids' in r.message for r in caplog.records)
+
+    def test_turnover_zero_disarms(self, tmp_path, caplog):
+        import logging as stdlib_logging
+        with caplog.at_level(stdlib_logging.ERROR):
+            s = self._load(tmp_path, manifest={'max_opening_orders_per_day': 0})
+        assert s._context.auto_execute is False
+        assert s._context.manifest_max_opens_per_day is None
+
+    def test_turnover_negative_disarms(self, tmp_path):
+        s = self._load(tmp_path, manifest={'max_opening_orders_per_hour': -3})
+        assert s._context.auto_execute is False
+
+    def test_turnover_non_int_disarms(self, tmp_path):
+        s = self._load(tmp_path, manifest={'max_opening_orders_per_day': 'lots'})
+        assert s._context.auto_execute is False
+
+    def test_direction_short_disarms(self, tmp_path, caplog):
+        import logging as stdlib_logging
+        with caplog.at_level(stdlib_logging.ERROR):
+            s = self._load(tmp_path, manifest={'direction': 'short'})
+        assert s._context.auto_execute is False
+        assert s._context.manifest_direction is None
+        assert any('long-only' in r.message for r in caplog.records)
+
+    def test_direction_both_disarms(self, tmp_path):
+        s = self._load(tmp_path, manifest={'direction': 'both'})
+        assert s._context.auto_execute is False
+
+    def test_direction_garbage_disarms(self, tmp_path):
+        s = self._load(tmp_path, manifest={'direction': 'sideways'})
+        assert s._context.auto_execute is False
+
+    def test_allowed_conids_null_is_valid_and_unchecked(self, tmp_path):
+        s = self._load(tmp_path, manifest={'allowed_conids': None, 'direction': 'long'})
+        assert s._context.auto_execute is True
+        assert s._context.manifest_allowed_conids is None
+        assert s._context.manifest_direction == 'long'
+
+
 class TestReconcileResilience:
     @pytest.mark.asyncio
     async def test_corrupt_yaml_does_not_advance_mtime(self, tmp_path):

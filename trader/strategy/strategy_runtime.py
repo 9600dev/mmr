@@ -47,6 +47,87 @@ error_table = {
 }
 
 
+# The auto-executor is long-only by construction (decide_signal has no
+# short-open path); only 'long' is an honourable declaration. 'short'/'both'
+# describe an executor that does not exist, so declaring them is a config
+# error that disarms the strategy rather than silently mis-describing it.
+_VALID_MANIFEST_DIRECTIONS = ('long', 'short', 'both')
+
+
+def _validate_manifest(
+    manifest: Optional[Dict],
+    subscription_conids: set,
+    auto_execute: bool,
+) -> tuple:
+    """Parse + validate an optional strategy manifest block.
+
+    Returns ``(fields, disarm_reason)``. ``fields`` is a dict of the four
+    context primitives (all ``None`` when the manifest is absent or invalid).
+    ``disarm_reason`` is ``None`` when the manifest is absent or fully valid,
+    otherwise a human-readable reason string; the caller then loads the
+    strategy DISARMED (auto_execute stripped) and stores no manifest fields.
+
+    Validation is deliberately strict — a malformed envelope must never
+    silently default to "unchecked". Disarm when:
+      * ``allowed_conids`` is not a list of ints (structural — unconditional);
+      * ``auto_execute`` is set AND any allowed conId is not in the
+        subscription set (you declared a tradeable instrument you don't watch);
+      * ``direction`` is not one of long/short/both/null;
+      * ``direction`` is short/both (the executor is long-only);
+      * ``max_opening_orders_per_day`` / ``_per_hour`` is not a positive int
+        or null.
+    """
+    fields = {
+        'manifest_allowed_conids': None,
+        'manifest_direction': None,
+        'manifest_max_opens_per_day': None,
+        'manifest_max_opens_per_hour': None,
+    }
+    if manifest is None:
+        return fields, None
+    if not isinstance(manifest, dict):
+        return fields, f'manifest must be a mapping, got {type(manifest).__name__}'
+
+    allowed = manifest.get('allowed_conids', None)
+    if allowed is not None:
+        # bool is a subclass of int — reject it explicitly so `true` can't
+        # masquerade as a conId.
+        if (isinstance(allowed, bool) or not isinstance(allowed, list)
+                or not all(isinstance(c, int) and not isinstance(c, bool)
+                           for c in allowed)):
+            return fields, f'allowed_conids must be a list of ints or null, got {allowed!r}'
+        allowed_ints = [int(c) for c in allowed]
+        if auto_execute:
+            missing = [c for c in allowed_ints if c not in subscription_conids]
+            if missing:
+                return fields, (
+                    f'allowed_conids {missing} are not in the subscription set '
+                    f'{sorted(subscription_conids)} — a tradeable conId must also '
+                    f'be subscribed')
+        fields['manifest_allowed_conids'] = allowed_ints
+
+    direction = manifest.get('direction', None)
+    if direction is not None:
+        if direction not in _VALID_MANIFEST_DIRECTIONS:
+            return fields, (
+                f"direction must be one of 'long'/'short'/'both'/null, got {direction!r}")
+        if direction in ('short', 'both'):
+            return fields, (
+                f"direction={direction!r} but the auto-executor is long-only — "
+                f"refusing to arm a strategy that declares a short/both envelope")
+        fields['manifest_direction'] = direction
+
+    for key, field_name in (('max_opening_orders_per_day', 'manifest_max_opens_per_day'),
+                            ('max_opening_orders_per_hour', 'manifest_max_opens_per_hour')):
+        value = manifest.get(key, None)
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                return fields, f'{key} must be a positive int or null, got {value!r}'
+            fields[field_name] = int(value)
+
+    return fields, None
+
+
 def _whattoshow_for_contract(contract: Contract) -> WhatToShow:
     """Pick the right IB whatToShow for an instrument's secType.
 
@@ -617,6 +698,20 @@ class StrategyRuntime():
             max_hold_bars=getattr(signal, 'max_hold_bars', None),
             bar_size_seconds=bar_size_seconds,
             pyramid_max_adds=int(getattr(ctx, 'pyramid_max_adds', 0) or 0) if ctx else 0,
+            # Manifest primitives — carried exactly like pyramid_max_adds.
+            # None on every field (no manifest declared) leaves the executor's
+            # gate a no-op, so behaviour is unchanged for un-manifested
+            # strategies.
+            manifest_allowed_conids=(
+                list(ctx.manifest_allowed_conids)
+                if ctx and getattr(ctx, 'manifest_allowed_conids', None) is not None
+                else None),
+            manifest_direction=(
+                getattr(ctx, 'manifest_direction', None) if ctx else None),
+            manifest_max_opens_per_day=(
+                getattr(ctx, 'manifest_max_opens_per_day', None) if ctx else None),
+            manifest_max_opens_per_hour=(
+                getattr(ctx, 'manifest_max_opens_per_hour', None) if ctx else None),
         )
         self.auto_executor.submit_signal(work)
 
@@ -727,6 +822,7 @@ class StrategyRuntime():
         auto_execute: bool = False,
         params: Optional[Dict] = None,
         pyramid_max_adds: int = 0,
+        manifest: Optional[Dict] = None,
     ) -> None:
 
         # Skip if strategy with this name already loaded
@@ -803,6 +899,41 @@ class StrategyRuntime():
             # authoritative check.
             if auto_execute and not self._gauntlet_allows_arming(name, filepath, class_name):
                 auto_execute = False
+
+            # Strategy manifest — validate the declared trading envelope BEFORE
+            # arming. Reuse the gauntlet-disarm pattern: a bad manifest loads
+            # the strategy DISARMED (auto_execute stripped) with a loud ERROR,
+            # rather than silently defaulting to "unchecked". The subscription
+            # set is the explicit conids plus any universe expansion — an
+            # allowed conId must be within it.
+            subscription_conids = set(int(c) for c in (conids or []))
+            if universe and getattr(self, 'universe_accessor', None) is not None:
+                try:
+                    _u = self.universe_accessor.get(universe)
+                    subscription_conids |= {
+                        int(d.conId) for d in _u.security_definitions}
+                except Exception:
+                    # Universe expansion failure leaves the subscription set as
+                    # the explicit conids; the allowed-conids check errs toward
+                    # disarming (safe) rather than passing an unverifiable set.
+                    logging.warning(
+                        'manifest: could not expand universe %r for %s — '
+                        'validating allowed_conids against explicit conids only',
+                        universe, name)
+            manifest_fields, manifest_disarm = _validate_manifest(
+                manifest, subscription_conids, auto_execute)
+            if manifest_disarm is not None:
+                logging.error(
+                    'strategy %s has an invalid manifest: %s — loading DISARMED '
+                    '(auto_execute stripped, manifest ignored)', name, manifest_disarm)
+                auto_execute = False
+                manifest_fields = {
+                    'manifest_allowed_conids': None,
+                    'manifest_direction': None,
+                    'manifest_max_opens_per_day': None,
+                    'manifest_max_opens_per_hour': None,
+                }
+
             class_object = load_class_from_file(filepath, class_name)
             if not class_object:
                 return
@@ -826,6 +957,10 @@ class StrategyRuntime():
                     description=description,
                     auto_execute=auto_execute,
                     pyramid_max_adds=pyramid_max_adds,
+                    manifest_allowed_conids=manifest_fields['manifest_allowed_conids'],
+                    manifest_direction=manifest_fields['manifest_direction'],
+                    manifest_max_opens_per_day=manifest_fields['manifest_max_opens_per_day'],
+                    manifest_max_opens_per_hour=manifest_fields['manifest_max_opens_per_hour'],
                     params=params if params else {},
                 )
                 instance.install(context)
@@ -873,6 +1008,7 @@ class StrategyRuntime():
                 auto_execute=strategy_config.get('auto_execute', False),
                 params=strategy_config.get('params', {}),
                 pyramid_max_adds=int(strategy_config.get('pyramid_max_adds', 0) or 0),
+                manifest=strategy_config.get('manifest'),
             )
 
     async def _reconcile(self):

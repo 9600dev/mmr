@@ -62,6 +62,22 @@ class StrategyContext:
     # Bounded pyramiding for the auto-executor: 0 = single-lot; N = up to N
     # fixed-size adds after the initial entry (stack tops out at N+1 lots).
     pyramid_max_adds: int = 0
+    # Strategy manifest — an optional, declared trading envelope validated at
+    # load time and enforced (opens only) by the auto-executor. All None =>
+    # unchecked, i.e. byte-identical to pre-manifest behaviour. Parsed and
+    # validated in ``StrategyRuntime.load_strategy``; a bad manifest disarms
+    # the strategy (auto_execute stripped) and leaves these None.
+    #   * manifest_allowed_conids: trade-universe whitelist. None => the
+    #     subscription set (today's behaviour). A conId not in this set is
+    #     watched but never opened.
+    #   * manifest_direction: 'long' (the only honourable value on the
+    #     long-only executor) or None. short/both are rejected at load.
+    #   * manifest_max_opens_per_day / _hour: rolling-window turnover caps on
+    #     exposure-INCREASING orders (opens + pyramid adds, never closes).
+    manifest_allowed_conids: Optional[List[int]] = None
+    manifest_direction: Optional[str] = None
+    manifest_max_opens_per_day: Optional[int] = None
+    manifest_max_opens_per_hour: Optional[int] = None
     params: Dict[str, Any] = field(default_factory=dict)
 
 
