@@ -349,7 +349,10 @@ echo_usage() {
     echo "      set MMR_FORCE_CLEAN_KEEP_DATA=1 to skip the data wipe)"
     echo "  -s (sync code to running MMR container)"
     echo "  -a (sync all files to running MMR container)"
-    echo "  -g (go: build, then start all containers and exec in)"
+    echo "  -g (go: build, start all containers, wait for healthy, then run"
+    echo "      'mmr verify' from the HOST and print the result. Exits non-zero"
+    echo "      on FAIL. Does NOT shell in — use -e, or MMR_GO_SHELL=1 to land"
+    echo "      in a container shell as it used to.)"
     echo "  -l (logs: tail logs from all containers)"
     echo "  -r (restart-ib: restart the IB Gateway container)"
     echo "  -e (exec: shell into running MMR container)"
@@ -856,6 +859,88 @@ exec_in() {
     exec $RUNTIME exec -it -u trader -w /home/trader/mmr "$CONTID" bash -l
 }
 
+wait_for_healthy() {
+    # `up -d` returns as soon as the containers are STARTED, which is not the
+    # same as usable: start_mmr.sh staggers the three service launches and the
+    # compose healthcheck allows a 240s start_period. Observed ~45s to green.
+    # The old `-g` slept 3s and handed over a prompt where RPC wasn't answering
+    # yet, so `mmr verify` / `status` failed for reasons that looked like bugs.
+    local timeout="${MMR_GO_HEALTH_TIMEOUT:-300}"
+    local waited=0 status=""
+    echo "Waiting for MMR services to report healthy (timeout ${timeout}s)..."
+    while [ "$waited" -lt "$timeout" ]; do
+        status="$($RUNTIME inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                 mmr-mmr-1 2>/dev/null || echo missing)"
+        case "$status" in
+            healthy) echo "  healthy after ${waited}s"; return 0 ;;
+            none)    echo "  container has no healthcheck — skipping wait"; return 0 ;;
+            missing) echo "  container not found yet..." ;;
+        esac
+        sleep 5
+        waited=$((waited + 5))
+        # Progress every 30s so a slow start doesn't look like a hang.
+        if [ $((waited % 30)) -eq 0 ]; then
+            echo "  still ${status} (${waited}s)"
+        fi
+    done
+    echo "  NOT healthy after ${timeout}s (last status: ${status})" >&2
+    return 1
+}
+
+verify_stack() {
+    # Prefer the HOST cli: it exercises the host->container ZMQ path that day-to-day
+    # use actually depends on (ports are mapped to 127.0.0.1), so a mapping problem
+    # shows up here instead of days later. Falls back to the in-container CLI when
+    # the host toolchain isn't available. Override wholesale with $MMR_VERIFY_CMD.
+    echo ""
+    if [ -n "${MMR_VERIFY_CMD:-}" ]; then
+        echo "Verifying via \$MMR_VERIFY_CMD..."
+        $MMR_VERIFY_CMD && return 0 || return 1
+    fi
+    if command -v uv &> /dev/null; then
+        echo "Verifying trade-readiness from the HOST (host->container RPC)..."
+        # Mirrors the usual host `mmr` shell function. The venv override is only
+        # applied when that venv exists (setting it empty would point uv at ""),
+        # so a plain `uv sync` layout still works. `if` not `&&` — a bare
+        # `[ -d x ] && v=y` returns 1 when the test fails, which errexit would
+        # turn into an abort right here.
+        local ok=0
+        if [ -d "$HOME/.cache/mmr-venv" ]; then
+            UV_PROJECT_ENVIRONMENT="$HOME/.cache/mmr-venv" \
+                uv run --project "$BUILDDIR" python -m trader.mmr_cli verify || ok=1
+        else
+            uv run --project "$BUILDDIR" python -m trader.mmr_cli verify || ok=1
+        fi
+        if [ "$ok" = "0" ]; then
+            return 0
+        fi
+        # A host-side failure can mean the stack is fine but the host toolchain
+        # isn't — retry inside the container to tell those two apart.
+        echo ""
+        echo "Host-side verify failed — retrying inside the container to isolate..." >&2
+    fi
+    echo "Verifying trade-readiness from INSIDE the container..."
+    $RUNTIME exec -u trader -w /home/trader/mmr mmr-mmr-1 mmr verify
+}
+
+print_go_next_steps() {
+    local ok="$1"
+    echo ""
+    if [ "$ok" = "0" ]; then
+        echo "Stack is up and trade-ready. You're on the HOST — run mmr from here:"
+        echo "  mmr status | mmr portfolio | mmr strategies"
+    else
+        echo "Stack did NOT verify. Triage, in order:"
+        echo "  ./docker.sh -l                      # container logs (both containers)"
+        echo "  scripts/last_pulse.sh               # is either service still pulsing?"
+        echo "  $RUNTIME logs mmr-mmr-1 | tail -50    # service startup errors"
+        echo "  See docs/MONITORING.md for the escalation policy."
+    fi
+    echo ""
+    echo "Shell into the container when you need it:  ./docker.sh -e"
+    echo "  (or MMR_GO_SHELL=1 ./docker.sh -g to land there automatically)"
+}
+
 sync() {
     echo "Syncing code directory to MMR container..."
     echo ""
@@ -934,9 +1019,23 @@ if [[ $g == "y" ]]; then
     down 2>/dev/null || true
     up
     echo ""
-    echo "Waiting for containers to start..."
-    sleep 3
-    exec_in
+    # Wait for readiness, then answer the only question that matters after a
+    # rebuild — "did it come up trade-ready?" — instead of handing over a prompt
+    # and leaving the operator to remember to ask. errexit is off for these two
+    # so a FAIL still reaches print_go_next_steps with triage pointers.
+    go_ok=0
+    wait_for_healthy || go_ok=1
+    verify_stack || go_ok=1
+    print_go_next_steps "$go_ok"
+    # Deliberately does NOT exec into the container by default: `mmr` is normally
+    # run from the host (ZMQ ports are mapped to 127.0.0.1), so a container shell
+    # is a detour. `-e` gives it on demand; MMR_GO_SHELL=1 restores the old
+    # land-in-a-shell behaviour. NOTE exec_in replaces this process, so it must
+    # stay last — anything after it never runs.
+    if [ "${MMR_GO_SHELL:-0}" = "1" ]; then
+        exec_in
+    fi
+    exit "$go_ok"
 fi
 if [[ $B == "y" ]]; then
     backup

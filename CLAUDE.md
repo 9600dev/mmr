@@ -267,7 +267,9 @@ Storage layout (host paths):
 
 ```bash
 # Docker (first-time prompts for IB credentials, writes .env)
-./docker.sh -g              # Build + start + exec in
+./docker.sh -g              # Build + start + wait for healthy + `mmr verify` from the HOST
+                            #   (non-zero exit on FAIL; does NOT shell in —
+                            #    MMR_GO_SHELL=1 restores the old drop-into-a-shell)
 ./docker.sh -b              # Build image only
 ./docker.sh -u              # Start containers
 ./docker.sh -d              # Stop containers
