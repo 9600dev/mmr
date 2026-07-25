@@ -97,3 +97,13 @@ class TestPinnedCounterexamples:
         $3,500 — refuse, don't bump."""
         with pytest.raises(ValueError):
             whole_shares_for_notional(3000.0, 35.0, multiplier=100.0)
+
+    def test_denormal_product_underflow_refuses_not_crashes(self):
+        """CrossHair (symbolic execution over the deal contracts) found that
+        ``price * multiplier`` underflows to 0.0 for denormal inputs, so the
+        pre-contract code did ``amount / 0.0`` → ZeroDivisionError — an
+        undeclared crash on the single conversion every order path uses. The
+        conversion must REFUSE loudly (ValueError), never crash. These are the
+        exact symbolic inputs CrossHair reported."""
+        with pytest.raises(ValueError):
+            whole_shares_for_notional(2.0, 3.0765742648370966e-154, 3.034084836703205e-308)
