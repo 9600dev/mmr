@@ -14,6 +14,10 @@ scratch/
 .python-version
 .trader.history
 .env
+# Timestamped backups docker.sh takes before regenerating .env — they contain the
+# IB password in plaintext, so they must never be committable. Deliberately NOT
+# `.env.*`, which would cover the tracked .env.example.
+.env.bak_*
 .claude/
 .venv/
 
