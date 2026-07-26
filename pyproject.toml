@@ -171,6 +171,7 @@ pytest_add_cli_args_test_selection = [
     "tests/invariants/test_auto_execute_decision.py",
     "tests/invariants/test_gate_properties.py",
     "tests/invariants/test_order_notional.py",
+    "tests/invariants/test_order_structure.py",
     "tests/test_order_validator.py",
     "tests/invariants/test_proposal_machine.py",
     "tests/invariants/test_sizing_properties.py",
