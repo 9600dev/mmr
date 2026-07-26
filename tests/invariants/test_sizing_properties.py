@@ -66,9 +66,26 @@ def sizing_configs(draw, max_spread_factor=1.0):
 
 @st.composite
 def portfolio_states(draw):
-    net_liq = draw(st.floats(min_value=10_000.0, max_value=5_000_000.0))
+    # WIDENED 2026-07-25 to include the degenerate region this generator used to
+    # exclude. With net_liq >= 10_000 a guard written `> 0` and one written `> 1`
+    # can never disagree, so mutating one into the other was undetectable — 70
+    # surviving mutants in position_sizing traced to exactly that. Every state
+    # produced here is MEASURED (net_liquidation_evaluable=True), which is what
+    # makes the percentage-cap assertions meaningful: an unreadable account has
+    # no meaningful cap and is covered separately below.
+    # A MIXTURE, not a uniform range. Widening the range alone was not enough:
+    # a uniform draw over [0, 5M] lands in the (0, 1] band about once in five
+    # million tries, so the boundary mutants (`> 0` vs `> 1`) stayed invisible.
+    # Sampling the degenerate band explicitly is what makes them reachable.
+    net_liq = draw(st.one_of(
+        st.just(0.0),                                          # measured-empty
+        st.floats(min_value=1e-6, max_value=1.0),              # sub-unit accounts
+        st.floats(min_value=1.0, max_value=1_000.0),           # tiny
+        st.floats(min_value=10_000.0, max_value=5_000_000.0),  # realistic
+    ))
     return PortfolioState(
         net_liquidation=net_liq,
+        net_liquidation_evaluable=True,
         gross_position_value=draw(st.floats(min_value=0.0, max_value=net_liq * 1.2)),
         available_funds=net_liq,
         daily_pnl=draw(st.floats(min_value=-15_000.0, max_value=15_000.0)),
@@ -77,17 +94,24 @@ def portfolio_states(draw):
     )
 
 
-@settings(max_examples=200, deadline=None)
+# 800 examples, not 200: the account-value strategy is a MIXTURE of four bands
+# (measured-empty, sub-unit, tiny, realistic). At 200 draws each band gets ~50,
+# which measurably weakened coverage of the realistic band — mutants that had
+# been killed started surviving. Widening an input space costs examples; budget
+# for it rather than diluting what already worked.
+@settings(max_examples=800, deadline=None)
 @given(
     cfg=sizing_configs(),
     state=portfolio_states(),
     confidence=st.floats(min_value=0.0, max_value=1.0),
-    price=st.floats(min_value=1.0, max_value=5_000.0),
+    price=st.one_of(st.floats(min_value=1e-4, max_value=1.0),      # sub-unit prices
+                    st.floats(min_value=1.0, max_value=5_000.0)),
     adv=st.floats(min_value=0.0, max_value=5e7),
 )
 def test_amount_never_exceeds_any_active_cap(cfg, state, confidence, price, adv):
-    """(a) With net_liquidation > 0 and a known price, the amount respects
-    every active cap simultaneously."""
+    """(a) For a MEASURED account, the amount respects every active cap
+    simultaneously — including when the measurement is zero, where every cap is
+    zero and the only conforming answer is to refuse."""
     liquidity = LiquidityInfo(
         avg_daily_volume=adv, bid=price * 0.999, ask=price * 1.001)
     result = PositionSizer(cfg).compute(
@@ -106,7 +130,7 @@ def test_amount_never_exceeds_any_active_cap(cfg, state, confidence, price, adv)
         )
 
 
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=800, deadline=None)
 @given(
     cfg=sizing_configs(),
     state=portfolio_states(),
@@ -134,7 +158,7 @@ def test_higher_atr_never_increases_amount(cfg, state, confidence, price, atr_a,
     )
 
 
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=800, deadline=None)
 @given(
     cfg=sizing_configs(),
     state=portfolio_states(),
@@ -154,7 +178,7 @@ def test_higher_confidence_never_decreases_amount(cfg, state, conf_a, conf_b, pr
     )
 
 
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=800, deadline=None)
 @given(
     cfg=sizing_configs(max_spread_factor=3.0),  # beyond the documented [0, 1] on purpose
     state=portfolio_states(),
@@ -208,3 +232,28 @@ def test_degenerate_spread_config_and_extreme_spreads_never_crash(
         liquidity=liquidity,
     )
     assert result.amount_usd >= 0.0
+
+
+@settings(max_examples=800, deadline=None)
+@given(cfg=sizing_configs(),
+       net_liq=st.floats(min_value=1e-6, max_value=5_000_000.0,
+                         allow_nan=False, allow_infinity=False),
+       confidence=st.floats(min_value=0.0, max_value=1.0),
+       price=st.floats(min_value=0.01, max_value=5_000.0))
+def test_a_measured_positive_account_is_never_refused_as_worthless(
+        cfg, net_liq, confidence, price):
+    """A MEASURED account with any positive value must never be refused on the
+    grounds of having no value.
+
+    The `net-liq-not-positive` refusal exists for a measured zero or negative
+    account. Its guard is `<= 0`, and mutating that to `<= 1` would silently
+    refuse every sub-unit account — a refusal the cap properties cannot catch,
+    because refusing always satisfies an upper bound. This is the property that
+    pins the guard from the other side.
+    """
+    state = PortfolioState(net_liquidation=net_liq, net_liquidation_evaluable=True,
+                           available_funds=net_liq)
+    result = PositionSizer(cfg).compute(
+        confidence=confidence, portfolio_state=state, price=price)
+    assert result.capped_by != 'net-liq-not-positive', (
+        f'a measured account worth {net_liq} was refused as worthless')
