@@ -8,6 +8,7 @@ an RTH filter, and the tests that would fail if someone "tightened" it to RTH
 are the point of the file.
 """
 import datetime as dt
+import pathlib
 
 import pandas as pd
 import pytest
@@ -125,3 +126,49 @@ class TestSessionWindow:
     def test_the_asx_window_includes_the_auction(self):
         window = session_window('ASX', dt.date(2026, 7, 24))
         assert window == (_utc('2026-07-24 00:00:00'), _utc('2026-07-24 06:10:00'))
+
+
+class TestLivePrimingMatchesTheBacktester:
+    """The live frame and the backtest frame must be the same series.
+
+    `Backtester.run` does `normalized.dropna(subset=['close'])` on exactly the
+    same DB rows through exactly the same `normalize_historical`. Until
+    2026-07-26 the live primer did not, so strategies ran on bars their
+    validation never saw — null OHLCV placeholders the provider returns for
+    future dates and holidays. Several landed ON a session boundary (GOOGL at
+    08:00 UTC = pre-market open, CAT at 13:30 UTC = RTH open), which is where
+    ORB reads its opening range.
+    """
+
+    def test_null_close_rows_are_dropped_from_the_primed_frame(self, tmp_path):
+        import pandas as pd
+        from trader.data.market_data import normalize_historical
+
+        raw = pd.DataFrame(
+            {
+                'open': [10.0, None, 11.0],
+                'high': [10.5, None, 11.5],
+                'low': [9.5, None, 10.5],
+                'close': [10.2, None, 11.2],
+                'volume': [1000.0, None, 2000.0],
+            },
+            index=pd.DatetimeIndex(
+                ['2026-07-24 13:30:00', '2026-07-24 13:31:00', '2026-07-24 13:32:00'],
+                name='date'),
+        )
+        # What the primer now does, and what the backtester has always done.
+        primed = normalize_historical(raw).dropna(subset=['close'])
+        assert len(primed) == 2
+        assert not primed['close'].isna().any()
+
+    def test_the_backtester_still_drops_them(self):
+        """Guard the other half of the pair: if the backtester's dropna is ever
+        removed, this stops being a match and nothing else would notice."""
+        source = (pathlib.Path(__file__).resolve().parent.parent
+                  / 'trader' / 'simulation' / 'backtester.py').read_text()
+        assert "dropna(subset=['close'])" in source
+
+    def test_the_live_primer_still_drops_them(self):
+        source = (pathlib.Path(__file__).resolve().parent.parent
+                  / 'trader' / 'strategy' / 'strategy_runtime.py').read_text()
+        assert "dropna(subset=['close'])" in source

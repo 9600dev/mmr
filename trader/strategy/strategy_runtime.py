@@ -611,6 +611,19 @@ class StrategyRuntime():
             df = ds.read(str(conId), start=start, end=end, bar_size=str(bar_size))
             if df is not None and not df.empty:
                 norm = normalize_historical(df)
+                # Drop NaN-close rows, exactly as Backtester.run does
+                # (backtester.py: `normalized.dropna(subset=['close'])`). The
+                # provider returns null OHLCV placeholders for future dates and
+                # holidays, and until 2026-07-26 only the BACKTEST dropped them:
+                # the live frame carried bars the validated series never had.
+                # Measured in the live DB at the time: 34 such rows for CAT, 79
+                # for GLD, 7 PLTR, 6 GOOGL — and several land ON a session
+                # boundary (GOOGL at 08:00 UTC = the pre-market open, CAT at
+                # 13:30 UTC = the RTH open), which is exactly where ORB reads its
+                # opening range. Same DB, same normalize_historical, two
+                # different series is the divergence class that invalidated the
+                # 2026-07 roster validation once already.
+                norm = norm.dropna(subset=['close'])
                 idx = norm.index
                 norm.index = idx.tz_localize('UTC') if idx.tz is None else idx.tz_convert('UTC')
                 self._hist_bars[key] = norm
