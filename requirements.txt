@@ -58,3 +58,4 @@ uniplot>=0.21
 vectorbt>=0.28
 massive>=2.2.0
 twelvedata[pandas]>=1.3
+pandas-market-calendars>=5.4.0
