@@ -114,6 +114,39 @@
 #       the full explanation. Not worth brittle exact-match tests.
 #     * evaluate 188 — `logging.debug(f'...')` -> `logging.debug(None)`. Cosmetic.
 #
+#   auto_executor.decide_signal SURVIVOR CLASSIFICATION (2026-07-25).
+#   The gate between a strategy signal and an unattended real-money order. It was
+#   pure and had 84 unit tests but NO property and NO mutation coverage, so their
+#   strength was unmeasured. Measured: 79.2% (32 survivors). Seven of those
+#   changed real behaviour in the dangerous direction, and all seven are now
+#   killed by tests/invariants/test_auto_execute_decision.py (-> 80.5%):
+#     * mutant 2  — `live_armed: bool = False` -> `True`. THE LIVE DOUBLE-ARM
+#       DEFAULTING TO ARMED. Nothing asserted that a caller omitting the argument
+#       gets the disarmed answer. Killed by test_the_DEFAULT_is_disarmed.
+#     * mutant 91 — `bar_age_seconds is not None` -> `is None`, inverting the
+#       stale-bar gate so stale data opens and fresh data does not.
+#     * mutant 93 — `stale_bar_multiple * bar_size` -> `/`, collapsing the stale
+#       threshold from 180s to 0.05s. Killed by asserting a FRESH bar still opens.
+#     * mutant 1  — the default stale multiple 3.0 -> 4.0. Killed with a bar at
+#       3.5x its interval, which is stale under 3x and fresh under 4x.
+#     * mutants 18/69 — `held_qty > 0` -> `> 1`, twice: a fractional (0.5-lot)
+#       position stops counting as held, so it loses its disarmed-close exemption
+#       and can be pyramided into. Killed with explicit 0.5-lot cases.
+#     * mutant 90 — `bar_size_seconds > 0` -> `> 1`, switching the stale gate off
+#       entirely for sub-second bar sizes.
+#   Remaining survivors are reason-STRING mutants (XX-wrapping and case flips on
+#   the human-readable explanation), the unreachable `unsupported action` branch,
+#   and two boundary cases classified rather than chased:
+#     * mutant 92  — `>` -> `>=` on the stale threshold. Differs only for a bar
+#       aged EXACTLY 3x its interval, and errs toward refusing an open. Safe
+#       direction, unreachable in practice with float ages.
+#     * mutant 125 — `work.quantity > 0` -> `> 1` on the size passthrough. A
+#       strategy-specified FRACTIONAL size would fall back to the position sizer
+#       instead of being honoured — a real difference, but the fallback is the
+#       safer path and no live strategy specifies fractional sizes.
+#   NOTE the module is 1,709 mutants in total; only decide_signal was analysed.
+#   The rest of auto_executor.py is now in scope and baselined, not examined.
+#
 #   position_sizing.py SURVIVOR CLASSIFICATION (2026-07-25, 396/161 = 71.1%).
 #   All 161 classified by whether they can change the SIZED AMOUNT — the only
 #   safety-relevant output (amount_usd / quantity):

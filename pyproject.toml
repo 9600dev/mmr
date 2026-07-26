@@ -149,6 +149,7 @@ only_mutate = [
     # permitting unlimited naked shorts through every gate -- survived all 1882
     # tests. Extracted to a pure module precisely so it lands here.
     "trader/trading/exit_class.py",
+    "trader/strategy/auto_executor.py",
     "trader/trading/position_sizing.py",
     "trader/trading/risk_gate.py",
 ]
@@ -161,6 +162,8 @@ pytest_add_cli_args_test_selection = [
     # which is slow, environment-dependent, and unrelated to the pure math
     # kernels mutated here. The ty gate is verified separately (scripts/ty_gate.py).
     "tests/invariants/test_exit_class.py",
+    "tests/test_auto_executor.py",
+    "tests/invariants/test_auto_execute_decision.py",
     "tests/invariants/test_gate_properties.py",
     "tests/invariants/test_order_notional.py",
     "tests/invariants/test_proposal_machine.py",
