@@ -60,16 +60,35 @@ absence. The pulses make liveness positively visible:
 
 - `trader_service` every 30s: `pulse ib_connected=True ib_upstream=True open_orders=0`
 - `strategy_service` every 30s (reconcile tick):
-  `pulse strategies=5/5 ticks_60s=[208813719:42,…] bar_age_s=[208813719:75,…] auto_exec_open=1`
+  `pulse strategies=5/5 ticks_60s=[208813719:42,…] bar_age_s=[208813719:75,…]
+  trade_age_s=[208813719:61,…] auto_exec_open=1`
 
 Reads:
 - `ticks_60s` **all zero while a traded market is open** → the feed is dead
   (gateway hang, dropped subscription, pubsub break) even if every flag
   still says connected. This is THE line that would have caught G3.
 - `bar_age_s` ≳ 2–3× the strategy's bar size during market hours → bars are
-  not forming / not dispatching.
+  not forming / not dispatching. **It is not a data-freshness metric** — see
+  the pair rule below.
+- `trade_age_s` missing for a conId, or ≫ `bar_age_s`, **during a session** →
+  bars are being manufactured from QUOTES, not trades.
 - **No pulse line for >2 intervals** → the service's loop is wedged
   (`last_pulse.sh` exits non-zero on this).
+
+**The two age fields are only readable together.** `bar_age_s` is the age of
+the last bar DISPATCHED to a strategy; `trade_age_s` is the age of the last
+tick where cumulative volume rose, i.e. when the instrument last actually
+traded. They diverge because `normalize_ticker` falls back to the bid/ask
+MIDPOINT when there is no trade price, so a quote-only tick still carries a
+non-NaN close, still forms a bar, and still resets `bar_age_s`.
+
+Observed 2026-07-26: WDS read `bar_age_s=218093` (correct — Friday's ASX close)
+until three out-of-hours quote ticks at 11:45 on a **Sunday** dropped it to
+`263`. Nothing had traded; the exchange was shut. Read alone, `bar_age_s` said
+the data was four minutes old when it was sixty hours old — and the same
+divergence during a session is what a quotes-but-no-trades partial outage looks
+like. `trade_age_s` was added so that state is visible instead of flattering.
+Out of session, an absent `trade_age_s` is normal and expected.
 
 ## Escalation policy
 
@@ -82,7 +101,8 @@ Reads:
   already-executed-bar, `stale_bar`) — these are correct behavior, logged for
   audit. A `stale_bar` skip means the gate refused to open on old data;
   *recurring* stale_bar skips during market hours mean the feed is lagging —
-  check the pulse's `bar_age_s`.
+  check the pulse's `bar_age_s` **and** `trade_age_s` (the first can look
+  healthy while the instrument has not traded — see the pair rule above).
 - G5's `KeyError: 81` ib_async decoder traceback after a reconnect (console
   noise only; root-caused, harmless).
 

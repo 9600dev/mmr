@@ -15,6 +15,7 @@ import pytest
 from trader.strategy.strategy_runtime import (
     _age_seconds,
     _count_recent,
+    _last_trade_age,
     build_runtime_status,
     format_pulse,
 )
@@ -137,7 +138,8 @@ class TestFormatPulse:
         assert 'auto_exec_open=1' in line
 
     def test_empty_pulse_never_raises(self):
-        assert format_pulse({}) == 'pulse strategies=0/0 ticks_60s=[] bar_age_s=[] auto_exec_open=0'
+        assert format_pulse({}) == ('pulse strategies=0/0 ticks_60s=[] bar_age_s=[] '
+                                   'trade_age_s=[] auto_exec_open=0')
 
 
 class TestVerifyRosterCheck:
@@ -242,3 +244,102 @@ class TestSessionBarTs:
         afternoon = _session_bar_ts(pd.Timestamp('2026-07-20 19:46:00', tz='UTC'), None)
         assert check_time_exit(morning, 10, flatten, None) is None          # 11:46 ET: hold
         assert check_time_exit(afternoon, 10, flatten, None) is not None    # 15:46 ET: exit
+
+
+# ---------------------------------------------------------------------------
+# trade_age_s — the metric bar_age_s was being mistaken for
+# ---------------------------------------------------------------------------
+
+def _tick_stream(rows, tz='UTC'):
+    """rows: [(timestamp, cumulative_volume), ...]"""
+    idx = pd.DatetimeIndex(pd.to_datetime([r[0] for r in rows]))
+    if tz is not None:
+        idx = idx.tz_localize(tz)
+    return pd.DataFrame({'close': [1.0] * len(rows),
+                         'volume': [r[1] for r in rows]}, index=idx)
+
+
+class TestLastTradeAge:
+    """Observed live 2026-07-26: WDS's bar_age_s sat at 218,093s (correct —
+    Friday's ASX close) until three out-of-hours QUOTE ticks at 11:45 on a
+    Sunday dropped it to 263s. Nothing traded; the ASX was shut. normalize_ticker
+    falls back to the bid/ask midpoint for close, so a quote-only tick forms a
+    real-looking bar and resets bar_age_s. trade_age_s is what actually answers
+    "when did this last trade".
+    """
+
+    def test_age_comes_from_the_last_volume_increase(self):
+        s = _tick_stream([
+            ('2026-07-16 14:50:00', 1000),
+            ('2026-07-16 14:58:00', 1500),   # traded — 120s before NOW
+            ('2026-07-16 14:59:30', 1500),   # quote only, volume unchanged
+            ('2026-07-16 14:59:59', 1500),   # quote only
+        ])
+        assert _last_trade_age(s, NOW_UTC) == 120
+
+    def test_quote_only_stream_reports_no_trade(self):
+        """The exact live case: ticks arriving, cumulative volume flat. The
+        answer must be 'no trade seen', not a fresh-looking number."""
+        s = _tick_stream([
+            ('2026-07-16 14:58:00', 900),
+            ('2026-07-16 14:59:00', 900),
+            ('2026-07-16 14:59:59', 900),
+        ])
+        assert _last_trade_age(s, NOW_UTC) is None
+
+    def test_day_boundary_reset_is_not_a_trade(self):
+        """The cumulative counter drops back toward zero at the session roll.
+        That decrease is not a trade; the next increase after it is."""
+        s = _tick_stream([
+            ('2026-07-16 14:50:00', 50_000),
+            ('2026-07-16 14:55:00', 10),      # counter reset — not a trade
+            ('2026-07-16 14:58:00', 40),      # first real trade of the new day
+            ('2026-07-16 14:59:00', 40),
+        ])
+        assert _last_trade_age(s, NOW_UTC) == 120
+
+    def test_single_tick_cannot_establish_a_trade(self):
+        assert _last_trade_age(_tick_stream([('2026-07-16 14:59:00', 100)]), NOW_UTC) is None
+
+    def test_missing_or_malformed_stream_degrades_to_none(self):
+        assert _last_trade_age(None, NOW_UTC) is None
+        assert _last_trade_age(pd.DataFrame(), NOW_UTC) is None
+        assert _last_trade_age(_stream(['2026-07-16 14:59:00']), NOW_UTC) is None  # no volume col
+
+    def test_nan_volume_never_counts_as_a_trade(self):
+        s = _tick_stream([
+            ('2026-07-16 14:50:00', float('nan')),
+            ('2026-07-16 14:59:00', float('nan')),
+        ])
+        assert _last_trade_age(s, NOW_UTC) is None
+
+
+class TestPulseReportsBothAges:
+    def _status(self, streams):
+        return build_runtime_status(
+            now_utc=NOW_UTC,
+            strategies=[_strategy('s1')],
+            streams=streams,
+            last_dispatched_bar={(111, 's1'): pd.Timestamp('2026-07-16 14:59:00', tz='UTC')},
+            auto_exec_open=0,
+        )
+
+    def test_a_quote_only_feed_shows_a_fresh_bar_and_no_trade(self):
+        """The pair is the point. bar_age_s alone reads perfectly healthy here —
+        which is exactly how a quotes-but-no-trades session outage hides."""
+        status = self._status({111: _tick_stream([
+            ('2026-07-16 14:58:00', 900),
+            ('2026-07-16 14:59:00', 900),
+        ])})
+        assert status['bar_age_s'][111] == 60      # dispatch is moving...
+        assert 111 not in status['trade_age_s']    # ...but nothing has traded
+        assert 'trade_age_s=[]' in format_pulse(status)
+
+    def test_a_trading_feed_reports_both(self):
+        status = self._status({111: _tick_stream([
+            ('2026-07-16 14:57:00', 900),
+            ('2026-07-16 14:59:00', 950),
+        ])})
+        assert status['bar_age_s'][111] == 60
+        assert status['trade_age_s'][111] == 60
+        assert 'trade_age_s=[111:60]' in format_pulse(status)

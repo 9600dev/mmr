@@ -195,6 +195,43 @@ def _age_seconds(ts, now_utc: pd.Timestamp) -> Optional[int]:
         return None
 
 
+def _last_trade_age(ticks, now_utc: pd.Timestamp) -> Optional[int]:
+    """Seconds since this instrument was last seen to actually TRADE.
+
+    ``bar_age_s`` cannot answer this, and reading it as if it could is the
+    trap this exists to close. ``normalize_ticker`` falls back to the bid/ask
+    MIDPOINT when there is no trade price, so a quote-only tick still carries a
+    non-NaN close, still forms a bar in ``resample_ticks_to_bars`` (which drops
+    only NaN-close bars), and still gets dispatched — resetting ``bar_age_s``
+    to seconds. Observed 2026-07-26: WDS sat at 218,093s (correct — Friday's
+    ASX close) until three out-of-hours quote ticks at 11:45 on a SUNDAY dropped
+    it to 263s. Nothing had traded; the ASX was shut.
+
+    The only field that distinguishes a trade is the cumulative day volume
+    counter, so this reports the age of the last tick where it INCREASED. A
+    decrease is the day-boundary reset, not a trade, and is ignored — the next
+    increase after it counts. ``None`` means no trade is visible in the retained
+    tick stream, which is the honest answer for a market that is closed.
+
+    Why it matters beyond tidiness: a feed delivering quotes but no trades
+    during a session is a real partial-outage mode, and ``bar_age_s`` reads
+    perfectly healthy throughout it.
+    """
+    try:
+        volume = ticks['volume']
+    except Exception:
+        return None
+    try:
+        if volume is None or len(volume) < 2:
+            return None
+        traded = volume.diff() > 0          # NaN diffs compare False
+        if not bool(traded.any()):
+            return None
+        return _age_seconds(volume.index[traded][-1], now_utc)
+    except Exception:
+        return None
+
+
 def build_runtime_status(
     now_utc: pd.Timestamp,
     strategies,
@@ -203,12 +240,24 @@ def build_runtime_status(
     auto_exec_open: int,
 ) -> dict:
     """Pure snapshot of pipeline health: strategy states, tick flow per conId,
-    freshest dispatched-bar age per conId, and open auto-exec positions.
+    freshest dispatched-bar age per conId, last-trade age per conId, and open
+    auto-exec positions.
 
     Consumed two ways: formatted by ``format_pulse`` into the periodic log
     line, and returned raw by the ``runtime_status`` RPC for `mmr verify` /
     healthchecks. Pure function of its inputs so tests can drive it with
     fabricated state.
+
+    THE TWO AGE FIELDS MEASURE DIFFERENT THINGS — read them together:
+
+    ``bar_age_s`` is the age of the last bar DISPATCHED to a strategy. It
+    answers "is the dispatch pipeline moving", and a quote-only tick is enough
+    to move it (see ``_last_trade_age``), so it is NOT a data-freshness metric.
+
+    ``trade_age_s`` is the age of the last tick where cumulative volume rose,
+    i.e. when the instrument last actually traded. Absent for a conId means no
+    trade is visible in the retained stream — normal out of session, an
+    ESCALATION during one.
     """
     states = {}
     running = 0
@@ -225,6 +274,12 @@ def build_runtime_status(
 
     ticks_60s = {int(conid): _count_recent(getattr(df, 'index', None), now_utc, 60)
                  for conid, df in streams.items()}
+
+    trade_age_s: Dict[int, int] = {}
+    for conid, df in streams.items():
+        age = _last_trade_age(df, now_utc)
+        if age is not None:
+            trade_age_s[int(conid)] = age
 
     bar_age_s: Dict[int, int] = {}
     for key, ts in last_dispatched_bar.items():
@@ -245,6 +300,7 @@ def build_runtime_status(
         'strategies_total': len(states),
         'ticks_60s': ticks_60s,
         'bar_age_s': bar_age_s,
+        'trade_age_s': trade_age_s,
         'auto_exec_open': int(auto_exec_open),
     }
 
@@ -252,16 +308,23 @@ def build_runtime_status(
 def format_pulse(status: dict) -> str:
     """One greppable INFO line per interval. ``ticks_60s=0`` for a subscribed
     conId during market hours is the escalate condition — a dead feed shows
-    up as this line going to zero, not as an absence of errors."""
+    up as this line going to zero, not as an absence of errors.
+
+    ``trade_age_s`` is printed next to ``bar_age_s`` deliberately: the pair is
+    only readable together. A small ``bar_age_s`` beside a large or missing
+    ``trade_age_s`` means bars are being manufactured from quotes, not trades —
+    which looks identical to health if you read ``bar_age_s`` alone."""
     ticks = ','.join(f'{k}:{v}' for k, v in sorted(status.get('ticks_60s', {}).items()))
     ages = ','.join(f'{k}:{v}' for k, v in sorted(status.get('bar_age_s', {}).items()))
+    trades = ','.join(f'{k}:{v}' for k, v in sorted(status.get('trade_age_s', {}).items()))
     return (
         'pulse strategies={running}/{total} ticks_60s=[{ticks}] '
-        'bar_age_s=[{ages}] auto_exec_open={open}'.format(
+        'bar_age_s=[{ages}] trade_age_s=[{trades}] auto_exec_open={open}'.format(
             running=status.get('strategies_running', 0),
             total=status.get('strategies_total', 0),
             ticks=ticks,
             ages=ages,
+            trades=trades,
             open=status.get('auto_exec_open', 0),
         )
     )

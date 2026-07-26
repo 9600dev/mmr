@@ -5,7 +5,12 @@
 #
 #   trader_service pulse:   pulse ib_connected=True ib_upstream=True open_orders=0
 #   strategy_service pulse: pulse strategies=5/5 ticks_60s=[conid:n,...]
-#                           bar_age_s=[conid:n,...] auto_exec_open=1
+#                           bar_age_s=[conid:n,...] trade_age_s=[conid:n,...]
+#                           auto_exec_open=1
+# bar_age_s = age of the last bar DISPATCHED (a quote-only tick moves it).
+# trade_age_s = age of the last tick where cumulative volume ROSE, i.e. when
+# the instrument last actually traded. A small bar_age_s next to a missing
+# trade_age_s during a session means bars are being made from quotes.
 #
 # Escalation reads (docs/MONITORING.md):
 #   - a pulse older than ~2 minutes  -> that service's loop is wedged
