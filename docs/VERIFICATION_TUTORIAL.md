@@ -204,62 +204,176 @@ Catch the boring stuff — `str` where an `int` belongs. Useful, unremarkable.
 
 ### The interesting use: making a *rule* into a *type*
 
-MMR's rule is: **every order placed with the broker must have passed the risk
-gate.** Normally that's a call-graph convention — you enforce it by everyone
-remembering. Instead:
+This is the least obvious idea in the tutorial, so it's built up in steps.
+
+**The rule we want to enforce:** *every order that reaches the broker must have
+passed the risk gate.*
+
+#### Step 1 — how you'd normally do it, and why it leaks
 
 ```python
-# trader/trading/approved_order.py
-_MINT_KEY = object()          # module-private; never exported
-
-class ApprovedOrder:
-    """A frozen, mint-only capability token proving an order was authorized."""
-    __slots__ = ('contract', 'order', 'is_exit', 'checks', 'exit_reason')
-
-    def __init__(self, _key: object = None, /, *, contract, order, ...):
-        if _key is not _MINT_KEY:
-            raise RuntimeError(
-                'ApprovedOrder is mint-only — construct it via the gate')
-        object.__setattr__(self, 'contract', contract)
-        ...
-
-    def __setattr__(self, name, value):        # frozen after mint
-        raise AttributeError('ApprovedOrder is frozen')
-
-    def __reduce__(self):                      # no pickle reconstruction path
-        raise TypeError('ApprovedOrder is not serializable')
+def place_from_dashboard(contract, order):
+    if not risk_gate.approves(contract, order):     # remember to check!
+        return
+    broker.place(contract, order)
 ```
 
-And the single **chokepoint** — the one function in the entire codebase that
-hands an order to the broker, so every order must pass through it — accepts
-*only* that type:
+That works, for that function. The problem is what it does *not* do: nothing
+stops the next function from being written like this —
+
+```python
+def place_from_new_feature(contract, order):
+    broker.place(contract, order)                   # ...oops
+```
+
+— which compiles, runs, and trades. The rule lives in the reviewer's head and in
+a docstring. It is a **convention**, and conventions are exactly what erodes when
+code volume goes up and review depth goes down.
+
+#### Step 2 — make the placement function demand *proof*
+
+Instead of asking callers to check first, change what the placement function is
+willing to *accept*:
 
 ```python
 # trader/trading/executioner.py
 async def subscribe_place_order_direct(self, approved: ApprovedOrder) -> Observable[Trade]:
 ```
 
-Now a code path that never reached the gate **cannot construct the argument the
-placement function requires**, and `ty` flags the attempt statically. There's a
-test that runs the real type checker on a probe to prove it:
+Read the signature as a sentence: **"I do not place orders. I place
+`ApprovedOrder`s."** You can no longer hand it a contract and an order at all —
+there's no parameter for them.
+
+#### Step 3 — make that value obtainable in exactly one place
+
+`ApprovedOrder` values come from exactly one function:
 
 ```python
-# tests/invariants/test_approved_order.py
-_TY_PROBE = """
-    async def bad(ex: TradeExecutioner):
-        await ex.subscribe_place_order_direct(Contract(), Order())   # must be a type error
-
-    async def good(ex: TradeExecutioner):
-        tok = mint_approved_order(Contract(), Order(), is_exit=False)
-        await ex.subscribe_place_order_direct(tok)                   # OK
-"""
+def mint_approved_order(contract, order, *, is_exit, checks=None) -> ApprovedOrder
 ```
 
-### Be honest about what this buys
+and that function is called only from the gate's approve branch. So the chain
+becomes:
 
-This is the part most write-ups get wrong, so it's worth stating plainly:
-`mint_approved_order()` performs **no verification**. It's an unconditional
-constructor. So the type proves *"someone called mint"*, **not** *"the gate
+```
+you want to place an order
+  └─ you must pass an ApprovedOrder
+       └─ which only mint_approved_order() produces
+            └─ which is only called after the gate approved
+```
+
+The rule *"you must pass the gate"* has been rewritten as *"you must be holding
+this value"* — and **"which values may go here" is precisely the question a type
+checker answers.** That's the whole trick: a process requirement has been
+converted into a data requirement.
+
+#### Step 4 — what the type checker actually does
+
+Write the gate-skipping call and run `ty` on it. This is real output:
+
+```console
+$ uv run ty check probe.py --output-format concise
+probe.py:7:43: error[invalid-argument-type] Argument to bound method
+  `TradeExecutioner.subscribe_place_order_direct` is incorrect:
+  Expected `ApprovedOrder`, found `Contract`
+probe.py:7:55: error[too-many-positional-arguments] Too many positional arguments
+  to bound method `TradeExecutioner.subscribe_place_order_direct`: expected 2, got 3
+Found 2 diagnostics
+```
+
+That is the enforcement, and it's worth being precise about what changed:
+skipping the gate is no longer *a thing a reviewer might notice* — it is a
+**type error**, produced before the code runs, by a tool that runs on every
+commit. There's a test in the suite that runs the real type checker on that
+probe and asserts it fails, so the guarantee itself is regression-tested.
+
+#### Step 5 — but Python has no private constructors
+
+Here's the hole, and it's the reason `_MINT_KEY` exists. A type checker only
+checks *types*. If anyone can build the value directly:
+
+```python
+tok = ApprovedOrder(contract=c, order=o)      # forged — and ty is perfectly happy!
+await ex.subscribe_place_order_direct(tok)    # ...straight to the broker
+```
+
+A forged `ApprovedOrder` **is** an `ApprovedOrder`. Types get you *"you can't
+pass the wrong thing"*; they do not get you *"you can't manufacture the right
+thing"*. Python has no `private` keyword to lean on.
+
+The fix is a **sentinel**: a secret value the constructor demands, which exists
+only inside the defining module.
+
+```python
+# trader/trading/approved_order.py
+_MINT_KEY = object()      # never in __all__, never returned, never passed out
+
+class ApprovedOrder:
+    __slots__ = ('contract', 'order', 'is_exit', 'checks', 'exit_reason')
+
+    def __init__(self, _key: object = None, /, *, contract, order, ...):
+        if _key is not _MINT_KEY:                      # note: `is`, not `==`
+            raise RuntimeError(
+                'ApprovedOrder is mint-only — construct it via the gate')
+        object.__setattr__(self, 'contract', contract)
+        ...
+```
+
+Three details in that snippet do real work:
+
+- **`object()`** — a bare object whose only distinguishing feature is its
+  *identity*. You cannot guess it, compute it, or construct an equal one.
+- **`is` not `==`** — identity comparison, so a look-alike can't satisfy it.
+  (`==` could be defeated by an object with a permissive `__eq__`.)
+- **`/`** — makes `_key` **positional-only**, so `ApprovedOrder(_key=...)` isn't
+  even expressible syntactically.
+
+Real behaviour, run against the actual class:
+
+```console
+ApprovedOrder(contract=..., order=...)           -> RuntimeError: ApprovedOrder is mint-only ...
+ApprovedOrder('guess', contract=..., order=...)  -> RuntimeError: ApprovedOrder is mint-only ...
+mint_approved_order(...)                         -> ApprovedOrder(BUY 100 AMD, open)
+tok.is_exit = True                               -> AttributeError: ApprovedOrder is frozen
+pickle.dumps(tok)                                -> TypeError: ApprovedOrder is not serializable
+```
+
+#### Step 6 — so what enforces what?
+
+Four mechanisms, four distinct jobs. This is the summary worth remembering:
+
+| Mechanism | Prevents | Enforced by | When |
+|---|---|---|---|
+| `approved: ApprovedOrder` parameter | passing raw contract/order to the broker | `ty` | statically, every commit |
+| `_MINT_KEY` sentinel | manufacturing a token without the gate | Python | at runtime |
+| `__setattr__` raises (frozen) | altering a decision after it was made | Python | at runtime |
+| `__reduce__` raises (no pickle) | rebuilding a token from serialized data | Python | at runtime |
+
+The type system and the sentinel are **complementary, and neither is sufficient
+alone**: types stop you passing the wrong value, the sentinel stops you creating
+the right one illegitimately. The frozen/unpicklable pair closes the remaining
+routes — mutating a token after it was approved, or reconstructing one from a
+message off the wire.
+
+> **Why not a Pydantic model?** An earlier version used one. Pydantic's *public*
+> constructors `model_construct()` and `model_copy()` bypass `__init__`
+> entirely — so a forged, sentinel-free, type-clean token was one documented
+> API call away. A plain frozen `__slots__` class has no such bypass.
+
+> **The honest threat model.** This stops *accidents* and *refactors* — an agent
+> or a colleague wiring up a new placement path without the gate. It is **not**
+> a defence against hostile code in the same process: anything that can
+> `import` the module can reach `_MINT_KEY` by reflection. True unforgeability
+> would need process isolation, which is a different (and much more expensive)
+> project. Know which threat you've actually addressed.
+
+### The gap the type cannot close
+
+Steps 1–6 stop you *forging* a token. There is a second, subtler gap they do
+not touch, and this is the part most write-ups of this pattern get wrong.
+
+State it plainly: `mint_approved_order()` performs **no verification**. It's an
+unconditional constructor. So the type proves *"someone called mint"*, **not** *"the gate
 ran"*. A new code path could mint without gating and `ty` would be perfectly
 happy.
 
