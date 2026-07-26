@@ -457,6 +457,53 @@ host propose now round-trips to the container store; only then populate the key
 file, set the threshold above the auto-executor ceiling, and run P1/P2/P3 — so
 there is **no window where a real key sits on a leaky surface.**
 
+## Verification hardening — SHIPPED (2026-07-25)
+
+A review of the verification toolchain itself ("who verifies the verifier"),
+prompted by the observation that a tool reporting success is not the same as a
+tool having run. Findings and fixes:
+
+- **The `ty` gate failed OPEN.** It ignored the subprocess return code and
+  regex-parsed stdout, so a missing/crashed/renamed `ty` parsed to zero
+  diagnostics, hence zero regressions, hence "gate OK" with exit 0 — on the only
+  enforcement point in a repo with no CI. It also then advised `--update`, which
+  would have written an EMPTY baseline over a real one. Now fails closed on a
+  non-zero exit or a missing summary line, `--update` included.
+- **The exit-class decision was invisible to every layer.** A targeted backdoor
+  (`if qty > 1000: return True`, permitting unlimited naked shorts past the
+  filter, leverage check, risk gate, approval requirement AND the approver tier)
+  passed all 41 invariants and all 1882 tests: the spec MOCKED the predicate, it
+  carried no `deal` contract so CrossHair never saw it, `trading_runtime.py` was
+  outside the mutation scope, and the unit examples all used qty <= 150.
+  Extracted to `trader/trading/exit_class.py` — pure, contracted, CrossHair-clean,
+  mutation-covered — with a Hypothesis property whose central claim is
+  QUANTITY-INDEPENDENCE, so no size threshold can hide inside it.
+- **`ApprovedOrder` was not the type invariant it was described as.**
+  `mint_approved_order` verifies nothing, so the type only ever proved "someone
+  called mint", not "the gate ran". Authorization evidence is now demanded where
+  the token is SPENT (the placement chokepoint refuses an exposure-increasing
+  token carrying no passing gate record), which also covers every future mint
+  site. Exit exemptions must additionally name their justifying rule
+  (`ExitReason`), enforced by an AST walk over every mint call.
+- **Coverage rot made mechanical.** The live-order path (`auto_executor.py`,
+  `strategy_runtime.py`, `sdk.py` — ~6.7k lines) was in NO ty scope;
+  `auto_executor` was already clean so it went to the kernel at zero. Tests now
+  fail if a new module under `trader/trading|strategy/` lands in no scope, if a
+  `@deal`-contracted function is missing from CrossHair's TARGETS, or if a spec
+  file is absent from the mutation oracle (adding one changed nothing until it
+  was listed — the file existed, passed, and measured zero mutants).
+- **The mutation score is now machine-checked** (`scripts/mutation_baseline.json`,
+  `run_mutation.sh check`) instead of a stale shell comment, and fails closed on
+  a missing baseline or an unexercised module.
+
+Residual, recorded rather than fixed: a flip's net-new opening remainder stays
+ungated (below); `PortfolioState` has no `net_liquidation_evaluable` flag, so the
+sizer cannot distinguish "trader_service offline" from "account worth zero" —
+the `*_evaluable` pattern `RiskInputs` already uses, missing here and in
+`check_leverage`.
+
+---
+
 ## Tranche 2 — designed, not built
 
 Priority order is roughly as listed; items are independent unless noted.

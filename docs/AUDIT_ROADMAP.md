@@ -8,6 +8,9 @@ risk, and a paper-validation plan for each.
 
 Legend: **effort** S/M/L · **risk** = blast radius if the change is wrong.
 
+Source material: [`AUDIT_2026-07.md`](AUDIT_2026-07.md) — the 20-reviewer audit
+these items were distilled from (historical; its confirmed bugs are remediated).
+
 ---
 
 ## Cluster A — Order lifecycle & broker-truth reconciliation  ★ highest value
