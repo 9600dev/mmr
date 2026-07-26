@@ -30,6 +30,20 @@
 # identical runs, which in a gate means spurious failures and then a gate nobody
 # trusts. The printed TABLE still shows raw killed/(killed+survived) so the
 # timeout column stays visible.
+# Scale note: a FULL pass is now ~2,600 mutants and takes tens of minutes,
+# because auto_executor.py (1,709 mutants on its own) entered the scope on
+# 2026-07-25. `run_mutation.sh check` requires a full pass by design — a partial
+# run cannot satisfy the gate — so budget for that, or use `cores` for a quick
+# read on the pure kernel while iterating.
+#
+#   auto_executor.py        1084 killed / 589 survived / 27 timeout = 64.8%
+#       BASELINED, NOT ENDORSED. Only decide_signal (154 mutants) has been
+#       analysed and specced; the other ~1,555 are a recorded floor so the score
+#       cannot silently regress, NOT a claim that those survivors are acceptable.
+#       9 mutants have no covering test at all. Whoever picks this up next:
+#       classify by consequence, as with position_sizing — most of this module is
+#       queue plumbing and logging, but the protective-stop placement and the
+#       reconcile path are worth the same treatment decide_signal just got.
 #   proposal_transitions.py    8 killed /  0 survived            = 100.0%
 #   order_math.py             57 killed /  3 survived / 1 timeout =  95.0%   (3 survivors = documented equivalents, see below)
 #   position_sizing.py       395 killed / 162 survived           =  70.9%   (survivors: reasoning/warning text + session_summary report + boundary/degenerate/defense-in-depth equivalents)

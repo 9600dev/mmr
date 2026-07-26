@@ -7,6 +7,12 @@
       "timeout": 0,
       "score": 1.0
     },
+    "trader/strategy/auto_executor.py": {
+      "killed": 1084,
+      "survived": 589,
+      "timeout": 27,
+      "score": 0.653529
+    },
     "trader/trading/exit_class.py": {
       "killed": 29,
       "survived": 2,
@@ -20,10 +26,10 @@
       "score": 0.95082
     },
     "trader/trading/position_sizing.py": {
-      "killed": 395,
-      "survived": 162,
+      "killed": 397,
+      "survived": 160,
       "timeout": 0,
-      "score": 0.709156
+      "score": 0.712747
     },
     "trader/trading/risk_gate.py": {
       "killed": 294,
