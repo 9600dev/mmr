@@ -566,6 +566,67 @@ tool actually see this?") of the code rather than the tooling.
   so an order with no quantity places one share and one with no limit price
   places a limit nobody chose). One property killed eleven of them.
 
+- **The disaster stop could be placed AT the entry price.** The broker-side GTC
+  STP SELL on every attributed open is the only protection that survives a dead
+  feed or a dead strategy_service while holding — the stale-bar gate guards
+  opens, nothing else guards a position already on the book. Its arithmetic lived
+  inline in `AutoExecutor._ensure_protective` between two SDK calls, and every
+  test of it used a $100 entry and a healthy position.
+
+  Extracted to `trader/trading/protective_stop.py` (pure, contracted,
+  CrossHair-clean, 81.8% → **92.3%** mutation) and measuring it immediately
+  found a real bug: `round(avg_cost * (1 - pct/100), 2)` returns the entry price
+  itself for any entry under about $0.0625 at the default 8% —
+  `round(0.05 * 0.92, 2) == 0.05` — so the disaster stop sold at market the
+  moment IB accepted it. Now FLOORS (rounding may only ever step away from
+  entry) and refuses outright when no two-decimal price sits strictly below
+  entry; the caller retries next bar. The Hypothesis property then found a
+  second: flooring alone does not guarantee "never nearer than requested",
+  because `target * 100` can round up onto an exact integer (at
+  99999.99999999999 and 1.00001% it lands on 9899999.0). Fixed with the same
+  step-down loop `order_math._floor_shares_for_notional` uses, and pinned.
+
+  The contracts state the two things it must never do: **oversell** (an
+  oversized protective SELL is exit-class, hence exempt from every gate, and
+  would open a SHORT out of the mechanism whose job is to close one) and **sit
+  at or above entry**. The spec states the converse too — a normal position
+  always gets a stop — since both safety properties are satisfied by a function
+  that plans nothing, and a naked position is what the mechanism exists to
+  prevent.
+
+- **The never-oversell clamp was not a clamp.** Both the executor's close path
+  and the protective stop wrote `min(attributed_qty, broker_qty)` and then
+  guarded with `if qty <= 0`. Neither survives a NaN: `min(140.0, nan)` returns
+  `140.0` (the comparison is False, so `min` keeps its first argument) and
+  `nan <= 0` is `False`. An unreadable broker quantity therefore passed the
+  clamp AND the guard and would have sold the full attributed size against a
+  position of unknown size — as an exit-class order, so the filter, the
+  leverage check, the risk gate and the approver tier would all have waved it
+  through. Now one contracted definition (`order_math.reducible_quantity`,
+  CrossHair-checked) used by both call sites: every non-number, NaN, inf, zero
+  or negative input yields 0.0.
+
+- **Reconciliation could disarm every protective stop it owns.** The first-work
+  reconcile marks attributed positions absent at the broker as
+  `CLOSED_EXTERNALLY` and cancels their stops. It read absence from an empty
+  dict — and `Trader.get_positions` falls back to MMR's own portfolio cache
+  when `ib.positions()` is empty, with both empty for the first moments after
+  trader_service connects. That is exactly when strategy_service starts pushing
+  bars and the executor reconciles. The failure is silent and permanent: real
+  positions lose their attribution (so no strategy will ever close them) and
+  lose their disaster stop (so nothing protects them), and nothing
+  re-attributes. An all-empty read is now inconclusive until it has persisted
+  for `MMR_EMPTY_BROKER_GRACE_S` (default 120s); a readable book resets the
+  clock. Bounded rather than unlimited, because a stale attribution blocks new
+  opens — refusing forever would trade one silent failure for another.
+
+  Tooling note: CrossHair crashed on this target (`ValueError: Exceeds the limit
+  (4300 digits)`) because realizing a symbolic float can make z3 return an exact
+  rational with thousands of digits, which CPython refuses to stringify. The
+  gate fails closed, so a tooling limit read as a contract violation.
+  `scripts/crosshair_check.py` now raises `PYTHONINTMAXSTRDIGITS` in the checker
+  subprocess.
+
 ---
 
 ## Tranche 2 — designed, not built

@@ -42,6 +42,40 @@ def _all_finite_positive(*values: float) -> bool:
 
 
 @deal.has()  # side-effect free (no I/O, no global mutation)
+@deal.pure
+@deal.ensure(
+    lambda _: _.result >= 0.0,
+    message='a reducible quantity is never negative')
+@deal.ensure(
+    lambda _: (_.result == 0.0
+               or (_all_finite_positive(_.broker_qty) and _.result <= _.broker_qty)),
+    message='reducible quantity would OVERSELL the live broker position')
+@deal.ensure(
+    lambda _: (_.result == 0.0
+               or (_all_finite_positive(_.attributed_qty) and _.result <= _.attributed_qty)),
+    message='reducible quantity exceeds what this strategy is attributed')
+def reducible_quantity(attributed_qty: float, broker_qty: float) -> float:
+    """How much of an attributed long position may be reduced right now.
+
+    ``0.0`` means "none, or not knowable" — the caller must not place a
+    reducing order. Both bounds are load-bearing and for different reasons:
+    exceeding the BROKER quantity opens a short, and exceeding the ATTRIBUTED
+    quantity closes shares this strategy has no claim on (a manual position in
+    the same instrument).
+
+    This exists because ``min(attributed, broker)`` — written inline at both
+    call sites — is NOT the clamp it looks like. ``min(140.0, float('nan'))``
+    returns 140.0, and ``nan <= 0`` is False, so a NaN broker read sailed
+    through both the clamp and the guard after it and would have sold the full
+    attributed size against an unknown position. Every non-number, NaN, inf,
+    zero or negative input is 0.0 here.
+    """
+    if not _all_finite_positive(attributed_qty, broker_qty):
+        return 0.0
+    return min(float(attributed_qty), float(broker_qty))
+
+
+@deal.has()  # side-effect free (no I/O, no global mutation)
 @deal.raises(ValueError)
 @deal.pre(lambda amount, price, multiplier=1.0: _all_finite_positive(amount, price, multiplier))
 @deal.ensure(lambda _: _.result >= 1 and _.result * _.price * _.multiplier <= _.amount)

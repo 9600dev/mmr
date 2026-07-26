@@ -154,6 +154,9 @@ only_mutate = [
     # bracket legs, protective stops) reached IB unchecked. Extracted pure and
     # moved to the placement chokepoint — and therefore measured here.
     "trader/trading/order_structure.py",
+    # The disaster stop's size and price: the only protection that survives a
+    # dead feed while holding, and it lived inline between two SDK calls.
+    "trader/trading/protective_stop.py",
     "trader/strategy/auto_executor.py",
     "trader/trading/position_sizing.py",
     "trader/trading/risk_gate.py",

@@ -57,6 +57,8 @@ from trader.common.logging_helper import setup_logging
 from trader.data.duckdb_store import DuckDBConnection
 from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.objects import Action
+from trader.trading.order_math import reducible_quantity
+from trader.trading.protective_stop import protective_stop_plan
 
 # Named logger routed to the strategy_service log (logging.yaml) so the
 # OPENED/CLOSING/CLOSED/CLOSE FAILED audit lines land in the same file as the
@@ -226,6 +228,42 @@ def decide_signal(
         return Directive('close', 'SELL while holding', quantity=held_qty)
 
     return Directive('skip', f'unsupported action {work.action}')
+
+
+def accept_empty_broker_read(
+    first_empty_at: Optional[float],
+    now: float,
+    grace_seconds: float,
+) -> bool:
+    """May "the broker reports NO positions at all" be believed?
+
+    Reconciliation marks every attributed position that is absent at the broker
+    as CLOSED_EXTERNALLY and cancels its protective stop. That is right when a
+    position really was closed while we were down. It is catastrophic when the
+    broker read is merely EMPTY-because-early: real positions lose their
+    attribution (so no strategy will ever close them) and lose their disaster
+    stop (so nothing protects them), permanently — nothing re-attributes.
+
+    That window is not theoretical. ``get_positions`` falls back to MMR's own
+    portfolio cache when ``ib.positions()`` is empty, and both are empty for the
+    first moments after trader_service connects — which is exactly when
+    strategy_service starts pushing bars and the executor does its first-work
+    reconcile.
+
+    So an empty read is INCONCLUSIVE on first sight and is believed only if it
+    is still empty ``grace_seconds`` later. A genuinely flat book converges
+    (the second read agrees); a startup race does not (positions arrive). The
+    grace period is bounded rather than unlimited because a stale attribution
+    blocks new opens — refusing to ever reconcile would trade one silent
+    failure for another.
+    """
+    if first_empty_at is None:
+        return False
+    try:
+        elapsed = float(now) - float(first_empty_at)
+    except (TypeError, ValueError):
+        return False
+    return elapsed >= float(grace_seconds)
 
 
 def check_time_exit(
@@ -504,6 +542,9 @@ class AutoExecutor:
         self._open_view: Dict[Tuple[str, int], Any] = {}
         self._view_lock = threading.Lock()
         self._reconciled = False
+        # When the broker first reported an empty book (see
+        # accept_empty_broker_read). None = the last read had positions.
+        self._first_empty_broker_read: Optional[float] = None
         self._worker = threading.Thread(target=self._run, name='auto-executor', daemon=True)
         self._started = False
         self._load_open_view()
@@ -556,6 +597,16 @@ class AutoExecutor:
         the kill switch's loose truthy parsing, arming real money must not
         happen via 'true'/'yes'/typo (mirrors horserank's double-arm)."""
         return os.environ.get(self.LIVE_ARM_ENV, '') == '1'
+
+    @property
+    def empty_broker_grace_seconds(self) -> float:
+        """How long an all-empty broker read must persist before reconcile
+        believes it. Malformed values fall back to the default rather than to
+        zero — zero would restore the startup-race bug this guards."""
+        try:
+            return float(os.environ.get('MMR_EMPTY_BROKER_GRACE_S', '') or 120.0)
+        except ValueError:
+            return 120.0
 
     @property
     def protective_stop_pct(self) -> float:
@@ -630,6 +681,30 @@ class AutoExecutor:
         except Exception as ex:
             logging.warning('auto-executor: reconcile skipped (broker unavailable: %s)', ex)
             return  # retry on next work item
+
+        # An EMPTY read is not the same as "everything was closed". Believing
+        # it wrongly strips attribution AND cancels the protective stop on
+        # positions that are really there — permanently, since nothing
+        # re-attributes. See accept_empty_broker_read.
+        if not broker:
+            now = dt.datetime.now().timestamp()
+            if self._first_empty_broker_read is None:
+                self._first_empty_broker_read = now
+            if not accept_empty_broker_read(
+                    self._first_empty_broker_read, now, self.empty_broker_grace_seconds):
+                logging.warning(
+                    'auto-executor: broker reports NO positions while %s attributed '
+                    'position(s) are open — treating as an incomplete read and '
+                    'retrying (portfolio feeds are empty for a moment after connect)',
+                    len(open_rows))
+                return  # retry on next work item
+            logging.warning(
+                'auto-executor: broker has reported no positions for %.0fs — '
+                'accepting it and reconciling %s attributed position(s) as closed',
+                now - self._first_empty_broker_read, len(open_rows))
+        else:
+            self._first_empty_broker_read = None
+
         for strategy, conid, qty, _entry, protective_id in open_rows:
             if broker.get(int(conid), 0.0) <= 0:
                 logging.warning(
@@ -856,7 +931,10 @@ class AutoExecutor:
             self._cancel_protective(strategy_name, conid,
                                     pos['protective_order_id'], context=reason)
         broker_qty = self._broker_positions().get(conid, 0.0)
-        qty = min(attributed_qty, broker_qty)
+        # NOT min(): min(140.0, nan) is 140.0 and nan <= 0 is False, so an
+        # unreadable broker quantity used to pass both the clamp and the guard
+        # below and sell the full attributed size against an unknown position.
+        qty = reducible_quantity(attributed_qty, broker_qty)
         if qty <= 0:
             logging.warning(
                 'auto-executor: close requested for %s conId %s but broker holds %s — '
@@ -947,13 +1025,19 @@ class AutoExecutor:
             mine = df[df['conId'] == conid]
             if mine.empty:
                 return  # fill not visible at broker yet — retry next bar
-            broker_qty = float(mine.iloc[0]['position'])
-            avg_cost = float(mine.iloc[0]['avgCost'])
-            qty = min(float(pos['quantity']), broker_qty)
-            if qty <= 0 or avg_cost <= 0:
+            broker_qty = mine.iloc[0]['position']
+            avg_cost = mine.iloc[0]['avgCost']
+            plan = protective_stop_plan(
+                attributed_qty=pos['quantity'], broker_qty=broker_qty,
+                avg_cost=avg_cost, stop_pct=pct)
+            if plan is None:
+                logging.debug(
+                    'auto-executor: no protective stop plan for %s conId %s '
+                    '(attributed %s, broker %s, avg cost %s, pct %s)',
+                    strategy, conid, pos['quantity'], broker_qty, avg_cost, pct)
                 return
+            qty, stop_price = plan.quantity, plan.stop_price
             ident = self._resolve_exact(conid)
-            stop_price = round(avg_cost * (1 - pct / 100.0), 2)
             result = sdk.place_protective_order(
                 symbol=ident['symbol'], action='SELL', quantity=qty,
                 order_type='STP', aux_price=stop_price, tif='GTC',

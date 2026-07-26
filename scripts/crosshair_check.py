@@ -38,14 +38,25 @@ every commit, so it does not block ``git commit``. Invoke deliberately with:
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 
 # The deal-contracted pure kernel functions, in kernel order. Keep in sync with
 # the @deal decorators in the source modules (and the tests that exercise them).
+#
+# An entry may be a bare dotted name (uses --timeout) or a (name, seconds) pair
+# capping that one target. The cap is a WALL-CLOCK decision, not a statement
+# that the target is less important: CrossHair's per-condition timeout is a
+# budget it will always spend, and a function containing a loop over a symbolic
+# integer explores paths without bound. protective_stop_plan's cent step-down
+# is exactly that shape — clean in 43s at 10s/condition, still running after 18
+# MINUTES at 30. A gate that takes 20 minutes is a gate nobody runs.
 TARGETS = [
     "trader.trading.exit_class.reduces_exposure",
     "trader.trading.order_structure.structural_rejection",
+    ("trader.trading.protective_stop.protective_stop_plan", 10),
+    "trader.trading.order_math.reducible_quantity",
     "trader.trading.order_math.whole_shares_for_notional",
     "trader.trading.order_math._floor_shares_for_notional",
     "trader.trading.position_sizing._confidence_scale",
@@ -57,10 +68,19 @@ TARGETS = [
 
 
 def check(target: str, timeout: int) -> tuple[int, str]:
+    # PYTHONINTMAXSTRDIGITS: realizing a symbolic float can make z3 hand back an
+    # exact rational whose numerator has thousands of digits, and CrossHair
+    # stringifies it — which trips CPython's 4300-digit int/str guard and crashes
+    # the checker with a ValueError. That reads as NOT-CLEAN (this gate fails
+    # closed), i.e. a tooling limit would look like a contract violation. Raising
+    # the limit only affects int-to-string conversion inside the checker; it does
+    # not weaken any check. Hit by protective_stop.protective_stop_plan, whose
+    # domain includes broker-supplied prices near the float maximum.
+    env = {**os.environ, "PYTHONINTMAXSTRDIGITS": "1000000"}
     proc = subprocess.run(
         [sys.executable, "-m", "crosshair", "check", target,
          "--per_condition_timeout", str(timeout)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=env,
     )
     return proc.returncode, (proc.stdout + proc.stderr).strip()
 
@@ -73,14 +93,17 @@ def main() -> int:
                     help="only run targets whose dotted name contains one of these substrings")
     args = ap.parse_args()
 
-    targets = [t for t in TARGETS if not args.filters or any(f in t for f in args.filters)]
+    resolved = [(t, args.timeout) if isinstance(t, str) else (t[0], min(t[1], args.timeout))
+                for t in TARGETS]
+    targets = [(name, cap) for name, cap in resolved
+               if not args.filters or any(f in name for f in args.filters)]
     if not targets:
         print("crosshair_check: no targets matched filters", file=sys.stderr)
         return 1
 
     not_clean = 0
-    for t in targets:
-        rc, out = check(t, args.timeout)
+    for t, cap in targets:
+        rc, out = check(t, cap)
         if rc == 0:
             print(f"OK    {t}")
         else:

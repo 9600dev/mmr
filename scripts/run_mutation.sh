@@ -36,19 +36,25 @@
 # run cannot satisfy the gate — so budget for that, or use `cores` for a quick
 # read on the pure kernel while iterating.
 #
-#   auto_executor.py        1084 killed / 589 survived / 27 timeout = 64.8%
-#       BASELINED, NOT ENDORSED. Only decide_signal (154 mutants) has been
-#       analysed and specced; the other ~1,555 are a recorded floor so the score
-#       cannot silently regress, NOT a claim that those survivors are acceptable.
-#       9 mutants have no covering test at all. Whoever picks this up next:
-#       classify by consequence, as with position_sizing — most of this module is
-#       queue plumbing and logging, but the protective-stop placement and the
-#       reconcile path are worth the same treatment decide_signal just got.
+#   auto_executor.py        1275 killed / 451 survived / 26 timeout = 73.9%
+#       BASELINED, NOT ENDORSED. decide_signal (2026-07-25) and then the
+#       protective-stop + reconcile paths (2026-07-26) have been analysed and
+#       specced; the rest is a recorded floor so the score cannot silently
+#       regress, NOT a claim that those survivors are acceptable. 9 mutants have
+#       no covering test at all. What the 2026-07-26 pass did was MOVE decisions
+#       out — the stop's arithmetic to protective_stop.py, the never-oversell
+#       clamp to order_math.reducible_quantity — so what remains in the big
+#       survivor blocks is SDK plumbing and log strings. Whoever picks this up
+#       next: the remaining consequence is in ORDERING (cancel-before-close,
+#       clear-tracking-in-finally) and in _process_signal/_execute_open, not in
+#       arithmetic.
 #   proposal_transitions.py    8 killed /  0 survived            = 100.0%
-#   order_math.py             57 killed /  3 survived / 1 timeout =  95.0%   (3 survivors = documented equivalents, see below)
+#   order_math.py             68 killed /  3 survived / 2 timeout =  95.8%   (3 survivors = documented equivalents, see below)
 #   order_structure.py        86 killed /  3 survived            =  96.6%   (3 survivors = documented equivalents, see below)
-#   position_sizing.py       395 killed / 162 survived           =  70.9%   (survivors: reasoning/warning text + session_summary report + boundary/degenerate/defense-in-depth equivalents)
-#   risk_gate.py             216 killed /  43 survived           =  83.4%   (survivors: diagnostic checks/reason strings + degenerate boundaries; every gate DECISION mutant killed)
+#   protective_stop.py        53 killed /  5 survived / 1 timeout =  91.4%   (4 equivalents + 1 unreachable-domain residual, see below)
+#   order_math.reducible_quantity                                 = 100.0%   (0 survivors of 11 — the shared never-oversell clamp)
+#   position_sizing.py       415 killed / 165 survived           =  71.6%   (survivors: reasoning/warning text + session_summary report + boundary/degenerate/defense-in-depth equivalents)
+#   risk_gate.py             294 killed /  16 survived           =  94.8%   (survivors: diagnostic checks/reason strings + degenerate boundaries; every gate DECISION mutant killed)
 # The pure cores (order_math, proposal_transitions) and the contracted sizing
 # scalars (_confidence_scale/_volatility_multiplier) are the hard safety floor
 # and score ~100%/95%; the lower numbers are cosmetic-text-dominated methods.
@@ -161,6 +167,55 @@
 #       safer path and no live strategy specifies fractional sizes.
 #   NOTE the module is 1,709 mutants in total; only decide_signal was analysed.
 #   The rest of auto_executor.py is now in scope and baselined, not examined.
+#
+#   protective_stop.py SURVIVOR CLASSIFICATION (2026-07-26, 81.8% -> 92.3%).
+#   The disaster stop's size and price, extracted pure from
+#   AutoExecutor._ensure_protective. Measuring it found a REAL BUG first:
+#   `round(avg_cost * (1 - pct/100), 2)` returns the entry price itself for any
+#   entry under ~$0.0625 at the default 8% (round(0.05*0.92, 2) == 0.05), so the
+#   disaster stop sold at market the instant IB accepted it. Every pre-existing
+#   test used a $100 entry. Now floors (never steps toward entry) and refuses
+#   when no two-decimal price sits strictly below entry.
+#   The Hypothesis property then found a SECOND one: flooring alone does not
+#   guarantee "never nearer than requested" — at 99999.99999999999 and 1.00001%,
+#   `target * 100` rounds up onto exactly 9899999.0. Fixed with the same
+#   step-down loop order_math._floor_shares_for_notional uses, and pinned.
+#   The 12 first-round survivors were the whole degenerate region: the off
+#   switch at a fractional-cent entry, the overflow guard, and every branch of
+#   the step-down loop (untested because the loop almost never runs). Three
+#   pinned cases killed seven. Remaining 5 (mutant NUMBERS below are from the
+#   2026-07-26 final run and shifted once already when the never-oversell clamp
+#   moved out to order_math.reducible_quantity — match on the DIFF, not the id):
+#     * 11 — `cost <= 0` -> `< 0`. At cost == 0 the target is 0, so the floor is
+#       0 and the `0 < stop_price` check refuses anyway. TRUE EQUIVALENT.
+#     * 36 — the INITIAL `math.floor(target * 100.0)` -> `* 101.0`. The step-down
+#       loop converges to the same cents from ANY start at or above the answer,
+#       so the output is identical (just slower). TRUE EQUIVALENT — and a
+#       property of the loop worth knowing: it makes the initial floor
+#       mutation-insensitive, so do not read a high score here as coverage of
+#       that expression.
+#     * 38 — `while cents > 0` -> `>= 0`. Diverges only for a negative target,
+#       where both land on a non-positive stop and return None. TRUE EQUIVALENT.
+#     * 39 — `while cents > 0` -> `> 1`. Needs a step from 1 cent to 0, i.e. a
+#       double target < 0.01 whose `* 100.0` rounds UP to >= 1.0. That window is
+#       narrower than one ULP of 0.01 (relative error <= 2**-53 vs a 2**-59
+#       absolute spacing); a +/-200-ULP scan below 0.01 finds no such double, and
+#       400k random samples in [1e-4, 1e3] find no float-boundary step-up at all.
+#       EQUIVALENT in IEEE754, same argument shape as the order_math pair.
+#       (Re-derive if the cent scale changes — sub-penny tick sizes would.)
+#     * 32 — the overflow guard's `target * 100.0` -> `* 101.0`. A REAL
+#       difference, in the band where `*100` is finite and `*101` is not:
+#       entry prices between about 1.78e306 and 1.80e306. Recorded as an
+#       unreachable-domain residual rather than pinned with an absurd test.
+#   order_math.reducible_quantity — the never-oversell clamp both the close path
+#   and the protective stop now share — has ZERO survivors out of 11 mutants.
+#
+#   auto_executor's _ensure_protective / _cancel_protective / set_protective are
+#   still the largest survivor block in the module (~130). They are now THIN:
+#   the decisions moved to protective_stop.py and order_math.reducible_quantity,
+#   which score 91.4% and 100%. What is left is SDK plumbing and log strings.
+#   Whoever picks this up next: the remaining consequence is in the ORDERING
+#   (cancel-before-close, clear-tracking-in-finally), not in arithmetic.
 #
 #   order_structure.py SURVIVOR CLASSIFICATION (2026-07-26, 84.3% -> 96.6%).
 #   The last structural check before IB, extracted pure from OrderValidator and

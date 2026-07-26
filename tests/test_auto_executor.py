@@ -333,6 +333,20 @@ class TestAutoExecutorPipeline:
             action=Action.SELL, bar_ts=TS + pd.Timedelta(minutes=30)))
         assert sdk.propose_calls[1]['quantity'] == 90.0
 
+    def test_close_with_an_unreadable_broker_position_places_no_order(self, executor):
+        """A NaN broker quantity defeated the inline min()/<=0 pair: min keeps
+        140.0 and nan <= 0 is False, so the executor would have sold the full
+        attributed size against a position it could not read. Exit-class orders
+        are exempt from every gate, so nothing downstream would have stopped
+        it."""
+        ex, sdk = executor
+        ex._process_signal(make_work())
+        sdk.broker[1111] = float('nan')
+        ex._process_signal(make_work(
+            action=Action.SELL, bar_ts=TS + pd.Timedelta(minutes=30)))
+        assert len(sdk.propose_calls) == 1  # the open only; no close placed
+        assert ex.state.open_position('orb_test', 1111) is None
+
     def test_close_when_broker_flat_marks_external(self, executor):
         ex, sdk = executor
         ex._process_signal(make_work())
@@ -433,12 +447,63 @@ class TestAutoExecutorPipeline:
         db = str(tmp_path / 'reconcile_test.duckdb')
         pre = AutoExecState(db)
         pre.record_open('orb_test', 1111, 140.0, TS, 1, None, None)   # stale: broker is flat
+        sdk.broker[2222] = 10.0   # the book is readable; OUR conid is what's absent
         ex = AutoExecutor(duckdb_path=db, paper_trading=True,
                           sdk_factory=lambda: sdk)
         assert ex.open_entry_bar('orb_test', 1111) is not None  # loaded from disk
         ex._reconcile_once()
         assert ex.state.open_position('orb_test', 1111) is None
         assert ex.open_entry_bar('orb_test', 1111) is None
+
+    def test_reconcile_does_not_believe_a_first_empty_broker_read(self, tmp_path):
+        """The startup race. get_positions falls back to MMR's portfolio cache
+        when ib.positions() is empty, and both are empty for a moment after
+        trader_service connects — which is when the first bars arrive and the
+        executor reconciles. Believing that read strips attribution AND cancels
+        the protective stop on positions that are really there, permanently."""
+        sdk = FakeSDK()
+        db = str(tmp_path / 'reconcile_empty.duckdb')
+        pre = AutoExecState(db)
+        pre.record_open('orb_test', 1111, 140.0, TS, 1, None, None)
+        pre.set_protective('orb_test', 1111, 942)
+        ex = AutoExecutor(duckdb_path=db, paper_trading=True, sdk_factory=lambda: sdk)
+        ex._reconcile_once()                       # broker dict is empty
+        assert ex.state.open_position('orb_test', 1111) is not None
+        assert sdk.cancel_calls == []
+        assert ex._reconciled is False             # will retry
+
+    def test_reconcile_believes_a_persistently_empty_broker(self, tmp_path):
+        """...but it must still converge. A book that really is flat (everything
+        closed while the service was down) has to reconcile eventually — a stale
+        attribution blocks new opens, so refusing forever trades one silent
+        failure for another."""
+        sdk = FakeSDK()
+        db = str(tmp_path / 'reconcile_empty2.duckdb')
+        pre = AutoExecState(db)
+        pre.record_open('orb_test', 1111, 140.0, TS, 1, None, None)
+        ex = AutoExecutor(duckdb_path=db, paper_trading=True, sdk_factory=lambda: sdk)
+        ex._reconcile_once()                       # first empty read: inconclusive
+        assert ex.state.open_position('orb_test', 1111) is not None
+        # ...the grace period elapses (backdated rather than slept)
+        ex._first_empty_broker_read -= ex.empty_broker_grace_seconds + 1
+        ex._reconcile_once()
+        assert ex.state.open_position('orb_test', 1111) is None
+        assert ex._reconciled is True
+
+    def test_a_readable_book_resets_the_empty_read_clock(self, tmp_path):
+        """Two empty reads separated by a good one are not evidence of a flat
+        book; they are two separate blips."""
+        sdk = FakeSDK()
+        db = str(tmp_path / 'reconcile_empty3.duckdb')
+        pre = AutoExecState(db)
+        pre.record_open('orb_test', 1111, 140.0, TS, 1, None, None)
+        ex = AutoExecutor(duckdb_path=db, paper_trading=True, sdk_factory=lambda: sdk)
+        ex._reconcile_once()
+        assert ex._first_empty_broker_read is not None
+        sdk.broker[1111] = 140.0                   # the feed comes good
+        ex._reconcile_once()
+        assert ex._first_empty_broker_read is None
+        assert ex.state.open_position('orb_test', 1111) is not None
 
     def test_reconcile_keeps_positions_broker_confirms(self, tmp_path):
         sdk = FakeSDK()
@@ -561,11 +626,59 @@ class TestProtectiveStops:
         assert len(sdk.protective_calls) == 1
         assert ex.state.open_position('orb_test', 1111)['protective_order_id'] == 900
 
+    def test_an_unreadable_broker_quantity_places_no_stop(self, executor):
+        """A NaN position is not a position. min(140.0, nan) is 140.0 and
+        nan <= 0 is False, so the old inline clamp would have sized a
+        protective SELL off attribution alone."""
+        ex, sdk = executor
+        ex.state.record_open('orb_test', 1111, 140.0, TS, None, None, None)
+        sdk.broker[1111] = float('nan')
+        ex._process_bar(BarWork('orb_test', 1111, TS + pd.Timedelta(minutes=1), 1))
+        assert sdk.protective_calls == []
+
+    def test_stop_is_clamped_to_the_broker_position_not_attribution(self, executor):
+        """Attribution can outrun the broker — a partial fill, or a position
+        trimmed by hand between the open and the next bar. The protective SELL
+        must cover what is actually held, because an exit-class order is exempt
+        from every gate and an oversized one would open a SHORT out of the
+        mechanism whose job is to close one."""
+        ex, sdk = executor
+        ex.state.record_open('orb_test', 1111, 140.0, TS, None, None, None)
+        sdk.broker[1111] = 60.0        # only part of it is really there
+        ex._process_bar(BarWork('orb_test', 1111, TS + pd.Timedelta(minutes=1), 1))
+        assert sdk.protective_calls[0]['quantity'] == 60.0
+
+    def test_a_five_cent_entry_gets_a_stop_below_it_not_at_it(self, executor):
+        """Regression. round(0.05 * 0.92, 2) == 0.05 — the stop landed ON the
+        entry price, so the disaster stop sold at market the moment IB accepted
+        it. Flooring puts it at 0.04, which is what a stop is for."""
+        ex, sdk = executor
+        sdk.avg_cost = 0.05
+        ex.state.record_open('orb_test', 1111, 140.0, TS, None, None, None)
+        sdk.broker[1111] = 140.0
+        ex._process_bar(BarWork('orb_test', 1111, TS + pd.Timedelta(minutes=1), 1))
+        assert sdk.protective_calls[0]['aux_price'] == pytest.approx(0.04)
+        assert sdk.protective_calls[0]['aux_price'] < 0.05
+
+    def test_no_stop_is_placed_when_none_can_sit_below_entry(self, executor):
+        """At a 1-cent entry there is no two-decimal price strictly below it and
+        above zero. Placing nothing (and retrying each bar) is honest; placing a
+        stop at or below zero is an order IB rejects, and one at the entry is an
+        instant market exit."""
+        ex, sdk = executor
+        sdk.avg_cost = 0.01
+        ex.state.record_open('orb_test', 1111, 140.0, TS, None, None, None)
+        sdk.broker[1111] = 140.0
+        ex._process_bar(BarWork('orb_test', 1111, TS + pd.Timedelta(minutes=1), 1))
+        assert sdk.protective_calls == []
+        assert ex.state.open_position('orb_test', 1111)['protective_order_id'] is None
+
     def test_reconcile_cancels_orphaned_stop(self, executor):
         ex, sdk = executor
         ex.state.record_open('orb_test', 1111, 140.0, TS, None, None, None)
         ex.state.set_protective('orb_test', 1111, 942)
         sdk.broker.pop(1111, None)   # position gone at broker
+        sdk.broker[2222] = 10.0      # ...but the book itself reads fine
         ex._reconciled = False
         ex._reconcile_once()
         assert sdk.cancel_calls == [942]
