@@ -501,10 +501,70 @@ tool having run. Findings and fixes:
   a missing baseline or an unexercised module.
 
 Residual, recorded rather than fixed: a flip's net-new opening remainder stays
-ungated (below); `PortfolioState` has no `net_liquidation_evaluable` flag, so the
-sizer cannot distinguish "trader_service offline" from "account worth zero" —
-the `*_evaluable` pattern `RiskInputs` already uses, missing here and in
-`check_leverage`.
+ungated (below); `check_leverage` still fails OPEN (deliberately — see the
+docstring, and the recorded `skipped:` states are the evidence to revisit it).
+`PortfolioState.net_liquidation_evaluable` was the third item here and is now
+closed (below).
+
+---
+
+## Verification hardening, second pass — SHIPPED (2026-07-26)
+
+Two gaps, both found by asking the same question the first pass asked ("does the
+tool actually see this?") of the code rather than the tooling.
+
+- **The sizer could not tell "offline" from "worthless".** `PortfolioState`
+  carried a bare `net_liquidation: float = 0.0`, and `sdk._get_portfolio_state()`
+  returns a default instance when the RPC fails — the documented offline
+  `propose` path. So a real account reading zero and an unreachable
+  trader_service were the same input, and the zero case bypassed the percentage
+  cap and returned the flat default size against a cap of $0. Fixed with the
+  `*_evaluable` flag pattern `RiskInputs` already uses: `evaluable=False`
+  (the default) keeps the offline fallback byte-identical, `evaluable=True` with
+  a non-positive value refuses to size. Zero test breakage, versus 45 for the
+  naive fix that refused on the value alone.
+
+  The spec's Hypothesis strategies could not reach the degenerate region at all
+  — widening the range barely helped (a uniform draw over [0, 5M] lands in (0,1]
+  about once in five million), so the generators became a MIXTURE sampling the
+  bands explicitly. A property was also missing from the other side: a measured
+  POSITIVE account must never be refused as worthless. Cap properties
+  structurally cannot catch an over-eager refusal, because refusing always
+  satisfies an upper bound. Mid-change the mutation gate FAILED on a regression
+  this introduced — the first time it caught something rather than merely
+  recording a number.
+
+- **The structural check guarded the wrong path.** `OrderValidator` rejects
+  malformed orders (bad action, non-positive/NaN quantity, a priced order type
+  with no price) and has done so correctly for years. It ran only under
+  `ExecutorCondition.SANITY_CHECK`, whose sole caller is `place_order_simple` —
+  `mmr buy` / `mmr sell`, the path with a human watching. Every automated order
+  (approve, the AutoExecutor's opens and closes, every bracket leg, the
+  protective stop) reaches IB through `place_expressive_order` →
+  `subscribe_place_order_direct` and was never structurally checked. Meanwhile
+  `place_expressive_order` takes `quantity: float` from the client without
+  checking it is positive or finite, and `ExecutionSpec.validate()` rejects a
+  missing limit price but not a zero one — the same "the server must not trust
+  client numbers" argument that motivates the approver notional tier.
+
+  The decision is now `trader/trading/order_structure.py`: pure, `deal`-
+  contracted, CrossHair-clean, mutation-tested (84.3% → **96.6%**, three
+  documented equivalents), and enforced at the CHOKEPOINT so every path is
+  covered by construction. It applies to exits too, which is not a breach of
+  "an exit is never refused": a malformed order is not a working exit — a SELL
+  of NaN shares reduces nothing, IB rejects it from the far side of the wire,
+  and refusing it here at least names the reason. `tests/invariants/
+  test_order_structure.py` pins both directions, because "nothing malformed
+  reaches the broker" is trivially satisfied by a validator that refuses
+  everything — and that failure mode (a close that cannot be placed) is the one
+  this codebase treats as worse than any limit breach.
+
+  Every survivor of the first measurement was a `getattr` DEFAULT mutant, i.e.
+  the behaviour when an order object is MISSING a field — untested, and six of
+  the fourteen changed real behaviour (three turned a refusal into an
+  `AttributeError` inside the placement path; three made the default permissive,
+  so an order with no quantity places one share and one with no limit price
+  places a limit nobody chose). One property killed eleven of them.
 
 ---
 

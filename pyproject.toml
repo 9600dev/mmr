@@ -149,6 +149,11 @@ only_mutate = [
     # permitting unlimited naked shorts through every gate -- survived all 1882
     # tests. Extracted to a pure module precisely so it lands here.
     "trader/trading/exit_class.py",
+    # The last structural check before IB. It existed for years wired only to
+    # the manual buy/sell path; the automated paths (approve, AutoExecutor,
+    # bracket legs, protective stops) reached IB unchecked. Extracted pure and
+    # moved to the placement chokepoint — and therefore measured here.
+    "trader/trading/order_structure.py",
     "trader/strategy/auto_executor.py",
     "trader/trading/position_sizing.py",
     "trader/trading/risk_gate.py",
@@ -166,6 +171,7 @@ pytest_add_cli_args_test_selection = [
     "tests/invariants/test_auto_execute_decision.py",
     "tests/invariants/test_gate_properties.py",
     "tests/invariants/test_order_notional.py",
+    "tests/test_order_validator.py",
     "tests/invariants/test_proposal_machine.py",
     "tests/invariants/test_sizing_properties.py",
     "tests/test_order_math.py",

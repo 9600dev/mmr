@@ -46,6 +46,7 @@
 #       reconcile path are worth the same treatment decide_signal just got.
 #   proposal_transitions.py    8 killed /  0 survived            = 100.0%
 #   order_math.py             57 killed /  3 survived / 1 timeout =  95.0%   (3 survivors = documented equivalents, see below)
+#   order_structure.py        86 killed /  3 survived            =  96.6%   (3 survivors = documented equivalents, see below)
 #   position_sizing.py       395 killed / 162 survived           =  70.9%   (survivors: reasoning/warning text + session_summary report + boundary/degenerate/defense-in-depth equivalents)
 #   risk_gate.py             216 killed /  43 survived           =  83.4%   (survivors: diagnostic checks/reason strings + degenerate boundaries; every gate DECISION mutant killed)
 # The pure cores (order_math, proposal_transitions) and the contracted sizing
@@ -160,6 +161,33 @@
 #       safer path and no live strategy specifies fractional sizes.
 #   NOTE the module is 1,709 mutants in total; only decide_signal was analysed.
 #   The rest of auto_executor.py is now in scope and baselined, not examined.
+#
+#   order_structure.py SURVIVOR CLASSIFICATION (2026-07-26, 84.3% -> 96.6%).
+#   The last structural check before IB, extracted pure from OrderValidator and
+#   moved to the placement chokepoint. First measurement: 14 survivors, ALL of
+#   them `getattr` DEFAULT mutants in the rejection_for_order adapter — i.e. the
+#   behaviour when an order object is MISSING a structural attribute, which no
+#   test exercised. Six changed real behaviour:
+#     * 16/25/45 — the default DELETED (`getattr(order, 'lmtPrice', )`). A
+#       missing field then raises AttributeError inside the placement path,
+#       converting a refusal into a crash with no recorded reason.
+#     * 29/49/59 — the default made PERMISSIVE (0 -> 1). An order with no
+#       totalQuantity places 1 share; one with no lmtPrice places a limit at a
+#       price nobody chose. Both look well-formed all the way to IB.
+#   Killed by test_an_order_missing_a_structural_field_is_refused, which pins the
+#   assumed value as well as the refusal (same reasoning as
+#   test_the_DEFAULT_is_disarmed: a default nothing asserts is a decision nobody
+#   is holding). That one property also killed 19/22/42/52, whose defaults differ
+#   only in what the refusal REPORTS.
+#   Remaining 3, all TRUE EQUIVALENTS:
+#     * 13 — action default '' -> None. _normalize does `str(text or '')`, so
+#       None and '' both normalize to '' and take the same refusal branch.
+#     * 32/39 — orderType default '' -> None / 'XXXX'. A missing order type
+#       deliberately degrades to "unpriced" (the price checks do not apply), and
+#       none of the three values is in _NEEDS_LIMIT/_NEEDS_STOP, so all three
+#       accept identically. Pinned by
+#       test_an_order_missing_its_type_degrades_to_unpriced_rather_than_refusing.
+#       (Re-derive if an order type is ever matched by prefix or truthiness.)
 #
 #   position_sizing.py SURVIVOR CLASSIFICATION (2026-07-25, 396/161 = 71.1%).
 #   All 161 classified by whether they can change the SIZED AMOUNT — the only

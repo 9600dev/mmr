@@ -21,6 +21,7 @@ from trader.data.universe import Universe, UniverseAccessor
 from trader.objects import Action, Basket, ContractOrderPair, ExecutorCondition
 from trader.trading.approved_order import ApprovedOrder, ExitReason, mint_approved_order
 from trader.trading.order_math import whole_shares_for_notional
+from trader.trading.order_structure import rejection_for_order
 from trader.trading.order_validator import OrderValidator
 from trader.trading.risk_gate import RiskGate, RiskGateResult
 from typing import cast, List, Optional, TYPE_CHECKING
@@ -87,6 +88,29 @@ class TradeExecutioner():
         contract = approved.contract
         order = approved.order
         is_exit = approved.is_exit
+
+        # Structural sanity, applied to EVERY order including exits.
+        #
+        # This check already existed (OrderValidator), but only on the
+        # ExecutorCondition.SANITY_CHECK path — i.e. only on `mmr buy`/`mmr sell`,
+        # the path with a human watching. Everything automated (approve, the
+        # AutoExecutor, every bracket leg, the protective stop) arrives here
+        # instead and was never structurally checked: place_expressive_order
+        # takes `quantity: float` straight from the client, and
+        # ExecutionSpec.validate() rejects a missing limit price but not a zero
+        # one. Enforcing it at the chokepoint covers every path by construction.
+        #
+        # It applies to exits despite "an exit is never refused" because a
+        # malformed order is not a working exit — a SELL of NaN shares reduces
+        # nothing. IB would reject it from the far side of the wire; refusing it
+        # here names the reason instead.
+        structural_reason = rejection_for_order(order)
+        if structural_reason is not None:
+            logging.error(
+                'placement refused: structurally malformed order (%s) — %r',
+                structural_reason, approved)
+            return rx.throw(ValueError(
+                f'placement refused: structurally malformed order — {structural_reason}'))
 
         # Spend-time authorization check. The token's TYPE only proves someone
         # called mint(); mint deliberately does not validate (a human-owned

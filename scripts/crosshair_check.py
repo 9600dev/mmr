@@ -45,6 +45,7 @@ import sys
 # the @deal decorators in the source modules (and the tests that exercise them).
 TARGETS = [
     "trader.trading.exit_class.reduces_exposure",
+    "trader.trading.order_structure.structural_rejection",
     "trader.trading.order_math.whole_shares_for_notional",
     "trader.trading.order_math._floor_shares_for_notional",
     "trader.trading.position_sizing._confidence_scale",
