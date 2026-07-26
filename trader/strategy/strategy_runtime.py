@@ -238,6 +238,7 @@ def build_runtime_status(
     streams: Dict[int, pd.DataFrame],
     last_dispatched_bar: Dict[tuple, pd.Timestamp],
     auto_exec_open: int,
+    oos_bars: Optional[Dict[int, int]] = None,
 ) -> dict:
     """Pure snapshot of pipeline health: strategy states, tick flow per conId,
     freshest dispatched-bar age per conId, last-trade age per conId, and open
@@ -301,6 +302,7 @@ def build_runtime_status(
         'ticks_60s': ticks_60s,
         'bar_age_s': bar_age_s,
         'trade_age_s': trade_age_s,
+        'oos_bars': {int(k): int(v) for k, v in (oos_bars or {}).items() if v},
         'auto_exec_open': int(auto_exec_open),
     }
 
@@ -317,14 +319,17 @@ def format_pulse(status: dict) -> str:
     ticks = ','.join(f'{k}:{v}' for k, v in sorted(status.get('ticks_60s', {}).items()))
     ages = ','.join(f'{k}:{v}' for k, v in sorted(status.get('bar_age_s', {}).items()))
     trades = ','.join(f'{k}:{v}' for k, v in sorted(status.get('trade_age_s', {}).items()))
+    oos = ','.join(f'{k}:{v}' for k, v in sorted(status.get('oos_bars', {}).items()))
     return (
         'pulse strategies={running}/{total} ticks_60s=[{ticks}] '
-        'bar_age_s=[{ages}] trade_age_s=[{trades}] auto_exec_open={open}'.format(
+        'bar_age_s=[{ages}] trade_age_s=[{trades}] oos_bars=[{oos}] '
+        'auto_exec_open={open}'.format(
             running=status.get('strategies_running', 0),
             total=status.get('strategies_total', 0),
             ticks=ticks,
             ages=ages,
             trades=trades,
+            oos=oos,
             open=status.get('auto_exec_open', 0),
         )
     )
@@ -398,6 +403,11 @@ class StrategyRuntime():
         # Last completed bar timestamp dispatched per (conId, strategy name), so
         # a strategy sees each bar once (not on every tick).
         self._last_dispatched_bar: Dict[tuple, pd.Timestamp] = {}
+        # Bars refused by the session gate, per conId, plus a once-per-day log
+        # guard. Exposed in the pulse so a wrong venue mapping shows up as a
+        # rising count rather than as a strategy that quietly stopped trading.
+        self._oos_bars: Dict[int, int] = {}
+        self._oos_logged: set = set()
         # Keep at most this many days of raw ticks per conid (bounds compute).
         self._tick_retention_days: int = 2
 
@@ -557,6 +567,7 @@ class StrategyRuntime():
             strategies=self.strategy_implementations,
             streams=self.streams,
             last_dispatched_bar=self._last_dispatched_bar,
+            oos_bars=self._oos_bars,
             auto_exec_open=auto_open,
         )
 
@@ -639,6 +650,43 @@ class StrategyRuntime():
         combined = pd.concat(frames)
         return combined[~combined.index.duplicated(keep='last')].sort_index()
 
+    def _bar_in_session(self, contract, bar_ts) -> bool:
+        """Session gate for a dispatched bar. Never raises and never blocks on
+        uncertainty — an error here would silently stop a strategy receiving
+        bars, which is worse than the pollution it guards against."""
+        try:
+            from trader.data.market_session import in_session
+            return in_session(
+                bar_ts,
+                exchange=getattr(contract, 'exchange', '') or '',
+                primary_exchange=getattr(contract, 'primaryExchange', '') or '',
+                sec_type=getattr(contract, 'secType', '') or '',
+            )
+        except Exception as ex:
+            logging.warning('session gate errored for conId %s (%s) — dispatching anyway',
+                            getattr(contract, 'conId', '?'), ex)
+            return True
+
+    def _note_out_of_session(self, conId: int, bar_ts) -> None:
+        """Count suppressions and say so ONCE per (conId, UTC day).
+
+        Silent suppression is the failure mode to avoid: if the venue mapping is
+        wrong, a strategy simply stops seeing bars and nothing says why. The
+        running count also rides along in the pulse.
+        """
+        self._oos_bars[conId] = self._oos_bars.get(conId, 0) + 1
+        try:
+            day = pd.Timestamp(bar_ts).date()
+        except Exception:
+            day = None
+        key = (conId, day)
+        if key not in self._oos_logged:
+            self._oos_logged.add(key)
+            logging.info(
+                'conId %s: bar %s is outside the exchange session (extended hours '
+                'included) — not dispatching. Quote-only ticks form bars off the '
+                'bid/ask midpoint; see AUDIT_ROADMAP G8.', conId, bar_ts)
+
     def on_ticker_next(self, ticker: Ticker):
         # Deliberately no per-tick logging: one line per tick per instrument
         # floods the service log all session for zero triage value. Tick-flow
@@ -675,6 +723,16 @@ class StrategyRuntime():
                 last_bar = frame.index[-1]
                 dkey = (conId, strategy.name)
                 if self._last_dispatched_bar.get(dkey) == last_bar:
+                    continue
+                # Out-of-session bars are NOT market data (AUDIT_ROADMAP G8).
+                # normalize_ticker falls back to the bid/ask midpoint, so an
+                # out-of-hours quote forms a real-looking bar; three of them on
+                # a Sunday were dispatched to orb_wds on 2026-07-26. Extended
+                # hours ARE in-session — this is not an RTH filter; see
+                # trader/data/market_session.py. Deliberately does NOT update
+                # _last_dispatched_bar, so bar_age_s keeps telling the truth.
+                if not self._bar_in_session(ticker.contract, last_bar):
+                    self._note_out_of_session(conId, last_bar)
                     continue
                 self._last_dispatched_bar[dkey] = last_bar
                 # G6: evaluate time-based exits once per new bar, whether or

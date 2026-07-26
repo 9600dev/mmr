@@ -350,7 +350,7 @@ e2b2fd1 (VwapReclaim on_prices). These are the residual robustness items.
   stub server, and consider a `MMR_TEST_MODE` guard that refuses default
   ports under pytest.
 
-### G8 — quote-only ticks form bars that are dispatched to strategies  (M, medium value)
+### G8 — quote-only ticks form bars that are dispatched to strategies  ✅ DONE (2026-07-26)
 
 - **Symptom (2026-07-26, Sunday, ASX shut):** three out-of-hours ticks for WDS
   at 11:45 PDT produced a dispatched "bar", dropping the pulse's `bar_age_s`
@@ -409,9 +409,23 @@ e2b2fd1 (VwapReclaim on_prices). These are the residual robustness items.
   trades, whereas the bug currently costs a slightly polluted EMA. Suppressions
   must be logged and counted, not silent. Needs its own paper session — it
   changes what every live strategy sees.
-- **Partially mitigated 2026-07-26** by `trade_age_s` in the pulse (commit
-  `6b7bf81`), which makes the condition VISIBLE. That is observability only;
-  the dispatch behaviour is unchanged.
+- **FIXED 2026-07-26.** `trader/data/market_session.py` + a gate in
+  `on_ticker_next`. `pandas_market_calendars` added as a runtime dep because
+  `exchange_calendars` genuinely cannot answer this — verified by grepping the
+  whole 4.13.1 package: zero files mention `market_times`, pre- or post-market,
+  and `ExchangeCalendar.market_times` does not exist.
+  - Window verified against our own stored history on both venues: NYSE
+    pre 08:00 UTC / post 24:00 UTC vs GOOGL's 1-min bars spanning 08:00-23:59
+    UTC; ASX open 00:00 / close 06:10 UTC vs WDS's real last bar at the 06:10
+    closing auction.
+  - Fails OPEN — unmapped venue, unparseable timestamp, calendar error and
+    `secType` CASH/CRYPTO all dispatch. The asymmetry is deliberate: the bug
+    costs a polluted moving average, an over-eager gate costs trades.
+  - Suppressions are counted per conId and surfaced in the pulse as
+    `oos_bars=[...]`, and logged once per (conId, day). A wrong venue mapping
+    shows up as a rising count, not as a strategy that quietly stopped.
+  - `bar_age_s` is deliberately NOT updated for a suppressed bar, so it keeps
+    reporting the true last dispatched bar.
 
 ## Recommended sequence
 

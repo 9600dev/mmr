@@ -139,7 +139,7 @@ class TestFormatPulse:
 
     def test_empty_pulse_never_raises(self):
         assert format_pulse({}) == ('pulse strategies=0/0 ticks_60s=[] bar_age_s=[] '
-                                   'trade_age_s=[] auto_exec_open=0')
+                                   'trade_age_s=[] oos_bars=[] auto_exec_open=0')
 
 
 class TestVerifyRosterCheck:
