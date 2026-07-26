@@ -504,8 +504,10 @@ those examples asserted was ≤ 150.
 
 **Where MMR applies it:** `tests/invariants/` is the human-owned executable
 spec. Properties there state safety facts: exit-class orders are never refused,
-gates fail closed, share conversion never exceeds the sized notional, a strategy
-without a PASS record can't arm.
+gates **fail closed** (when a required input can't be read, refuse the trade
+rather than wave it through — the opposite of *fail open*), share conversion
+never exceeds the sized notional, and a strategy without a passing pre-deploy
+check can't start trading.
 
 > **In the LLM loop.** This is the direct antidote to *"the model tested the
 > inputs it had in mind."* A model writing example tests draws from the same
@@ -519,8 +521,17 @@ without a PASS record can't arm.
 
 ### A caveat you must internalise
 
-Hypothesis only explores the space **your strategies describe**. MMR's sizing
-spec had good properties that missed 70 mutants for exactly this reason:
+Hypothesis only explores the space **your strategies describe** — the
+`min_value`/`max_value` bounds you hand it. Anything outside those bounds is
+never tried, so a bug living there is invisible no matter how many examples run.
+
+Here is how MMR discovered that about its own sizing spec. Jumping ahead
+slightly: [section 6](#6-layer-4--mutation-testing-mutmut) introduces **mutation
+testing**, which deliberately injects small bugs — a *mutant* is one such
+deliberately-broken copy of the code, e.g. a `>` changed to `>=` — and then
+checks whether the test suite notices. A mutant nothing notices marks a gap.
+
+Seventy mutants in the sizing code survived, and they all had the same shape:
 
 ```python
 net_liq = draw(st.floats(min_value=10_000.0, max_value=5_000_000.0))  # never 0
@@ -528,8 +539,13 @@ price   = st.floats(min_value=1.0, max_value=5_000.0)                 # never < 
 ```
 
 With `net_liq ≥ 10,000`, a guard written `> 0` and a guard written `> 1` can
-**never disagree**, so mutating one into the other is undetectable. The property
-was fine; the *input space* was too polite.
+**never disagree** — you'd need a value between 0 and 1 to tell them apart, and
+the strategy never generates one. So mutating `> 0` into `> 1` is undetectable,
+not because the property is weak but because the input space is too polite.
+
+**The property was fine. The generator was the bug.** That distinction is easy to
+miss and worth holding onto: a property test can be simultaneously well-written
+and near-useless if its inputs avoid the interesting region.
 
 ---
 
@@ -571,9 +587,10 @@ A contract is simultaneously three things:
 
 1. **Documentation that cannot rot** — it runs.
 2. **A runtime guard** in production.
-3. **A test oracle.** Combine with Hypothesis and you don't even need to write
-   the assertion — feed the function generated inputs and the contract does the
-   judging. In the run above, `deal` raised *before* the test's own `assert`:
+3. **A test oracle** — the thing that decides whether a given run passed or
+   failed. Normally that's your `assert`. Here the contract plays the role, so
+   combined with Hypothesis you don't even need to write the assertion: feed the
+   function generated inputs and the contract does the judging. In the run above, `deal` raised *before* the test's own `assert`:
 
    ```
    E  deal.PostContractError: expected result <= qty (where result=2, price=1.0, qty=1)
