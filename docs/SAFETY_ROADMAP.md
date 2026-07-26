@@ -459,6 +459,10 @@ there is **no window where a real key sits on a leaky surface.**
 
 ## Verification hardening — SHIPPED (2026-07-25)
 
+> For an introduction to the tools themselves — contracts, property testing,
+> symbolic execution, mutation testing — see
+> [`VERIFICATION_TUTORIAL.md`](VERIFICATION_TUTORIAL.md).
+
 A review of the verification toolchain itself ("who verifies the verifier"),
 prompted by the observation that a tool reporting success is not the same as a
 tool having run. Findings and fixes:
