@@ -99,6 +99,8 @@ The reason PubSub and MessageBus are separate (despite overlap) is efficiency: Z
 
 **Reactive streams (RxPY)**: `IBAIORx` converts IB events into RxPY Subjects/Observables. Strategies receive accumulated DataFrames via reactive pipelines.
 
+**Session gating of live bars** (`trader/data/market_session.py`): a bar is dispatched to `strategy.on_prices` only when its timestamp falls inside the contract's exchange session — **extended hours included** (US 04:00–20:00 ET; ASX through the 16:10 closing auction). This is NOT an RTH filter: 23% of GOOGL's stored 1-min bars are zero-volume and those *are* the extended-hours minutes, the backtester sees them, so the live path must too. Without the gate, `normalize_ticker`'s bid/ask-midpoint fallback turned any out-of-hours quote into a real-looking bar — three quote ticks on a Sunday were dispatched to `orb_wds` (AUDIT_ROADMAP G8). The gate **fails open**: an unmapped venue, an unparseable timestamp, a calendar error and `secType` CASH/CRYPTO all dispatch, because starving a strategy of real bars is worse than admitting a few synthetic ones. Suppressions are counted in the pulse (`oos_bars`) and logged once per (conId, day), and a suppressed bar deliberately does not advance `bar_age_s`.
+
 **Proposal state machine**: `trader/data/proposal_store.py` enforces valid status transitions: `PENDING → APPROVED | REJECTED | EXPIRED | FAILED`, `APPROVED → EXECUTED | FAILED | REJECTED`, and terminal states (`EXECUTED`, `REJECTED`, `EXPIRED`, `FAILED`) are immutable. Illegal transitions raise `InvalidProposalTransition`. This prevents double-approvals, re-executions, and resurrected proposals. `update_metadata` is also atomic (the read-merge-write runs under a single connection), so concurrent metadata updates can't lose each other.
 
 **Bracket order transactionality**: `trading_runtime.place_expressive_order` treats a `BRACKET` exit as all-or-nothing. Entry is staged with `transmit=False`, then TP, then SL (which transmits the whole group). If the TP leg fails, the staged entry is cancelled and `SuccessFail.fail` returned. If the SL leg fails, both entry and TP are cancelled. Because the bracket isn't transmitted to the market until the SL is placed, a failure at any earlier leg leaves no live orders behind.
@@ -163,6 +165,7 @@ mmr/
 │   │   ├── duckdb_store.py    # DuckDB implementations (DuckDBDataStore, DuckDBObjectStore)
 │   │   ├── data_access.py     # TickData, DictData, TickStorage, SecurityDefinition
 │   │   ├── event_store.py     # EventStore — trading event audit trail (DuckDB)
+│   │   ├── market_session.py  # is this minute tradeable? (extended hours INCLUDED) — gates live bar dispatch
 │   │   ├── backtest_store.py  # BacktestStore + SweepStore — run history + parent sweep metadata
 │   │   ├── gauntlet_store.py  # GauntletStore — gauntlet verdicts keyed by source SHA-256 ("no hash, no live")
 │   │   ├── proposal_store.py  # ProposalStore — trade proposal storage (DuckDB)
@@ -587,10 +590,17 @@ console handler and every service log with it.
 
 **Heartbeat pulses:** both services emit a 30s INFO `pulse ...` line
 (strategy side: `strategies=N/N ticks_60s=[conid:n,...] bar_age_s=[...]
-auto_exec_open=N`; trader side: `ib_connected/ib_upstream/open_orders`). A
-healthy pipeline is otherwise silent at INFO, so pulse absence — or
-`ticks_60s` at zero during market hours — is the dead-feed signal (the G3
-outage class). See `docs/MONITORING.md` for the monitors
+trade_age_s=[...] oos_bars=[...] auto_exec_open=N`; trader side:
+`ib_connected/ib_upstream/open_orders`). A healthy pipeline is otherwise silent
+at INFO, so pulse absence — or `ticks_60s` at zero during market hours — is the
+dead-feed signal (the G3 outage class). **`bar_age_s` and `trade_age_s` are
+only readable together**: the first is the age of the last bar DISPATCHED and a
+quote-only tick is enough to move it, the second is the age of the last tick
+where cumulative volume ROSE. A small `bar_age_s` beside a missing `trade_age_s`
+during a session means bars are being made from quotes, not trades.
+`oos_bars` counts bars refused by the session gate (below) per conId — a rising
+count for an instrument that should be trading means its venue is mapped
+wrongly in `market_session._EXCHANGE_CALENDARS`. See `docs/MONITORING.md` for the monitors
 (`scripts/monitor_trading.sh`, `scripts/monitor_health.sh`,
 `scripts/last_pulse.sh`), the escalation policy, and triage order. After any
 restart: `mmr verify` asserts trade-readiness (live IB round-trip via the
@@ -608,9 +618,11 @@ restart: `mmr verify` asserts trade-readiness (live IB round-trip via the
 
 ## Dependencies
 
-Key runtime packages: `ib_async`, `duckdb`, `pyzmq`, `msgpack`, `reactivex`, `pandas`, `numpy`, `pyarrow`, `dill`, `rich`, `backoff`, `psutil`, `exchange-calendars`, `massive`, `pydantic` (validated value objects), `deal` (Design-by-Contract on the pure kernel — contracts execute at import/runtime).
+Key runtime packages: `ib_async`, `duckdb`, `pyzmq`, `msgpack`, `reactivex`, `pandas`, `numpy`, `pyarrow`, `dill`, `rich`, `backoff`, `psutil`, `exchange-calendars`, `pandas-market-calendars`, `massive`, `pydantic` (validated value objects), `deal` (Design-by-Contract on the pure kernel — contracts execute at import/runtime).
 
-**`pydantic` and `deal` are RUNTIME deps** — deploying code that imports them needs a **container image rebuild**, not just a `./docker.sh -s` code sync (a sync alone `ModuleNotFoundError`s at service start).
+**Two calendar libraries, deliberately.** `exchange-calendars` answers "is this a trading day / what are the regular hours" (data service, sweep freshness guard). It models REGULAR hours ONLY — verified on 4.13.1: no file in the package mentions pre- or post-market and `ExchangeCalendar.market_times` does not exist. `pandas-market-calendars` answers "is this minute tradeable INCLUDING extended hours" (`trader/data/market_session.py`, the live bar-dispatch gate), because it models `pre`/`post` explicitly.
+
+**`pydantic`, `deal` and `pandas-market-calendars` are RUNTIME deps** — deploying code that imports them needs a **container image rebuild**, not just a `./docker.sh -s` code sync (a sync alone `ModuleNotFoundError`s at service start).
 
 Dev/verification tooling (never in the container — see below): `ty`, `crosshair-tool`, `mutmut`, `pre-commit`, `hypothesis`.
 
