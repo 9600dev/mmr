@@ -370,13 +370,45 @@ e2b2fd1 (VwapReclaim on_prices). These are the residual robustness items.
   out-of-hours fill appears in the ledger. But trailing indicators (EMA/ATR/VWAP)
   computed over the frame do ingest midpoint bars, and nothing structurally
   prevents a strategy from signalling on one.
-- **Fix:** gate dispatch on the contract's exchange session
-  (`exchange-calendars` is already a dependency — the backtester and
-  `_freshness_check` use it). Two decisions to make deliberately: whether
-  pre/post-market bars should reach US strategies at all (the backtester's
-  1-min history includes extended hours), and whether to drop such bars from
-  the frame entirely or merely suppress dispatch. Needs its own paper session
-  to validate — it changes what every live strategy sees.
+- **DECIDED 2026-07-26 (operator): US extended-hours bars MUST reach
+  strategies.** That settles the open question and, with the measurement below,
+  determines the implementation.
+- **The obvious cheap fix is therefore ruled out.** "Only dispatch bars that
+  contain a trade" would have been calendar-free, halt-safe and venue-agnostic
+  — but it would diverge from the backtester the roster was validated on.
+  Measured in the live history DB:
+
+  | | 1-min bars | zero-volume | share |
+  |---|---|---|---|
+  | GOOGL | 443,368 | 101,311 | 23.0% |
+  | WDS | 101,840 | 4,869 | 4.8% |
+
+  And those zero-volume bars ARE the extended-hours ones. GOOGL by hour
+  (stored PDT; US RTH = 06:30-13:00 PDT):
+
+  ```
+  01:00-05:00  42-54% zero-volume   <- pre-market  (04:00 ET on)
+  06:00        13.0%                <- 06:00-06:30 pre + RTH
+  07:00-12:00   0.0%                <- RTH, every minute trades
+  13:00-16:59  36-54% zero-volume   <- post-market (to 20:00 ET)
+  ```
+
+  So a fifth of GOOGL's extended-hours minutes have no trade, the backtester
+  sees them, and suppressing them live would silently change what every US
+  strategy computes.
+- **Fix (given the above):** gate dispatch on the contract's exchange SESSION,
+  with an explicit extended-hours window. Note `exchange_calendars` models RTH
+  only — `XNYS`/`XNAS` report `open=09:30, close=16:00` and `market_times` is
+  `None` — so the pre/post extension must be supplied per venue (US:
+  -330 min / +240 min for 04:00-20:00 ET; ASX: RTH plus roughly +10 min for the
+  closing auction, which is where WDS's real last bar lands). Day-level
+  correctness comes free from `cal.is_session` and is what would have caught the
+  observed Sunday case on its own.
+- **The residual risk of the fix is worse than the bug**, so it needs care: a
+  mis-specified window silently starves a strategy of bars, which costs real
+  trades, whereas the bug currently costs a slightly polluted EMA. Suppressions
+  must be logged and counted, not silent. Needs its own paper session — it
+  changes what every live strategy sees.
 - **Partially mitigated 2026-07-26** by `trade_age_s` in the pulse (commit
   `6b7bf81`), which makes the condition VISIBLE. That is observability only;
   the dispatch behaviour is unchanged.
