@@ -104,7 +104,8 @@ can't check it, and you're back to trusting the diff.
 8. [Putting it together: how a change flows through](#8-putting-it-together)
 9. [Running everything](#9-running-everything)
 10. [When *not* to reach for these](#10-when-not-to-reach-for-these)
-11. [The loop, restated](#11-the-loop-restated)
+11. [Adopting this on a real project](#11-adopting-this-on-a-real-project)
+12. [The loop, restated](#12-the-loop-restated)
 
 ---
 
@@ -498,9 +499,11 @@ if act == 'SELL':
     return held > 0
 ```
 
-That backdoor passed **all 41 invariants tests and all 1,882 suite tests** when
-the predicate was only covered by example-based tests — because every quantity
-those examples asserted was ≤ 150.
+That backdoor passed **all 41 invariants tests and all 1,882 suite tests** as
+they stood at the time. The predicate was covered only by example-based tests,
+and every quantity those examples asserted was 150 or less, so nothing ever
+reached the threshold. The property below did not exist yet — writing it is what
+turned the backdoor from invisible into two red tests.
 
 **Where MMR applies it:** `tests/invariants/` is the human-owned executable
 spec. Properties there state safety facts: exit-class orders are never refused,
@@ -1183,7 +1186,233 @@ trade; if it means an unbounded short position, it is not.
 
 ---
 
-## 11. The loop, restated
+## 11. Adopting this on a real project
+
+Everything above is *what* the tools do. This section is *how to get there* —
+either on a new project or on one that already exists — plus what it actually
+cost here.
+
+### First, the load-bearing decision
+
+**Pick the dangerous core, and be ruthless about how small it is.**
+
+Every one of these techniques has a cost that scales with surface area, and a
+benefit that scales with *consequence*. So the first question is not "which tool"
+but "which few hundred lines would I be unable to sleep after shipping wrong?"
+
+In MMR that's roughly:
+
+| In the core | Not in the core |
+|---|---|
+| amount → share-count conversion | the 10,000-line CLI |
+| the risk gate's decisions | reporting and summary output |
+| exit-class classification | data downloads, scanners |
+| position sizing caps | backtest plumbing |
+
+That's a few hundred lines out of tens of thousands. If your answer is "all of
+it", you haven't answered yet — and applying this everywhere is how the method
+dies of exhaustion in week three.
+
+A useful heuristic: **where would you refuse to accept "the tests pass" as an
+answer?** That's the core.
+
+### Path A — starting a new project
+
+The order matters, because each layer makes the next cheaper.
+
+1. **Type checker + a fail-closed gate, on day one.** Cheapest possible win, no
+   test-writing required, and adopting it later means burning down a backlog of
+   diagnostics instead of never creating one.
+2. **Write the invariants before the implementation.** Not TDD exactly — you're
+   not writing example tests, you're writing down the two or three sentences
+   that must never stop being true. *"An order that reduces a position is never
+   refused."* *"A returned share count never costs more than the budget."* Give
+   those to the LLM as the specification.
+3. **Make the dangerous decisions pure.** The single highest-leverage structural
+   habit, and the one an LLM won't do unprompted: separate *deciding* from
+   *doing*. A decision that takes plain values and returns a plain value can be
+   contracted, property-tested, symbolically checked and mutation-tested. The
+   same logic buried inside a method that also reads a database can be tested
+   only through mocks.
+4. **Contracts on those pure functions** as you write them.
+5. **Mutation testing once the suite exists** — and treat the first run as a
+   review of your tests, not your code.
+6. **CrossHair last**, on the handful of numeric functions where a pathological
+   float is plausible.
+
+### Path B — retrofitting an existing codebase
+
+The trap here is trying to reach a clean state before getting any value. Don't.
+
+1. **Baseline, don't fix.** Run the type checker, record every existing
+   diagnostic as accepted, and gate only on *new* ones. MMR's advisory scope
+   started at 49 diagnostics and is still not zero — that was never the point.
+   The ratchet is the point.
+2. **Find the dead code first.** Retrofitting is a good excuse to delete. This
+   session removed three packages — 19 files, **5,673 lines** — that could not
+   even be imported (`ModuleNotFoundError: No module named 'arctic'`), and had been
+   sitting next to the live code looking plausible. Verification you apply to
+   dead code is pure waste, and worse, dead code is a trap for an LLM grepping
+   for "the CLI".
+3. **Extract one decision.** Pick the single scariest boolean or number in the
+   system and pull the *decision* out into a pure function, leaving the I/O
+   where it is. In MMR that was one afternoon's work and it changed the
+   predicate from untestable to 93.5% mutation-covered.
+4. **Write one property for it.** Just one, stating the thing that must never
+   happen.
+5. **Run mutation testing on that one module.** This is the moment the method
+   sells itself: you will discover your brand-new property does less than you
+   thought.
+6. **Only then widen.**
+
+> Steps 3–5 are a half-day and produce a complete worked example inside *your*
+> codebase, which is worth more than any tutorial for convincing colleagues —
+> or for giving an LLM a pattern to imitate.
+
+### Prompts that actually change what you get back
+
+Models default to example-based tests and to putting logic wherever the data
+already is. These are the instructions that reliably move them, phrased as you'd
+actually type them.
+
+**Making decisions extractable:**
+
+```
+Before implementing: separate the DECISION from the I/O.
+Put the decision in a module-level pure function that takes plain
+values (no self, no config lookups, no network) and returns a plain
+value. The caller can do the lookups and pass the results in.
+```
+
+**Getting properties instead of examples:**
+
+```
+Do not write example tests for this. Write a Hypothesis property.
+State the invariant that must hold for ALL valid inputs, and let
+Hypothesis generate them. If you find yourself writing a specific
+number in an assertion, that is a sign you are still writing examples.
+```
+
+**The one that catches the backdoor class:**
+
+```
+Is there an input dimension this function's answer must NOT depend on?
+If so, write that independence as the property.
+```
+
+That single question is what produced the strongest test in this repo. The
+exit-class answer must not depend on order quantity — so a size-triggered
+backdoor has nowhere to hide, because no threshold can exist inside a function
+whose answer is constant in that variable.
+
+**Widening a generator (the failure mode from section 3):**
+
+```
+Review the Hypothesis strategies in this test. For each bound, ask
+whether excluding that region hides a bug: zero, negative, sub-1,
+non-finite, empty. Widen them, then tell me which assertions break —
+do NOT adjust the assertions to keep them passing.
+```
+
+**Turning a mutation run into work:**
+
+```
+Here are the surviving mutants. For each one, decide: real test gap,
+or equivalent mutant. If it is a gap, add a test that KILLS it and
+show me the mutation score afterwards. If you claim equivalence, prove
+it — show me why no input can distinguish the original from the mutant.
+Do not modify the source to raise the score.
+```
+
+That last sentence matters. Without it you will get production code "simplified"
+until the mutant no longer exists, which raises the number and destroys the
+signal.
+
+**The standing rule, worth putting in your `CLAUDE.md` / `AGENTS.md`:**
+
+```
+tests/invariants/ is the specification and is human-owned. If a change
+makes an invariant fail, the implementation is wrong — fix the code, or
+stop and tell me the property needs revising. Never edit an invariant to
+make an implementation pass.
+```
+
+### What it cost, and what it caught — this session, n=1
+
+Being straight about the evidence: this is **one weekend on one codebase, with no
+control group.** Nobody ran the counterfactual. What follows is what happened,
+not a measured effect size.
+
+**Caught, in a suite that was fully green beforehand:**
+
+| Layer | Finding |
+|---|---|
+| CrossHair | `ZeroDivisionError` from denormal float underflow, on the conversion every order path uses |
+| Property | A `qty > 1000` backdoor in the exit-class predicate that passed **every one of the 41 invariants and 1,882 suite tests then in place** |
+| Mutation | An untested silently-approving path in the leverage check |
+| Mutation | A brand-new set of tests that killed **1 of 5** mutants — confident tests that verified nearly nothing |
+| Fail-closed gate | The type gate reporting `OK`/exit 0 on every run where the checker had not run at all |
+| Spec guard | An implementation change that would have required weakening a human-owned property |
+| Wiring test | A new spec file that measured **zero** mutants until it was added to the oracle |
+
+**Rough costs, measured:**
+
+- Type gate: **seconds**, every commit.
+- Property tests: minutes to write, **~10s** for the invariants suite.
+- CrossHair: **tens of seconds per function**; run deliberately, not on commit.
+- Mutation, one module: **2–5 minutes**. Full kernel: **~15 minutes**.
+- Retrofit of the scariest predicate (extract → contract → property → mutation
+  → wire into the gates): **one session**, and it went 61.3% → 93.5% mutation
+  coverage with two remaining survivors *proven* equivalent.
+
+**The honest counter-evidence** — the method is not free and this session showed
+its costs too:
+
+- I proposed a "fix" to the sizer that **broke 45 tests**, because I'd
+  misunderstood which of two callers relied on the existing behaviour. The tests
+  caught it; my reasoning did not. That's the system working, but it's also an
+  hour spent on a change that got reverted.
+- My first attempt at killing five mutants killed one. The discriminating inputs
+  had to be *derived numerically* rather than reasoned out.
+- I misread which argument a type diagnostic referred to and wrote a wrong
+  explanation into a commit message, corrected in the next commit.
+- I hypothesised that mutation scores were nondeterministic and used it to
+  explain an anomaly. Three controlled runs proved me wrong.
+
+Every one of those was an LLM being confidently wrong inside a loop *designed to
+catch that*. Which is the argument, really: the tooling is not there because
+models are bad, it's there because **plausible-and-wrong is the characteristic
+failure**, and it is invisible to review precisely because it reads well.
+
+### Failure modes of the method itself
+
+- **Applying it everywhere.** The fastest way to abandon it. Core only.
+- **Chasing the mutation score.** `position_sizing` sits at 70.9% and that's
+  correct — 85 of its survivors are in a reporting method. A number going up is
+  not the goal; a *specific* survivor being explained is.
+- **Letting the agent re-baseline.** `--update` on any of these gates is a
+  human-reviewed act. An agent that can re-record the baseline can make any
+  regression disappear.
+- **Property theatre.** `assert result is not None` is a property in the same
+  way a smoke alarm with no battery is a smoke alarm.
+- **Forgetting the generators.** The single most likely way your property suite
+  is weaker than you think. Re-read section 3's caveat.
+
+### The smallest useful version
+
+If you do nothing else on an existing project:
+
+1. Turn on a type checker with a **baseline** and a **fail-closed** gate.
+2. Pick the scariest function. Make its decision **pure**.
+3. Write **one** property that says what must never happen.
+4. Run **mutation testing on that one module** and read the survivors.
+
+That is an afternoon, and step 4 will tell you something surprising about tests
+you already trusted.
+
+---
+
+## 12. The loop, restated
 
 The premise was that `human intent → LLM → code → ??? → ship` needs something
 better than "the tests pass" in the `???`. Concretely, that is:
