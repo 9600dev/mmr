@@ -350,6 +350,37 @@ e2b2fd1 (VwapReclaim on_prices). These are the residual robustness items.
   stub server, and consider a `MMR_TEST_MODE` guard that refuses default
   ports under pytest.
 
+### G8 — quote-only ticks form bars that are dispatched to strategies  (M, medium value)
+
+- **Symptom (2026-07-26, Sunday, ASX shut):** three out-of-hours ticks for WDS
+  at 11:45 PDT produced a dispatched "bar", dropping the pulse's `bar_age_s`
+  from 218,093s (correct — Friday's ASX close) to 263s. `orb_wds.on_prices` was
+  called with a frame whose last bar never traded.
+- **Mechanism:** `normalize_ticker` falls back to the bid/ask MIDPOINT when
+  there is no trade price, so a quote-only tick carries a non-NaN `close`.
+  `resample_ticks_to_bars` drops only NaN-close bars, so the quote becomes a
+  real-looking OHLCV bar, and `on_ticker_next` dispatches it because the frame's
+  last index changed. Nothing anywhere asks whether the exchange was open.
+- **Why the existing gates miss it:** the auto-executor's stale-bar gate
+  compares the SIGNAL's bar age to `3 x bar_size` — a quote-built bar is
+  genuinely recent, so the gate passes it. The gate is blind to bars that are
+  too RECENT-but-synthetic; it only catches bars that are too old.
+- **Impact today is low, not zero.** ORB anchors its range on session-relative
+  times, so an out-of-hours bar does not create a range, and no spurious
+  out-of-hours fill appears in the ledger. But trailing indicators (EMA/ATR/VWAP)
+  computed over the frame do ingest midpoint bars, and nothing structurally
+  prevents a strategy from signalling on one.
+- **Fix:** gate dispatch on the contract's exchange session
+  (`exchange-calendars` is already a dependency — the backtester and
+  `_freshness_check` use it). Two decisions to make deliberately: whether
+  pre/post-market bars should reach US strategies at all (the backtester's
+  1-min history includes extended hours), and whether to drop such bars from
+  the frame entirely or merely suppress dispatch. Needs its own paper session
+  to validate — it changes what every live strategy sees.
+- **Partially mitigated 2026-07-26** by `trade_age_s` in the pulse (commit
+  `6b7bf81`), which makes the condition VISIBLE. That is observability only;
+  the dispatch behaviour is unchanged.
+
 ## Recommended sequence
 
 1. **Cluster A (A1+A2, then A3)** — the capital-safety core; do first. ~1 week.
