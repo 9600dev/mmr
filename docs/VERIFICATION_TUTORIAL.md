@@ -11,6 +11,31 @@ Everything below is real code from this repository and real output from these
 tools. Where a tool caught a bug, the bug was real — including several caught in
 the session that produced this document.
 
+### What MMR is, since the examples all come from it
+
+**MMR ("Make Me Rich")** is the open-source algorithmic trading platform this
+tutorial lives in — [github.com/9600dev/mmr](https://github.com/9600dev/mmr),
+[README](../README.md). It's a Python system that connects to
+[Interactive Brokers](https://www.interactivebrokers.com/), streams market data,
+runs trading strategies, and — the part that matters here — **places real orders
+with real money, automatically, without a human confirming each one.**
+
+Three things about it make it a useful worked example:
+
+1. **Mistakes are expensive and immediate.** Not "a bad row renders in a table"
+   — an order that shouldn't have been placed, at a size that shouldn't have been
+   used. There is no undo button on a filled trade.
+2. **It is substantially LLM-written.** The codebase is developed by directing a
+   model, which is precisely the loop this tutorial is about. It is not a
+   hypothetical.
+3. **It has a small, well-defined dangerous core.** A few hundred lines decide
+   how many shares to buy and whether an order is allowed at all. That's the part
+   worth verifying properly; the surrounding ~10,000-line CLI is not.
+
+You don't need to know anything about trading to follow along — every domain term
+is explained where it first appears, and there's a
+[finance primer](#a-five-minute-finance-primer) in section 1.
+
 ---
 
 ## The loop this is really about
@@ -102,7 +127,7 @@ checks *one point* in a two-dimensional input space that you chose while you
 already believed the code was correct.
 
 This matters more than usual here. MMR converts a dollar amount into a share
-count, and a wrong answer spends real money. The bug that motivated
+count on every automated trade, and a wrong answer spends real money. The bug that motivated
 `order_math.py` was exactly this shape: an ad-hoc `round(amount / price)` plus a
 "bump to at least 1 share" turned a ~$340 sized order on a >$510 stock into a
 full share — an overspend, produced by code that passed its tests.
@@ -205,7 +230,9 @@ class ApprovedOrder:
         raise TypeError('ApprovedOrder is not serializable')
 ```
 
-And the single placement chokepoint accepts *only* that type:
+And the single **chokepoint** — the one function in the entire codebase that
+hands an order to the broker, so every order must pass through it — accepts
+*only* that type:
 
 ```python
 # trader/trading/executioner.py
