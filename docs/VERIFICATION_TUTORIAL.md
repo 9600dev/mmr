@@ -1,12 +1,69 @@
-# A Tutorial on MMR's Verification Toolchain
+# Hardening the LLM programming loop
 
-**Audience:** you know Python and OO programming. You've written unit tests. You
-have not used design-by-contract, property-based testing, symbolic execution, or
-mutation testing, and you'd like to know what they actually do — and why a
-trading system bothers.
+### A tutorial on verification tooling, using a live trading system as the worked example
+
+**Audience:** you know Python and OO programming, you've written unit tests, and
+you now write a lot of your code by directing an LLM. You have not used
+design-by-contract, property-based testing, symbolic execution, or mutation
+testing, and you'd like to know what they actually do.
 
 Everything below is real code from this repository and real output from these
-tools. Where a tool caught a bug, the bug was real.
+tools. Where a tool caught a bug, the bug was real — including several caught in
+the session that produced this document.
+
+---
+
+## The loop this is really about
+
+The old loop was:
+
+```
+human intent  →  human writes code  →  human reviews diff  →  ship
+```
+
+Review worked because the reviewer had written something similar, at human speed,
+and could hold the change in their head. The new loop is:
+
+```
+human intent  →  LLM writes code  →  ??? →  ship
+```
+
+and the honest thing to admit is what fills the `???`. It is *not* line-by-line
+review. Nobody reads 5,000 lines of generated diff with the attention they'd give
+50 lines they wrote themselves. You skim, you spot-check, you look for the shape
+of a mistake — and then you ship on the strength of "the tests pass".
+
+That last part is the problem, because **the LLM also wrote the tests.**
+
+An LLM is extremely good at producing code that is *plausible* and a test suite
+that is *green*. Those two facts are correlated with correctness, but they are
+not the same thing, and they fail together in a specific way: the model tests
+what it just built, using the inputs it had in mind while building it. Green
+tests over a wrong assumption look exactly like green tests over a right one.
+
+So the loop has to become:
+
+```
+human intent
+   ↓  stated in a form a machine can check   ← contracts, properties, types
+LLM writes code
+   ↓  adversarial search for where code ≠ intent   ← CrossHair, Hypothesis
+   ↓  check the TESTS actually test something      ← mutation testing
+   ↓  gates that cannot report success falsely     ← fail-closed baselines
+ship
+```
+
+Each tool in this tutorial exists to fill one of those arrows. That framing
+also explains a choice that would otherwise look odd in a technical document:
+**this tutorial explains finance terms as it goes.** Not as a courtesy — because
+the whole method depends on the human being able to state intent precisely in
+domain language ("an order that reduces a position must never be refused"), and
+then encoding *that sentence* as something executable. If you can't say it, you
+can't check it, and you're back to trusting the diff.
+
+> **The uncomfortable version:** every technique here is a way of not trusting
+> code you didn't read. That includes code *you* wrote six months ago, but it is
+> acute when a model wrote it ten seconds ago and is very confident.
 
 ---
 
@@ -22,6 +79,7 @@ tools. Where a tool caught a bug, the bug was real.
 8. [Putting it together: how a change flows through](#8-putting-it-together)
 9. [Running everything](#9-running-everything)
 10. [When *not* to reach for these](#10-when-not-to-reach-for-these)
+11. [The loop, restated](#11-the-loop-restated)
 
 ---
 
@@ -213,6 +271,15 @@ The kernel (order construction, risk gate, and the code that actually places
 live orders) is held at **0 diagnostics**. Advisory scopes have their existing
 diagnostics recorded; a *new* one fails the gate, so the count can only fall.
 
+> **In the LLM loop.** Ask a model to "add a way to place a market order from the
+> dashboard" and you will get a plausible, working function that calls the broker
+> API directly — because that is the shortest path to the stated goal, and the
+> gate is somewhere else in a 2,000-line file. A type makes that *impossible to
+> express*: there is no way to obtain an `ApprovedOrder` except through the gate,
+> so the model's shortcut doesn't compile. This is the cheapest layer, because it
+> converts "reviewer must notice the missing check" into "the code does not
+> typecheck", and the second one scales to diffs nobody reads.
+
 ---
 
 ## 3. Layer 1 — Property-based testing (Hypothesis)
@@ -298,6 +365,16 @@ those examples asserted was ≤ 150.
 spec. Properties there state safety facts: exit-class orders are never refused,
 gates fail closed, share conversion never exceeds the sized notional, a strategy
 without a PASS record can't arm.
+
+> **In the LLM loop.** This is the direct antidote to *"the model tested the
+> inputs it had in mind."* A model writing example tests draws from the same
+> distribution it used to write the code, so its blind spots are correlated —
+> it will test `qty=100` because it was thinking about `qty=100`. The backdoor
+> in the next subsection survived 1,882 tests for exactly this reason: every
+> example asserted a quantity of 150 or less. A property doesn't ask the model
+> for inputs; Hypothesis generates them, and shrinks any failure to the minimal
+> case. Note the division of labour: **you** state the invariant (that's intent,
+> and it's the part a human must own), the library hunts for violations.
 
 ### A caveat you must internalise
 
@@ -402,6 +479,15 @@ Why? A fatal `@deal.pre` would convert those documented `ValueError`s into
 the **public function is defensively total** — it validates its own inputs and
 fails loudly with the offending parameter named.
 
+> **In the LLM loop.** A contract is intent written **once**, by the human, that
+> then checks *every future call* — including calls in code generated months
+> later by a model that never saw the discussion where the rule was agreed. A
+> docstring saying "never overspend" is a suggestion to a reader; `@deal.ensure`
+> is a tripwire in production. It also survives refactoring: when a model
+> rewrites the body of a contracted function, the contract is still standing
+> there judging the result. Of everything in this tutorial, contracts have the
+> best ratio of *intent captured* to *characters typed*.
+
 The rule of thumb: contract the *pure* parts. `PositionSizer.compute` reads
 config and portfolio state and threads a human-readable reasoning string through
 many branches — a bad contract target. So its genuinely pure sub-steps were
@@ -479,6 +565,15 @@ def test_denormal_product_underflow_refuses_not_crashes(self):
 **This is the workflow, and it's the whole point:** tool finds counterexample →
 counterexample becomes a named, deterministic test → *then* the fix lands. The
 test outlives the tool run.
+
+> **In the LLM loop.** Neither a human nor a model proposes
+> `3.0765742648370966e-154` as a test input. It isn't a lack of skill — it's that
+> both are reasoning about *plausible* trading inputs, and the bug lives outside
+> plausibility. A solver has no such bias: it works backwards from the
+> postcondition to any input that breaks it. Use it when the human's intent is
+> already written down as a contract and you want to know whether the generated
+> implementation actually satisfies it, rather than merely passing the examples
+> that came with it.
 
 ### What it is not
 
@@ -605,13 +700,45 @@ future run re-litigates the same three survivors.
 > **Rule:** never change production code to raise the mutation score. Only add
 > tests. A survivor tells you about your *tests*.
 
+> **In the LLM loop — this is the load-bearing one.** Every other layer checks
+> the code. Mutation testing is the only one that answers the question the LLM
+> loop actually raises: *the model wrote the tests too — do they check anything?*
+>
+> A worked example from the session that produced this document. Mutation found
+> five survivors in `check_leverage`, so tests were written to kill them. Re-run:
+> **only one of the five died.** The tests looked thorough, asserted sensible
+> things, and passed — and four of them exercised paths where the mutant and the
+> original produce identical output. One test used a large `net_liquidation`, so
+> an injected default of `1` produced a leverage near zero that passed the limit
+> anyway; both versions approved; nothing was proven. The discriminating inputs
+> had to be *derived* rather than guessed:
+>
+> ```python
+> # inputs where the original and the mutant actually disagree
+> c9  = ({'equityWithLoanAfter': 0}, net_liq=1.0, max_lev=0.5)
+> #     original: key absent -> 0 -> branch skipped -> APPROVE
+> #     mutant:   default 1  -> 1/1.0 = 1.0x > 0.5  -> REFUSE
+> ```
+>
+> Confident-looking tests that verify nothing is the characteristic failure of
+> generated test suites, and it is invisible to code review — the tests *read*
+> correctly. Only mutation testing surfaces it.
+
 ---
 
 ## 7. Layer 5 — Gates that cannot lie
 
-This layer is the one most projects skip, and it's arguably the most important.
-**A tool that reports success when it didn't run is worse than no tool**, because
-it manufactures confidence.
+This layer is the one most projects skip, and in an LLM loop it is arguably the
+most important. **A tool that reports success when it didn't run is worse than no
+tool**, because it manufactures confidence — and confidence is exactly what you
+are substituting for review.
+
+There is also a hazard here that simply does not exist when humans write all the
+code: **the thing being verified and the thing doing the verifying are produced
+by the same process.** An agent that can edit both the implementation and the
+test that checks it can converge on something self-consistent and wrong, with
+every light green. Everything in this section is about removing that degree of
+freedom.
 
 ### Fail closed
 
@@ -701,6 +828,23 @@ override env var is settable by anything that can run `git`. Its value is that
 weakening a property becomes a *separate, visible, reviewable act* instead of a
 line buried in a large diff.
 
+> **In the LLM loop — it works, and here is it working.** While writing the
+> `ApprovedOrder` hardening described in section 2, the obvious implementation
+> was to make `mint_approved_order()` validate its arguments. That change turned
+> `tests/invariants/test_approved_order.py` **red**: a human-owned property pins
+> that a token may legally be constructed with an empty record.
+>
+> The tempting move — and the one an unsupervised agent takes, because it makes
+> the suite green — is to adjust the property. The policy forbids it: *a red
+> invariant means the implementation is wrong unless a human revises the spec.*
+> So the validation moved to where the token is **spent** instead, which turned
+> out to be the better design anyway: it covers every future mint site rather
+> than the ones someone remembered to audit.
+>
+> The guard didn't prevent a security breach. It prevented a worse outcome —
+> a plausible change, a green suite, and a silently weakened guarantee that
+> nobody would ever have gone looking for.
+
 ### Make coverage rot impossible
 
 Every layer above is configured by a hand-maintained list with a "keep in sync"
@@ -723,6 +867,16 @@ That second one is not hypothetical. Adding a new property file left the
 module's mutation score unchanged at 61.3%, because mutmut only runs the
 hand-listed oracle. Adding the file to `pytest_add_cli_args_test_selection` took
 it to 93.5%. **The file existed, passed, and measured nothing.**
+
+> **In the LLM loop.** Ask a model to "add the new test file to the verification
+> setup" and it will add the file. Whether it also updated four hand-maintained
+> registries — the CrossHair target list, the mutation scope, the mutation
+> oracle, the type-check scope — depends on whether it happened to know they
+> exist. Nobody notices the omission, because the failure mode is silent *and
+> flattering*: the tool still runs, still passes, and quietly stops looking at
+> something. These wiring tests convert "the agent must remember" into "the
+> suite fails until it's wired", which is the only version that survives a
+> hundred sessions.
 
 ---
 
@@ -862,12 +1016,73 @@ core** — a few hundred lines where being wrong costs money.
 - **Property tests** are wasted on functions with no interesting invariant.
   "Returns a dict with these keys" is not a property worth the machinery.
 
-The honest summary of what this bought MMR: a `ZeroDivisionError` on the single
-conversion every order uses (CrossHair), an ungated-order class made impossible
-by construction (types + chokepoint), an unexamined fail-open path in the
-leverage check (mutation), and a size-triggered backdoor that would have passed
-1,882 tests (property). Every one was invisible to a normal test suite that was
-entirely green.
+The proportionality rule that follows from the loop framing: **apply this where
+you would not accept "the tests pass" as an answer.** In MMR that is order
+construction, the risk gate, position sizing and the exit-class decision — a few
+hundred lines. The 10,000-line CLI next door has none of it, deliberately. If a
+mistake there means a bad table on a terminal, review-by-skimming is a rational
+trade; if it means an unbounded short position, it is not.
+
+---
+
+## 11. The loop, restated
+
+The premise was that `human intent → LLM → code → ??? → ship` needs something
+better than "the tests pass" in the `???`. Concretely, that is:
+
+**1. State intent where a machine can check it — and where the LLM cannot
+quietly edit it.**
+Not a docstring, not a comment, not a ticket. A contract, a property, or a type.
+In this repo those live in `tests/invariants/` and in `@deal` decorators, and a
+pre-commit guard stops implementation and spec moving in the same commit.
+
+**2. Let the machine attack the code, not just exercise it.**
+Hypothesis generates the inputs nobody thought of; CrossHair solves for the ones
+outside plausibility. Both search for *code ≠ intent*, which is a different
+activity from confirming that code does what its author expected.
+
+**3. Verify the verifier.**
+The model wrote the tests. Mutation testing is the only cheap way to find out
+whether they check anything — and in this session it caught a set of freshly
+written, sensible-looking tests that killed **one mutant out of five**.
+
+**4. Make the gates incapable of lying.**
+A gate that passes when it didn't run doesn't just fail to help; it actively
+manufactures the confidence you're substituting for review. Fail closed on a
+missing tool, a missing baseline, or a partial run.
+
+**5. Make coverage rot mechanical, not remembered.**
+Hand-maintained registries drift silently. A test that fails when a module,
+contract or spec file is left unwired is worth more than any amount of
+documentation telling future sessions to remember.
+
+### What it actually bought here
+
+Every one of these was invisible to a green test suite:
+
+| Found by | What it was |
+|---|---|
+| CrossHair | `ZeroDivisionError` from a denormal float underflow, on the single conversion every order path uses |
+| Property test | A size-triggered backdoor in the exit-class predicate that passed **all 1,882 tests** |
+| Mutation | An untested, silently-approving path in the leverage check — *and* a set of new tests that verified almost nothing |
+| Fail-closed gate | The type gate reporting "OK" with exit 0 on every run where the type checker never actually ran |
+| Spec guard | An implementation change that would have quietly weakened a human-owned safety property |
+
+### The honest limits
+
+None of this makes generated code correct. It makes a specific, narrow class of
+wrongness *loud*, in a core small enough to be worth the effort. The 10,000-line
+CLI in this repo has none of this machinery, and that is a deliberate
+proportionality call — the tools are aimed at the few hundred lines where being
+wrong costs money.
+
+And the human is still in the loop, just at a different altitude: **you are no
+longer reviewing statements, you are reviewing intent** — the properties, the
+contracts, the scopes, and the decisions about what is allowed to fail open.
+Those are the artifacts to read carefully. The implementation, increasingly, is
+the part the machine checks for you.
+
+---
 
 ### Further reading
 
