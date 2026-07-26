@@ -12,7 +12,7 @@ tools. Where a tool caught a bug, the bug was real.
 
 ## Table of contents
 
-1. [The problem with tests](#1-the-problem-with-tests)
+1. [The problem with tests](#1-the-problem-with-tests) · [finance primer](#a-five-minute-finance-primer)
 2. [Layer 0 — Types that encode permission (`ty`)](#2-layer-0--types-that-encode-permission-ty)
 3. [Layer 1 — Property-based testing (Hypothesis)](#3-layer-1--property-based-testing-hypothesis)
 4. [Layer 2 — Contracts (`deal`)](#4-layer-2--contracts-deal)
@@ -33,6 +33,11 @@ Here is an ordinary, sensible unit test:
 def test_shares_for_amount():
     assert whole_shares_for_notional(1000.0, 100.0) == 10
 ```
+
+(*Notional* is the cash value of an order — `quantity × price`. This function
+answers "I want to spend $1,000 and the price is $100 — how many whole shares?"
+There is a short [finance primer](#a-five-minute-finance-primer) below if terms
+like this are unfamiliar.)
 
 It passes. It will keep passing. And it tells you almost nothing, because it
 checks *one point* in a two-dimensional input space that you chose while you
@@ -69,11 +74,43 @@ enough. The rest run on demand or as manual-stage hooks.
 
 They compose. None replaces unit tests.
 
+### A five-minute finance primer
+
+The examples below are all real trading code, so a handful of terms recur. If
+you already know them, skip ahead.
+
+- **Position** — how much of an instrument you currently hold, as a *signed*
+  number. `+75` means you own 75 shares (you are **long**). `-75` means you owe
+  75 shares (you are **short** — you sold shares you didn't own, and must buy
+  them back later). `0` means **flat**.
+- **Notional** — the cash value of an order: `quantity × price`. A "notional of
+  $5,000" is a $5,000 order, whatever the share price. The word matters because
+  position sizing works in *dollars* ("risk $5,000 on this idea") while the
+  broker works in *shares*, so something has to convert — and that conversion is
+  where money gets lost if it rounds the wrong way.
+- **Multiplier** — some instruments trade in bundles. One options contract
+  typically covers 100 shares, so its notional is `quantity × price × 100`.
+  Forget the multiplier and you under-count your exposure 100-fold.
+- **Opening vs closing** — an order that *increases* your position (buying when
+  flat or long) takes on new risk. An order that *reduces* it (selling what you
+  hold) removes risk. This distinction drives nearly every safety rule below.
+- **NetLiquidation** — what the account is worth if you closed everything now.
+  Percentage limits ("never put more than 10% in one position") are computed
+  against it.
+- **Leverage / margin cushion** — leverage is borrowed exposure: holding
+  $200,000 of stock against a $100,000 account is 2×. The cushion is how much
+  spare equity remains before the broker force-liquidates you.
+- **The risk gate** — MMR's pre-trade checks: position too big, daily loss
+  exceeded, too many open orders, order rate too high. It can **refuse** an
+  order.
+
 ---
 
 ## 2. Layer 0 — Types that encode permission (`ty`)
 
 > **[ty](https://github.com/astral-sh/ty)** · `uv add --dev ty` · static type checker
+>
+> **When it runs:** development + every commit. **Never at runtime** — it reads your source, it does not execute it. Zero production impact.
 
 `ty` is Astral's type checker (same family as `ruff`/`uv`). Fast enough to run
 on every commit.
@@ -181,6 +218,8 @@ diagnostics recorded; a *new* one fails the gate, so the count can only fall.
 ## 3. Layer 1 — Property-based testing (Hypothesis)
 
 > **[Hypothesis](https://hypothesis.readthedocs.io/)** · `pip install hypothesis` · [source](https://github.com/HypothesisWorks/hypothesis)
+>
+> **When it runs:** test time only. It is a pytest plugin; nothing it does reaches production.
 
 Instead of asserting one input/output pair, you state something true of **all**
 inputs, and the library hunts for a counterexample.
@@ -221,10 +260,17 @@ Falsifying example: test_never_returns_more_than_requested(
 ### The property that catches what examples can't
 
 Sometimes the *right* property isn't about a value at all — it's about an
-**invariance**. MMR's most important boolean decides whether an order is
-"exit-class" (a reduction of an existing position), because a `True` answer
-exempts it from the trading filter, the leverage check, the risk gate, the
-approval requirement *and* the approver notional tier — five gates at once.
+**invariance**.
+
+MMR's most important boolean answers: *does this order reduce a position I
+already hold, or take on new risk?* An order that reduces one is called
+**exit-class**, and exit-class orders are deliberately exempt from every safety
+gate — because refusing to let someone close a position is worse than any limit
+that refusal would protect. One `True` therefore switches off the trading
+filter, the leverage check, the risk gate, the approval requirement *and* the
+approver notional tier: five gates at once. [Section 8](#8-putting-it-together)
+works through why in full; for now, all you need is that a wrongly-`True` answer
+is the worst single outcome in the system.
 
 ```python
 # tests/invariants/test_exit_class.py
@@ -272,6 +318,8 @@ was fine; the *input space* was too polite.
 ## 4. Layer 2 — Contracts (`deal`)
 
 > **[deal](https://deal.readthedocs.io/)** · `pip install deal` · [source](https://github.com/life4/deal)
+>
+> **When it runs:** ⚠️ **RUNTIME — in production, on every call.** The only tool here that does. A violated contract raises inside the live trading system. That is the feature, not a side effect: see [Why this is more than a fancy assert](#why-this-is-more-than-a-fancy-assert).
 
 A contract states pre/postconditions **as executable code attached to the
 function**, instead of prose in a docstring that drifts.
@@ -376,6 +424,8 @@ sizing safety story depends on.
 ## 5. Layer 3 — Symbolic execution (CrossHair)
 
 > **[CrossHair](https://crosshair.readthedocs.io/)** · `pip install crosshair-tool` · [source](https://github.com/pschanely/CrossHair)
+>
+> **When it runs:** on demand, by a developer. Too slow for a commit hook (tens of seconds per function) and never at runtime.
 
 Hypothesis *samples*. CrossHair *solves*.
 
@@ -454,7 +504,9 @@ verification. Also: it only works on small, referentially-transparent functions
 
 ## 6. Layer 4 — Mutation testing (`mutmut`)
 
-> **[mutmut](https://mutmut.readthedocs.io/)** · [source](https://github.com/boxed/mutmut) · pin `mutmut==3.6.0`, and install it into the **same interpreter that runs pytest** — mutmut 3.x runs pytest in-process, so the test env *is* the mutation env
+> **[mutmut](https://mutmut.readthedocs.io/)** · [source](https://github.com/boxed/mutmut) · pin `mutmut==3.6.0`, installed into the **same interpreter that runs pytest**
+>
+> **When it runs:** on demand, by a developer — minutes per pass. Never at runtime. It works on a throwaway *copy* of your source in `mutants/`; your working tree is never modified.
 
 The previous layers check the code. This one checks **the tests**.
 
@@ -467,6 +519,8 @@ tests still pass, they never actually checked that behaviour.
 
 ### Reading a real run
 
+`scripts/run_mutation.sh all` prints this:
+
 ```
 module                                    killed   survived  timeout    score
 trader/data/proposal_transitions.py            8          0        0   100.0%
@@ -475,6 +529,39 @@ trader/trading/order_math.py                  56          3        2    94.9%
 trader/trading/risk_gate.py                  294         16        0    94.8%
 trader/trading/position_sizing.py            395        162        0    70.9%
 ```
+
+Reading it row by row:
+
+- **`killed`** — mutants where at least one test failed. Your tests noticed the
+  change. This is the good column.
+- **`survived`** — mutants where the whole suite still passed. **Nothing you
+  wrote can tell the difference between the real code and the broken code.**
+- **`timeout`** — the mutant made the suite hang (usually an infinite loop). MMR
+  counts these as caught: a hang is a detected difference.
+- **`score`** — `killed / (killed + survived)`. The share of injected bugs your
+  tests actually catch.
+
+The score is **not** a target to maximise, and this table shows why.
+`proposal_transitions.py` at 100% is a 20-line state machine where every branch
+matters. `position_sizing.py` at 70.9% looks alarming until you look at *where*
+its 162 survivors live: **85 of them are inside a `session_summary()` reporting
+method**, and another 6 mutate human-readable explanation strings. A mutant that
+changes a log message cannot lose a single dollar. Chasing that module to 95%
+would mean writing dozens of tests asserting the exact wording of status text.
+
+So the useful question is never "what's the number?" but:
+
+> **Of the mutants that survived, which ones could change something that
+> matters?**
+
+For MMR the classification is by *consequence*: does this mutant change the
+number of shares ordered, or the approve/refuse decision? For
+`position_sizing.py`, 70 of the 162 could touch the sized amount — those got
+examined; the other 92 were classified as cosmetic and written down as such.
+
+A score dropping is meaningful even when the absolute value isn't: it means a
+mutant that *used* to be caught no longer is. That's why the score is recorded
+in `scripts/mutation_baseline.json` and checked by `run_mutation.sh check`.
 
 ### Surviving mutants are the interesting part
 
@@ -517,26 +604,6 @@ future run re-litigates the same three survivors.
 
 > **Rule:** never change production code to raise the mutation score. Only add
 > tests. A survivor tells you about your *tests*.
-
-### The trap: mutmut skips decorated functions
-
-mutmut 3.x refuses to mutate any decorated function — which would mean the
-entire `@deal`-contracted safety kernel silently gets **zero mutants** and
-reports a perfect score for code it never tested. MMR patches around it:
-
-```python
-# scripts/run_mutation.py
-def _patched_skip(self, node):
-    # never mutate a deal.* contract expression — that's the spec, not the code
-    if isinstance(node, cst.Decorator) and _root_name(node.decorator) == "deal":
-        return True
-    # un-skip a function decorated SOLELY by deal.* so its body is mutated
-    if isinstance(node, cst.FunctionDef) and _all_deal(node):
-        return False
-    return _ORIG_SKIP(self, node)
-```
-
-Always run it via `scripts/run_mutation.sh`, never a bare `mutmut run`.
 
 ---
 
@@ -661,7 +728,46 @@ it to 93.5%. **The file existed, passed, and measured nothing.**
 
 ## 8. Putting it together
 
-Take the highest-consequence boolean in the system: is this order exit-class?
+### First: what "exit-class" means, and why it is the scariest boolean here
+
+Every order either **increases** your exposure or **reduces** it.
+
+- You hold **+75 shares** of WDS. Selling 75 → position goes to 0. That is an
+  **exit**: risk removed.
+- You hold **0** shares. Selling 75 → position goes to **−75**, a short. You now
+  owe 75 shares you never had. That is an **open**: risk *added*, and the loss on
+  a short is theoretically unbounded, because a price can rise forever.
+
+Notice both are `SELL` orders. The action word tells you nothing; only the
+action *combined with the position you already hold* does.
+
+**Why the system must treat these completely differently.** MMR refuses orders
+for good reasons: the position would be too large, the daily loss limit is hit,
+the instrument is denylisted, the account value can't be read. But every one of
+those reasons is an argument for *not taking on more risk*. Applying them to an
+exit is perverse — you'd be refusing to let someone **close a losing position
+because they're losing money**. A blocked exit can turn a bad day into a
+catastrophic one, and a stop-loss you refuse to place is not a stop-loss.
+
+So the rule is: **exit-class orders are never refusable.** They skip the trading
+filter, the leverage check, the risk gate, the approval requirement, and the
+approver notional tier.
+
+Which means this one boolean decides whether *five safety gates apply at all*:
+
+```
+reduces_exposure(...) == True   →  all five gates SKIPPED (correct for a genuine exit)
+reduces_exposure(...) == False  →  all five gates APPLY   (correct for an open)
+```
+
+A wrong `False` is an annoyance: a legitimate exit gets gated, and might be
+refused. A wrong `True` is the whole system's failure mode in one value — an
+*opening* order that faces no checks whatsoever. That's why it gets every layer
+in the toolchain pointed at it, and why the property in section 3 is about
+quantity-*independence*: a backdoor needs a threshold to hide behind.
+
+### The function
+
 
 ```python
 # trader/trading/exit_class.py
@@ -693,7 +799,7 @@ Every layer touches it:
 | **`deal`** | `@deal.pure` — side-effect free, total. |
 | **CrossHair** | In `TARGETS`; symbolically checked, clean. |
 | **Hypothesis** | Quantity-independence + the direction rule + fail-closed on every degenerate input. |
-| **mutmut** | 61.3% → 93.5% once the property joined the oracle. Two survivors remain, both *proven* equivalent (they differ only at `position == 0.0`, which the guard above makes unreachable). |
+| **mutmut** | Injects bugs to check the tests notice. It first scored **61.3%** — nearly 4 in 10 injected bugs went undetected, including three that flipped a fail-safe `return False` into `return True`, i.e. *fail-open* versions of the guards. After the property above was wired into the mutation oracle: **93.5%**. The 2 remaining survivors are *proven* equivalent — they differ only at `position == 0.0`, which the guard above already excluded, so no input can tell them apart. |
 | **`ty`** | The module is in the kernel scope, held at zero. |
 | **Wiring tests** | Fail if it ever drops out of TARGETS or the mutation scope. |
 
