@@ -52,7 +52,7 @@ from __future__ import annotations
 import datetime as dt
 import threading
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, NamedTuple, Optional, Tuple
 
 import pandas as pd
 
@@ -85,9 +85,29 @@ _EXCHANGE_CALENDARS: Dict[str, str] = {
 # Instruments that trade around the clock — no session gate applies.
 _ALWAYS_OPEN_SEC_TYPES = frozenset({'CASH', 'CRYPTO'})
 
+Window = Tuple[pd.Timestamp, pd.Timestamp]
+
+
+class SessionLookup(NamedTuple):
+    """Tri-state answer, because two-state was silently fail-CLOSED.
+
+    ``window is None`` is ambiguous on its own: it means both "the venue is
+    legitimately shut that day" and "we could not find out". The first must
+    suppress a bar; the second must NOT, per this module's stated policy. With a
+    bare ``Optional`` they collapsed, and mutation testing found the collapse —
+    a calendar error logged "treating as open" and then returned False, which
+    would have starved every strategy of bars from a single library exception.
+
+    Same ``*_evaluable`` shape ``RiskInputs`` and ``PortfolioState`` use, and for
+    the same reason: "could not read it" is not a value.
+    """
+    window: Optional[Window]
+    evaluable: bool
+
+
 _lock = threading.Lock()
 _calendar_cache: Dict[str, object] = {}
-_schedule_cache: Dict[Tuple[str, dt.date], Optional[Tuple[pd.Timestamp, pd.Timestamp]]] = {}
+_schedule_cache: Dict[Tuple[str, dt.date], Optional[Window]] = {}
 _warned_unknown: set = set()
 
 
@@ -132,21 +152,22 @@ def _utc_stamps(row, columns, names) -> list:
     return out
 
 
-def session_window(
-    calendar_name: str,
-    day: dt.date,
-) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
+def session_window(calendar_name: str, day: dt.date) -> SessionLookup:
     """The full tradeable window (UTC) for *day*, extended hours INCLUDED.
 
-    ``None`` means the venue has no session that day — a weekend or a holiday.
-    Cached per (calendar, day): the schedule call is not cheap and the runtime
-    asks this on every dispatched bar.
+    ``SessionLookup(window=None, evaluable=True)`` = the venue has no session
+    that day (weekend, holiday) — a bar then really is out of session.
+    ``evaluable=False`` = the lookup failed and the caller must fail OPEN.
+
+    Successful lookups are cached per (calendar, day); FAILURES ARE NOT. Caching
+    an error would pin that day to the wrong answer for the life of the process,
+    turning one transient exception into a permanent outage for that instrument.
     """
     key = (calendar_name, day)
     with _lock:
         if key in _schedule_cache:
-            return _schedule_cache[key]
-    window: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None
+            return SessionLookup(_schedule_cache[key], True)
+    window: Optional[Window] = None
     try:
         cal = _calendar(calendar_name)
         stamp = day.isoformat()
@@ -157,19 +178,23 @@ def session_window(
             row = sched.iloc[0]
             starts = _utc_stamps(row, sched.columns, ('pre', 'market_open'))
             ends = _utc_stamps(row, sched.columns, ('post', 'market_close'))
-            if starts and ends:
-                window = (min(starts), max(ends))
+            if not starts or not ends:
+                # A session row we cannot read is not evidence of a closed
+                # market — do not cache it and do not suppress on it.
+                logging.warning(
+                    'market_session: %s has a session on %s but no readable '
+                    'open/close (%s) — treating as open', calendar_name, day,
+                    list(sched.columns))
+                return SessionLookup(None, False)
+            window = (min(starts), max(ends))
     except Exception as ex:
         logging.warning(
-            'market_session: could not read %s schedule for %s (%s) — treating as open',
-            calendar_name, day, ex)
-        window = None
-        with _lock:
-            _schedule_cache[key] = None
-        return None
+            'market_session: could not read %s schedule for %s (%s) — treating '
+            'as open, NOT caching', calendar_name, day, ex)
+        return SessionLookup(None, False)
     with _lock:
         _schedule_cache[key] = window
-    return window
+    return SessionLookup(window, True)
 
 
 def in_session(
@@ -219,8 +244,22 @@ def in_session(
     day = stamp.date()
     if not isinstance(day, dt.date):        # NaT.date() is NaT, not a date
         return True
+
+    # A session can straddle UTC midnight in both directions (NYSE post-market
+    # ends at 00:00 UTC the NEXT day; the ASX session starts at 00:00 UTC on the
+    # session date), so check the neighbouring days rather than assuming the UTC
+    # date and the session date agree.
+    unevaluable = False
     for offset in (-1, 0, 1):
-        window = session_window(name, day + dt.timedelta(days=offset))
-        if window and window[0] <= stamp <= window[1]:
+        lookup = session_window(name, day + dt.timedelta(days=offset))
+        if not lookup.evaluable:
+            unevaluable = True
+            continue
+        if lookup.window and lookup.window[0] <= stamp <= lookup.window[1]:
             return True
+    if unevaluable:
+        # Every relevant day answered "unknown" — fail OPEN. Returning False
+        # here is what the two-state version did, and it would have suppressed
+        # every bar for this instrument off one library exception.
+        return True
     return False

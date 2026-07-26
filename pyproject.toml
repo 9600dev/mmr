@@ -158,6 +158,10 @@ only_mutate = [
     # The disaster stop's size and price: the only protection that survives a
     # dead feed while holding, and it lived inline between two SDK calls.
     "trader/trading/protective_stop.py",
+    # Decides which bars a strategy is allowed to see at all. Not on the
+    # order path, but a wrong answer either starves a strategy of real bars
+    # or feeds it bars that never traded.
+    "trader/data/market_session.py",
     "trader/strategy/auto_executor.py",
     "trader/trading/position_sizing.py",
     "trader/trading/risk_gate.py",
@@ -177,6 +181,7 @@ pytest_add_cli_args_test_selection = [
     "tests/invariants/test_order_notional.py",
     "tests/invariants/test_order_structure.py",
     "tests/invariants/test_protective_stop.py",
+    "tests/test_market_session.py",
     "tests/test_order_validator.py",
     "tests/invariants/test_proposal_machine.py",
     "tests/invariants/test_sizing_properties.py",
