@@ -44,21 +44,36 @@ count, and a wrong answer spends real money. The bug that motivated
 "bump to at least 1 share" turned a ~$340 sized order on a >$510 stock into a
 full share — an overspend, produced by code that passed its tests.
 
-The tools below attack four different blind spots:
+The tools below each attack a different blind spot:
 
-| Blind spot | Tool |
-|---|---|
-| "I only tested the inputs I thought of" | **Hypothesis** — generates inputs |
-| "My assumptions live in my head, not the code" | **deal** — contracts execute |
-| "Random sampling never hits the pathological corner" | **CrossHair** — solves for it |
-| "My tests pass, but do they actually *check* anything?" | **mutmut** — breaks the code and sees if tests notice |
-| "A whole category of call sites is unprotected" | **ty** — types make it impossible |
+| Blind spot | Tool | What it is |
+|---|---|---|
+| "I only tested the inputs I thought of" | **[Hypothesis](https://hypothesis.readthedocs.io/)** ([repo](https://github.com/HypothesisWorks/hypothesis)) | property-based testing — generates inputs and shrinks failures |
+| "My assumptions live in my head, not the code" | **[deal](https://deal.readthedocs.io/)** ([repo](https://github.com/life4/deal)) | design-by-contract — pre/postconditions that execute |
+| "Random sampling never hits the pathological corner" | **[CrossHair](https://crosshair.readthedocs.io/)** ([repo](https://github.com/pschanely/CrossHair)) | symbolic execution — an SMT solver *solves* for a counterexample |
+| "My tests pass, but do they actually *check* anything?" | **[mutmut](https://mutmut.readthedocs.io/)** ([repo](https://github.com/boxed/mutmut)) | mutation testing — breaks the code, sees if the tests notice |
+| "A whole category of call sites is unprotected" | **[ty](https://github.com/astral-sh/ty)** | static type checker (Astral, same family as `ruff`/`uv`) |
+
+All five are open source and installable from PyPI. Four of them are **dev-only**
+and never enter the trading container: `ty`, Hypothesis, CrossHair and mutmut are
+things you *run against* the code.
+
+**`deal` is the exception, and deliberately so — it is a RUNTIME dependency.**
+Contracts are not a test harness; they execute on every real call in production,
+so a violated postcondition raises in the live system rather than passing a bad
+value downstream. That is why adding a contracted module needs a container image
+rebuild, not just a code sync.
+
+Of the dev-only four, only `ty` runs on every commit — it is the only one fast
+enough. The rest run on demand or as manual-stage hooks.
 
 They compose. None replaces unit tests.
 
 ---
 
 ## 2. Layer 0 — Types that encode permission (`ty`)
+
+> **[ty](https://github.com/astral-sh/ty)** · `uv add --dev ty` · static type checker
 
 `ty` is Astral's type checker (same family as `ruff`/`uv`). Fast enough to run
 on every commit.
@@ -165,6 +180,8 @@ diagnostics recorded; a *new* one fails the gate, so the count can only fall.
 
 ## 3. Layer 1 — Property-based testing (Hypothesis)
 
+> **[Hypothesis](https://hypothesis.readthedocs.io/)** · `pip install hypothesis` · [source](https://github.com/HypothesisWorks/hypothesis)
+
 Instead of asserting one input/output pair, you state something true of **all**
 inputs, and the library hunts for a counterexample.
 
@@ -253,6 +270,8 @@ was fine; the *input space* was too polite.
 ---
 
 ## 4. Layer 2 — Contracts (`deal`)
+
+> **[deal](https://deal.readthedocs.io/)** · `pip install deal` · [source](https://github.com/life4/deal)
 
 A contract states pre/postconditions **as executable code attached to the
 function**, instead of prose in a docstring that drifts.
@@ -356,6 +375,8 @@ sizing safety story depends on.
 
 ## 5. Layer 3 — Symbolic execution (CrossHair)
 
+> **[CrossHair](https://crosshair.readthedocs.io/)** · `pip install crosshair-tool` · [source](https://github.com/pschanely/CrossHair)
+
 Hypothesis *samples*. CrossHair *solves*.
 
 It runs your function with symbolic values instead of concrete ones and asks an
@@ -432,6 +453,8 @@ verification. Also: it only works on small, referentially-transparent functions
 ---
 
 ## 6. Layer 4 — Mutation testing (`mutmut`)
+
+> **[mutmut](https://mutmut.readthedocs.io/)** · [source](https://github.com/boxed/mutmut) · pin `mutmut==3.6.0`, and install it into the **same interpreter that runs pytest** — mutmut 3.x runs pytest in-process, so the test env *is* the mutation env
 
 The previous layers check the code. This one checks **the tests**.
 
