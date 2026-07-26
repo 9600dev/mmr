@@ -15,7 +15,7 @@ human-owned property plus the pinned counterexamples.
 import pytest
 from hypothesis import given, settings, strategies as st
 
-from trader.trading.order_math import whole_shares_for_notional
+from trader.trading.order_math import reducible_quantity, whole_shares_for_notional
 
 
 @settings(max_examples=500, deadline=None)
@@ -107,3 +107,72 @@ class TestPinnedCounterexamples:
         exact symbolic inputs CrossHair reported."""
         with pytest.raises(ValueError):
             whole_shares_for_notional(2.0, 3.0765742648370966e-154, 3.034084836703205e-308)
+
+
+# ---------------------------------------------------------------------------
+# The never-oversell clamp: how much of an attributed position may be reduced
+# ---------------------------------------------------------------------------
+
+@settings(max_examples=500, deadline=None)
+@given(
+    attributed=st.one_of(
+        st.floats(min_value=-1e4, max_value=1e6),
+        st.sampled_from([0, 0.0, -0.0, 0.5, float('nan'), float('inf'), None, 'x']),
+    ),
+    broker=st.one_of(
+        st.floats(min_value=-1e4, max_value=1e6),
+        st.sampled_from([0, 0.0, -0.0, 0.5, float('nan'), float('inf'), None, 'x']),
+    ),
+)
+def test_a_reduction_never_exceeds_the_position_or_the_attribution(attributed, broker):
+    """Both bounds, over the whole input space including the unreadable parts.
+
+    Exceeding the BROKER quantity opens a short out of a closing order —
+    and reducing orders are exit-class, hence exempt from the trading filter,
+    the leverage check, the risk gate and the approver tier, so nothing
+    downstream would argue. Exceeding the ATTRIBUTED quantity sells shares this
+    strategy has no claim on, i.e. a manual position in the same instrument.
+    """
+    result = reducible_quantity(attributed, broker)
+    assert result >= 0.0
+    if result > 0.0:
+        assert result <= float(broker)
+        assert result <= float(attributed)
+
+
+@settings(max_examples=200, deadline=None)
+@given(
+    attributed=st.floats(min_value=1.0, max_value=1e6, allow_nan=False, allow_infinity=False),
+    broker=st.floats(min_value=1.0, max_value=1e6, allow_nan=False, allow_infinity=False),
+)
+def test_a_readable_position_is_always_reducible(attributed, broker):
+    """The converse. "Never oversell" is satisfied by a function that always
+    returns zero, and a close that silently refuses to close is how a position
+    outlives the strategy that opened it."""
+    assert reducible_quantity(attributed, broker) == min(attributed, broker)
+
+
+class TestPinnedOversellCounterexamples:
+    def test_a_nan_broker_quantity_reduces_nothing(self):
+        """Pinned counterexample (2026-07-26).
+
+        Both call sites wrote ``min(attributed, broker)`` and then guarded with
+        ``if qty <= 0``. Neither holds for NaN: ``min(140.0, nan)`` is 140.0
+        (the comparison is False, so min keeps the first argument) and
+        ``nan <= 0`` is False. A NaN broker read therefore passed the clamp AND
+        the guard, and would have sold the full attributed size against a
+        position of unknown size.
+        """
+        assert reducible_quantity(140.0, float('nan')) == 0.0
+        assert reducible_quantity(float('nan'), 140.0) == 0.0
+
+    def test_an_infinite_broker_quantity_reduces_nothing(self):
+        """``min(140.0, inf)`` is 140.0, which happens to be safe — but an
+        infinite position is an unreadable one, and acting on it means acting
+        on a number the broker did not give us."""
+        assert reducible_quantity(140.0, float('inf')) == 0.0
+
+    def test_a_non_numeric_broker_quantity_reduces_nothing(self):
+        """``min(140.0, '')`` raises TypeError inside the placement path."""
+        assert reducible_quantity(140.0, None) == 0.0
+        assert reducible_quantity(140.0, 'unknown') == 0.0

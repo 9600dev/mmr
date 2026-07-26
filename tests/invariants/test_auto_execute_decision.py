@@ -35,7 +35,9 @@ import pytest
 from hypothesis import given, settings, strategies as st
 
 from trader.objects import Action
-from trader.strategy.auto_executor import SignalWork, decide_signal
+from trader.strategy.auto_executor import (
+    SignalWork, accept_empty_broker_read, decide_signal,
+)
 
 _SETTINGS = settings(max_examples=300, deadline=None)
 
@@ -252,3 +254,63 @@ class TestCooldown:
                           already_executed_bar=False, cooldown_active=True,
                           live_armed=armed)
         assert d.kind != 'open'
+
+
+class TestEmptyBrokerReadIsNotEvidenceOfAFlatBook:
+    """Reconciliation marks attributed positions absent at the broker as
+    CLOSED_EXTERNALLY and cancels their protective stops. Done wrongly, that is
+    the worst outcome in this module: the position is still there, no strategy
+    will ever close it (attribution is gone) and nothing protects it (the stop
+    is cancelled) — permanently, because nothing re-attributes.
+
+    An empty read is exactly the input where "absent" is least trustworthy:
+    ``get_positions`` falls back to MMR's own portfolio cache when
+    ``ib.positions()`` is empty, and both are empty for the first moments after
+    trader_service connects — which is when strategy_service starts pushing bars
+    and the executor does its first-work reconcile.
+    """
+
+    def test_a_first_empty_read_is_never_believed(self):
+        """The startup race, stated directly: with no prior empty read there is
+        no evidence, and no elapsed time can manufacture any."""
+        assert accept_empty_broker_read(None, now=1e9, grace_seconds=0.0) is False
+        assert accept_empty_broker_read(None, now=1e9, grace_seconds=120.0) is False
+
+    @_SETTINGS
+    @given(
+        first=st.floats(min_value=0.0, max_value=2e9, allow_nan=False,
+                        allow_infinity=False),
+        delta=st.floats(min_value=0.0, max_value=1e6, allow_nan=False,
+                        allow_infinity=False),
+        grace=st.floats(min_value=0.0, max_value=1e4, allow_nan=False,
+                        allow_infinity=False),
+    )
+    def test_belief_requires_the_full_grace_period(self, first, delta, grace):
+        """Compared against the MEASURED elapsed time, not the nominal delta:
+        (first + delta) - first is not delta for a real epoch timestamp, and
+        the guarantee is about what the clock actually showed."""
+        now = first + delta
+        measured = now - first
+        assert accept_empty_broker_read(first, now, grace) == (measured >= grace)
+
+    @_SETTINGS
+    @given(
+        first=st.floats(min_value=0.0, max_value=2e9, allow_nan=False,
+                        allow_infinity=False),
+        grace=st.floats(min_value=1.0, max_value=1e4, allow_nan=False,
+                        allow_infinity=False),
+    )
+    def test_belief_is_monotone_in_elapsed_time(self, first, grace):
+        """Waiting longer never un-believes an empty book — the guard delays a
+        reconcile, it must not be able to prevent one indefinitely."""
+        assert accept_empty_broker_read(first, first + grace * 0.5, grace) is False
+        assert accept_empty_broker_read(first, first + grace * 2.0 + 1.0, grace) is True
+
+    @_SETTINGS
+    @given(bad=st.sampled_from([None, 'soon', float('nan'), object()]))
+    def test_an_unreadable_clock_does_not_close_anything(self, bad):
+        """Fail toward NOT reconciling. A stale attribution blocks new opens,
+        which is loud and recoverable; a wrongly-cancelled disaster stop on a
+        live position is silent and is not."""
+        assert accept_empty_broker_read(bad, now=1e9, grace_seconds=1.0) is False
+        assert accept_empty_broker_read(1e9, now=bad, grace_seconds=1.0) is False
