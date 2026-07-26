@@ -208,8 +208,27 @@ class PositionSizingConfig:
 
 @dataclass
 class PortfolioState:
-    """Snapshot of current portfolio for sizing decisions."""
+    """Snapshot of current portfolio for sizing decisions.
+
+    ``net_liquidation_evaluable`` disambiguates the two very different situations
+    that both arrive as ``net_liquidation == 0.0``, and which the sizer previously
+    could not tell apart:
+
+      * **False (default) — "I could not read it."** ``propose`` is documented to
+        work with trader_service down, and ``_get_portfolio_state`` returns a bare
+        ``PortfolioState()`` when the account RPC fails. Falling back to a flat
+        ``base_position_usd`` is the INTENDED behaviour there, so percentage caps
+        computed against an unknown account are meaningless rather than violated.
+      * **True — "I read it, and it is this."** Now a zero or negative value means
+        a genuinely worthless account, which must not trade at all.
+
+    Mirrors the ``*_evaluable`` tri-state that ``RiskInputs`` already uses in the
+    risk gate. Default False so every existing caller keeps its current
+    behaviour — the flag only ever ADDS a refusal, for the one case a caller
+    explicitly asserts it measured.
+    """
     net_liquidation: float = 0.0
+    net_liquidation_evaluable: bool = False
     gross_position_value: float = 0.0
     available_funds: float = 0.0
     daily_pnl: float = 0.0
@@ -307,6 +326,27 @@ class PositionSizer:
         state = portfolio_state or PortfolioState()
         warnings: list[str] = []
         capped_by = ''
+
+        # A MEASURED account value of <= 0 means there is nothing to trade
+        # against, so every percentage cap is genuinely zero and any amount would
+        # breach it. Refuse rather than emit a number.
+        #
+        # Deliberately gated on net_liquidation_evaluable: an UNREADABLE value
+        # (the flag's default) must keep falling back to the flat base size,
+        # because that is the documented offline-`propose` path. An earlier
+        # attempt at this refused on the value alone and broke 45 tests by
+        # collapsing that fallback — the flag is what makes the two cases
+        # distinguishable at all.
+        if state.net_liquidation_evaluable and state.net_liquidation <= 0:
+            warnings.append(
+                f'NetLiquidation was read as {state.net_liquidation:,.2f} — an account '
+                'with no value cannot support a position; every percentage cap is zero.'
+            )
+            return SizingResult(
+                amount_usd=0.0, quantity=0,
+                reasoning='no size: measured NetLiquidation is not positive',
+                warnings=warnings, capped_by='net-liq-not-positive',
+            )
 
         # 1. Base * risk multiplier
         risk_mult = RISK_MULTIPLIERS.get(cfg.risk_level, 1.0)

@@ -936,6 +936,11 @@ class MMR:
                 state.net_liquidation = float(acct_vals.get('NetLiquidation', {}).get('value', 0))
                 state.gross_position_value = float(acct_vals.get('GrossPositionValue', {}).get('value', 0))
                 state.available_funds = float(acct_vals.get('AvailableFunds', {}).get('value', 0))
+                # We successfully READ the account value, so percentage caps are
+                # meaningful and a non-positive value means a genuinely worthless
+                # account. Left False on the exception path below, where the
+                # sizer must keep its flat-base offline fallback instead.
+                state.net_liquidation_evaluable = True
         except Exception as e:
             logger.warning('get_account_values RPC failed: %s', e)
             state.rpc_errors.append(f'account_values: {type(e).__name__}: {e}')

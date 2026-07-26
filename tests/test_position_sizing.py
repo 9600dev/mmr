@@ -1350,3 +1350,45 @@ class TestSizingWithUnreadableNetLiquidation:
                                       portfolio_value_evaluable=True)
         assert unreadable.approved is False
         assert readable_zero.approved is False
+
+
+class TestMeasuredWorthlessAccountRefusal:
+    """The `net-liq-not-positive` refusal must be COHERENT, not just zero-ish.
+
+    Mutation testing found that asserting `amount_usd == 0` alone left the rest of
+    the returned object unpinned: a mutant returning `quantity=1` alongside
+    `amount_usd=0.0` survived, i.e. a refusal that simultaneously claims to have
+    sized zero dollars and one share. Another dropped the warnings list, removing
+    the operator's only explanation for the refusal.
+    """
+
+    def _measured(self, net_liq):
+        return PortfolioState(net_liquidation=net_liq, net_liquidation_evaluable=True,
+                              available_funds=max(net_liq, 0.0))
+
+    @pytest.mark.parametrize('net_liq', [0.0, -0.01, -100_000.0])
+    def test_refusal_is_coherent_in_every_field(self, net_liq):
+        result = PositionSizer(PositionSizingConfig()).compute(
+            confidence=0.8, portfolio_state=self._measured(net_liq), price=100.0)
+        assert result.amount_usd == 0.0
+        assert result.quantity == 0, 'a refusal must not report a share count'
+        assert result.capped_by == 'net-liq-not-positive'
+        assert result.warnings, 'a refusal must explain itself to the operator'
+        assert 'NetLiquidation' in result.warnings[0]
+
+    def test_an_unreadable_account_is_NOT_this_refusal(self):
+        """The whole point of the flag: unreadable keeps the flat-base fallback,
+        because `propose` is documented to work with trader_service down."""
+        result = PositionSizer(PositionSizingConfig()).compute(
+            confidence=0.8, portfolio_state=PortfolioState(net_liquidation=0.0),
+            price=100.0)
+        assert result.capped_by != 'net-liq-not-positive'
+        assert result.amount_usd > 0.0
+
+    def test_a_sub_unit_measured_account_is_sized_not_refused(self):
+        """Guard is `<= 0`, not `<= 1`: a $0.50 account is poor, not worthless.
+        It will be capped to near-nothing by max_position_pct and then fall below
+        min_position_usd — but via the CAP path, not the worthless-account path."""
+        result = PositionSizer(PositionSizingConfig()).compute(
+            confidence=0.8, portfolio_state=self._measured(0.5), price=100.0)
+        assert result.capped_by != 'net-liq-not-positive'
