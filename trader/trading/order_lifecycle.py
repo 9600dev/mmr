@@ -40,7 +40,15 @@ class OrderLifecycleTracker:
     def __init__(self, event_store: Optional[EventStore] = None):
         self._event_store = event_store
         self._status: Dict[int, str] = {}        # order_id -> latest status seen
-        self._terminal_logged: set = set()       # order_ids already outcome-logged
+        # order_id -> outcome class already recorded ('filled' | 'dead').
+        # A dict, not a set: Filled must be able to SUPERSEDE a recorded dead
+        # outcome. Observed live 2026-07-27 (QBTS order 320): IB's status
+        # stream went Cancelled -> Filled 25ms apart for the same order — the
+        # broker filled it, but terminal-once kept ORDER_CANCELLED as the
+        # permanent record and the fill was never written. The PnL ledger
+        # pairs ORDER_FILLED events, so on a strategy exit this race would
+        # silently drop the sell from realized PnL.
+        self._terminal_logged: Dict[int, str] = {}
         self._waiters: Dict[int, List[asyncio.Future]] = {}
 
     def set_event_store(self, event_store: EventStore) -> None:
@@ -68,10 +76,23 @@ class OrderLifecycleTracker:
             if decisive is not None:
                 self._resolve_waiters(order_id, decisive)
 
-            # Record the terminal outcome exactly once per order.
-            if (status in _FILLED or status in _DEAD) and order_id not in self._terminal_logged:
-                self._terminal_logged.add(order_id)
-                self._record_event(trade, status)
+            # Record the terminal outcome once per order — EXCEPT that Filled
+            # supersedes a previously-recorded dead outcome (money moved; the
+            # earlier Cancelled was a transient lie). The reverse never
+            # supersedes: a Cancelled after Filled is stream noise.
+            if status in _FILLED or status in _DEAD:
+                outcome = 'filled' if status in _FILLED else 'dead'
+                logged = self._terminal_logged.get(order_id)
+                if logged is None:
+                    self._terminal_logged[order_id] = outcome
+                    self._record_event(trade, status)
+                elif outcome == 'filled' and logged == 'dead':
+                    logging.warning(
+                        'order %s: IB status Cancelled superseded by Filled — '
+                        'recording the fill (the earlier cancel was transient)',
+                        order_id)
+                    self._terminal_logged[order_id] = 'filled'
+                    self._record_event(trade, status, superseded='Cancelled')
         except Exception as ex:  # never let a status update crash the stream
             logging.warning('order lifecycle on_trade error: %s', ex)
 
@@ -127,7 +148,7 @@ class OrderLifecycleTracker:
     # ------------------------------------------------------------------
     # Event recording
     # ------------------------------------------------------------------
-    def _record_event(self, trade, status: str) -> None:
+    def _record_event(self, trade, status: str, superseded: Optional[str] = None) -> None:
         if self._event_store is None:
             return
         if status in _FILLED:
@@ -154,7 +175,8 @@ class OrderLifecycleTracker:
                 quantity=qty,
                 price=float(getattr(st, 'avgFillPrice', 0.0) or 0.0),
                 order_id=int(getattr(order, 'orderId', 0) or 0),
-                metadata={'status': status},
+                metadata=({'status': status, 'superseded': superseded}
+                          if superseded else {'status': status}),
             ))
         except Exception as ex:
             logging.warning('failed to record %s event: %s', event_type, ex)

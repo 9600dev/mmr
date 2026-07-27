@@ -84,3 +84,64 @@ class TestDecisiveWait:
 def _epoch():
     import datetime as dt
     return dt.datetime(1970, 1, 1)
+
+
+class TestFilledSupersedesCancelled:
+    """IB's status stream can lie transiently. Observed live 2026-07-27 (QBTS
+    order 320): Cancelled at +25ms, then the SAME order filled — broker truth
+    'Filled', event store stuck on ORDER_CANCELLED forever, no fill recorded.
+    The PnL ledger pairs ORDER_FILLED events, so on a strategy exit this race
+    silently drops the sell from realized PnL.
+    """
+
+    def _trade(self, order_id, status, filled=0.0, ref='s1'):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            order=SimpleNamespace(orderId=order_id, orderRef=ref,
+                                  action='SELL', totalQuantity=50.0),
+            orderStatus=SimpleNamespace(status=status, filled=filled,
+                                        avgFillPrice=18.9),
+            contract=SimpleNamespace(conId=1, symbol='QBTS'),
+        )
+
+    def test_cancelled_then_filled_records_the_fill(self, tmp_path):
+        from trader.data.event_store import EventStore, EventType
+        from trader.trading.order_lifecycle import OrderLifecycleTracker
+        es = EventStore(str(tmp_path / 'lc.duckdb'))
+        t = OrderLifecycleTracker(es)
+        t.on_trade(self._trade(320, 'Cancelled'))
+        t.on_trade(self._trade(320, 'Filled', filled=50.0))
+        events = [e.event_type for e in es.query_since(
+            since=__import__('datetime').datetime(2000, 1, 1))]
+        assert EventType.ORDER_CANCELLED in events
+        assert EventType.ORDER_FILLED in events, (
+            'the fill was suppressed by the earlier transient Cancelled')
+        fills = [e for e in es.query_since(
+            since=__import__('datetime').datetime(2000, 1, 1))
+            if e.event_type == EventType.ORDER_FILLED]
+        assert (fills[0].metadata or {}).get('superseded') == 'Cancelled'
+
+    def test_filled_then_cancelled_does_not_record_the_cancel(self, tmp_path):
+        """The reverse direction stays terminal-once: money moved, a later
+        Cancelled is stream noise and must not shadow the fill."""
+        from trader.data.event_store import EventStore, EventType
+        from trader.trading.order_lifecycle import OrderLifecycleTracker
+        es = EventStore(str(tmp_path / 'lc2.duckdb'))
+        t = OrderLifecycleTracker(es)
+        t.on_trade(self._trade(321, 'Filled', filled=50.0))
+        t.on_trade(self._trade(321, 'Cancelled'))
+        events = [e.event_type for e in es.query_since(
+            since=__import__('datetime').datetime(2000, 1, 1))]
+        assert events.count(EventType.ORDER_FILLED) == 1
+        assert EventType.ORDER_CANCELLED not in events
+
+    def test_duplicate_filled_records_once(self, tmp_path):
+        from trader.data.event_store import EventStore, EventType
+        from trader.trading.order_lifecycle import OrderLifecycleTracker
+        es = EventStore(str(tmp_path / 'lc3.duckdb'))
+        t = OrderLifecycleTracker(es)
+        t.on_trade(self._trade(322, 'Filled', filled=50.0))
+        t.on_trade(self._trade(322, 'Filled', filled=50.0))
+        events = [e.event_type for e in es.query_since(
+            since=__import__('datetime').datetime(2000, 1, 1))]
+        assert events.count(EventType.ORDER_FILLED) == 1
