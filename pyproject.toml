@@ -188,6 +188,7 @@ pytest_add_cli_args_test_selection = [
     "tests/test_market_session.py",
     "tests/test_order_validator.py",
     "tests/test_order_lifecycle.py",
+    "tests/test_seams.py",
     "tests/invariants/test_proposal_machine.py",
     "tests/invariants/test_sizing_properties.py",
     "tests/test_order_math.py",
