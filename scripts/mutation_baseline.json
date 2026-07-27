@@ -48,6 +48,12 @@
       "survived": 16,
       "timeout": 0,
       "score": 0.948387
+    },
+    "trader/data/market_session.py": {
+      "killed": 144,
+      "survived": 49,
+      "timeout": 0,
+      "score": 0.746114
     }
   }
 }

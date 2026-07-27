@@ -25,6 +25,26 @@ def _utc(s):
     return pd.Timestamp(s, tz='UTC')
 
 
+@pytest.fixture(autouse=True)
+def _cold_caches():
+    """Every test starts with cold module caches.
+
+    Mutation testing exposed why this matters: `_schedule_cache` is
+    module-level, so once any test resolves (calendar, day) the cached window
+    answers for every later test — and mutants in `_utc_stamps` / `_calendar` /
+    the schedule call survived DIRECT assertions on their output because the
+    mutated code never ran. A warm cache turns a behavioural test into a cache
+    read. `test_a_failed_lookup_is_not_cached` additionally depends on starting
+    cold to mean anything.
+    """
+    import trader.data.market_session as ms
+    with ms._lock:
+        ms._schedule_cache.clear()
+        ms._calendar_cache.clear()
+        ms._warned_unknown.clear()
+    yield
+
+
 class TestExtendedHoursReachStrategies:
     """23% of GOOGL's stored 1-min bars are zero-volume and they ARE the
     extended-hours minutes (0% zero-volume inside RTH, 42-54% outside). The
@@ -92,6 +112,15 @@ class TestFailsOpen:
         assert in_session(_utc('2026-07-26 18:45:00'), 'IDEALPRO', '',
                           sec_type='CASH') is True
 
+    def test_cash_overrides_a_mapped_and_closed_venue(self):
+        """The always-open check must decide BEFORE the venue lookup. This
+        pins that: sec_type CASH on a venue that is mapped and currently shut
+        is still in-session. The forex test above cannot pin it — IDEALPRO is
+        unmapped, so the fail-open path gives the same answer even if the
+        CASH check is broken (a mutant proved exactly that)."""
+        assert in_session(_utc('2026-07-26 18:45:00'), 'ASX', 'ASX',
+                          sec_type='CASH') is True
+
     def test_an_unparseable_timestamp_is_treated_as_open(self):
         assert in_session('not-a-timestamp', 'ASX', 'ASX') is True
         assert in_session(None, 'ASX', 'ASX') is True
@@ -118,6 +147,16 @@ class TestVenueMapping:
 
     def test_mapping_is_case_and_whitespace_insensitive(self):
         assert calendar_name_for(' asx ', '') == 'ASX'
+
+    def test_in_session_resolves_the_venue_from_primary_alone(self):
+        """IB can report a routing code we have no mapping for while
+        primaryExchange names the real venue. Dropping either argument on the
+        way into calendar_name_for silently falls open — Sunday must still be
+        refused when only primary maps."""
+        assert in_session(_utc('2026-07-26 18:45:00'), 'UNMAPPEDROUTER', 'ASX') is False
+
+    def test_in_session_resolves_the_venue_from_exchange_alone(self):
+        assert in_session(_utc('2026-07-26 18:45:00'), 'ASX', '') is False
 
 
 class TestSessionWindow:
@@ -147,19 +186,13 @@ class TestACalendarErrorFailsOpen:
     exact failure this module's docstring calls worse than the bug it fixes.
     """
 
-    def _clear(self):
-        import trader.data.market_session as ms
-        ms._schedule_cache.clear()
-
     def test_an_exploding_calendar_admits_the_bar(self):
         import trader.data.market_session as ms
-        self._clear()
         with mock.patch.object(ms, '_calendar', side_effect=RuntimeError('boom')):
             assert ms.in_session(_utc('2026-07-27 01:00:00'), 'ASX', 'ASX') is True
 
     def test_an_exploding_calendar_reports_not_evaluable(self):
         import trader.data.market_session as ms
-        self._clear()
         with mock.patch.object(ms, '_calendar', side_effect=RuntimeError('boom')):
             lookup = ms.session_window('ASX', dt.date(2026, 7, 27))
         assert lookup.evaluable is False
@@ -169,7 +202,6 @@ class TestACalendarErrorFailsOpen:
         """Caching a failure pins that day to the wrong answer for the life of
         the process — one transient exception becomes a permanent outage."""
         import trader.data.market_session as ms
-        self._clear()
         with mock.patch.object(ms, '_calendar', side_effect=RuntimeError('boom')):
             ms.session_window('ASX', dt.date(2026, 7, 27))
         assert ('ASX', dt.date(2026, 7, 27)) not in ms._schedule_cache
@@ -183,7 +215,6 @@ class TestACalendarErrorFailsOpen:
         """A schedule that has a row but no usable open/close is not evidence of
         a closed market."""
         import trader.data.market_session as ms
-        self._clear()
         with mock.patch.object(ms, '_utc_stamps', return_value=[]):
             lookup = ms.session_window('ASX', dt.date(2026, 7, 27))
             assert lookup.evaluable is False
@@ -234,3 +265,68 @@ class TestLivePrimingMatchesTheBacktester:
         source = (pathlib.Path(__file__).resolve().parent.parent
                   / 'trader' / 'strategy' / 'strategy_runtime.py').read_text()
         assert "dropna(subset=['close'])" in source
+
+
+class TestSessionsThatStraddleUtcMidnight:
+    """The neighbouring-day loop in in_session is load-bearing, in both
+    directions, for the two venues we actually trade.
+
+    +1 is the Australian-summer case: Sydney is UTC+11 under DST, so the ASX
+    session for date D opens at 23:00 UTC on D-1. Without the +1 offset, every
+    ASX bar between 23:00 UTC and midnight would be wrongly refused for the
+    entire southern summer — the gate would eat the first hour of every
+    session, and it would look exactly like a slow feed.
+
+    -1 is the US case: NYSE post-market runs to 00:00 UTC of the NEXT day, so
+    the final minute of Friday's session carries Saturday's UTC date.
+    """
+
+    def test_asx_under_dst_opens_on_the_previous_utc_day(self):
+        # Tue 2026-01-06 AEDT session = 23:00 UTC Mon Jan 5 → 05:10 UTC Jan 6.
+        lookup = session_window('ASX', dt.date(2026, 1, 6))
+        assert lookup.window == (_utc('2026-01-05 23:00:00'),
+                                 _utc('2026-01-06 05:10:00'))
+        # 23:30 UTC Monday belongs to TUESDAY's session; Monday's own session
+        # closed at 05:10 UTC. Only the +1 offset can admit this bar.
+        assert in_session(_utc('2026-01-05 23:30:00'), 'ASX', 'ASX') is True
+
+    def test_us_post_market_final_minute_lands_on_the_next_utc_date(self):
+        # 00:00 UTC Saturday = 20:00 ET Friday, the post-market close. Only the
+        # -1 offset can admit it: Saturday itself has no session.
+        assert in_session(_utc('2026-07-25 00:00:00'), 'SMART', 'NASDAQ') is True
+
+
+class TestCachedAnswersKeepTheirMeaning:
+    def test_a_cached_closed_day_still_refuses(self):
+        """The cache-hit path must return evaluable=True — a mutant returning a
+        falsy evaluable turns every CACHED closed day into fail-open, i.e. the
+        gate works exactly once per (venue, day) and then stops. The second call
+        here is the cache hit."""
+        assert in_session(_utc('2026-07-26 18:45:00'), 'ASX', 'ASX') is False
+        assert in_session(_utc('2026-07-26 18:45:00'), 'ASX', 'ASX') is False
+        lookup = session_window('ASX', dt.date(2026, 7, 26))
+        assert lookup.evaluable is True and lookup.window is None
+
+
+class TestUtcStampsRowReading:
+    def test_a_nat_column_is_skipped_not_terminal(self):
+        """A NaT in one schedule column must not stop the read of the next —
+        skipping means 'this column has no time today', stopping means the
+        whole day reads as unreadable and fails open."""
+        from trader.data.market_session import _utc_stamps
+        row = pd.Series({'pre': pd.NaT, 'market_open': _utc('2026-07-24 13:30:00')})
+        assert _utc_stamps(row, row.index, ('pre', 'market_open')) == \
+            [_utc('2026-07-24 13:30:00')]
+
+    def test_a_none_column_is_skipped_not_terminal(self):
+        from trader.data.market_session import _utc_stamps
+        row = pd.Series({'pre': None, 'market_open': _utc('2026-07-24 13:30:00')},
+                        dtype=object)
+        assert _utc_stamps(row, row.index, ('pre', 'market_open')) == \
+            [_utc('2026-07-24 13:30:00')]
+
+    def test_a_naive_time_is_read_as_utc(self):
+        from trader.data.market_session import _utc_stamps
+        row = pd.Series({'market_open': pd.Timestamp('2026-07-24 13:30:00')})
+        assert _utc_stamps(row, row.index, ('market_open',)) == \
+            [_utc('2026-07-24 13:30:00')]

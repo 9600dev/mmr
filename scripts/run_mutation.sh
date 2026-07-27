@@ -52,6 +52,7 @@
 #   order_math.py             68 killed /  3 survived / 2 timeout =  95.8%   (3 survivors = documented equivalents, see below)
 #   order_structure.py        86 killed /  3 survived            =  96.6%   (3 survivors = documented equivalents, see below)
 #   protective_stop.py        53 killed /  5 survived / 1 timeout =  91.4%   (4 equivalents + 1 unreachable-domain residual, see below)
+#   market_session.py        144 killed / 49 survived            =  74.6%   (log-string-dominated; every behavioural survivor classified, see below)
 #   order_math.reducible_quantity                                 = 100.0%   (0 survivors of 11 — the shared never-oversell clamp)
 #   position_sizing.py       415 killed / 165 survived           =  71.6%   (survivors: reasoning/warning text + session_summary report + boundary/degenerate/defense-in-depth equivalents)
 #   risk_gate.py             294 killed /  16 survived           =  94.8%   (survivors: diagnostic checks/reason strings + degenerate boundaries; every gate DECISION mutant killed)
@@ -217,6 +218,55 @@
 #   Whoever picks this up next: the remaining consequence is in the ORDERING
 #   (cancel-before-close, clear-tracking-in-finally), not in arithmetic.
 #
+#   market_session.py SURVIVOR CLASSIFICATION (2026-07-26, 25.7% -> 74.6%).
+#   The session gate for dispatched bars, scoped the day it shipped. The first
+#   measurement was the WORST in the kernel — 25.7% with 28 passing tests — and
+#   the survivor pattern (84 broken-schedule mutants collapsing into False)
+#   exposed that the documented fail-open policy was NOT IMPLEMENTED for
+#   calendar errors: "shut that day" and "lookup failed" were the same bare
+#   Optional, so one library exception suppressed every bar for every
+#   instrument, and failures were CACHED, pinning the wrong answer for the
+#   process lifetime. Fixed with the tri-state SessionLookup (548db31); the
+#   score moved 25.7% -> 63.7% from the semantics fix alone, with no
+#   assertions added for the purpose.
+#   Then two test-infrastructure findings:
+#     * COLD CACHES (63.7% -> 70.5%). _schedule_cache is module-level and
+#       leaked across tests, so mutants in _utc_stamps/_calendar survived
+#       DIRECT assertions on their output — the mutated code never ran, the
+#       test read a cache warmed by an earlier test. Autouse fixture clears
+#       all three module caches per test. A warm cache turns a behavioural
+#       test into a cache read; check for this before trusting any module
+#       with module-level memoization.
+#     * The OFFSET mutants pointed at real load-bearing behaviour
+#       (70.5% -> 74.6%): the neighbouring-day loop is what admits ASX bars
+#       23:00-24:00 UTC all southern summer (Sydney UTC+11 opens the session
+#       on the PREVIOUS UTC day) and the final minute of US post-market
+#       (00:00 UTC next day). Pinned in TestSessionsThatStraddleUtcMidnight —
+#       without +1, the gate would eat the first hour of every ASX session
+#       from October to April and it would look exactly like a slow feed.
+#   Remaining 49, all classified:
+#     * ~24 log-string/log-arg mutants (XX-wrap, case-flip, None'd args) and
+#       warn-once bookkeeping (worst case: the unmapped-venue warning logs
+#       every time instead of once). Cosmetic.
+#     * session_window 45/62/63 — EXCEPT-NET EQUIVALENTS: the mutated return
+#       (SessionLookup(False) / (None,) / and-for-or making min([]) reachable)
+#       raises TypeError/ValueError INSIDE the try, the broad except catches
+#       it and returns the correct SessionLookup(None, False) anyway. Only the
+#       log text differs. (Re-derive if the except ever narrows.)
+#     * in_session 60 — `day - dt.timedelta(offset)` over the SYMMETRIC set
+#       {-1,0,1} visits the same three days. TRUE EQUIVALENT.
+#     * in_session 65 — continue->break on an unevaluable day: every path
+#       that reaches the break also sets unevaluable=True, and the post-loop
+#       fail-open returns True in both versions. OBSERVABLY EQUIVALENT.
+#     * tz-case mutants ('UTC' -> 'utc') — pytz resolves both. EQUIVALENT.
+#     * or->and belt-and-braces (value None/NaT double-checks) — the NaT is
+#       caught by the isinstance(Timestamp) check downstream. EQUIVALENT.
+#     * default-arg mutants — the one production call site
+#       (strategy_runtime._bar_in_session) passes every argument explicitly,
+#       and 'XXXX' maps to no calendar so the fallthrough is identical.
+#     * the isinstance(day, dt.date) guard's return — unreachable: NaT is
+#       filtered by the isna check before .date() is called. Defensive only.
+#
 #   order_structure.py SURVIVOR CLASSIFICATION (2026-07-26, 84.3% -> 96.6%).
 #   The last structural check before IB, extracted pure from OrderValidator and
 #   moved to the placement chokepoint. First measurement: 14 survivors, ALL of
@@ -268,6 +318,22 @@
 #       Pinned in tests/test_position_sizing.py::TestSizingWithUnreadableNet-
 #       Liquidation. Widening the spec's strategies therefore needs that
 #       behaviour decided FIRST, or the widened property goes red on day one.
+#
+# RUN-INTEGRITY WARNING (2026-07-26): full passes are UNRELIABLE ON A BUSY
+# MACHINE. A full run executed during the live ASX open (containers streaming
+# ticks) flipped ~173 auto_executor mutants killed->survived vs the morning's
+# run of IDENTICAL code and tests. Proven false survivor:
+# xǁAutoExecutorǁ_execute_open__mutmut_5 was recorded SURVIVED, but running its
+# own covering set manually (MUTANT_UNDER_TEST=... pytest, cwd=mutants) fails
+# 23 tests including test_buy_signal_opens_position. The stats mapping was
+# intact (25 covering tests recorded), so the harness ran them and mis-scored.
+# Meanwhile spot-checked survivors (_execute_close_9, _ensure_protective_2)
+# were GENUINE — the corruption is selective, which is what makes it dangerous:
+# it looks like a plausible score, not like a crash.
+# Policy: run full passes on a QUIET machine only; if a baseline moves by more
+# than ~1% without a code/test change, DISBELIEVE IT and manually re-verify a
+# sample of flipped mutants before recording. `baseline` records without
+# checking first — do not run it casually.
 #
 # Usage:
 #   scripts/run_mutation.sh            # all 4 modules, then per-module score
