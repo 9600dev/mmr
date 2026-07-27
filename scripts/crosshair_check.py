@@ -56,6 +56,7 @@ TARGETS = [
     "trader.trading.exit_class.reduces_exposure",
     "trader.trading.order_structure.structural_rejection",
     ("trader.trading.protective_stop.protective_stop_plan", 10),
+    "trader.trading.order_split.split_order",
     "trader.trading.order_math.reducible_quantity",
     "trader.trading.order_math.whole_shares_for_notional",
     "trader.trading.order_math._floor_shares_for_notional",

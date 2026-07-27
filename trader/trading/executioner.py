@@ -217,7 +217,13 @@ class TradeExecutioner():
         skip_risk_gate: bool = False,
         position_value_hint: Optional[float] = None,
         approver_key: str = '',
+        force_open: bool = False,
     ) -> Observable[Trade]:
+        # ``force_open`` is set ONLY by the flip-splitting branch in
+        # place_order_simple, for the OPENING half of a position-crossing
+        # order. That half must be gated as new exposure even though the live
+        # position read may still show the pre-reduction size, which would
+        # otherwise re-classify it as an exit and wave it through.
         contract = contract_order.contract
         order = contract_order.order
 
@@ -234,7 +240,7 @@ class TradeExecutioner():
                 'place_order: skip_risk_gate=True is deprecated and IGNORED — '
                 'exit-class orders are detected server-side from the live broker position')
 
-        is_exit = self.trader.order_reduces_exposure(
+        is_exit = False if force_open else self.trader.order_reduces_exposure(
             contract, str(order.action), float(order.totalQuantity or 0))
 
         # Hard attribute access — Trader.__init__ declares risk_gate = None,

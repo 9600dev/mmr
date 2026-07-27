@@ -158,6 +158,10 @@ only_mutate = [
     # The disaster stop's size and price: the only protection that survives a
     # dead feed while holding, and it lived inline between two SDK calls.
     "trader/trading/protective_stop.py",
+    # Decomposes a position-crossing order into its unrefusable reduction and
+    # its gated remainder. Closes the flip residual; a wrong split either
+    # refuses a close or re-opens the hole.
+    "trader/trading/order_split.py",
     # The order-outcome recorder: the PnL ledger pairs the ORDER_FILLED events
     # it writes, and the live Cancelled->Filled race (d23746d) proved a wrong
     # record silently corrupts realized PnL. Small, pure-ish, high-consequence.

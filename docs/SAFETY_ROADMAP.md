@@ -500,13 +500,70 @@ tool having run. Findings and fixes:
   `run_mutation.sh check`) instead of a stale shell comment, and fails closed on
   a missing baseline or an unexercised module.
 
-Residual, recorded rather than fixed: a flip's net-new opening remainder stays
-ungated (below); ~~`check_leverage` still fails OPEN~~ — **CLOSED 2026-07-26**
+Residual, recorded rather than fixed: ~~a flip's net-new opening remainder
+stays ungated~~ **CLOSED 2026-07-27 by order-splitting** — see the entry below; ~~`check_leverage` still fails OPEN~~ — **CLOSED 2026-07-26**
 (operator decision): `check_leverage` and the whatIfOrder call site now refuse
 opens on unreadable inputs like every other gate, with the tri-state skip
 states carried as the refusal's evidence. Exits never reach the margin section.
 `PortfolioState.net_liquidation_evaluable` was the third item here and is now
 closed (below).
+
+---
+
+---
+
+## Flip residual CLOSED — order-splitting (2026-07-27)
+
+The last documented hole in the exit-class rule. Exit-class is direction-aware
+and not size-clamped, so with 3 shares held a `SELL 5` was labelled an exit and
+all five shares skipped every gate: three closed a position, two opened a short
+that nothing checked.
+
+**Confirmed live before fixing.** `mmr sell QBTS --limit 19.40 --quantity 5`
+against 3 held was accepted and submitted with no refusal from the trading
+filter, the leverage check, the risk gate, the approval requirement or the
+approver tier. It failed to execute only because IB held it for the next
+session, which was a separate bug (the missing `outsideRth`, fixed in the same
+session). The resting order was cancelled before it could fire unattended.
+
+**Why "clamp the classifier" is the wrong fix.** Clamping makes an oversized
+close *refusable*, and a refusal blocks the whole order including the
+legitimate reduction. Someone fat-fingering a close in a falling market would
+have their exit rejected for being too big. Refusing a reduction is worse than
+any limit the refusal would enforce, which is the rule that created the
+residual in the first place.
+
+**The fix.** The order was always two economically different things wearing one
+label. `trader/trading/order_split.py` decomposes it:
+
+```
+held +3, SELL 5  ->  reduce 3  (exit-class, ungated, never refusable)
+                   + open   2  (new short exposure, fully gated)
+```
+
+- The reduction is placed **first**. A refused remainder therefore leaves the
+  caller flat rather than stuck in the position they asked to leave.
+- The remainder carries `force_open=True` so it cannot be re-classified as an
+  exit by a position read that still shows the pre-reduction size.
+- Both order paths split: `place_expressive_order` and the direct
+  `place_order_simple` (the path a human uses, and the likeliest place for an
+  oversized close to be typed by accident).
+- Any exit spec (bracket, trailing stop) rides with the **remainder**, since
+  the new position is what needs protection; the reduction is a plain close.
+
+**Verification.** Pure, `deal`-contracted (conservation, non-negativity, and
+"the reduction never exceeds the position"), CrossHair-clean, 95.2% mutation
+with two proven equivalents. `tests/invariants/test_order_split.py` pins both
+directions, because each alone is satisfiable by a broken splitter: one that
+puts everything in `open_qty` closes the hole and makes exits refusable, and
+one that puts everything in `reduce_qty` preserves exits and leaves the hole
+untouched. Conservation (the halves sum to the request) is the property that
+catches both, plus any arithmetic slip.
+
+**Still open:** turnover caps, the complementary control. Splitting bounds
+*classification*; a turnover cap bounds *volume* per interval regardless of
+classification, which limits the damage from any ungated path rather than this
+one specifically.
 
 ---
 

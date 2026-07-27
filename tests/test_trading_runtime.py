@@ -1249,3 +1249,137 @@ class TestStructuralCheckPrecedesTheBroker:
         spec = ExecutionSpec(order_type='MARKET', exit_type='NONE').to_dict()
         asyncio.run(t.place_expressive_order(self._contract(), 'BUY', 10, spec))
         t.check_order_margin.assert_called_once()
+
+
+class TestFlipSplitting:
+    """The flip residual, closed. With 3 held, SELL 5 used to pass every gate
+    as one 'exit' — three shares closing a position and two opening an
+    unchecked short (confirmed live 2026-07-27). It is now placed as two
+    orders: an unrefusable reduction, then a gated remainder.
+
+    Ordering is the safety property. The reduction goes FIRST, so a refused
+    remainder leaves the caller flat rather than stuck in the position they
+    asked to leave.
+    """
+
+    def _trader(self, held, gate_approves_open=True):
+        import threading as _threading
+        from unittest.mock import AsyncMock, MagicMock
+        from trader.trading.trading_runtime import Trader
+        from trader.trading.risk_gate import RiskGateResult, RiskInputs
+        t = object.__new__(Trader)
+        t.pnl_subscriptions = {}
+        t._pnl_subscriptions_lock = _threading.Lock()
+        t._main_loop = None
+        t.disposables = []
+        t.ib_account = 'DU1'
+        t.approver_required_above_usd = 0.0
+        t.approver_key = ''
+        t.order_tracker = None
+        t.require_proposal_approval = False
+        t._signed_position = MagicMock(return_value=held)
+        t.order_reduces_exposure = MagicMock(
+            side_effect=lambda c, a, q: (held > 0 and a == 'SELL') or (held < 0 and a == 'BUY'))
+        t.enforce_approver_tier = AsyncMock(return_value=None)
+        gate = MagicMock()
+        gate.check_instrument.return_value = RiskGateResult(approved=True)
+        gate.check_leverage.return_value = RiskGateResult(
+            approved=True, checks={'leverage': 'pass'})
+        gate.evaluate.return_value = RiskGateResult(
+            approved=gate_approves_open,
+            reason='' if gate_approves_open else 'position concentration too high',
+            checks={'concentration': 'pass' if gate_approves_open else 'fail'})
+        t.risk_gate = gate
+        t.gather_risk_inputs = MagicMock(return_value=RiskInputs(
+            open_order_count=0, daily_pnl=0.0, daily_pnl_evaluable=True,
+            portfolio_value=1e6, portfolio_value_evaluable=True))
+        t.check_order_margin = AsyncMock(
+            return_value={'initMarginAfter': 1.0, 'equityWithLoanAfter': 2.0})
+        t.client = MagicMock()
+        t.client.get_snapshot = AsyncMock(return_value=MagicMock(ask=20.0, bid=19.0, last=19.5, close=19.5))
+        t.client.ib.accountValues = MagicMock(return_value=[])
+        t.client.ib.managedAccounts = MagicMock(return_value=['DU1'])
+        placed = []
+
+        class _Exec:
+            async def subscribe_place_order_direct(self, approved):
+                import reactivex as rx
+                from unittest.mock import MagicMock as MM
+                placed.append((str(approved.order.action),
+                               float(approved.order.totalQuantity),
+                               approved.is_exit))
+                ft = MM()
+                ft.order = MM()
+                ft.order.orderId = 5000 + len(placed)
+                return rx.from_iterable([ft])
+
+        t.executioner = _Exec()
+        t._placed = placed
+        return t
+
+    def _contract(self):
+        from unittest.mock import MagicMock
+        c = MagicMock()
+        c.symbol = 'QBTS'; c.secType = 'STK'; c.exchange = 'SMART'
+        c.conId = 578031277; c.multiplier = None
+        return c
+
+    def test_the_live_case_places_two_orders_reduction_first(self):
+        import asyncio
+        from trader.trading.proposal import ExecutionSpec
+        t = self._trader(held=3.0)
+        spec = ExecutionSpec(order_type='MARKET', exit_type='NONE').to_dict()
+        result = asyncio.run(t.place_expressive_order(self._contract(), 'SELL', 5.0, spec))
+        assert result.is_success(), result.error
+        assert len(t._placed) == 2, t._placed
+        (a1, q1, exit1), (a2, q2, exit2) = t._placed
+        assert (q1, exit1) == (3.0, True), 'reduction must go FIRST and be exit-class'
+        assert (q2, exit2) == (2.0, False), 'remainder must be gated as new exposure'
+
+    def test_the_remainder_is_gated_and_a_refusal_leaves_the_caller_flat(self):
+        import asyncio
+        from trader.trading.proposal import ExecutionSpec
+        t = self._trader(held=3.0, gate_approves_open=False)
+        spec = ExecutionSpec(order_type='MARKET', exit_type='NONE').to_dict()
+        result = asyncio.run(t.place_expressive_order(self._contract(), 'SELL', 5.0, spec))
+        assert not result.is_success()
+        assert 'reduced 3' in str(result.error) and 'refused' in str(result.error)
+        assert len(t._placed) == 1, 'the reduction must still have been placed'
+        assert t._placed[0][1] == 3.0
+
+    def test_the_gate_saw_the_remainder_not_the_whole_order(self):
+        """The hole was that the gates never saw the new exposure at all."""
+        import asyncio
+        from trader.trading.proposal import ExecutionSpec
+        t = self._trader(held=3.0)
+        spec = ExecutionSpec(order_type='MARKET', exit_type='NONE').to_dict()
+        asyncio.run(t.place_expressive_order(self._contract(), 'SELL', 5.0, spec))
+        t.risk_gate.evaluate.assert_called_once()
+
+    def test_an_ordinary_close_is_not_split_and_is_never_gated(self):
+        import asyncio
+        from trader.trading.proposal import ExecutionSpec
+        t = self._trader(held=3.0)
+        spec = ExecutionSpec(order_type='MARKET', exit_type='NONE').to_dict()
+        result = asyncio.run(t.place_expressive_order(self._contract(), 'SELL', 3.0, spec))
+        assert result.is_success()
+        assert len(t._placed) == 1
+        assert t._placed[0] == ('SELL', 3.0, True)
+        t.risk_gate.evaluate.assert_not_called()
+
+    def test_an_ordinary_open_is_not_split(self):
+        import asyncio
+        from trader.trading.proposal import ExecutionSpec
+        t = self._trader(held=0.0)
+        spec = ExecutionSpec(order_type='MARKET', exit_type='NONE').to_dict()
+        asyncio.run(t.place_expressive_order(self._contract(), 'BUY', 5.0, spec))
+        assert len(t._placed) == 1
+        assert t._placed[0] == ('BUY', 5.0, False)
+
+    def test_a_short_flip_splits_symmetrically(self):
+        import asyncio
+        from trader.trading.proposal import ExecutionSpec
+        t = self._trader(held=-3.0)
+        spec = ExecutionSpec(order_type='MARKET', exit_type='NONE').to_dict()
+        asyncio.run(t.place_expressive_order(self._contract(), 'BUY', 5.0, spec))
+        assert [(q, e) for _, q, e in t._placed] == [(3.0, True), (2.0, False)]

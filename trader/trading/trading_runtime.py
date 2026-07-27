@@ -22,6 +22,7 @@ from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
 from trader.trading.approved_order import ExitReason, mint_approved_order
 from trader.trading.exit_class import reduces_exposure
+from trader.trading.order_split import split_order
 from trader.trading.order_structure import rejection_for_order
 from trader.trading.risk_gate import RiskGate, RiskInputs, RiskLimits
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
@@ -1386,6 +1387,64 @@ class Trader():
         )
 
     @log_method
+    async def _place_flip_split(
+        self,
+        contract: Contract,
+        action: str,
+        plan,
+        execution_spec: dict,
+        algo_name: str,
+        approver_key: str,
+    ) -> SuccessFail:
+        """Place a position-crossing order as its two real halves.
+
+        Ordering is the safety property: the REDUCTION goes first and is never
+        refusable, so a refused opening half leaves the caller flat instead of
+        stuck in the position they asked to leave. The two outcomes are
+        reported together, because "closed 3, refused the new short 2" is a
+        materially different result from either half alone and the caller must
+        not have to infer it.
+        """
+        logging.warning(
+            'flip split: %s %s %s crosses zero — placing reduction %s (exit-class) '
+            'then opening remainder %s (gated)',
+            action, plan.reduce_qty + plan.open_qty, contract.symbol,
+            plan.reduce_qty, plan.open_qty)
+
+        # The reduction is a plain close: no bracket, no protective legs. Any
+        # exit spec belongs to the NEW position, so it rides with the remainder.
+        reduce_spec = dict(execution_spec)
+        reduce_spec['exit_type'] = 'NONE'
+        reduce_result = await self.place_expressive_order(
+            contract, action, plan.reduce_qty, reduce_spec,
+            algo_name=algo_name, approver_key=approver_key)
+
+        if not reduce_result.is_success():
+            # The unrefusable half failed for a non-gate reason (broker reject,
+            # timeout). Do NOT place the opening half on top of an unknown
+            # position.
+            return SuccessFail.fail(
+                error=f'flip split: the reduction of {plan.reduce_qty:g} failed '
+                      f'({reduce_result.error}); the opening remainder of '
+                      f'{plan.open_qty:g} was NOT attempted')
+
+        open_result = await self.place_expressive_order(
+            contract, action, plan.open_qty, execution_spec,
+            algo_name=algo_name, approver_key=approver_key, force_open=True)
+
+        if not open_result.is_success():
+            logging.warning(
+                'flip split: reduction of %s placed; opening remainder of %s '
+                'REFUSED by the gates (%s) — caller is flat, not flipped',
+                plan.reduce_qty, plan.open_qty, open_result.error)
+            return SuccessFail.fail(
+                error=f'flip split: reduced {plan.reduce_qty:g} (placed), but the '
+                      f'opening remainder of {plan.open_qty:g} was refused: '
+                      f'{open_result.error}')
+
+        trades = list(reduce_result.obj or []) + list(open_result.obj or [])
+        return SuccessFail.success(obj=trades)
+
     async def place_expressive_order(
         self,
         contract: Contract,
@@ -1394,8 +1453,16 @@ class Trader():
         execution_spec: dict,
         algo_name: str = 'proposal',
         approver_key: str = '',
+        force_open: bool = False,
     ) -> SuccessFail:
-        """Place an order with full execution specification (brackets, trailing stops, etc.)."""
+        """Place an order with full execution specification (brackets, trailing stops, etc.).
+
+        ``force_open`` is set ONLY by the flip-splitting branch below, for the
+        opening half of a position-crossing order. That half must be gated as
+        new exposure even though the live position read may still show the old
+        pre-reduction size, which would otherwise re-classify it as an exit and
+        wave it through. It is never set by an external caller.
+        """
         from trader.trading.proposal import ExecutionSpec
         spec = ExecutionSpec.from_dict(execution_spec)
 
@@ -1457,7 +1524,29 @@ class Trader():
         # — e.g. an AutoExecutor close, a strategy's own exit after its
         # protective stop was cancelled) are exempt from every gate: refusing
         # an exit is worse than any limit. Opens keep filter + leverage + gate.
-        is_exit = self.order_reduces_exposure(contract, action, quantity)
+        # FLIP SPLITTING — closes the documented flip residual.
+        #
+        # Exit-class is direction-aware and NOT size-clamped, so with 3 held a
+        # SELL 5 is labelled an exit and all five shares skip every gate: three
+        # close a position, two open an UNCHECKED short. Confirmed live
+        # 2026-07-27 (accepted, no refusal from anything).
+        #
+        # The order was always two economically different things under one
+        # label. Split it: the reduction stays exit-class and unrefusable, the
+        # remainder is gated as the new exposure it is. Reduction goes FIRST so
+        # a refused remainder leaves the caller flat rather than blocking the
+        # close. See trader/trading/order_split.py.
+        if not force_open:
+            held_signed = self._signed_position(contract.conId)
+            if held_signed is not None:
+                plan = split_order(action, held_signed, quantity)
+                if plan.is_flip:
+                    return await self._place_flip_split(
+                        contract, action, plan, execution_spec, algo_name,
+                        approver_key)
+
+        is_exit = False if force_open else self.order_reduces_exposure(
+            contract, action, quantity)
 
         # Tri-state gate record carried into the entry leg's minted token
         # (empty for exit-class entries and for protective children).
@@ -2085,6 +2174,45 @@ class Trader():
                 position_value_hint = abs(
                     float(contract_order.order.totalQuantity)) * price * multiplier
                 break
+
+        # FLIP SPLITTING on the direct path too. This is the path the
+        # 2026-07-27 probe used (`mmr sell QBTS --quantity 5` against 3 held),
+        # and it is the one a HUMAN reaches for, so it is the likeliest place
+        # for an oversized close to be typed by accident. Same contract as
+        # place_expressive_order: reduction first and unrefusable, remainder
+        # gated as the new exposure it is.
+        final_qty = float(contract_order.order.totalQuantity or 0)
+        held_signed = self._signed_position(contract.conId)
+        if held_signed is not None:
+            plan = split_order(str(action), held_signed, final_qty)
+            if plan.is_flip:
+                logging.warning(
+                    'flip split (direct path): %s %s %s crosses zero — reduction %s '
+                    '(exit-class) then remainder %s (gated)',
+                    action, final_qty, contract.symbol, plan.reduce_qty, plan.open_qty)
+                reduce_order = self.executioner.helper_create_order(
+                    contract, action, latest_tick, None, plan.reduce_qty,
+                    limit_price, market_order, stop_loss_percentage, algo_name, debug)
+                reduce_obs = await self.executioner.place_order(
+                    contract_order=reduce_order,
+                    condition=ExecutorCondition.SANITY_CHECK,
+                    position_value_hint=position_value_hint,
+                    approver_key=approver_key,
+                )
+                open_order = self.executioner.helper_create_order(
+                    contract, action, latest_tick, None, plan.open_qty,
+                    limit_price, market_order, stop_loss_percentage, algo_name, debug)
+                # The remainder may be refused; that leaves the caller flat,
+                # which is the safe direction. Its observable carries the
+                # refusal to the caller exactly as any gated order would.
+                await self.executioner.place_order(
+                    contract_order=open_order,
+                    condition=ExecutorCondition.SANITY_CHECK,
+                    position_value_hint=position_value_hint,
+                    approver_key=approver_key,
+                    force_open=True,
+                )
+                return reduce_obs
 
         return await self.executioner.place_order(
             contract_order=contract_order,

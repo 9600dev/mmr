@@ -51,6 +51,7 @@
 #   proposal_transitions.py    8 killed /  0 survived            = 100.0%
 #   order_math.py             68 killed /  3 survived / 2 timeout =  95.8%   (3 survivors = documented equivalents, see below)
 #   order_structure.py        86 killed /  3 survived            =  96.6%   (3 survivors = documented equivalents, see below)
+#   order_split.py            40 killed /  2 survived            =  95.2%   (2 documented equivalents, see below)
 #   protective_stop.py        53 killed /  5 survived / 1 timeout =  91.4%   (4 equivalents + 1 unreachable-domain residual, see below)
 #   market_session.py        144 killed / 49 survived            =  74.6%   (log-string-dominated; every behavioural survivor classified, see below)
 #   order_math.reducible_quantity                                 = 100.0%   (0 survivors of 11 — the shared never-oversell clamp)
@@ -188,6 +189,20 @@
 #       safer path and no live strategy specifies fractional sizes.
 #   NOTE the module is 1,709 mutants in total; only decide_signal was analysed.
 #   The rest of auto_executor.py is now in scope and baselined, not examined.
+#
+#   order_split.py FIRST MEASUREMENT (2026-07-27, 95.2%, 40/2).
+#   Closes the flip residual: decomposes a position-crossing order into an
+#   unrefusable reduction and a gated remainder. Both survivors are TRUE
+#   EQUIVALENTS, and both for the same reason — the mutated boundary falls
+#   through to a branch that computes the identical answer:
+#     * 3  — `qty <= 0` -> `qty < 0`. At qty == 0 the fallthrough reaches
+#       reduces_exposure(), which itself refuses a non-positive quantity and
+#       returns False, producing SplitPlan(0.0, 0.0): the same value the guard
+#       returns directly.
+#     * 27 — `qty <= available` -> `qty < available`. At qty == available the
+#       fallthrough computes SplitPlan(available, qty - available), and
+#       qty - available == 0, so it equals SplitPlan(qty, 0.0).
+#   (Re-derive if either fallthrough branch changes.)
 #
 #   protective_stop.py SURVIVOR CLASSIFICATION (2026-07-26, 81.8% -> 92.3%).
 #   The disaster stop's size and price, extracted pure from

@@ -60,6 +60,12 @@
       "survived": 32,
       "timeout": 0,
       "score": 0.909091
+    },
+    "trader/trading/order_split.py": {
+      "killed": 40,
+      "survived": 2,
+      "timeout": 0,
+      "score": 0.952381
     }
   }
 }
