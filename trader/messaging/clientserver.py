@@ -845,6 +845,44 @@ class RPCServer(Generic[T]):
 # RPCClient
 # ---------------------------------------------------------------------------
 
+
+# The well-known live service ports (trader/data/strategy RPC). A test that
+# dials one of these with the stack up lands on the REAL services — observed
+# 2026-07-16 (AUDIT_ROADMAP G7): a full pytest run produced a burst of IB
+# error-200 contract lookups for the fixture conId 12345 in the LIVE
+# trader_service log. Harmless that day (read-only resolves, fail-loudly), but
+# a test that PLACED anything would go through the same door.
+_LIVE_RPC_PORTS = frozenset({42001, 42003, 42005})
+# The live MessageBus port carries STRATEGY SIGNALS — a test publishing to it
+# could hand the live auto-executor a signal, which is worse than a stray
+# resolve. Guarded in MessageBusClient.connect, which is what dials it.
+_LIVE_BUS_PORTS = frozenset({42006})
+
+
+def _refuse_live_ports_under_pytest(address: str, port: int) -> None:
+    """Refuse RPC connections to the live service ports from inside pytest.
+
+    Armed by ``MMR_PYTEST=1`` (set in tests/conftest.py before any trader
+    import), so production behaviour is byte-identical — the check reads one
+    env var and returns. In-process test servers are unaffected: they bind
+    ephemeral ports from ``_free_port()``, never the live 42001/3/5.
+
+    ``MMR_ALLOW_LIVE_PORTS=1`` is the deliberate escape hatch for an
+    integration run that KNOWS it wants the live stack.
+    """
+    if _os.environ.get('MMR_PYTEST') != '1':
+        return
+    if _os.environ.get('MMR_ALLOW_LIVE_PORTS') == '1':
+        return
+    if (port in _LIVE_RPC_PORTS or port in _LIVE_BUS_PORTS) \
+            and ('127.0.0.1' in address or 'localhost' in address):
+        raise ConnectionError(
+            f'refusing to connect to live service port {port} from inside pytest '
+            f'(AUDIT_ROADMAP G7): with the stack up this request would land on the '
+            f'REAL trader/strategy/data service. Point the test at an in-process '
+            f'stub or an ephemeral port; set MMR_ALLOW_LIVE_PORTS=1 only for a '
+            f'deliberate integration run.')
+
 class RPCClient(Generic[T]):
     def __init__(
         self,
@@ -877,6 +915,7 @@ class RPCClient(Generic[T]):
 
     async def connect(self, loop=None):
         logging.debug('trying RPCClient.connect()')
+        _refuse_live_ports_under_pytest(self.zmq_server_address, self.zmq_server_port)
         self.socket = self.ctx.socket(zmq.DEALER)
         self._configure_socket(self.socket)
         self.socket.connect(self.address)
@@ -1101,6 +1140,7 @@ class MessageBusClient(Generic[T]):
         self.ctx = zmq.asyncio.Context()
 
     async def connect(self) -> None:
+        _refuse_live_ports_under_pytest(self.zmq_address, self.zmq_port)
         self.client = self.ctx.socket(zmq.DEALER)
         self.client.connect(f'{self.zmq_address}:{self.zmq_port}')
 

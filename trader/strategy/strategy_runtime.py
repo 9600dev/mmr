@@ -22,7 +22,7 @@ from trader.objects import Action, BarSize, WhatToShow
 from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.strategy.auto_executor import AutoExecutor, SignalWork
 from trader.trading.strategy import Signal, Strategy, StrategyConfig, StrategyContext, StrategyState
-from typing import cast, Dict, List, Optional
+from typing import Any, cast, Dict, List, Optional
 
 import asyncio
 import backoff
@@ -408,6 +408,15 @@ class StrategyRuntime():
         # rising count rather than as a strategy that quietly stopped trading.
         self._oos_bars: Dict[int, int] = {}
         self._oos_logged: set = set()
+        # Last refused bar_ts per conId, so the counter counts DISTINCT bars.
+        # The gate runs per tick, and a refused bar sits at the frame tail until
+        # the next in-session bar completes — so without this, every arriving
+        # tick re-counted the same bar (WDS read oos_bars=230 pre-open for ~a
+        # dozen actual bars). Refused bars arrive monotonically (always the
+        # frame tail), so remembering only the LAST one per conId is exact
+        # distinct-counting with O(conIds) memory — a seen-set would grow by
+        # one entry per out-of-session minute for the life of the process.
+        self._oos_last: Dict[int, Any] = {}
         # Keep at most this many days of raw ticks per conid (bounds compute).
         self._tick_retention_days: int = 2
 
@@ -681,12 +690,15 @@ class StrategyRuntime():
             return True
 
     def _note_out_of_session(self, conId: int, bar_ts) -> None:
-        """Count suppressions and say so ONCE per (conId, UTC day).
+        """Count DISTINCT suppressed bars; say so ONCE per (conId, UTC day).
 
         Silent suppression is the failure mode to avoid: if the venue mapping is
         wrong, a strategy simply stops seeing bars and nothing says why. The
         running count also rides along in the pulse.
         """
+        if self._oos_last.get(conId) == bar_ts:
+            return                       # same refused bar, another tick — counted already
+        self._oos_last[conId] = bar_ts
         self._oos_bars[conId] = self._oos_bars.get(conId, 0) + 1
         try:
             day = pd.Timestamp(bar_ts).date()
