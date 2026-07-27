@@ -22,6 +22,7 @@ from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
 from trader.trading.approved_order import ExitReason, mint_approved_order
 from trader.trading.exit_class import reduces_exposure
+from trader.trading.order_structure import rejection_for_order
 from trader.trading.risk_gate import RiskGate, RiskInputs, RiskLimits
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
 from trader.messaging.clientserver import MessageBusServer, MultithreadedTopicPubSub, RPCClient, RPCServer
@@ -1424,6 +1425,31 @@ class Trader():
             else:
                 # spec.validate() (above) guarantees limit_price is non-None for LIMIT orders; ib_async stub-types lmtPrice as int|float.
                 return LimitOrder(lmtPrice=spec.limit_price, **common)  # ty: ignore[invalid-argument-type]
+
+        # STRUCTURAL SANITY, BEFORE ANY BROKER INTERACTION.
+        #
+        # The chokepoint enforces this too, and did so first — but it sits
+        # DOWNSTREAM of the whatIfOrder margin probe below, so a malformed
+        # order was still handed to IB before anything of ours refused it.
+        # Proven by an adversarial probe 2026-07-27: proposing a NaN quantity
+        # produced IB error 320, "Unable to parse field: 'Order Size' for input
+        # string: 'nan'". Nothing traded (the fail-closed margin gate refused
+        # the open when whatIf failed), so this is hygiene rather than a hole —
+        # but the refusal was owned by the broker's validator, and a safety
+        # property should not depend on the counterparty being fussy.
+        #
+        # Checking the built ENTRY order (not the raw arguments) reuses the
+        # exact adapter the chokepoint uses, so the two can never disagree
+        # about what "well-formed" means. _build_entry touches no I/O.
+        # Applies to exits as well, for the chokepoint's reason: a malformed
+        # order is not a working exit.
+        structural_reason = rejection_for_order(_build_entry(**common))
+        if structural_reason is not None:
+            logging.warning(
+                'refusing structurally malformed order before the broker sees it: %s',
+                structural_reason)
+            return SuccessFail.fail(
+                error=f'structurally malformed order — {structural_reason}')
 
         # --- Pre-trade risk checks ---
         #

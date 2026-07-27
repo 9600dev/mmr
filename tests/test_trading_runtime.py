@@ -1144,3 +1144,108 @@ class TestCashMarginExemption:
         contract.secType = 'CASH'
         assert (contract.secType or '').upper() == 'CASH'
         assert called == []
+
+
+class TestStructuralCheckPrecedesTheBroker:
+    """The chokepoint has always refused malformed orders, but it sits
+    DOWNSTREAM of the whatIfOrder margin probe, so a malformed order still
+    reached IB first. An adversarial probe on 2026-07-27 proved it: a NaN
+    quantity produced IB error 320, "Unable to parse field: 'Order Size' for
+    input string: 'nan'". Nothing traded, because the fail-closed margin gate
+    refused the open when whatIf failed. But the refusal was owned by the
+    BROKER'S validator, and a safety property must not depend on the
+    counterparty being fussy.
+
+    The guarantee these pin is not "malformed orders are refused" (the
+    chokepoint already gave that). It is "the broker is never even ASKED about
+    a malformed order".
+    """
+
+    def _trader(self):
+        import threading as _threading
+        from unittest.mock import AsyncMock, MagicMock
+        from trader.trading.trading_runtime import Trader
+        t = object.__new__(Trader)
+        t.pnl_subscriptions = {}
+        t._pnl_subscriptions_lock = _threading.Lock()
+        t._main_loop = None
+        t.disposables = []
+        t.ib_account = 'DU1'
+        t.approver_required_above_usd = 0.0
+        t.approver_key = ''
+        t.order_tracker = None
+        t.order_reduces_exposure = MagicMock(return_value=False)
+        t.enforce_approver_tier = AsyncMock(return_value=None)
+        t.risk_gate = MagicMock()
+        # the two broker-facing calls that must NOT happen
+        t.check_order_margin = AsyncMock(
+            return_value={'initMarginAfter': 1.0, 'equityWithLoanAfter': 2.0})
+        t.client = MagicMock()
+        t.client.get_snapshot = AsyncMock(return_value=MagicMock(ask=20.0, bid=19.0))
+        t.executioner = MagicMock()
+        t.executioner.subscribe_place_order_direct = AsyncMock()
+        return t
+
+    def _contract(self):
+        from unittest.mock import MagicMock
+        c = MagicMock()
+        c.symbol = 'QBTS'
+        c.secType = 'STK'
+        c.exchange = 'SMART'
+        c.conId = 578031277
+        c.multiplier = None
+        return c
+
+    @pytest.mark.parametrize('qty', [float('nan'), float('inf'), 0.0, -5.0])
+    def test_the_broker_is_never_asked_about_a_malformed_quantity(self, qty):
+        import asyncio
+        from trader.trading.proposal import ExecutionSpec
+        t = self._trader()
+        spec = ExecutionSpec(order_type='MARKET', exit_type='NONE').to_dict()
+        result = asyncio.run(t.place_expressive_order(self._contract(), 'BUY', qty, spec))
+        assert not result.is_success()
+        assert 'structurally malformed' in str(result.error)
+        t.check_order_margin.assert_not_called()
+        t.executioner.subscribe_place_order_direct.assert_not_called()
+
+    def test_a_zero_limit_price_never_reaches_the_broker(self):
+        import asyncio
+        from trader.trading.proposal import ExecutionSpec
+        t = self._trader()
+        spec = ExecutionSpec(order_type='LIMIT', limit_price=0.0, exit_type='NONE').to_dict()
+        result = asyncio.run(t.place_expressive_order(self._contract(), 'BUY', 10, spec))
+        assert not result.is_success()
+        t.check_order_margin.assert_not_called()
+
+    def test_malformed_EXITS_are_refused_too(self):
+        """Same rule as the chokepoint: a SELL of NaN shares reduces nothing,
+        so it is not a working exit and the exit exemption does not apply."""
+        import asyncio
+        from unittest.mock import MagicMock
+        from trader.trading.proposal import ExecutionSpec
+        t = self._trader()
+        t.order_reduces_exposure = MagicMock(return_value=True)
+        spec = ExecutionSpec(order_type='MARKET', exit_type='NONE').to_dict()
+        result = asyncio.run(
+            t.place_expressive_order(self._contract(), 'SELL', float('nan'), spec))
+        assert not result.is_success()
+        t.executioner.subscribe_place_order_direct.assert_not_called()
+
+    def test_a_well_formed_order_still_reaches_the_margin_check(self):
+        """The converse: the new guard must not block legitimate orders."""
+        import asyncio
+        from trader.trading.proposal import ExecutionSpec
+        from trader.trading.risk_gate import RiskGateResult
+        t = self._trader()
+        t.risk_gate.check_instrument.return_value = RiskGateResult(approved=True)
+        t.risk_gate.evaluate.return_value = RiskGateResult(
+            approved=False, reason='stop here', checks={'concentration': 'fail'})
+        t.risk_gate.check_leverage.return_value = RiskGateResult(
+            approved=True, checks={'leverage': 'pass'})
+        t.gather_risk_inputs = lambda: __import__(
+            'trader.trading.risk_gate', fromlist=['RiskInputs']).RiskInputs(
+                open_order_count=0, daily_pnl=0.0, daily_pnl_evaluable=True,
+                portfolio_value=1e6, portfolio_value_evaluable=True)
+        spec = ExecutionSpec(order_type='MARKET', exit_type='NONE').to_dict()
+        asyncio.run(t.place_expressive_order(self._contract(), 'BUY', 10, spec))
+        t.check_order_margin.assert_called_once()
