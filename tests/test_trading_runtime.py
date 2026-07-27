@@ -13,7 +13,7 @@ Covers:
 import asyncio
 import threading
 import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -142,6 +142,9 @@ async def test_bracket_rolls_back_when_tp_fails(monkeypatch):
         def cancelOrder(self, order):
             cancelled_orders.append(getattr(order, 'orderId', '?'))
 
+        def accountValues(self):
+            return []   # margin path runs now (benign whatIf stub); no rows is fine
+
     class _StubClient:
         ib = _StubIB()
 
@@ -184,7 +187,10 @@ async def test_bracket_rolls_back_when_tp_fails(monkeypatch):
             return RiskGateResult(approved=True, checks={'max_open_orders': 'pass', 'daily_loss': 'pass', 'concentration': 'pass', 'order_rate': 'pass'})
 
     trader.risk_gate = _ApproveAll()
-    trader.check_order_margin = MagicMock(side_effect=Exception('skip margin'))
+    # Benign margin data, NOT a raising stub: check_order_margin failing is no
+    # longer a skip — it refuses the open (fail-closed), which would make every
+    # test here exercise the margin gate instead of its actual subject.
+    trader.check_order_margin = AsyncMock(return_value={'initMarginAfter': 1000.0, 'equityWithLoanAfter': 2000.0})
 
     class _Book:
         def get_orders(self):

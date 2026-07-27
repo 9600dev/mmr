@@ -361,7 +361,10 @@ def _tier_trader(threshold, key, *, is_exit):
     t.order_tracker = None
     t.order_reduces_exposure = MagicMock(return_value=is_exit)
     t.risk_gate = _TierApproveAllGate()
-    t.check_order_margin = AsyncMock(side_effect=Exception('skip'))
+    # Benign margin data, NOT a raising stub: check_order_margin failing is no
+    # longer a skip — it refuses the open (fail-closed), which would make every
+    # test here exercise the margin gate instead of its actual subject.
+    t.check_order_margin = AsyncMock(return_value={'initMarginAfter': 1000.0, 'equityWithLoanAfter': 2000.0})
     t.gather_risk_inputs = MagicMock(return_value=_RiskInputs(
         open_order_count=0, daily_pnl=0.0, daily_pnl_evaluable=True,
         portfolio_value=1e7, portfolio_value_evaluable=True))

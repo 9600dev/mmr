@@ -343,3 +343,41 @@ class TestPulseReportsBothAges:
         assert status['bar_age_s'][111] == 60
         assert status['trade_age_s'][111] == 60
         assert 'trade_age_s=[111:60]' in format_pulse(status)
+
+
+class TestOosBarsCountsDistinctBars:
+    """The session gate runs per TICK, and a refused bar sits at the frame tail
+    until the next in-session bar completes — so before the dedupe, every
+    arriving tick re-counted the same bar (WDS read oos_bars=230 pre-open for
+    ~a dozen actual bars). The counter's job is 'how many bars did the gate
+    eat', not 'how many ticks arrived while it was eating one'."""
+
+    def _runtime(self):
+        from trader.strategy.strategy_runtime import StrategyRuntime
+        rt = object.__new__(StrategyRuntime)
+        rt._oos_bars = {}
+        rt._oos_logged = set()
+        rt._oos_last = {}
+        return rt
+
+    def test_the_same_refused_bar_counts_once_across_many_ticks(self):
+        rt = self._runtime()
+        bar = pd.Timestamp('2026-07-26 23:59:00', tz='UTC')
+        for _ in range(50):                     # 50 ticks, one refused bar
+            rt._note_out_of_session(1111, bar)
+        assert rt._oos_bars[1111] == 1
+
+    def test_distinct_refused_bars_each_count(self):
+        rt = self._runtime()
+        for minute in (57, 58, 59):
+            bar = pd.Timestamp(f'2026-07-26 23:{minute}:00', tz='UTC')
+            for _ in range(10):
+                rt._note_out_of_session(1111, bar)
+        assert rt._oos_bars[1111] == 3
+
+    def test_conids_do_not_share_dedup_state(self):
+        rt = self._runtime()
+        bar = pd.Timestamp('2026-07-26 23:59:00', tz='UTC')
+        rt._note_out_of_session(1111, bar)
+        rt._note_out_of_session(2222, bar)
+        assert rt._oos_bars == {1111: 1, 2222: 1}

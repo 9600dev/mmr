@@ -15,6 +15,14 @@ from uuid import uuid4
 os.environ.setdefault(
     'MMR_LOG_DIR', os.path.join(tempfile.gettempdir(), 'mmr-pytest-logs'))
 
+# Arm the live-port guard (AUDIT_ROADMAP G7): with this set, RPCClient.connect
+# refuses tcp://127.0.0.1:{42001,42003,42005} — so a test that constructs a real
+# client against the default ports fails LOUDLY here instead of landing its
+# requests on the live services when the stack is up. Observed 2026-07-16: a
+# full pytest run made the live trader_service issue IB contract lookups for the
+# fixture conId 12345. In-process test servers use ephemeral ports; unaffected.
+os.environ.setdefault('MMR_PYTEST', '1')
+
 import numpy as np
 import pandas as pd
 import pytest
