@@ -55,7 +55,7 @@
 #   market_session.py        144 killed / 49 survived            =  74.6%   (log-string-dominated; every behavioural survivor classified, see below)
 #   order_math.reducible_quantity                                 = 100.0%   (0 survivors of 11 — the shared never-oversell clamp)
 #   position_sizing.py       415 killed / 165 survived           =  71.6%   (survivors: reasoning/warning text + session_summary report + boundary/degenerate/defense-in-depth equivalents)
-#   risk_gate.py             294 killed /  16 survived           =  94.8%   (survivors: diagnostic checks/reason strings + degenerate boundaries; every gate DECISION mutant killed)
+#   risk_gate.py             320 killed /  32 survived           =  90.9%   (post-flip: +14 string mutants from the new refusal reasons; every decision mutant killed)   (survivors: diagnostic checks/reason strings + degenerate boundaries; every gate DECISION mutant killed)
 # The pure cores (order_math, proposal_transitions) and the contracted sizing
 # scalars (_confidence_scale/_volatility_multiplier) are the hard safety floor
 # and score ~100%/95%; the lower numbers are cosmetic-text-dominated methods.
@@ -95,11 +95,26 @@
 #       was added to the ORACLE selection in pyproject.toml — adding the spec file
 #       alone changed nothing, the drift tests/test_verification_wiring.py now catches.
 #
-#   [STALE as of the 2026-07-26 fail-closed flip — check_leverage was rewritten,
-#   so these mutant numbers AND the equivalence arguments need re-derivation on
-#   the next risk_gate run: `equity_after` is now consumed by a refusal branch,
-#   not only a truthiness guard, so the 13/15 equivalents below may now be
-#   killable. Kept for the historical record.]
+#   RE-DERIVED 2026-07-26 after the fail-closed flip (targeted run, 320/32 =
+#   90.9%; the 94.8% -> 90.9% drop is DENOMINATOR GROWTH, not lost coverage —
+#   the three new refusal messages contribute ~14 unkillable-by-policy string
+#   mutants, and every DECISION mutant is killed):
+#     * check_leverage 4/6/13/15 — get('initMarginAfter'/'equityWithLoanAfter',
+#       0) -> None / omitted default. TRUE EQUIVALENTS post-flip, by a NEW
+#       argument: both defaults are falsy, the falsy guard now routes both to
+#       the same refusal BEFORE any arithmetic runs, so the TypeError that
+#       once discriminated None can never be reached. (Pre-flip only the
+#       equity pair was equivalent; the flip made the init-margin pair
+#       equivalent too.)
+#     * check_leverage 39/42-45, 64/67-69, 104/107-110 — XX-wrap/case-flip on
+#       the three refusal reasons. The contract-bearing substrings
+#       ('NetLiquidation', 'initMarginAfter', 'equityWithLoanAfter',
+#       'fail-closed') ARE asserted; only exact-text matches would kill these.
+#       Cosmetic, same policy as the six evaluate string mutants.
+#     * evaluate 1/2/3/8 + check_instrument 1/2 (default-args), evaluate
+#       41/44/88/91/106/108 (strings), evaluate 188 (debug log), __init__ 3
+#       (falsy equivalent) — unchanged from the 2026-07-25 classification.
+#   Historical (pre-flip) derivation for the old 13/15 pair:
 #   xǁRiskGateǁcheck_leverage__mutmut_13  (`get('equityWithLoanAfter', 0)` -> None)
 #   xǁRiskGateǁcheck_leverage__mutmut_15  (`get('equityWithLoanAfter', )`  -> None)
 #       (were 12/14 before check_leverage grew its tri-state record — mutant

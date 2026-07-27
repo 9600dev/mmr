@@ -297,13 +297,12 @@ class TestRiskGateBoundaryMutationKills:
         assert _gate.check_leverage({'initMarginAfter': init, 'equityWithLoanAfter': equity_low}, nl).approved is False
 
     def test_missing_init_margin_defaults_to_zero_not_none(self, _gate):
-        """Kills the `get('initMarginAfter', 0)` -> default-None mutants.
-
-        When IB omits initMarginAfter, it must default to 0 so the falsy check
-        routes to the no-margin-data REFUSAL (post-flip) rather than a
-        TypeError somewhere in the arithmetic. The discriminator is the reason:
-        a refusal that names the missing datum, not a crash and not a
-        leverage-limit refusal.
+        """Post-flip, the default-None mutants are TRUE EQUIVALENTS — this
+        test no longer kills them and no test can: None and 0 are both falsy,
+        the falsy guard routes both to the no-margin-data refusal, and the
+        arithmetic that could have TypeError'd on None sits behind that guard.
+        Kept because the BEHAVIOUR it pins (refusal naming the missing datum,
+        never a crash, never a leverage-limit refusal) is still the contract.
         """
         result = _gate.check_leverage({'equityWithLoanAfter': 50_000.0}, 100_000.0)
         assert result.approved is False

@@ -44,10 +44,10 @@
       "score": 0.915254
     },
     "trader/trading/risk_gate.py": {
-      "killed": 294,
-      "survived": 16,
+      "killed": 320,
+      "survived": 32,
       "timeout": 0,
-      "score": 0.948387
+      "score": 0.909091
     },
     "trader/data/market_session.py": {
       "killed": 144,
