@@ -1439,16 +1439,26 @@ class Trader():
             # clean-looking approval with NOTHING recording that the leverage
             # limit was never applied — the audit trail could not distinguish
             # "checked and fine" from "never checked".
+            # FAIL CLOSED (2026-07-26): a whatIfOrder failure or an empty
+            # margin dict REFUSES the open. This was the last gate input that
+            # still failed open — the recorded 'skipped:' states existed so the
+            # audit trail could distinguish "checked and fine" from "never
+            # checked", and the flip makes "never checked" refuse like every
+            # other unreadable critical input. Exits never reach this branch.
             leverage_checks: Dict[str, str] = {}
-            margin_impact = None
             try:
                 margin_impact = await self.check_order_margin(contract, probe_order)
             except Exception as ex:
-                logging.warning(f'whatIfOrder failed, proceeding without margin check: {ex}')
-                leverage_checks = {
-                    'leverage': 'skipped:margin-not-evaluable',
-                    'margin_cushion': 'skipped:margin-not-evaluable',
-                }
+                logging.warning('whatIfOrder failed — refusing open (fail-closed): %s', ex)
+                return SuccessFail.fail(
+                    error=f'margin impact could not be computed (whatIfOrder '
+                          f'failed: {ex}) — refusing to open new exposure without '
+                          f'the leverage check (fail-closed; exits are exempt)')
+            if not margin_impact:
+                return SuccessFail.fail(
+                    error='margin impact came back empty — refusing to open new '
+                          'exposure without the leverage check (fail-closed; '
+                          'exits are exempt)')
 
             # 3. Leverage limit check
             if margin_impact:

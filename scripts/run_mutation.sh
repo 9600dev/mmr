@@ -95,6 +95,11 @@
 #       was added to the ORACLE selection in pyproject.toml — adding the spec file
 #       alone changed nothing, the drift tests/test_verification_wiring.py now catches.
 #
+#   [STALE as of the 2026-07-26 fail-closed flip — check_leverage was rewritten,
+#   so these mutant numbers AND the equivalence arguments need re-derivation on
+#   the next risk_gate run: `equity_after` is now consumed by a refusal branch,
+#   not only a truthiness guard, so the 13/15 equivalents below may now be
+#   killable. Kept for the historical record.]
 #   xǁRiskGateǁcheck_leverage__mutmut_13  (`get('equityWithLoanAfter', 0)` -> None)
 #   xǁRiskGateǁcheck_leverage__mutmut_15  (`get('equityWithLoanAfter', )`  -> None)
 #       (were 12/14 before check_leverage grew its tri-state record — mutant

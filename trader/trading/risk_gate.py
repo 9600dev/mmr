@@ -253,60 +253,79 @@ class RiskGate:
         margin_impact: dict,
         net_liquidation: float,
     ) -> RiskGateResult:
-        """Check if an order's margin impact exceeds leverage limits.
+        """Check an order's margin impact against the leverage limits — and
+        REFUSE when the inputs cannot be read, exactly like ``evaluate``.
 
-        Records a tri-state per check, like ``evaluate``. The OUTCOMES are
-        unchanged — this still approves when the data is missing rather than
-        refusing — but the skip is no longer SILENT. Previously an absent
-        ``initMarginAfter``, an empty ``margin_impact`` or a non-positive
-        ``net_liquidation`` skipped both branches and returned a bare approval,
-        so nothing downstream could tell "leverage checked and fine" from
-        "leverage never checked". That distinction is the whole point of the
-        tri-state, and mutation testing found the missing-data paths were
-        untested precisely because nothing observable depended on them.
+        FLIPPED TO FAIL-CLOSED 2026-07-26 (operator decision). This was the one
+        gate that still approved on missing data: an absent ``initMarginAfter``,
+        an unreadable ``NetLiquidation`` or an empty ``margin_impact`` skipped
+        the checks and returned a bare approval. The old rationale (the
+        concentration check backstops NetLiquidation; whatIfOrder has never
+        failed in production; the limit sits ~33x from binding) is preserved in
+        git history — the counterargument that won is consistency: every OTHER
+        critical input refuses opens when unreadable, and a gate that quietly
+        stops checking is the audit-trail failure the tri-state records were
+        built to prevent.
 
-        Deliberately NOT fail-closed, unlike ``evaluate``: an unreadable
-        NetLiquidation is already refused downstream by the concentration check
-        (``portfolio_value_evaluable``), the only unbackstopped case is a
-        whatIfOrder failure which has never occurred in production, and the
-        limit sits ~33x from binding at current book size. Refusing here would
-        add a new way to miss trades to guard something that is not close. The
-        recorded skips are the evidence to revisit that if it changes.
+        Only ever called for exposure-increasing orders — exits are routed away
+        before the margin section and can never be refused here. Expect brief
+        open-refusals right after connect while IB's account feeds warm up,
+        matching the documented behaviour of the other gates.
         """
         checks: Dict[str, str] = {}
         init_margin_after = margin_impact.get('initMarginAfter', 0)
         equity_after = margin_impact.get('equityWithLoanAfter', 0)
 
         if net_liquidation <= 0:
-            # Both branches are guarded on net_liquidation > 0; say so once.
             checks['leverage'] = 'skipped:net-liq-not-evaluable'
             checks['margin_cushion'] = 'skipped:net-liq-not-evaluable'
-            return RiskGateResult(approved=True, checks=checks)
+            return RiskGateResult(
+                approved=False,
+                reason='NetLiquidation could not be read (or is not positive) — '
+                       'refusing to open new exposure without the leverage check '
+                       '(fail-closed; exits are exempt)',
+                checks=checks,
+            )
 
         if not init_margin_after:
             checks['leverage'] = 'skipped:no-margin-data'
-        else:
-            post_leverage = init_margin_after / net_liquidation
-            if post_leverage > self.limits.max_leverage:
-                checks['leverage'] = 'fail'
-                return RiskGateResult(
-                    approved=False,
-                    reason=f'post-trade leverage {post_leverage:.2f}x exceeds limit {self.limits.max_leverage:.2f}x',
-                    checks=checks,
-                )
-            checks['leverage'] = 'pass'
+            checks['margin_cushion'] = 'skipped:no-margin-data'
+            return RiskGateResult(
+                approved=False,
+                reason='margin impact carried no initMarginAfter — refusing to '
+                       'open new exposure without the leverage check '
+                       '(fail-closed; exits are exempt)',
+                checks=checks,
+            )
+
+        post_leverage = init_margin_after / net_liquidation
+        if post_leverage > self.limits.max_leverage:
+            checks['leverage'] = 'fail'
+            return RiskGateResult(
+                approved=False,
+                reason=f'post-trade leverage {post_leverage:.2f}x exceeds limit {self.limits.max_leverage:.2f}x',
+                checks=checks,
+            )
+        checks['leverage'] = 'pass'
 
         if not equity_after:
             checks['margin_cushion'] = 'skipped:no-equity-data'
-        else:
-            cushion = (equity_after - init_margin_after) / net_liquidation
-            if cushion < self.limits.min_margin_cushion:
-                checks['margin_cushion'] = 'fail'
-                return RiskGateResult(
-                    approved=False,
-                    reason=f'margin cushion {cushion:.2%} below minimum {self.limits.min_margin_cushion:.2%}',
-                    checks=checks,
-                )
-            checks['margin_cushion'] = 'pass'
+            return RiskGateResult(
+                approved=False,
+                reason='margin impact carried no equityWithLoanAfter — refusing '
+                       'to open new exposure without the margin-cushion check '
+                       '(fail-closed; exits are exempt)',
+                checks=checks,
+            )
+
+        cushion = (equity_after - init_margin_after) / net_liquidation
+        if cushion < self.limits.min_margin_cushion:
+            checks['margin_cushion'] = 'fail'
+            return RiskGateResult(
+                approved=False,
+                reason=f'margin cushion {cushion:.2%} below minimum {self.limits.min_margin_cushion:.2%}',
+                checks=checks,
+            )
+        checks['margin_cushion'] = 'pass'
 
         return RiskGateResult(approved=True, checks=checks)

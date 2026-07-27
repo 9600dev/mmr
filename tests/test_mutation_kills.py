@@ -297,11 +297,14 @@ class TestRiskGateBoundaryMutationKills:
         assert _gate.check_leverage({'initMarginAfter': init, 'equityWithLoanAfter': equity_low}, nl).approved is False
 
     def test_missing_init_margin_defaults_to_zero_not_none(self, _gate):
-        """Kills check_leverage mutants 3 and 5 (`get('initMarginAfter', 0)` -> default None).
+        """Kills the `get('initMarginAfter', 0)` -> default-None mutants.
 
-        When IB omits initMarginAfter, it must default to 0 so the cushion
-        subtraction stays numeric. Defaulting to None would TypeError on
-        `equityWithLoanAfter - None` inside the cushion check.
+        When IB omits initMarginAfter, it must default to 0 so the falsy check
+        routes to the no-margin-data REFUSAL (post-flip) rather than a
+        TypeError somewhere in the arithmetic. The discriminator is the reason:
+        a refusal that names the missing datum, not a crash and not a
+        leverage-limit refusal.
         """
         result = _gate.check_leverage({'equityWithLoanAfter': 50_000.0}, 100_000.0)
-        assert result.approved is True
+        assert result.approved is False
+        assert 'initMarginAfter' in result.reason

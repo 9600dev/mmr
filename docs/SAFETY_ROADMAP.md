@@ -501,8 +501,10 @@ tool having run. Findings and fixes:
   a missing baseline or an unexercised module.
 
 Residual, recorded rather than fixed: a flip's net-new opening remainder stays
-ungated (below); `check_leverage` still fails OPEN (deliberately — see the
-docstring, and the recorded `skipped:` states are the evidence to revisit it).
+ungated (below); ~~`check_leverage` still fails OPEN~~ — **CLOSED 2026-07-26**
+(operator decision): `check_leverage` and the whatIfOrder call site now refuse
+opens on unreadable inputs like every other gate, with the tri-state skip
+states carried as the refusal's evidence. Exits never reach the margin section.
 `PortfolioState.net_liquidation_evaluable` was the third item here and is now
 closed (below).
 

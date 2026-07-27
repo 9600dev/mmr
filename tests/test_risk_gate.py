@@ -344,15 +344,17 @@ class TestLeverageCheck:
         assert 'cushion' in result.reason
 
     def test_check_leverage_no_net_liq(self, risk_gate):
-        """Zero net liquidation → skip check, approved."""
+        """Zero net liquidation → REFUSE (fail-closed, 2026-07-26 flip)."""
         margin_impact = {'initMarginAfter': 150000, 'equityWithLoanAfter': 90000}
         result = risk_gate.check_leverage(margin_impact, net_liquidation=0)
-        assert result.approved is True
+        assert result.approved is False
+        assert 'NetLiquidation' in result.reason
 
     def test_check_leverage_empty_impact(self, risk_gate):
-        """Empty margin impact dict → approved (no data to check)."""
+        """Empty margin impact dict → REFUSE (fail-closed, 2026-07-26 flip)."""
         result = risk_gate.check_leverage({}, net_liquidation=100000)
-        assert result.approved is True
+        assert result.approved is False
+        assert 'fail-closed' in result.reason
 
 
 class TestCheckLeverageMissingData:
@@ -363,12 +365,15 @@ class TestCheckLeverageMissingData:
     boundary. Nothing exercised those paths, so the check's behaviour with
     unreadable inputs was entirely unspecified.
 
-    It matters because the answer is SILENTLY APPROVE: absent margin keys or a
-    non-positive NetLiquidation skip both branches and return approved, with
-    nothing recorded to say the leverage limit was never applied. These tests
-    pin that behaviour so it cannot drift unnoticed; whether it SHOULD be
-    fail-closed (as evaluate() is for its own inputs) is a separate policy
-    decision, deliberately not pre-empted here.
+    HISTORY, in three stages, each pinned by tests at the time:
+      1. Originally these paths SILENTLY APPROVED — the five mutation survivors
+         existed because nothing exercised them at all.
+      2. The tri-state pass (2026-07-25) kept the approvals but RECORDED the
+         skips, so the audit trail could at least see "never checked".
+      3. 2026-07-26 (operator decision): FAIL-CLOSED. Unreadable inputs refuse
+         the open like every other gate input; the skip states become the
+         refusal's evidence. Exits never reach this method — they are routed
+         away before the margin section (pinned in the invariants suite).
     """
 
     def _gate(self, event_store, max_leverage=2.0, min_margin_cushion=0.1):
@@ -377,18 +382,25 @@ class TestCheckLeverageMissingData:
             event_store=event_store,
         )
 
-    def test_missing_init_margin_key_skips_the_leverage_branch(self, event_store):
-        """Kills mutant 9 (default 0 -> 1): with the key absent the branch must
-        not run at all, regardless of how breachy net_liq would make it look."""
-        gate = self._gate(event_store, max_leverage=0.001)   # any real check would refuse
+    def test_missing_init_margin_key_refuses(self, event_store):
+        """A missing initMarginAfter is unreadable data, not a zero — refuse,
+        naming the missing datum, with the skip recorded as evidence."""
+        gate = self._gate(event_store)
         result = gate.check_leverage({'equityWithLoanAfter': 0}, net_liquidation=1_000_000.0)
-        assert result.approved is True
+        assert result.approved is False
+        assert 'initMarginAfter' in result.reason
+        assert result.checks['leverage'] == 'skipped:no-margin-data'
 
-    def test_missing_equity_key_skips_the_cushion_branch(self, event_store):
-        """Kills mutants 12/14 (default 0 -> None / omitted)."""
-        gate = self._gate(event_store, min_margin_cushion=0.99)  # any real check would refuse
+    def test_missing_equity_key_refuses_after_leverage_passes(self, event_store):
+        """Leverage evaluable and fine, cushion unreadable: the refusal names
+        equityWithLoanAfter and the record shows leverage=pass beside the skip —
+        partial evaluation stays visible, which is the tri-state's whole point."""
+        gate = self._gate(event_store)
         result = gate.check_leverage({'initMarginAfter': 1.0}, net_liquidation=1_000_000.0)
-        assert result.approved is True
+        assert result.approved is False
+        assert 'equityWithLoanAfter' in result.reason
+        assert result.checks['leverage'] == 'pass'
+        assert result.checks['margin_cushion'] == 'skipped:no-equity-data'
 
     def test_leverage_is_enforced_when_both_keys_are_present(self, event_store):
         """The control: with data present the limit really does bite."""
@@ -400,14 +412,15 @@ class TestCheckLeverageMissingData:
         assert 'leverage' in (result.reason or '')
 
     @pytest.mark.parametrize('net_liq', [0.0, -1.0, -100_000.0])
-    def test_non_positive_net_liquidation_skips_every_branch(self, event_store, net_liq):
-        """An unreadable/zero NetLiquidation silently approves — the fail-OPEN
-        that evaluate() explicitly refuses for its own inputs."""
+    def test_non_positive_net_liquidation_refuses(self, event_store, net_liq):
+        """An unreadable/zero NetLiquidation refuses the open, exactly as
+        evaluate() does for its own inputs (the 2026-07-26 flip)."""
         gate = self._gate(event_store, max_leverage=0.001, min_margin_cushion=0.99)
         result = gate.check_leverage(
             {'initMarginAfter': 999_999.0, 'equityWithLoanAfter': 1.0},
             net_liquidation=net_liq)
-        assert result.approved is True
+        assert result.approved is False
+        assert 'NetLiquidation' in result.reason
 
     @pytest.mark.parametrize('net_liq', [0.5, 1.0])
     def test_net_liquidation_between_zero_and_one_is_still_checked(self, event_store, net_liq):
@@ -424,15 +437,17 @@ class TestCheckLeverageMissingData:
     def test_absent_init_margin_must_not_be_treated_as_a_real_value(self, event_store):
         """Kills mutant 9 (`get('initMarginAfter', 0)` -> default 1).
 
-        Chosen so the two differ: with net_liq=1.0 and a 0.5x limit, a default of
-        1 computes 1/1.0 = 1.0x and REFUSES, while the real default of 0 skips the
-        branch and approves. My first attempt at this test used a large net_liq,
-        where the injected 1 produced a ~0 leverage that passed anyway — both
-        approved, and the mutant survived. A missing key must mean 'no data',
-        never a synthetic value that can trip or satisfy a limit."""
+        A missing key must mean 'no data', never a synthetic value fed into the
+        arithmetic. Post-flip both paths refuse, so the discriminator is the
+        REASON and the record: an injected default of 1 at net_liq=1.0 and a
+        0.5x limit computes 1.0x and refuses on LEVERAGE ('exceeds'), while the
+        real path refuses on MISSING DATA with the skip recorded."""
         gate = self._gate(event_store, max_leverage=0.5)
         result = gate.check_leverage({'equityWithLoanAfter': 0}, net_liquidation=1.0)
-        assert result.approved is True
+        assert result.approved is False
+        assert 'initMarginAfter' in result.reason
+        assert 'exceeds' not in result.reason
+        assert result.checks['leverage'] == 'skipped:no-margin-data'
 
     def test_cushion_branch_runs_for_any_positive_net_liquidation(self, event_store):
         """Kills mutant 32 (cushion guard `> 0` -> `> 1`).
@@ -447,22 +462,19 @@ class TestCheckLeverageMissingData:
         assert 'cushion' in (result.reason or '')
 
     def test_skipped_leverage_is_RECORDED_not_silent(self, event_store):
-        """The point of option B: outcomes unchanged, but a skip is now visible.
-
-        Previously an absent initMarginAfter returned a bare approval and the
-        audit trail could not distinguish 'leverage checked and fine' from
-        'leverage never checked'."""
+        """The skip states survive the flip — now as the refusal's evidence
+        rather than an approval's footnote."""
         gate = self._gate(event_store)
         result = gate.check_leverage({}, net_liquidation=1_000_000.0)
-        assert result.approved is True
+        assert result.approved is False
         assert result.checks['leverage'] == 'skipped:no-margin-data'
-        assert result.checks['margin_cushion'] == 'skipped:no-equity-data'
+        assert result.checks['margin_cushion'] == 'skipped:no-margin-data'
 
     def test_non_positive_net_liq_records_why_both_branches_were_skipped(self, event_store):
         gate = self._gate(event_store)
         result = gate.check_leverage(
             {'initMarginAfter': 1.0, 'equityWithLoanAfter': 1.0}, net_liquidation=0.0)
-        assert result.approved is True
+        assert result.approved is False
         assert result.checks == {
             'leverage': 'skipped:net-liq-not-evaluable',
             'margin_cushion': 'skipped:net-liq-not-evaluable',
@@ -499,10 +511,14 @@ class TestCheckLeverageMissingData:
         assert 'cushion' in (result.reason or '')
         assert result.checks == {'leverage': 'pass', 'margin_cushion': 'fail'}
 
-    def test_empty_margin_impact_approves_silently(self, event_store):
-        """whatIfOrder returning {} — the shape closest to a real IB failure."""
+    def test_empty_margin_impact_refuses(self, event_store):
+        """whatIfOrder returning {} — the shape closest to a real IB failure —
+        refuses instead of silently approving (the name of the old version of
+        this test was literally 'approves_silently')."""
         gate = self._gate(event_store, max_leverage=0.001, min_margin_cushion=0.99)
-        assert gate.check_leverage({}, net_liquidation=1_000_000.0).approved is True
+        result = gate.check_leverage({}, net_liquidation=1_000_000.0)
+        assert result.approved is False
+        assert 'fail-closed' in result.reason
 
 
 class TestEvaluateUnassertedSurface:
