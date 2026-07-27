@@ -107,6 +107,8 @@ can't check it, and you're back to trusting the diff.
 11. [Adopting this on a real project](#11-adopting-this-on-a-real-project)
 12. [The loop, restated](#12-the-loop-restated)
 
+Appendix A. [The day live testing outran the toolchain](#appendix-a--the-day-live-testing-outran-the-toolchain)
+
 ---
 
 ## 1. The problem with tests
@@ -1470,6 +1472,128 @@ Those are the artifacts to read carefully. The implementation, increasingly, is
 the part the machine checks for you.
 
 ---
+
+---
+
+## Appendix A — The day live testing outran the toolchain
+
+*Written 2026-07-27, the evening after. This appendix is a case study in the
+toolchain's blind spots, documented while the evidence is fresh. Everything
+below happened in one day of deliberate live testing against the paper broker,
+and every bug was in code with passing tests, a clean type gate, and a
+recorded mutation baseline.*
+
+### What happened
+
+With every safety layer green, we spent a day driving the system's surface
+against the real (paper) broker: firing a protective stop on purpose, running
+a real portfolio resize, forcing a pyramiding add with a synthetic strategy,
+arming and tripping every refusal flag, and round-tripping a forex order.
+Eighteen paths that had never executed in production executed. **Nine real
+bugs fell out** — a rate no verification session in this repo has matched.
+
+That demands the uncomfortable question this appendix answers honestly:
+*could pushing the toolchain harder have found them instead?*
+
+### The scoreboard
+
+Scored bug by bug. "Findable" means: a discipline we already teach in this
+tutorial, applied more thoroughly, catches it with no broker contact.
+
+| # | Bug (commit) | Findable? | What it would have taken |
+|---|---|---|---|
+| 1 | CLI resize plan crashed rendering float deltas (`7214dac`) | **Yes — trivially** | Any test that executed the render path. Pure coverage gap: the CLI's render paths are in no test and no mutation scope. |
+| 2 | The *approver* role could propose (`3ea0947`) | **Yes** | The spec existed in the code's own capability table — "approver: approve, reject, reads". A table-driven test enumerating role × command against that documented matrix finds the missing branch instantly. Example tests checked the denials that existed; nothing could notice a denial that was *absent*. |
+| 3 | Forex contracts SMART-routed, IB error 200 (`1cbbe2f`) | **Yes** | The rule was in CLAUDE.md the whole time: *"forex pairs are constructed on IDEALPRO."* Prose nobody turned into an assertion. One unit test on `_resolve_contract('EUR', sec_type='CASH')` catches it. |
+| 4 | Resize re-created stops without `orderRef` (`bef98e8`) | **Yes** | A round-trip property — *a re-created protective equals the old order except quantity* — is obvious in hindsight. `execute_resize_plan` had zero tests; only its pure sibling `compute_resize_deltas` was verified. |
+| 5 | Executor tracking pointed at dead stop ids after resize (`bef98e8`) | **Yes — with composition** | Each side was verified *in isolation*: resize's tests contained no executor, the executor's tests contained no resize. Composing the two existing fake harnesses (done after the fact, in ~20 minutes) reproduces it exactly. The bug lived in the seam. |
+| 6 | `Cancelled → Filled` status sequence dropped the fill from the ledger (`d23746d`) | **Plausibly** | A Hypothesis property over *arbitrary status sequences* — "any sequence ending in Filled records a fill" — finds it immediately. But writing it requires already suspecting IB's stream is non-monotonic. Sequence-fuzzing the environment model is a discipline, not a tool. |
+| 7 | 10197 recovery re-requested **0** subscriptions (`99c8adb`) | **Borderline** | Both ends are our code (the registry and the subscription path), so an end-to-end wiring test could catch it. But the unit test *injected* the registry state — it tested the mock. Same disease as the oracle-wiring drift Layer 5 exists to catch. |
+| 8 | `whatIfOrderAsync` returns a *list* for CASH (`fd4ddc8`) | **No** | ib_async's own types say `OrderState`. No property, contract, or stub could know the real API hands back a list. Environment fact. |
+| 9 | IB returns *no* whatIf state at all for CASH (`fd4ddc8`) | **No** | Same. Unknowable without asking the real IB. |
+
+Tally: **six findable, one borderline, two genuinely require the live
+environment.**
+
+### The three doors
+
+Every escape used one of three doors, and naming them is the point of this
+appendix:
+
+**Door 1 — Unstated specs.** Bugs 1–4 were violations of rules that already
+existed *as prose*: a CLAUDE.md sentence, a docstring capability table, an
+"obviously" symmetric matrix. The toolchain verifies properties you *state*;
+these were never stated where a machine could see them. The forex-IDEALPRO
+rule sat in documentation for the life of the repo while the code violated it
+on one of two paths.
+
+**Door 2 — Seams.** Bugs 5 and 7 lived *between* verified components.
+Mutation scores, contracts and properties are all per-component; nothing in
+the stack asks "what happens when the resize path mutates state the executor
+tracks?" Components passed in isolation and composed into a hazard — a stale
+tracking id whose worst case was a GTC stop firing into a flat book, i.e. an
+unattended short.
+
+**Door 3 — Wrong environment models.** Bugs 6, 8, 9. The code's model of IB —
+statuses are monotonic, whatIf returns one state, every instrument has margin
+data — was wrong, and no amount of reasoning about *our* code could reveal
+facts about *theirs*. Notably, the fail-closed flip from earlier the same day
+is what made two of these visible at all: the whatIf crash had been silently
+swallowed by fail-open **forever**. A fail-closed gate is, among other things,
+an environment-mismatch detector.
+
+### What "pushing harder" concretely means now
+
+Each door suggests a discipline, all of them bounded work with a
+known-productive shape:
+
+1. **Docs-as-spec extraction** (Door 1). Mine CLAUDE.md and docstrings for
+   *must / never / always / only* sentences and turn each into an assertion or
+   an explicit waiver. The forex rule was sitting there; the question is what
+   else is.
+2. **Exhaustive matrices for capability tables** (Door 1). Any role/permission
+   table gets an enumeration test over its full cross-product, derived from
+   the documented table — never hand-picked examples.
+3. **Round-trip properties for cancel-and-re-create** (Door 1). Anything that
+   destroys and rebuilds an object asserts field-level equality modulo the
+   intended change.
+4. **Seam tests** (Door 2). Compose the existing fake harnesses:
+   resize × executor (now exists), propose→approve × executor,
+   reconcile × resize. One test per pair of components that share
+   broker-side state.
+5. **Sequence-fuzz the environment** (Door 3, partially). Hypothesis over IB
+   status streams and error-code sequences into the lifecycle tracker and the
+   recovery loop. This cannot conjure unknown facts, but it removes the
+   *monotonicity assumptions* we didn't know we were making.
+6. **Record reality into fixtures** (Door 3). When live contact reveals an
+   environment shape (a list-valued whatIf, an empty CASH response, a
+   `Cancelled→Filled` stream), the raw shape goes into a fixture so the test
+   suite carries a growing museum of true IB behaviour.
+
+### The synthesis
+
+The temptation is to score this day as "live testing 9, toolchain 0." That is
+the wrong reading. What actually happened is the loop from §12 running at a
+larger radius:
+
+- **Live contact is property discovery.** It samples reality — including the
+  parts of reality (IB's actual behaviour) that no amount of introspection on
+  our own code can reach — and tells you *which properties matter and which
+  models are wrong*.
+- **The toolchain is property retention.** Every one of the nine bugs now has
+  a pinned regression (a supersession test, a role matrix, a routing
+  assertion, a round-trip check, an adoption/sweep suite). They can never come
+  back silently. Live testing without the toolchain finds bugs once;
+  with it, each find is permanent.
+
+They are not rivals; they are the two strokes of the same engine. The honest
+asymmetry is search-space: verification exhausts the properties you conceived,
+live testing samples the ones you didn't. A day like this one is what
+generates the next month's invariants.
+
+*(Follow-ups from this appendix are tracked as the docs-as-spec pass and seam
+tests; the tutorial itself will be reorganized around the three-door taxonomy
+in a future revision.)*
 
 ### Further reading
 
