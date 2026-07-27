@@ -23,6 +23,7 @@ import backoff
 import datetime
 import datetime as dt
 import pandas as pd
+import time
 import reactivex as rx
 
 
@@ -207,6 +208,23 @@ class IBAIORx():
         self.pnl_cache: Dict[int, bool] = {}
         self._shutdown: bool = True
 
+        # Competing-session (error 10197) auto-recovery. IB revokes market data
+        # when the same login opens another session (TWS/mobile/web); the
+        # existing reqMktData subscriptions go silent and NOTHING re-requests
+        # them — contracts_cache still holds the dead observables, so
+        # subscribe_contract() skips. Observed 2026-07-27: a mobile-app login at
+        # 08:53 killed every feed for 22 minutes mid-session; a single fresh
+        # reqMktData recovered instantly once the session was released. The
+        # retry loop below re-issues reqMktData for every cached contract while
+        # data is lost. See _md_retry_action for the tri-state decision.
+        self._md_lost_at: Optional[float] = None
+        self._md_last_tick_at: float = 0.0
+        self._md_retry_task: Optional[asyncio.Task] = None
+        self._md_retry_interval: float = 60.0
+        # Registered on the initial IB() here and preserved across the IB()
+        # replacement in connect() via _PRESERVED_IB_EVENTS (pendingTickersEvent).
+        self.ib.pendingTickersEvent += self._note_market_data
+
         # try binding helper methods to things we care about
         Contract.to_df = Helpers.to_df  # type: ignore
 
@@ -216,11 +234,80 @@ class IBAIORx():
     def __exit__(self, *args):
         asyncio.run(self.shutdown())
 
+    def _note_market_data(self, tickers) -> None:
+        """Liveness timestamp for the 10197 retry loop. Runs on every pending-
+        tickers batch — keep it to one attribute write."""
+        self._md_last_tick_at = time.time()
+
+    def _md_retry_action(self) -> str:
+        """'idle' (no loss recorded) | 'clear' (ticks flowed after the loss —
+        recovered) | 'resubscribe' (still dark). Pure read of the two
+        timestamps so it is trivially testable."""
+        if self._md_lost_at is None:
+            return 'idle'
+        if self._md_last_tick_at > self._md_lost_at:
+            return 'clear'
+        return 'resubscribe'
+
+    def _resubscribe_market_data(self) -> int:
+        """Re-issue reqMktData for every cached streaming subscription.
+
+        ib_async keys tickers by contract, so a re-request feeds the SAME
+        Ticker objects and every existing observable pipeline resumes — no
+        cache invalidation, no re-subscription dance in the strategy layer."""
+        contracts = list(self.contracts_cache.keys())
+        for c in contracts:
+            try:
+                self._contracts_source.call_event_subscriber_sync(
+                    lambda c=c: self.ib.reqMktData(
+                        contract=c, genericTickList='',
+                        snapshot=False, regulatorySnapshot=False),
+                    asend_result=False)
+            except Exception as ex:
+                logging.warning('10197 resubscribe failed for %s: %s',
+                                getattr(c, 'symbol', c), ex)
+        return len(contracts)
+
+    async def _market_data_retry_loop(self):
+        while not self._shutdown:
+            await asyncio.sleep(self._md_retry_interval)
+            action = self._md_retry_action()
+            if action == 'clear':
+                logging.warning(
+                    'market data RECOVERED after competing-session loss (10197) — '
+                    '%d subscriptions live again', len(self.contracts_cache))
+                self._md_lost_at = None
+            elif action == 'resubscribe':
+                n = self._resubscribe_market_data()
+                logging.warning(
+                    'market data still dark after 10197 (competing live session — '
+                    'TWS/mobile/web logged in with this username?) — re-requested '
+                    '%d subscriptions; will retry every %.0fs until ticks flow',
+                    n, self._md_retry_interval)
+
+    def _ensure_md_retry_task(self) -> None:
+        """Started lazily from the error handler (which always runs inside the
+        IB event loop) so no caller has to remember to wire it."""
+        if self._md_retry_task is None or self._md_retry_task.done():
+            try:
+                self._md_retry_task = asyncio.ensure_future(self._market_data_retry_loop())
+            except RuntimeError:
+                # No running loop (sync/test context) — the next handled error
+                # inside the loop will start it.
+                pass
+
     async def __handle_error(self, reqId, errorCode, errorString, contract):
         global error_code
 
         if errorCode in (2104, 2106, 2107, 2158):
             return
+
+        if errorCode == 10197:
+            # Competing live session took the market-data entitlement. Mark the
+            # loss and make sure the recovery loop is running; it re-requests
+            # every subscription until ticks flow again.
+            self._md_lost_at = time.time()
+            self._ensure_md_retry_task()
 
         if errorCode == 202:
             # for whatever reason, order cancellations are considered errors

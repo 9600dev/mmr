@@ -106,6 +106,13 @@ Out of session, an absent `trade_age_s` is normal and expected.
 - G5's `KeyError: 81` ib_async decoder traceback after a reconnect (console
   noise only; root-caused, harmless).
 
+**Stay silent on** (added 2026-07-27): `market data still dark after 10197`
+lines — the retry loop is handling it; the feed self-heals when the competing
+session (TWS / IBKR mobile / web with the trading username) logs out or times
+out. NOTE the mobile app holds its session for a while after being closed —
+closing the app is not a logout. Escalate only if the `RECOVERED` line never
+arrives after the competing session is genuinely gone (~5+ min).
+
 **Escalate immediately on**:
 - `auto-executor: CLOSE FAILED … position remains OPEN` — an unmanaged
   position; verify against IB (`mmr orders` / `mmr portfolio`) before anything else.

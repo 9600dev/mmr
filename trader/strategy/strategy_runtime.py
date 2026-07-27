@@ -844,6 +844,7 @@ class StrategyRuntime():
             max_hold_bars=getattr(signal, 'max_hold_bars', None),
             bar_size_seconds=bar_size_seconds,
             pyramid_max_adds=int(getattr(ctx, 'pyramid_max_adds', 0) or 0) if ctx else 0,
+            trade_amount=float(getattr(ctx, 'trade_amount', 0.0) or 0.0) if ctx else 0.0,
             # Manifest primitives — carried exactly like pyramid_max_adds.
             # None on every field (no manifest declared) leaves the executor's
             # gate a no-op, so behaviour is unchanged for un-manifested
@@ -968,6 +969,7 @@ class StrategyRuntime():
         auto_execute: bool = False,
         params: Optional[Dict] = None,
         pyramid_max_adds: int = 0,
+        trade_amount: float = 0.0,
         manifest: Optional[Dict] = None,
     ) -> None:
 
@@ -1103,6 +1105,7 @@ class StrategyRuntime():
                     description=description,
                     auto_execute=auto_execute,
                     pyramid_max_adds=pyramid_max_adds,
+                    trade_amount=trade_amount,
                     manifest_allowed_conids=manifest_fields['manifest_allowed_conids'],
                     manifest_direction=manifest_fields['manifest_direction'],
                     manifest_max_opens_per_day=manifest_fields['manifest_max_opens_per_day'],
@@ -1154,6 +1157,7 @@ class StrategyRuntime():
                 auto_execute=strategy_config.get('auto_execute', False),
                 params=strategy_config.get('params', {}),
                 pyramid_max_adds=int(strategy_config.get('pyramid_max_adds', 0) or 0),
+                trade_amount=float(strategy_config.get('trade_amount', 0.0) or 0.0),
                 manifest=strategy_config.get('manifest'),
             )
 

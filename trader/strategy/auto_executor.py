@@ -86,6 +86,7 @@ class SignalWork:
     probability: float = 0.0
     risk: float = 0.0
     quantity: float = 0.0             # >0 = strategy-specified size (BUY only)
+    trade_amount: float = 0.0         # >0 = fixed per-open $ notional (0 = auto-size)
     auto_execute: bool = False
     paper_only: bool = False
     state_running: bool = True
@@ -846,10 +847,18 @@ class AutoExecutor:
             ident['symbol'], work.conid, work.strategy_name, confidence,
             f', qty {directive.quantity}' if directive.quantity else ' (auto-sized)')
 
+        # A strategy-specified SHARE quantity wins; else a per-strategy fixed
+        # dollar notional (trade_amount in strategy_runtime.yaml — matches the
+        # backtester's live-semantics trade_notional); else the position sizer.
+        # Closes never come through here, so this can never affect an exit.
+        fixed_amount = (float(work.trade_amount)
+                        if not directive.quantity and work.trade_amount
+                        and work.trade_amount > 0 else None)
         proposal_id, _leverage, _snap = sdk.propose(
             symbol=ident['symbol'],
             action='BUY',
             quantity=directive.quantity,
+            amount=fixed_amount,
             reasoning=f'auto-executed {work.strategy_name} BUY signal @ bar {work.bar_ts}',
             confidence=confidence,
             source=f'strategy:{work.strategy_name}',

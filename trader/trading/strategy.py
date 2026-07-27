@@ -62,6 +62,12 @@ class StrategyContext:
     # Bounded pyramiding for the auto-executor: 0 = single-lot; N = up to N
     # fixed-size adds after the initial entry (stack tops out at N+1 lots).
     pyramid_max_adds: int = 0
+    # Fixed per-open dollar notional for the auto-executor (0 = auto-size via
+    # the position sizer). Matches the backtester's live-semantics
+    # `trade_notional` — the knob that makes a high-priced instrument tradeable
+    # when auto-sizing lands below one share (CAT at ~$1,250 vs a $646
+    # auto-sized amount refuses on whole-share conversion, correctly, forever).
+    trade_amount: float = 0.0
     # Strategy manifest — an optional, declared trading envelope validated at
     # load time and enforced (opens only) by the auto-executor. All None =>
     # unchecked, i.e. byte-identical to pre-manifest behaviour. Parsed and

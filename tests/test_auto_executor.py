@@ -575,6 +575,46 @@ class TestWorkerThread:
 # self-healed per bar, orphan-cancelled on reconcile.
 # ---------------------------------------------------------------------------
 
+class TestTradeAmountPassThrough:
+    """Per-strategy fixed notional (trade_amount in strategy_runtime.yaml).
+
+    Exists because auto-sizing on a high-priced instrument can land below one
+    share forever: CAT at ~$1,250 vs a $646 auto-sized amount refused on
+    whole-share conversion on every signal (2026-07-27, correctly — but the
+    strategy was permanently signal-only). trade_amount matches the
+    backtester's live-semantics trade_notional, per strategy.
+    """
+
+    def test_fixed_amount_reaches_propose(self, executor):
+        ex, sdk = executor
+        ex._process_signal(make_work(trade_amount=2000.0))
+        assert sdk.propose_calls[0]['amount'] == 2000.0
+
+    def test_zero_means_auto_size(self, executor):
+        ex, sdk = executor
+        ex._process_signal(make_work())
+        assert sdk.propose_calls[0].get('amount') is None
+
+    def test_explicit_share_quantity_wins_over_amount(self, executor):
+        """A strategy that names a share count has decided; the notional knob
+        must not override it."""
+        ex, sdk = executor
+        ex._process_signal(make_work(quantity=25.0, trade_amount=2000.0))
+        assert sdk.propose_calls[0]['quantity'] == 25.0
+        assert sdk.propose_calls[0].get('amount') is None
+
+    def test_closes_never_carry_the_amount(self, executor):
+        """Closes are sized by attribution, full stop — a fixed notional on a
+        SELL would resize an exit."""
+        ex, sdk = executor
+        ex._process_signal(make_work(trade_amount=2000.0))
+        ex._process_signal(make_work(action=Action.SELL, trade_amount=2000.0,
+                                     bar_ts=TS + pd.Timedelta(minutes=1)))
+        close = sdk.propose_calls[-1]
+        assert close['action'] == 'SELL'
+        assert close.get('amount') is None
+
+
 class TestProtectiveStops:
     def test_open_places_gtc_stop_with_attribution(self, executor):
         ex, sdk = executor
