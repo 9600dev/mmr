@@ -227,6 +227,7 @@ class FakeSDK:
         self.cancel_calls = []
         self.next_protective_id = 900
         self.protective_result = None   # override to fail placement
+        self.open_orders = []           # rows for the own-protective scan
 
     def resolve(self, symbol, sec_type='STK', exchange='', universe='', currency=''):
         if symbol == 1111 or symbol == 'WDS':
@@ -270,10 +271,13 @@ class FakeSDK:
         return FakeResult(ok=True)
 
     def trades(self):
-        rows = [{'orderId': pid * 10, 'totalQuantity':
-                 (self.proposals[pid].quantity or self.fill_qty)}
+        rows = [{'orderId': pid * 10, 'orderRef': '', 'conId': 0,
+                 'status': 'Filled', 'action': 'BUY',
+                 'totalQuantity': (self.proposals[pid].quantity or self.fill_qty)}
                 for pid in self.approve_calls]
-        return pd.DataFrame(rows)
+        # open_orders: rows the _own_live_protectives scan sees (orderRef-owned
+        # live stops, possibly created externally e.g. by a resize re-create).
+        return pd.DataFrame(rows + list(self.open_orders))
 
     def _proposal_store(self):
         proposals = self.proposals
@@ -1103,3 +1107,66 @@ class TestManifestPipelineOpen:
         # No manifest fields => _manifest_gate returns None without a DB query.
         ex._process_signal(make_work())
         assert len(sdk.propose_calls) == 1
+
+
+class TestExternalStopReplacementSurvival:
+    """The live resize test (2026-07-27) cancelled the executor's tracked
+    stops (227/289) and re-created replacements it knew nothing about. Two
+    consequences, both now handled by orderRef ownership: a dead tracked id
+    with a live ref-stamped replacement is ADOPTED; on close, any OTHER live
+    ref-owned order is SWEPT — without the sweep, the close left a GTC stop
+    live against a flat position, where a later trigger fires into a SHORT
+    with no gate re-check."""
+
+    def _own_row(self, oid, ref='orb_test', conid=1111, status='PreSubmitted'):
+        return {'orderId': oid, 'orderRef': ref, 'conId': conid,
+                'status': status, 'action': 'SELL', 'totalQuantity': 140.0}
+
+    def test_dead_tracked_id_with_live_replacement_is_adopted(self, executor):
+        ex, sdk = executor
+        ex.state.record_open('orb_test', 1111, 140.0, TS, None, None, None)
+        ex.state.set_protective('orb_test', 1111, 942)          # dead — not in open orders
+        sdk.broker[1111] = 140.0
+        sdk.open_orders.append(self._own_row(970))              # the replacement
+        ex._process_bar(BarWork('orb_test', 1111, TS + pd.Timedelta(minutes=1), 1))
+        assert ex.state.open_position('orb_test', 1111)['protective_order_id'] == 970
+        assert sdk.protective_calls == []                       # adopted, not re-placed
+
+    def test_dead_tracked_id_with_no_replacement_replaces(self, executor):
+        ex, sdk = executor
+        ex.state.record_open('orb_test', 1111, 140.0, TS, None, None, None)
+        ex.state.set_protective('orb_test', 1111, 942)
+        sdk.broker[1111] = 140.0
+        ex._process_bar(BarWork('orb_test', 1111, TS + pd.Timedelta(minutes=1), 1))
+        assert len(sdk.protective_calls) == 1
+        assert ex.state.open_position('orb_test', 1111)['protective_order_id'] == 900
+
+    def test_live_tracked_id_is_left_alone(self, executor):
+        ex, sdk = executor
+        ex.state.record_open('orb_test', 1111, 140.0, TS, None, None, None)
+        ex.state.set_protective('orb_test', 1111, 942)
+        sdk.broker[1111] = 140.0
+        sdk.open_orders.append(self._own_row(942))              # tracked AND live
+        ex._process_bar(BarWork('orb_test', 1111, TS + pd.Timedelta(minutes=1), 1))
+        assert sdk.protective_calls == []
+        assert ex.state.open_position('orb_test', 1111)['protective_order_id'] == 942
+
+    def test_close_sweeps_untracked_ref_owned_stop(self, executor):
+        ex, sdk = executor
+        ex._process_signal(make_work())                          # open + stop 900
+        sdk.open_orders.append(self._own_row(971))               # external re-create
+        ex._process_signal(make_work(action=Action.SELL,
+                                     bar_ts=TS + pd.Timedelta(minutes=1)))
+        assert 971 in sdk.cancel_calls, 'the untracked own stop was not swept'
+        assert ex.state.open_position('orb_test', 1111) is None
+
+    def test_close_never_touches_manual_orders(self, executor):
+        """A stop with someone else's ref (or none) is not ours to cancel."""
+        ex, sdk = executor
+        ex._process_signal(make_work())
+        sdk.open_orders.append(self._own_row(972, ref=''))       # manual
+        sdk.open_orders.append(self._own_row(973, ref='other_strategy'))
+        ex._process_signal(make_work(action=Action.SELL,
+                                     bar_ts=TS + pd.Timedelta(minutes=1)))
+        assert 972 not in sdk.cancel_calls
+        assert 973 not in sdk.cancel_calls

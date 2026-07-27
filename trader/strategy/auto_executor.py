@@ -936,9 +936,23 @@ class AutoExecutor:
         # broker read below then shows the position gone, and the close
         # degrades to CLOSED_EXTERNALLY instead of overselling into a short.
         pos = self.state.open_position(strategy_name, conid)
-        if pos and pos.get('protective_order_id'):
-            self._cancel_protective(strategy_name, conid,
-                                    pos['protective_order_id'], context=reason)
+        tracked_id = pos.get('protective_order_id') if pos else None
+        if tracked_id:
+            self._cancel_protective(strategy_name, conid, tracked_id, context=reason)
+        # Sweep OWN orphans: any other live SELL order carrying this strategy's
+        # orderRef for this conid — e.g. a resize-re-created stop the tracking
+        # never knew about. Without this, the close leaves that GTC stop live
+        # against a flat position, where a later trigger fires into a SHORT
+        # with no gate re-check (gates run at placement, not at trigger).
+        # Ownership is the orderRef, so manual orders are never touched.
+        for oid in self._own_live_protectives(sdk, strategy_name, conid):
+            if tracked_id and int(oid) == int(tracked_id):
+                continue
+            logging.warning(
+                'auto-executor: sweeping untracked protective %s for %s conId %s '
+                'before close (external re-placement?)', oid, strategy_name, conid)
+            self._cancel_protective(strategy_name, conid, oid,
+                                    context=f'{reason} (orphan sweep)')
         broker_qty = self._broker_positions().get(conid, 0.0)
         # NOT min(): min(140.0, nan) is 140.0 and nan <= 0 is False, so an
         # unreadable broker quantity used to pass both the clamp and the guard
@@ -992,9 +1006,12 @@ class AutoExecutor:
         if not pos:
             return
         # Self-heal the disaster stop: positions opened before the feature
-        # shipped, or whose placement failed, get one on the next bar.
-        if not pos.get('protective_order_id'):
-            self._ensure_protective(work.strategy_name, work.conid)
+        # shipped, whose placement failed, or whose TRACKED stop was cancelled
+        # externally (resize re-creates; verify/adopt lives inside
+        # _ensure_protective). Called unconditionally — the old caller-side
+        # 'only when untracked' guard silently skipped the verify path, which
+        # is exactly the state the live resize test left behind.
+        self._ensure_protective(work.strategy_name, work.conid)
         trigger = check_time_exit(
             work.bar_ts, work.bars_held, pos['close_by_time'], pos['max_hold_bars'])
         if trigger is None:
@@ -1025,8 +1042,32 @@ class AutoExecutor:
             return
         try:
             pos = self.state.open_position(strategy, conid)
-            if not pos or pos.get('protective_order_id'):
+            if not pos:
                 return
+            tracked = pos.get('protective_order_id')
+            if tracked:
+                # Trust, but verify: the tracked order can be CANCELLED out
+                # from under us by an external re-placement — the live resize
+                # test (2026-07-27) cancelled stops 227/289 and re-created
+                # replacements, leaving tracking pointed at dead ids. A dead
+                # tracked id with a live ref-stamped replacement is ADOPTED
+                # (tracking repaired, no double placement); dead with no
+                # replacement clears and falls through to normal placement.
+                sdk = self._get_sdk()
+                own = self._own_live_protectives(sdk, strategy, conid)
+                if int(tracked) in own:
+                    return                      # tracked and live — nothing to do
+                if own:
+                    self.state.set_protective(strategy, conid, own[0])
+                    logging.warning(
+                        'auto-executor: tracked protective %s for %s conId %s is '
+                        'dead but a live ref-stamped stop %s exists — ADOPTED',
+                        tracked, strategy, conid, own[0])
+                    return
+                logging.warning(
+                    'auto-executor: tracked protective %s for %s conId %s is dead '
+                    'and no replacement exists — re-placing', tracked, strategy, conid)
+                self.state.set_protective(strategy, conid, None)
             sdk = self._get_sdk()
             df = sdk.positions()
             if df is None or df.empty:
@@ -1074,6 +1115,29 @@ class AutoExecutor:
         except Exception:
             logging.exception(
                 'auto-executor: protective stop error for %s conId %s', strategy, conid)
+
+    def _own_live_protectives(self, sdk, strategy: str, conid: int) -> list:
+        """Order ids of LIVE protective orders this strategy owns for *conid*,
+        recognized by orderRef — the executor's orders carry the strategy name
+        by construction, so the ref is the ownership test that survives
+        external re-placement. A manual stop (ref '' or anything else) is never
+        touched. Empty list on any read failure."""
+        try:
+            df = sdk.trades()
+            if df is None or len(df) == 0:
+                return []
+            out = []
+            for _, r in df.iterrows():
+                if (str(r.get('orderRef', '') or '') == strategy
+                        and int(r.get('conId', 0) or 0) == int(conid)
+                        and str(r.get('status', '')) in ('PreSubmitted', 'Submitted')
+                        and str(r.get('action', '')) == 'SELL'):
+                    out.append(int(r.get('orderId', 0) or 0))
+            return [o for o in out if o]
+        except Exception as ex:
+            logging.warning('auto-executor: could not list own protectives for %s conId %s: %s',
+                            strategy, conid, ex)
+            return []
 
     def _cancel_protective(self, strategy: str, conid: int,
                            order_id, context: str):

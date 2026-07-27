@@ -707,6 +707,7 @@ class MMR:
                 'conId': t.contract.conId,
                 'symbol': t.contract.symbol,
                 'orderId': t.order.orderId,
+                'orderRef': str(getattr(t.order, 'orderRef', '') or ''),
                 'action': t.order.action,
                 'status': t.orderStatus.status,
                 'filled': t.orderStatus.filled,
@@ -1935,6 +1936,13 @@ class MMR:
                             'lmtPrice': float(lmt),
                             'trailingPercent': float(trail_pct),
                             'tif': o.tif or 'GTC',
+                            # Attribution travels with the order. The live
+                            # resize test (2026-07-27) proved re-created stops
+                            # came back with orderRef='' — a fired stop's fill
+                            # then lands in the ledger as 'manual' instead of
+                            # its strategy, and the auto-executor's own-order
+                            # sweep can no longer recognize it.
+                            'orderRef': str(getattr(o, 'orderRef', '') or ''),
                         })
 
             adj['associated_orders'] = associated
@@ -2132,6 +2140,7 @@ class MMR:
                             limit_price=order_info['lmtPrice'],
                             trailing_percent=order_info['trailingPercent'],
                             tif=order_info['tif'],
+                            order_ref=order_info.get('orderRef', ''),
                         )
                     )
                     if getattr(place_result, 'is_success', lambda: True)():
