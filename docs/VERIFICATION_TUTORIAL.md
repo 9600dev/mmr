@@ -2,39 +2,38 @@
 
 ### A tutorial on verification tooling, using a live trading system as the worked example
 
-**Audience:** you know Python and OO programming, you've written unit tests, and
-you now write a lot of your code by directing an LLM. You have not used
+**Audience:** you know Python and OO programming, and you have written unit
+tests. You now write a lot of your code by directing an LLM. You have not used
 design-by-contract, property-based testing, symbolic execution, or mutation
-testing, and you'd like to know what they actually do.
+testing. This tutorial shows you what each one does.
 
 Everything below is real code from this repository and real output from these
-tools. Where a tool caught a bug, the bug was real — including several caught in
-the session that produced this document.
+tools. Every bug shown here was a real bug. Several were caught in the sessions
+that produced this document.
 
-### What MMR is, since the examples all come from it
+### What MMR is
 
 **MMR ("Make Me Rich")** is the open-source algorithmic trading platform this
-tutorial lives in — [github.com/9600dev/mmr](https://github.com/9600dev/mmr),
-[README](../README.md). It's a Python system that connects to
-[Interactive Brokers](https://www.interactivebrokers.com/), streams market data,
-runs trading strategies, and — the part that matters here — **places real orders
-with real money, automatically, without a human confirming each one.**
+tutorial lives in: [github.com/9600dev/mmr](https://github.com/9600dev/mmr),
+[README](../README.md). It is a Python system that connects to
+[Interactive Brokers](https://www.interactivebrokers.com/), streams market
+data, runs trading strategies, and places real orders with real money. No
+human confirms each order.
 
-Three things about it make it a useful worked example:
+Three properties make it a useful worked example:
 
-1. **Mistakes are expensive and immediate.** Not "a bad row renders in a table"
-   — an order that shouldn't have been placed, at a size that shouldn't have been
-   used. There is no undo button on a filled trade.
-2. **It is substantially LLM-written.** The codebase is developed by directing a
-   model, which is precisely the loop this tutorial is about. It is not a
-   hypothetical.
-3. **It has a small, well-defined dangerous core.** A few hundred lines decide
-   how many shares to buy and whether an order is allowed at all. That's the part
-   worth verifying properly; the surrounding ~10,000-line CLI is not.
+1. **Mistakes are expensive and immediate.** A bad change places an order that
+   should not exist, at a size that should not be used. A filled trade has no
+   undo.
+2. **An LLM wrote most of it.** A human directs a model, and the model writes
+   the code. That is the loop this tutorial is about.
+3. **The dangerous core is small.** A few hundred lines decide how many shares
+   to buy and whether an order is allowed at all. Those lines get the full
+   toolchain. The surrounding ~10,000-line CLI does not need it.
 
-You don't need to know anything about trading to follow along — every domain term
-is explained where it first appears, and there's a
-[finance primer](#a-five-minute-finance-primer) in section 1.
+You do not need to know trading to follow along. The tutorial explains each
+domain term where it first appears, and section 1 contains a
+[finance primer](#a-five-minute-finance-primer).
 
 ---
 
@@ -46,25 +45,25 @@ The old loop was:
 human intent  →  human writes code  →  human reviews diff  →  ship
 ```
 
-Review worked because the reviewer had written something similar, at human speed,
+Review worked because the reviewer had written similar code, at human speed,
 and could hold the change in their head. The new loop is:
 
 ```
 human intent  →  LLM writes code  →  ??? →  ship
 ```
 
-and the honest thing to admit is what fills the `???`. It is *not* line-by-line
-review. Nobody reads 5,000 lines of generated diff with the attention they'd give
-50 lines they wrote themselves. You skim, you spot-check, you look for the shape
-of a mistake — and then you ship on the strength of "the tests pass".
+Be honest about what fills the `???`. It is not line-by-line review. Nobody
+reads 5,000 lines of generated diff with the attention they give 50 lines of
+their own. You skim, you spot-check, and you ship on the strength of "the
+tests pass".
 
-That last part is the problem, because **the LLM also wrote the tests.**
+**The LLM also wrote the tests.** That is the problem.
 
-An LLM is extremely good at producing code that is *plausible* and a test suite
-that is *green*. Those two facts are correlated with correctness, but they are
-not the same thing, and they fail together in a specific way: the model tests
-what it just built, using the inputs it had in mind while building it. Green
-tests over a wrong assumption look exactly like green tests over a right one.
+An LLM is very good at producing plausible code and a green test suite. Those
+two facts correlate with correctness, but they are not correctness, and they
+fail together: the model tests what it just built, using the inputs it had in
+mind while it built it. Green tests over a wrong assumption look exactly like
+green tests over a right one.
 
 So the loop has to become:
 
@@ -78,17 +77,17 @@ LLM writes code
 ship
 ```
 
-Each tool in this tutorial exists to fill one of those arrows. That framing
-also explains a choice that would otherwise look odd in a technical document:
-**this tutorial explains finance terms as it goes.** Not as a courtesy — because
-the whole method depends on the human being able to state intent precisely in
-domain language ("an order that reduces a position must never be refused"), and
-then encoding *that sentence* as something executable. If you can't say it, you
-can't check it, and you're back to trusting the diff.
+Each tool in this tutorial fills one of those arrows.
+
+This framing also explains why a technical document stops to define finance
+terms. The method depends on the human stating intent precisely in domain
+language ("an order that reduces a position must never be refused") and then
+encoding that sentence as something executable. If you cannot say it, you
+cannot check it, and you are back to trusting the diff.
 
 > **The uncomfortable version:** every technique here is a way of not trusting
-> code you didn't read. That includes code *you* wrote six months ago, but it is
-> acute when a model wrote it ten seconds ago and is very confident.
+> code you did not read. That includes code you wrote six months ago. It is
+> acute when a model wrote the code ten seconds ago and is confident about it.
 
 ---
 
@@ -107,7 +106,7 @@ can't check it, and you're back to trusting the diff.
 11. [Adopting this on a real project](#11-adopting-this-on-a-real-project)
 12. [The loop, restated](#12-the-loop-restated)
 
-Appendix A. [The day live testing outran the toolchain](#appendix-a--the-day-live-testing-outran-the-toolchain)
+Appendix A. [The day live testing outran the toolchain](#appendix-a-the-day-live-testing-outran-the-toolchain)
 
 ---
 
@@ -1416,192 +1415,234 @@ you already trusted.
 
 ## 12. The loop, restated
 
-The premise was that `human intent → LLM → code → ??? → ship` needs something
-better than "the tests pass" in the `???`. Concretely, that is:
+The premise: `human intent → LLM → code → ??? → ship` needs something better
+than "the tests pass" in the `???`. That something is five practices:
 
-**1. State intent where a machine can check it — and where the LLM cannot
+**1. State intent where a machine can check it, and where the LLM cannot
 quietly edit it.**
-Not a docstring, not a comment, not a ticket. A contract, a property, or a type.
-In this repo those live in `tests/invariants/` and in `@deal` decorators, and a
-pre-commit guard stops implementation and spec moving in the same commit.
+Not a docstring, not a comment, not a ticket. A contract, a property, or a
+type. In this repo those live in `tests/invariants/` and in `@deal`
+decorators. A pre-commit guard stops implementation and spec from moving in
+the same commit.
 
 **2. Let the machine attack the code, not just exercise it.**
-Hypothesis generates the inputs nobody thought of; CrossHair solves for the ones
-outside plausibility. Both search for *code ≠ intent*, which is a different
-activity from confirming that code does what its author expected.
+Hypothesis generates the inputs nobody thought of. CrossHair solves for the
+inputs outside plausibility. Both search for places where code differs from
+intent. That is a different activity from confirming that code does what its
+author expected.
 
 **3. Verify the verifier.**
 The model wrote the tests. Mutation testing is the only cheap way to find out
-whether they check anything — and in this session it caught a set of freshly
-written, sensible-looking tests that killed **one mutant out of five**.
+whether those tests check anything. In one session it caught a set of freshly
+written, sensible-looking tests that killed one mutant out of five.
 
 **4. Make the gates incapable of lying.**
-A gate that passes when it didn't run doesn't just fail to help; it actively
-manufactures the confidence you're substituting for review. Fail closed on a
-missing tool, a missing baseline, or a partial run.
+A gate that passes when it did not run manufactures false confidence. Fail
+closed on a missing tool, a missing baseline, or a partial run.
 
 **5. Make coverage rot mechanical, not remembered.**
-Hand-maintained registries drift silently. A test that fails when a module,
-contract or spec file is left unwired is worth more than any amount of
-documentation telling future sessions to remember.
+Hand-maintained registries drift silently. Write a test that fails when a
+module, contract, or spec file is left unwired. That test is worth more than
+any instruction to "remember to update the list".
 
-### What it actually bought here
+### What the static toolchain bought
 
-Every one of these was invisible to a green test suite:
+Each of these was invisible to a green test suite:
 
 | Found by | What it was |
 |---|---|
 | CrossHair | `ZeroDivisionError` from a denormal float underflow, on the single conversion every order path uses |
-| Property test | A size-triggered backdoor in the exit-class predicate that passed **all 1,882 tests** |
-| Mutation | An untested, silently-approving path in the leverage check — *and* a set of new tests that verified almost nothing |
-| Fail-closed gate | The type gate reporting "OK" with exit 0 on every run where the type checker never actually ran |
-| Spec guard | An implementation change that would have quietly weakened a human-owned safety property |
+| Property test | A size-triggered backdoor in the exit-class predicate. It passed all 1,882 tests. |
+| Mutation | An untested, silently-approving path in the leverage check. Also a set of new tests that verified almost nothing. |
+| Fail-closed gate | The type gate reported "OK" with exit 0 on every run where the type checker never ran. |
+| Spec guard | An implementation change that would have quietly weakened a human-owned safety property. |
+
+### What the full loop bought: the 2026-07-27 case
+
+The static toolchain is half of the method. The other half is live testing
+with the LLM watching the run. One day of it, in paper trading, produced the
+strongest safety result in this repo's history:
+
+- **18 execution paths ran against the real broker for the first time.**
+  A protective stop fired. A pyramid stack built, hit its cap, and closed. A
+  real resize cancelled and re-created live protective orders. Every refusal
+  gate (risk limits, proposal-approval, approver tier, kill switch,
+  gauntlet-enforce, role matrix) refused a real request.
+- **Nine real bugs surfaced. All nine were in code with passing tests, a
+  clean type gate, and a recorded mutation baseline.** One example: the
+  resize path cancelled the auto-executor's stop orders and re-created them
+  without attribution. The executor then tracked dead order ids. The worst
+  case was a live stop order left behind after a close, able to fire into a
+  short position with no gate check.
+- **The LLM monitored the run and closed the loop the same day.** For each
+  bug: reproduce, fix, write the regression test, wire the test into the
+  toolchain, deploy, and confirm on the live system. By the next session, all
+  nine bugs had pinned regressions, the modules two of them lived in had
+  joined the mutation scope, and the seams two of them crossed had composed
+  integration tests.
+
+The safety win came from the combination, not from either half:
+
+- Live testing **discovers** the properties that matter. It samples reality,
+  including facts about the broker's behaviour that no analysis of our own
+  code can reach.
+- The toolchain **retains** them. Every discovered failure becomes a
+  permanent, machine-checked regression. Live testing without the toolchain
+  finds a bug once. With the toolchain, each find is permanent.
+- The LLM makes the cycle fast enough to run in one day. Reproduce, fix,
+  pin, measure, deploy, verify: nine times, between market open and close,
+  while the book stayed protected by broker-side stops the whole time.
+
+Appendix A analyses this day in detail, including which bugs the static
+toolchain could have caught on its own, and which needed live contact.
 
 ### The honest limits
 
-None of this makes generated code correct. It makes a specific, narrow class of
-wrongness *loud*, in a core small enough to be worth the effort. The 10,000-line
-CLI in this repo has none of this machinery, and that is a deliberate
-proportionality call — the tools are aimed at the few hundred lines where being
+None of this makes generated code correct. It makes a specific, narrow class
+of wrongness loud, in a core small enough to be worth the effort. The
+10,000-line CLI in this repo has none of this machinery. That is a deliberate
+proportionality call: the tools aim at the few hundred lines where being
 wrong costs money.
 
-And the human is still in the loop, just at a different altitude: **you are no
-longer reviewing statements, you are reviewing intent** — the properties, the
-contracts, the scopes, and the decisions about what is allowed to fail open.
-Those are the artifacts to read carefully. The implementation, increasingly, is
-the part the machine checks for you.
+The human stays in the loop, at a different altitude. You no longer review
+statements. You review intent: the properties, the contracts, the scopes, and
+the decisions about what may fail open. Read those carefully. The
+implementation, increasingly, is the part the machine checks for you.
 
 ---
 
----
+## Appendix A: The day live testing outran the toolchain
 
-## Appendix A — The day live testing outran the toolchain
-
-*Written 2026-07-27, the evening after. This appendix is a case study in the
-toolchain's blind spots, documented while the evidence is fresh. Everything
-below happened in one day of deliberate live testing against the paper broker,
-and every bug was in code with passing tests, a clean type gate, and a
-recorded mutation baseline.*
+*Written 2026-07-27, the evening after, while the evidence was fresh. Updated
+after the follow-up work landed. This appendix is a case study in the
+toolchain's blind spots.*
 
 ### What happened
 
-With every safety layer green, we spent a day driving the system's surface
-against the real (paper) broker: firing a protective stop on purpose, running
-a real portfolio resize, forcing a pyramiding add with a synthetic strategy,
-arming and tripping every refusal flag, and round-tripping a forex order.
-Eighteen paths that had never executed in production executed. **Nine real
-bugs fell out** — a rate no verification session in this repo has matched.
+Every safety layer was green. We then spent one day driving the system's
+surface against the real (paper) broker: we fired a protective stop on
+purpose, ran a real portfolio resize, forced a pyramiding add with a
+synthetic strategy, armed and tripped every refusal flag, and round-tripped a
+forex order. Eighteen paths executed in production for the first time.
+**Nine real bugs fell out.** No verification session in this repo has matched
+that rate.
 
-That demands the uncomfortable question this appendix answers honestly:
-*could pushing the toolchain harder have found them instead?*
+That result demands an uncomfortable question, answered honestly below:
+could a harder push on the toolchain have found these bugs instead?
 
 ### The scoreboard
 
-Scored bug by bug. "Findable" means: a discipline we already teach in this
-tutorial, applied more thoroughly, catches it with no broker contact.
+Each bug is scored. "Findable" means: a discipline this tutorial already
+teaches, applied more thoroughly, catches the bug with no broker contact.
 
 | # | Bug (commit) | Findable? | What it would have taken |
 |---|---|---|---|
-| 1 | CLI resize plan crashed rendering float deltas (`7214dac`) | **Yes — trivially** | Any test that executed the render path. Pure coverage gap: the CLI's render paths are in no test and no mutation scope. |
-| 2 | The *approver* role could propose (`3ea0947`) | **Yes** | The spec existed in the code's own capability table — "approver: approve, reject, reads". A table-driven test enumerating role × command against that documented matrix finds the missing branch instantly. Example tests checked the denials that existed; nothing could notice a denial that was *absent*. |
-| 3 | Forex contracts SMART-routed, IB error 200 (`1cbbe2f`) | **Yes** | The rule was in CLAUDE.md the whole time: *"forex pairs are constructed on IDEALPRO."* Prose nobody turned into an assertion. One unit test on `_resolve_contract('EUR', sec_type='CASH')` catches it. |
-| 4 | Resize re-created stops without `orderRef` (`bef98e8`) | **Yes** | A round-trip property — *a re-created protective equals the old order except quantity* — is obvious in hindsight. `execute_resize_plan` had zero tests; only its pure sibling `compute_resize_deltas` was verified. |
-| 5 | Executor tracking pointed at dead stop ids after resize (`bef98e8`) | **Yes — with composition** | Each side was verified *in isolation*: resize's tests contained no executor, the executor's tests contained no resize. Composing the two existing fake harnesses (done after the fact, in ~20 minutes) reproduces it exactly. The bug lived in the seam. |
-| 6 | `Cancelled → Filled` status sequence dropped the fill from the ledger (`d23746d`) | **Plausibly** | A Hypothesis property over *arbitrary status sequences* — "any sequence ending in Filled records a fill" — finds it immediately. But writing it requires already suspecting IB's stream is non-monotonic. Sequence-fuzzing the environment model is a discipline, not a tool. |
-| 7 | 10197 recovery re-requested **0** subscriptions (`99c8adb`) | **Borderline** | Both ends are our code (the registry and the subscription path), so an end-to-end wiring test could catch it. But the unit test *injected* the registry state — it tested the mock. Same disease as the oracle-wiring drift Layer 5 exists to catch. |
-| 8 | `whatIfOrderAsync` returns a *list* for CASH (`fd4ddc8`) | **No** | ib_async's own types say `OrderState`. No property, contract, or stub could know the real API hands back a list. Environment fact. |
-| 9 | IB returns *no* whatIf state at all for CASH (`fd4ddc8`) | **No** | Same. Unknowable without asking the real IB. |
+| 1 | CLI resize plan crashed rendering float deltas (`7214dac`) | **Yes, trivially** | Any test that executed the render path. The CLI's render paths were in no test and no mutation scope. |
+| 2 | The *approver* role could propose (`3ea0947`) | **Yes** | The spec existed in the code's own capability table: "approver: approve, reject, reads". A test that enumerates every role × command pair against that table finds the missing branch at once. The example tests checked the denials that existed. Nothing could notice a denial that was absent. |
+| 3 | Forex contracts routed to SMART, IB error 200 (`1cbbe2f`) | **Yes** | CLAUDE.md states the rule: "forex pairs are constructed on IDEALPRO." That sentence was never turned into an assertion. One unit test on `_resolve_contract('EUR', sec_type='CASH')` catches it. |
+| 4 | Resize re-created stops without `orderRef` (`bef98e8`) | **Yes** | A round-trip property: a re-created protective equals the old order except quantity. `execute_resize_plan` had zero tests. Only its pure sibling `compute_resize_deltas` was verified. |
+| 5 | Executor tracking pointed at dead stop ids after resize (`bef98e8`) | **Yes, with composition** | Each side passed its own tests in isolation. The resize tests contained no executor. The executor tests contained no resize. Composing the two fake harnesses reproduces the bug exactly. The bug lived in the seam. |
+| 6 | A `Cancelled → Filled` status sequence dropped the fill from the ledger (`d23746d`) | **Plausibly** | A Hypothesis property over arbitrary status sequences ("any sequence that ends in Filled records a fill") finds it at once. Writing that property requires suspecting that IB's stream is non-monotonic. Sequence-fuzzing the environment model is a discipline, not a tool. |
+| 7 | 10197 recovery re-requested **0** subscriptions (`99c8adb`) | **Borderline** | Both ends are our code: the registry and the subscription path. An end-to-end wiring test could catch it. The unit test injected the registry state, so it tested the mock. |
+| 8 | `whatIfOrderAsync` returns a *list* for CASH (`fd4ddc8`) | **No** | ib_async's own types say `OrderState`. No property, contract, or stub could know that the real API hands back a list. This is an environment fact. |
+| 9 | IB returns *no* whatIf state at all for CASH (`fd4ddc8`) | **No** | Same. Only the real IB can tell you this. |
 
-Tally: **six findable, one borderline, two genuinely require the live
-environment.**
+Tally: six findable, one borderline, two that require the live environment.
 
 ### The three doors
 
-Every escape used one of three doors, and naming them is the point of this
-appendix:
+Every escape used one of three doors:
 
-**Door 1 — Unstated specs.** Bugs 1–4 were violations of rules that already
-existed *as prose*: a CLAUDE.md sentence, a docstring capability table, an
-"obviously" symmetric matrix. The toolchain verifies properties you *state*;
-these were never stated where a machine could see them. The forex-IDEALPRO
-rule sat in documentation for the life of the repo while the code violated it
-on one of two paths.
+**Door 1: unstated specs.** Bugs 1 through 4 violated rules that already
+existed as prose: a CLAUDE.md sentence, a docstring capability table, an
+"obviously" symmetric matrix. The toolchain verifies properties you state.
+These were never stated where a machine could see them. The forex rule sat in
+the documentation for the life of the repo while the code violated it on one
+of two paths.
 
-**Door 2 — Seams.** Bugs 5 and 7 lived *between* verified components.
-Mutation scores, contracts and properties are all per-component; nothing in
-the stack asks "what happens when the resize path mutates state the executor
-tracks?" Components passed in isolation and composed into a hazard — a stale
-tracking id whose worst case was a GTC stop firing into a flat book, i.e. an
-unattended short.
+**Door 2: seams.** Bugs 5 and 7 lived between verified components. Mutation
+scores, contracts, and properties are all per-component. Nothing asked "what
+happens when the resize path mutates state the executor tracks?" The
+components passed in isolation and composed into a hazard: a stale tracking
+id whose worst case was a GTC stop firing into a flat book, which is an
+unattended short position.
 
-**Door 3 — Wrong environment models.** Bugs 6, 8, 9. The code's model of IB —
-statuses are monotonic, whatIf returns one state, every instrument has margin
-data — was wrong, and no amount of reasoning about *our* code could reveal
-facts about *theirs*. Notably, the fail-closed flip from earlier the same day
-is what made two of these visible at all: the whatIf crash had been silently
-swallowed by fail-open **forever**. A fail-closed gate is, among other things,
-an environment-mismatch detector.
+**Door 3: wrong environment models.** Bugs 6, 8, and 9. The code's model of
+IB was wrong: it assumed statuses are monotonic, whatIf returns one state,
+and every instrument has margin data. No analysis of our code can reveal
+facts about theirs. Note also: the fail-closed flip from earlier the same day
+is what made two of these visible at all. Fail-open had swallowed the whatIf
+crash silently, forever. A fail-closed gate is, among other things, an
+environment-mismatch detector.
 
-### What "pushing harder" concretely means now
+### What "pushing harder" means, and what happened when we did
 
-Each door suggests a discipline, all of them bounded work with a
-known-productive shape:
+Each door implies a discipline. The follow-up work ran the first two to
+completion; the results are themselves evidence.
 
-1. **Docs-as-spec extraction** (Door 1). Mine CLAUDE.md and docstrings for
-   *must / never / always / only* sentences and turn each into an assertion or
-   an explicit waiver. The forex rule was sitting there; the question is what
-   else is.
-2. **Exhaustive matrices for capability tables** (Door 1). Any role/permission
-   table gets an enumeration test over its full cross-product, derived from
-   the documented table — never hand-picked examples.
-3. **Round-trip properties for cancel-and-re-create** (Door 1). Anything that
-   destroys and rebuilds an object asserts field-level equality modulo the
-   intended change.
-4. **Seam tests** (Door 2). Compose the existing fake harnesses:
-   resize × executor (now exists), propose→approve × executor,
-   reconcile × resize. One test per pair of components that share
-   broker-side state.
-5. **Sequence-fuzz the environment** (Door 3, partially). Hypothesis over IB
-   status streams and error-code sequences into the lifecycle tracker and the
-   recovery loop. This cannot conjure unknown facts, but it removes the
-   *monotonicity assumptions* we didn't know we were making.
-6. **Record reality into fixtures** (Door 3). When live contact reveals an
+1. **Cover the found bugs first** (done, `1d21da4`). Auditing the nine bugs
+   against the toolchain found three coverage gaps. Closing one of them
+   repeated the day's lesson at small scale: `order_lifecycle.py`, the module
+   that writes the ledger rows, entered the mutation scope and scored 61.7%.
+   About 90 survivors sat inside `_record_event`. Every field of the ledger
+   row could be corrupted without a test noticing, because the tests asserted
+   event types and never content. The row is now pinned field by field
+   (78.1%).
+2. **Seam tests** (done, `83c01bf`). One shared fake broker that both
+   components mutate for real: `execute_resize_plan` acts on it through a
+   stubbed RPC, and the executor reads it through its SDK. The harness
+   reproduces the live resize sequence end to end, including the
+   counterfactual (strip the attribution the way the old code did, and the
+   orphaned stop provably survives the close). On its first run the harness
+   also surfaced a three-way interaction nobody planned to test: the
+   trim-to-zero seam collided with the empty-broker grace period, which
+   correctly refused to believe an all-empty book.
+3. **Docs-as-spec extraction** (queued). Mine CLAUDE.md and the docstrings
+   for must / never / always / only sentences. Verify each against actual
+   behaviour first, because a wrong doc pinned as a test enshrines the error.
+   Each claim lands in one of three buckets: pinned (true, becomes a test),
+   doc-bug (false, doc corrected), or flagged (cannot verify cheaply).
+4. **Exhaustive matrices for capability tables** (queued). Any
+   role/permission table gets an enumeration test over its full
+   cross-product, derived from the documented table.
+5. **Sequence-fuzz the environment** (queued). Hypothesis over IB status
+   streams and error sequences into the lifecycle tracker and the recovery
+   loop. This cannot conjure unknown facts. It removes the monotonicity
+   assumptions we did not know we were making.
+6. **Record reality into fixtures** (ongoing). When live contact reveals an
    environment shape (a list-valued whatIf, an empty CASH response, a
-   `Cancelled→Filled` stream), the raw shape goes into a fixture so the test
-   suite carries a growing museum of true IB behaviour.
+   `Cancelled → Filled` stream), that shape goes into a fixture. The test
+   suite accumulates a museum of true IB behaviour.
 
 ### The synthesis
 
-The temptation is to score this day as "live testing 9, toolchain 0." That is
-the wrong reading. What actually happened is the loop from §12 running at a
-larger radius:
+The tempting reading is "live testing 9, toolchain 0". That reading is wrong.
+The day was the loop from section 12 running at a larger radius:
 
-- **Live contact is property discovery.** It samples reality — including the
-  parts of reality (IB's actual behaviour) that no amount of introspection on
-  our own code can reach — and tells you *which properties matter and which
-  models are wrong*.
+- **Live contact is property discovery.** It samples reality, including the
+  parts no analysis of our own code can reach, and it tells you which
+  properties matter and which models are wrong.
 - **The toolchain is property retention.** Every one of the nine bugs now has
-  a pinned regression (a supersession test, a role matrix, a routing
-  assertion, a round-trip check, an adoption/sweep suite). They can never come
-  back silently. Live testing without the toolchain finds bugs once;
-  with it, each find is permanent.
+  a pinned regression: a supersession test, a role matrix, a routing
+  assertion, a round-trip check, an adoption-and-sweep suite, a seam harness.
+  None of them can return silently. Live testing without the toolchain finds
+  a bug once. With it, each find is permanent.
+- **The LLM in the monitoring seat is what makes the radius affordable.** The
+  find-fix-pin-deploy-verify cycle ran nine times in one day because the same
+  agent that watched the logs also wrote the fix, the regression, and the
+  toolchain wiring, and then confirmed the deployed behaviour live.
 
-They are not rivals; they are the two strokes of the same engine. The honest
-asymmetry is search-space: verification exhausts the properties you conceived,
-live testing samples the ones you didn't. A day like this one is what
+The honest asymmetry is search space. Verification exhausts the properties
+you conceived. Live testing samples the ones you did not. A day like this one
 generates the next month's invariants.
-
-*(Follow-ups from this appendix are tracked as the docs-as-spec pass and seam
-tests; the tutorial itself will be reorganized around the three-door taxonomy
-in a future revision.)*
 
 ### Further reading
 
-- Hypothesis — <https://hypothesis.readthedocs.io/>
-- deal — <https://deal.readthedocs.io/>
-- CrossHair — <https://crosshair.readthedocs.io/>
-- mutmut — <https://mutmut.readthedocs.io/>
-- ty — <https://github.com/astral-sh/ty>
+- Hypothesis: <https://hypothesis.readthedocs.io/>
+- deal: <https://deal.readthedocs.io/>
+- CrossHair: <https://crosshair.readthedocs.io/>
+- mutmut: <https://mutmut.readthedocs.io/>
+- ty: <https://github.com/astral-sh/ty>
 
 In-repo companions: [`SAFETY_ROADMAP.md`](SAFETY_ROADMAP.md) for what is shipped
 and what is designed, [`AUDIT_ROADMAP.md`](AUDIT_ROADMAP.md) for outstanding
