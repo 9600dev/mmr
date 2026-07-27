@@ -470,12 +470,25 @@ class TradeExecutioner():
 
         order: Order = Order()
 
+        # outsideRth=True, matching every OTHER order path in the system
+        # (ExecutionSpec.outside_rth and place_standalone_order both default
+        # True). Without it IB applies the account's RTH-only preset and
+        # answers warning 399: "Your order will not be placed at the exchange
+        # until <next session open>". Found live 2026-07-27 in extended hours:
+        # a direct `mmr sell` reported PendingSubmit and sat there, which is
+        # exactly the wrong behaviour for THIS path — `mmr sell` / `mmr close`
+        # is the manual emergency close a human reaches for out of hours, and
+        # it silently became a resting order for the next session instead.
+        # (The auto-executor is unaffected: its closes go through
+        # place_expressive_order, and protective stops through
+        # place_standalone_order, both of which already set it.)
         if market_order:
             order = MarketOrder(
                 action=str(action),
                 totalQuantity=cast(float, quantity),
                 orderRef=algo_name,
                 account=self.trader.ib_account,
+                outsideRth=True,
             )
         else:
             order = LimitOrder(
@@ -484,5 +497,6 @@ class TradeExecutioner():
                 lmtPrice=order_price,
                 orderRef=algo_name,
                 account=self.trader.ib_account,
+                outsideRth=True,
             )
         return ContractOrderPair(contract=contract, order=order)

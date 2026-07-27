@@ -97,3 +97,40 @@ class TestReCreateRoundTrip:
         assert re['aux_price'] == old['auxPrice']
         assert re['tif'] == old['tif']
         assert re['quantity'] == 1.0            # the one INTENDED change
+
+
+class TestJsonOutputIsValidJson:
+    """`mmr --json` is the machine-readable interface the LLM trading loop
+    consumes. Python's json.dumps writes bare NaN / Infinity by default, which
+    is not RFC-8259 JSON: jq, Go, Rust and JavaScript's JSON.parse all reject
+    it. Found 2026-07-27 by proposing an order with a NaN quantity and watching
+    the output become unparseable by a strict reader.
+    """
+
+    def test_non_finite_floats_become_null(self):
+        import json
+        from trader.mmr_cli import _json_dumps
+        out = _json_dumps({'data': {'quantity': float('nan'),
+                                    'leverage': float('inf'),
+                                    'other': float('-inf'),
+                                    'good': 1.5}})
+        assert 'NaN' not in out and 'Infinity' not in out
+        parsed = json.loads(out)          # strict parse must succeed
+        assert parsed['data']['quantity'] is None
+        assert parsed['data']['leverage'] is None
+        assert parsed['data']['other'] is None
+        assert parsed['data']['good'] == 1.5
+
+    def test_nested_structures_are_cleaned(self):
+        import json
+        from trader.mmr_cli import _json_dumps
+        out = _json_dumps({'data': [{'a': [float('nan'), 2]}, {'b': {'c': float('inf')}}]})
+        parsed = json.loads(out)
+        assert parsed['data'][0]['a'] == [None, 2]
+        assert parsed['data'][1]['b']['c'] is None
+
+    def test_ordinary_payloads_are_unchanged(self):
+        import json
+        from trader.mmr_cli import _json_dumps
+        payload = {'data': [{'symbol': 'QBTS', 'position': 3.0}], 'title': 'Portfolio'}
+        assert json.loads(_json_dumps(payload)) == payload

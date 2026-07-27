@@ -705,3 +705,40 @@ async def test_corroboration_failure_does_not_block_the_exit(caplog):
 
     assert trader.client.subscribe_place_order.call_count == 1
     assert 'could not corroborate' in caplog.text
+
+
+class TestDirectPathIsOutsideRthCapable:
+    """Found live 2026-07-27, in US post-market: a direct `mmr sell` reported
+    PendingSubmit and never executed, because helper_create_order omitted
+    outsideRth and IB applied its RTH-only preset (warning 399: "Your order
+    will not be placed at the exchange until <next session open>").
+
+    This is the MANUAL EMERGENCY CLOSE path. A human trying to flatten a
+    position out of hours saw a working order that was in fact resting until
+    the next session. Every other path (ExecutionSpec.outside_rth,
+    place_standalone_order) already defaulted True; this one was the outlier.
+    """
+
+    def _order(self, market_order, limit_price=None):
+        from unittest.mock import MagicMock
+        from trader.objects import Action
+        from trader.trading.executioner import TradeExecutioner
+        ex = TradeExecutioner()
+        trader = MagicMock()
+        trader.ib_account = 'DU1'
+        ex.connect(trader)
+        tick = MagicMock()
+        tick.ask = 20.0
+        tick.bid = 19.0
+        pair = ex.helper_create_order(
+            contract=MagicMock(multiplier=None), action=Action.SELL,
+            latest_tick=tick, equity_amount=None, quantity=5.0,
+            limit_price=limit_price, market_order=market_order,
+            stop_loss_percentage=0.0, algo_name='manual')
+        return pair.order
+
+    def test_market_order_is_outside_rth(self):
+        assert self._order(market_order=True).outsideRth is True
+
+    def test_limit_order_is_outside_rth(self):
+        assert self._order(market_order=False, limit_price=19.4).outsideRth is True

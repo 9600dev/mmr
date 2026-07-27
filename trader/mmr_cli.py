@@ -39,14 +39,39 @@ _json_mode = False
 # Output helpers
 # ------------------------------------------------------------------
 
+def _json_dumps(payload) -> str:
+    """json.dumps, but emitting RFC-8259 JSON.
+
+    Python's json module writes bare NaN / Infinity / -Infinity by default,
+    which is NOT valid JSON: jq, Go, Rust and JavaScript's JSON.parse all
+    reject it. `mmr --json` is the machine-readable interface the LLM trading
+    loop consumes, so it must parse everywhere. Found 2026-07-27 by proposing
+    an order with a NaN quantity and watching the output become unparseable.
+    Non-finite floats become null, which every parser accepts and which is the
+    honest encoding of "not a number".
+    """
+    import math
+
+    def _clean(o):
+        if isinstance(o, float):
+            return o if math.isfinite(o) else None
+        if isinstance(o, dict):
+            return {k: _clean(v) for k, v in o.items()}
+        if isinstance(o, (list, tuple)):
+            return [_clean(v) for v in o]
+        return o
+
+    return json.dumps(_clean(payload), default=str, allow_nan=False)
+
+
 def print_df(df, title=None):
     """Render a pandas DataFrame as a rich table (or JSON if _json_mode)."""
     if _json_mode:
         if df is None or df.empty:
-            print(json.dumps({"data": [], "title": title}, default=str))
+            print(_json_dumps({"data": [], "title": title}))
         else:
             records = json.loads(df.to_json(orient='records', date_format='iso'))
-            print(json.dumps({"data": records, "title": title}, default=str))
+            print(_json_dumps({"data": records, "title": title}))
         return
 
     if df is None or df.empty:
@@ -104,7 +129,7 @@ def print_df(df, title=None):
 def print_dict(d, title=None):
     """Render a dict as a two-column rich table (or JSON if _json_mode)."""
     if _json_mode:
-        print(json.dumps({"data": d if d else {}, "title": title}, default=str))
+        print(_json_dumps({"data": d if d else {}, "title": title}))
         return
 
     if not d:
@@ -222,7 +247,7 @@ def print_portfolio_cards(df, title='Portfolio'):
 def print_list(items, title=None):
     """Render a list as a single-column rich table (or JSON if _json_mode)."""
     if _json_mode:
-        print(json.dumps({"data": [str(i) for i in items] if items else [], "title": title}, default=str))
+        print(_json_dumps({"data": [str(i) for i in items] if items else [], "title": title}))
         return
 
     if not items:
@@ -239,7 +264,7 @@ def print_list(items, title=None):
 def print_json_result(data, title=None):
     """Print structured data as JSON (for handlers that build custom Rich tables)."""
     if _json_mode:
-        print(json.dumps({"data": data, "title": title}, default=str))
+        print(_json_dumps({"data": data, "title": title}))
         return
     # Fallback: try print_dict or print_df
     if isinstance(data, dict):
@@ -257,7 +282,7 @@ def print_json_result(data, title=None):
 def print_status(message, success=True):
     """Print a status message (or JSON if _json_mode)."""
     if _json_mode:
-        print(json.dumps({"success": success, "message": message}, default=str))
+        print(_json_dumps({"success": success, "message": message}))
         return
     if success:
         console.print(f'[green]{message}[/green]')
@@ -2087,7 +2112,7 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
             results = mmr.snapshot_batch(args.symbols, exchange=args.exchange,
                                           currency=args.currency, source=source)
             title = 'Snapshots' + (f' ({source})' if source != 'ib' else '')
-            print(json.dumps({"data": results, "title": title}, default=str))
+            print(_json_dumps({"data": results, "title": title}))
 
         elif cmd == 'depth':
             _handle_depth(mmr, args)
@@ -2643,7 +2668,7 @@ def _handle_propose(mmr: MMR, args: argparse.Namespace):
             'snapshot': snapshot_info,
             'leverage': leverage_info,
         }
-        print(json.dumps({"data": result, "title": f"Proposal #{proposal_id}"}, default=str))
+        print(_json_dumps({"data": result, "title": f"Proposal #{proposal_id}"}))
         return
 
     summary = f'{args.action} {args.symbol}'
@@ -4014,7 +4039,7 @@ def _handle_strategies_inspect(args: argparse.Namespace):
             })
 
     if _json_mode:
-        print(json.dumps({'data': rows, 'title': 'Strategy Inspect'}, default=str))
+        print(_json_dumps({'data': rows, 'title': 'Strategy Inspect'}))
         return
 
     from rich.table import Table
@@ -5970,7 +5995,7 @@ def _handle_backtests(args: argparse.Namespace):
             if getattr(args, 'include_raw', False):
                 payload['trades_json'] = r.trades_json
                 payload['equity_curve_json'] = r.equity_curve_json
-            print(json.dumps({'data': payload}, default=str))
+            print(_json_dumps({'data': payload}))
             return
 
         # Rich detail — colored metric values matching the list view's
@@ -6214,7 +6239,7 @@ def _handle_backtests(args: argparse.Namespace):
                 'note': (r.note or '')[:20],
             })
         if _json_mode:
-            print(json.dumps({'data': rows, 'title': 'Backtest Comparison'}, default=str))
+            print(_json_dumps({'data': rows, 'title': 'Backtest Comparison'}))
             return
         print_df(pd.DataFrame(rows), title='Backtest Comparison')
         return
@@ -7640,7 +7665,7 @@ def _handle_sweep_list(args: argparse.Namespace):
                 'digest_path': s.digest_path,
                 'note': s.note,
             })
-        print(json.dumps({'data': data, 'title': 'Sweep History'}, default=str))
+        print(_json_dumps({'data': data, 'title': 'Sweep History'}))
         return
 
     if not sweeps:
@@ -9609,7 +9634,7 @@ def _handle_data_status():
         })
 
     if _json_mode:
-        print(json.dumps({'data': rows, 'title': 'Data Refresh Status'}, default=str))
+        print(_json_dumps({'data': rows, 'title': 'Data Refresh Status'}))
         return
 
     table = Table(title='Data Refresh Status', show_lines=False)
@@ -10135,7 +10160,7 @@ def _handle_news_search(args: argparse.Namespace):
         return
     results = body.get('results') or []
     if _json_mode:
-        print(json.dumps({'data': results, 'title': f'Search: {query!r}'}, default=str))
+        print(_json_dumps({'data': results, 'title': f'Search: {query!r}'}))
         return
     if not results:
         console.print('[yellow]No results.[/yellow]')
@@ -10198,7 +10223,7 @@ def _handle_news_enrich(args: argparse.Namespace):
             enriched.append({'title': r.get('title', ''), 'url': url, 'ok': False, 'error': str(ex)})
 
     if _json_mode:
-        print(json.dumps({'data': enriched, 'title': f'News enrich: {ticker}'}, default=str))
+        print(_json_dumps({'data': enriched, 'title': f'News enrich: {ticker}'}))
         return
     for e in enriched:
         mark = '[green]✓[/]' if e.get('ok') else '[red]✗[/]'
@@ -10688,7 +10713,7 @@ def _handle_diagnose(mmr: MMR, args: argparse.Namespace):
         return
 
     if _json_mode:
-        print(json.dumps({'data': result, 'title': 'Portfolio Feed Diagnostic'}, default=str))
+        print(_json_dumps({'data': result, 'title': 'Portfolio Feed Diagnostic'}))
         return
 
     console.print(f'[bold]Portfolio Feed Diagnostic[/bold]')
