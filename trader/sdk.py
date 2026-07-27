@@ -396,7 +396,18 @@ class MMR:
         sec_exchange = sec.exchange or ''
         sec_primary = getattr(sec, 'primaryExchange', '') or ''
         us_smart = {'SMART', 'NYSE', 'NASDAQ', 'AMEX', 'ARCA', 'BATS', 'IEX', 'ISLAND'}
-        if sec_exchange.upper() in us_smart:
+        if (getattr(sec, 'secType', '') or sec_type or '').upper() == 'CASH':
+            # Forex is ALWAYS direct-routed on IDEALPRO — SMART cannot route
+            # CASH at all. The stock rule below rewrote it to exchange=SMART/
+            # primaryExchange=IDEALPRO, and IB answered error 200 ("No
+            # security definition") and cancelled the order — observed live
+            # 2026-07-27 on approve of an EUR.USD proposal, while the direct
+            # `buy EUR --sectype CASH` path (which builds Forex on IDEALPRO
+            # explicitly) worked. One rule, stated in CLAUDE.md all along:
+            # forex pairs are constructed on IDEALPRO by the caller.
+            order_exchange = 'IDEALPRO'
+            primary_exchange = ''
+        elif sec_exchange.upper() in us_smart:
             order_exchange = sec_exchange
             primary_exchange = sec_primary
         else:

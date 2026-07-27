@@ -1388,3 +1388,41 @@ class TestExecuteResizeGrowProtection:
         placed = mock_client.rpc.return_value.place_standalone_order.call_args
         assert placed.kwargs['quantity'] == 60
         assert any('re-created' in s for s in results['successes'])
+
+
+class TestResolveContractForexRouting:
+    """CASH resolutions must come out on IDEALPRO, never SMART-routed.
+
+    Live 2026-07-27: approve of an EUR.USD proposal built exchange=SMART /
+    primaryExchange=IDEALPRO (the non-US-stock SMART rule applied to forex),
+    IB answered error 200 and cancelled the order. The direct buy path builds
+    Forex on IDEALPRO explicitly and always worked — the two paths must agree.
+    """
+
+    def test_cash_resolution_stays_on_idealpro(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from trader.sdk import MMR
+        mmr = MMR.__new__(MMR)
+        sec = SimpleNamespace(conId=12087792, symbol='EUR', secType='CASH',
+                              exchange='IDEALPRO', primaryExchange='',
+                              currency='USD', multiplier='')
+        mmr.resolve = MagicMock(return_value=[sec])
+        c = mmr._resolve_contract('EUR', sec_type='CASH', currency='USD')
+        assert c.exchange == 'IDEALPRO'
+        assert (c.primaryExchange or '') == ''
+        assert c.secType == 'CASH'
+
+    def test_asx_stock_still_smart_routed(self):
+        """The stock rule the carve-out must not disturb."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from trader.sdk import MMR
+        mmr = MMR.__new__(MMR)
+        sec = SimpleNamespace(conId=4036812, symbol='BHP', secType='STK',
+                              exchange='ASX', primaryExchange='ASX',
+                              currency='AUD', multiplier='')
+        mmr.resolve = MagicMock(return_value=[sec])
+        c = mmr._resolve_contract('BHP', sec_type='STK', exchange='ASX', currency='AUD')
+        assert c.exchange == 'SMART'
+        assert c.primaryExchange == 'ASX'
