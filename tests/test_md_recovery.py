@@ -74,18 +74,32 @@ class TestHandlerMarksTheLoss:
 
 
 class TestResubscribeReissuesEveryCachedContract:
-    def test_reissues_reqmktdata_per_cached_contract(self):
+    def test_reissues_reqmktdata_for_every_active_ticker(self):
+        """The subscription set MUST come from ib.tickers(), not
+        contracts_cache — the first live trial re-requested 0 subscriptions
+        because the trader service's publisher path never populates the
+        cache. ib_async's ticker registry sees every subscription."""
+        from types import SimpleNamespace
         rx = _rx()
         calls = []
         rx.ib.reqMktData = lambda **kw: calls.append(kw['contract'].conId)
-        # call_event_subscriber_sync needs no live loop for a sync callable
+        rx.ib.tickers = lambda: [SimpleNamespace(contract=Contract(conId=1)),
+                                 SimpleNamespace(contract=Contract(conId=2))]
         rx._contracts_source.call_event_subscriber_sync = (
             lambda fn, asend_result=False: fn())
-        c1, c2 = Contract(conId=1), Contract(conId=2)
-        rx.contracts_cache[c1] = object()
-        rx.contracts_cache[c2] = object()
         assert rx._resubscribe_market_data() == 2
         assert sorted(calls) == [1, 2]
+
+    def test_falls_back_to_the_cache_when_no_tickers_exist(self):
+        rx = _rx()
+        calls = []
+        rx.ib.reqMktData = lambda **kw: calls.append(kw['contract'].conId)
+        rx.ib.tickers = lambda: []
+        rx._contracts_source.call_event_subscriber_sync = (
+            lambda fn, asend_result=False: fn())
+        rx.contracts_cache[Contract(conId=3)] = object()
+        assert rx._resubscribe_market_data() == 1
+        assert calls == [3]
 
     def test_one_failing_contract_does_not_stop_the_rest(self):
         rx = _rx()
@@ -96,11 +110,12 @@ class TestResubscribeReissuesEveryCachedContract:
                 raise RuntimeError('boom')
             calls.append(kw['contract'].conId)
 
+        from types import SimpleNamespace
         rx.ib.reqMktData = req
+        rx.ib.tickers = lambda: [SimpleNamespace(contract=Contract(conId=1)),
+                                 SimpleNamespace(contract=Contract(conId=2))]
         rx._contracts_source.call_event_subscriber_sync = (
             lambda fn, asend_result=False: fn())
-        rx.contracts_cache[Contract(conId=1)] = object()
-        rx.contracts_cache[Contract(conId=2)] = object()
         rx._resubscribe_market_data()
         assert calls == [2]
 

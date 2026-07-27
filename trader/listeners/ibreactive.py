@@ -250,12 +250,26 @@ class IBAIORx():
         return 'resubscribe'
 
     def _resubscribe_market_data(self) -> int:
-        """Re-issue reqMktData for every cached streaming subscription.
+        """Re-issue reqMktData for every active streaming subscription.
 
-        ib_async keys tickers by contract, so a re-request feeds the SAME
-        Ticker objects and every existing observable pipeline resumes — no
-        cache invalidation, no re-subscription dance in the strategy layer."""
-        contracts = list(self.contracts_cache.keys())
+        The subscription set comes from ``ib.tickers()`` — ib_async keeps one
+        Ticker per requested contract for the life of the session, so it knows
+        every live subscription REGARDLESS of which wrapper created it. The
+        first live 10197 trial (2026-07-27 11:18) proved why that matters:
+        this method originally read ``contracts_cache``, which only
+        ``subscribe_contract`` populates — the trader service's ticker
+        publisher subscribes through a different path, the cache was EMPTY,
+        and the loop faithfully re-requested zero subscriptions once a minute.
+        Detection worked; recovery re-armed nothing.
+
+        Re-requests feed the SAME Ticker objects, so every downstream pipeline
+        resumes with no cache invalidation anywhere."""
+        try:
+            contracts = [t.contract for t in self.ib.tickers() if t.contract is not None]
+        except Exception:
+            contracts = []
+        if not contracts:
+            contracts = list(self.contracts_cache.keys())
         for c in contracts:
             try:
                 self._contracts_source.call_event_subscriber_sync(
