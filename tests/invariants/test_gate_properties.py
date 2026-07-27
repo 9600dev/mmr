@@ -486,3 +486,47 @@ def test_flip_is_exit_class_and_never_gated_by_approver_tier():
     t_open = _tier_flip_trader(1000.0, 'correct-secret', held_long=0)
     assert asyncio.run(t_open.enforce_approver_tier(
         _tier_contract(), 'SELL', 30, 'MARKET', None, '')) is not None
+
+
+class TestDegenerateOrderInputsNeverTrade:
+    """Live adversarial probe, 2026-07-27: NaN / inf / 1e308 / negative / zero
+    quantities and non-positive limit prices were pushed through the real
+    propose->approve path against the paper broker. Nothing traded. But the
+    defence that fired was IB's OWN validator ("Unable to parse field: 'Order
+    Size' for input string: 'nan'") plus the fail-closed margin gate, because
+    the structural check sits DOWNSTREAM of the whatIf probe order.
+
+    These pin the part that must not depend on the broker being picky, and
+    record which layer owns each refusal.
+    """
+
+    @pytest.mark.parametrize('qty', [
+        float('nan'), float('inf'), float('-inf'), -5.0, 0.0, -0.0])
+    def test_malformed_quantities_are_structurally_refused(self, qty):
+        from trader.trading.order_structure import structural_rejection
+        assert structural_rejection('BUY', qty, 'MKT', 0.0, 0.0) is not None
+
+    @pytest.mark.parametrize('limit', [0.0, -5.0, float('nan'), float('inf')])
+    def test_non_positive_limit_prices_are_structurally_refused(self, limit):
+        from trader.trading.order_structure import structural_rejection
+        assert structural_rejection('BUY', 10, 'LMT', limit, 0.0) is not None
+
+    def test_an_absurd_but_finite_quantity_is_structurally_ALLOWED(self):
+        """Layer ownership, pinned because I assumed the opposite and the test
+        caught me. 1e308 shares is finite and positive, so it is well-FORMED.
+        The structural layer's job is shape, not magnitude. "How many shares is
+        too many" belongs to sizing and the risk gate (concentration and
+        leverage both refuse it live), with IB refusing last. Asserting a
+        structural refusal here would move a risk decision into a layer with no
+        principled bound to make it with."""
+        from trader.trading.order_structure import structural_rejection
+        assert structural_rejection('BUY', 1e308, 'MKT', 0.0, 0.0) is None
+
+    def test_a_fractional_quantity_is_structurally_ALLOWED(self):
+        """Same boundary, other direction: 0.5 shares is well-formed (some
+        venues support fractional), so the structural layer permits it and the
+        BROKER refuses it ("Fractional-sized order cannot be placed via API").
+        Recording which layer owns this stops a future reader assuming the
+        structural check covers it."""
+        from trader.trading.order_structure import structural_rejection
+        assert structural_rejection('BUY', 0.5, 'MKT', 0.0, 0.0) is None

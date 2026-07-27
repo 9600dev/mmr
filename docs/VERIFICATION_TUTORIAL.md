@@ -93,8 +93,9 @@ cannot check it, and you are back to trusting the diff.
 
 ## Table of contents
 
-1. [The problem with tests](#1-the-problem-with-tests) · [finance primer](#a-five-minute-finance-primer)
+1. [The problem with tests](#1-the-problem-with-tests)
 2. [Layer 0: types that encode permission (`ty`)](#2-layer-0-types-that-encode-permission-ty)
+1.1. [finance primer](#a-five-minute-finance-primer)
 3. [Layer 1: property-based testing (Hypothesis)](#3-layer-1-property-based-testing-hypothesis)
 4. [Layer 2: contracts (`deal`)](#4-layer-2-contracts-deal)
 5. [Layer 3: symbolic execution (CrossHair)](#5-layer-3-symbolic-execution-crosshair)
@@ -1096,7 +1097,6 @@ toolchain points at it, and why the property in section 3 states
 quantity-independence. A backdoor needs a threshold to hide behind.
 
 ### The function
-
 
 ```python
 # trader/trading/exit_class.py

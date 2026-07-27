@@ -296,3 +296,60 @@ class TestPolicyLayersStack:
         # silent None, so read loops can drop-and-continue.
         with pytest.raises(DillDeserializationError):
             _decode_payload(b'\xff\xff not msgpack not dill \x00\x01')
+
+
+class TestGadgetsDoNotExecuteLiveProbe:
+    """Live adversarial probe, 2026-07-27, run against the running container
+    and over the live RPC socket. Each gadget's payload, IF EXECUTED, writes a
+    marker file; the probe asserted on the marker's ABSENCE rather than on the
+    exception, because "it raised" and "it raised before running the payload"
+    are different claims and only the second one is security.
+
+    All four refused pre-execution, the msgpack ExtType wire path refused, the
+    live trader_service returned a structured DillDeserializationError instead
+    of hanging or dying, and it was still answering RPC afterwards.
+    """
+
+    def _detonate(self, tmp_path, gadget_factory):
+        import dill
+        from trader.messaging.clientserver import _safe_dill_loads
+        marker = tmp_path / 'DETONATED'
+        payload = dill.dumps(gadget_factory(str(marker)))
+        with pytest.raises(Exception):
+            _safe_dill_loads(payload)
+        return marker.exists()
+
+    def test_os_system_gadget_does_not_run(self, tmp_path):
+        import os
+
+        class G:
+            def __init__(self, path): self.path = path
+            def __reduce__(self): return (os.system, (f'touch {self.path}',))
+
+        assert self._detonate(tmp_path, G) is False
+
+    def test_subprocess_gadget_does_not_run(self, tmp_path):
+        import subprocess
+
+        class G:
+            def __init__(self, path): self.path = path
+            def __reduce__(self): return (subprocess.call, (['touch', self.path],))
+
+        assert self._detonate(tmp_path, G) is False
+
+    def test_eval_gadget_does_not_run(self, tmp_path):
+        class G:
+            def __init__(self, path): self.path = path
+            def __reduce__(self):
+                return (eval, (f"__import__('os').system('touch {self.path}')",))
+
+        assert self._detonate(tmp_path, G) is False
+
+    def test_legitimate_payloads_still_load(self):
+        """The other half: a boundary that refuses everything is not a
+        boundary, it is an outage."""
+        import datetime as dt
+        import dill
+        from trader.messaging.clientserver import _safe_dill_loads
+        for obj in ({'a': 1}, [1, 2, 3], dt.datetime(2026, 1, 1), 'x', 42):
+            assert _safe_dill_loads(dill.dumps(obj)) == obj
