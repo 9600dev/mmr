@@ -124,3 +124,32 @@ class TestResubscribeReissuesEveryCachedContract:
         before = rx._md_last_tick_at
         rx._note_market_data(set())
         assert rx._md_last_tick_at > before
+
+
+class TestRecoveredAnnouncementCountsLiveTickers:
+    def test_clear_branch_counts_tickers_not_the_cache(self, caplog):
+        """The first live RECOVERED line said '0 subscriptions live again'
+        while 12 streamed — it counted the same empty cache the resubscribe
+        bug read. One loop tick, state arranged as post-recovery."""
+        import logging as _logging
+        from types import SimpleNamespace
+        rx = _rx()
+        rx._md_retry_interval = 0.01
+        rx._md_lost_at = time.time() - 10
+        rx._md_last_tick_at = time.time()          # ticks flowed after the loss
+        rx.ib.tickers = lambda: [SimpleNamespace(contract=Contract(conId=i))
+                                 for i in (1, 2, 3)]
+        rx._shutdown = False
+
+        async def one_tick():
+            task = asyncio.ensure_future(rx._market_data_retry_loop())
+            await asyncio.sleep(0.05)
+            rx._shutdown = True
+            task.cancel()
+
+        with caplog.at_level(_logging.WARNING):
+            asyncio.new_event_loop().run_until_complete(one_tick())
+        recovered = [r.message for r in caplog.records if 'RECOVERED' in r.message]
+        assert recovered, 'the clear branch never announced'
+        assert '3 subscriptions' in recovered[0]
+        assert rx._md_lost_at is None

@@ -145,3 +145,189 @@ class TestFilledSupersedesCancelled:
         events = [e.event_type for e in es.query_since(
             since=__import__('datetime').datetime(2000, 1, 1))]
         assert events.count(EventType.ORDER_FILLED) == 1
+
+
+class TestRecordedEventContent:
+    """Mutation scored this module 61.7% on first measurement, with ~90
+    survivors inside _record_event — every FIELD of the ledger row could be
+    corrupted unnoticed because tests asserted event types, never content.
+    The PnL ledger pairs these rows by strategy_name and quantity; a wrong
+    field is a silently wrong realized PnL, which is the same failure class
+    as the live Cancelled->Filled bug that put this module in the mutation
+    scope in the first place."""
+
+    def _trade(self, status='Filled', filled=37.0, total=50.0):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            order=SimpleNamespace(orderId=414, orderRef='orb_googl',
+                                  action='SELL', totalQuantity=total),
+            orderStatus=SimpleNamespace(status=status, filled=filled,
+                                        avgFillPrice=296.5),
+            contract=SimpleNamespace(conId=208813719, symbol='GOOGL'),
+        )
+
+    def _one_event(self, tmp_path, trade):
+        import datetime as dt
+        from trader.data.event_store import EventStore
+        from trader.trading.order_lifecycle import OrderLifecycleTracker
+        es = EventStore(str(tmp_path / 'content.duckdb'))
+        t = OrderLifecycleTracker(es)
+        t.on_trade(trade)
+        events = list(es.query_since(since=dt.datetime(2000, 1, 1)))
+        assert len(events) == 1
+        return events[0]
+
+    def test_fill_row_fields_round_trip_from_the_trade(self, tmp_path):
+        from trader.data.event_store import EventType
+        e = self._one_event(tmp_path, self._trade())
+        assert e.event_type == EventType.ORDER_FILLED
+        assert e.strategy_name == 'orb_googl', 'ledger attribution comes from orderRef'
+        assert e.conid == 208813719
+        assert e.symbol == 'GOOGL'
+        assert e.action == 'SELL'
+        assert e.quantity == 37.0, 'a FILL records the FILLED quantity, not totalQuantity'
+        assert e.price == 296.5, 'fill price is avgFillPrice'
+        assert e.order_id == 414
+        assert (e.metadata or {}).get('status') == 'Filled'
+
+    def test_cancel_row_records_total_quantity(self, tmp_path):
+        """A cancel has no fill; its size is what was ASKED (totalQuantity),
+        and filled=0 must not zero it."""
+        from trader.data.event_store import EventType
+        e = self._one_event(tmp_path, self._trade(status='Cancelled', filled=0.0))
+        assert e.event_type == EventType.ORDER_CANCELLED
+        assert e.quantity == 50.0
+        assert e.strategy_name == 'orb_googl'
+        assert (e.metadata or {}).get('status') == 'Cancelled'
+
+    def test_inactive_maps_to_rejected(self, tmp_path):
+        from trader.data.event_store import EventType
+        e = self._one_event(tmp_path, self._trade(status='Inactive', filled=0.0))
+        assert e.event_type == EventType.ORDER_REJECTED
+
+    def test_blank_orderref_falls_back_to_order_not_empty(self, tmp_path):
+        from types import SimpleNamespace
+        tr = self._trade()
+        tr.order.orderRef = ''
+        e = self._one_event(tmp_path, tr)
+        assert e.strategy_name == 'order', 'blank ref must not write an empty strategy_name'
+
+
+class TestOnTradeGuards:
+    def _tracker(self):
+        from trader.trading.order_lifecycle import OrderLifecycleTracker
+        return OrderLifecycleTracker(None)
+
+    def _trade(self, oid, status):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            order=SimpleNamespace(orderId=oid, orderRef='', action='SELL',
+                                  totalQuantity=1.0),
+            orderStatus=SimpleNamespace(status=status, filled=0.0, avgFillPrice=0.0),
+            contract=SimpleNamespace(conId=1, symbol='X'),
+        )
+
+    def test_order_id_zero_is_ignored(self):
+        t = self._tracker()
+        t.on_trade(self._trade(0, 'Filled'))
+        assert t.latest_status(0) is None
+
+    def test_empty_status_is_ignored(self):
+        t = self._tracker()
+        t.on_trade(self._trade(5, ''))
+        assert t.latest_status(5) is None
+
+    def test_latest_status_tracks_progression(self):
+        t = self._tracker()
+        for st in ('PendingSubmit', 'PreSubmitted', 'Submitted', 'Filled'):
+            t.on_trade(self._trade(6, st))
+        assert t.latest_status(6) == 'Filled'
+
+
+class TestWaitDecisive:
+    def _tracker(self):
+        from trader.trading.order_lifecycle import OrderLifecycleTracker
+        return OrderLifecycleTracker(None)
+
+    def _trade(self, oid, status):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            order=SimpleNamespace(orderId=oid, orderRef='', action='BUY',
+                                  totalQuantity=1.0),
+            orderStatus=SimpleNamespace(status=status, filled=1.0, avgFillPrice=1.0),
+            contract=SimpleNamespace(conId=1, symbol='X'),
+        )
+
+    def test_known_status_resolves_immediately(self):
+        import asyncio
+        t = self._tracker()
+        t.on_trade(self._trade(7, 'Submitted'))
+        out = asyncio.new_event_loop().run_until_complete(t.wait_decisive(7, timeout=0.2))
+        assert out == 'accepted'
+
+    def test_later_status_resolves_a_waiter(self):
+        import asyncio
+        t = self._tracker()
+
+        async def drive():
+            fut = asyncio.ensure_future(t.wait_decisive(8, timeout=2.0))
+            await asyncio.sleep(0.01)
+            t.on_trade(self._trade(8, 'Cancelled'))
+            return await fut
+
+        assert asyncio.new_event_loop().run_until_complete(drive()) == 'rejected'
+
+    def test_timeout_returns_timeout_and_cleans_up(self):
+        import asyncio
+        t = self._tracker()
+        out = asyncio.new_event_loop().run_until_complete(t.wait_decisive(9, timeout=0.05))
+        assert out == 'timeout'
+        assert 9 not in t._waiters, 'timed-out waiter must not leak'
+
+    def test_filled_wins_over_accepted_for_new_waiters(self):
+        import asyncio
+        t = self._tracker()
+        t.on_trade(self._trade(10, 'Submitted'))
+        t.on_trade(self._trade(10, 'Filled'))
+        out = asyncio.new_event_loop().run_until_complete(t.wait_decisive(10, timeout=0.2))
+        assert out == 'filled'
+
+
+class TestApiCancelledAndDegenerateFill:
+    def test_apicancelled_maps_to_cancelled(self, tmp_path):
+        """ApiCancelled is OUR cancel (vs a desk/exchange cancel) and must
+        record identically — three surviving mutants proved nothing pinned
+        the second member of the status pair."""
+        import datetime as dt
+        from types import SimpleNamespace
+        from trader.data.event_store import EventStore, EventType
+        from trader.trading.order_lifecycle import OrderLifecycleTracker
+        es = EventStore(str(tmp_path / 'api.duckdb'))
+        t = OrderLifecycleTracker(es)
+        t.on_trade(SimpleNamespace(
+            order=SimpleNamespace(orderId=20, orderRef='s', action='SELL',
+                                  totalQuantity=5.0),
+            orderStatus=SimpleNamespace(status='ApiCancelled', filled=0.0,
+                                        avgFillPrice=0.0),
+            contract=SimpleNamespace(conId=1, symbol='X')))
+        events = list(es.query_since(since=dt.datetime(2000, 1, 1)))
+        assert events[0].event_type == EventType.ORDER_CANCELLED
+
+    def test_fill_with_zero_filled_records_zero_not_a_fabricated_quantity(self, tmp_path):
+        """Degenerate but pinned: a Filled status carrying filled=0 must record
+        0, never a fabricated default — a wrong nonzero here would enter the
+        PnL pairing as a phantom lot."""
+        import datetime as dt
+        from types import SimpleNamespace
+        from trader.data.event_store import EventStore
+        from trader.trading.order_lifecycle import OrderLifecycleTracker
+        es = EventStore(str(tmp_path / 'zf.duckdb'))
+        t = OrderLifecycleTracker(es)
+        t.on_trade(SimpleNamespace(
+            order=SimpleNamespace(orderId=21, orderRef='s', action='BUY',
+                                  totalQuantity=5.0),
+            orderStatus=SimpleNamespace(status='Filled', filled=0.0,
+                                        avgFillPrice=0.0),
+            contract=SimpleNamespace(conId=1, symbol='X')))
+        events = list(es.query_since(since=dt.datetime(2000, 1, 1)))
+        assert events[0].quantity == 0.0

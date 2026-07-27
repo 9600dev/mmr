@@ -238,6 +238,22 @@
 #   Whoever picks this up next: the remaining consequence is in the ORDERING
 #   (cancel-before-close, clear-tracking-in-finally), not in arithmetic.
 #
+#   order_lifecycle.py FIRST MEASUREMENT (2026-07-27, 61.7% -> 78.1%).
+#   Scoped as part of the nine-bug coverage audit: the module writes the
+#   ORDER_FILLED rows the PnL ledger pairs, and the live Cancelled->Filled race
+#   proved a wrong record silently corrupts realized PnL. First measurement had
+#   ~90 survivors inside _record_event alone — every FIELD of the ledger row
+#   (strategy_name from orderRef, filled-vs-total quantity, avgFillPrice,
+#   conid, order_id, metadata.status) could be corrupted unnoticed, because
+#   tests asserted event TYPES and never content. TestRecordedEventContent
+#   pins the whole row; ApiCancelled mapping and the filled=0 degenerate are
+#   pinned separately (3+4 more kills).
+#   RESIDUAL 73: FIRST-PASS CLASSIFICATION ONLY — spot-checked families are
+#   defensive getattr-default equivalents (attrs always present on real Trade
+#   objects), log-string mutants in the supersede branch, and async
+#   cleanup-order variants in wait_decisive. NOT exhaustively derived; treat
+#   as a floor, not an endorsement (auto_executor-style).
+#
 #   market_session.py SURVIVOR CLASSIFICATION (2026-07-26, 25.7% -> 74.6%).
 #   The session gate for dispatched bars, scoped the day it shipped. The first
 #   measurement was the WORST in the kernel — 25.7% with 28 passing tests — and

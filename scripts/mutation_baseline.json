@@ -54,6 +54,12 @@
       "survived": 49,
       "timeout": 0,
       "score": 0.746114
+    },
+    "trader/trading/order_lifecycle.py": {
+      "killed": 260,
+      "survived": 73,
+      "timeout": 1,
+      "score": 0.781437
     }
   }
 }

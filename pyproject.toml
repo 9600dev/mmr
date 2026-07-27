@@ -158,6 +158,10 @@ only_mutate = [
     # The disaster stop's size and price: the only protection that survives a
     # dead feed while holding, and it lived inline between two SDK calls.
     "trader/trading/protective_stop.py",
+    # The order-outcome recorder: the PnL ledger pairs the ORDER_FILLED events
+    # it writes, and the live Cancelled->Filled race (d23746d) proved a wrong
+    # record silently corrupts realized PnL. Small, pure-ish, high-consequence.
+    "trader/trading/order_lifecycle.py",
     # Decides which bars a strategy is allowed to see at all. Not on the
     # order path, but a wrong answer either starves a strategy of real bars
     # or feeds it bars that never traded.
@@ -183,6 +187,7 @@ pytest_add_cli_args_test_selection = [
     "tests/invariants/test_protective_stop.py",
     "tests/test_market_session.py",
     "tests/test_order_validator.py",
+    "tests/test_order_lifecycle.py",
     "tests/invariants/test_proposal_machine.py",
     "tests/invariants/test_sizing_properties.py",
     "tests/test_order_math.py",
