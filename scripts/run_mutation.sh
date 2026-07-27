@@ -36,7 +36,7 @@
 # run cannot satisfy the gate — so budget for that, or use `cores` for a quick
 # read on the pure kernel while iterating.
 #
-#   auto_executor.py        1275 killed / 451 survived / 26 timeout = 73.9%
+#   auto_executor.py        1212 killed / 685 survived / 25 timeout = 63.9%   (corrected floor — see run-integrity note; the 74.3% was run inflation)
 #       BASELINED, NOT ENDORSED. decide_signal (2026-07-25) and then the
 #       protective-stop + reconcile paths (2026-07-26) have been analysed and
 #       specced; the rest is a recorded floor so the score cannot silently
@@ -355,21 +355,23 @@
 #       Liquidation. Widening the spec's strategies therefore needs that
 #       behaviour decided FIRST, or the widened property goes red on day one.
 #
-# RUN-INTEGRITY WARNING (2026-07-26): full passes are UNRELIABLE ON A BUSY
-# MACHINE. A full run executed during the live ASX open (containers streaming
-# ticks) flipped ~173 auto_executor mutants killed->survived vs the morning's
-# run of IDENTICAL code and tests. Proven false survivor:
-# xǁAutoExecutorǁ_execute_open__mutmut_5 was recorded SURVIVED, but running its
-# own covering set manually (MUTANT_UNDER_TEST=... pytest, cwd=mutants) fails
-# 23 tests including test_buy_signal_opens_position. The stats mapping was
-# intact (25 covering tests recorded), so the harness ran them and mis-scored.
-# Meanwhile spot-checked survivors (_execute_close_9, _ensure_protective_2)
-# were GENUINE — the corruption is selective, which is what makes it dangerous:
-# it looks like a plausible score, not like a crash.
-# Policy: run full passes on a QUIET machine only; if a baseline moves by more
-# than ~1% without a code/test change, DISBELIEVE IT and manually re-verify a
-# sample of flipped mutants before recording. `baseline` records without
-# checking first — do not run it casually.
+# RUN-INTEGRITY WARNING (2026-07-26, RESOLVED 2026-07-27): mutmut's
+# shared-process model can mis-score in BOTH directions, and the two errors
+# look different:
+#   * UNDER-kill (false survivors): proven once — _execute_open__mutmut_5 was
+#     recorded SURVIVED while its own covering set, run manually
+#     (MUTANT_UNDER_TEST=... pytest, cwd=mutants), failed 23 tests.
+#   * OVER-kill (false kills): the 2026-07-26 morning run scored auto_executor
+#     74.3%; the evening run and the 2026-07-27 quiet-machine run BOTH scored
+#     ~63.9% on it, and ELEVEN of eleven manually-verified survivors from the
+#     quiet run were genuine. The 74.3% was the outlier — inflated, most
+#     plausibly by cross-mutant state contamination making later tests fail
+#     spuriously. A spurious failure IS a spurious kill.
+# The meta-lesson: one proven false survivor does not condemn a whole run, and
+# an agreeing pair of runs beats a flattering singleton. Policy: prefer quiet
+# machines; when runs disagree, manually verify a SAMPLE of the disputed
+# verdicts IN BOTH DIRECTIONS before recording either number; `baseline`
+# records without checking first, so never run it casually.
 #
 # Usage:
 #   scripts/run_mutation.sh            # all 4 modules, then per-module score

@@ -1,6 +1,12 @@
 {
   "note": "Per-module mutation SCORE floor. Regenerate with scripts/run_mutation.sh baseline after a human-reviewed change. Scores are keyed on the module, not mutant ids, which renumber.",
   "modules": {
+    "trader/data/market_session.py": {
+      "killed": 144,
+      "survived": 49,
+      "timeout": 0,
+      "score": 0.746114
+    },
     "trader/data/proposal_transitions.py": {
       "killed": 8,
       "survived": 0,
@@ -8,10 +14,10 @@
       "score": 1.0
     },
     "trader/strategy/auto_executor.py": {
-      "killed": 1275,
-      "survived": 451,
-      "timeout": 26,
-      "score": 0.74258
+      "killed": 1212,
+      "survived": 685,
+      "timeout": 25,
+      "score": 0.6436
     },
     "trader/trading/exit_class.py": {
       "killed": 29,
@@ -19,10 +25,16 @@
       "timeout": 0,
       "score": 0.935484
     },
+    "trader/trading/order_lifecycle.py": {
+      "killed": 260,
+      "survived": 73,
+      "timeout": 1,
+      "score": 0.781437
+    },
     "trader/trading/order_math.py": {
-      "killed": 68,
+      "killed": 69,
       "survived": 3,
-      "timeout": 2,
+      "timeout": 1,
       "score": 0.958904
     },
     "trader/trading/order_structure.py": {
@@ -32,10 +44,10 @@
       "score": 0.966292
     },
     "trader/trading/position_sizing.py": {
-      "killed": 415,
-      "survived": 165,
+      "killed": 412,
+      "survived": 168,
       "timeout": 0,
-      "score": 0.715517
+      "score": 0.710345
     },
     "trader/trading/protective_stop.py": {
       "killed": 53,
@@ -48,18 +60,6 @@
       "survived": 32,
       "timeout": 0,
       "score": 0.909091
-    },
-    "trader/data/market_session.py": {
-      "killed": 144,
-      "survived": 49,
-      "timeout": 0,
-      "score": 0.746114
-    },
-    "trader/trading/order_lifecycle.py": {
-      "killed": 260,
-      "survived": 73,
-      "timeout": 1,
-      "score": 0.781437
     }
   }
 }
