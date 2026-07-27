@@ -3287,7 +3287,11 @@ def _handle_resize_positions(mmr: MMR, args: argparse.Namespace):
     table.add_column('Target Value', justify='right')
 
     for adj in plan['adjustments']:
-        delta_str = f'{adj["delta_qty"]:+d}'
+        # delta_qty is a FLOAT (share deltas from compute_resize_deltas) — the
+        # old {:+d} raised "Unknown format code 'd'" and crashed the plan
+        # rendering, including --dry-run, before showing anything. Found live
+        # 2026-07-27 by actually running the dry-run in the surface battery.
+        delta_str = f'{adj["delta_qty"]:+.0f}'
         action_style = 'green' if adj['action'] == 'BUY' else 'red'
         table.add_row(
             adj['symbol'],
