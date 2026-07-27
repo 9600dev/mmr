@@ -287,9 +287,13 @@ class IBAIORx():
             await asyncio.sleep(self._md_retry_interval)
             action = self._md_retry_action()
             if action == 'clear':
+                try:
+                    live = len(self.ib.tickers())
+                except Exception:
+                    live = len(self.contracts_cache)
                 logging.warning(
                     'market data RECOVERED after competing-session loss (10197) — '
-                    '%d subscriptions live again', len(self.contracts_cache))
+                    '%d subscriptions live again', live)
                 self._md_lost_at = None
             elif action == 'resubscribe':
                 n = self._resubscribe_market_data()
