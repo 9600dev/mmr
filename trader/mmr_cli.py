@@ -1844,6 +1844,14 @@ def _role_allows(cmd: Optional[str], args: argparse.Namespace) -> Optional[str]:
         # The whole point: approve is absent from the proposer's surface.
         return _deny('the approve capability is absent from the proposer role')
 
+    if role == 'approver' and cmd == 'propose':
+        # The SYMMETRIC half, missing until the 2026-07-27 live role matrix:
+        # an approver who can also propose defeats the two-person severing
+        # exactly as thoroughly as a proposer who can approve — one context
+        # would originate the trade and wave it through. Found live: the
+        # probe's propose sailed through and created a real PENDING proposal.
+        return _deny('the propose capability is absent from the approver role')
+
     return None
 
 

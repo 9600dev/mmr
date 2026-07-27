@@ -160,3 +160,38 @@ def test_env_key_wins_over_yaml(monkeypatch):
     env_key = _os.environ.get('MMR_APPROVER_KEY')
     resolved = env_key if env_key is not None else (yaml_key or '')
     assert resolved == 'yaml-secret'
+
+
+class TestRoleMatrixSymmetry:
+    """The two halves of the proposer/approver severing, found asymmetric by
+    the 2026-07-27 live role matrix: proposer->approve was denied but
+    approver->propose sailed through and created a real PENDING proposal.
+    Either direction alone defeats the two-person rule."""
+
+    def _ns(self):
+        import argparse
+        return argparse.Namespace()
+
+    def test_approver_cannot_propose(self, monkeypatch):
+        from trader.mmr_cli import _role_allows
+        monkeypatch.setenv('MMR_ROLE', 'approver')
+        refusal = _role_allows('propose', self._ns())
+        assert refusal is not None and 'propose' in refusal
+
+    def test_proposer_cannot_approve(self, monkeypatch):
+        from trader.mmr_cli import _role_allows
+        monkeypatch.setenv('MMR_ROLE', 'proposer')
+        refusal = _role_allows('approve', self._ns())
+        assert refusal is not None and 'approve' in refusal
+
+    def test_approver_can_still_approve_and_read(self, monkeypatch):
+        from trader.mmr_cli import _role_allows
+        monkeypatch.setenv('MMR_ROLE', 'approver')
+        assert _role_allows('approve', self._ns()) is None
+        assert _role_allows('proposals', self._ns()) is None
+        assert _role_allows('portfolio', self._ns()) is None
+
+    def test_proposer_can_still_propose(self, monkeypatch):
+        from trader.mmr_cli import _role_allows
+        monkeypatch.setenv('MMR_ROLE', 'proposer')
+        assert _role_allows('propose', self._ns()) is None
