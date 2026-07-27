@@ -30,7 +30,7 @@ from trader.trading.book import BookSubject
 from trader.trading.executioner import TradeExecutioner
 from trader.trading.portfolio import Portfolio
 from trader.trading.strategy import Strategy, StrategyConfig, StrategyState
-from typing import cast, Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, cast, Dict, List, NamedTuple, Optional, Tuple, Union
 
 import asyncio
 import backoff
@@ -998,9 +998,45 @@ class Trader():
         return await self.executioner.place_order(contract_order=ContractOrderPair(contract, order), condition=condition)
 
     @log_method
+    async def _margin_impact_or_refusal(self, contract: Contract, probe_order: Order):
+        """whatIf margin impact, or a fail-closed SuccessFail refusal.
+
+        Returns the margin dict on success; a SuccessFail.fail on any failure
+        (exception or empty result) so the open branch refuses with a reason.
+        CASH contracts never reach this — they carry the documented
+        skipped:forex-cash exemption at the call site.
+        """
+        try:
+            margin_impact = await self.check_order_margin(contract, probe_order)
+        except Exception as ex:
+            logging.warning('whatIfOrder failed — refusing open (fail-closed): %s', ex)
+            return SuccessFail.fail(
+                error=f'margin impact could not be computed (whatIfOrder '
+                      f'failed: {ex}) — refusing to open new exposure without '
+                      f'the leverage check (fail-closed; exits are exempt)')
+        if not margin_impact:
+            return SuccessFail.fail(
+                error='margin impact came back empty — refusing to open new '
+                      'exposure without the leverage check (fail-closed; '
+                      'exits are exempt)')
+        return margin_impact
+
     async def check_order_margin(self, contract: Contract, order: Order) -> dict:
         """Run whatIfOrder to get margin impact without placing."""
         order_state = await self.client.ib.whatIfOrderAsync(contract, order)
+        # ib_async can hand back a LIST of order states — observed live
+        # 2026-07-27 on a CASH/IDEALPRO whatIf, where `.numeric` on the list
+        # raised AttributeError. Before the fail-closed flip that crash was
+        # silently swallowed and the margin check simply never ran for forex;
+        # after it, the crash refused the open, which is how it was found.
+        # Normalize to the first state; an empty list is a failed whatIf and
+        # raises so the caller's fail-closed refusal says why.
+        if isinstance(order_state, (list, tuple)):
+            if not order_state:
+                raise ValueError('whatIfOrder returned no order state')
+            # ty narrows a list/tuple element to `object`; the runtime type is
+            # ib_async OrderState (duck-typed .numeric/.warningText below).
+            order_state = cast(Any, order_state[0])
         numeric = order_state.numeric(2)
         return {
             'initMarginBefore': numeric.initMarginBefore,
@@ -1446,19 +1482,23 @@ class Trader():
             # checked", and the flip makes "never checked" refuse like every
             # other unreadable critical input. Exits never reach this branch.
             leverage_checks: Dict[str, str] = {}
-            try:
-                margin_impact = await self.check_order_margin(contract, probe_order)
-            except Exception as ex:
-                logging.warning('whatIfOrder failed — refusing open (fail-closed): %s', ex)
-                return SuccessFail.fail(
-                    error=f'margin impact could not be computed (whatIfOrder '
-                          f'failed: {ex}) — refusing to open new exposure without '
-                          f'the leverage check (fail-closed; exits are exempt)')
-            if not margin_impact:
-                return SuccessFail.fail(
-                    error='margin impact came back empty — refusing to open new '
-                          'exposure without the leverage check (fail-closed; '
-                          'exits are exempt)')
+            if (contract.secType or '').upper() == 'CASH':
+                # A forex order is a currency conversion, not leveraged stock
+                # exposure — the same reasoning that exempts CASH from the
+                # concentration check. This is also a practical necessity, not
+                # just taste: IB's whatIfOrder returns NO order state for
+                # CASH/IDEALPRO (observed live 2026-07-27), so without this
+                # carve-out the fail-closed margin gate makes forex opens
+                # permanently impossible. Recorded, never silent.
+                leverage_checks = {
+                    'leverage': 'skipped:forex-cash',
+                    'margin_cushion': 'skipped:forex-cash',
+                }
+                margin_impact = None
+            else:
+                margin_impact = await self._margin_impact_or_refusal(contract, probe_order)
+                if isinstance(margin_impact, SuccessFail):
+                    return margin_impact
 
             # 3. Leverage limit check
             if margin_impact:

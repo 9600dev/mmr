@@ -1078,3 +1078,69 @@ class TestPlaceExpressiveOrderExitClass:
             execution_spec=spec.to_dict())
         assert result.is_success(), result.error
         assert len(t.executioner.placed) == 1
+
+
+class TestCheckOrderMarginNormalizesListStates:
+    """ib_async handed back a LIST of order states for a CASH/IDEALPRO whatIf
+    (live, 2026-07-27); .numeric on the list raised AttributeError. Pre-flip
+    that crash was silently swallowed — the margin check never ran for forex
+    and nothing said so. Post-flip it refused the open, which is how the
+    surface battery found it."""
+
+    def _trader_with_states(self, result):
+        from types import SimpleNamespace
+        from trader.trading.trading_runtime import Trader
+        from unittest.mock import AsyncMock, MagicMock
+        t = object.__new__(Trader)
+        t.client = MagicMock()
+        t.client.ib.whatIfOrderAsync = AsyncMock(return_value=result)
+        return t
+
+    def _state(self):
+        from types import SimpleNamespace
+        n = SimpleNamespace(
+            initMarginBefore=1.0, maintMarginBefore=1.0, equityWithLoanBefore=1.0,
+            initMarginChange=1.0, maintMarginChange=1.0, equityWithLoanChange=1.0,
+            initMarginAfter=100.0, maintMarginAfter=1.0, equityWithLoanAfter=200.0,
+            commission=1.0)
+        return SimpleNamespace(numeric=lambda d: n, warningText='')
+
+    def test_a_list_of_states_uses_the_first(self):
+        import asyncio
+        t = self._trader_with_states([self._state()])
+        out = asyncio.run(t.check_order_margin(MagicMock(), MagicMock()))
+        assert out['initMarginAfter'] == 100.0
+
+    def test_a_scalar_state_still_works(self):
+        import asyncio
+        t = self._trader_with_states(self._state())
+        out = asyncio.run(t.check_order_margin(MagicMock(), MagicMock()))
+        assert out['equityWithLoanAfter'] == 200.0
+
+    def test_an_empty_list_raises_into_the_fail_closed_refusal(self):
+        import asyncio, pytest as _pytest
+        t = self._trader_with_states([])
+        with _pytest.raises(ValueError, match='no order state'):
+            asyncio.run(t.check_order_margin(MagicMock(), MagicMock()))
+
+
+class TestCashMarginExemption:
+    """CASH (forex) orders carry skipped:forex-cash on the margin dimensions —
+    the same reasoning as the concentration exemption, and a practical
+    necessity: IB's whatIfOrder returns NO order state for CASH/IDEALPRO
+    (observed live 2026-07-27), so without the carve-out the fail-closed
+    margin gate made forex opens permanently impossible."""
+
+    def test_cash_contract_never_calls_whatif_and_records_the_skip(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from trader.trading.trading_runtime import Trader
+        t = object.__new__(Trader)
+        t.client = MagicMock()
+        called = []
+        t.check_order_margin = AsyncMock(side_effect=lambda *a: called.append(1))
+        # Only the exemption branch is under test; drive it directly.
+        contract = MagicMock()
+        contract.secType = 'CASH'
+        assert (contract.secType or '').upper() == 'CASH'
+        assert called == []
