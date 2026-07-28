@@ -26,12 +26,33 @@ from trader.strategy.auto_executor import (
     decide_signal,
 )
 
-# A FRESH bar. These tests drive the OPEN path, and the stale-bar gate refuses
-# an open whose bar is older than 3x the bar size. The hardcoded past date this
-# replaced only ever passed because an unset `bar_size_seconds` disabled the
-# gate, so the suite was exercising opens under conditions that cannot occur
-# live. Naive here means UTC, which is how bar_age_seconds reads it.
-TS = pd.Timestamp.now(tz='UTC').tz_localize(None).floor('min')
+# A fixed bar timestamp, kept deterministic on purpose. These tests drive the
+# OPEN path, which the stale-bar gate guards; the age they are judged against
+# is frozen by the _freeze_bar_age fixture below rather than taken from the
+# wall clock, so the same code always produces the same result.
+from trader.strategy import auto_executor as auto_executor_module
+
+TS = pd.Timestamp('2026-07-06 10:39:00')
+
+@pytest.fixture(autouse=True)
+def _freeze_bar_age(monkeypatch):
+    """Freeze the stale-bar gate's clock for this module.
+
+    `_process_signal` computes the bar's age against the wall clock, so a test
+    fixture is only "fresh" relative to when the test runs. Making the fixture
+    timestamp dynamic fixed that and introduced NONDETERMINISM: two mutation
+    runs over identical code disagreed on ~30 mutants in this module, because
+    each mutant runs in its own pytest invocation at a different instant.
+
+    A verification gate whose number moves without the code moving is a gate
+    whose alarms cannot be trusted, so the age is frozen instead. The bar
+    timestamp stays fixed and reproducible, and these tests present a healthy
+    age because none of them are ABOUT bar freshness. The ones that are call
+    `decide_signal` directly with an explicit age, and are unaffected by this.
+    """
+    monkeypatch.setattr(auto_executor_module, 'bar_age_seconds',
+                        lambda bar_ts, now_utc=None: 10.0)
+
 
 
 def make_work(**kwargs) -> SignalWork:
