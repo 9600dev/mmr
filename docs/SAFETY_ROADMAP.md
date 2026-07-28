@@ -514,6 +514,59 @@ closed (below).
 
 ---
 
+---
+
+## Stale-bar gate fails CLOSED, and an exemption audit — SHIPPED (2026-07-28)
+
+**The gate.** A bar much older than its own interval means a stalled feed or a
+reconnect flush, and opening at current market off it is trading on garbage.
+The gate refuses such opens (3x bar size by default) and never applies to
+closes. It needs two inputs, and missing either used to make it silently not
+run:
+
+* `bar_age_seconds is None` — the bar timestamp could not be dated
+* `bar_size_seconds <= 0` — the interval could not be resolved
+
+Both now refuse. That brings the last gate input into line with the rest of the
+system (daily PnL, NetLiquidation, position value, and the leverage check since
+2026-07-26 all refuse an open they cannot evaluate). Refusing is the benign
+direction here because the check is OPENS ONLY: the worst case is no new
+positions, while existing ones still exit and the broker-side disaster stops
+are untouched, so the book stays closeable even if it refused everything.
+
+**The second input was the real defect, and it was not in the gate.**
+`SignalWork.bar_size_seconds` defaulted to `0.0`, which the gate read as
+"interval unknown". Production always set it. No test ever did. So a
+safety-critical input had a default that switched the check off, every caller
+inherited it, and no test could reveal it. The field is now required: a caller
+who forgets fails at construction instead.
+
+**What that exposed.** Removing the default failed 31 tests at once. They had
+been exercising the open path with the gate disabled, several against a
+hardcoded bar timestamp three weeks stale. Fixing them moved auto_executor's
+mutation score from 72.4% to 86-90% without changing a single assertion. The
+tests were not checking what they appeared to check, and nothing could have
+shown that while every caller shared the disabling default.
+
+**Exemption audit (same day).** Every path that can skip a safety check was
+walked: `skip_risk_gate` (deprecated and ignored server-side), the exit-class
+predicate (two mismatches fixed 2026-07-27, now resolved through one function),
+`POSITION_CLASSIFIED` (corroborated at the chokepoint), `VALIDATED_STANDALONE`
+(validated on direction AND magnitude, fail-closed on an unreadable position),
+`allow_open`, and the RPC surface (dotted traversal refused, so no client can
+walk to `place_order_simple` around the gate). One gap found and closed:
+`PROTECTIVE_CHILD` is the only exit exemption nothing corroborates, and its
+justification — the leg reverses the entry, matches its quantity, and is
+parented to it — was asserted in comments and enforced by nothing. Now pinned
+across BRACKET/STOP_LOSS/TRAILING_STOP on both long and short entries, and
+verified non-vacuous by injecting each violation.
+
+**Still open:** turnover caps are built and calibrated but OFF in the live
+config; enabling is a one-line change and is safe mid-session since the
+legacy-history fix.
+
+---
+
 ## Turnover caps — SHIPPED, default OFF (2026-07-27)
 
 The last unbuilt control from Tranche 2, and the complement to everything above.

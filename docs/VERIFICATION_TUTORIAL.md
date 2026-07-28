@@ -934,6 +934,48 @@ Mutation testing found this one indirectly, which is worth noting: the score
 did not drop, it was *always* low and nobody could see why. The number moved
 only after the cause was removed.
 
+#### Fixing a time-dependent test, three ways, two of them wrong
+
+The fix above had a sequel worth recording, because the wrong turns are the
+kind anyone would take.
+
+The gate compares a bar timestamp against *now*, so every test that drives it
+is time-dependent. Three attempts:
+
+| attempt | deterministic? | module score |
+|---|---|---|
+| make the fixture timestamp dynamic | no | 90.2% |
+| stub out the age function | yes | **64.8%** |
+| override the clock | yes | ~90% |
+
+**Attempt one** replaced the rotten hardcoded date with `now()`. Correct about
+the problem, wrong about the fix: every mutant runs in its own test process at
+a different instant, so the score began moving without the code moving. Two
+full passes over identical code disagreed on about 30 mutants. A gate whose
+number drifts is a gate whose alarms cannot be trusted, and that is the same
+defect the tooling exists to catch in the product.
+
+**Attempt two** stubbed the age function to return a constant. The score
+stopped moving. It also fell 26 points, because every mutant *of the stubbed
+function* became unreachable from those tests. This is the trap: **a number
+that stabilises because you deleted what it was measuring looks exactly like a
+number that stabilised because you fixed something.** Only running the
+measurement told the two apart.
+
+**Attempt three** overrode the clock. The real function still runs against the
+real fixture data; only *now* is pinned. Determinism at no cost to coverage.
+
+The general rule: **fix a time-dependent test at the clock.** Not at the
+fixture data, which makes it nondeterministic, and not by removing the
+calculation, which makes it blind. Production keeps the wall clock; the seam
+exists only so a test can hold it still.
+
+There is a second lesson underneath. Two of the three attempts *passed the test
+suite*, and the suite could not distinguish between them. What separated them
+was a measurement of the measurement. If you take one thing from this section:
+the mutation score is not a grade, it is an instrument, and instruments need
+checking against known conditions like anything else.
+
 ---
 
 ### How strong should a property be?
