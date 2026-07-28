@@ -1600,6 +1600,43 @@ def build_parser() -> argparse.ArgumentParser:
                               help='Leaderboard rows to show (default: 10)')
 
     # bt-sweep — cartesian-product parameter sweep. One process, N backtests.
+    wf_p = sub.add_parser(
+        'walk-forward',
+        help='Choose parameters on the past, report on the future. Answers '
+             '"how good is the REFIT RULE", which is deployable, rather than '
+             '"how good is the best cell", which is not.',
+        epilog='Examples:\n'
+               '  walk-forward -s strategies/opening_range_breakout.py \\\n'
+               '      --class OpeningRangeBreakout --conids 756733 --days 250 \\\n'
+               "      --grid '{\"RANGE_MINUTES\":[15,30,45],\"VOLUME_MULT\":[1.2,1.5,2.0]}'\n"
+               '  walk-forward ... --train-days 90 --test-days 30 --anchored',
+        formatter_class=fmt)
+    wf_p.add_argument('-s', '--strategy', required=True)
+    wf_p.add_argument('--class', dest='class_name', required=True)
+    wf_p.add_argument('--conids', type=int, nargs='+', required=True)
+    wf_p.add_argument('--grid', required=True, metavar='JSON',
+                      help='JSON object mapping param name -> list of values')
+    wf_p.add_argument('--days', type=int, default=365)
+    wf_p.add_argument('--train-days', type=int, default=90,
+                      help='Length of each fitting window (default 90)')
+    wf_p.add_argument('--test-days', type=int, default=30,
+                      help='Length of each out-of-sample window, and the step '
+                           'between folds (default 30)')
+    wf_p.add_argument('--anchored', action='store_true',
+                      help='Expand the training window from a fixed start '
+                           'instead of rolling it. More data per fit, at the '
+                           'cost of averaging over regimes that have ended.')
+    wf_p.add_argument('--metric', default='sharpe',
+                      choices=['sharpe', 'profit_factor', 'total_return',
+                               'sortino', 'expectancy_bps'],
+                      help='What the fit optimises (default sharpe)')
+    wf_p.add_argument('--capital', type=float, default=100000)
+    wf_p.add_argument('--bar-size', default='1 min')
+    wf_p.add_argument('--live-semantics', action='store_true',
+                      help='AutoExecutor semantics — validate the way you deploy')
+    wf_p.add_argument('--trade-notional', type=float, default=None)
+    wf_p.add_argument('--slippage-bps', type=float, default=1.0)
+
     sw_p = sub.add_parser('bt-sweep',
                            help='Single-strategy parameter sweep (sequential, in-process). For cron-ready multi-strategy runs use `mmr sweep run`.',
                            epilog='Examples:\n'
@@ -2498,6 +2535,9 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
 
         elif cmd == 'bt-sweep':
             _handle_backtest_sweep(args)
+
+        elif cmd == 'walk-forward':
+            _handle_walk_forward(args)
 
         elif cmd == 'sweep':
             _handle_sweep(args)
@@ -8233,6 +8273,168 @@ def _handle_sweep_watch(args: argparse.Namespace):
             f'\n[yellow]stopped watching sweep #{args.sweep_id} '
             f'(still running in the background)[/yellow]'
         )
+
+
+def _handle_walk_forward(args: argparse.Namespace):
+    """Fit on the past, judge on the future, report what the RULE earned.
+
+    A sweep answers "which cell was best over this period", and the answer is
+    the maximum of N draws — not something anyone could have earned, because
+    picking it required knowing the period. This answers a question you can
+    actually act on: "if I refit every `test_days` on the previous
+    `train_days` and traded the result, what happened?"
+
+    The reported number is out-of-sample by construction, so there is nothing
+    to deflate — the trial count is one, the procedure, however many cells it
+    considered along the way.
+    """
+    import datetime as dt
+    import itertools
+    import json
+    import math
+
+    from trader.container import Container
+    from trader.data.data_access import TickStorage
+    from trader.objects import BarSize
+    from trader.simulation.backtester import BacktestConfig, Backtester
+    from trader.simulation.walk_forward import (
+        plan_fold_offsets, resolve_folds, run_walk_forward, selection_stability)
+
+    try:
+        grid = json.loads(args.grid)
+        cells = [dict(zip(grid, combo))
+                 for combo in itertools.product(*grid.values())]
+    except (ValueError, TypeError) as exc:
+        print_status(f'bad --grid: {exc}', success=False)
+        return
+
+    offsets = plan_fold_offsets(args.days, args.train_days, args.test_days,
+                                anchored=args.anchored)
+    if not offsets:
+        print_status(
+            f'{args.days} days cannot hold even one fold at '
+            f'train={args.train_days} + test={args.test_days}. Widen --days or '
+            f'shorten the windows — a shrunken window would answer a different '
+            f'question.', success=False)
+        return
+
+    period_start = (dt.datetime.now() - dt.timedelta(days=args.days)).date()
+    folds = resolve_folds(period_start, offsets)
+
+    cfg = Container.instance().config()
+    storage = TickStorage(cfg.get('history_duckdb_path', '')
+                          or cfg.get('duckdb_path', ''))
+    bar_size = BarSize.parse_str(args.bar_size)
+
+    def run_backtest(cell, start, end):
+        config = BacktestConfig(
+            start_date=dt.datetime.combine(start, dt.time.min),
+            end_date=dt.datetime.combine(end, dt.time.min),
+            initial_capital=args.capital,
+            bar_size=bar_size,
+            slippage_bps=args.slippage_bps,
+            execution_mode='live' if args.live_semantics else 'accumulate',
+        )
+        if args.live_semantics and args.trade_notional:
+            config.trade_notional = args.trade_notional
+        try:
+            r = Backtester(storage, config).run_from_module(
+                args.strategy, args.class_name, args.conids, params=dict(cell))
+        except Exception as exc:                         # noqa: BLE001
+            logging.warning('walk-forward: %s %s..%s failed: %s',
+                            cell, start, end, exc)
+            return None
+        return {
+            'sharpe': r.sharpe_ratio, 'sortino': r.sortino_ratio,
+            'profit_factor': r.profit_factor, 'total_return': r.total_return,
+            'expectancy_bps': r.expectancy_bps, 'trades': r.total_trades,
+            'win_rate': r.win_rate, 'max_drawdown': r.max_drawdown,
+        }
+
+    def score(metrics):
+        v = metrics.get(args.metric) if metrics else None
+        # A cell with no trades has not been evaluated. Letting its 0.0 or
+        # None compete would deploy a configuration nothing was learned about.
+        if v is None or not math.isfinite(v) or not metrics.get('trades'):
+            return None
+        return float(v)
+
+    total_runs = len(folds) * (len(cells) + 1)
+    console.print(
+        f'\n[bold]walk-forward[/bold] {args.class_name} — {len(folds)} folds x '
+        f'({len(cells)} cells fitted + 1 tested) = up to {total_runs} backtests')
+    console.print(
+        f'  {"anchored" if args.anchored else "rolling"} '
+        f'train={args.train_days}d test={args.test_days}d, '
+        f'selecting on {args.metric}, '
+        f'{"live" if args.live_semantics else "accumulate"} semantics\n')
+
+    def _progress(res):
+        m = res.test_metrics or {}
+        chosen = json.dumps(res.chosen) if res.chosen else '—'
+        ret = m.get('total_return')
+        console.print(
+            f'  fold {res.fold.index}: fit {res.fold.train_start}..'
+            f'{res.fold.train_end} -> test {res.fold.test_start}..'
+            f'{res.fold.test_end}  chose {chosen}  '
+            f'OOS return {("%+.2f%%" % (ret * 100)) if ret is not None else "—"}'
+            f'  ({m.get("trades", 0)} trades)')
+
+    results = run_walk_forward(folds, cells, run_backtest, score,
+                               on_fold=_progress)
+
+    tested = [r for r in results if r.test_metrics.get('trades')]
+    oos_returns = [r.test_metrics['total_return'] for r in tested
+                   if r.test_metrics.get('total_return') is not None]
+    compounded = 1.0
+    for x in oos_returns:
+        compounded *= (1.0 + x)
+    compounded -= 1.0
+    stability = selection_stability(results)
+
+    payload = {
+        'strategy': args.class_name, 'conids': args.conids,
+        'folds': len(folds), 'cells': len(cells), 'metric': args.metric,
+        'mode': 'anchored' if args.anchored else 'rolling',
+        'train_days': args.train_days, 'test_days': args.test_days,
+        'oos_compounded_return': compounded,
+        'oos_folds_profitable': sum(1 for x in oos_returns if x > 0),
+        'oos_folds_tested': len(oos_returns),
+        'selection_stability': stability,
+        'per_fold': [{
+            'fold': r.fold.index,
+            'train': [str(r.fold.train_start), str(r.fold.train_end)],
+            'test': [str(r.fold.test_start), str(r.fold.test_end)],
+            'chosen': r.chosen, 'train_score': r.train_score,
+            **{k: v for k, v in (r.test_metrics or {}).items()},
+        } for r in results],
+    }
+    if _json_mode:
+        print_json_result(payload, title='walk-forward')
+        return
+
+    console.print()
+    if not oos_returns:
+        console.print('[yellow]no fold produced a tested result — nothing to '
+                      'report out-of-sample[/yellow]')
+        return
+    colour = 'green' if compounded > 0 else 'red'
+    console.print(
+        f'  [bold]OUT-OF-SAMPLE[/bold]  compounded return '
+        f'[{colour}]{compounded:+.2%}[/{colour}] over {len(oos_returns)} folds  '
+        f'({payload["oos_folds_profitable"]}/{len(oos_returns)} profitable)')
+    if stability is not None:
+        scol = 'green' if stability >= 0.5 else 'yellow' if stability >= 0.25 else 'red'
+        console.print(
+            f'  selection stability [{scol}]{stability:.0%}[/{scol}] — '
+            f'how often consecutive folds kept the same cell. Low means the '
+            f'procedure is chasing noise, and a positive return above it is '
+            f'luck rather than evidence.')
+    console.print(
+        '\n[dim]This number is out-of-sample by construction: at every fold the\n'
+        'parameters were chosen using only data preceding the window they are\n'
+        'judged on. There is nothing to deflate — the trial count is one (the\n'
+        'rule), not the number of cells it considered.[/dim]\n')
 
 
 def _handle_backtest_sweep(args: argparse.Namespace):

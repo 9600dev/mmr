@@ -176,6 +176,11 @@ only_mutate = [
     # deflation that never deflates, or a PBO that never reaches 0.5, would
     # rubber-stamp the whole roster while looking like diligence.
     "trader/simulation/selection_bias.py",
+    # Walk-forward fold planning. The leakage property (a fold's test window
+    # never begins before its training window ends) is arithmetic, invisible
+    # in any summary of the output, and would silently turn walk-forward back
+    # into the in-sample selection it exists to replace.
+    "trader/simulation/walk_forward.py",
     # Decides which bars a strategy is allowed to see at all. Not on the
     # order path, but a wrong answer either starves a strategy of real bars
     # or feeds it bars that never traded.
@@ -197,6 +202,8 @@ pytest_add_cli_args_test_selection = [
     "tests/invariants/test_auto_execute_decision.py",
     "tests/invariants/test_bar_quality.py",
     "tests/invariants/test_selection_bias.py",
+    "tests/invariants/test_walk_forward.py",
+    "tests/invariants/test_null_market.py",
     "tests/invariants/test_gate_properties.py",
     "tests/invariants/test_order_notional.py",
     "tests/invariants/test_order_split.py",
