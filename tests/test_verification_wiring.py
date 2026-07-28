@@ -76,13 +76,41 @@ _ORACLE_EXCLUSIONS = {
 }
 
 
+# Contracted functions CrossHair cannot analyse, with the reason. The contract
+# still runs at runtime and is still pinned by Hypothesis — what is excluded is
+# only the SYMBOLIC pass. Any other omission is drift and fails the test below.
+#
+# The bar for entry here is "CrossHair would report success without having
+# checked anything", which is worse than an honest gap: it executes symbolically
+# and cannot see through numpy's C implementations, so a function whose entire
+# body is array work yields a vacuous green tick.
+_CROSSHAIR_EXCLUSIONS = {
+    # Takes an ndarray of returns and an arbitrary-length trial vector; every
+    # branch runs through numpy reductions and scipy's compiled norm.cdf.
+    'trader.simulation.selection_bias.deflated_sharpe',
+    # Enumerates C(S, S/2) numpy slicings — symbolically intractable, and the
+    # properties that matter (noise -> 0.5, real edge -> low) are statistical
+    # rather than per-input, so they are pinned by generated data instead.
+    'trader.simulation.selection_bias.pbo_cscv',
+    # Tried and rejected by the tool, not by us: CrossHair reaches
+    # scipy.stats.norm.ppf and dies inside the compiled ndtri ufunc with
+    # "not supported for the input types ... calling expected_max_sharpe(2, 0.5)".
+    # That input is fine concretely (it returns 0.367, postcondition holds) — the
+    # failure is symbolic values meeting C code, which no rewrite of this
+    # function fixes short of reimplementing the inverse normal CDF.
+    'trader.simulation.selection_bias.expected_max_sharpe',
+}
+
+
 class TestCrossHairTargetsInSync:
     def test_every_contracted_function_is_symbolically_checked(self):
         """A ``@deal`` contract that CrossHair never runs is decoration."""
-        missing = _deal_contracted_functions() - _crosshair_targets()
+        missing = (_deal_contracted_functions() - _crosshair_targets()
+                   - _CROSSHAIR_EXCLUSIONS)
         assert not missing, (
             'these @deal-contracted functions are absent from crosshair TARGETS '
-            f'(add them to scripts/crosshair_check.py): {sorted(missing)}'
+            '(add them to scripts/crosshair_check.py, or to _CROSSHAIR_EXCLUSIONS '
+            f'here with a reason): {sorted(missing)}'
         )
 
     def test_no_stale_targets(self):

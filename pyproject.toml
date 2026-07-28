@@ -171,6 +171,11 @@ only_mutate = [
     # (highs below the close, from quote-midpoint synthesis). A wrong rule here
     # either buries that finding or floods the report with false alarms.
     "trader/data/bar_quality.py",
+    # Selection-bias correction. Not on the order path, but it is what says
+    # whether a strategy family is real, and its failure mode is silent: a
+    # deflation that never deflates, or a PBO that never reaches 0.5, would
+    # rubber-stamp the whole roster while looking like diligence.
+    "trader/simulation/selection_bias.py",
     # Decides which bars a strategy is allowed to see at all. Not on the
     # order path, but a wrong answer either starves a strategy of real bars
     # or feeds it bars that never traded.
@@ -191,6 +196,7 @@ pytest_add_cli_args_test_selection = [
     "tests/test_auto_executor.py",
     "tests/invariants/test_auto_execute_decision.py",
     "tests/invariants/test_bar_quality.py",
+    "tests/invariants/test_selection_bias.py",
     "tests/invariants/test_gate_properties.py",
     "tests/invariants/test_order_notional.py",
     "tests/invariants/test_order_split.py",

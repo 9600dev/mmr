@@ -1571,6 +1571,21 @@ def build_parser() -> argparse.ArgumentParser:
     swp_show_p.add_argument('sweep_id', type=int)
     swp_show_p.add_argument('--top', type=int, default=10)
 
+    swp_overfit_p = swp_sub.add_parser(
+        'overfit',
+        help='Was this sweep\'s winner real, or the best of N coin flips? '
+             '(PBO via CSCV + deflated Sharpe)')
+    swp_overfit_p.add_argument('sweep_id', type=int)
+    swp_overfit_p.add_argument(
+        '--splits', type=int, default=16,
+        help='CSCV blocks S, must be even (default 16 -> 12,870 symmetric splits)')
+    swp_overfit_p.add_argument(
+        '--per-conid', action='store_true',
+        help='Score each instrument separately instead of pooling. Pooling is '
+             'the default because choosing WHICH symbol to arm was itself a '
+             'selection made on these results, so the symbol axis is part of '
+             'the search and excluding it understates the trial count.')
+
     # sweep watch — live-refresh view for a running sweep. Polls the DB
     # every --interval seconds, re-rendering progress + leaderboard via
     # Rich Live. Exits cleanly when the sweep reaches a terminal state
@@ -6992,6 +7007,8 @@ def _handle_sweep(args: argparse.Namespace):
         _handle_sweep_list(args)
     elif action == 'show':
         _handle_sweep_show(args)
+    elif action == 'overfit':
+        _handle_sweep_overfit(args)
     elif action == 'watch':
         _handle_sweep_watch(args)
     else:
@@ -7729,6 +7746,177 @@ def _handle_sweep_list(args: argparse.Namespace):
             s.digest_path or '—',
         )
     console.print(tbl)
+
+
+def _handle_sweep_overfit(args: argparse.Namespace):
+    """Was this sweep's winner an edge, or the best of N coin flips?
+
+    Two numbers, and they answer different questions. PBO indicts the SEARCH
+    (how often does the in-sample winner land in the bottom half out of
+    sample?); DSR indicts the RESULT (is the winner's Sharpe still significant
+    once you account for having looked N times?). A sweep can pass one and
+    fail the other, and the failure that matters more is PBO — you can re-run
+    a strategy on better data, but you cannot rescue a selection procedure
+    that was never informative.
+
+    Trials are POOLED across instruments by default. That is a judgement and
+    it is deliberate: the 2026-07 roster was chosen by running six strategies
+    over 55 symbols and arming the handful that scored best, so the symbol
+    axis was part of the search. Scoring each instrument in isolation would
+    report the trial count as 9 when the operator actually looked at 495, and
+    would flatter every result accordingly.
+    """
+    import json
+    import math
+    import numpy as np
+    from trader.container import Container
+    from trader.data.backtest_store import BacktestStore
+    from trader.simulation.selection_bias import (
+        align_equity_curves, deflated_sharpe, infer_periods_per_year, pbo_cscv)
+
+    cfg = Container.instance().config()
+    bstore = BacktestStore(cfg.get('duckdb_path', ''))
+    swp = bstore.get_sweep(args.sweep_id)
+    if not swp:
+        print_status(f'sweep #{args.sweep_id} not found', success=False)
+        return
+
+    runs = [r for r in bstore.list(sweep_id=args.sweep_id, limit=None,
+                                   include_archived=True)
+            if r.equity_curve_json]
+    if len(runs) < 2:
+        print_status(
+            f'sweep #{args.sweep_id} has {len(runs)} run(s) with a stored equity '
+            f'curve — need at least 2. Re-run without --no-save-trades.',
+            success=False)
+        return
+
+    groups: dict = {}
+    for r in runs:
+        # conids round-trips as a list; a list cannot key a dict.
+        key = 'ALL' if not args.per_conid else str(r.conids or '?')
+        groups.setdefault(key, []).append(r)
+
+    payload = {'sweep_id': args.sweep_id, 'name': swp.name, 'groups': []}
+    for key in sorted(groups):
+        members = groups[key]
+        if len(members) < 2:
+            continue
+        curves = []
+        kept = []
+        for r in members:
+            try:
+                curves.append(json.loads(r.equity_curve_json))
+                kept.append(r)
+            except (ValueError, TypeError):
+                continue
+        aligned = align_equity_curves(curves)
+        n_dropped = 0
+        if aligned is None:
+            matrix, result = None, None
+        else:
+            matrix, _n_used, n_dropped = aligned
+            result = pbo_cscv(matrix, n_splits=args.splits)
+
+        sharpes = [r.sharpe_ratio for r in kept
+                   if r.sharpe_ratio is not None and math.isfinite(r.sharpe_ratio)]
+        winner = max(kept, key=lambda r: r.sharpe_ratio
+                     if r.sharpe_ratio is not None else -1e18)
+        dsr = None
+        wsr = None
+        if winner.equity_curve_json and sharpes:
+            try:
+                pts = json.loads(winner.equity_curve_json)
+                vals = np.array([float(x['value']) for x in pts], dtype=float)
+                if len(vals) >= 4:
+                    wret = np.diff(vals) / vals[:-1]
+                    # Inferred from the curve, NOT from winner.bar_size: the
+                    # blob is decimated to daily on write, so a 1-min run's
+                    # bar-size factor (98,280) would de-annualise the trial
+                    # Sharpes by ~19.7x too much and make DSR far too kind.
+                    bpy = (infer_periods_per_year([x['timestamp'] for x in pts])
+                           or _bars_per_year_for(winner.bar_size))
+                    dsr = deflated_sharpe(wret, sharpes, bars_per_year=bpy)
+                    from trader.simulation.backtest_stats import probabilistic_sharpe
+                    wsr = probabilistic_sharpe(wret)
+            except (ValueError, TypeError, KeyError):
+                dsr = None
+
+        payload['groups'].append({
+            'group': key,
+            # Two different counts, deliberately. PBO ran on the columns that
+            # could be aligned onto a common calendar; DSR deflates by every
+            # trial the operator LOOKED at, including ones whose curve could
+            # not join the matrix — you do not un-search a symbol by failing
+            # to align it later.
+            'n_trials_searched': len(kept),
+            'n_trials_in_pbo': result.n_trials if result else None,
+            'n_curves_dropped': n_dropped,
+            'pbo': result.pbo if result else None,
+            'pbo_caveat': result.caveat if result else None,
+            'n_splits': result.n_splits if result else None,
+            'n_combinations': result.n_combinations if result else None,
+            'n_observations': result.n_observations if result else None,
+            'median_oos_rank': result.median_oos_rank if result else None,
+            'winner_run_id': winner.id,
+            'winner_sharpe': winner.sharpe_ratio,
+            'winner_psr': wsr,
+            'winner_dsr': dsr,
+        })
+
+    if _json_mode:
+        print_json_result(payload, title=f'overfitting: sweep #{args.sweep_id}')
+        return
+
+    console.print(f'\n[bold]sweep #{args.sweep_id} — {swp.name}[/bold]  '
+                  f'({len(runs)} runs with equity curves)')
+    for g in payload['groups']:
+        dropped = (f", {g['n_curves_dropped']} curve(s) dropped as unalignable"
+                   if g['n_curves_dropped'] else '')
+        console.print(f"\n[bold cyan]{g['group']}[/bold cyan]  "
+                      f"{g['n_trials_searched']} configurations searched"
+                      f"{dropped}")
+        if g['pbo'] is None:
+            console.print('  PBO: [yellow]not computable[/yellow] — curves could '
+                          'not be aligned onto a common index')
+        else:
+            colour = ('red' if g['pbo'] >= 0.5 else
+                      'yellow' if g['pbo'] >= 0.2 else 'green')
+            console.print(
+                f"  PBO  [{colour}]{g['pbo']:.1%}[/{colour}]   "
+                f"(over {g['n_trials_in_pbo']} aligned trials; S={g['n_splits']}, "
+                f"{g['n_combinations']:,} splits, T={g['n_observations']}, "
+                f"median OOS rank {g['median_oos_rank']:.2f})")
+            if g['pbo_caveat']:
+                console.print(f"       [dim]caveat: {g['pbo_caveat']}[/dim]")
+        if g['winner_dsr'] is not None:
+            dcol = ('green' if g['winner_dsr'] >= 0.95 else
+                    'yellow' if g['winner_dsr'] >= 0.8 else 'red')
+            console.print(
+                f"  best run #{g['winner_run_id']}  Sharpe {g['winner_sharpe']:.2f}   "
+                f"PSR {g['winner_psr']:.3f}  ->  "
+                f"DSR [{dcol}]{g['winner_dsr']:.3f}[/{dcol}]"
+                f"  (deflated for {g['n_trials_searched']} trials)")
+    console.print(
+        '\n[dim]PBO is the probability the in-sample winner underperforms the '
+        'median out of sample.\n'
+        '0.5 = the search had no skill; the winner is a coin flip however good '
+        'its headline looks.\n'
+        'DSR is PSR re-benchmarked against the best Sharpe N trials would '
+        'produce with no edge at all.[/dim]\n')
+
+
+def _bars_per_year_for(bar_size: str) -> float:
+    """Annualisation factor for a persisted bar-size string, defaulting to
+    daily. Mirrors the decoding in `_backtest_confidence` — BarSize is an
+    IntEnum, so BarSize('1 min') always raises and parse_str is the decoder."""
+    try:
+        from trader.objects import BarSize
+        from trader.simulation.backtester import Backtester
+        return Backtester._bars_per_year(
+            BarSize.parse_str(bar_size) if bar_size else BarSize.Days1)
+    except Exception:
+        return 252.0
 
 
 def _handle_sweep_show(args: argparse.Namespace):
