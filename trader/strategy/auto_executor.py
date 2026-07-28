@@ -537,6 +537,9 @@ class AutoExecutor:
         self._sdk = None
         self._queue: 'queue.Queue' = queue.Queue()
         self._last_exec: Dict[Tuple[str, int], float] = {}
+        # (strategy, conid) -> the reason its stale-bar gate is inert.
+        # Deduped so a persistent condition logs once, not once per bar.
+        self._stale_gate_warned: Dict[Tuple[str, int], str] = {}
         # Loop-side read model: (strategy, conid) -> entry_bar_ts for open
         # auto positions, so the dispatch loop can compute bars_held from the
         # frame without queue round-trips. Guarded by _view_lock.
@@ -752,12 +755,51 @@ class AutoExecutor:
 
     # -- signal processing ------------------------------------------------------
 
+    def _warn_if_stale_gate_inert(self, work, age) -> None:
+        """Say so when the stale-bar gate cannot evaluate.
+
+        It needs a datable bar timestamp AND a known bar interval; without
+        either it simply does not fire, and an open proceeds on a bar of
+        unknown age. That is a deliberate choice (refusing every trade over a
+        timestamp quirk is worse), but an unannounced one was indistinguishable
+        from the gate working. Both conditions should be impossible in normal
+        operation: `bar_ts` comes from the frame index and `bar_size` is parsed
+        to an enum at load. So if either fires, something upstream is wrong and
+        the operator needs to know.
+        """
+        reason = None
+        if work.bar_size_seconds <= 0:
+            reason = (f'bar interval unknown (bar_size_seconds='
+                      f'{work.bar_size_seconds!r})')
+        elif age is None:
+            reason = f'bar timestamp not datable (bar_ts={work.bar_ts!r})'
+        if reason is None:
+            return
+        key = (work.strategy_name, work.conid)
+        if self._stale_gate_warned.get(key) == reason:
+            return
+        self._stale_gate_warned[key] = reason
+        logging.warning(
+            'auto-executor: STALE-BAR GATE INERT for %s conId %s — %s. Opens are '
+            'NOT being checked for bar freshness on this instrument.',
+            work.strategy_name, work.conid, reason)
+
     def _process_signal(self, work: SignalWork):
         key = (work.strategy_name, work.conid)
         pos = self.state.open_position(work.strategy_name, work.conid)
         held_qty = pos['quantity'] if pos else 0.0
         now = dt.datetime.now().timestamp()
         cooldown_active = (now - self._last_exec.get(key, 0.0)) < self.cooldown_seconds
+
+        # The stale-bar gate needs BOTH a datable bar and a known bar interval.
+        # Missing either makes it silently not run, which is the shape of bug
+        # this system keeps finding: a safety check that declines rather than
+        # refuses, and says nothing. Behaviour is unchanged (an open is still
+        # allowed, deliberately — see bar_age_seconds), but it is no longer
+        # silent. Logged once per (strategy, conid) so a persistent condition
+        # does not drown the log at one line per bar.
+        age = bar_age_seconds(work.bar_ts)
+        self._warn_if_stale_gate_inert(work, age)
 
         directive = decide_signal(
             work,
@@ -767,7 +809,7 @@ class AutoExecutor:
             already_executed_bar=self.state.executed_for_bar(
                 work.strategy_name, work.conid, work.bar_ts),
             cooldown_active=cooldown_active,
-            bar_age_seconds=bar_age_seconds(work.bar_ts),
+            bar_age_seconds=age,
             stale_bar_multiple=self.stale_bar_multiple,
             live_armed=self.live_armed,
             held_lots=pos['lots'] if pos else 0,

@@ -8872,6 +8872,7 @@ def _handle_data_download(args: argparse.Namespace):
     end_date = dt.datetime.now()
     start_date = end_date - dt.timedelta(days=args.days)
     completed = 0
+    no_data = 0
     failed = 0
     skipped_up_to_date = 0
     total_rows_written = 0
@@ -8946,6 +8947,7 @@ def _handle_data_download(args: argparse.Namespace):
 
         symbol_rows = 0
         symbol_failed = False
+        symbol_empty_windows = 0
         for dr in fetch_ranges:
             try:
                 if not _json_mode:
@@ -8992,9 +8994,25 @@ def _handle_data_download(args: argparse.Namespace):
                     tickdata.write_resolve_overlap(storage_key, df)
                     symbol_rows += len(df)
             except Exception as e:
-                symbol_failed = True
-                if not _json_mode:
-                    console.print(f'[red]  Error downloading {symbol} {dr.start.strftime("%Y-%m-%d")}-{dr.end.strftime("%Y-%m-%d")}: {e}[/red]')
+                # "No data for this window" is an EMPTY RESULT, not a failure,
+                # even when the vendor delivers it as an HTTP 400. The
+                # incremental range always includes the current edge, and
+                # today's daily bar does not exist until after the close, so on
+                # a routine run most symbols hit this. Counting it as a failure
+                # made the job report ~46/58 symbols failed on every healthy
+                # run — which is why nobody could use its exit status, and why
+                # a genuinely empty refresh went unnoticed for days.
+                if _is_empty_window_response(e):
+                    symbol_empty_windows += 1
+                    if not _json_mode:
+                        console.print(
+                            f'[dim]  No data for {symbol} '
+                            f'{dr.start.strftime("%Y-%m-%d")}-{dr.end.strftime("%Y-%m-%d")}'
+                            f' (source has nothing for this window)[/dim]')
+                else:
+                    symbol_failed = True
+                    if not _json_mode:
+                        console.print(f'[red]  Error downloading {symbol} {dr.start.strftime("%Y-%m-%d")}-{dr.end.strftime("%Y-%m-%d")}: {e}[/red]')
 
         if symbol_rows > 0:
             completed += 1
@@ -9004,8 +9022,15 @@ def _handle_data_download(args: argparse.Namespace):
         elif symbol_failed:
             failed += 1
         else:
-            # No rows and no failure: upstream returned empty for every range.
-            # That's legitimate (e.g. weekend-only window) — don't mark failed.
+            # No rows and no error. Sometimes legitimate (a window containing
+            # no session), sometimes the vendor simply has not published yet —
+            # and the two are indistinguishable from here. It is NOT counted as
+            # a failure, but it IS counted, because treating it as nothing at
+            # all is how a refresh reports success having achieved nothing.
+            # That is exactly what happened on 2026-07-27: every symbol came
+            # back empty for the daily bar, the job exited 0, and the series
+            # silently fell a session behind.
+            no_data += 1
             if not _json_mode:
                 console.print(f'[yellow]  No data returned for {symbol}[/yellow]')
 
@@ -9032,6 +9057,7 @@ def _handle_data_download(args: argparse.Namespace):
             'completed': completed,
             'skipped_up_to_date': skipped_up_to_date,
             'failed': failed,
+            'no_data': no_data,
             'rows_written': total_rows_written,
         }))
     else:
@@ -9047,6 +9073,7 @@ def _handle_data_download(args: argparse.Namespace):
         'completed': completed,
         'skipped_up_to_date': skipped_up_to_date,
         'failed': failed,
+        'no_data': no_data,
         'rows_written': total_rows_written,
     }
 
@@ -9448,6 +9475,48 @@ def _auto_source_for_universe(universe_symbols) -> str:
     return 'twelvedata' if us_count >= len(universe_symbols) / 2 else 'ib'
 
 
+def _is_empty_window_response(exc: BaseException) -> bool:
+    """True when a source is saying "I have nothing for that window" rather
+    than "something went wrong".
+
+    TwelveData reports this as an HTTP 400 with an explicit message, which is
+    indistinguishable from a real error unless the message is read. The
+    incremental refresh always asks for the current edge, and today's daily bar
+    does not exist until after the close, so a healthy run hits this for most
+    symbols. Treating it as a failure made the job's own success flag useless.
+
+    Matched on the message, deliberately narrowly. Anything else — auth,
+    rate limits, timeouts, malformed responses — stays a failure, because those
+    genuinely mean the data did not arrive when it should have.
+    """
+    text = str(exc).lower()
+    return ('no data is available on the specified dates' in text
+            or 'no data available' in text)
+
+
+def _refresh_achieved_nothing(summary: Dict[str, Any]) -> bool:
+    """True when a refresh job ran cleanly and accomplished nothing.
+
+    Nothing written, nothing already current, and at least one symbol whose
+    source returned empty. Every individual call succeeded, so no exception
+    fires and no symbol is marked failed — which is precisely how a stale
+    series stays invisible.
+
+    2026-07-27: `data_refresh_us` fired 30 minutes after the close, the vendor
+    had not published that day's DAILY bar, every symbol came back empty, and
+    the job exited 0. pycron logged `ret: [0]` and the daily series sat a
+    session behind for days.
+
+    A partially-empty result is NOT this. One symbol with no session in the
+    window is ordinary, and flagging it would make the check cry wolf and get
+    it ignored. Neither is "everything was already current", which is a
+    successful no-op.
+    """
+    return (int(summary.get('completed', 0) or 0) == 0
+            and int(summary.get('skipped_up_to_date', 0) or 0) == 0
+            and int(summary.get('no_data', 0) or 0) > 0)
+
+
 def _handle_data_refresh(args: argparse.Namespace):
     """Run declarative refresh jobs from data_refresh.yaml. Each job is a
     thin wrapper around ``data download`` — same underlying machinery, just
@@ -9538,13 +9607,32 @@ def _handle_data_refresh(args: argparse.Namespace):
                 # so a stale universe looked fresh — a fail-loudly violation
                 # that could lead to trading on stale data.
                 dl_failed = int(summary.get('failed', 0))
-                job_ok = dl_failed == 0
+                dl_empty = int(summary.get('no_data', 0))
+                # POSTCONDITION, not just "did it run". A job that wrote
+                # nothing, found nothing already current, and got an empty
+                # response for every symbol has achieved nothing — but every
+                # individual call succeeded, so without this it exits 0 and the
+                # series quietly falls behind. That is the 2026-07-27 failure:
+                # the run fired 30 min after the close, the vendor had not
+                # published the daily bar, and nothing reported a problem.
+                achieved_nothing = _refresh_achieved_nothing(summary)
+                job_ok = dl_failed == 0 and not achieved_nothing
+                if achieved_nothing and not _json_mode:
+                    console.print(
+                        f'[red]  {job_name}: every symbol returned empty and '
+                        f'nothing was already current — the source has not '
+                        f'published this window yet, or the window is wrong. '
+                        f'Nothing was refreshed.[/red]')
                 results.append({'job': job_name, 'success': job_ok,
                                 'universe': universe_name, 'source': source,
                                 'symbols': len(symbols), 'bar_size': bar_size,
                                 'days': days, 'downloaded': summary.get('completed', 0),
                                 'failed_symbols': dl_failed,
-                                **({} if job_ok else {'error': f'{dl_failed} symbol(s) failed to download'})})
+                                **({} if job_ok else {'error': (
+                                    f'{dl_failed} symbol(s) failed to download'
+                                    if dl_failed else
+                                    f'nothing refreshed: {dl_empty} symbol(s) '
+                                    f'returned empty, 0 written, 0 already current')})})
             finally:
                 _json_mode = saved_json_mode
         except Exception as ex:
@@ -9567,6 +9655,14 @@ def _handle_data_refresh(args: argparse.Namespace):
             console.print(f'  {mark} {r["job"]}: {detail}')
         console.print(f'[bold]{ok}/{len(results)} jobs ok[/]'
                       + (f', {fail} failed' if fail else ''))
+
+    # One-shot mode (cron, or a shell): non-zero exit on failure, matching
+    # `verify`. Without this the batch printed its failures and still exited 0,
+    # so pycron logged `ret: [0]` for a run that refreshed nothing — the whole
+    # reason a silently-stale series went unnoticed for days. In the REPL
+    # sys.exit would kill the session, so it is skipped there.
+    if fail and len(sys.argv) > 1:
+        sys.exit(1)
 
 
 def _handle_data_status():

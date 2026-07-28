@@ -1170,3 +1170,91 @@ class TestExternalStopReplacementSurvival:
                                      bar_ts=TS + pd.Timedelta(minutes=1)))
         assert 972 not in sdk.cancel_calls
         assert 973 not in sdk.cancel_calls
+
+
+class TestTheStaleBarGateAnnouncesWhenItCannotRun:
+    """The gate needs a datable bar AND a known interval. Missing either makes
+    it silently not fire, and an open proceeds on a bar of unknown age.
+
+    Letting the open through is deliberate: refusing every trade over a
+    timestamp quirk is worse than acting on one. Doing it SILENTLY was not
+    deliberate, and left the gate indistinguishable from a working one. Both
+    conditions should be impossible in normal operation (`bar_ts` comes from
+    the frame index, `bar_size` is parsed to an enum at load), so either one
+    firing means something upstream is wrong.
+
+    These tests assert the announcement, not a refusal. Changing the gate to
+    refuse is a behaviour change on the live trading path and is a separate,
+    deliberate decision.
+    """
+
+    def _executor(self):
+        from unittest.mock import MagicMock
+        from trader.strategy.auto_executor import AutoExecutor
+        ex = object.__new__(AutoExecutor)
+        ex._stale_gate_warned = {}
+        return ex
+
+    def _work(self, bar_size_seconds=60.0, bar_ts='2026-07-28T13:45:00Z'):
+        from unittest.mock import MagicMock
+        w = MagicMock()
+        w.strategy_name = 'orb_probe'
+        w.conid = 4391
+        w.bar_size_seconds = bar_size_seconds
+        w.bar_ts = bar_ts
+        return w
+
+    def test_an_unknown_bar_interval_is_announced(self, caplog):
+        import logging as stdlib_logging
+        ex = self._executor()
+        with caplog.at_level(stdlib_logging.WARNING):
+            ex._warn_if_stale_gate_inert(self._work(bar_size_seconds=0.0), 12.0)
+        assert any('STALE-BAR GATE INERT' in r.message for r in caplog.records)
+        assert any('bar interval unknown' in r.message for r in caplog.records)
+
+    def test_an_undatable_bar_is_announced(self, caplog):
+        import logging as stdlib_logging
+        ex = self._executor()
+        with caplog.at_level(stdlib_logging.WARNING):
+            ex._warn_if_stale_gate_inert(self._work(), None)
+        assert any('not datable' in r.message for r in caplog.records)
+
+    def test_a_healthy_gate_says_nothing(self, caplog):
+        """No noise in the normal case, or the warning stops meaning anything."""
+        import logging as stdlib_logging
+        ex = self._executor()
+        with caplog.at_level(stdlib_logging.WARNING):
+            ex._warn_if_stale_gate_inert(self._work(), 12.0)
+        assert not [r for r in caplog.records if 'STALE-BAR' in r.message]
+
+    def test_a_persistent_condition_logs_once_not_once_per_bar(self, caplog):
+        """A 1-min strategy would otherwise emit 1,440 identical warnings a
+        day, which is how a real signal gets filtered out by whoever reads the
+        log."""
+        import logging as stdlib_logging
+        ex = self._executor()
+        work = self._work(bar_size_seconds=0.0)
+        with caplog.at_level(stdlib_logging.WARNING):
+            for _ in range(25):
+                ex._warn_if_stale_gate_inert(work, 12.0)
+        assert len([r for r in caplog.records if 'STALE-BAR' in r.message]) == 1
+
+    def test_each_instrument_is_reported_separately(self, caplog):
+        import logging as stdlib_logging
+        ex = self._executor()
+        a, b = self._work(bar_size_seconds=0.0), self._work(bar_size_seconds=0.0)
+        b.conid = 9999
+        with caplog.at_level(stdlib_logging.WARNING):
+            ex._warn_if_stale_gate_inert(a, 12.0)
+            ex._warn_if_stale_gate_inert(b, 12.0)
+        assert len([r for r in caplog.records if 'STALE-BAR' in r.message]) == 2
+
+    def test_a_changed_reason_is_reported_again(self, caplog):
+        """Dedup is per (instrument, reason). A different failure on the same
+        instrument is new information."""
+        import logging as stdlib_logging
+        ex = self._executor()
+        with caplog.at_level(stdlib_logging.WARNING):
+            ex._warn_if_stale_gate_inert(self._work(bar_size_seconds=0.0), 12.0)
+            ex._warn_if_stale_gate_inert(self._work(), None)
+        assert len([r for r in caplog.records if 'STALE-BAR' in r.message]) == 2
