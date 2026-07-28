@@ -144,6 +144,93 @@ def ohlcv_choppy(n: int = 240, seed: int = 202) -> pd.DataFrame:
     return _finish(df)
 
 
+def driftless_session_bars(
+    days: int = 250,
+    seed: int = 0,
+    start_price: float = 100.0,
+    annual_vol: float = 0.32,
+    session_tz: str = 'America/New_York',
+    open_minute: int = 9 * 60 + 30,
+    close_minute: int = 16 * 60,
+    start_date: str = '2025-07-01',
+) -> pd.DataFrame:
+    """A year of 1-minute bars containing, by construction, NOTHING to find.
+
+    This is the NEGATIVE CONTROL instrument. Prices follow a driftless random
+    walk: every minute's log return is drawn i.i.d. from a zero-mean Gaussian,
+    so no rule computable from bars 0..t carries any information about bar t+1.
+    Overnight gaps are drawn the same way. A strategy that scores well on this
+    has not found an edge, because there is no edge here to find — it has
+    measured its own search.
+
+    Why a control is needed at all: the whole pipeline (sweep, rank by
+    composite score, keep the top cells) is a machine for finding the best of N
+    draws, and the best of N draws from noise looks good. Reading a backtest
+    without knowing what the same machine reports on nothing is like reading a
+    scale without knowing its zero.
+
+    What is deliberately REAL here — session boundaries, the 09:30-16:00
+    trading day, weekday-only dates, plausible per-minute volatility — is
+    structure the strategies need in order to run at all. An opening-range
+    breakout requires an opening range to exist. What is deliberately ABSENT
+    is any relationship between one bar and the next beyond the random walk
+    itself: no drift, no mean reversion, no volatility clustering, no
+    intraday U-shape. Adding those would make the data more realistic and the
+    control weaker, because then a strategy could profit from a real pattern
+    and the result would no longer be unambiguously manufactured.
+
+    ``annual_vol`` defaults to 32%, roughly a liquid US large-cap.
+    """
+    rng = np.random.default_rng(seed)
+
+    sessions = pd.bdate_range(start=start_date, periods=days, tz=session_tz)
+    per_session = close_minute - open_minute
+    # Per-minute sigma from the annualised figure: 252 sessions of
+    # `per_session` minutes each.
+    sigma = annual_vol / np.sqrt(252.0 * per_session)
+
+    index_parts = []
+    for day in sessions:
+        base = day.normalize() + pd.Timedelta(minutes=open_minute)
+        index_parts.append(pd.date_range(base, periods=per_session, freq='1min'))
+    index = pd.DatetimeIndex(np.concatenate([p.values for p in index_parts]))
+    index = pd.DatetimeIndex(index).tz_localize('UTC').tz_convert(session_tz) \
+        if index.tz is None else index
+    n = len(index)
+
+    # Close-to-close log returns, zero mean. Overnight boundaries get the same
+    # distribution scaled up a little, which is the only concession to realism
+    # and cannot create predictability (it is still zero-mean and independent).
+    steps = rng.normal(0.0, sigma, n)
+    session_start = np.zeros(n, dtype=bool)
+    session_start[::per_session] = True
+    steps[session_start] *= 3.0
+    close = start_price * np.exp(np.cumsum(steps))
+
+    # Open is the prior close (or the first close for bar 0). High/low straddle
+    # the open-close body by a nonnegative random amount, so every bar is
+    # structurally coherent by construction — `bar_quality.impossible_mask`
+    # must accept all of them, and the write path enforces that.
+    open_ = np.empty(n)
+    open_[0] = start_price
+    open_[1:] = close[:-1]
+    body_hi = np.maximum(open_, close)
+    body_lo = np.minimum(open_, close)
+    wick = np.abs(rng.normal(0.0, sigma, n)) * close
+    high = body_hi + wick
+    low = np.maximum(body_lo - np.abs(rng.normal(0.0, sigma, n)) * close, 1e-6)
+
+    volume = rng.lognormal(mean=7.0, sigma=0.7, size=n).round()
+
+    df = pd.DataFrame({
+        'open': open_, 'high': high, 'low': low, 'close': close,
+        'volume': volume,
+        'average': (high + low + close) / 3.0,
+        'bar_count': rng.integers(5, 200, n).astype(float),
+    }, index=index)
+    return _finish(df)
+
+
 def battery() -> Dict[str, pd.DataFrame]:
     """Every synthetic frame, keyed by name — the gauntlet's S3 input set."""
     return {
