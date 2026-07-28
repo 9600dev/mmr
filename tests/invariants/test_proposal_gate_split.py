@@ -225,6 +225,65 @@ class TestApprovalGateNeverLetsOpeningQuantityThrough:
             f'expected reduction then a force_open remainder, got {api._placed}')
 
 
+class TestTheApproverTierDoesNotExemptTheRemainderEither:
+    """The same hole, in a third layer, found by auditing rather than probing.
+
+    After fixing the RPC proposal gate, the lesson written down was "look for
+    the OTHER askers before declaring a classification bug fixed". Applying it
+    immediately found `enforce_approver_tier` doing the same thing: it exempts
+    any order that `order_reduces_exposure` calls a reduction, and a split
+    flip's opening half still reads as one, because the reduction it follows
+    may not have filled yet. So the notional tier handed the remainder exactly
+    the exemption the split exists to remove.
+
+    Latent rather than live — the tier is off by default
+    (`approver_required_above_usd = 0`) — but it is the control that is
+    supposed to stand between a compromised proposer context and a large
+    position, which is precisely where a silent exemption matters.
+
+    `force_open` is what keeps the exemption honest, and it must not cost the
+    genuine exits their exemption; all three cases are pinned together, because
+    fixing this by simply recomputing the opening remainder here would gate a
+    real exit whenever the position read failed.
+    """
+
+    def _tier(self, held, force_open, action='SELL', qty=2.0):
+        from trader.trading.trading_runtime import Trader
+        t = object.__new__(Trader)
+        t.approver_required_above_usd = 1000.0     # tier ON
+        t.approver_key = 'secret'
+        p = MagicMock()
+        p.contract = MagicMock()
+        p.contract.conId = 1
+        p.contract.symbol = 'X'
+        p.position = held
+        t.get_positions = MagicMock(return_value=[p] if held else [])
+        t._tier_notional = AsyncMock(return_value=(50_000.0, True))
+        c = MagicMock()
+        c.conId = 1
+        c.symbol = 'X'
+        c.multiplier = None
+        return asyncio.run(t.enforce_approver_tier(
+            c, action, qty, 'MARKET', None, '', force_open=force_open))
+
+    def test_a_split_remainder_is_gated_by_the_tier(self):
+        """held +1, SELL 2 arriving as the opening half. $50k, no key."""
+        assert self._tier(held=1.0, force_open=True) is not None
+
+    def test_the_identical_order_from_flat_is_also_gated(self):
+        """The control. If this passed while the remainder was exempted, the
+        difference would be the bug rather than the position."""
+        assert self._tier(held=0.0, force_open=False) is not None
+
+    def test_a_genuine_pure_exit_is_still_never_gated(self):
+        """SELL 2 against a held 5 needs no approver key, and must not acquire
+        one from this fix. Refusing an exit is worse than any limit."""
+        assert self._tier(held=5.0, force_open=False) is None
+
+    def test_a_short_side_flip_remainder_is_gated_symmetrically(self):
+        assert self._tier(held=-1.0, force_open=True, action='BUY') is not None
+
+
 class TestOneResolverForBothQuestions:
     """The structural fix behind the behavioural one: there is a single place
     that decides how much of an order opens exposure. Two implementations
