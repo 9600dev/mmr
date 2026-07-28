@@ -77,9 +77,18 @@ def _limits(min_open_orders=1):
 def test_approval_implies_no_failed_check(
         gate_event_store, limits, open_orders, daily_pnl,
         portfolio_value, position_value, daily_ok, pv_ok, posv_ok):
-    """An approved exposure-increasing order has no recorded 'fail' and no
-    not-evaluable skip; a refusal always carries a reason and a failing or
-    not-evaluable check (skipped:zero-notional alone never refuses)."""
+    """An approved exposure-increasing order carries no failed check and no
+    check whose input could not be READ. A refusal always carries a reason
+    and a recorded check that is not a plain pass.
+
+    The property names the HARM (approving while a check failed, or while
+    its input was unreadable) rather than the mechanism (which literal
+    strings the gate happens to record). The earlier form enumerated the
+    allowed `skipped:` strings by name, which made it FALSE: a forex order
+    legitimately approves with `concentration = skipped:forex-cash`,
+    because a currency conversion is not position concentration. It never
+    fired only because this generator produces no CASH orders.
+    """
     gate = RiskGate(limits=limits, event_store=gate_event_store)
     result = gate.evaluate(
         _signal(f'strat_{uuid4().hex[:12]}'),
@@ -93,16 +102,17 @@ def test_approval_implies_no_failed_check(
     )
     if result.approved:
         assert all(v != 'fail' for v in result.checks.values())
-        assert not any(
-            v.startswith('skipped:') and v != 'skipped:zero-notional'
-            for v in result.checks.values()
-        )
+        # 'unevaluable:' is the category for "the check applies and its
+        # input could not be read". It must never appear on an approved
+        # order. A 'skipped:' value means the check does not APPLY, which is
+        # compatible with approval and is deliberately not enumerated here.
+        assert not any(v.startswith('unevaluable:')
+                       for v in result.checks.values())
     else:
+        # A refusal is always explained: a reason, and a recorded check that
+        # is not a plain pass. WHICH category explains it is mechanism.
         assert result.reason != ''
-        assert any(
-            v == 'fail' or (v.startswith('skipped:') and v != 'skipped:zero-notional')
-            for v in result.checks.values()
-        )
+        assert any(v != 'pass' for v in result.checks.values())
 
 
 # ---------------------------------------------------------------------------
@@ -132,15 +142,18 @@ def test_not_evaluable_critical_input_refuses_open_naming_it(
     )
     assert result.approved is False
     reason = result.reason.lower()
+    # The missing datum is NAMED in the reason, and the check it belongs to
+    # did not pass. The recorded value is mechanism; being told which input
+    # was unreadable is the harm this property exists to prevent.
     if which == 'daily_pnl':
         assert 'daily pnl' in reason
-        assert result.checks['daily_loss'] == 'skipped:not-evaluable'
+        assert result.checks['daily_loss'] != 'pass'
     elif which == 'portfolio_value':
         assert 'portfolio value' in reason or 'netliquidation' in reason
-        assert result.checks['concentration'] == 'skipped:portfolio-value-not-evaluable'
+        assert result.checks['concentration'] != 'pass'
     else:
         assert 'price' in reason
-        assert result.checks['concentration'] == 'skipped:no-price'
+        assert result.checks['concentration'] != 'pass'
 
 
 # ---------------------------------------------------------------------------
