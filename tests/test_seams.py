@@ -23,7 +23,12 @@ from trader.sdk import MMR
 from trader.strategy.auto_executor import AutoExecutor, BarWork
 from trader.trading.strategy import Signal
 
-TS = pd.Timestamp('2026-07-06 10:39:00')
+# A FRESH bar. These tests drive the OPEN path, and the stale-bar gate refuses
+# an open whose bar is older than 3x the bar size. The hardcoded past date this
+# replaced only ever passed because an unset `bar_size_seconds` disabled the
+# gate, so the suite was exercising opens under conditions that cannot occur
+# live. Naive here means UTC, which is how bar_age_seconds reads it.
+TS = pd.Timestamp.now(tz='UTC').tz_localize(None).floor('min')
 
 
 class SeamBroker:
@@ -227,7 +232,7 @@ class TestResizeThenExecutor:
         from trader.strategy.auto_executor import SignalWork
         ex._process_signal(SignalWork(
             strategy_name='probe', conid=CONID, action=Action.SELL,
-            bar_ts=TS + pd.Timedelta(minutes=2), auto_execute=True,
+            bar_ts=TS + pd.Timedelta(minutes=2), bar_size_seconds=60.0, auto_execute=True,
             state_running=True))
         assert ex.state.open_position('probe', CONID) is None
         assert [o for o in broker.live_orders() if o['conId'] == CONID] == [], (
@@ -251,7 +256,7 @@ class TestResizeThenExecutor:
         from trader.strategy.auto_executor import SignalWork
         ex._process_signal(SignalWork(
             strategy_name='probe', conid=CONID, action=Action.SELL,
-            bar_ts=TS + pd.Timedelta(minutes=2), auto_execute=True,
+            bar_ts=TS + pd.Timedelta(minutes=2), bar_size_seconds=60.0, auto_execute=True,
             state_running=True))
         # The unattributed stop SURVIVES the close — the documented hazard the
         # orderRef fix exists to prevent, reproduced through the real seam.

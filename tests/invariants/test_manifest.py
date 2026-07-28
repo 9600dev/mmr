@@ -38,7 +38,12 @@ from trader.strategy.auto_executor import (
     decide_signal,
 )
 
-TS = pd.Timestamp('2026-07-06 10:39:00')
+# A FRESH bar. These tests drive the OPEN path, and the stale-bar gate refuses
+# an open whose bar is older than 3x the bar size. The hardcoded past date this
+# replaced only ever passed because an unset `bar_size_seconds` disabled the
+# gate, so the suite was exercising opens under conditions that cannot occur
+# live. Naive here means UTC, which is how bar_age_seconds reads it.
+TS = pd.Timestamp.now(tz='UTC').tz_localize(None).floor('min')
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +137,7 @@ def _open_no_manifest(ex, sdk):
     carries the refusing envelope in the test body."""
     ex._process_signal(SignalWork(
         strategy_name='orb', conid=1111, action=Action.BUY, bar_ts=TS,
+        bar_size_seconds=60.0,
         probability=0.6, auto_execute=True, state_running=True))
     assert ex.state.open_position('orb', 1111) is not None
     assert sdk.broker[1111] == 140.0
@@ -152,7 +158,7 @@ class TestManifestNeverBlocksExit:
         pre_opens = [c for c in sdk.propose_calls if c['action'] == 'BUY']
         ex._process_signal(SignalWork(
             strategy_name='orb', conid=1111, action=Action.SELL,
-            bar_ts=TS + pd.Timedelta(minutes=30), auto_execute=True,
+            bar_ts=TS + pd.Timedelta(minutes=30), bar_size_seconds=60.0, auto_execute=True,
             state_running=True,
             manifest_allowed_conids=[2222, 3333],      # 1111 excluded
             manifest_max_opens_per_day=1,               # already exhausted below
@@ -175,6 +181,7 @@ class TestManifestNeverBlocksTimeExit:
         # Open with a max_hold_bars time-exit and no manifest.
         ex._process_signal(SignalWork(
             strategy_name='orb', conid=1111, action=Action.BUY, bar_ts=TS,
+        bar_size_seconds=60.0,
             probability=0.6, auto_execute=True, state_running=True,
             max_hold_bars=5))
         assert ex.state.open_position('orb', 1111) is not None
@@ -211,6 +218,7 @@ class TestBackwardCompatIdentical:
         an un-manifested strategy is byte-identical to today."""
         work = SignalWork(
             strategy_name='s', conid=conid, action=action, bar_ts=TS,
+            bar_size_seconds=60.0,
             manifest_allowed_conids=None, manifest_direction=None,
             manifest_max_opens_per_day=None, manifest_max_opens_per_hour=None)
         directive = Directive(kind, 'reason', quantity=None)
@@ -232,6 +240,7 @@ class TestBackwardCompatIdentical:
         (The manifest lives entirely in the separate check_manifest gate.)"""
         base = dict(
             strategy_name='s', conid=1, action=action, bar_ts=TS,
+            bar_size_seconds=60.0,
             probability=0.6, auto_execute=auto_execute, state_running=True)
         plain = SignalWork(**base)
         with_manifest = SignalWork(

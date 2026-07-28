@@ -46,6 +46,7 @@ _BAR = dt.datetime(2026, 7, 24, 10, 30)
 
 def _work(action=Action.BUY, **kw):
     base = dict(strategy_name='s', conid=1, action=action, bar_ts=_BAR,
+                bar_size_seconds=60.0,
                 auto_execute=True, state_running=True)
     base.update(kw)
     return SignalWork(**base)

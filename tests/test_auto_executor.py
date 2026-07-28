@@ -26,12 +26,18 @@ from trader.strategy.auto_executor import (
     decide_signal,
 )
 
-TS = pd.Timestamp('2026-07-06 10:39:00')
+# A FRESH bar. These tests drive the OPEN path, and the stale-bar gate refuses
+# an open whose bar is older than 3x the bar size. The hardcoded past date this
+# replaced only ever passed because an unset `bar_size_seconds` disabled the
+# gate, so the suite was exercising opens under conditions that cannot occur
+# live. Naive here means UTC, which is how bar_age_seconds reads it.
+TS = pd.Timestamp.now(tz='UTC').tz_localize(None).floor('min')
 
 
 def make_work(**kwargs) -> SignalWork:
     defaults = dict(
         strategy_name='orb_test', conid=1111, action=Action.BUY, bar_ts=TS,
+        bar_size_seconds=60.0,
         probability=0.6, risk=0.4, quantity=0.0,
         auto_execute=True, paper_only=False, state_running=True,
     )
