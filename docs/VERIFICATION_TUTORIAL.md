@@ -898,6 +898,42 @@ every future run re-litigates the same three survivors.
 > failure of generated test suites, and it is invisible to code review,
 > because the tests read correctly. Only mutation testing surfaces it.
 
+#### A second way tests verify nothing: the disabled precondition
+
+The case above is weak assertions. This one is worse, because the assertions
+are fine and the test is exercising a different code path from production.
+
+A safety gate refuses to open a position on a stale bar. It divides by the
+strategy's bar interval, carried on the work item as
+`bar_size_seconds: float = 0.0`, with `0` meaning "interval unknown" and
+causing the gate to decline to run.
+
+**The default was the value that disables the check.** Production always set it
+properly. No test ever did. So every test that drove the open path drove it
+with that gate switched off, and no test could reveal this, because every
+caller inherited the same default. They also used a hardcoded fixture
+timestamp, `pd.Timestamp('2026-07-06 10:39:00')`, which was three weeks stale
+by the time anyone looked and got worse daily. With the gate off, that never
+mattered either.
+
+Removing the default made 31 tests fail at once. They had been asserting that
+opens succeed under conditions that cannot occur live. Fixing them moved the
+module's mutation score from **72.4% to 86.1%** without changing a single
+assertion: the tests were simply reaching code they had never reached.
+
+Two things to take from it:
+
+- **A default that disables a check is not a default, it is an off switch that
+  every caller flips without noticing.** The fix was not in the gate. It was
+  removing the default so a caller who forgets fails loudly at construction.
+- **Fixture rot is invisible until something checks freshness.** A hardcoded
+  past timestamp is fine right up until a time-dependent rule starts caring,
+  and then it is wrong in a way that looks like the rule is broken.
+
+Mutation testing found this one indirectly, which is worth noting: the score
+did not drop, it was *always* low and nobody could see why. The number moved
+only after the cause was removed.
+
 ---
 
 ### How strong should a property be?
@@ -1007,6 +1043,58 @@ if not any(_SUMMARY_RE.match(ln.strip()) for ln in out.splitlines()):
 The mutation gate applies the same principle: a missing baseline, absent
 mutation data, or a baselined module that a partial run did not exercise are
 each a failure, never a silent pass.
+
+### The third state
+
+Fail-closed is about what a check does when it cannot decide. This is about
+whether it admits that it could not decide, and it turned out to be the most
+common defect in this codebase by a wide margin.
+
+Almost every value that crosses a boundary has three states, not two: the
+thing, the absence of the thing, and *unknown*. Collapse the third onto either
+of the others and you get a component that reports confidently while delivering
+something else. Five instances, found across two days, all in code with passing
+tests:
+
+| Where | The third state | Collapsed onto | Result |
+|---|---|---|---|
+| Order audit trail | broker library's "unset" sentinel for a market order's price | a price | a $1.8e308 notional recorded as fact |
+| Data freshness | a bar's timezone; days that are not trading days | dropped offset, calendar days | "stale 4" for data that was current |
+| Data refresh | source returned nothing | nothing to do | job exits 0 having refreshed nothing |
+| Data refresh | source returned nothing, as an HTTP 400 | a failure | 46 of 58 symbols "failed" on a healthy run |
+| Stale-bar gate | bar age could not be computed | fresh enough | opened on a bar of unknown age |
+
+Note that the same boundary appears twice with the collapse going in opposite
+directions. That is the tell: the problem is not which side you pick, it is
+that a two-valued answer cannot carry the information.
+
+The fix is the same shape every time. Keep the third state, name it, and make
+the consumer decide:
+
+- The order valuation returns `(notional, evaluable)` and never a bare number.
+- The gate's check record distinguishes `skipped:<why>` (the check does not
+  apply) from `unevaluable:<what>` (the check applies and its input could not
+  be read). The chokepoint then treats `unevaluable:` like a failure, which
+  gives the distinction teeth rather than leaving it a naming convention.
+- The refresh counts "source returned empty" separately from both success and
+  failure, and a job that wrote nothing, found nothing current, and saw an
+  empty response fails.
+
+This is the same principle as `RiskInputs`' `*_evaluable` flags, which the risk
+gate had from the start. The lesson is that it generalises: anywhere a value
+can be absent, a two-state representation will eventually be read as the wrong
+one of the two.
+
+**A gate you add reveals the noise that was already there.** Worth expecting,
+because it looks like your change broke something. Adding a non-zero exit code
+to the refresh job immediately made it fail on a healthy run. The exit code was
+correct; it exposed that benign "no data for this window" responses had been
+counted as download failures all along, invisibly, because nobody read the
+job's status. Shipping the signal without cleaning the channel first would have
+produced a daily false alarm, and a daily false alarm is how a signal gets
+switched off. Clean the channel, then add the signal.
+
+---
 
 ### Baseline the right thing
 
@@ -1563,10 +1651,28 @@ to catch that. This is the argument. The tooling is not there because models
 are bad. It is there because plausible-and-wrong is the characteristic
 failure, and it is invisible to review precisely because it reads well.
 
+A later session added two more, and they share a mechanism worth naming:
+
+- I reported that a CLI command returned stale data. It does not. It resolves
+  the symbol correctly, and I had inferred the behaviour from the storage layer
+  instead of running the command.
+- I reported that a safety gate was disabled for every strategy in the live
+  roster, which would have been a serious outage. It was not. My probe passed a
+  configuration string where the runtime passes a parsed enum, and the function
+  raises on one and works on the other. The gate was fine.
+
+Both were **reconstructions of production rather than production**. A probe
+that is meant to tell you what the live system does has to use the live
+system's own types and call path, or it is measuring a plausible-looking
+neighbour. In each case the correction came from re-running against the real
+code path, and in the second the alarm was loud enough that publishing it
+without checking would have been costly.
+
 Note what caught each one. The suite caught the sizer change. Controlled reruns
 caught the nondeterminism claim. Reading the live database caught the
-zero-price claim. Switching the control on caught the fail-closed trap. Four
-different layers, and no layer would have caught more than its own.
+zero-price claim. Switching the control on caught the fail-closed trap.
+Re-running against the real call path caught the last two. Five different
+layers, and no layer would have caught more than its own.
 
 ### Failure modes of the method itself
 
