@@ -149,6 +149,16 @@ equity_decimation: daily
 #   max_daily_open_notional: 35000.0               # ~6x peak observed day
 #   max_daily_open_notional_per_strategy: 10000.0  # ~8x peak strategy-day
 #
+#   # ENABLE AT A DAY BOUNDARY. The cap refuses opens while ANY of today's
+#   # opening submissions cannot be valued, because a lower bound is not a
+#   # bound. Submissions recorded before 2026-07-27 carry no notional, so
+#   # switching the cap on mid-session refuses every open for the REST OF THAT
+#   # DAY and then clears by itself. Verified live: enabling it at 20:00 on the
+#   # deploy day produced "14 of today's opening submissions cannot be valued,
+#   # so today's turnover (>= $1,859) is only a lower bound". That is the
+#   # intended fail-closed behaviour, not a bug, but it is a surprise if you
+#   # meet it unannounced.
+#
 #   # Known limitation: forex (sec_type CASH) is exempt, for the same reason
 #   # the concentration check exempts it — a currency conversion is not a
 #   # position and its notional is not comparable. Turnover in a CASH pair is

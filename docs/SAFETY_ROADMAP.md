@@ -574,6 +574,17 @@ strategy-day $1,241. Recommended values are in `config_defaults/trader.yaml`
 with that rationale attached, and the instruction to re-measure rather than
 copy them.
 
+**Operational note, found by enabling it live.** The cap refuses opens while
+ANY of the day's opening submissions cannot be valued, since a lower bound is
+not a bound. History written before this change carries no notional, so
+switching the cap on mid-session refuses every open for the rest of that day
+and then clears by itself at the day boundary. Verified on the deploy day:
+approving a 1-share proposal returned "14 of today's opening submissions cannot
+be valued, so today's turnover (>= $1,859) is only a lower bound". Intended
+fail-closed behaviour, and the reason the live config was left OFF rather than
+suppressing a session's trading without the operator asking for it. Enable at a
+day boundary.
+
 **What it does not cover.**
 
 * Forex (`sec_type` CASH) is exempt, for the same reason concentration exempts
