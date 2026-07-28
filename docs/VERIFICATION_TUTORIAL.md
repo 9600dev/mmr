@@ -900,6 +900,60 @@ every future run re-litigates the same three survivors.
 
 ---
 
+### How strong should a property be?
+
+The two slow layers measure opposite failure modes of the same thing, and it
+took a long time to see it stated plainly.
+
+- **Contracts and CrossHair find over-specification.** A property that is too
+  strong fails against a CORRECT implementation. That is what it means when a
+  `deal` postcondition fires on code that is doing the right thing.
+- **Mutation testing finds under-specification.** A property that is too weak
+  lets mutants live.
+
+The right strength sits between them, and it is nearer the weak end than
+instinct suggests. Michael Bennett argues that when choosing among hypotheses
+that all fit what you have seen, the one most likely to hold on what you have
+not seen is the WEAKEST, not the shortest: a less specific statement
+contradicts fewer possibilities. His razor is *explanations should be no more
+specific than necessary* (M. T. Bennett, [The Optimal Choice of Hypothesis Is
+the Weakest, Not the Shortest](https://arxiv.org/abs/2301.12987), AGI 2023).
+
+A specification is exactly that kind of hypothesis. The situations you tested
+are the child task; production is the parent. So the working rule is: **name
+the harm, not the mechanism.** Any property mentioning a string constant, an
+exact float relation, or a specific call is a candidate for being too strong.
+
+Weak is not short, and the difference matters. Bennett's own example of a
+short, maximally specific statement is "all things are blue crabs". In this
+repo the equivalent was a one-line property asserting exact float equality,
+which turned out to be satisfiable only by an implementation that OVERSELLS,
+something another property in the same file forbids. It was not merely
+unachievable; it contradicted a more important property standing beside it.
+
+Two consequences worth carrying:
+
+- The equivalent-mutant ledger reads better as **a record of deliberate
+  weakness** than as a list of tool noise. Log text, `approved=False` versus
+  `approved=None`, a boundary whose branches compute the same value: those are
+  the dimensions where the spec is correctly silent.
+- A safety property is not an exception. It should be strong about the harm
+  and weak about everything else, which IS the weakest form that forbids the
+  harm. "Never oversell" names a harm. `checks['daily_loss'] ==
+  'skipped:not-evaluable'` names a mechanism. The property built on those
+  strings was quietly FALSE of correct behaviour, and had never fired only
+  because no test in that file generated a forex order.
+
+**Where the razor stops.** Bennett maximises the probability that a hypothesis
+generalises, counting tasks under a uniform distribution. A trading system is
+not optimising that. It minimises expected HARM, and the harm is wildly
+asymmetric: refusing an exit is catastrophic, refusing an open costs an
+opportunity. Weakness maximisation cannot express that preference, which is why
+fail-closed exists at all. Use the razor on descriptive properties; keep
+consequence-weighting for normative ones.
+
+---
+
 ## 7. Layer 5: gates that cannot lie
 
 Most projects skip this layer. In an LLM loop it is arguably the most
@@ -1908,6 +1962,12 @@ using it to aim the other.
 - CrossHair: <https://crosshair.readthedocs.io/>
 - mutmut: <https://mutmut.readthedocs.io/>
 - ty: <https://github.com/astral-sh/ty>
+
+On choosing the strength of a hypothesis: M. T. Bennett, "The Optimal Choice of
+Hypothesis Is the Weakest, Not the Shortest", AGI 2023,
+<https://arxiv.org/abs/2301.12987> (doi:10.1007/978-3-031-33469-6_5). The
+source of "name the harm, not the mechanism" in
+[`tests/invariants/README.md`](../tests/invariants/README.md).
 
 In-repo companions: [`SAFETY_ROADMAP.md`](SAFETY_ROADMAP.md) for what is shipped
 and what is designed, [`AUDIT_ROADMAP.md`](AUDIT_ROADMAP.md) for outstanding

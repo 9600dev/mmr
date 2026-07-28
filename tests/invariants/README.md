@@ -48,6 +48,59 @@ disagree, the spec wins by default.
    and to reduce the judgement call to a single sentence.
 
 
+## Name the harm, not the mechanism
+
+A property is a hypothesis about what the system must do. The useful ones are
+as WEAK as they can be while still forbidding the harm: they constrain the
+outcome and stay silent about how any implementation reaches it. Michael
+Bennett's razor puts it as *explanations should be no more specific than
+necessary*, on the grounds that a less specific statement contradicts fewer
+possibilities (M. T. Bennett, [The Optimal Choice of Hypothesis Is the Weakest, Not the
+Shortest](https://arxiv.org/abs/2301.12987), AGI 2023,
+doi:10.1007/978-3-031-33469-6_5). Note that weak is not
+short: "all things are blue crabs" is brief and maximally specific.
+
+**Working rule.** Any invariant mentioning a string constant, an exact float
+relation, or a specific call is a candidate for being too strong. Ask what
+harm the property exists to prevent, and assert that.
+
+Over-specification is not a tidiness problem. It has two failure modes, and
+this directory has produced both:
+
+| Symptom | What it means | Example |
+|---|---|---|
+| The property fails against CORRECT code | It is unsatisfiable, or contradicts another property | `reduce + open == qty` could only be satisfied by overselling, which the same file forbids |
+| The property breaks whenever benign behaviour is added, or is quietly false | It enumerates instances where it should name a category | An approved order "carries no `skipped:` except `zero-notional`" was already false for forex, and had never fired |
+
+Both were found by machinery rather than by reading, and it is worth knowing
+which machinery finds which:
+
+- **Contracts and CrossHair detect over-specification.** A property that is too
+  strong fails against a correct implementation, which is exactly what a
+  `deal` postcondition firing on correct code means.
+- **Mutation testing detects under-specification.** A property that is too weak
+  lets mutants live.
+
+The target sits between them. That also gives the equivalent-mutant ledger in
+`scripts/run_mutation.sh` a better reading than "mutmut noise": it is a record
+of DELIBERATE weakness, the dimensions where the spec is correctly silent (log
+text, `approved=False` versus `None`, a boundary whose branches compute the
+same value).
+
+**A safety property is not an exception to this.** It should be strong about
+the harm and weak about everything else, which is the weakest form that still
+forbids the harm. "Never oversell" names a harm and says nothing about
+mechanism. `checks['daily_loss'] == 'skipped:not-evaluable'` names a mechanism.
+
+**Where the razor stops.** Bennett maximises the probability that a hypothesis
+generalises, counting tasks under a uniform distribution. This system is not
+optimising that. It minimises expected HARM, and the harm here is wildly
+asymmetric: refusing an exit is catastrophic, refusing an open costs an
+opportunity. That asymmetry is why fail-closed exists, and it is not something
+weakness maximisation can express. Use the razor on descriptive properties
+(what the code does); keep consequence-weighting for normative ones (what it
+must never do).
+
 ## Revising a property: the four-point protocol
 
 The spec guard (`scripts/invariants_guard.py`) stops an agent changing a
