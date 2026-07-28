@@ -63,12 +63,19 @@ def _run_instrument(db_dir: str, config, strategy: str, class_name: str,
                     annual_drift: float = 0.0):
     """Generate ONE instrument and run every parameter cell against it.
 
-    Each worker owns its own single-instrument DuckDB. That is not a
-    micro-optimisation: pointing 14 processes at one shared store deadlocked
-    the first attempt at 0% CPU, because DuckDB takes a per-file lock and every
-    worker opens read-write. Per-worker files remove the contention entirely
-    and cost nothing, since the data is generated deterministically from the
-    seed rather than shared.
+    Each worker owns its own single-instrument DuckDB, which avoids any
+    contention on a shared store and costs nothing, since the data is a pure
+    function of the seed and was never worth sharing.
+
+    A correction is recorded here because the original version of this comment
+    was wrong and would have misled: it claimed a shared store had DEADLOCKED
+    an earlier attempt at 0% CPU. It had not. The workers are spawned, so they
+    run as `python3 -c from multiprocessing...` and a `ps | grep
+    negative_control` matches only the parent and the resource tracker — it
+    reported two processes and no CPU while fourteen were in fact saturating
+    the machine. The earlier run was killed for no reason. Per-worker stores
+    are still the better design; they were simply not adopted for the stated
+    cause.
     """
     conid = _BASE_CONID + index
     path = os.path.join(db_dir, f'nc_{conid}.duckdb')
