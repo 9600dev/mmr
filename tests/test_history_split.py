@@ -23,13 +23,24 @@ from trader.objects import BarSize
 
 
 def _sample_df(n=10, start="2024-01-02 09:30"):
+    """Bars that could actually have happened.
+
+    Each field used to be drawn independently, which produced rows whose "high"
+    was below the open or close about 70% of the time — bars describing no
+    possible market. That went unnoticed until the write path started refusing
+    impossible bars, at which point 7 of these 10 were dropped. The fixture was
+    wrong, not the guard: a storage test should store data of the shape storage
+    actually receives.
+    """
     dates = pd.date_range(start, periods=n, freq="1min", tz="UTC")
     rng = np.random.default_rng(42)
+    open_ = 100.0 + rng.normal(0, 1, n)
+    close = 100.0 + rng.normal(0, 1, n)
     return pd.DataFrame({
-        "open": 100.0 + rng.normal(0, 1, n),
-        "high": 101.0 + rng.normal(0, 1, n),
-        "low": 99.0 + rng.normal(0, 1, n),
-        "close": 100.0 + rng.normal(0, 1, n),
+        "open": open_,
+        "high": np.maximum(open_, close) + np.abs(rng.normal(0, 0.5, n)),
+        "low": np.minimum(open_, close) - np.abs(rng.normal(0, 0.5, n)),
+        "close": close,
         "volume": rng.integers(100, 1000, n).astype(float),
     }, index=dates)
 

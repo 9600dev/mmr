@@ -235,3 +235,66 @@ def unexplained_jumps(bars: Sequence[Bar], threshold: float = 0.25) -> List[Find
             out.append(Finding('large_jump', 'warn', i,
                                f'close moved {move:.1%} ({prev:g} -> {cur:g})'))
     return out
+
+
+# --------------------------------------------------------------------------
+# Vectorised counterpart, for the write path.
+#
+# The rules above are the SPEC: pure, contracted, CrossHair-checked, and they
+# build a NamedTuple per bar. That is far too slow for ingestion, which writes
+# frames of tens of thousands of rows. So the write path uses the mask below.
+#
+# Two implementations of one rule is exactly the shape that produced the
+# flip-residual bug (a gate and a splitter answering different questions), so
+# they are not allowed to drift: `tests/invariants/test_bar_quality.py` asserts
+# the mask selects precisely the rows `check_bar` calls errors, over generated
+# frames. The spec stays the source of truth; this is an optimisation of it.
+# --------------------------------------------------------------------------
+
+_OHLC = ('open', 'high', 'low', 'close')
+
+
+def impossible_mask(df) -> Any:
+    """Boolean Series: True for rows that cannot describe a real market.
+
+    ERRORS only. An all-empty bar is a placeholder, not an impossibility, and
+    is deliberately NOT selected: those rows may be load-bearing for the
+    incremental refresh (they record "we asked and the source had nothing"),
+    and dropping them could send it re-fetching the same empty range forever.
+    """
+    import numpy as np
+    import pandas as pd
+
+    if df is None or len(df) == 0:
+        return pd.Series([], dtype=bool)
+    if not all(c in df.columns for c in _OHLC):
+        # Nothing to judge against; refusing here would block legitimate
+        # non-OHLC writes rather than protect anything.
+        return pd.Series(False, index=df.index)
+
+    cols = {c: pd.to_numeric(df[c], errors='coerce').to_numpy(dtype=float)
+            for c in _OHLC}
+    finite = {c: np.isfinite(v) for c, v in cols.items()}
+    n_finite = sum(finite[c].astype(int) for c in _OHLC)
+
+    all_missing = n_finite == 0
+    some_missing = (n_finite > 0) & (n_finite < len(_OHLC))
+
+    o, h, l, c = (cols['open'], cols['high'], cols['low'], cols['close'])
+    with np.errstate(invalid='ignore'):
+        body_hi = np.fmax(o, c)
+        body_lo = np.fmin(o, c)
+        non_positive = (
+            (np.nan_to_num(o, nan=1.0) <= 0) | (np.nan_to_num(h, nan=1.0) <= 0)
+            | (np.nan_to_num(l, nan=1.0) <= 0) | (np.nan_to_num(c, nan=1.0) <= 0))
+        incoherent = (h < l) | (h < body_hi) | (l > body_lo)
+
+    bad = some_missing | (~all_missing & (non_positive | incoherent))
+
+    if 'volume' in df.columns:
+        vol = pd.to_numeric(df['volume'], errors='coerce').to_numpy(dtype=float)
+        # A missing volume on an otherwise complete bar is corrupt; a missing
+        # volume on a placeholder row is just part of the placeholder.
+        bad = bad | (~all_missing & (~np.isfinite(vol) | (vol < 0)))
+
+    return pd.Series(bad, index=df.index)

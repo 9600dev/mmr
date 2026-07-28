@@ -7,6 +7,7 @@ from ib_async.contract import Contract, ContractDetails
 from pandas.core.base import PandasObject
 from trader.common.helpers import daily_close, daily_open, dateify, market_hours, symbol_to_contract
 from trader.common.logging_helper import setup_logging
+from trader.data.bar_quality import impossible_mask
 from trader.data.store import DateRange
 from trader.data.duckdb_store import DuckDBDataStore, DuckDBObjectStore, _default_db_path
 from trader.objects import BarSize
@@ -387,7 +388,48 @@ class Data():
     def write(self,
               contract: Union[Contract, SecurityDefinition, int],
               data_frame: pd.DataFrame):
-        self.library.write(self._to_symbol(contract), data_frame)
+        """Persist bars, refusing any that cannot describe a real market.
+
+        This is the lowest chokepoint every writer passes through: the download
+        service, the strategy runtime's history priming, and
+        write_resolve_overlap. Validating here rather than at each caller is
+        the same argument as the IB placement chokepoint — a path that skips
+        the check should not exist.
+
+        Structurally impossible bars are DROPPED, not raised on. One bad row in
+        a 20,000-row frame must not cost a day of data, and refusing the frame
+        would make ingestion fail closed in a way that starves strategies. But
+        it is never silent: the count and the reason are logged, and the
+        standing `mmr data audit` gate measures what is in the store
+        independently.
+
+        Found necessary on 2026-07-28: 2,580 stored 1-min bars had a "high"
+        between open and close with bar_count=0, i.e. synthesised from bid/ask
+        midpoints rather than trades. ORB's whole signal is the high and low of
+        the opening range, so it had been reading fiction.
+        """
+        symbol = self._to_symbol(contract)
+        if data_frame is not None and len(data_frame) > 0:
+            try:
+                bad = impossible_mask(data_frame)
+                n_bad = int(bad.sum())
+                if n_bad:
+                    sample = data_frame[bad].head(1).to_dict('records')
+                    logging.warning(
+                        'REFUSED %d of %d structurally impossible bar(s) for %s '
+                        '(a bar whose high is below its own open/close, or with '
+                        'partial/negative values, cannot have happened). '
+                        'First: %s', n_bad, len(data_frame), symbol, sample)
+                    data_frame = cast(pd.DataFrame, data_frame[~bad])
+                if len(data_frame) == 0:
+                    return
+            except Exception as ex:
+                # A validation failure must not become a data-loss event: if the
+                # check itself breaks, persist and let `mmr data audit` catch
+                # what got through.
+                logging.warning('bar validation failed for %s, writing '
+                                'unvalidated: %s', symbol, ex)
+        self.library.write(symbol, data_frame)
 
     def delete(self,
                contract: Union[Contract, SecurityDefinition, int]):

@@ -405,3 +405,75 @@ class TestShadowedHostDatabase:
         sub.mkdir()
         conn = DuckDBConnection(str(sub / 'fine.duckdb'))
         assert conn.db_path.endswith('fine.duckdb')
+
+
+class TestWritesRefuseImpossibleBars:
+    """The write path is the lowest chokepoint every bar passes through, so it
+    is where a bar that cannot have happened gets stopped.
+
+    Before 2026-07-28 nothing validated data on the way in, and 2,580 stored
+    1-min bars had a "high" between their own open and close with bar_count=0:
+    synthesised from bid/ask midpoints rather than trades. ORB's entire signal
+    is the high and low of the opening range.
+
+    Dropping rather than raising is deliberate. One bad row in a 20,000-row
+    frame must not cost a day of data, and a frame-level refusal would make
+    ingestion fail closed in a way that starves strategies of real bars.
+    """
+
+    def _tick_data(self, tmp_duckdb_path):
+        from trader.data.data_access import TickData
+        from trader.objects import BarSize
+        return TickData(tmp_duckdb_path, BarSize.Mins1)
+
+    def _frame(self, rows):
+        import datetime as dt
+        import pandas as pd
+        idx = pd.DatetimeIndex(
+            [dt.datetime(2026, 7, 28, 13, 30) + dt.timedelta(minutes=i)
+             for i in range(len(rows))], name='date').tz_localize('UTC')
+        return pd.DataFrame(rows, index=idx)
+
+    def test_a_midpoint_high_is_refused(self, tmp_duckdb_path):
+        """The exact shape found in the store."""
+        td = self._tick_data(tmp_duckdb_path)
+        df = self._frame([
+            {'open': 76.81, 'high': 76.825, 'low': 76.80, 'close': 76.83,
+             'volume': 5994.0},                                    # impossible
+            {'open': 76.81, 'high': 76.90, 'low': 76.80, 'close': 76.83,
+             'volume': 100.0},                                     # fine
+        ])
+        td.write(4391, df)
+        stored = td.read(4391)
+        assert len(stored) == 1, 'the impossible bar was persisted'
+        assert float(stored['high'].iloc[0]) == 76.90
+
+    def test_a_wholly_bad_frame_writes_nothing_rather_than_raising(self, tmp_duckdb_path):
+        td = self._tick_data(tmp_duckdb_path)
+        df = self._frame([
+            {'open': 10.0, 'high': 9.0, 'low': 8.0, 'close': 9.5, 'volume': 1.0},
+        ])
+        td.write(4392, df)                    # must not raise
+        assert len(td.read(4392)) == 0
+
+    def test_good_bars_are_untouched(self, tmp_duckdb_path):
+        td = self._tick_data(tmp_duckdb_path)
+        df = self._frame([
+            {'open': 10.0, 'high': 11.0, 'low': 9.0, 'close': 10.5, 'volume': 5.0},
+            {'open': 10.5, 'high': 10.5, 'low': 10.5, 'close': 10.5, 'volume': 0.0},
+        ])
+        td.write(4393, df)
+        assert len(td.read(4393)) == 2, 'a legitimate flat/zero-volume bar was dropped'
+
+    def test_the_refusal_is_logged_not_silent(self, tmp_duckdb_path, caplog):
+        """Silently dropping data is the failure mode this whole exercise
+        exists to remove."""
+        import logging as stdlib_logging
+        td = self._tick_data(tmp_duckdb_path)
+        df = self._frame([
+            {'open': 76.81, 'high': 76.825, 'low': 76.80, 'close': 76.83,
+             'volume': 5994.0},
+        ])
+        with caplog.at_level(stdlib_logging.WARNING):
+            td.write(4394, df)
+        assert any('REFUSED' in r.message for r in caplog.records)
