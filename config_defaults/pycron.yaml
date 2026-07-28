@@ -87,10 +87,19 @@ jobs:
       description: refresh ASX universes (IB) — after ASX close
       command: python3
       arguments: -m trader.mmr_cli data refresh asx_daily asx_1min
-      start: "30 16 * * 0-4"     # 4:30 PM ET Sun-Thu = 6:30 AM UTC Mon-Fri =
-                                 # 16:30 AEST (30 min after Sydney 16:00 close
-                                 # to let the closing auction settle). ASX has
-                                 # no after-hours session, so this is final.
+      start: "0 6 * * 1-5"       # 6:00 AM ET Mon-Fri = 10:00 UTC = 20:00 AEST,
+                                 # ~4 h after the Sydney close.
+                                 #
+                                 # This was 16:30 AEST, i.e. 20 min after the
+                                 # 16:10 closing auction. Same race the US job
+                                 # had: enough for the 1-min bars, not for the
+                                 # DAILY bar, so the job exited 0 having
+                                 # refreshed 1-min and skipped the daily
+                                 # series. Confirmed 2026-07-28: the 16:30 AEST
+                                 # run did not pick up that day's ASX daily
+                                 # bar. The wide buffer also absorbs the US/AU
+                                 # daylight-saving drift, which moves the two
+                                 # zones up to 2 h relative to each other.
       start_on_pycron_start: False
       restart_if_found: False
       restart_if_finished: False
