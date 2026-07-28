@@ -1671,9 +1671,14 @@ class Trader():
                     return SuccessFail.fail(error=leverage_result.reason)
             elif not leverage_checks:
                 # margin_impact was falsy but no exception fired (e.g. {}).
+                # UNEVALUABLE, not skipped: the check applies to this order and
+                # its input could not be read. The chokepoint treats that like a
+                # failure for an opening order, which is the documented policy
+                # (unreadable margin data refuses an open) now expressed in the
+                # gate record rather than only in prose.
                 leverage_checks = {
-                    'leverage': 'skipped:no-margin-data',
-                    'margin_cushion': 'skipped:no-margin-data',
+                    'leverage': 'unevaluable:margin-data',
+                    'margin_cushion': 'unevaluable:margin-data',
                 }
 
             # 4. Risk gate checks (open orders, daily loss, concentration)

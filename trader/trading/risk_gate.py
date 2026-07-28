@@ -115,7 +115,18 @@ class RiskInputs:
 class RiskGateResult:
     approved: bool
     reason: str = ''
-    # check name -> 'pass' | 'fail' | 'skipped:<reason>'
+    # check name -> 'pass' | 'fail' | 'skipped:<why>' | 'unevaluable:<what>'
+    #
+    # The last two are NOT the same thing, and collapsing them was a spec
+    # defect. 'skipped:' means the check does not APPLY to this order (a forex
+    # conversion is not position concentration; a turnover cap that is switched
+    # off). 'unevaluable:' means the check applies and its input could not be
+    # READ, which is always a refusal and never appears on an approved order.
+    #
+    # Naming the category rather than enumerating instances is what lets the
+    # spec state the rule once. The previous vocabulary forced the invariant to
+    # list allowed 'skipped:' strings by name, so every new benign skip broke
+    # it, and one benign skip ('skipped:forex-cash') silently contradicted it.
     checks: Dict[str, str] = field(default_factory=dict)
 
 
@@ -160,7 +171,7 @@ class RiskGate:
 
         # Daily loss check — an unreadable daily PnL is NOT a pass.
         if not daily_pnl_evaluable:
-            checks['daily_loss'] = 'skipped:not-evaluable'
+            checks['daily_loss'] = 'unevaluable:daily-pnl'
             return RiskGateResult(
                 approved=False,
                 reason='daily PnL could not be read — refusing to open new exposure '
@@ -183,7 +194,7 @@ class RiskGate:
         if str(sec_type).upper() == 'CASH':
             checks['concentration'] = 'skipped:forex-cash'
         elif not portfolio_value_evaluable:
-            checks['concentration'] = 'skipped:portfolio-value-not-evaluable'
+            checks['concentration'] = 'unevaluable:portfolio-value'
             return RiskGateResult(
                 approved=False,
                 reason='portfolio value (NetLiquidation) could not be read — refusing to '
@@ -191,7 +202,7 @@ class RiskGate:
                 checks=checks,
             )
         elif not position_value_evaluable:
-            checks['concentration'] = 'skipped:no-price'
+            checks['concentration'] = 'unevaluable:position-value'
             return RiskGateResult(
                 approved=False,
                 reason='no price available to value the position — refusing to open new '
@@ -323,7 +334,7 @@ class RiskGate:
                 "BOUND. Proceeding on it; this clears at the day boundary.",
                 legacy, f'{spent:,.0f}')
         if unvaluable:
-            checks['daily_turnover'] = 'skipped:unvaluable-history'
+            checks['daily_turnover'] = 'unevaluable:turnover-history'
             return RiskGateResult(
                 approved=False,
                 reason=f'{unvaluable} of today\'s opening submissions could not be valued '
@@ -472,8 +483,8 @@ class RiskGate:
         equity_after = margin_impact.get('equityWithLoanAfter', 0)
 
         if net_liquidation <= 0:
-            checks['leverage'] = 'skipped:net-liq-not-evaluable'
-            checks['margin_cushion'] = 'skipped:net-liq-not-evaluable'
+            checks['leverage'] = 'unevaluable:net-liq'
+            checks['margin_cushion'] = 'unevaluable:net-liq'
             return RiskGateResult(
                 approved=False,
                 reason='NetLiquidation could not be read (or is not positive) — '
@@ -483,8 +494,8 @@ class RiskGate:
             )
 
         if not init_margin_after:
-            checks['leverage'] = 'skipped:no-margin-data'
-            checks['margin_cushion'] = 'skipped:no-margin-data'
+            checks['leverage'] = 'unevaluable:margin-data'
+            checks['margin_cushion'] = 'unevaluable:margin-data'
             return RiskGateResult(
                 approved=False,
                 reason='margin impact carried no initMarginAfter — refusing to '
@@ -504,7 +515,7 @@ class RiskGate:
         checks['leverage'] = 'pass'
 
         if not equity_after:
-            checks['margin_cushion'] = 'skipped:no-equity-data'
+            checks['margin_cushion'] = 'unevaluable:equity-data'
             return RiskGateResult(
                 approved=False,
                 reason='margin impact carried no equityWithLoanAfter — refusing '

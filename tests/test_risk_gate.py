@@ -165,7 +165,7 @@ class TestTriStateInputs:
         result = risk_gate.evaluate(_make_signal(), daily_pnl_evaluable=False)
         assert result.approved is False
         assert "daily pnl" in result.reason.lower()
-        assert result.checks["daily_loss"] == "skipped:not-evaluable"
+        assert result.checks["daily_loss"] == "unevaluable:daily-pnl"
 
     def test_daily_pnl_exactly_zero_is_a_pass(self, risk_gate):
         result = risk_gate.evaluate(_make_signal(), daily_pnl=0.0, daily_pnl_evaluable=True)
@@ -176,13 +176,13 @@ class TestTriStateInputs:
         result = risk_gate.evaluate(_make_signal(), portfolio_value_evaluable=False)
         assert result.approved is False
         assert "netliquidation" in result.reason.lower() or "portfolio value" in result.reason.lower()
-        assert result.checks["concentration"] == "skipped:portfolio-value-not-evaluable"
+        assert result.checks["concentration"] == "unevaluable:portfolio-value"
 
     def test_no_price_for_concentration_refuses(self, risk_gate):
         result = risk_gate.evaluate(_make_signal(), position_value_evaluable=False)
         assert result.approved is False
         assert "price" in result.reason.lower()
-        assert result.checks["concentration"] == "skipped:no-price"
+        assert result.checks["concentration"] == "unevaluable:position-value"
 
     def test_zero_portfolio_value_with_real_position_refuses(self, risk_gate):
         """Evaluable portfolio_value of 0 against a real notional is infinite
@@ -389,7 +389,7 @@ class TestCheckLeverageMissingData:
         result = gate.check_leverage({'equityWithLoanAfter': 0}, net_liquidation=1_000_000.0)
         assert result.approved is False
         assert 'initMarginAfter' in result.reason
-        assert result.checks['leverage'] == 'skipped:no-margin-data'
+        assert result.checks['leverage'] == 'unevaluable:margin-data'
 
     def test_missing_equity_key_refuses_after_leverage_passes(self, event_store):
         """Leverage evaluable and fine, cushion unreadable: the refusal names
@@ -400,7 +400,7 @@ class TestCheckLeverageMissingData:
         assert result.approved is False
         assert 'equityWithLoanAfter' in result.reason
         assert result.checks['leverage'] == 'pass'
-        assert result.checks['margin_cushion'] == 'skipped:no-equity-data'
+        assert result.checks['margin_cushion'] == 'unevaluable:equity-data'
 
     def test_leverage_is_enforced_when_both_keys_are_present(self, event_store):
         """The control: with data present the limit really does bite."""
@@ -447,7 +447,7 @@ class TestCheckLeverageMissingData:
         assert result.approved is False
         assert 'initMarginAfter' in result.reason
         assert 'exceeds' not in result.reason
-        assert result.checks['leverage'] == 'skipped:no-margin-data'
+        assert result.checks['leverage'] == 'unevaluable:margin-data'
 
     def test_cushion_branch_runs_for_any_positive_net_liquidation(self, event_store):
         """Kills mutant 32 (cushion guard `> 0` -> `> 1`).
@@ -467,8 +467,8 @@ class TestCheckLeverageMissingData:
         gate = self._gate(event_store)
         result = gate.check_leverage({}, net_liquidation=1_000_000.0)
         assert result.approved is False
-        assert result.checks['leverage'] == 'skipped:no-margin-data'
-        assert result.checks['margin_cushion'] == 'skipped:no-margin-data'
+        assert result.checks['leverage'] == 'unevaluable:margin-data'
+        assert result.checks['margin_cushion'] == 'unevaluable:margin-data'
 
     def test_non_positive_net_liq_records_why_both_branches_were_skipped(self, event_store):
         gate = self._gate(event_store)
@@ -476,8 +476,8 @@ class TestCheckLeverageMissingData:
             {'initMarginAfter': 1.0, 'equityWithLoanAfter': 1.0}, net_liquidation=0.0)
         assert result.approved is False
         assert result.checks == {
-            'leverage': 'skipped:net-liq-not-evaluable',
-            'margin_cushion': 'skipped:net-liq-not-evaluable',
+            'leverage': 'unevaluable:net-liq',
+            'margin_cushion': 'unevaluable:net-liq',
         }
 
     def test_passing_checks_are_recorded_as_pass(self, event_store):
@@ -758,7 +758,7 @@ class TestDailyTurnoverCap:
         result = self._evaluate(gate, position_value=0.0,
                                 position_value_evaluable=False)
         assert not result.approved
-        assert result.checks['concentration'] == 'skipped:no-price'
+        assert result.checks['concentration'] == 'unevaluable:position-value'
         assert 'daily_turnover' not in result.checks
 
     def test_a_zero_notional_order_contributes_nothing(self, event_store):
@@ -775,7 +775,7 @@ class TestDailyTurnoverCap:
         self._submit(event_store, 'test_strat', 0.0, evaluable=False, price=0.0)
         result = self._evaluate(gate, position_value=100.0)
         assert not result.approved
-        assert result.checks['daily_turnover'] == 'skipped:unvaluable-history'
+        assert result.checks['daily_turnover'] == 'unevaluable:turnover-history'
         assert 'lower bound' in result.reason
 
     def test_the_unset_price_sentinel_does_not_become_a_huge_turnover(self, event_store):
@@ -790,7 +790,7 @@ class TestDailyTurnoverCap:
         # Refused as UNVALUABLE, not as a 1e308 breach — the distinction is the
         # whole point: one is an honest "cannot tell", the other is nonsense
         # presented as fact.
-        assert result.checks['daily_turnover'] == 'skipped:unvaluable-history'
+        assert result.checks['daily_turnover'] == 'unevaluable:turnover-history'
 
     def test_a_limit_order_from_older_history_is_valued_from_its_price(self, event_store):
         """The fallback that keeps this from refusing everything on day one:
@@ -883,7 +883,7 @@ class TestDailyTurnoverCap:
         self._submit(event_store, 'test_strat', 'not-a-number', price=0.0)
         result = self._evaluate(gate, position_value=100.0)
         assert not result.approved
-        assert result.checks['daily_turnover'] == 'skipped:unvaluable-history'
+        assert result.checks['daily_turnover'] == 'unevaluable:turnover-history'
 
     def test_a_nonsense_recorded_notional_is_not_trusted(self, event_store):
         """NaN and negative recorded notionals must be treated as unreadable,
@@ -894,7 +894,7 @@ class TestDailyTurnoverCap:
             store_gate = self._gate(event_store, max_daily_open_notional=10_000.0)
             self._submit(event_store, 'test_strat', bad, price=0.0)
             result = self._evaluate(store_gate, position_value=100.0)
-            assert result.checks['daily_turnover'] == 'skipped:unvaluable-history', bad
+            assert result.checks['daily_turnover'] == 'unevaluable:turnover-history', bad
             assert not result.approved
 
     def test_a_genuinely_zero_notional_record_is_readable_not_unvaluable(self, event_store):
@@ -994,7 +994,7 @@ class TestDailyTurnoverCap:
         self._submit(event_store, 'test_strat', 0.0, evaluable=False, price=0.0)
         result = self._evaluate(gate, position_value=100.0)
         assert not result.approved
-        assert result.checks['daily_turnover'] == 'skipped:unvaluable-history'
+        assert result.checks['daily_turnover'] == 'unevaluable:turnover-history'
         assert 'market data' in result.reason, result.reason
 
     def test_a_fill_values_a_submission_that_could_not_be_valued(self, event_store):

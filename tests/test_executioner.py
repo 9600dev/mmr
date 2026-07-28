@@ -440,7 +440,7 @@ async def test_place_order_mints_token_carrying_gate_checks():
     class _Gate(_ApproveAllGate):
         def evaluate(self, **kw):
             return RiskGateResult(approved=True,
-                                  checks={'daily_loss': 'pass', 'concentration': 'skipped:no-price'})
+                                  checks={'daily_loss': 'pass', 'concentration': 'unevaluable:position-value'})
 
     ex, trader = _make_executioner_with_trader(risk_gate=_Gate())
     captured = {}
@@ -458,7 +458,7 @@ async def test_place_order_mints_token_carrying_gate_checks():
     tok = captured['token']
     assert isinstance(tok, ApprovedOrder)
     assert tok.is_exit is False
-    assert tok.checks == {'daily_loss': 'pass', 'concentration': 'skipped:no-price'}
+    assert tok.checks == {'daily_loss': 'pass', 'concentration': 'unevaluable:position-value'}
 
 
 @pytest.mark.asyncio

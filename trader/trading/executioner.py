@@ -232,10 +232,18 @@ class TradeExecutioner():
 
         if not is_exit:
             recorded = approved.checks or {}
+            # 'fail' is a check that ran and refused. 'unevaluable:' is a check
+            # whose INPUT could not be read, which is equally disqualifying for
+            # an opening order: the gate has no more idea than we do whether
+            # this order is safe. Neither should ever reach here, because both
+            # refuse upstream; treating them alike is defence in depth, and it
+            # gives the vocabulary teeth rather than leaving it a naming
+            # convention. 'skipped:' means the check did not APPLY (forex is
+            # not position concentration) and is not disqualifying.
             failed = sorted(k for k, v in recorded.items()
-                            if str(v).split(':', 1)[0] == 'fail')
+                            if str(v).split(':', 1)[0] in ('fail', 'unevaluable'))
             if not recorded or failed:
-                why = (f'failed checks {failed}' if failed
+                why = (f'failed or unevaluable checks {failed}' if failed
                        else 'no gate record (checks was empty)')
                 logging.error(
                     'placement refused: exposure-increasing order with %s — %r', why, approved)
