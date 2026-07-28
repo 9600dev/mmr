@@ -301,20 +301,36 @@ class RiskGate:
         # the running total.
         this_order = position_value if position_value > 0 else 0.0
 
-        spent, spent_by_strategy, unvaluable = self._daily_open_notional()
+        spent, spent_by_strategy, unvaluable, legacy = self._daily_open_notional()
+
+        # Two very different reasons a submission cannot be valued, and
+        # collapsing them was a footgun.
+        #
+        # LEGACY: written before order notionals were recorded at all, so the
+        # key is simply absent. Nothing is wrong with the system; there is
+        # history from before the feature existed. Refusing on this turned
+        # "enable the cap" into "no opens for the rest of today", which is how
+        # a safety control gets switched off and left off. It self-clears at
+        # the day boundary, so proceed on the lower bound and say so loudly.
+        #
+        # LIVE: the CURRENT build tried to value the order and could not. That
+        # is a real degradation of the input this cap runs on, and it is the
+        # fail-closed case the design wants.
+        if legacy:
+            logging.warning(
+                "daily turnover: %d of today's opening submissions predate "
+                "order-notional recording, so today's turnover (>= $%s) is a LOWER "
+                "BOUND. Proceeding on it; this clears at the day boundary.",
+                legacy, f'{spent:,.0f}')
         if unvaluable:
-            # A lower bound is not a bound. Refusing is the same fail-closed
-            # rule the rest of the gate follows, and it self-clears: every
-            # submission recorded from 2026-07-27 carries its own notional, so
-            # only same-day history written by an older build can trigger this.
             checks['daily_turnover'] = 'skipped:unvaluable-history'
             return RiskGateResult(
                 approved=False,
-                reason=f'{unvaluable} of today\'s opening submissions cannot be valued, '
-                       f'so today\'s turnover (>= ${spent:,.0f}) is only a lower bound — '
-                       f'refusing to open while a turnover cap is active (fail-closed). '
-                       f'Clears once today\'s history is all from a build that records '
-                       f'order notionals.',
+                reason=f'{unvaluable} of today\'s opening submissions could not be valued '
+                       f'by this build, so today\'s turnover (>= ${spent:,.0f}) is only a '
+                       f'lower bound — refusing to open while a turnover cap is active '
+                       f'(fail-closed). This is a live valuation failure, not old history: '
+                       f'check that market data is flowing for the symbols being traded.',
                 checks=checks,
             )
 
@@ -339,8 +355,14 @@ class RiskGate:
         checks['daily_turnover'] = 'pass'
         return None
 
-    def _daily_open_notional(self) -> Tuple[float, Dict[str, float], int]:
-        """Today's opening notional as ``(total, per_strategy, unvaluable_count)``.
+    def _daily_open_notional(self) -> Tuple[float, Dict[str, float], int, int]:
+        """Today's opening notional as
+        ``(total, per_strategy, unvaluable_count, legacy_count)``.
+
+        The two counts are separate on purpose: ``unvaluable`` is a LIVE
+        failure of this build to value an order it placed, ``legacy`` is
+        history from before notionals were recorded at all. Only the first is
+        worth refusing over.
 
         Read from the event store, so it survives a restart. In-memory counters
         would reset on every crash, and supervise() restarts the service
@@ -352,9 +374,23 @@ class RiskGate:
         start_of_day = dt.datetime.combine(dt.date.today(), dt.time.min)
         events = self.event_store.query_since(
             since=start_of_day, event_type=EventType.ORDER_SUBMITTED)
+        # Fills carry a real avgFillPrice, so they can value a submission whose
+        # own record could not be valued — a market order placed on a symbol
+        # with no cached price, for instance. Most submissions that matter do
+        # fill, so this shrinks the unvaluable set to orders that never traded.
+        fill_price: Dict[int, float] = {}
+        for f in self.event_store.query_since(
+                since=start_of_day, event_type=EventType.ORDER_FILLED):
+            try:
+                price = float(f.price)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(price) and price > 0 and f.order_id:
+                fill_price.setdefault(int(f.order_id), price)
         total = 0.0
         per_strategy: Dict[str, float] = {}
         unvaluable = 0
+        legacy = 0
         for e in events:
             meta = e.metadata or {}
             if meta.get('exit_class'):
@@ -372,17 +408,26 @@ class RiskGate:
                 if candidate is not None and math.isfinite(candidate) and candidate >= 0:
                     notional = candidate
             if notional is None:
-                # Fall back to the event's own price column. Usable for limit
-                # orders; order_notional rejects ib_async's unset sentinel, which
-                # is what a MARKET order's recorded price actually is.
-                value, ok = order_notional((e.price,), e.quantity)
+                # Fall back to the event's own price column, then to the price
+                # this order actually filled at. order_notional rejects
+                # ib_async's unset sentinel, which is what a MARKET order's
+                # recorded price column actually holds.
+                value, ok = order_notional(
+                    (e.price, fill_price.get(int(e.order_id or 0))), e.quantity)
                 notional = value if ok else None
             if notional is None:
-                unvaluable += 1
+                # 'notional_evaluable' absent entirely means this row predates
+                # notional recording: old history, not a live failure. The
+                # distinction is the difference between "enable the cap" and
+                # "no opens for the rest of today" — see _check_daily_turnover.
+                if 'notional_evaluable' in meta:
+                    unvaluable += 1
+                else:
+                    legacy += 1
                 continue
             total += notional
             per_strategy[e.strategy_name] = per_strategy.get(e.strategy_name, 0.0) + notional
-        return (total, per_strategy, unvaluable)
+        return (total, per_strategy, unvaluable, legacy)
 
     def check_instrument(
         self,

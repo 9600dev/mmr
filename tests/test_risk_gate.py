@@ -948,6 +948,77 @@ class TestDailyTurnoverCap:
         result2 = self._evaluate(gate2, position_value=100.0)
         assert result2.reason and result2.reason.strip()
 
+
+    def _submit_legacy(self, event_store, strategy, price, quantity):
+        """An ORDER_SUBMITTED exactly as builds before 2026-07-27 wrote it:
+        no notional keys at all, and price = order.lmtPrice."""
+        import datetime as dt
+        from trader.data.event_store import EventType, TradingEvent
+        event_store.append(TradingEvent(
+            event_type=EventType.ORDER_SUBMITTED, timestamp=dt.datetime.now(),
+            strategy_name=strategy, conid=4391, symbol='AMD', action='BUY',
+            quantity=quantity, price=price, order_id=0, metadata={}))
+
+    def test_history_from_before_notionals_does_not_block_the_day(self, event_store):
+        """THE footgun, fixed. Enabling the cap used to refuse every open for
+        the rest of the day, because the day already contained submissions
+        written by a build that recorded no notional. That turns "switch on a
+        safety control" into "stop trading", which is how a control gets
+        switched off and left off.
+
+        Old history is a migration artifact, not a live failure. Proceed on the
+        lower bound, say so loudly, and let it clear at the day boundary.
+        """
+        import sys as _sys
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        # A market order as the old build recorded it: the unset sentinel.
+        self._submit_legacy(event_store, 'test_strat', _sys.float_info.max, 1.0)
+        result = self._evaluate(gate, position_value=1_000.0)
+        assert result.approved is True, result.reason
+        assert result.checks['daily_turnover'] == 'pass'
+
+    def test_old_history_still_counts_whatever_can_be_valued(self, event_store):
+        """Proceeding on a lower bound must still USE the bound — a legacy
+        limit order has a real price column and belongs in the total."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        self._submit_legacy(event_store, 'test_strat', 100.0, 99.0)   # $9,900
+        result = self._evaluate(gate, position_value=500.0)
+        assert not result.approved
+        assert '9,900' in result.reason
+
+    def test_a_live_valuation_failure_still_refuses(self, event_store):
+        """The fail-closed case is preserved. If THIS build placed an order it
+        could not value, the input the cap runs on is genuinely degraded, and
+        that is worth refusing over — it points at market data, not history."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        self._submit(event_store, 'test_strat', 0.0, evaluable=False, price=0.0)
+        result = self._evaluate(gate, position_value=100.0)
+        assert not result.approved
+        assert result.checks['daily_turnover'] == 'skipped:unvaluable-history'
+        assert 'market data' in result.reason, result.reason
+
+    def test_a_fill_values_a_submission_that_could_not_be_valued(self, event_store):
+        """A market order placed with no cached price cannot be valued at
+        placement, but its FILL carries a real avgFillPrice. Using it shrinks
+        the refusing case to orders that never traded — which contributed no
+        turnover anyway."""
+        import datetime as dt
+        from trader.data.event_store import EventType, TradingEvent
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        event_store.append(TradingEvent(
+            event_type=EventType.ORDER_SUBMITTED, timestamp=dt.datetime.now(),
+            strategy_name='test_strat', conid=4391, symbol='AMD', action='BUY',
+            quantity=100.0, price=0.0, order_id=777,
+            metadata={'notional': 0.0, 'notional_evaluable': False}))
+        event_store.append(TradingEvent(
+            event_type=EventType.ORDER_FILLED, timestamp=dt.datetime.now(),
+            strategy_name='test_strat', conid=4391, symbol='AMD', action='BUY',
+            quantity=100.0, price=99.0, order_id=777, metadata={}))
+        result = self._evaluate(gate, position_value=200.0)
+        assert not result.approved, 'the fill price should have valued it at $9,900'
+        assert result.checks['daily_turnover'] == 'fail'
+        assert '9,900' in result.reason
+
     def test_forex_is_exempt(self, event_store):
         """A currency conversion is not a position, exactly as the
         concentration check treats it. A known limitation, not a claim that

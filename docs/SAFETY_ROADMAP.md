@@ -574,16 +574,35 @@ strategy-day $1,241. Recommended values are in `config_defaults/trader.yaml`
 with that rationale attached, and the instruction to re-measure rather than
 copy them.
 
-**Operational note, found by enabling it live.** The cap refuses opens while
-ANY of the day's opening submissions cannot be valued, since a lower bound is
-not a bound. History written before this change carries no notional, so
-switching the cap on mid-session refuses every open for the rest of that day
-and then clears by itself at the day boundary. Verified on the deploy day:
-approving a 1-share proposal returned "14 of today's opening submissions cannot
-be valued, so today's turnover (>= $1,859) is only a lower bound". Intended
-fail-closed behaviour, and the reason the live config was left OFF rather than
-suppressing a session's trading without the operator asking for it. Enable at a
-day boundary.
+**A footgun, found by enabling it live, then removed.** The first cut refused
+opens while ANY of the day's opening submissions could not be valued, on the
+principle that a lower bound is not a bound. Enabling it on the deploy day
+therefore refused a 1-share proposal with "14 of today's opening submissions
+cannot be valued, so today's turnover (>= $1,859) is only a lower bound". Every
+open would have been refused for the rest of that day.
+
+Technically fail-closed, and practically a trap: it turns "switch on a safety
+control" into "stop trading", which is exactly how a control gets switched off
+again and left off. The cause was that two very different situations were
+collapsed into one:
+
+* **Legacy** — the row predates notional recording, so the key is simply
+  absent. Nothing is wrong; there is history from before the feature existed.
+  Now counted, logged as a lower bound, and allowed to proceed. It clears at
+  the day boundary by itself.
+* **Live** — this build placed an order and could not value it. That is a real
+  degradation of the input the cap runs on, and still refuses, with a message
+  pointing at market data rather than at history.
+
+A second fallback shrinks the live case further: a submission that could not be
+valued at placement is valued from its FILL, which carries a real
+`avgFillPrice`. Re-measured on the same day's data, that took the unvaluable
+count from 14 to 2, with 0 live failures — and the 2 remaining were correctly
+handled as legacy. Re-verified live: the identical proposal that had been
+refused was approved and executed.
+
+The live config is left with the cap OFF (the shipped default). It is now safe
+to enable mid-session.
 
 **What it does not cover.**
 
