@@ -1,0 +1,2356 @@
+{
+  "config": {
+    "strategy": "strategies/opening_range_breakout.py",
+    "class_name": "OpeningRangeBreakout",
+    "grid": "{\"RANGE_MINUTES\":[15,30,45],\"VOLUME_MULT\":[1.2,1.5,2.0]}",
+    "instruments": 20,
+    "days": 250,
+    "start_date": "2025-07-01",
+    "live_semantics": false,
+    "db": "/private/tmp/claude-501/-Users-joelpob-dev-mmr/e1319ec2-c33a-4611-8c56-e50d67d38a64/scratchpad/nc_run",
+    "json_out": "/private/tmp/claude-501/-Users-joelpob-dev-mmr/e1319ec2-c33a-4611-8c56-e50d67d38a64/scratchpad/nc_orb.json",
+    "workers": 14
+  },
+  "results": [
+    {
+      "conid": 900000008,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.7540324152443652,
+      "profit_factor": 0.7798181955601968,
+      "total_return": -0.04971082178369024,
+      "trades": 412,
+      "win_rate": 0.30097087378640774,
+      "max_drawdown": -0.09433971871079877
+    },
+    {
+      "conid": 900000008,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.4928331178106685,
+      "profit_factor": 0.8362635532799441,
+      "total_return": -0.027795468395043543,
+      "trades": 266,
+      "win_rate": 0.3013698630136986,
+      "max_drawdown": -0.07577498701886336
+    },
+    {
+      "conid": 900000008,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.5582762268133925,
+      "profit_factor": 0.6611428580324229,
+      "total_return": -0.037606871140397846,
+      "trades": 131,
+      "win_rate": 0.3142857142857143,
+      "max_drawdown": -0.060790797403760054
+    },
+    {
+      "conid": 900000008,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.4499533047773771,
+      "profit_factor": 0.8255944087746969,
+      "total_return": -0.032827019654371514,
+      "trades": 349,
+      "win_rate": 0.29545454545454547,
+      "max_drawdown": -0.08012231967670336
+    },
+    {
+      "conid": 900000008,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.41084332389780426,
+      "profit_factor": 0.7964888669665664,
+      "total_return": -0.02644328594271106,
+      "trades": 234,
+      "win_rate": 0.3225806451612903,
+      "max_drawdown": -0.056113875656346415
+    },
+    {
+      "conid": 900000008,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.45267132479552535,
+      "profit_factor": 0.7027551256280195,
+      "total_return": -0.02404621562177245,
+      "trades": 125,
+      "win_rate": 0.3888888888888889,
+      "max_drawdown": -0.04591634103852763
+    },
+    {
+      "conid": 900000008,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.30026984754327646,
+      "profit_factor": 1.145520937439102,
+      "total_return": 0.019287639628623454,
+      "trades": 320,
+      "win_rate": 0.2987012987012987,
+      "max_drawdown": -0.06742493624844481
+    },
+    {
+      "conid": 900000008,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.08695351426219193,
+      "profit_factor": 0.9555741388228568,
+      "total_return": -0.006887802573777413,
+      "trades": 222,
+      "win_rate": 0.3448275862068966,
+      "max_drawdown": -0.062308525693972314
+    },
+    {
+      "conid": 900000008,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 0.46008567404234707,
+      "profit_factor": 1.4848084733118105,
+      "total_return": 0.025708414275944946,
+      "trades": 117,
+      "win_rate": 0.4375,
+      "max_drawdown": -0.038549807697780374
+    },
+    {
+      "conid": 900000003,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 1.2418113037098186,
+      "profit_factor": 1.600660995240098,
+      "total_return": 0.09159271772960564,
+      "trades": 426,
+      "win_rate": 0.35185185185185186,
+      "max_drawdown": -0.0606517908373726
+    },
+    {
+      "conid": 900000003,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 1.4825529857707282,
+      "profit_factor": 2.091981671456685,
+      "total_return": 0.11313294889384906,
+      "trades": 282,
+      "win_rate": 0.3611111111111111,
+      "max_drawdown": -0.05497193605883431
+    },
+    {
+      "conid": 900000003,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 0.5307074334371803,
+      "profit_factor": 1.487645149290034,
+      "total_return": 0.028348006723168284,
+      "trades": 138,
+      "win_rate": 0.4418604651162791,
+      "max_drawdown": -0.044968900577375216
+    },
+    {
+      "conid": 900000003,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.6009654730376052,
+      "profit_factor": 1.209294972013481,
+      "total_return": 0.03842844465324324,
+      "trades": 387,
+      "win_rate": 0.34444444444444444,
+      "max_drawdown": -0.05268930462273627
+    },
+    {
+      "conid": 900000003,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.349393135953481,
+      "profit_factor": 1.133865161599313,
+      "total_return": 0.01922042008423852,
+      "trades": 265,
+      "win_rate": 0.3382352941176471,
+      "max_drawdown": -0.06362163597760705
+    },
+    {
+      "conid": 900000003,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.5631985903894408,
+      "profit_factor": 0.7157575230932793,
+      "total_return": -0.0265092643691609,
+      "trades": 137,
+      "win_rate": 0.35714285714285715,
+      "max_drawdown": -0.05831030728724275
+    },
+    {
+      "conid": 900000003,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.2952766865516357,
+      "profit_factor": 1.170533285044867,
+      "total_return": 0.01912011458028884,
+      "trades": 366,
+      "win_rate": 0.34146341463414637,
+      "max_drawdown": -0.07205699466319247
+    },
+    {
+      "conid": 900000003,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.3183457742449022,
+      "profit_factor": 0.8702532397579811,
+      "total_return": -0.023171370372001787,
+      "trades": 242,
+      "win_rate": 0.3225806451612903,
+      "max_drawdown": -0.07302543563276467
+    },
+    {
+      "conid": 900000003,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 0.5352401215356613,
+      "profit_factor": 1.4979785641834518,
+      "total_return": 0.033933424357454056,
+      "trades": 121,
+      "win_rate": 0.3870967741935484,
+      "max_drawdown": -0.05026394492997425
+    },
+    {
+      "conid": 900000002,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.2583474639895092,
+      "profit_factor": 0.8976145772043659,
+      "total_return": -0.019172688622571932,
+      "trades": 396,
+      "win_rate": 0.31313131313131315,
+      "max_drawdown": -0.08021118104162252
+    },
+    {
+      "conid": 900000002,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.5445274989284238,
+      "profit_factor": 1.1825825338414657,
+      "total_return": 0.02818942160282978,
+      "trades": 264,
+      "win_rate": 0.32051282051282054,
+      "max_drawdown": -0.05108113542703351
+    },
+    {
+      "conid": 900000002,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.09025378369292895,
+      "profit_factor": 0.9174149183274498,
+      "total_return": -0.007965579781223031,
+      "trades": 129,
+      "win_rate": 0.24324324324324326,
+      "max_drawdown": -0.07457746650251508
+    },
+    {
+      "conid": 900000002,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.2132643571384396,
+      "profit_factor": 1.0408850111926584,
+      "total_return": 0.01212048699455126,
+      "trades": 343,
+      "win_rate": 0.3176470588235294,
+      "max_drawdown": -0.0961535649072712
+    },
+    {
+      "conid": 900000002,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.12491339304270246,
+      "profit_factor": 1.0258932180707754,
+      "total_return": 0.0058063707110309615,
+      "trades": 231,
+      "win_rate": 0.36363636363636365,
+      "max_drawdown": -0.08823928126758633
+    },
+    {
+      "conid": 900000002,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -1.3468661109746383,
+      "profit_factor": 0.4758880844732995,
+      "total_return": -0.06348299060496121,
+      "trades": 116,
+      "win_rate": 0.34285714285714286,
+      "max_drawdown": -0.07514190446819093
+    },
+    {
+      "conid": 900000002,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.04407479897214036,
+      "profit_factor": 0.947641950910994,
+      "total_return": -0.005478279059128677,
+      "trades": 350,
+      "win_rate": 0.2682926829268293,
+      "max_drawdown": -0.07770575410567644
+    },
+    {
+      "conid": 900000002,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.16772319048901307,
+      "profit_factor": 1.047210144175626,
+      "total_return": 0.00837335456472954,
+      "trades": 244,
+      "win_rate": 0.29850746268656714,
+      "max_drawdown": -0.07346668725682065
+    },
+    {
+      "conid": 900000002,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.5097075426146599,
+      "profit_factor": 0.7377861245889862,
+      "total_return": -0.02570255636405283,
+      "trades": 119,
+      "win_rate": 0.34285714285714286,
+      "max_drawdown": -0.06352766319401817
+    },
+    {
+      "conid": 900000013,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -1.7438429183965756,
+      "profit_factor": 0.5171013358509163,
+      "total_return": -0.10311029839651364,
+      "trades": 437,
+      "win_rate": 0.27586206896551724,
+      "max_drawdown": -0.11607865157272843
+    },
+    {
+      "conid": 900000013,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.39371838627884526,
+      "profit_factor": 0.8226759660649141,
+      "total_return": -0.024370728977200384,
+      "trades": 293,
+      "win_rate": 0.3,
+      "max_drawdown": -0.0818233970806913
+    },
+    {
+      "conid": 900000013,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.92433925554476,
+      "profit_factor": 0.5291109376615948,
+      "total_return": -0.05151983703100904,
+      "trades": 154,
+      "win_rate": 0.2553191489361702,
+      "max_drawdown": -0.07376701298785057
+    },
+    {
+      "conid": 900000013,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.7819164453697349,
+      "profit_factor": 0.7256603912610671,
+      "total_return": -0.058671207215138965,
+      "trades": 383,
+      "win_rate": 0.3258426966292135,
+      "max_drawdown": -0.07916004712393465
+    },
+    {
+      "conid": 900000013,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.40277095473464214,
+      "profit_factor": 0.8163790323752724,
+      "total_return": -0.030570096665620827,
+      "trades": 271,
+      "win_rate": 0.3088235294117647,
+      "max_drawdown": -0.07001053655928606
+    },
+    {
+      "conid": 900000013,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.3268670285839873,
+      "profit_factor": 0.8020597605479826,
+      "total_return": -0.01985458843571597,
+      "trades": 145,
+      "win_rate": 0.28888888888888886,
+      "max_drawdown": -0.06529508235900122
+    },
+    {
+      "conid": 900000013,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -1.1782097675187002,
+      "profit_factor": 0.6291160679572368,
+      "total_return": -0.07743472490422665,
+      "trades": 360,
+      "win_rate": 0.3218390804597701,
+      "max_drawdown": -0.09600484392982812
+    },
+    {
+      "conid": 900000013,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.8816122664866415,
+      "profit_factor": 0.665684884751099,
+      "total_return": -0.053464108729811666,
+      "trades": 251,
+      "win_rate": 0.3333333333333333,
+      "max_drawdown": -0.0846107301159006
+    },
+    {
+      "conid": 900000013,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.7039279275606548,
+      "profit_factor": 0.5976320479608282,
+      "total_return": -0.03535996481814585,
+      "trades": 132,
+      "win_rate": 0.2926829268292683,
+      "max_drawdown": -0.0637415578385759
+    },
+    {
+      "conid": 900000006,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.6971264506580849,
+      "profit_factor": 0.7650277514553356,
+      "total_return": -0.04639816873575853,
+      "trades": 442,
+      "win_rate": 0.24299065420560748,
+      "max_drawdown": -0.10085416729992816
+    },
+    {
+      "conid": 900000006,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.6131535163775191,
+      "profit_factor": 0.77956914932829,
+      "total_return": -0.03447585461784819,
+      "trades": 306,
+      "win_rate": 0.25882352941176473,
+      "max_drawdown": -0.07837459597348795
+    },
+    {
+      "conid": 900000006,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.13792450241872303,
+      "profit_factor": 0.8734013667198225,
+      "total_return": -0.011027026827794217,
+      "trades": 146,
+      "win_rate": 0.37777777777777777,
+      "max_drawdown": -0.0654655652247373
+    },
+    {
+      "conid": 900000006,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.6400107363700659,
+      "profit_factor": 0.780159081595776,
+      "total_return": -0.04433208593750926,
+      "trades": 387,
+      "win_rate": 0.3,
+      "max_drawdown": -0.13632282238978702
+    },
+    {
+      "conid": 900000006,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.19103397297659105,
+      "profit_factor": 1.0782859038032013,
+      "total_return": 0.009709902913167978,
+      "trades": 265,
+      "win_rate": 0.3333333333333333,
+      "max_drawdown": -0.08059279861723938
+    },
+    {
+      "conid": 900000006,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 0.6427145998571898,
+      "profit_factor": 1.4852120938487658,
+      "total_return": 0.03396966924398792,
+      "trades": 138,
+      "win_rate": 0.3783783783783784,
+      "max_drawdown": -0.05769617106962354
+    },
+    {
+      "conid": 900000006,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.9108319666348648,
+      "profit_factor": 0.6976951894333744,
+      "total_return": -0.06731357262627835,
+      "trades": 359,
+      "win_rate": 0.35064935064935066,
+      "max_drawdown": -0.13575725123071586
+    },
+    {
+      "conid": 900000006,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.147688801344757,
+      "profit_factor": 0.9398406621312995,
+      "total_return": -0.010498606230739393,
+      "trades": 241,
+      "win_rate": 0.3709677419354839,
+      "max_drawdown": -0.08883695754166546
+    },
+    {
+      "conid": 900000006,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.1980206652851199,
+      "profit_factor": 0.9036986043569032,
+      "total_return": -0.011823236924953351,
+      "trades": 124,
+      "win_rate": 0.34375,
+      "max_drawdown": -0.0849804374757302
+    },
+    {
+      "conid": 900000007,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.12887169892859496,
+      "profit_factor": 0.9481315731635295,
+      "total_return": -0.01004786811578029,
+      "trades": 475,
+      "win_rate": 0.2396694214876033,
+      "max_drawdown": -0.0434213263218252
+    },
+    {
+      "conid": 900000007,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.5329114755015175,
+      "profit_factor": 0.8006618225278069,
+      "total_return": -0.03151614324036056,
+      "trades": 296,
+      "win_rate": 0.2716049382716049,
+      "max_drawdown": -0.049865531154801024
+    },
+    {
+      "conid": 900000007,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 0.30573557280559543,
+      "profit_factor": 1.2196673329340033,
+      "total_return": 0.014512827795156946,
+      "trades": 142,
+      "win_rate": 0.3617021276595745,
+      "max_drawdown": -0.05421963667756853
+    },
+    {
+      "conid": 900000007,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.6905958439962505,
+      "profit_factor": 0.7682107104260885,
+      "total_return": -0.04696642479739499,
+      "trades": 407,
+      "win_rate": 0.26262626262626265,
+      "max_drawdown": -0.0638066893101264
+    },
+    {
+      "conid": 900000007,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -1.0368140303732434,
+      "profit_factor": 0.6416943585888252,
+      "total_return": -0.061035751673285565,
+      "trades": 264,
+      "win_rate": 0.2753623188405797,
+      "max_drawdown": -0.06914720749993125
+    },
+    {
+      "conid": 900000007,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.7775985509693395,
+      "profit_factor": 0.6384248619913134,
+      "total_return": -0.03902180062636307,
+      "trades": 137,
+      "win_rate": 0.3488372093023256,
+      "max_drawdown": -0.08686956866183734
+    },
+    {
+      "conid": 900000007,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.867256618941721,
+      "profit_factor": 1.3414399617910993,
+      "total_return": 0.06727366034703652,
+      "trades": 383,
+      "win_rate": 0.2682926829268293,
+      "max_drawdown": -0.057821288034148224
+    },
+    {
+      "conid": 900000007,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.723235599649662,
+      "profit_factor": 1.3584604127836486,
+      "total_return": 0.04784626969345562,
+      "trades": 255,
+      "win_rate": 0.3333333333333333,
+      "max_drawdown": -0.04662495743651909
+    },
+    {
+      "conid": 900000007,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.0448008023259096,
+      "profit_factor": 0.9536507180539738,
+      "total_return": -0.004109434214237817,
+      "trades": 139,
+      "win_rate": 0.3076923076923077,
+      "max_drawdown": -0.06381028148697312
+    },
+    {
+      "conid": 900000000,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -1.215574481277185,
+      "profit_factor": 0.6412184605482406,
+      "total_return": -0.08559406540156211,
+      "trades": 471,
+      "win_rate": 0.3,
+      "max_drawdown": -0.1154493700163606
+    },
+    {
+      "conid": 900000000,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -1.0557840161213896,
+      "profit_factor": 0.6548704050016886,
+      "total_return": -0.06613495635148747,
+      "trades": 330,
+      "win_rate": 0.37209302325581395,
+      "max_drawdown": -0.08509764819356093
+    },
+    {
+      "conid": 900000000,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.23478397404970583,
+      "profit_factor": 0.8549053090050067,
+      "total_return": -0.016417119727869967,
+      "trades": 175,
+      "win_rate": 0.425531914893617,
+      "max_drawdown": -0.06757226756124646
+    },
+    {
+      "conid": 900000000,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.7684217258594422,
+      "profit_factor": 0.7383119752022795,
+      "total_return": -0.05870075573795419,
+      "trades": 420,
+      "win_rate": 0.32954545454545453,
+      "max_drawdown": -0.11385528523129218
+    },
+    {
+      "conid": 900000000,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -1.4009676627015033,
+      "profit_factor": 0.5595342817823525,
+      "total_return": -0.07925624500572914,
+      "trades": 288,
+      "win_rate": 0.3424657534246575,
+      "max_drawdown": -0.0997522725711364
+    },
+    {
+      "conid": 900000000,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -1.0541267202736528,
+      "profit_factor": 0.5424715005454607,
+      "total_return": -0.05333210387037235,
+      "trades": 149,
+      "win_rate": 0.4,
+      "max_drawdown": -0.07952870381374164
+    },
+    {
+      "conid": 900000000,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.7992908692693025,
+      "profit_factor": 0.7146145247949588,
+      "total_return": -0.06723491391767544,
+      "trades": 395,
+      "win_rate": 0.3291139240506329,
+      "max_drawdown": -0.11596108441601627
+    },
+    {
+      "conid": 900000000,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -1.1694772081678602,
+      "profit_factor": 0.5903399362959028,
+      "total_return": -0.07650684512291539,
+      "trades": 271,
+      "win_rate": 0.3387096774193548,
+      "max_drawdown": -0.09944949443462639
+    },
+    {
+      "conid": 900000000,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.9999050743120567,
+      "profit_factor": 0.49187584610209517,
+      "total_return": -0.06169451233656553,
+      "trades": 141,
+      "win_rate": 0.37142857142857144,
+      "max_drawdown": -0.09703417862318145
+    },
+    {
+      "conid": 900000009,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.09037837640042162,
+      "profit_factor": 0.9550776786248395,
+      "total_return": -0.008663333331765055,
+      "trades": 436,
+      "win_rate": 0.32407407407407407,
+      "max_drawdown": -0.07994378200592571
+    },
+    {
+      "conid": 900000009,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.27791758593435084,
+      "profit_factor": 0.8780555681370946,
+      "total_return": -0.017913555655921676,
+      "trades": 286,
+      "win_rate": 0.2962962962962963,
+      "max_drawdown": -0.06450743705878541
+    },
+    {
+      "conid": 900000009,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.45327063092453973,
+      "profit_factor": 0.7547396981402272,
+      "total_return": -0.022063037840731825,
+      "trades": 133,
+      "win_rate": 0.36585365853658536,
+      "max_drawdown": -0.05001478472994489
+    },
+    {
+      "conid": 900000009,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.8228573741669802,
+      "profit_factor": 0.6615600137918127,
+      "total_return": -0.0640434922039178,
+      "trades": 421,
+      "win_rate": 0.30337078651685395,
+      "max_drawdown": -0.11071614499400367
+    },
+    {
+      "conid": 900000009,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -1.2408592071062365,
+      "profit_factor": 0.5335675953856585,
+      "total_return": -0.08009492823261755,
+      "trades": 282,
+      "win_rate": 0.2857142857142857,
+      "max_drawdown": -0.11240462651981498
+    },
+    {
+      "conid": 900000009,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.2011912323243515,
+      "profit_factor": 0.8679954630851118,
+      "total_return": -0.009237844501245429,
+      "trades": 129,
+      "win_rate": 0.38461538461538464,
+      "max_drawdown": -0.04362522077722729
+    },
+    {
+      "conid": 900000009,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.7765030288985318,
+      "profit_factor": 0.7045726468014382,
+      "total_return": -0.055154693293100965,
+      "trades": 360,
+      "win_rate": 0.35714285714285715,
+      "max_drawdown": -0.10985027092389084
+    },
+    {
+      "conid": 900000009,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -1.4125954303131998,
+      "profit_factor": 0.38871540363826484,
+      "total_return": -0.0940353112358453,
+      "trades": 240,
+      "win_rate": 0.328125,
+      "max_drawdown": -0.13035140862180303
+    },
+    {
+      "conid": 900000009,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.5419981806936582,
+      "profit_factor": 0.6498943542217385,
+      "total_return": -0.029080600964397574,
+      "trades": 118,
+      "win_rate": 0.40540540540540543,
+      "max_drawdown": -0.055539185096872584
+    },
+    {
+      "conid": 900000005,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.6029463051084614,
+      "profit_factor": 0.8821179004469908,
+      "total_return": -0.045175012764914535,
+      "trades": 484,
+      "win_rate": 0.32432432432432434,
+      "max_drawdown": -0.10215942921183566
+    },
+    {
+      "conid": 900000005,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.030092463566771012,
+      "profit_factor": 1.0462697735614195,
+      "total_return": -0.0042350304608611555,
+      "trades": 327,
+      "win_rate": 0.38095238095238093,
+      "max_drawdown": -0.06556763601204271
+    },
+    {
+      "conid": 900000005,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 1.1145605854649663,
+      "profit_factor": 2.027507415747683,
+      "total_return": 0.06530912795487875,
+      "trades": 168,
+      "win_rate": 0.4782608695652174,
+      "max_drawdown": -0.030537353243499408
+    },
+    {
+      "conid": 900000005,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.34830377143539787,
+      "profit_factor": 0.845073906338685,
+      "total_return": -0.028714859859919506,
+      "trades": 426,
+      "win_rate": 0.34782608695652173,
+      "max_drawdown": -0.07807791487017472
+    },
+    {
+      "conid": 900000005,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.17657643158408165,
+      "profit_factor": 1.0698442000657367,
+      "total_return": 0.009644310308031034,
+      "trades": 303,
+      "win_rate": 0.379746835443038,
+      "max_drawdown": -0.04928368268914346
+    },
+    {
+      "conid": 900000005,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 0.058507526442118304,
+      "profit_factor": 1.0144011397462167,
+      "total_return": 0.0016867394763659949,
+      "trades": 153,
+      "win_rate": 0.3953488372093023,
+      "max_drawdown": -0.05953042522978316
+    },
+    {
+      "conid": 900000005,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.6588879958702779,
+      "profit_factor": 0.6813341000489269,
+      "total_return": -0.05781062932347558,
+      "trades": 379,
+      "win_rate": 0.3466666666666667,
+      "max_drawdown": -0.09056299229994484
+    },
+    {
+      "conid": 900000005,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.414989666569961,
+      "profit_factor": 1.26942317715422,
+      "total_return": 0.03038276612360491,
+      "trades": 265,
+      "win_rate": 0.3709677419354839,
+      "max_drawdown": -0.07090495059774203
+    },
+    {
+      "conid": 900000005,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 0.6396637809779984,
+      "profit_factor": 2.573517065968138,
+      "total_return": 0.04564709702758862,
+      "trades": 139,
+      "win_rate": 0.4722222222222222,
+      "max_drawdown": -0.07729919167237402
+    },
+    {
+      "conid": 900000011,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.6340576679764985,
+      "profit_factor": 1.2182353474060423,
+      "total_return": 0.03265459786879976,
+      "trades": 411,
+      "win_rate": 0.375,
+      "max_drawdown": -0.04358517531371026
+    },
+    {
+      "conid": 900000011,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 1.741487228610606,
+      "profit_factor": 1.8553619424265757,
+      "total_return": 0.08663785447000905,
+      "trades": 290,
+      "win_rate": 0.4418604651162791,
+      "max_drawdown": -0.031180035468120752
+    },
+    {
+      "conid": 900000011,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 1.9815147135348845,
+      "profit_factor": 2.916938473249191,
+      "total_return": 0.08438402279852264,
+      "trades": 148,
+      "win_rate": 0.5319148936170213,
+      "max_drawdown": -0.02196053534997074
+    },
+    {
+      "conid": 900000011,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.3652497062655916,
+      "profit_factor": 1.1281064083255676,
+      "total_return": 0.021791001490020223,
+      "trades": 379,
+      "win_rate": 0.3626373626373626,
+      "max_drawdown": -0.07202734380395323
+    },
+    {
+      "conid": 900000011,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.6211722968337546,
+      "profit_factor": 1.2975210920973101,
+      "total_return": 0.03450845761604859,
+      "trades": 264,
+      "win_rate": 0.4057971014492754,
+      "max_drawdown": -0.051838289734310476
+    },
+    {
+      "conid": 900000011,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 0.7677933453370724,
+      "profit_factor": 1.4379286068596615,
+      "total_return": 0.03333061427558892,
+      "trades": 133,
+      "win_rate": 0.40476190476190477,
+      "max_drawdown": -0.03949223056419981
+    },
+    {
+      "conid": 900000011,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.9371631873995346,
+      "profit_factor": 1.4902573682261615,
+      "total_return": 0.06737561287943894,
+      "trades": 373,
+      "win_rate": 0.3291139240506329,
+      "max_drawdown": -0.0803327966921718
+    },
+    {
+      "conid": 900000011,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.7551407892797305,
+      "profit_factor": 1.4195198529175974,
+      "total_return": 0.04632108957515735,
+      "trades": 271,
+      "win_rate": 0.3787878787878788,
+      "max_drawdown": -0.06902217998043854
+    },
+    {
+      "conid": 900000011,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 0.31837419072798634,
+      "profit_factor": 1.1842532882295371,
+      "total_return": 0.015417185410760093,
+      "trades": 120,
+      "win_rate": 0.35294117647058826,
+      "max_drawdown": -0.05712804892038327
+    },
+    {
+      "conid": 900000004,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.342259393603267,
+      "profit_factor": 0.8427319991897227,
+      "total_return": -0.02499725586278978,
+      "trades": 441,
+      "win_rate": 0.3177570093457944,
+      "max_drawdown": -0.08576128680512671
+    },
+    {
+      "conid": 900000004,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.3912769320440447,
+      "profit_factor": 0.7890499792427835,
+      "total_return": -0.02495078985307031,
+      "trades": 282,
+      "win_rate": 0.3684210526315789,
+      "max_drawdown": -0.06753494987745526
+    },
+    {
+      "conid": 900000004,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.815123557709884,
+      "profit_factor": 0.5890074659875768,
+      "total_return": -0.04990173359383454,
+      "trades": 162,
+      "win_rate": 0.3695652173913043,
+      "max_drawdown": -0.08738607871977382
+    },
+    {
+      "conid": 900000004,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.6042894219618227,
+      "profit_factor": 1.2251655659609175,
+      "total_return": 0.03918207888026459,
+      "trades": 388,
+      "win_rate": 0.33695652173913043,
+      "max_drawdown": -0.06183268931869139
+    },
+    {
+      "conid": 900000004,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.08068577399011803,
+      "profit_factor": 0.9528641009161009,
+      "total_return": -0.005792453020821098,
+      "trades": 257,
+      "win_rate": 0.36486486486486486,
+      "max_drawdown": -0.055172371936278254
+    },
+    {
+      "conid": 900000004,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.43237041793173475,
+      "profit_factor": 0.8218526068673067,
+      "total_return": -0.0228536855019289,
+      "trades": 150,
+      "win_rate": 0.4418604651162791,
+      "max_drawdown": -0.0647443990389824
+    },
+    {
+      "conid": 900000004,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.5689620648257108,
+      "profit_factor": 1.2266761185416841,
+      "total_return": 0.03708528527656485,
+      "trades": 362,
+      "win_rate": 0.3793103448275862,
+      "max_drawdown": -0.05801512742689873
+    },
+    {
+      "conid": 900000004,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.049692766521016285,
+      "profit_factor": 1.009183734697182,
+      "total_return": 0.0012233348918326836,
+      "trades": 240,
+      "win_rate": 0.35294117647058826,
+      "max_drawdown": -0.04607440769464858
+    },
+    {
+      "conid": 900000004,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.7868920303364103,
+      "profit_factor": 0.5862848882475328,
+      "total_return": -0.04070892342697918,
+      "trades": 130,
+      "win_rate": 0.4166666666666667,
+      "max_drawdown": -0.06998335519603863
+    },
+    {
+      "conid": 900000001,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.0757523145883456,
+      "profit_factor": 1.0141941166045731,
+      "total_return": 0.0026955188759212323,
+      "trades": 438,
+      "win_rate": 0.3391304347826087,
+      "max_drawdown": -0.07359398030947573
+    },
+    {
+      "conid": 900000001,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.47353257324163384,
+      "profit_factor": 1.175367753907376,
+      "total_return": 0.02733331055617194,
+      "trades": 310,
+      "win_rate": 0.3953488372093023,
+      "max_drawdown": -0.0636655177035371
+    },
+    {
+      "conid": 900000001,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 0.9080833152684629,
+      "profit_factor": 1.5777482329218466,
+      "total_return": 0.045304304140283636,
+      "trades": 148,
+      "win_rate": 0.5681818181818182,
+      "max_drawdown": -0.030637311198978934
+    },
+    {
+      "conid": 900000001,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.23883514722117993,
+      "profit_factor": 1.0685748135290498,
+      "total_return": 0.012917199090329845,
+      "trades": 393,
+      "win_rate": 0.3711340206185567,
+      "max_drawdown": -0.07826915060558626
+    },
+    {
+      "conid": 900000001,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.8046378136073856,
+      "profit_factor": 1.3396418796224863,
+      "total_return": 0.04608431098610066,
+      "trades": 294,
+      "win_rate": 0.4155844155844156,
+      "max_drawdown": -0.044396993397194315
+    },
+    {
+      "conid": 900000001,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 0.3773430100917841,
+      "profit_factor": 1.230154186618364,
+      "total_return": 0.016743258852429888,
+      "trades": 136,
+      "win_rate": 0.41025641025641024,
+      "max_drawdown": -0.036630692638603385
+    },
+    {
+      "conid": 900000001,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.5801448025336675,
+      "profit_factor": 1.2017820281502298,
+      "total_return": 0.04218612382502562,
+      "trades": 390,
+      "win_rate": 0.3333333333333333,
+      "max_drawdown": -0.06636662319371012
+    },
+    {
+      "conid": 900000001,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.5972467570932323,
+      "profit_factor": 1.2341164298160592,
+      "total_return": 0.03713585538448827,
+      "trades": 272,
+      "win_rate": 0.3880597014925373,
+      "max_drawdown": -0.06101364782398195
+    },
+    {
+      "conid": 900000001,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 1.0351616722211558,
+      "profit_factor": 1.6232718684109204,
+      "total_return": 0.056552542239849624,
+      "trades": 131,
+      "win_rate": 0.38461538461538464,
+      "max_drawdown": -0.050596229390573545
+    },
+    {
+      "conid": 900000010,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.8538617285935977,
+      "profit_factor": 1.3140031729270885,
+      "total_return": 0.05943685797873055,
+      "trades": 473,
+      "win_rate": 0.3783783783783784,
+      "max_drawdown": -0.057698735673360584
+    },
+    {
+      "conid": 900000010,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 1.6085635909259188,
+      "profit_factor": 2.0844990612487804,
+      "total_return": 0.1230632700028369,
+      "trades": 317,
+      "win_rate": 0.4050632911392405,
+      "max_drawdown": -0.06187297809846023
+    },
+    {
+      "conid": 900000010,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 1.1984263120613616,
+      "profit_factor": 1.9019178477025183,
+      "total_return": 0.06749612414331141,
+      "trades": 160,
+      "win_rate": 0.32608695652173914,
+      "max_drawdown": -0.0464350064696676
+    },
+    {
+      "conid": 900000010,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 1.0617841004529458,
+      "profit_factor": 1.4975555066185071,
+      "total_return": 0.06877216811184983,
+      "trades": 398,
+      "win_rate": 0.358695652173913,
+      "max_drawdown": -0.043106713412684565
+    },
+    {
+      "conid": 900000010,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 1.4549517136084398,
+      "profit_factor": 1.9708655453281352,
+      "total_return": 0.08830132108762112,
+      "trades": 260,
+      "win_rate": 0.3939393939393939,
+      "max_drawdown": -0.034883910077112626
+    },
+    {
+      "conid": 900000010,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.046517185076727925,
+      "profit_factor": 0.9586111847646703,
+      "total_return": -0.0037100128983883485,
+      "trades": 125,
+      "win_rate": 0.34210526315789475,
+      "max_drawdown": -0.04964734514714465
+    },
+    {
+      "conid": 900000010,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.6122890728134799,
+      "profit_factor": 1.2469507650863885,
+      "total_return": 0.04286393408675804,
+      "trades": 385,
+      "win_rate": 0.3246753246753247,
+      "max_drawdown": -0.05160527431735662
+    },
+    {
+      "conid": 900000010,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 1.059000435260016,
+      "profit_factor": 1.5117240581833942,
+      "total_return": 0.06338678019185795,
+      "trades": 258,
+      "win_rate": 0.3548387096774194,
+      "max_drawdown": -0.03817042333085738
+    },
+    {
+      "conid": 900000010,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 0.7891744835614614,
+      "profit_factor": 1.5901603326580247,
+      "total_return": 0.04361072323152282,
+      "trades": 128,
+      "win_rate": 0.39473684210526316,
+      "max_drawdown": -0.04142587656782544
+    },
+    {
+      "conid": 900000012,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 1.4638343940734635,
+      "profit_factor": 1.5103617566311875,
+      "total_return": 0.098604454593066,
+      "trades": 496,
+      "win_rate": 0.304,
+      "max_drawdown": -0.04163135343615964
+    },
+    {
+      "conid": 900000012,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 1.319470897081353,
+      "profit_factor": 1.6222919952934778,
+      "total_return": 0.07445512182705505,
+      "trades": 317,
+      "win_rate": 0.33707865168539325,
+      "max_drawdown": -0.037610792646034584
+    },
+    {
+      "conid": 900000012,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 0.8057692419126404,
+      "profit_factor": 1.5752299796992306,
+      "total_return": 0.032597257573931726,
+      "trades": 153,
+      "win_rate": 0.35294117647058826,
+      "max_drawdown": -0.025447549162619414
+    },
+    {
+      "conid": 900000012,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 1.490525457344221,
+      "profit_factor": 1.6679547594646098,
+      "total_return": 0.10991997762059857,
+      "trades": 426,
+      "win_rate": 0.3723404255319149,
+      "max_drawdown": -0.04791371000585443
+    },
+    {
+      "conid": 900000012,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 1.2464931482893533,
+      "profit_factor": 1.6005922654522093,
+      "total_return": 0.06838423911164293,
+      "trades": 273,
+      "win_rate": 0.40540540540540543,
+      "max_drawdown": -0.035090032743593715
+    },
+    {
+      "conid": 900000012,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 0.5392079914035065,
+      "profit_factor": 1.3642238283746375,
+      "total_return": 0.024187935219276424,
+      "trades": 145,
+      "win_rate": 0.5434782608695652,
+      "max_drawdown": -0.04109222412530783
+    },
+    {
+      "conid": 900000012,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 2.0440309903178027,
+      "profit_factor": 2.12634107020458,
+      "total_return": 0.18571467945040165,
+      "trades": 397,
+      "win_rate": 0.4025974025974026,
+      "max_drawdown": -0.055123951334276625
+    },
+    {
+      "conid": 900000012,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 1.331262860837116,
+      "profit_factor": 1.8049928376246016,
+      "total_return": 0.08973036140293522,
+      "trades": 256,
+      "win_rate": 0.4166666666666667,
+      "max_drawdown": -0.0315621509844507
+    },
+    {
+      "conid": 900000012,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": 0.8177578280843673,
+      "profit_factor": 1.8981980587191607,
+      "total_return": 0.054119965582749785,
+      "trades": 145,
+      "win_rate": 0.5675675675675675,
+      "max_drawdown": -0.044013639806299416
+    },
+    {
+      "conid": 900000014,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.9927638965288681,
+      "profit_factor": 0.6852880980944818,
+      "total_return": -0.07511120766538226,
+      "trades": 497,
+      "win_rate": 0.2796610169491525,
+      "max_drawdown": -0.10854694207633672
+    },
+    {
+      "conid": 900000014,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -1.050177171218485,
+      "profit_factor": 0.6097432650214555,
+      "total_return": -0.06552507275136976,
+      "trades": 335,
+      "win_rate": 0.3076923076923077,
+      "max_drawdown": -0.09308915500051498
+    },
+    {
+      "conid": 900000014,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -1.1765738644238457,
+      "profit_factor": 0.46041469900001947,
+      "total_return": -0.05535009409289604,
+      "trades": 172,
+      "win_rate": 0.35714285714285715,
+      "max_drawdown": -0.0787568017827076
+    },
+    {
+      "conid": 900000014,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -1.5134031135510595,
+      "profit_factor": 0.5758166485678545,
+      "total_return": -0.10218432554208734,
+      "trades": 387,
+      "win_rate": 0.2553191489361702,
+      "max_drawdown": -0.1425060405071579
+    },
+    {
+      "conid": 900000014,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -1.7857916640084692,
+      "profit_factor": 0.44299011143662714,
+      "total_return": -0.09625159557257645,
+      "trades": 243,
+      "win_rate": 0.29577464788732394,
+      "max_drawdown": -0.1186564495367265
+    },
+    {
+      "conid": 900000014,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.6382878706689602,
+      "profit_factor": 0.5753615095808743,
+      "total_return": -0.029957143782517126,
+      "trades": 121,
+      "win_rate": 0.3611111111111111,
+      "max_drawdown": -0.05414721250374673
+    },
+    {
+      "conid": 900000014,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.4141922126406249,
+      "profit_factor": 0.8271197948956338,
+      "total_return": -0.03560967103268631,
+      "trades": 370,
+      "win_rate": 0.2926829268292683,
+      "max_drawdown": -0.13222754713479928
+    },
+    {
+      "conid": 900000014,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.6595539913262829,
+      "profit_factor": 0.7227623047697268,
+      "total_return": -0.04321316755833893,
+      "trades": 221,
+      "win_rate": 0.29310344827586204,
+      "max_drawdown": -0.1225619566021245
+    },
+    {
+      "conid": 900000014,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.5432516508842811,
+      "profit_factor": 0.7058651873254109,
+      "total_return": -0.025470056767841753,
+      "trades": 99,
+      "win_rate": 0.43333333333333335,
+      "max_drawdown": -0.06769961041099841
+    },
+    {
+      "conid": 900000015,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.10956344651568566,
+      "profit_factor": 1.0286056580902818,
+      "total_return": 0.005408711420071377,
+      "trades": 441,
+      "win_rate": 0.3333333333333333,
+      "max_drawdown": -0.10456626395640653
+    },
+    {
+      "conid": 900000015,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.534362797350464,
+      "profit_factor": 1.2834705760615772,
+      "total_return": 0.03332376839067708,
+      "trades": 289,
+      "win_rate": 0.36619718309859156,
+      "max_drawdown": -0.07486506731473547
+    },
+    {
+      "conid": 900000015,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.4132806230666797,
+      "profit_factor": 0.8057403670716443,
+      "total_return": -0.02353483338484863,
+      "trades": 160,
+      "win_rate": 0.4,
+      "max_drawdown": -0.0907073605912917
+    },
+    {
+      "conid": 900000015,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.6044843283594148,
+      "profit_factor": 0.7800960818072645,
+      "total_return": -0.04807016943431608,
+      "trades": 406,
+      "win_rate": 0.28735632183908044,
+      "max_drawdown": -0.10531388039688042
+    },
+    {
+      "conid": 900000015,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.23970962386495745,
+      "profit_factor": 1.096216878676764,
+      "total_return": 0.014724656460254115,
+      "trades": 263,
+      "win_rate": 0.2903225806451613,
+      "max_drawdown": -0.0839626369184555
+    },
+    {
+      "conid": 900000015,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.10240520857757557,
+      "profit_factor": 0.9282603125584387,
+      "total_return": -0.009751538314647035,
+      "trades": 141,
+      "win_rate": 0.39473684210526316,
+      "max_drawdown": -0.10314000783537909
+    },
+    {
+      "conid": 900000015,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.05382390896523643,
+      "profit_factor": 0.9699137811445407,
+      "total_return": -0.007406487070573453,
+      "trades": 371,
+      "win_rate": 0.2716049382716049,
+      "max_drawdown": -0.11634600163159832
+    },
+    {
+      "conid": 900000015,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.6810589501414828,
+      "profit_factor": 1.2888498582884207,
+      "total_return": 0.04785067048685443,
+      "trades": 240,
+      "win_rate": 0.32727272727272727,
+      "max_drawdown": -0.09625739087611695
+    },
+    {
+      "conid": 900000015,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.3859453638307674,
+      "profit_factor": 0.8374863886785577,
+      "total_return": -0.02752868084066662,
+      "trades": 131,
+      "win_rate": 0.3055555555555556,
+      "max_drawdown": -0.1464843956189717
+    },
+    {
+      "conid": 900000016,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -2.401168764045038,
+      "profit_factor": 0.4084648817732014,
+      "total_return": -0.1499721649706246,
+      "trades": 464,
+      "win_rate": 0.3050847457627119,
+      "max_drawdown": -0.16428575544382779
+    },
+    {
+      "conid": 900000016,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -1.9394164113937395,
+      "profit_factor": 0.4396274463297635,
+      "total_return": -0.11741430608609105,
+      "trades": 319,
+      "win_rate": 0.34831460674157305,
+      "max_drawdown": -0.12563252204598013
+    },
+    {
+      "conid": 900000016,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.9514706790657239,
+      "profit_factor": 0.7057468592632806,
+      "total_return": -0.043578981467975786,
+      "trades": 175,
+      "win_rate": 0.3898305084745763,
+      "max_drawdown": -0.06904970442199687
+    },
+    {
+      "conid": 900000016,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -1.54605860752747,
+      "profit_factor": 0.5257267223794432,
+      "total_return": -0.11618767533521956,
+      "trades": 420,
+      "win_rate": 0.2857142857142857,
+      "max_drawdown": -0.13107828005419953
+    },
+    {
+      "conid": 900000016,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -1.3793071852611627,
+      "profit_factor": 0.5289554462924341,
+      "total_return": -0.09226720530018773,
+      "trades": 269,
+      "win_rate": 0.34375,
+      "max_drawdown": -0.1042847908452047
+    },
+    {
+      "conid": 900000016,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.20832966202331069,
+      "profit_factor": 0.9061736021606132,
+      "total_return": -0.012061142982403128,
+      "trades": 152,
+      "win_rate": 0.35714285714285715,
+      "max_drawdown": -0.056745100358715134
+    },
+    {
+      "conid": 900000016,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.9075472320793102,
+      "profit_factor": 0.6872073626706591,
+      "total_return": -0.06879899959084779,
+      "trades": 356,
+      "win_rate": 0.36,
+      "max_drawdown": -0.13003690571772358
+    },
+    {
+      "conid": 900000016,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.6920026560118993,
+      "profit_factor": 0.7309399713112746,
+      "total_return": -0.047281408183706186,
+      "trades": 228,
+      "win_rate": 0.43636363636363634,
+      "max_drawdown": -0.09542914647879634
+    },
+    {
+      "conid": 900000016,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.3353150399295775,
+      "profit_factor": 0.8468817828029406,
+      "total_return": -0.016834373495141053,
+      "trades": 123,
+      "win_rate": 0.3783783783783784,
+      "max_drawdown": -0.05793150635450788
+    },
+    {
+      "conid": 900000017,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.4985136403281167,
+      "profit_factor": 0.8455486158520932,
+      "total_return": -0.03139095808363879,
+      "trades": 446,
+      "win_rate": 0.3089430894308943,
+      "max_drawdown": -0.08659009954885448
+    },
+    {
+      "conid": 900000017,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -1.6881157648638423,
+      "profit_factor": 0.5101525096312088,
+      "total_return": -0.08853183384039887,
+      "trades": 291,
+      "win_rate": 0.29069767441860467,
+      "max_drawdown": -0.10825791426054059
+    },
+    {
+      "conid": 900000017,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.24035575917859428,
+      "profit_factor": 0.8629876329780236,
+      "total_return": -0.012976744322040434,
+      "trades": 153,
+      "win_rate": 0.3333333333333333,
+      "max_drawdown": -0.05361810074710979
+    },
+    {
+      "conid": 900000017,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.1332870747099862,
+      "profit_factor": 1.0376878645863017,
+      "total_return": 0.006589617080297705,
+      "trades": 392,
+      "win_rate": 0.31313131313131315,
+      "max_drawdown": -0.06973656550114757
+    },
+    {
+      "conid": 900000017,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.6150551726837681,
+      "profit_factor": 0.7622912383017053,
+      "total_return": -0.037174778420479004,
+      "trades": 268,
+      "win_rate": 0.2702702702702703,
+      "max_drawdown": -0.05230681551885413
+    },
+    {
+      "conid": 900000017,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.9780316665726122,
+      "profit_factor": 0.4835272012608222,
+      "total_return": -0.06171310371162453,
+      "trades": 140,
+      "win_rate": 0.2894736842105263,
+      "max_drawdown": -0.07984420488505142
+    },
+    {
+      "conid": 900000017,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -0.49349178811290356,
+      "profit_factor": 0.8277353274753227,
+      "total_return": -0.029716155217116125,
+      "trades": 316,
+      "win_rate": 0.345679012345679,
+      "max_drawdown": -0.08503549292870771
+    },
+    {
+      "conid": 900000017,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -0.9045779839322083,
+      "profit_factor": 0.6494414865830437,
+      "total_return": -0.046444186210581107,
+      "trades": 215,
+      "win_rate": 0.288135593220339,
+      "max_drawdown": -0.07797414935418026
+    },
+    {
+      "conid": 900000017,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.8150346639852014,
+      "profit_factor": 0.5775915391093003,
+      "total_return": -0.0400431338775068,
+      "trades": 119,
+      "win_rate": 0.34285714285714286,
+      "max_drawdown": -0.08039557187760099
+    },
+    {
+      "conid": 900000019,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -2.773212696753243,
+      "profit_factor": 0.3433951290711529,
+      "total_return": -0.1299324684784906,
+      "trades": 434,
+      "win_rate": 0.25,
+      "max_drawdown": -0.14063270041899598
+    },
+    {
+      "conid": 900000019,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -1.2449477769613513,
+      "profit_factor": 0.5674422762985893,
+      "total_return": -0.06786921986473793,
+      "trades": 286,
+      "win_rate": 0.2619047619047619,
+      "max_drawdown": -0.09970009676903117
+    },
+    {
+      "conid": 900000019,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -1.627565121386619,
+      "profit_factor": 0.33243179823713176,
+      "total_return": -0.07552101902334618,
+      "trades": 143,
+      "win_rate": 0.3023255813953488,
+      "max_drawdown": -0.10956155729385834
+    },
+    {
+      "conid": 900000019,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -3.9352014509555926,
+      "profit_factor": 0.21159831630089762,
+      "total_return": -0.18894654898569507,
+      "trades": 414,
+      "win_rate": 0.19827586206896552,
+      "max_drawdown": -0.1926455801612074
+    },
+    {
+      "conid": 900000019,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -2.1448423145564752,
+      "profit_factor": 0.33105222026425685,
+      "total_return": -0.11594466392998404,
+      "trades": 269,
+      "win_rate": 0.2631578947368421,
+      "max_drawdown": -0.13080462623576658
+    },
+    {
+      "conid": 900000019,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -1.6380515863778538,
+      "profit_factor": 0.32225035597406876,
+      "total_return": -0.08401512533571831,
+      "trades": 137,
+      "win_rate": 0.16666666666666666,
+      "max_drawdown": -0.11472470974723359
+    },
+    {
+      "conid": 900000019,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": -3.718944375888098,
+      "profit_factor": 0.24932437547801803,
+      "total_return": -0.16902420424344866,
+      "trades": 368,
+      "win_rate": 0.2403846153846154,
+      "max_drawdown": -0.17448957999510833
+    },
+    {
+      "conid": 900000019,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": -2.2085452792476947,
+      "profit_factor": 0.21945524431993216,
+      "total_return": -0.12848918446682644,
+      "trades": 258,
+      "win_rate": 0.28378378378378377,
+      "max_drawdown": -0.14029713280784947
+    },
+    {
+      "conid": 900000019,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -2.4001040450539017,
+      "profit_factor": 0.15164537921312107,
+      "total_return": -0.10746006327180846,
+      "trades": 132,
+      "win_rate": 0.225,
+      "max_drawdown": -0.11369902047618913
+    },
+    {
+      "conid": 900000018,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.9152189892728207,
+      "profit_factor": 1.3166553741262708,
+      "total_return": 0.05603635734875123,
+      "trades": 447,
+      "win_rate": 0.3220338983050847,
+      "max_drawdown": -0.06804917857838517
+    },
+    {
+      "conid": 900000018,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.5574947676309936,
+      "profit_factor": 1.193912629919684,
+      "total_return": 0.03066548799694635,
+      "trades": 306,
+      "win_rate": 0.2988505747126437,
+      "max_drawdown": -0.08514777123752641
+    },
+    {
+      "conid": 900000018,
+      "params": {
+        "RANGE_MINUTES": 15,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -0.6972643992968189,
+      "profit_factor": 0.6120817425464447,
+      "total_return": -0.034608894609720164,
+      "trades": 144,
+      "win_rate": 0.25,
+      "max_drawdown": -0.0672435521171731
+    },
+    {
+      "conid": 900000018,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.7062141005924457,
+      "profit_factor": 1.2869707293888115,
+      "total_return": 0.047773526905332764,
+      "trades": 396,
+      "win_rate": 0.34408602150537637,
+      "max_drawdown": -0.0789117931043606
+    },
+    {
+      "conid": 900000018,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.6565945379082542,
+      "profit_factor": 1.2923755731423539,
+      "total_return": 0.03923431794470145,
+      "trades": 264,
+      "win_rate": 0.3055555555555556,
+      "max_drawdown": -0.07127800655914192
+    },
+    {
+      "conid": 900000018,
+      "params": {
+        "RANGE_MINUTES": 30,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -1.0475181546266528,
+      "profit_factor": 0.47195549963255856,
+      "total_return": -0.05918976333476367,
+      "trades": 119,
+      "win_rate": 0.3235294117647059,
+      "max_drawdown": -0.08530560526190456
+    },
+    {
+      "conid": 900000018,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.2
+      },
+      "sharpe": 0.4171836161626906,
+      "profit_factor": 1.1652013224832667,
+      "total_return": 0.028365751840754738,
+      "trades": 369,
+      "win_rate": 0.3132530120481928,
+      "max_drawdown": -0.08463801581662037
+    },
+    {
+      "conid": 900000018,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 1.5
+      },
+      "sharpe": 0.4847084463909911,
+      "profit_factor": 1.2131882135582417,
+      "total_return": 0.027026483070864415,
+      "trades": 240,
+      "win_rate": 0.3125,
+      "max_drawdown": -0.07278111768308791
+    },
+    {
+      "conid": 900000018,
+      "params": {
+        "RANGE_MINUTES": 45,
+        "VOLUME_MULT": 2.0
+      },
+      "sharpe": -1.1369679279564513,
+      "profit_factor": 0.4174492151278427,
+      "total_return": -0.05306780843289949,
+      "trades": 114,
+      "win_rate": 0.1875,
+      "max_drawdown": -0.07644710905417806
+    }
+  ]
+}
