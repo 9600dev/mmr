@@ -93,6 +93,43 @@
 #         `>= 0`: at 0 both yield 0.0, and for negatives both take the else.
 #         TRUE EQUIVALENT.
 #
+#   STALE-BAR GATE, fail-closed (2026-07-28). auto_executor 72.4% -> 91.7%,
+#     protective_stop 91.5% -> 100%, risk_gate 91.9% -> 89.2%,
+#     position_sizing wobbles ~71.0-71.6%. Two of those need explaining.
+#
+#     auto_executor's 19-point jump involved NO new tests. `SignalWork.
+#     bar_size_seconds` defaulted to 0.0, which the stale-bar gate reads as
+#     "interval unknown" and responds to by not running. Production always set
+#     it; no test ever did. So every test that drove the open path drove it
+#     with that gate switched off, and no test could reveal this because every
+#     caller inherited the same default. The tests also used a hardcoded bar
+#     timestamp three weeks in the past, which only worked because the gate was
+#     off. Removing the default failed 31 tests at once; fixing them to state a
+#     real interval and present a fresh bar moved the score 19 points, because
+#     the tests finally reached code they had never reached. A default that
+#     disables a check is an off switch every caller flips without noticing.
+#
+#     risk_gate DROPPED 2.7 points and the cause is mechanical, not a
+#     regression. The `skipped:` / `unevaluable:` vocabulary split renamed
+#     seven check values, and longer + more string literals mean more string
+#     mutants, which survive. Verified rather than assumed: normalising every
+#     string Constant in each survivor's AST and comparing against the original
+#     shows 32 of the 60 survivors differ ONLY inside a literal. The rename
+#     changed no structure, so it cannot have introduced a decision mutant, and
+#     the module's standing rule (every gate DECISION mutant killed; survivors
+#     are reason strings and degenerate boundaries) still holds. Recorded at
+#     the lower number rather than papered over.
+#
+#     position_sizing is UNCHANGED code that measured 71.6%, 71.0% and 71.2%
+#     across three runs. That contradicts the reproducibility claim below, so
+#     it is recorded at the LOWEST observed value: a floor set at a wobbling
+#     measurement's high-water mark cries wolf, and this gate's whole value is
+#     that its alarms mean something. The cause is not established. The
+#     candidates are mutmut scheduling under different load (the full pass runs
+#     3,400+ mutants, the isolated one 580) and the newly dynamic bar timestamp
+#     in the shared oracle. Worth pinning down before trusting sub-1% moves in
+#     this module.
+#
 # EQUIVALENT-MUTANT LEDGER (the policy says a survivor is either a test gap or a
 # documented equivalent *stating why*; the why was missing, so here it is —
 # derived and verified 2026-07-24, all three order_math survivors):

@@ -87,8 +87,15 @@ def check_against_baseline(per_module: dict[str, dict[str, int]]) -> int:
     from 12/14 to 13/15 when the function grew a tri-state record), so a
     key-based baseline would false-alarm on every edit. The score is normalised
     against what actually ran: adding well-tested code raises it, adding
-    untested code lowers it, and for UNCHANGED code it is exactly reproducible
-    (verified: three consecutive runs produced byte-identical results).
+    untested code lowers it.
+
+    REPRODUCIBILITY IS NOT GUARANTEED, and this docstring used to claim it was
+    ("three consecutive runs produced byte-identical results"). On 2026-07-28
+    two full passes over IDENTICAL code disagreed on ~30 auto_executor mutants
+    (91.7% vs 90.2%), and position_sizing moved 71.6/71.0/71.2 across three
+    runs without being touched. Treat a sub-2% move in a large module as noise
+    until it reproduces, and never record a baseline from a single run whose
+    number you have not seen twice.
 
     FAILS CLOSED, the lesson from the ty gate: a missing baseline, absent
     mutation data, or a module that was generated but never exercised is a
