@@ -775,6 +775,22 @@ class AutoExecutor:
 
     # -- signal processing ------------------------------------------------------
 
+    def _now_utc(self) -> dt.datetime:
+        """Wall clock, as a seam.
+
+        The stale-bar gate compares a bar timestamp against now, so any test
+        driving that path is time-dependent. Tests previously handled this by
+        making the FIXTURE dynamic, which made the mutation score move without
+        the code moving (~30 mutants flipping between identical runs), and then
+        by stubbing out `bar_age_seconds` entirely, which cost ~26 points of
+        coverage because the function's own mutants became unreachable.
+
+        Overriding the clock is the version that costs nothing: the real
+        `bar_age_seconds` still runs against a real bar timestamp, and only
+        "now" is pinned.
+        """
+        return dt.datetime.now(dt.timezone.utc)
+
     def _warn_if_stale_gate_inert(self, work, age) -> None:
         """Say so when the stale-bar gate cannot evaluate.
 
@@ -818,7 +834,7 @@ class AutoExecutor:
         # allowed, deliberately — see bar_age_seconds), but it is no longer
         # silent. Logged once per (strategy, conid) so a persistent condition
         # does not drown the log at one line per bar.
-        age = bar_age_seconds(work.bar_ts)
+        age = bar_age_seconds(work.bar_ts, self._now_utc())
         self._warn_if_stale_gate_inert(work, age)
 
         directive = decide_signal(
