@@ -10,6 +10,8 @@ minimally-wired StrategyRuntime and drive the pieces under test directly.
 
 import asyncio
 import os
+
+from unittest.mock import MagicMock
 from pathlib import Path
 
 import pytest
@@ -34,6 +36,8 @@ def _make_runtime(tmp_path, strategies_dir, config_file=None, paper_trading=True
     rt._config_mtime = 0.0
     rt.trader_client = None  # type: ignore
     rt.paper_trading = paper_trading
+    rt._published_conids = set()
+    rt._trader_boot_id = None
     return rt
 
 
@@ -313,6 +317,148 @@ class TestManifestLoad:
         assert s._context.manifest_direction == 'long'
 
 
+class TestTraderServiceRestartResubscribes:
+    """A trader_service restart drops every market-data subscription, and
+    nothing downstream could tell.
+
+    The live outage (2026-07-27): trader_service was restarted to deploy a fix,
+    strategy_service kept running, and ticks stopped for 30 minutes. Both
+    services reported healthy the whole time. The RPC socket reconnects
+    transparently, so every call kept working; only the data stopped. Meanwhile
+    `subscribe()` keyed its publish request off the strategies dict, which still
+    listed every conId, so each 30-second reconcile re-ran and did nothing.
+
+    Strategies were blind. Only the broker-side disaster stops still protected
+    the book. This matters beyond deploys: `supervise()` restarts
+    trader_service automatically after a crash, so a routine recovery produced
+    a silent data outage.
+    """
+
+    def _runtime_with(self, tmp_path, boot_ids):
+        strategies = tmp_path / 'strategies'
+        strategies.mkdir()
+        config_file = tmp_path / 'strategy_runtime.yaml'
+        config_file.write_text('strategies: []\n')
+        rt = _make_runtime(tmp_path, strategies, config_file)
+        published = []
+
+        class _RPC:
+            def get_status(self_inner):
+                return {'boot_id': boot_ids[0]}
+
+            def publish_contract(self_inner, contract, delayed=False):
+                published.append(contract.conId)
+
+            def resolve_symbol(self_inner, conId):
+                return []
+
+        class _Client:
+            def rpc(self_inner, return_type=None):
+                return _RPC()
+
+        rt.trader_client = _Client()  # type: ignore
+        rt._published = published
+        return rt
+
+    def _contract(self, conid):
+        from ib_async.contract import Contract
+        return Contract(secType='STK', conId=conid, symbol='X', exchange='SMART')
+
+    def test_a_restart_causes_resubscription(self, tmp_path):
+        boot = ['boot-A']
+        rt = self._runtime_with(tmp_path, boot)
+
+        class _S:
+            name = 's'
+        strat = _S()
+
+        rt._note_trader_boot()
+        rt.subscribe(strat, self._contract(101))
+        assert rt._published == [101]
+
+        # Same process: reconciling again must NOT re-ask.
+        rt._note_trader_boot()
+        rt.subscribe(strat, self._contract(101))
+        assert rt._published == [101], 'a steady-state reconcile must not re-subscribe'
+
+        # trader_service restarts. Its subscriptions are gone.
+        boot[0] = 'boot-B'
+        assert rt._note_trader_boot() is True
+        rt.subscribe(strat, self._contract(101))
+        assert rt._published == [101, 101], (
+            'after a trader_service restart the conId must be published again')
+
+    def test_the_routing_table_survives_the_restart(self, tmp_path):
+        """Only the mirror of the OTHER process's state is discarded. Which
+        strategies want a conId is ours and must not be lost, or ticks would
+        arrive with nobody to deliver them to."""
+        boot = ['boot-A']
+        rt = self._runtime_with(tmp_path, boot)
+
+        class _S:
+            name = 's'
+        strat = _S()
+        rt._note_trader_boot()
+        rt.subscribe(strat, self._contract(101))
+
+        boot[0] = 'boot-B'
+        rt._note_trader_boot()
+        assert rt.strategies[101] == [strat]
+        rt.subscribe(strat, self._contract(101))
+        assert rt.strategies[101] == [strat], 'the strategy was duplicated or dropped'
+
+    def test_an_unreadable_status_is_not_treated_as_a_restart(self, tmp_path):
+        """Re-publishing every conId on a transient RPC failure would hammer
+        trader_service with duplicate subscriptions on exactly the cycles it is
+        least able to serve them."""
+        rt = self._runtime_with(tmp_path, ['boot-A'])
+
+        class _S:
+            name = 's'
+        strat = _S()
+        rt._note_trader_boot()
+        rt.subscribe(strat, self._contract(101))
+
+        class _Client:
+            def rpc(self_inner, return_type=None):
+                raise ConnectionError('trader_service restarting')
+
+        rt.trader_client = _Client()  # type: ignore
+        assert rt._note_trader_boot() is False
+        rt.subscribe(strat, self._contract(101))
+        assert rt._published == [101], 'a failed status read must not force a re-subscribe'
+
+    def test_an_older_trader_service_without_a_boot_id_is_tolerated(self, tmp_path):
+        rt = self._runtime_with(tmp_path, ['boot-A'])
+
+        class _RPC:
+            def get_status(self_inner):
+                return {'ib_connected': True}
+
+        class _Client:
+            def rpc(self_inner, return_type=None):
+                return _RPC()
+
+        rt.trader_client = _Client()  # type: ignore
+        assert rt._note_trader_boot() is False
+
+    def test_trader_status_reports_a_stable_boot_id(self):
+        """The detector is only as good as the signal. The id must be constant
+        within a process — a value that changed per call would re-subscribe
+        every cycle forever."""
+        from trader.trading import trading_runtime
+
+        t = object.__new__(trading_runtime.Trader)
+        t.client = MagicMock()
+        t.client.ib.isConnected = MagicMock(return_value=True)
+        t._ib_upstream_connected = True
+        t.data = object()
+        first = t.status()['boot_id']
+        t._status_cache_ts = 0.0          # defeat the 1s cache
+        assert t.status()['boot_id'] == first
+        assert first == trading_runtime._BOOT_ID
+
+
 class TestReconcileResilience:
     @pytest.mark.asyncio
     async def test_corrupt_yaml_does_not_advance_mtime(self, tmp_path):
@@ -417,6 +563,9 @@ class TestReconcileResilience:
         class _SlowClient:
             def rpc(self, return_type=None):
                 return self
+            def get_status(self):
+                time.sleep(0.2)
+                return {'boot_id': 'boot-A'}
             def resolve_symbol(self, conId):
                 time.sleep(0.2)
                 return []

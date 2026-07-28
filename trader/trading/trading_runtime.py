@@ -46,9 +46,18 @@ import threading
 import time
 import trader.messaging.strategy_service_api as strategy_bus
 import trader.messaging.trader_service_api as bus
+import uuid
 
 
 logging = setup_logging(module_name='trading_runtime')
+
+# Identifies this trader_service PROCESS. Live market-data subscriptions exist
+# only in its memory, so a restart silently drops every one of them — and
+# subscribers cannot tell, because a reconnected RPC socket looks identical to
+# one that never dropped. Exposed via status(); strategy_service re-subscribes
+# when it changes. Found live 2026-07-27: restarting trader_service alone left
+# every strategy blind for 30 minutes with both services reporting healthy.
+_BOOT_ID = uuid.uuid4().hex
 
 # notes
 # https://groups.io/g/insync/topic/using_reqallopenorders/27261173?p=,,,20,0,0,0::recentpostdate%2Fsticky,,,20,2,0,27261173
@@ -2351,6 +2360,11 @@ class Trader():
             'ib_connected': self.client.ib.isConnected(),
             'ib_upstream_connected': self._ib_upstream_connected,
             'storage_connected': self.data is not None,
+            # Identifies THIS trader_service process. Market-data
+            # subscriptions live only in its memory, so when this value
+            # changes every subscription is gone and subscribers must ask
+            # again. strategy_service watches it; see _reconcile_sync.
+            'boot_id': _BOOT_ID,
         }
         if not self._ib_upstream_connected:
             status['ib_upstream_error'] = self._ib_upstream_error

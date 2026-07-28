@@ -393,6 +393,12 @@ class StrategyRuntime():
         self.universe_accessor: UniverseAccessor
 
         self.strategies: Dict[int, List[Strategy]] = {}
+        # conIds we have asked trader_service to publish. Deliberately NOT
+        # derived from `strategies` above: that is our routing table and
+        # outlives everything, while this mirrors state inside ANOTHER process
+        # and must be discarded when that process restarts.
+        self._published_conids: set[int] = set()
+        self._trader_boot_id: Optional[str] = None
         self.strategy_implementations: List[Strategy] = []
         self.streams: Dict[int, pd.DataFrame] = {}
         # Historical OHLCV bars per (conId, bar_size), loaded from the DB on
@@ -892,13 +898,72 @@ class StrategyRuntime():
         logging.debug('StrategyRuntime.on_completed')
 
     def subscribe(self, strategy: Strategy, contract: Contract) -> None:
+        """Route ``contract``'s ticks to ``strategy``, asking trader_service to
+        publish them if nobody has yet.
+
+        The two facts are tracked SEPARATELY, and that separation is the fix
+        for a live outage. "Which strategies want this conId" is our state and
+        survives anything; "trader_service is publishing this conId" is THEIR
+        state and dies with their process. This used to key the publish request
+        off the strategies dict, so after a trader_service restart every conId
+        was still in the dict, no request was re-sent, and the feed stayed dead
+        until strategy_service happened to restart too. See
+        ``_note_trader_boot`` for how the restart is detected.
+        """
         logging.debug('strategy_runtime.subscribe() contract: {} strategy: {}'.format(contract, strategy))
-        if contract.conId not in self.strategies:
-            self.strategies[contract.conId] = []
-            self.strategies[contract.conId].append(strategy)
+        subscribers = self.strategies.setdefault(contract.conId, [])
+        if strategy not in subscribers:
+            subscribers.append(strategy)
+        if contract.conId not in self._published_conids:
             self.trader_client.rpc().publish_contract(contract=contract, delayed=False)
-        elif contract.conId in self.strategies and strategy not in self.strategies[contract.conId]:
-            self.strategies[contract.conId].append(strategy)
+            self._published_conids.add(contract.conId)
+
+    def _note_trader_boot(self) -> bool:
+        """Detect a trader_service RESTART and forget what it was publishing.
+
+        Returns True when a restart was observed, so the caller knows this
+        cycle's subscribe() calls are re-establishing a dead feed rather than
+        doing nothing.
+
+        A restart is invisible from here without this check: the RPC socket
+        reconnects transparently, every call keeps working, and only the ticks
+        stop. `mmr verify`'s tick_flow check and a `ticks_60s=0` pulse were the
+        only signals, and neither self-heals — the 2026-07-27 outage ran 30
+        minutes with both services reporting healthy, every strategy blind, and
+        only the broker-side disaster stops still protecting the book.
+
+        Unreadable status is NOT treated as a restart. Re-publishing every
+        conId on a transient RPC failure would hammer trader_service with
+        duplicate subscriptions on exactly the cycles it is least able to
+        serve them.
+        """
+        try:
+            status = self.trader_client.rpc().get_status()
+        except (TimeoutError, ConnectionError) as ex:
+            logging.debug('could not read trader_service status this cycle: %s', ex)
+            return False
+        except Exception as ex:
+            # Deliberately broad, against the usual "let real bugs propagate"
+            # rule. This check is what REPAIRS a dead feed; if it raises, the
+            # reconcile body dies and nothing re-subscribes, which is strictly
+            # worse than the outage it exists to fix. Logged at WARNING so it
+            # cannot rot silently.
+            logging.warning('trader_service boot check failed: %s', ex)
+            return False
+        boot_id = (status or {}).get('boot_id')
+        if not boot_id:
+            return False   # older trader_service; nothing to compare against
+
+        previous, self._trader_boot_id = self._trader_boot_id, boot_id
+        if previous is None or previous == boot_id:
+            return False
+
+        logging.warning(
+            'trader_service restarted (boot %s -> %s) — its market-data '
+            'subscriptions died with it; re-subscribing %d conId(s)',
+            previous, boot_id, len(self._published_conids))
+        self._published_conids.clear()
+        return True
 
     def subscribe_universe(self, strategy: Strategy, universe_name: str) -> None:
         logging.debug('strategy_runtime.subscribe_universe() universe: {} strategy: {}'.format(universe_name, strategy))
@@ -1196,7 +1261,12 @@ class StrategyRuntime():
                 return
             self._config_mtime = current_mtime
 
-        # 2. Re-subscribe all strategies (idempotent — only new conIds trigger publish_contract).
+        # 2. Re-subscribe all strategies (idempotent — only conIds trader_service
+        # is not already publishing trigger publish_contract). Checked FIRST so
+        # that if trader_service restarted, this cycle's subscribe() calls
+        # actually re-establish the feed instead of no-opping against stale
+        # bookkeeping.
+        self._note_trader_boot()
         # Only swallow the well-known transient failures (trader_service bouncing,
         # RPC timeout, socket not-yet-connected). Any other exception is a real
         # bug and should propagate to the run() error handler so it gets logged
