@@ -94,8 +94,8 @@ cannot check it, and you are back to trusting the diff.
 ## Table of contents
 
 1. [The problem with tests](#1-the-problem-with-tests)
+   1.1. [A five-minute finance primer](#a-five-minute-finance-primer)
 2. [Layer 0: types that encode permission (`ty`)](#2-layer-0-types-that-encode-permission-ty)
-1.1. [finance primer](#a-five-minute-finance-primer)
 3. [Layer 1: property-based testing (Hypothesis)](#3-layer-1-property-based-testing-hypothesis)
 4. [Layer 2: contracts (`deal`)](#4-layer-2-contracts-deal)
 5. [Layer 3: symbolic execution (CrossHair)](#5-layer-3-symbolic-execution-crosshair)
@@ -108,7 +108,7 @@ cannot check it, and you are back to trusting the diff.
 12. [Adopting this on a real project](#12-adopting-this-on-a-real-project)
 13. [The loop, restated](#13-the-loop-restated)
 
-Appendix A. [The day live testing outran the toolchain](#appendix-a-the-day-live-testing-outran-the-toolchain)
+Appendix A. [What live testing finds, and what the toolchain finds](#appendix-a-what-live-testing-finds-and-what-the-toolchain-finds)
 
 ---
 
@@ -1172,12 +1172,51 @@ affordable. The procedure, as MMR runs it in paper trading:
    wired into the mutation scope and oracle, then deployed and confirmed
    against the live system.
 
-One day of this (2026-07-27) executed 18 first-time paths and surfaced nine
-real bugs. All nine were in code with passing tests, a clean type gate, and a
-recorded mutation baseline. Section 13 summarises the day;
-[Appendix A](#appendix-a-the-day-live-testing-outran-the-toolchain) scores
-every bug against the question "could the static toolchain have caught this?"
-(six yes, one borderline, two no).
+One session of this executed 18 first-time paths and surfaced nine real bugs.
+All nine were in code with passing tests, a clean type gate, and a recorded
+mutation baseline. A follow-on session, probing code written that same day,
+produced nine more findings, of which five needed the live system.
+Section 13 summarises both;
+[Appendix A](#appendix-a-what-live-testing-finds-and-what-the-toolchain-finds)
+scores each finding against the question "could the other half have caught
+this?"
+
+Read the second scoreboard before adopting the layer. Live testing is the
+expensive half, and it is worth knowing which faults it is the only way to
+reach.
+
+### Three practices that decide whether a probe tells you anything
+
+The follow-on session added these. Each came from a probe that would have
+reported the wrong answer without it.
+
+**Run a control beside the probe.** A probe alone shows you what happened. It
+does not show you whether that was the new behaviour or the old one. We fixed
+the flip residual, deployed, and probed it: `sell GOOGL --quantity 3` against 1
+share held. Two orders appeared. That looks like the split working. The control
+told the truth: the same command shape on a flat symbol, `sell AAPL --quantity
+2`, was refused. So the flip's opening half had been allowed where an identical
+plain open was refused. The split was working and a gate above it was not.
+Without the control we would have recorded a pass.
+
+**One live find earns a systematic search.** A live probe is expensive. The
+grep it justifies is free. After the gate above the splitter turned out to ask a
+different question, we listed every caller of the same classifier. One of them,
+the approver notional tier, had the same hole: it exempted a split flip's
+opening half from the notional threshold. A 50,000 dollar opening short with no
+approver key was exempted as a "flip remainder" while the identical order from
+flat was refused. That one needed no broker contact at all. The live find paid
+for the audit, and the audit found the instance the probe could not reach
+because the feature is off by default.
+
+**Check the fix the way you checked the bug.** Twice in one session, the fix
+carried the same shape of hole as the bug it closed. Order-splitting was
+correct and did not close the residual, because a gate upstream had already
+exempted the order. The service-restart fix detected a restart correctly and
+still left the feed dead, because the first status read can land after the
+restart it was meant to notice. Both were caught by re-running the original
+probe against the fix. A fix is a new piece of code, and it deserves the
+procedure that found the fault.
 
 Two design points make the layer safe enough to run:
 
@@ -1453,10 +1492,27 @@ showed its costs too:
 - I hypothesised that mutation scores were nondeterministic and used that to
   explain an anomaly. Three controlled runs proved me wrong.
 
-Every one of those was an LLM being confidently wrong inside a loop designed
+A later session added two more of the same kind, both worth reading as the
+argument rather than as an aside:
+
+- I stated that market orders were recorded at a price of zero, and designed a
+  fix around it. The live database said the value was the broker library's
+  unset sentinel, 1.797e308. The wrong model would have produced a worse bug
+  than the one being fixed, because that sentinel is finite and positive and so
+  survives the obvious guard.
+- I wrote a fail-closed rule that was correct and would have stopped all
+  trading for a day the first time anyone switched the feature on. It took
+  enabling it on the live paper system to see that.
+
+Every one of these was an LLM being confidently wrong inside a loop designed
 to catch that. This is the argument. The tooling is not there because models
 are bad. It is there because plausible-and-wrong is the characteristic
 failure, and it is invisible to review precisely because it reads well.
+
+Note what caught each one. The suite caught the sizer change. Controlled reruns
+caught the nondeterminism claim. Reading the live database caught the
+zero-price claim. Switching the control on caught the fail-closed trap. Four
+different layers, and no layer would have caught more than its own.
 
 ### Failure modes of the method itself
 
@@ -1529,6 +1585,10 @@ Each of these was invisible to a green test suite:
 | Mutation | An untested, silently-approving path in the leverage check. Also a set of new tests that verified almost nothing. |
 | Fail-closed gate | The type gate reported "OK" with exit 0 on every run where the type checker never ran. |
 | Spec guard | An implementation change that would have quietly weakened a human-owned safety property. |
+| Mutation | 51 gaps in tests written the same hour. One example: every test for a valuation used a multiplier of 1.0, where multiplying and dividing by it agree, so nothing could tell the two apart. |
+| Mutation | Two mutants of a float step-down that survived because the code only does work at denormal magnitudes, which no test had ever reached. |
+| Contract | Exact float conservation, asserted in a hand-written property, turned out to be unsatisfiable by any implementation. The `deal` postcondition found the counterexample. |
+| Wiring test | A newly contracted function that was not in the symbolic-execution target list. The toolchain refused to let its own coverage rot. |
 
 ### What the full loop bought: the 2026-07-27 case
 
@@ -1554,6 +1614,14 @@ strongest safety result in this repo's history:
   joined the mutation scope, and the seams two of them crossed had composed
   integration tests.
 
+A follow-on session then built two controls (order splitting, and daily
+turnover caps) and produced nine more findings. Five needed the live system.
+Four did not, and those four are the useful correction to the first session's
+scoreboard: mutation testing found 51 gaps in tests written that same hour, a
+contract found a property that no implementation could satisfy, and a grep
+justified by one live find turned up the same fault in a second control with no
+broker contact at all.
+
 The safety win came from the combination, not from either half:
 
 - Live testing **discovers** the properties that matter. It samples reality,
@@ -1566,8 +1634,15 @@ The safety win came from the combination, not from either half:
   pin, measure, deploy, verify: nine times, between market open and close,
   while the book stayed protected by broker-side stops the whole time.
 
-Appendix A analyses this day in detail, including which bugs the static
-toolchain could have caught on its own, and which needed live contact.
+A follow-on session ran the queued disciplines and built two more controls.
+Nine further findings came out of it, and the split of who found what was very
+different: three came from live contact, one from a grep the live finds
+justified, one from reading live data before writing any code, and four from
+the toolchain. Appendix A analyses both sessions, including which bugs each
+half could have caught alone.
+
+That second split matters more than the first. It is evidence that the two
+halves find different classes, rather than evidence that one wins.
 
 ### The honest limits
 
@@ -1584,11 +1659,12 @@ implementation, increasingly, is the part the machine checks for you.
 
 ---
 
-## Appendix A: The day live testing outran the toolchain
+## Appendix A: What live testing finds, and what the toolchain finds
 
-*Written 2026-07-27, the evening after, while the evidence was fresh. Updated
-after the follow-up work landed. This appendix is a case study in the
-toolchain's blind spots.*
+*Written the evening after the first session, while the evidence was fresh,
+then extended after a follow-on session that built two more controls. It began
+as a case study in the toolchain's blind spots. The second half is a case study
+in live testing's blind spots, which turn out to be just as sharp.*
 
 ### What happened
 
@@ -1687,27 +1763,143 @@ completion; the results are themselves evidence.
    `Cancelled → Filled` stream), that shape goes into a fixture. The test
    suite accumulates a museum of true IB behaviour.
 
+### The follow-on session: what happened when the toolchain was pushed
+
+Doors 1 and 2 were then worked, and two more controls were built: order
+splitting, and daily turnover caps. Nine further findings came out. The
+interesting result is not the count. It is who found what.
+
+| # | Finding | Found by | Broker contact needed |
+|---|---|---|---|
+| 1 | An oversized close carried an ungated opening remainder (the "flip residual") | Design review, then confirmed live before fixing | To confirm, not to find |
+| 2 | Splitting did not close it. A gate above the splitter asked a different question and had already exempted the order. | Live probe **with a control** | Yes |
+| 3 | The approver notional tier exempted split remainders too | A grep the previous find justified | No |
+| 4 | Restarting one service silently blinded every strategy for 30 minutes, with both services reporting healthy | Live, caused by a routine deploy | Yes |
+| 5 | The fix for 4 left the feed dead in one ordering of events | Re-running the original probe against the fix | Yes |
+| 6 | Order submissions recorded the broker library's unset sentinel, not a price | Reading live data before writing the fix | Data, not orders |
+| 7 | The sentinel is finite and positive, so it passes the obvious guard. A first valuation reported 1.8e308 as a valid notional. | Live data plus a contract | Data, not orders |
+| 8 | 51 gaps in tests written the same hour | Mutation | No |
+| 9 | A fail-closed rule that would have stopped all trading for a day | Live, by switching the control on | Yes |
+
+Counting precisely: four needed live orders (2, 4, 5, 9), two needed live data
+but no orders (6, 7), and three needed neither (1 was found by design review
+and only confirmed live; 3 and 8 needed nothing outside the repo).
+
+That is a different shape from the first session, where only two of nine
+strictly required live contact. The reason is not that one session probed
+better code. It is what the two sessions were doing. The first hunted for
+faults in a mature surface, and most of what it found was checkable at rest.
+The second built new controls, and the faults it found live were about
+INTERACTIONS: which gate runs before which, what one process assumes about
+another, what happens to an operator on the day a control is switched on. Those
+are the classes no analysis of a single component reaches, however hard it is
+pushed.
+
+### Four lessons that were not in this tutorial before
+
+**A probe without a control can report a pass.** Finding 2 looked like a
+success. Two orders appeared where one order used to, which is what splitting
+is supposed to do. Only the control, the same command shape on a flat symbol,
+showed that the opening half had skipped a gate that an identical plain open
+did not skip. Design the control before the probe, and expect the probe alone
+to be ambiguous.
+
+**A fix deserves the procedure that found the fault.** Findings 2 and 5 are the
+same story twice. Splitting was correct and did not close the hole, because
+something upstream had already decided. The restart detector was correct and
+did not repair the feed, because the first successful status read can arrive
+after the restart it exists to detect. Both fixes had passing tests. Both were
+caught by re-running the original probe.
+
+**Fail-closed is a direction, not a virtue.** Finding 9 is the sharpest lesson
+of the session. The turnover cap refused to act on a total it could not fully
+verify, which is the rule the rest of this system follows. Switching it on
+produced a refusal of every open for the rest of that day, because the day
+already held submissions from before the feature existed. That is fail-closed
+and it is a trap. A control that costs a trading day to enable is a control
+that gets switched off and left off, and a control nobody dares enable protects
+nothing. The fix separated the two situations that had been collapsed into one:
+history from before the feature (proceed on the lower bound, and log it) and a
+live failure to value an order this build placed (refuse, and point at market
+data). Ask what a fail-closed rule costs the operator, not only what it
+prevents.
+
+**Check the claim against the data before encoding it.** Finding 6 began as a
+confident statement that market orders were recorded at zero. The live event
+store said otherwise: they were recorded at the broker library's unset
+sentinel, 1.797e308. A fix built on the first model would have been worse than
+the bug, because the sentinel is finite and positive and therefore passes
+`isfinite(x) and x > 0`. At a quantity of 1.0 the product stays finite, so the
+first version of the valuation reported 1.8e308 as a valid notional. One such
+number in a cumulative total exceeds every possible cap forever. The predicted
+failure was fail-open. The real one was a fail-closed that would have refused
+every open permanently.
+
+### What the toolchain caught that live testing could not
+
+The first session invited the reading "live testing 9, toolchain 0". The
+follow-on session is the correction.
+
+Mutation testing found 51 gaps in tests written that same hour, and the gaps
+were not exotic:
+
+- Every test for the valuation used a multiplier of 1.0. Multiplying and
+  dividing by 1.0 give the same answer, so no test could tell the two apart.
+- The event-type filter was mutated to "query everything" and survived, because
+  every test wrote only the one event type it cared about.
+- A `continue` was mutated to `break` and survived a test written for that exact
+  mutant, because the store returns newest-first and the test appended the
+  events in the other order.
+- An assertion that the message contained "2 of" passed when the count was -2,
+  because "-2 of" contains "2 of".
+
+None of these are reachable by live testing. A live probe exercises one path
+with one set of values. It cannot tell you that your test would still pass if
+the code were wrong.
+
+Two more findings came from the code rather than from any test. A fail-closed
+branch was unreachable, because an earlier check already refused that input, so
+it read as protection while doing nothing. And an order valued at zero was
+refused where it should contribute nothing. Both surfaced while writing tests
+that tried to reach them.
+
 ### The synthesis
 
-The tempting reading is "live testing 9, toolchain 0". That reading is wrong.
-The day was the loop from section 13 running at a larger radius:
+The tempting reading of the first session is "live testing 9, toolchain 0".
+Taken alone it invites the wrong conclusion. Both sessions together show the
+two halves finding different classes of fault:
+
+- Live contact finds **wrong beliefs**: about the broker, about what another
+  process is doing, about which gate runs first, about what is already recorded
+  in your own database.
+- The toolchain finds **weak checking**: properties that cannot fail, tests
+  that would pass on broken code, inputs no test reaches, contracts that no
+  implementation could satisfy.
+
+Neither reaches the other's class. A live probe cannot tell you that your test
+would still pass if the code were wrong. A mutation score cannot tell you that
+the broker returns a list where its own types promise an object, or that a
+restart quietly dropped every market-data subscription.
+
+The loop from section 13, running at a larger radius:
 
 - **Live contact is property discovery.** It samples reality, including the
   parts no analysis of our own code can reach, and it tells you which
   properties matter and which models are wrong.
-- **The toolchain is property retention.** Every one of the nine bugs now has
+- **The toolchain is property retention.** Every finding from both sessions has
   a pinned regression: a supersession test, a role matrix, a routing
-  assertion, a round-trip check, an adoption-and-sweep suite, a seam harness.
-  None of them can return silently. Live testing without the toolchain finds
-  a bug once. With it, each find is permanent.
+  assertion, a round-trip check, a seam harness, a split spec, a sentinel
+  regression. None of them can return silently. Live testing without the
+  toolchain finds a bug once. With it, each find is permanent.
 - **The LLM in the monitoring seat is what makes the radius affordable.** The
   find-fix-pin-deploy-verify cycle ran nine times in one day because the same
   agent that watched the logs also wrote the fix, the regression, and the
   toolchain wiring, and then confirmed the deployed behaviour live.
 
-The honest asymmetry is search space. Verification exhausts the properties
-you conceived. Live testing samples the ones you did not. A day like this one
-generates the next month's invariants.
+The honest asymmetry is search space. Verification exhausts the properties you
+conceived. Live testing samples the ones you did not. Neither is the safety
+result on its own: the findings that mattered most came from running one, then
+using it to aim the other.
 
 ### Further reading
 
