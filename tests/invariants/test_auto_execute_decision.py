@@ -319,3 +319,61 @@ class TestEmptyBrokerReadIsNotEvidenceOfAFlatBook:
         live position is silent and is not."""
         assert accept_empty_broker_read(bad, now=1e9, grace_seconds=1.0) is False
         assert accept_empty_broker_read(1e9, now=bad, grace_seconds=1.0) is False
+
+
+class TestTheStaleBarGateRefusesWhatItCannotEvaluate:
+    """An open is refused when the gate cannot establish the bar's freshness.
+
+    Every other gate input in this system refuses an open it cannot read: daily
+    PnL, NetLiquidation, position value, and the leverage check since
+    2026-07-26. The stale-bar gate was the exception — an unreadable age made
+    it silently not fire and the open proceeded on a bar of UNKNOWN age, which
+    is precisely the state it exists to detect.
+
+    Refusing is the benign direction, and that is what makes it safe to do
+    here: this branch is OPENS ONLY. The worst case is no new positions, while
+    existing ones still exit normally and the broker-side disaster stops are
+    untouched. The book stays closeable even if this refused everything.
+
+    Both directions are pinned. "Refuses an unreadable age" alone is satisfied
+    by a gate that refuses every open, which would silently stop the roster
+    trading; "opens on a normal bar" alone is satisfied by the old fail-open.
+    """
+
+    def test_an_undatable_bar_refuses_the_open(self):
+        d = decide_signal(
+            _work(Action.BUY, bar_size_seconds=60.0),
+            kill_switch=False, paper_trading=True, held_qty=0.0,
+            already_executed_bar=False, cooldown_active=False,
+            bar_age_seconds=None)
+        assert d.kind == 'skip'
+        assert 'fail-closed' in d.reason
+
+    def test_a_normal_bar_still_opens(self):
+        """The other half. Without this, refusing everything would pass."""
+        d = decide_signal(
+            _work(Action.BUY, bar_size_seconds=60.0),
+            kill_switch=False, paper_trading=True, held_qty=0.0,
+            already_executed_bar=False, cooldown_active=False,
+            bar_age_seconds=10.0)
+        assert d.kind == 'open'
+
+    def test_an_undatable_bar_never_blocks_a_close(self):
+        """The exit-class rule outranks this gate, as it outranks every gate.
+        Being unable to date a bar must not strand a position."""
+        d = decide_signal(
+            _work(Action.SELL, bar_size_seconds=60.0),
+            kill_switch=False, paper_trading=True, held_qty=100.0,
+            already_executed_bar=False, cooldown_active=False,
+            bar_age_seconds=None)
+        assert d.kind == 'close'
+        assert d.quantity == 100.0
+
+    def test_the_bar_interval_cannot_be_omitted(self):
+        """The other half of the fix, enforced at construction rather than in
+        the gate: a caller that forgets the interval cannot silently disable
+        the check, because there is no longer a default to inherit."""
+        import pytest as _pytest
+        with _pytest.raises(TypeError):
+            SignalWork(strategy_name='s', conid=1, action=Action.BUY,
+                       bar_ts=_BAR)          # no bar_size_seconds
