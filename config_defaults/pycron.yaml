@@ -83,6 +83,18 @@ jobs:
       start_on_pycron_start: False
       restart_if_found: False
       restart_if_finished: False
+    - name: data_audit
+      description: quality-gate the stored OHLCV against the recorded baseline
+      command: python3
+      arguments: -m trader.mmr_cli data audit
+      # After BOTH refresh jobs (US 23:00 ET, ASX 06:00 ET), so it grades the
+      # data the strategies will actually read tomorrow. Exits non-zero on a
+      # NEW violation, which is the whole point: a one-off audit is worthless
+      # because the data changes nightly.
+      start: "0 7 * * 1-5"
+      start_on_pycron_start: False
+      restart_if_found: False
+      restart_if_finished: False
     - name: data_refresh_asx
       description: refresh ASX universes (IB) — after ASX close
       command: python3

@@ -1070,7 +1070,7 @@ WEB_SUP_PID=$!
 # scheduling anything.
 run_pycron() {
     $PY -m pycron.pycron --config "$HOME/.config/mmr/pycron.yaml" \
-        -s db_backup -s data_refresh_us -s data_refresh_asx \
+        -s db_backup -s data_refresh_us -s data_refresh_asx -s data_audit \
         -s preflight_us -s preflight_asx \
         --no-health-check \
         >> "$HOME/.local/share/mmr/logs/pycron_cron.log" 2>&1

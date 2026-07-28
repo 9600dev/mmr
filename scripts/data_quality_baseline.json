@@ -1,0 +1,11 @@
+{
+  "note": "Accepted data-quality violation counts, per '<bar_size>|<rule>'. A count ABOVE these fails `mmr data audit`. Re-record with --update-baseline after reviewing why the number moved.",
+  "counts": {
+    "1 day|empty_bar": 113,
+    "1 day|large_jump": 10,
+    "1 min|duplicate_timestamp": 49,
+    "1 min|empty_bar": 312,
+    "1 min|high_not_highest": 1761,
+    "1 min|low_not_lowest": 819
+  }
+}

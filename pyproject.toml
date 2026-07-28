@@ -166,6 +166,11 @@ only_mutate = [
     # it writes, and the live Cancelled->Filled race (d23746d) proved a wrong
     # record silently corrupts realized PnL. Small, pure-ish, high-consequence.
     "trader/trading/order_lifecycle.py",
+    # The quality rules for stored bars. Nothing verified the DATA until
+    # 2026-07-28; the first run found 2,580 structurally impossible 1-min bars
+    # (highs below the close, from quote-midpoint synthesis). A wrong rule here
+    # either buries that finding or floods the report with false alarms.
+    "trader/data/bar_quality.py",
     # Decides which bars a strategy is allowed to see at all. Not on the
     # order path, but a wrong answer either starves a strategy of real bars
     # or feeds it bars that never traded.
@@ -185,6 +190,7 @@ pytest_add_cli_args_test_selection = [
     "tests/invariants/test_exit_class.py",
     "tests/test_auto_executor.py",
     "tests/invariants/test_auto_execute_decision.py",
+    "tests/invariants/test_bar_quality.py",
     "tests/invariants/test_gate_properties.py",
     "tests/invariants/test_order_notional.py",
     "tests/invariants/test_order_split.py",

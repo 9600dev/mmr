@@ -64,6 +64,10 @@ TARGETS = [
     "trader.trading.position_sizing._confidence_scale",
     "trader.trading.position_sizing._volatility_multiplier",
     "trader.trading.position_sizing.compute_atr",
+    "trader.data.bar_quality.check_bar",
+    ("trader.data.bar_quality.check_series", 10),
+    ("trader.data.bar_quality.spacing_findings", 10),
+    ("trader.data.bar_quality.unexplained_jumps", 10),
     "trader.data.proposal_transitions.is_known_status",
     "trader.data.proposal_transitions.is_valid_transition",
 ]

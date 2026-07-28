@@ -25,6 +25,7 @@ import argparse
 import asyncio
 import json
 import os
+import pathlib
 import shlex
 import sys
 import time
@@ -1741,6 +1742,20 @@ def build_parser() -> argparse.ArgumentParser:
         help='Rewrite string-keyed tick_data rows to conId-keyed '
              '(requires trader_service)',
     )
+
+    _audit = data_sub.add_parser(
+        'audit',
+        help='Quality-check stored OHLCV against a recorded baseline; '
+             'non-zero exit on NEW violations (cron-able)',
+    )
+    _audit.add_argument('--bar-size', default=None,
+                        help='only this bar size (default: every size present)')
+    _audit.add_argument('--limit-symbols', type=int, default=0,
+                        help='cap symbols per bar size (0 = all); the 1-min '
+                             'series is large, so a cron run may sample')
+    _audit.add_argument('--update-baseline', action='store_true',
+                        help='record the current counts as the accepted floor '
+                             '(a human-reviewed act)')
 
     _mtz = data_sub.add_parser(
         'migrate-timezone',
@@ -8594,6 +8609,8 @@ def _handle_data(args: argparse.Namespace):
         _handle_data_refresh(args)
     elif action == 'status':
         _handle_data_status()
+    elif action == 'audit':
+        _handle_data_audit(args)
     else:
         console.print(f'[yellow]Unknown data action: {action}[/yellow]')
 
@@ -9663,6 +9680,140 @@ def _handle_data_refresh(args: argparse.Namespace):
     # sys.exit would kill the session, so it is skipped there.
     if fail and len(sys.argv) > 1:
         sys.exit(1)
+
+
+DATA_QUALITY_BASELINE = pathlib.Path(__file__).resolve().parent.parent / 'scripts' / 'data_quality_baseline.json'
+
+
+def _handle_data_audit(args: argparse.Namespace):
+    """Quality-check the stored OHLCV series against a recorded baseline.
+
+    A one-off audit is close to worthless: the data changes nightly. So this is
+    a GATE, shaped like the mutation gate — known violations are recorded as a
+    floor, a NEW violation fails with a non-zero exit, and re-recording the
+    floor is a deliberate act. Cron it after each refresh and it stays true.
+
+    The rules themselves are pure and live in trader/data/bar_quality.py, which
+    means they get the same treatment as the trading kernel: deal contracts,
+    Hypothesis properties and mutation testing.
+    """
+    import json as _json
+    import yaml as _yaml
+    from collections import Counter
+
+    from trader.container import Container, default_config_path
+    from trader.data.bar_quality import (
+        Bar, check_series, spacing_findings, unexplained_jumps)
+    from trader.data.duckdb_store import DuckDBConnection
+
+    cfg = Container.instance().config()
+    history = os.path.expanduser(cfg.get('history_duckdb_path', '') or cfg.get('duckdb_path', ''))
+    if not history:
+        print_status('history_duckdb_path not configured', success=False)
+        return
+    db = DuckDBConnection(history)
+
+    expected = {'1 day': 86400.0, '1 min': 60.0, '5 mins': 300.0,
+                '15 mins': 900.0, '1 hour': 3600.0}
+    sizes = ([args.bar_size] if getattr(args, 'bar_size', None)
+             else [r[0] for r in db.execute(
+                 'SELECT DISTINCT bar_size FROM tick_data ORDER BY bar_size',
+                 fetch='all') or []])
+
+    tally: Counter = Counter()
+    worst: dict = {}
+    scanned = 0
+    for bar_size in sizes:
+        symbols = [r[0] for r in db.execute(
+            'SELECT DISTINCT symbol FROM tick_data WHERE bar_size = ? ORDER BY symbol',
+            [bar_size], fetch='all') or []]
+        # ORDER BY above is load-bearing: an unordered sample makes two runs
+        # scan different symbols and disagree, which is indistinguishable from
+        # the data having changed.
+        cap = int(getattr(args, 'limit_symbols', 0) or 0)
+        if cap:
+            symbols = symbols[:cap]
+        for sym in symbols:
+            rows = db.execute(
+                'SELECT date, open, high, low, close, volume FROM tick_data '
+                'WHERE symbol = ? AND bar_size = ? ORDER BY date',
+                [sym, bar_size], fetch='all') or []
+            if not rows:
+                continue
+            scanned += 1
+            bars = [Bar(ts=d.timestamp(), open=o, high=h, low=l, close=c,
+                        volume=(v if v is not None else 0.0))
+                    for d, o, h, l, c, v in rows]
+            findings = list(check_series(bars))
+            # Spacing only for INTRADAY series. A daily bar is anchored to a
+            # local midnight, so a DST transition makes a legitimate one-day
+            # step 23h or 25h — not a multiple of 86400 and not a defect. On
+            # the first run that produced 338 findings across 117 series, none
+            # of them real. A check that is wrong by construction for a whole
+            # bar size teaches people to ignore the whole report.
+            step = expected.get(bar_size)
+            if step and step < 86400.0:
+                findings += spacing_findings(bars, step)
+            if bar_size == '1 day':
+                findings += unexplained_jumps(bars, threshold=0.30)
+            for f in findings:
+                key = f'{bar_size}|{f.rule}'
+                tally[key] += 1
+                if tally[key] > worst.get(key, (0, ''))[0]:
+                    pass
+                worst.setdefault(key, (0, sym))
+                if f.severity == 'error':
+                    worst[key] = (tally[key], sym)
+
+    current = dict(sorted(tally.items()))
+    baseline = {}
+    if DATA_QUALITY_BASELINE.exists():
+        try:
+            baseline = _json.loads(DATA_QUALITY_BASELINE.read_text()).get('counts', {})
+        except Exception as ex:
+            print_status(f'unreadable baseline {DATA_QUALITY_BASELINE}: {ex}', success=False)
+            return
+
+    if getattr(args, 'update_baseline', False):
+        DATA_QUALITY_BASELINE.write_text(_json.dumps({
+            'note': ('Accepted data-quality violation counts, per '
+                     "'<bar_size>|<rule>'. A count ABOVE these fails "
+                     '`mmr data audit`. Re-record with --update-baseline after '
+                     'reviewing why the number moved.'),
+            'counts': current,
+        }, indent=2) + '\n')
+        print_status(f'data-quality baseline recorded: {len(current)} rule(s) '
+                     f'over {scanned} series -> {DATA_QUALITY_BASELINE}')
+        return
+
+    regressions = {k: (v, baseline.get(k, 0)) for k, v in current.items()
+                   if v > baseline.get(k, 0)}
+
+    if _json_mode:
+        print(_json_dumps({'data': {'counts': current, 'baseline': baseline,
+                                    'regressions': regressions,
+                                    'series_scanned': scanned},
+                           'title': 'Data Quality Audit'}))
+    else:
+        table = Table(title=f'Data Quality Audit ({scanned} series)')
+        table.add_column('bar_size'); table.add_column('rule')
+        table.add_column('count', justify='right')
+        table.add_column('accepted', justify='right')
+        for k, v in current.items():
+            bs, rule = k.split('|', 1)
+            base = baseline.get(k, 0)
+            style = 'red' if v > base else ('yellow' if v else 'green')
+            table.add_row(bs, rule, f'[{style}]{v}[/{style}]', str(base))
+        console.print(table)
+        if not current:
+            console.print('[green]no findings[/green]')
+
+    if regressions:
+        for k, (now, was) in sorted(regressions.items()):
+            print_status(f'data quality REGRESSED [{k}]: {now} > accepted {was}',
+                         success=False)
+        if len(sys.argv) > 1:
+            sys.exit(1)
 
 
 def _handle_data_status():
