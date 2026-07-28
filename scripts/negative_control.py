@@ -58,42 +58,50 @@ from trader.simulation.synthetic_markets import driftless_session_bars  # noqa: 
 _BASE_CONID = 900_000_000
 
 
-def build_null_store(path: str, instruments: int, days: int,
-                     start_date: str) -> list[int]:
-    """Generate and persist ``instruments`` independent edge-free series."""
-    storage = TickStorage(path)
-    tick: TickData = storage.get_tickdata(BarSize.Mins1)
-    conids = []
-    for i in range(instruments):
-        conid = _BASE_CONID + i
-        df = driftless_session_bars(days=days, seed=1000 + i,
-                                    start_price=50.0 + 5.0 * i,
-                                    start_date=start_date)
-        # Goes through the same write chokepoint as real data, so the bars are
-        # validated by bar_quality on the way in. A generator that produced
-        # impossible bars would be refused here rather than quietly measured.
-        tick.write(str(conid), df)
-        conids.append(conid)
-        print(f'  wrote {len(df):,} bars for synthetic conid {conid}', flush=True)
-    return conids
+def _run_instrument(db_dir: str, config, strategy: str, class_name: str,
+                    index: int, days: int, start_date: str, cells: list):
+    """Generate ONE instrument and run every parameter cell against it.
 
-
-def _run_one(db: str, config, strategy: str, class_name: str,
-             conid: int, cell: dict):
-    """One (instrument, parameter-cell) backtest, in its own process.
-
-    Each worker builds its own TickStorage: DuckDB serialises access per file
-    and `execute_atomic` retries on contention, so concurrent readers are safe.
+    Each worker owns its own single-instrument DuckDB. That is not a
+    micro-optimisation: pointing 14 processes at one shared store deadlocked
+    the first attempt at 0% CPU, because DuckDB takes a per-file lock and every
+    worker opens read-write. Per-worker files remove the contention entirely
+    and cost nothing, since the data is generated deterministically from the
+    seed rather than shared.
     """
-    storage = TickStorage(db)
-    bt = Backtester(storage, config)
-    r = bt.run_from_module(strategy, class_name, [conid], params=dict(cell))
-    return {
-        'conid': conid, 'params': cell,
-        'sharpe': r.sharpe_ratio, 'profit_factor': r.profit_factor,
-        'total_return': r.total_return, 'trades': r.total_trades,
-        'win_rate': r.win_rate, 'max_drawdown': r.max_drawdown,
-    }
+    conid = _BASE_CONID + index
+    path = os.path.join(db_dir, f'nc_{conid}.duckdb')
+    if os.path.exists(path):
+        os.remove(path)
+
+    df = driftless_session_bars(days=days, seed=1000 + index,
+                                start_price=50.0 + 5.0 * index,
+                                start_date=start_date)
+    storage = TickStorage(path)
+    # Written through the ordinary chokepoint, so bar_quality validates these
+    # bars exactly as it would a vendor's.
+    storage.get_tickdata(BarSize.Mins1).write(str(conid), df)
+
+    out = []
+    for cell in cells:
+        bt = Backtester(storage, config)
+        try:
+            r = bt.run_from_module(strategy, class_name, [conid],
+                                   params=dict(cell))
+        except Exception as exc:                         # noqa: BLE001
+            out.append({'conid': conid, 'params': cell, 'error': str(exc)})
+            continue
+        out.append({
+            'conid': conid, 'params': cell,
+            'sharpe': r.sharpe_ratio, 'profit_factor': r.profit_factor,
+            'total_return': r.total_return, 'trades': r.total_trades,
+            'win_rate': r.win_rate, 'max_drawdown': r.max_drawdown,
+        })
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return out
 
 
 def main() -> int:
@@ -117,19 +125,14 @@ def main() -> int:
     grid = json.loads(args.grid)
     cells = [dict(zip(grid, combo)) for combo in itertools.product(*grid.values())]
 
-    db = args.db or os.path.join(
-        tempfile.gettempdir(), 'mmr_negative_control.duckdb')
-    if os.path.exists(db):
-        os.remove(db)
+    db_dir = args.db or os.path.join(tempfile.gettempdir(), 'mmr_negative_control')
+    os.makedirs(db_dir, exist_ok=True)
 
     print(f'negative control: {args.class_name} over {args.instruments} '
           f'edge-free instruments x {len(cells)} parameter cells '
           f'= {args.instruments * len(cells)} runs')
-    print(f'store: {db}  (isolated — the live history is never touched)\n')
+    print(f'stores: {db_dir}/  (isolated — the live history is never touched)')
 
-    conids = build_null_store(db, args.instruments, args.days, args.start_date)
-
-    storage = TickStorage(db)
     start = dt.datetime.fromisoformat(args.start_date)
     config = BacktestConfig(
         start_date=start - dt.timedelta(days=2),
@@ -137,28 +140,28 @@ def main() -> int:
         bar_size=BarSize.Mins1,
         execution_mode='live' if args.live_semantics else 'accumulate',
     )
+    print(f'running with {args.workers} workers '
+          f'({config.execution_mode} semantics)...', flush=True)
 
-    jobs = [(c, cell) for c in conids for cell in cells]
-    print(f'\nrunning {len(jobs)} backtests ({config.execution_mode} semantics, '
-          f'{args.workers} workers)...', flush=True)
     results = []
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         futures = {
-            pool.submit(_run_one, db, config, args.strategy, args.class_name,
-                        conid, cell): (conid, cell)
-            for conid, cell in jobs
+            pool.submit(_run_instrument, db_dir, config, args.strategy,
+                        args.class_name, i, args.days, args.start_date, cells): i
+            for i in range(args.instruments)
         }
         for fut in as_completed(futures):
-            conid, cell = futures[fut]
+            i = futures[fut]
             try:
-                res = fut.result()
+                batch = fut.result()
             except Exception as exc:                     # noqa: BLE001
-                print(f'  run failed conid={conid} {cell}: {exc}', flush=True)
+                print(f'  instrument {i} failed: {exc}', flush=True)
                 continue
-            if res is not None:
-                results.append(res)
-            if len(results) % 20 == 0:
-                print(f'  {len(results)}/{len(jobs)} done', flush=True)
+            ok = [r for r in batch if 'error' not in r]
+            results.extend(ok)
+            print(f'  instrument {i}: {len(ok)}/{len(cells)} cells '
+                  f'({len(results)}/{args.instruments * len(cells)} total)',
+                  flush=True)
 
     if not results:
         print('no runs completed', file=sys.stderr)
