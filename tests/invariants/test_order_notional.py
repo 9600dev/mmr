@@ -12,6 +12,8 @@ Deeper example-based cases live in tests/test_order_math.py; this file is the
 human-owned property plus the pinned counterexamples.
 """
 
+import math
+
 import pytest
 from hypothesis import given, settings, strategies as st
 
@@ -176,3 +178,129 @@ class TestPinnedOversellCounterexamples:
         """``min(140.0, '')`` raises TypeError inside the placement path."""
         assert reducible_quantity(140.0, None) == 0.0
         assert reducible_quantity(140.0, 'unknown') == 0.0
+
+
+class TestAValuationNeverSilentlyReadsZero:
+    """SPEC: an order that cannot be valued says so. It never reports $0.
+
+    This is the property that makes a cumulative notional limit possible at
+    all, and its absence is why one could not be built on the existing audit
+    trail. `ORDER_SUBMITTED` recorded `price=order.lmtPrice`, and for a MARKET
+    or STOP order ib_async leaves that field at its unset sentinel,
+    `sys.float_info.max`. Confirmed in the live event store: market submissions
+    are recorded at 1.7976931348623157e+308.
+
+    Nothing looked broken, because the only consumer was the order-RATE limit,
+    which counts rows and never reads value.
+
+    The sentinel is the dangerous part, and not for the reason first assumed.
+    It is FINITE and POSITIVE, so the natural guard — `isfinite(price) and
+    price > 0` — passes it, and at a quantity of 1.0 the product is still
+    finite. A first cut of this valuation therefore reported a $1.8e308
+    notional as VALID. One of those in a cumulative total exceeds every
+    conceivable cap forever, so the cap would refuse all opens: not the
+    fail-open originally predicted, but a system-bricking fail-closed.
+
+    So the invariant is about the failure mode, not the arithmetic. Unevaluable
+    must be DISTINGUISHABLE from zero, and a sentinel must never be mistaken
+    for a price.
+    """
+
+    def test_a_market_order_with_no_price_anywhere_is_not_evaluable(self):
+        from trader.trading.order_math import order_notional
+        # A MARKET order carries no limit and no stop; with no cached price
+        # either, there is nothing to value it with.
+        notional, evaluable = order_notional((0, 0), 100.0)
+        assert evaluable is False
+        assert notional == 0.0
+
+    def test_the_unset_sentinel_is_never_mistaken_for_a_price(self):
+        """THE regression. sys.float_info.max is what ib_async puts in an unset
+        lmtPrice, and it is finite and positive, so it defeats the obvious
+        guard. Quantity 1.0 is the case that matters: the product stays finite,
+        so nothing downstream catches it either."""
+        import sys as _sys
+        from trader.trading.order_math import order_notional
+        unset = _sys.float_info.max
+        for qty in (1.0, 0.5, 2.0, 100.0):
+            assert order_notional((unset,), qty) == (0.0, False), qty
+        # A STOP order: lmtPrice unset, auxPrice real. The stop price is the
+        # valuation, and the sentinel ahead of it must not win.
+        assert order_notional((unset, 90.0), 3.0) == (270.0, True)
+
+    def test_zero_notional_is_never_reported_as_evaluable(self):
+        """The precise confusion to prevent: a real valuation and a failed one
+        must not both look like 0.0-with-confidence."""
+        from trader.trading.order_math import order_notional
+        for candidates in ((), (0,), (None,), (float('nan'),), (-5.0,),
+                           (float('inf'),)):
+            notional, evaluable = order_notional(candidates, 10.0)
+            assert (notional, evaluable) == (0.0, False), candidates
+
+    @settings(max_examples=300, deadline=None)
+    @given(
+        price=st.floats(min_value=1e-6, max_value=1e6,
+                        allow_nan=False, allow_infinity=False),
+        qty=st.floats(min_value=1e-6, max_value=1e6,
+                      allow_nan=False, allow_infinity=False),
+        multiplier=st.sampled_from([1.0, 100.0, 50.0]),
+    )
+    def test_a_usable_price_always_yields_an_evaluable_positive_notional(
+            self, price, qty, multiplier):
+        from trader.trading.order_math import order_notional
+        notional, evaluable = order_notional((price,), qty, multiplier)
+        if evaluable:
+            assert notional > 0.0
+        else:
+            # The only permitted failure with a usable price is an overflow to
+            # infinity, which is not a valuation either.
+            assert notional == 0.0
+            assert not math.isfinite(price * qty * multiplier)
+
+    def test_the_first_usable_candidate_wins_in_the_order_given(self):
+        """Callers own the price POLICY by ordering the tuple. If this function
+        reordered or picked a 'best' price, the approver tier's anti-forgery
+        rule (never value below the live market) would silently change."""
+        from trader.trading.order_math import order_notional
+        assert order_notional((0, None, 7.0, 9999.0), 1.0) == (7.0, True)
+
+    def test_direction_does_not_change_the_size(self):
+        from trader.trading.order_math import order_notional
+        assert order_notional((10.0,), 5.0) == order_notional((10.0,), -5.0)
+
+    def test_a_zero_quantity_is_not_a_valuation(self):
+        """0 shares at a real price multiplies out to $0, which would be
+        reported as an EVALUABLE zero — indistinguishable from a real $0
+        valuation and, in a cumulative total, free."""
+        from trader.trading.order_math import order_notional
+        assert order_notional((19.5,), 0.0) == (0.0, False)
+        assert order_notional((19.5,), -0.0) == (0.0, False)
+
+    def test_a_degenerate_multiplier_is_not_a_valuation(self):
+        """Same trap on the other factor: a multiplier of 0 makes every order
+        worth $0, and a cumulative cap would never fill."""
+        from trader.trading.order_math import order_notional
+        for mult in (0.0, -1.0, float('nan'), float('inf')):
+            assert order_notional((19.5,), 10.0, mult) == (0.0, False), mult
+
+    def test_non_numeric_inputs_are_not_evaluable(self):
+        from trader.trading.order_math import order_notional
+        assert order_notional((19.5,), 'ten') == (0.0, False)
+        assert order_notional((19.5,), 10.0, 'x') == (0.0, False)
+        assert order_notional((19.5,), None) == (0.0, False)
+
+    def test_the_multiplier_multiplies(self):
+        """An options contract on 100 shares is worth 100x, not 1/100th. Every
+        other test here uses multiplier 1.0, where multiply and divide agree —
+        so this is the only test that can tell them apart."""
+        from trader.trading.order_math import order_notional
+        assert order_notional((2.5,), 4.0, 100.0) == (1000.0, True)
+        assert order_notional((2.5,), 4.0, 50.0) == (500.0, True)
+
+    def test_an_overflowing_valuation_is_not_a_valuation(self):
+        """A product that leaves the float range is not a number we can compare
+        against a cap, so it must be reported as unevaluable rather than as inf
+        (which exceeds every cap) or as a wrapped value."""
+        from trader.trading.order_math import order_notional
+        assert order_notional((1e200,), 1e200) == (0.0, False)
+        assert order_notional((1e300,), 1e10, 1e10) == (0.0, False)
