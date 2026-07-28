@@ -190,7 +190,42 @@
 #   NOTE the module is 1,709 mutants in total; only decide_signal was analysed.
 #   The rest of auto_executor.py is now in scope and baselined, not examined.
 #
-#   order_split.py FIRST MEASUREMENT (2026-07-27, 95.2%, 40/2).
+#   order_split.py RE-MEASURED (2026-07-27, 95.4%, 62 killed / 3 survived).
+#     The first measurement (95.2%, 40/2) predates the step-down loop and the
+#     _conserves oracle, both added when a `deal` postcondition failure showed
+#     exact float conservation was unachievable. Re-measuring after that change
+#     dropped the score to 87.9% and surfaced TWO NON-equivalent survivors:
+#       * `while open_qty > 0.0` -> `> 1.0`
+#       * `nextafter(open_qty, 0.0)` -> `nextafter(open_qty, 1.0)`
+#     Both survived because no test ever entered the regime where the step-down
+#     does any work. It only runs when qty > 2*|held|; at ordinary sizes that
+#     forces a remainder far above 1.0, so the sub-1.0 path is reachable ONLY at
+#     tiny magnitudes (available=2.656539007259914e-180, qty=3.79631089884772e-178
+#     overshoots by 5.5e-194). Found by search after mutation flagged it — the
+#     same denormal corner CrossHair found in _floor_shares_for_notional. Pinned
+#     in tests/invariants/test_order_split.py, plus tiny-magnitude branches added
+#     to the Hypothesis strategies so the property tests reach it too.
+#     A third survivor (`_conserves` boundary `qty <= 0` -> `qty < 0`) was also
+#     genuine: it drops a zero request into the sum-based path, where halves that
+#     CANCEL, like (-1, +1), read as conserving. Killed by testing the oracle
+#     directly. Lesson worth keeping: a mutated POSTCONDITION fails silently —
+#     the contract just stops catching things and every test still passes — so
+#     the oracle needs its own tests, not only the function it guards.
+#     The 3 remaining survivors are documented EQUIVALENTS, each a boundary moved
+#     to a branch whose fallthrough computes the identical value. Verified by
+#     differential testing over 400k inputs across the ordinary, denormal and
+#     exactly-at-boundary regimes, not by reading alone:
+#       * mutmut_3  (`qty <= 0` -> `qty < 0`): 0 differences beyond the SIGN of a
+#         zero (open_qty -0.0 vs 0.0). -0.0 == 0.0 in every comparison and in
+#         share semantics.
+#       * mutmut_27 (`qty <= available` -> `qty < available`): 0 differences.
+#         At qty == available the flip branch computes open_qty = 0 and the loop
+#         is a no-op, returning the same plan.
+#       * mutmut_36 (`while open_qty > 0.0` -> `>= 0.0`): 0 differences. Differs
+#         only if open_qty reaches exactly 0 while available > qty, which the
+#         branch condition (qty > available) makes impossible. The guard is
+#         defensive: were that state reachable, nextafter(0.0, 0.0) == 0.0 would
+#         spin forever.
 #   Closes the flip residual: decomposes a position-crossing order into an
 #   unrefusable reduction and a gated remainder. Both survivors are TRUE
 #   EQUIVALENTS, and both for the same reason — the mutated boundary falls

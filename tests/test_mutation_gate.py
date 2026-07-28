@@ -67,6 +67,57 @@ class TestFailsClosed:
         assert gate.check_against_baseline({'kernel.py': {'killed': 0, 'survived': 0}}) == 1
 
 
+class TestUpdateIsAlsoFailClosed:
+    """`--check` failed closed on a partial run; `--update` did not, and wrote a
+    0/0 record over every module the run had not exercised — erasing their floor
+    while printing a success line.
+
+    Hit for real on 2026-07-27: re-measuring one module after an edit and
+    updating dropped ten other modules to zero. Any later regression in those
+    ten would then have passed the gate. The safe path and the destructive path
+    looked identical from the command line, which is the actual defect.
+    """
+
+    def _update(self, gate, per_module, monkeypatch, argv):
+        monkeypatch.setattr('sys.argv', argv)
+        return gate.main()
+
+    def test_update_refuses_to_erase_an_unexercised_module(self, gate, tmp_path, monkeypatch):
+        _write_baseline(tmp_path, {
+            'kernel.py': {'killed': 90, 'survived': 10, 'score': 0.9},
+            'other.py': {'killed': 50, 'survived': 0, 'score': 1.0},
+        })
+        monkeypatch.setattr(gate, 'collect',
+                            lambda: ({'kernel.py': {'killed': 95, 'survived': 5}}, {}))
+        rc = self._update(gate, None, monkeypatch, ['mutation_score.py', '--update'])
+        assert rc == 1, 'a partial run must not be recordable as a baseline'
+        after = json.loads((tmp_path / 'mutation_baseline.json').read_text())['modules']
+        assert after['other.py']['score'] == 1.0, 'the untouched floor was overwritten'
+
+    def test_update_accepts_a_full_run(self, gate, tmp_path, monkeypatch):
+        _write_baseline(tmp_path, {
+            'kernel.py': {'killed': 90, 'survived': 10, 'score': 0.9},
+            'other.py': {'killed': 50, 'survived': 0, 'score': 1.0},
+        })
+        monkeypatch.setattr(gate, 'collect', lambda: ({
+            'kernel.py': {'killed': 95, 'survived': 5},
+            'other.py': {'killed': 50, 'survived': 0},
+        }, {}))
+        rc = self._update(gate, None, monkeypatch, ['mutation_score.py', '--update'])
+        assert rc == 0
+        after = json.loads((tmp_path / 'mutation_baseline.json').read_text())['modules']
+        assert after['kernel.py']['killed'] == 95
+
+    def test_update_still_works_with_no_baseline_yet(self, gate, tmp_path, monkeypatch):
+        """Bootstrapping must stay possible — the guard compares against an
+        EXISTING baseline, so a first recording has nothing to erase."""
+        monkeypatch.setattr(gate, 'collect',
+                            lambda: ({'kernel.py': {'killed': 95, 'survived': 5}}, {}))
+        rc = self._update(gate, None, monkeypatch, ['mutation_score.py', '--update'])
+        assert rc == 0
+        assert (tmp_path / 'mutation_baseline.json').exists()
+
+
 class TestRegressionDetection:
     def test_score_drop_fails(self, gate, tmp_path):
         _write_baseline(tmp_path, {'kernel.py': {'killed': 90, 'survived': 10, 'score': 0.9}})

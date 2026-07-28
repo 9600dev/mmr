@@ -145,11 +145,33 @@ def main() -> int:
         return 1
 
     if args.update:
+        # --update on a PARTIAL run used to overwrite every unexercised module
+        # with a 0/0 record, silently erasing its floor. `--check` fails closed
+        # on a partial run; `--update` did not, so the safe path and the
+        # destructive path looked identical. Hit for real on 2026-07-27:
+        # re-measuring one module and updating dropped the floor for ten
+        # others to zero, which would have let any regression through.
+        report = _module_report(per_module)
+        if BASELINE.exists():
+            existing = json.loads(BASELINE.read_text()).get("modules", {})
+            missing = sorted(
+                m for m in existing
+                if (report.get(m, {}).get("killed", 0)
+                    + report.get(m, {}).get("survived", 0)) == 0)
+            if missing:
+                print(
+                    "mutation baseline REFUSED — this run did not exercise "
+                    f"{len(missing)} already-baselined module(s), and recording it "
+                    "would erase their floor:\n  "
+                    + "\n  ".join(missing)
+                    + "\nRe-record from a FULL pass: scripts/run_mutation.sh baseline",
+                    file=sys.stderr)
+                return 1
         BASELINE.write_text(json.dumps(
             {"note": "Per-module mutation SCORE floor. Regenerate with "
                      "scripts/run_mutation.sh baseline after a human-reviewed change. "
                      "Scores are keyed on the module, not mutant ids, which renumber.",
-             "modules": _module_report(per_module)}, indent=2) + "\n")
+             "modules": report}, indent=2) + "\n")
         print(f"mutation baseline updated: {len(per_module)} module(s) -> {BASELINE}")
         return 0
 

@@ -22,7 +22,7 @@ from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
 from trader.trading.approved_order import ExitReason, mint_approved_order
 from trader.trading.exit_class import reduces_exposure
-from trader.trading.order_split import split_order
+from trader.trading.order_split import SplitPlan, split_order
 from trader.trading.order_structure import rejection_for_order
 from trader.trading.risk_gate import RiskGate, RiskInputs, RiskLimits
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
@@ -1135,39 +1135,43 @@ class Trader():
         # direction rule is verified there, where the toolchain can see it.
         return reduces_exposure(act, held, qty)
 
-    def _opening_exposure_quantity(
+    def split_for_order(
         self, contract: Contract, action: str, quantity: float
-    ) -> float:
-        """The portion of ``action quantity`` on ``contract`` that opens
-        NET-NEW exposure — the only quantity the approver notional tier gates.
+    ) -> SplitPlan:
+        """Divide ``action quantity`` on ``contract`` into the half that
+        REDUCES the live broker position and the half that OPENS new exposure.
 
-        Mirrors ``order_reduces_exposure``'s direction-aware classification:
-          * 0.0 for a pure exit (a SELL fully within a held long, a BUY fully
-            within a held short) — never gated;
-          * the FULL qty for a true open (a SELL with no long, a BUY with no
-            short) — an added position;
-          * the REMAINDER ``max(0, qty - |held opposing|)`` for a flip that
-            crosses zero (e.g. SELL 30 against a +10 long opens a 20-short) —
-            only the net-new side is gated.
+        This is the ONE place the system answers that question. The proposal
+        gate, the approver notional tier and both order paths all call it, so
+        they cannot drift apart and re-open the flip residual from opposite
+        sides. That is not hypothetical: the residual survived its own fix
+        once, because the RPC-layer proposal gate asked a DIFFERENT question
+        (the unsplit exit-class boolean) and exempted the whole order before
+        the splitter downstream ever saw it. Found live 2026-07-27.
 
-        FAIL-CLOSED (treat the FULL qty as opening): an unreadable position, an
-        unknown/blank conId with no same-symbol fallback, or a non-BUY/SELL
-        action. Uses ``_signed_position`` and the ``_signed_position_by_symbol``
-        fallback exactly like ``order_reduces_exposure``.
+        Position resolution mirrors ``order_reduces_exposure`` exactly: conId
+        first, then a same-symbol fallback for cache lag right after a fill or
+        a conId change.
+
+        FAIL-CLOSED — the WHOLE quantity is opening, so it faces every gate —
+        when the position is unreadable, when a blank conId has no same-symbol
+        fallback, or when the action is not BUY/SELL. The arithmetic itself
+        lives in the pure, contracted, mutation- and CrossHair-checked kernel
+        (``trader.trading.order_split``); this method only resolves ``held``.
         """
         try:
             conid = int(getattr(contract, 'conId', 0) or 0)
             qty = float(quantity or 0.0)
         except (TypeError, ValueError):
             try:
-                return abs(float(quantity or 0.0))
+                return SplitPlan(0.0, abs(float(quantity or 0.0)))
             except (TypeError, ValueError):
-                return 0.0
+                return SplitPlan(0.0, 0.0)
         if qty <= 0 or not math.isfinite(qty):
-            return 0.0
+            return SplitPlan(0.0, 0.0)
         act = str(action).strip().upper()
         if act not in ('BUY', 'SELL'):
-            return qty  # fail-closed: unknown action → treat as opening
+            return SplitPlan(0.0, qty)  # fail-closed: unknown action → opening
         held = self._signed_position(conid) if conid > 0 else None
         if held is None or held == 0.0:
             symbol = (getattr(contract, 'symbol', '') or '').strip()
@@ -1176,14 +1180,19 @@ class Trader():
                 if by_symbol is not None and by_symbol != 0.0:
                     held = by_symbol
         if held is None:
-            return qty  # fail-closed: unreadable position → treat as opening
-        if act == 'SELL':
-            # Only a long is reduced by a SELL. No long → full open (short);
-            # a long → exit up to |held|, the remainder flips short (opening).
-            return qty if held <= 0 else max(0.0, qty - abs(held))
-        # BUY: only a short is reduced. No short → full open (long); a short →
-        # exit up to |held|, the remainder flips long (opening).
-        return qty if held >= 0 else max(0.0, qty - abs(held))
+            return SplitPlan(0.0, qty)  # fail-closed: unreadable → opening
+        return split_order(act, held, qty)
+
+    def _opening_exposure_quantity(
+        self, contract: Contract, action: str, quantity: float
+    ) -> float:
+        """The portion of ``action quantity`` that opens NET-NEW exposure —
+        the only quantity the approver notional tier gates.
+
+        Thin accessor over ``split_for_order`` so the tier and the splitter
+        can never disagree about how much of an order is new exposure.
+        """
+        return self.split_for_order(contract, action, quantity).open_qty
 
     async def _tier_notional(
         self, contract: Contract, action: str, quantity: float,
@@ -1537,13 +1546,11 @@ class Trader():
         # a refused remainder leaves the caller flat rather than blocking the
         # close. See trader/trading/order_split.py.
         if not force_open:
-            held_signed = self._signed_position(contract.conId)
-            if held_signed is not None:
-                plan = split_order(action, held_signed, quantity)
-                if plan.is_flip:
-                    return await self._place_flip_split(
-                        contract, action, plan, execution_spec, algo_name,
-                        approver_key)
+            plan = self.split_for_order(contract, action, quantity)
+            if plan.is_flip:
+                return await self._place_flip_split(
+                    contract, action, plan, execution_spec, algo_name,
+                    approver_key)
 
         is_exit = False if force_open else self.order_reduces_exposure(
             contract, action, quantity)
@@ -2136,7 +2143,13 @@ class Trader():
         debug: bool = False,
         skip_risk_gate: bool = False,
         approver_key: str = '',
+        allow_open: bool = True,
     ) -> Observable[Trade]:
+        """``allow_open=False`` means this path may reduce a position but may
+        not open one. The RPC layer sets it when ``require_proposal_approval``
+        is on: a close must never be blocked behind a proposal, but the
+        OPENING half of a position-crossing order is a new trade and has to go
+        through propose → approve like any other."""
         latest_tick: Ticker = await self.client.get_snapshot(contract)
 
         contract_order = self.executioner.helper_create_order(
@@ -2182,37 +2195,42 @@ class Trader():
         # place_expressive_order: reduction first and unrefusable, remainder
         # gated as the new exposure it is.
         final_qty = float(contract_order.order.totalQuantity or 0)
-        held_signed = self._signed_position(contract.conId)
-        if held_signed is not None:
-            plan = split_order(str(action), held_signed, final_qty)
-            if plan.is_flip:
-                logging.warning(
-                    'flip split (direct path): %s %s %s crosses zero — reduction %s '
-                    '(exit-class) then remainder %s (gated)',
-                    action, final_qty, contract.symbol, plan.reduce_qty, plan.open_qty)
-                reduce_order = self.executioner.helper_create_order(
-                    contract, action, latest_tick, None, plan.reduce_qty,
-                    limit_price, market_order, stop_loss_percentage, algo_name, debug)
-                reduce_obs = await self.executioner.place_order(
-                    contract_order=reduce_order,
-                    condition=ExecutorCondition.SANITY_CHECK,
-                    position_value_hint=position_value_hint,
-                    approver_key=approver_key,
-                )
-                open_order = self.executioner.helper_create_order(
-                    contract, action, latest_tick, None, plan.open_qty,
-                    limit_price, market_order, stop_loss_percentage, algo_name, debug)
-                # The remainder may be refused; that leaves the caller flat,
-                # which is the safe direction. Its observable carries the
-                # refusal to the caller exactly as any gated order would.
-                await self.executioner.place_order(
-                    contract_order=open_order,
-                    condition=ExecutorCondition.SANITY_CHECK,
-                    position_value_hint=position_value_hint,
-                    approver_key=approver_key,
-                    force_open=True,
-                )
+        plan = self.split_for_order(contract, str(action), final_qty)
+        if plan.is_flip:
+            logging.warning(
+                'flip split (direct path): %s %s %s crosses zero — reduction %s '
+                '(exit-class) then remainder %s (%s)',
+                action, final_qty, contract.symbol, plan.reduce_qty, plan.open_qty,
+                'gated' if allow_open else 'REFUSED: opens need propose → approve')
+            reduce_order = self.executioner.helper_create_order(
+                contract, action, latest_tick, None, plan.reduce_qty,
+                limit_price, market_order, stop_loss_percentage, algo_name, debug)
+            reduce_obs = await self.executioner.place_order(
+                contract_order=reduce_order,
+                condition=ExecutorCondition.SANITY_CHECK,
+                position_value_hint=position_value_hint,
+                approver_key=approver_key,
+            )
+            if not allow_open:
+                # require_proposal_approval is on. The reduction still goes
+                # through — a close is never blocked behind a proposal — but
+                # the opening half is a NEW trade and needs the reviewed path.
+                # Leaving the caller flat is the safe direction.
                 return reduce_obs
+            open_order = self.executioner.helper_create_order(
+                contract, action, latest_tick, None, plan.open_qty,
+                limit_price, market_order, stop_loss_percentage, algo_name, debug)
+            # The remainder may be refused; that leaves the caller flat,
+            # which is the safe direction. Its observable carries the
+            # refusal to the caller exactly as any gated order would.
+            await self.executioner.place_order(
+                contract_order=open_order,
+                condition=ExecutorCondition.SANITY_CHECK,
+                position_value_hint=position_value_hint,
+                approver_key=approver_key,
+                force_open=True,
+            )
+            return reduce_obs
 
         return await self.executioner.place_order(
             contract_order=contract_order,

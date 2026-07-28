@@ -25,8 +25,18 @@ class _FakeContract:
 
 
 class _FakeTrader:
-    """Minimal Trader stand-in — only needs the gate flag, the exit-class
-    predicate, and a place_order_simple stub. Real Trader has dozens of attrs."""
+    """Minimal Trader stand-in — only needs the gate flag, the splitter, and a
+    place_order_simple stub. Real Trader has dozens of attrs.
+
+    The gate used to ask ``order_reduces_exposure`` (a boolean over the WHOLE
+    order) and now asks ``split_for_order`` (how much of it opens exposure).
+    That change is the fix for the 2026-07-27 live hole: the boolean answered
+    "exit" for an oversized close and exempted the opening remainder with it.
+    ``is_exit`` is kept as this fake's input because these tests are about the
+    pure-exit and pure-open cases, where the two questions agree; the flip
+    case, where they do not, is pinned in
+    ``tests/invariants/test_proposal_gate_split.py``.
+    """
     def __init__(self, require_proposal_approval=False, is_exit=False):
         self.require_proposal_approval = require_proposal_approval
         self.place_order_simple_call_count = 0
@@ -36,6 +46,12 @@ class _FakeTrader:
     def order_reduces_exposure(self, contract, action, quantity):
         self.exit_check_calls.append((contract, action, quantity))
         return self._is_exit
+
+    def split_for_order(self, contract, action, quantity):
+        from trader.trading.order_split import SplitPlan
+        self.exit_check_calls.append((contract, action, quantity))
+        qty = float(quantity or 0.0)
+        return SplitPlan(qty, 0.0) if self._is_exit else SplitPlan(0.0, qty)
 
     async def place_order_simple(self, **kwargs):
         """If we get here, the gate let us through. Return an observable

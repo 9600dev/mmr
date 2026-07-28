@@ -60,14 +60,42 @@ def _as_finite(x) -> float:
     return v if math.isfinite(v) else 0.0
 
 
+def _conserves(plan: 'SplitPlan', qty: float) -> bool:
+    """The halves account for the request, and never for MORE than it.
+
+    Exact equality is not achievable and was the wrong thing to demand. One
+    half is pinned to ``|held|`` and the other is a float subtraction, so
+    ``|held| + (qty - |held|)`` can miss ``qty`` by an ULP. CrossHair and
+    Hypothesis both found it: ``held=-1.2890519581908961``,
+    ``BUY 513.7350762451457``. No implementation can satisfy the exact form,
+    so the exact form was a bug in the spec, not evidence of a bug in the
+    code.
+
+    What replaces it is asymmetric, because the two directions of error are
+    not equally bad:
+
+      * summing to MORE than the request is refused EXACTLY. That direction
+        invents exposure out of rounding, which is the whole class of thing
+        this module exists to prevent, so no tolerance is allowed.
+      * summing to LESS is allowed by at most one ULP of the request. That
+        direction places a vanishing fraction of a share fewer than asked.
+
+    ``split_order`` steps the opening half down until the exact half of this
+    holds, so the tolerance covers only the unavoidable residue.
+    """
+    if qty <= 0:
+        return plan.reduce_qty == 0.0 and plan.open_qty == 0.0
+    total = plan.reduce_qty + plan.open_qty
+    return total <= qty and (qty - total) <= math.ulp(qty)
+
+
 @deal.has()  # side-effect free: no I/O, no global mutation
 @deal.pure
 @deal.ensure(
     lambda _: _.result.reduce_qty >= 0.0 and _.result.open_qty >= 0.0,
     message='a split half cannot be negative')
 @deal.ensure(
-    lambda _: (_.result.reduce_qty + _.result.open_qty
-               == _as_finite(_.quantity) if _as_finite(_.quantity) > 0 else True),
+    lambda _: _conserves(_.result, _as_finite(_.quantity)),
     message='the split lost or invented shares — halves must sum to the request')
 @deal.ensure(
     lambda _: _.result.reduce_qty <= abs(_as_finite(_.held)),
@@ -102,4 +130,17 @@ def split_order(action: str, held: float, quantity: float) -> SplitPlan:
     if qty <= available:
         return SplitPlan(qty, 0.0)
 
-    return SplitPlan(available, qty - available)
+    # A flip. The reduction is exactly the position (a sign flip, so no
+    # rounding); the remainder is what is left over.
+    open_qty = qty - available
+    # That subtraction can round UP, which would make the two halves sum to
+    # MORE than the caller asked for — exposure invented by arithmetic. Step
+    # the opening half down until the halves provably fit inside the request.
+    # It terminates: open_qty decreases monotonically toward 0, and at 0 the
+    # sum is `available`, which is below `qty` in this branch. The direction
+    # is deliberate — giving up a ULP of an opening order is free, placing
+    # more than was asked for is not.
+    while open_qty > 0.0 and available + open_qty > qty:
+        open_qty = math.nextafter(open_qty, 0.0)
+
+    return SplitPlan(available, open_qty)

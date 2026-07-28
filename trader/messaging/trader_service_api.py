@@ -107,22 +107,45 @@ class TraderServiceApi(RPCHandler):
         # in via place_expressive_order, which the approve() path uses after
         # a proposal has been reviewed. Defensive against LLM loops / scripts
         # firing direct orders that weren't in a reviewed plan.
+        #
+        # The gate asks how much of the order OPENS exposure, not whether the
+        # order is exit-class. Those differ for a position-crossing order, and
+        # the difference was a live hole: exit-class is direction-aware and not
+        # size-clamped, so a SELL 3 against 1 held classified as an exit and
+        # the WHOLE order was exempted here — including the 2 shares that open
+        # a short. Splitting the order downstream did not help, because this
+        # gate had already waved it through. Found live 2026-07-27, after the
+        # split itself was written. One resolver now answers for both.
+        allow_open = True
         if getattr(self.trader, 'require_proposal_approval', False):
-            is_exit = False
             try:
-                is_exit = bool(self.trader.order_reduces_exposure(contract, _a, quantity))
+                plan = self.trader.split_for_order(contract, _a, quantity)
             except Exception as ex:
                 logging.warning(
-                    'proposal gate: exit-class check failed (%s) — treating as an open', ex)
-            if not is_exit:
-                return SuccessFail.fail(
-                    error=(
-                        'Direct order rejected: require_proposal_approval is true. '
-                        'New trades must go through propose → approve (see `mmr propose` '
-                        'and `mmr approve`). Orders that reduce an existing position '
-                        '(closes, resize trims) are exempt automatically.'
-                    ),
-                )
+                    'proposal gate: split check failed (%s) — treating as an open', ex)
+                plan = None
+            if plan is None or plan.open_qty > 0:
+                if plan is not None and plan.reduce_qty > 0:
+                    # A flip: the reduction is a close and closes are never
+                    # blocked behind a proposal, but the opening remainder is
+                    # a new trade. Let the reduction through and refuse the
+                    # remainder downstream, which leaves the caller flat.
+                    allow_open = False
+                    logging.warning(
+                        'proposal gate: %s %s %s crosses zero — allowing the '
+                        'reduction of %s, refusing the opening remainder of %s '
+                        '(require_proposal_approval is true)',
+                        _a, quantity, getattr(contract, 'symbol', '?'),
+                        plan.reduce_qty, plan.open_qty)
+                else:
+                    return SuccessFail.fail(
+                        error=(
+                            'Direct order rejected: require_proposal_approval is true. '
+                            'New trades must go through propose → approve (see `mmr propose` '
+                            'and `mmr approve`). Orders that reduce an existing position '
+                            '(closes, resize trims) are exempt automatically.'
+                        ),
+                    )
 
         task = asyncio.Event()
         disposable: DisposableBase = Disposable()
@@ -155,6 +178,7 @@ class TraderServiceApi(RPCHandler):
             debug=debug,
             skip_risk_gate=skip_risk_gate,
             approver_key=approver_key,
+            allow_open=allow_open,
         )
         observable.subscribe(observer)
 
