@@ -1251,6 +1251,155 @@ class TestStructuralCheckPrecedesTheBroker:
         t.check_order_margin.assert_called_once()
 
 
+class TestProtectiveChildIsActuallyAChild:
+    """PROTECTIVE_CHILD is the one exit exemption nothing corroborates.
+
+    The chokepoint re-asks the position predicate for POSITION_CLASSIFIED, and
+    place_standalone_order validates VALIDATED_STANDALONE against the live
+    position (direction AND magnitude). PROTECTIVE_CHILD gets neither, on
+    purpose: a TP/SL leg hangs off an entry staged `transmit=False` that has
+    not filled, so there is no position to classify it against, and asking
+    would refuse every bracket.
+
+    Its justification is therefore structural — the leg reverses the entry,
+    matches its quantity, and is parented to it, so it can only ever reduce
+    what the entry creates. That was asserted in comments and enforced by
+    nothing. `test_exit_reason_wiring.py` checks only that a mint site STATES
+    a reason, not that a PROTECTIVE_CHILD site builds a child.
+
+    This is the shape of bug found three times on 2026-07-27: a claim made at
+    one layer and trusted at another without anyone checking it holds. Here the
+    claim is checkable, so it is checked.
+    """
+
+    def _trader(self):
+        import threading as _threading
+        from unittest.mock import AsyncMock, MagicMock
+        from trader.trading.trading_runtime import Trader
+        from trader.trading.risk_gate import RiskGateResult, RiskInputs
+        t = object.__new__(Trader)
+        t.pnl_subscriptions = {}
+        t._pnl_subscriptions_lock = _threading.Lock()
+        t._main_loop = None
+        t.disposables = []
+        t.ib_account = 'DU1'
+        t.approver_required_above_usd = 0.0
+        t.approver_key = ''
+        t.order_tracker = None
+        t.require_proposal_approval = False
+        t.get_positions = MagicMock(return_value=[])       # flat: a clean open
+        t.enforce_approver_tier = AsyncMock(return_value=None)
+        gate = MagicMock()
+        gate.check_instrument.return_value = RiskGateResult(approved=True)
+        gate.check_leverage.return_value = RiskGateResult(
+            approved=True, checks={'leverage': 'pass'})
+        gate.evaluate.return_value = RiskGateResult(
+            approved=True, checks={'concentration': 'pass'})
+        t.risk_gate = gate
+        t.gather_risk_inputs = MagicMock(return_value=RiskInputs(
+            open_order_count=0, daily_pnl=0.0, daily_pnl_evaluable=True,
+            portfolio_value=1e6, portfolio_value_evaluable=True))
+        t.check_order_margin = AsyncMock(
+            return_value={'initMarginAfter': 1.0, 'equityWithLoanAfter': 2.0})
+        t.client = MagicMock()
+        t.client.get_snapshot = AsyncMock(
+            return_value=MagicMock(ask=20.0, bid=19.0, last=19.5, close=19.5))
+        t.client.ib.accountValues = MagicMock(return_value=[])
+        t.client.ib.managedAccounts = MagicMock(return_value=['DU1'])
+        t.client.ib.cancelOrder = MagicMock()
+        minted = []
+
+        class _Exec:
+            async def subscribe_place_order_direct(self, approved):
+                import reactivex as rx
+                from unittest.mock import MagicMock as MM
+                minted.append(approved)
+                ft = MM()
+                ft.order = approved.order
+                ft.order.orderId = 7000 + len(minted)
+                return rx.from_iterable([ft])
+
+        t.executioner = _Exec()
+        t._minted = minted
+        return t
+
+    def _contract(self):
+        from unittest.mock import MagicMock
+        c = MagicMock()
+        c.symbol = 'AMD'; c.secType = 'STK'; c.exchange = 'SMART'
+        c.conId = 4391; c.multiplier = None
+        return c
+
+    def _check_children(self, t, entry_action, entry_qty):
+        from trader.trading.approved_order import ExitReason
+        entries = [m for m in t._minted if m.exit_reason is not ExitReason.PROTECTIVE_CHILD]
+        children = [m for m in t._minted if m.exit_reason is ExitReason.PROTECTIVE_CHILD]
+        assert len(entries) == 1, f'expected exactly one entry, got {len(entries)}'
+        assert children, 'expected at least one protective child'
+        entry_id = entries[0].order.orderId
+        opposite = 'SELL' if entry_action == 'BUY' else 'BUY'
+        for child in children:
+            o = child.order
+            assert child.is_exit is True, 'a protective child must claim exit-class'
+            assert str(o.action) == opposite, (
+                f'a protective leg must REVERSE the entry: entry {entry_action}, '
+                f'leg {o.action} — a same-direction leg would ADD exposure while '
+                f'exempt from every gate')
+            assert float(o.totalQuantity) == entry_qty, (
+                f'a protective leg must match the entry quantity ({entry_qty}), '
+                f'got {o.totalQuantity} — a larger leg flips the book')
+            assert getattr(o, 'parentId', 0) == entry_id, (
+                'a protective leg must be PARENTED to the staged entry; that '
+                'parenting is the entire reason it is exempt without a position '
+                'to classify against')
+
+    @pytest.mark.asyncio
+    async def test_bracket_legs_are_reversed_matched_and_parented(self):
+        from trader.trading.proposal import ExecutionSpec
+        t = self._trader()
+        spec = ExecutionSpec(order_type='MARKET', exit_type='BRACKET',
+                             take_profit_price=30.0, stop_loss_price=15.0).to_dict()
+        result = await t.place_expressive_order(self._contract(), 'BUY', 10.0, spec)
+        assert result.is_success(), result.error
+        self._check_children(t, 'BUY', 10.0)
+
+    @pytest.mark.asyncio
+    async def test_stop_loss_leg_is_reversed_matched_and_parented(self):
+        from trader.trading.proposal import ExecutionSpec
+        t = self._trader()
+        spec = ExecutionSpec(order_type='MARKET', exit_type='STOP_LOSS',
+                             stop_loss_price=15.0).to_dict()
+        result = await t.place_expressive_order(self._contract(), 'BUY', 10.0, spec)
+        assert result.is_success(), result.error
+        self._check_children(t, 'BUY', 10.0)
+
+    @pytest.mark.asyncio
+    async def test_trailing_stop_leg_is_reversed_matched_and_parented(self):
+        from trader.trading.proposal import ExecutionSpec
+        t = self._trader()
+        # A trailing stop needs a LIMIT parent — IB refuses it on a MARKET
+        # entry, and ExecutionSpec.validate() catches that before we do.
+        spec = ExecutionSpec(order_type='LIMIT', limit_price=19.5,
+                             exit_type='TRAILING_STOP',
+                             trailing_stop_percent=5.0).to_dict()
+        result = await t.place_expressive_order(self._contract(), 'BUY', 10.0, spec)
+        assert result.is_success(), result.error
+        self._check_children(t, 'BUY', 10.0)
+
+    @pytest.mark.asyncio
+    async def test_a_short_entrys_protective_legs_reverse_too(self):
+        """Symmetry. A SELL entry's protective legs must BUY — the direction is
+        derived, and a derivation that ignored the entry would only show up on
+        the side that is used less."""
+        from trader.trading.proposal import ExecutionSpec
+        t = self._trader()
+        spec = ExecutionSpec(order_type='MARKET', exit_type='BRACKET',
+                             take_profit_price=10.0, stop_loss_price=25.0).to_dict()
+        result = await t.place_expressive_order(self._contract(), 'SELL', 10.0, spec)
+        assert result.is_success(), result.error
+        self._check_children(t, 'SELL', 10.0)
+
+
 class TestFlipSplitting:
     """The flip residual, closed. With 3 held, SELL 5 used to pass every gate
     as one 'exit' — three shares closing a position and two opening an
