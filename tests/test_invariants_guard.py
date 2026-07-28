@@ -65,12 +65,27 @@ def repo(tmp_path):
     return tmp_path, git
 
 
-def run_guard(root: pathlib.Path, **env_overrides) -> int:
+def run_guard(root: pathlib.Path, message: str | None = None,
+              **env_overrides) -> int:
+    """Run the guard the way git does.
+
+    No message => the pre-commit stage, which checks staged files only. A
+    message => the commit-msg stage, where git hands the hook the real message
+    file as argv[1]. That split is not cosmetic: git writes COMMIT_EDITMSG
+    AFTER pre-commit hooks run, so a message check at pre-commit reads a stale
+    message from the previous commit. The guard did exactly that on its first
+    real use and rejected a compliant one.
+    """
     env = {k: v for k, v in os.environ.items()
            if k not in ('ALLOW_INVARIANTS_IMPL', 'ALLOW_SPEC_REVISION')}
     env.update(env_overrides)
-    return subprocess.run([sys.executable, str(GUARD)], cwd=root,
-                          capture_output=True, text=True, env=env).returncode
+    argv = [sys.executable, str(GUARD)]
+    if message is not None:
+        msg_file = root / '.git' / 'COMMIT_EDITMSG'
+        msg_file.write_text(message)
+        argv.append(str(msg_file))
+    return subprocess.run(argv, cwd=root, capture_output=True, text=True,
+                          env=env).returncode
 
 
 def _set_message(root: pathlib.Path, text: str) -> None:
@@ -129,14 +144,12 @@ class TestRemovingAPropertyRequiresEvidence:
     def test_a_removal_without_the_protocol_is_refused(self, repo):
         root, git = repo
         self._weaken(root, git)
-        _set_message(root, 'made it pass')
-        assert run_guard(root) == 1
+        assert run_guard(root, message='made it pass') == 1
 
     def test_a_removal_with_all_four_points_is_allowed(self, repo):
         root, git = repo
         self._weaken(root, git)
-        _set_message(root, self._FULL)
-        assert run_guard(root) == 0
+        assert run_guard(root, message=self._FULL) == 0
 
     @pytest.mark.parametrize('missing', [
         'Counterexample:', 'Falsification:', 'Still caught:', 'Newly allowed:'])
@@ -145,8 +158,7 @@ class TestRemovingAPropertyRequiresEvidence:
         revision cannot pass by supplying the easy ones."""
         root, git = repo
         self._weaken(root, git)
-        _set_message(root, self._FULL.replace(missing, 'Removed:'))
-        assert run_guard(root) == 1
+        assert run_guard(root, message=self._FULL.replace(missing, 'Removed:')) == 1
 
     def test_adding_properties_is_never_blocked(self, repo):
         """Additions must stay frictionless. A guard that taxes adding a
@@ -156,8 +168,7 @@ class TestRemovingAPropertyRequiresEvidence:
             _spec(root).read_text()
             + '\n\ndef test_another_property():\n    assert True\n')
         git('add', '-A')
-        _set_message(root, 'spec: add a property')
-        assert run_guard(root) == 0
+        assert run_guard(root, message='spec: add a property') == 0
 
     def test_rewording_a_comment_is_not_a_revision(self, repo):
         """Rationale prose is not a property. Counting comment edits as
@@ -171,8 +182,7 @@ class TestRemovingAPropertyRequiresEvidence:
             '    assert 2 + 2 == 4\n'
         )
         git('add', '-A')
-        _set_message(root, 'docs: reword a comment')
-        assert run_guard(root) == 0
+        assert run_guard(root, message='docs: reword a comment') == 0
 
     def test_narrowing_a_generator_counts_as_a_revision(self, repo):
         """Weakening is not only deleting an assert. Shrinking the input range
@@ -193,8 +203,7 @@ class TestRemovingAPropertyRequiresEvidence:
             '    assert isinstance(x, int)\n'
         )
         git('add', '-A')
-        _set_message(root, 'spec: narrow the range')
-        assert run_guard(root) == 1
+        assert run_guard(root, message='spec: narrow the range') == 1
 
     def test_the_override_still_works(self, repo):
         """Documented escape hatch. It is review hygiene, not a security
@@ -202,5 +211,55 @@ class TestRemovingAPropertyRequiresEvidence:
         gate."""
         root, git = repo
         self._weaken(root, git)
-        _set_message(root, 'no protocol here')
-        assert run_guard(root, ALLOW_SPEC_REVISION='1') == 0
+        assert run_guard(root, message='no protocol here',
+                         ALLOW_SPEC_REVISION='1') == 0
+
+
+class TestTheStageSplitIsLoadBearing:
+    """The protocol check MUST run at commit-msg, not pre-commit.
+
+    git writes COMMIT_EDITMSG after pre-commit hooks run, so a pre-commit check
+    of the message reads whatever the PREVIOUS commit left there. The guard
+    shipped that way and rejected the first compliant message it ever saw,
+    because it was reading a stale file from an earlier test run. A guard that
+    refuses correct input is worse than no guard: it teaches people to reach
+    for the override.
+    """
+
+    def test_the_pre_commit_stage_ignores_the_message_entirely(self, repo):
+        """No argument means pre-commit. It must judge staged files only, and
+        must not consult any message file, however tempting one on disk is."""
+        root, git = repo
+        _spec(root).write_text(
+            '# a rationale comment\n'
+            'def test_a_property():\n'
+            '    assert 1 + 1 == 2\n'
+        )
+        git('add', '-A')
+        # A stale message with no protocol markers sits on disk.
+        (root / '.git' / 'COMMIT_EDITMSG').write_text('something unrelated')
+        assert run_guard(root) == 0, (
+            'the pre-commit stage read a message it cannot legitimately see')
+
+    def test_the_commit_msg_stage_reads_the_file_git_hands_it(self, repo):
+        """Not a fixed path. git passes the message file as argv[1], and during
+        a merge or a rebase that is not COMMIT_EDITMSG."""
+        root, git = repo
+        self_weaken = (
+            '# a rationale comment\n'
+            'def test_a_property():\n'
+            '    assert 1 + 1 == 2\n'
+        )
+        _spec(root).write_text(self_weaken)
+        git('add', '-A')
+        elsewhere = root / '.git' / 'MERGE_MSG'
+        elsewhere.write_text(
+            'spec: revise\n\nCounterexample: x\nFalsification: y\n'
+            'Still caught: z\nNewly allowed: w\n')
+        (root / '.git' / 'COMMIT_EDITMSG').write_text('no markers here at all')
+        env = {k: v for k, v in os.environ.items()
+               if k not in ('ALLOW_INVARIANTS_IMPL', 'ALLOW_SPEC_REVISION')}
+        rc = subprocess.run(
+            [sys.executable, str(GUARD), str(elsewhere)],
+            cwd=root, capture_output=True, text=True, env=env).returncode
+        assert rc == 0, 'the guard ignored the message file git gave it'

@@ -15,6 +15,17 @@ repos:
         pass_filenames: false
         always_run: true
 
+      # Separate stage, deliberately. git writes COMMIT_EDITMSG AFTER the
+      # pre-commit hooks run, so a message check at pre-commit reads a stale
+      # message from the previous commit. commit-msg is the stage where git
+      # hands the real message to the hook.
+      - id: invariants-revision-evidence
+        name: spec revision requires the four-point protocol
+        entry: python3 scripts/invariants_guard.py
+        language: system
+        stages: [commit-msg]
+        always_run: true
+
       - id: ty-gate
         name: ty type-check gate (kernel + advisory, no new diagnostics beyond baseline)
         entry: uv run python scripts/ty_gate.py

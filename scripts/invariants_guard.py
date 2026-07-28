@@ -87,23 +87,21 @@ def removed_spec_lines() -> dict[str, list[str]]:
     return removed
 
 
-def main() -> int:
+def check_revision_evidence(message_path: str) -> int:
+    """commit-msg stage: a REVISION (spec lines removed) must carry its
+    evidence. A pure ADDITION never trips this — adding properties is always
+    allowed and always cheap to review. Only taking one away needs the
+    argument, because that is the act the guard exists to make visible."""
     if os.environ.get("ALLOW_INVARIANTS_IMPL") == "1":
         return 0
-
-    # A REVISION (spec lines removed) must carry its evidence. A pure ADDITION
-    # never trips this: adding properties is always allowed and always cheap to
-    # review. Only taking one away needs the argument, because that is the act
-    # the guard exists to make visible.
     removed = removed_spec_lines()
     if removed and os.environ.get("ALLOW_SPEC_REVISION") != "1":
-        message = ""
-        for path in (".git/MERGE_MSG", ".git/COMMIT_EDITMSG"):
-            try:
-                message = pathlib.Path(path).read_text()
-                break
-            except OSError:
-                continue
+        # The message file is handed to us by git at the commit-msg stage. It
+        # is NOT readable at pre-commit: git writes COMMIT_EDITMSG after
+        # pre-commit hooks run, so a pre-commit check of the message reads a
+        # STALE one from a previous commit. This guard did exactly that on its
+        # first real use and rejected a compliant message. Hence the split.
+        message = pathlib.Path(message_path).read_text()
         missing = [m for m in PROTOCOL_MARKERS if m not in message]
         if missing:
             print("spec-protection guard FAILED — this commit REMOVES properties "
@@ -124,7 +122,13 @@ def main() -> int:
                   "Deliberate override: ALLOW_SPEC_REVISION=1 git commit ...",
                   file=sys.stderr)
             return 1
+    return 0
 
+
+def check_spec_impl_separation() -> int:
+    """pre-commit stage: spec and implementation may not move together."""
+    if os.environ.get("ALLOW_INVARIANTS_IMPL") == "1":
+        return 0
     files = staged_files()
     spec = [f for f in files if f.startswith(SPEC_PREFIX)]
     impl = [f for f in files if f.startswith(IMPL_PREFIX)]
@@ -143,5 +147,13 @@ def main() -> int:
     return 0
 
 
+def main(argv: list[str]) -> int:
+    # git hands the message file to a commit-msg hook as argv[1]. With no
+    # argument we are at pre-commit, where the message does not exist yet.
+    if len(argv) > 1:
+        return check_revision_evidence(argv[1])
+    return check_spec_impl_separation()
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv))
