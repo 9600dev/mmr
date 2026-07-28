@@ -7001,8 +7001,8 @@ def _freshness_check(
     bar series only — even for 1-min sweeps, having yesterday's daily
     bar means the 1-min feed is probably also caught up.
     """
-    import datetime as dt
     from trader.container import Container
+    from trader.data.bar_staleness import sessions_behind
     from trader.data.data_access import TickStorage
     from trader.objects import BarSize
 
@@ -7011,7 +7011,6 @@ def _freshness_check(
     tick = storage.get_tickdata(BarSize.Days1)
 
     stale = []
-    cutoff = dt.datetime.now() - dt.timedelta(days=max_staleness_days)
     for cid in conids:
         try:
             df = tick.read(int(cid))
@@ -7024,15 +7023,19 @@ def _freshness_check(
                            'reason': 'no data'})
             continue
         last_ts = df.index.max()
-        # DataFrame index may be tz-aware; compare as naive.
-        last_naive = last_ts.to_pydatetime().replace(tzinfo=None) if hasattr(
-            last_ts, 'to_pydatetime'
-        ) else last_ts
-        if last_naive < cutoff:
+        # Weekday sessions behind, via the same helper `data status` uses. The
+        # old comparison dropped the bar's timezone (keeping the wall clock,
+        # moving the instant) and counted calendar days, so a series current
+        # through Friday looked three days stale on a Monday and could refuse
+        # a sweep on perfectly good data.
+        behind = sessions_behind(last_ts)
+        if behind is None or behind > max_staleness_days:
             stale.append({
                 'conid': int(cid),
-                'last_bar': str(last_naive)[:10],
-                'reason': f'stale ({last_naive} < cutoff {cutoff})',
+                'last_bar': str(last_ts)[:10],
+                'reason': (f'{behind} trading session(s) behind '
+                           f'(limit {max_staleness_days})' if behind is not None
+                           else 'last bar timestamp unreadable'),
             })
     return stale
 
@@ -9572,6 +9575,7 @@ def _handle_data_status():
     fire a manual refresh."""
     import datetime as dt
     from trader.container import Container
+    from trader.data.bar_staleness import sessions_behind
     from trader.data.universe import UniverseAccessor
     from trader.data.duckdb_store import DuckDBConnection
 
@@ -9616,10 +9620,12 @@ def _handle_data_status():
         latest_bars = [v for v in per_sym_map.values() if v is not None]
         if latest_bars:
             latest = max(latest_bars)
-            # Compare as naive UTC
-            latest_naive = (latest.replace(tzinfo=None) if latest.tzinfo
-                            else latest)
-            stale_days = (now.replace(tzinfo=None) - latest_naive).days
+            # Weekday sessions behind, with the offset CONVERTED rather than
+            # dropped. `.replace(tzinfo=None)` on a tz-aware bar keeps the wall
+            # clock and moves the instant, and counting calendar days made a
+            # series current through Friday read as three days stale every
+            # Monday. See trader/data/bar_staleness.py.
+            stale_days = sessions_behind(latest, now)
         else:
             latest = None
             stale_days = None
@@ -9629,7 +9635,13 @@ def _handle_data_status():
             'bar_size': bar_size,
             'covered': len(per_sym_map),
             'total': len(cids),
-            'last_bar': latest.isoformat() if latest else None,
+            # In UTC, so the date shown agrees with the session it names and
+            # with the staleness count beside it. Rendered in the stored local
+            # offset, Monday's session reads as "2026-07-26" (a Sunday), which
+            # is how a perfectly current series comes to look wrong.
+            'last_bar': (latest.astimezone(dt.timezone.utc).isoformat()
+                         if latest and latest.tzinfo else
+                         latest.isoformat() if latest else None),
             'stale_days': stale_days,
         })
 

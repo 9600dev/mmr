@@ -67,10 +67,19 @@ jobs:
       description: refresh US universes (TwelveData) — after US after-hours close
       command: python3
       arguments: -m trader.mmr_cli data refresh us_top20_daily us_top20_1min
-      start: "30 20 * * 1-5"     # 8:30 PM ET weekdays. TwelveData 1-min bars
+      start: "0 23 * * 1-5"      # 11 PM ET weekdays. TwelveData 1-min bars
                                  # include pre (4-9:30 AM) + post (16-20:00 ET);
-                                 # AH closes at 20:00 so we wait 30 min for the
-                                 # final bars to publish.
+                                 # AH closes at 20:00.
+                                 #
+                                 # This was 20:30 ET, 30 min after the AH
+                                 # close. That is enough for the 1-min bars and
+                                 # NOT always enough for the DAILY bar, so the
+                                 # job refreshed 1-min, found no daily bar yet,
+                                 # and exited 0 — leaving the daily series one
+                                 # session short with nothing reporting a
+                                 # problem. A partial success still returns
+                                 # success. Observed 2026-07-27: the run wrote
+                                 # Friday's daily bar and missed Monday's.
       start_on_pycron_start: False
       restart_if_found: False
       restart_if_finished: False
