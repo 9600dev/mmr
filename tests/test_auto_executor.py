@@ -752,7 +752,7 @@ class TestPyramidingDecision:
         d = decide_signal(
             make_work(pyramid_max_adds=3), kill_switch=False, paper_trading=True,
             held_qty=100.0, already_executed_bar=False, cooldown_active=False,
-            held_lots=1)
+            held_lots=1, bar_age_seconds=10.0)
         assert d.kind == 'open'
         assert 'pyramid add (lot 2)' in d.reason
 
@@ -767,7 +767,7 @@ class TestPyramidingDecision:
         d = decide_signal(
             make_work(pyramid_max_adds=3), kill_switch=False, paper_trading=True,
             held_qty=100.0, already_executed_bar=False, cooldown_active=True,
-            held_lots=1)
+            held_lots=1, bar_age_seconds=10.0)
         assert d.kind == 'skip' and 'cooldown' in d.reason
 
     def test_live_double_arm_gates_adds_too(self):

@@ -83,6 +83,14 @@ class SignalWork:
     conid: int
     action: Action
     bar_ts: Any                       # pd.Timestamp of the bar that produced the signal
+    # REQUIRED, deliberately: this is the stale-bar gate's denominator, and it
+    # used to default to 0.0, which the gate read as "interval unknown" and
+    # silently declined to run. A safety-critical input with a default that
+    # disables the check is a trap for the next caller — the failure is at the
+    # construction site, not in the gate, so it is removed here rather than
+    # handled downstream. Every construction site passes keywords, so ordering
+    # this before the defaulted fields breaks nothing.
+    bar_size_seconds: float
     probability: float = 0.0
     risk: float = 0.0
     quantity: float = 0.0             # >0 = strategy-specified size (BUY only)
@@ -92,7 +100,6 @@ class SignalWork:
     state_running: bool = True
     close_by_time: Optional[dt.time] = None
     max_hold_bars: Optional[int] = None
-    bar_size_seconds: float = 0.0     # 0 = unknown -> stale-bar gate disabled
     # Bounded pyramiding (validated 2026-07-22: the pyramid structure is the
     # statistically-real part of ORB's edge — see OPERATIONAL_STATE.md).
     # 0 = single-lot (default, historical behaviour); N = allow N adds after
@@ -208,7 +215,20 @@ def decide_signal(
         # older than its interval means the feed stalled, the queue backed
         # up, or a reconnect flushed old data — opening at CURRENT market
         # off that bar is trading on garbage (the G3 outage class).
-        if (work.bar_size_seconds > 0 and bar_age_seconds is not None
+        # An undatable bar means the gate cannot answer its own question, and
+        # every other gate input in this system refuses an open it cannot
+        # evaluate (daily PnL, NetLiquidation, position value, and the leverage
+        # check since 2026-07-26). This one used to be the exception and let
+        # the open through on a bar of UNKNOWN age, which is the state it
+        # exists to detect. Refusing is the benign direction here: this branch
+        # is OPENS ONLY, so the worst case is no new positions, while existing
+        # ones still exit and the broker-side stops are untouched.
+        if bar_age_seconds is None:
+            return Directive(
+                'skip',
+                'stale_bar: bar timestamp not datable — cannot verify bar '
+                'freshness, refusing to open (fail-closed)')
+        if (work.bar_size_seconds > 0
                 and bar_age_seconds > stale_bar_multiple * work.bar_size_seconds):
             return Directive(
                 'skip',

@@ -217,8 +217,27 @@ class TestStaleBarGate:
     def test_unknown_bar_size_disables_gate(self):
         assert _decide(_work(Action.BUY, bar_size_seconds=0.0), bar_age=10_000.0).kind == 'open'
 
-    def test_unknown_age_disables_gate(self):
-        assert _decide(_work(Action.BUY), bar_age=None).kind == 'open'
+    def test_unknown_age_refuses_the_open(self):
+        """CHANGED 2026-07-28. This used to assert the opposite: an undatable
+        bar disabled the gate and the open went through.
+
+        The gate exists to stop an open being placed at current market off a
+        bar that may be stale. An age it cannot compute is not evidence of
+        freshness, and every other gate input in this system refuses an open it
+        cannot evaluate. This one was the exception.
+
+        Refusing is the benign direction: the check is OPENS ONLY, so the worst
+        case is no new positions while existing ones still exit and the
+        broker-side stops are untouched.
+        """
+        d = _decide(_work(Action.BUY), bar_age=None)
+        assert d.kind == 'skip'
+        assert 'not datable' in d.reason and 'fail-closed' in d.reason
+
+    def test_a_normal_bar_still_opens(self):
+        """The other half: refusing on an unreadable age must not refuse on a
+        readable one, or the gate would simply block everything."""
+        assert _decide(_work(Action.BUY), bar_age=10.0).kind == 'open'
 
     def test_multiple_is_tunable(self):
         assert _decide(_work(Action.BUY), bar_age=200.0, multiple=10.0).kind == 'open'
