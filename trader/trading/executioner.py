@@ -20,21 +20,41 @@ from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.data.universe import Universe, UniverseAccessor
 from trader.objects import Action, Basket, ContractOrderPair, ExecutorCondition
 from trader.trading.approved_order import ApprovedOrder, ExitReason, mint_approved_order
-from trader.trading.order_math import whole_shares_for_notional
+from trader.trading.order_math import order_notional, whole_shares_for_notional
 from trader.trading.order_structure import rejection_for_order
 from trader.trading.order_validator import OrderValidator
 from trader.trading.risk_gate import RiskGate, RiskGateResult
 from typing import cast, List, Optional, TYPE_CHECKING
 
 import datetime as dt
+import math
 import reactivex as rx
 import reactivex.operators as ops
+import sys
 
 
 logging = setup_logging(module_name='trading_runtime')
 
 if TYPE_CHECKING:
     from trader.trading.trading_runtime import Trader
+
+
+
+def _price_or_none(value):
+    """An ib_async numeric order field as a real price, or None if unset.
+
+    ib_async writes ``UNSET_DOUBLE`` (``sys.float_info.max``) into fields an
+    order does not use, so a MARKET order's ``lmtPrice`` is not 0 but
+    1.7976931348623157e+308. Treating that as a price is how a market order
+    acquires a $1.8e308 notional.
+    """
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(price) or price <= 0 or price >= sys.float_info.max:
+        return None
+    return price
 
 
 class TradeExecutioner():
@@ -63,6 +83,38 @@ class TradeExecutioner():
             # are stamped so the rate limit — which counts only exposure-
             # increasing opens — can exclude them.
             metadata = {'exit_class': True} if is_exit else {}
+            # Value the order for the audit trail. The `price` column cannot
+            # carry this: it records order.lmtPrice, which for a MARKET or STOP
+            # order is ib_async's UNSET_DOUBLE. Every market submission in the
+            # live event store sits at 1.797e308. Harmless for the order-RATE
+            # limit (it counts rows) and useless for anything summing VALUE,
+            # which is what a cumulative notional cap has to do.
+            #
+            # Prices already to hand only: no snapshot is awaited here. This is
+            # the placement chokepoint, and a network call on it would add
+            # latency and a new failure mode to every order. A cached ticker is
+            # a dict lookup. When nothing is usable we record that fact rather
+            # than a zero that reads like a real valuation.
+            # ib_async leaves an unused numeric field at UNSET_DOUBLE
+            # (sys.float_info.max), so a MARKET order's lmtPrice and a STOP
+            # order's lmtPrice both arrive as 1.797e308. Stripped here, where we
+            # know the convention is ib_async's; order_notional refuses it too,
+            # because the value is finite and positive and so defeats every
+            # ordinary sanity guard.
+            notional, notional_evaluable = order_notional(
+                (_price_or_none(getattr(order, 'lmtPrice', None)),
+                 _price_or_none(getattr(order, 'auxPrice', None)))
+                + self._cached_prices(contract),
+                float(order.totalQuantity or 0),
+                self._multiplier(contract),
+            )
+            metadata['notional'] = notional
+            metadata['notional_evaluable'] = notional_evaluable
+            if not notional_evaluable:
+                logging.warning(
+                    'could not value %s %s %s for the audit trail (no limit, stop '
+                    'or cached price) — recorded as not evaluable',
+                    order.action, order.totalQuantity, contract.symbol)
             event = TradingEvent(
                 event_type=event_type,
                 timestamp=dt.datetime.now(),
@@ -76,6 +128,30 @@ class TradeExecutioner():
                 metadata=metadata,
             )
             self.trader.event_store.append(event)
+
+    def _multiplier(self, contract: Contract) -> float:
+        try:
+            return float(contract.multiplier) if contract.multiplier else 1.0
+        except (TypeError, ValueError):
+            return 1.0
+
+    def _cached_prices(self, contract: Contract) -> tuple:
+        """Live prices for ``contract`` from ib_async's ticker cache, best
+        first. Never blocks and never raises — a valuation for the audit trail
+        must not be able to fail a placement."""
+        try:
+            conid = int(getattr(contract, 'conId', 0) or 0)
+            for ticker in self.trader.client.ib.tickers():
+                tc = getattr(ticker, 'contract', None)
+                if tc is None or int(getattr(tc, 'conId', 0) or 0) != conid:
+                    continue
+                return (getattr(ticker, 'last', None),
+                        getattr(ticker, 'close', None),
+                        getattr(ticker, 'ask', None),
+                        getattr(ticker, 'bid', None))
+        except Exception as ex:
+            logging.debug('no cached price for %s: %s', getattr(contract, 'symbol', '?'), ex)
+        return ()
 
     async def subscribe_place_order_direct(
         self,

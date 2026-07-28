@@ -61,6 +61,38 @@
 # scalars (_confidence_scale/_volatility_multiplier) are the hard safety floor
 # and score ~100%/95%; the lower numbers are cosmetic-text-dominated methods.
 #
+#   TURNOVER CAP + order_notional (2026-07-27). order_math 95.9% -> 97.3%,
+#     risk_gate 90.9% -> 91.9%. First measurement was 87.7% / 85.6%: 51 new
+#     survivors, and nearly all were genuine gaps in the NEW tests, not
+#     equivalents. Worth recording what they were, because they are the same
+#     shapes every time:
+#       * inputs never exercised: quantity 0, multiplier 0/negative/NaN,
+#         non-numeric quantity, and the overflow branch. All reachable, none
+#         tested.
+#       * `qty * price * mult` -> `qty * price / mult` survived because EVERY
+#         test used multiplier 1.0, where the two agree. One options-multiplier
+#         test kills it.
+#       * `event_type=ORDER_SUBMITTED` -> `None` (query everything) survived
+#         because the tests only ever wrote ORDER_SUBMITTED rows. Counting
+#         SIGNAL and ORDER_FILLED too would multiply the measured turnover.
+#       * `continue` -> `break` on the exit-class skip survived even after a
+#         test was written for it, because query_since returns NEWEST FIRST and
+#         the test appended the exit event first. An exit on both sides of the
+#         opening event makes the test independent of iteration order.
+#       * `unvaluable += 1` -> `-= 1` survived an assertion of "'2 of' in
+#         reason", because '-2 of' contains '2 of'. startswith kills it.
+#       * the per-strategy branch's own `checks[...] = 'fail'` and reason text
+#         were unasserted; only the account branch was. Two branches, one
+#         tested.
+#     The 8 survivors that remain are documented equivalents:
+#       * 4x logging.debug MESSAGE mutants in the CASH-exempt path (diagnostic
+#         text, no behaviour). TRUE EQUIVALENTS.
+#       * 3x `approved=False` -> `approved=None` — the module's existing
+#         both-falsy class. TRUE EQUIVALENTS.
+#       * `this_order = position_value if position_value > 0 else 0.0` ->
+#         `>= 0`: at 0 both yield 0.0, and for negatives both take the else.
+#         TRUE EQUIVALENT.
+#
 # EQUIVALENT-MUTANT LEDGER (the policy says a survivor is either a test gap or a
 # documented equivalent *stating why*; the why was missing, so here it is —
 # derived and verified 2026-07-24, all three order_math survivors):

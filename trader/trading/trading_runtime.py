@@ -22,6 +22,7 @@ from trader.data.market_data import SecurityDataStream
 from trader.data.universe import Universe, UniverseAccessor
 from trader.trading.approved_order import ExitReason, mint_approved_order
 from trader.trading.exit_class import reduces_exposure
+from trader.trading.order_math import order_notional
 from trader.trading.order_split import SplitPlan, split_order
 from trader.trading.order_structure import rejection_for_order
 from trader.trading.risk_gate import RiskGate, RiskInputs, RiskLimits
@@ -1261,9 +1262,14 @@ class Trader():
         if snapshot_price is None:
             # NOT evaluable — never trust a bare client limit downward.
             return (0.0, False)
+        # The POLICY (anchor on the live snapshot, allow a client limit to push
+        # the valuation up but never down, refuse without a snapshot) stays
+        # here, because it is specific to defending against a forged-low
+        # notional. Only the ARITHMETIC is shared with the audit trail, which
+        # has the opposite failure preference: best-effort valuation, and record
+        # that it could not value rather than refuse to place.
         price = max(snapshot_price, limit_val) if limit_val is not None else snapshot_price
-        notional = abs(float(quantity)) * price * multiplier
-        return (notional, True)
+        return order_notional((price,), quantity, multiplier)
 
     async def enforce_approver_tier(
         self, contract: Contract, action: str, quantity: float,

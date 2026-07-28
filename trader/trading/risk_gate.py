@@ -2,10 +2,12 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from trader.common.logging_helper import setup_logging
 from trader.data.event_store import EventStore, EventType
+from trader.trading.order_math import order_notional
 from trader.trading.strategy import Signal
-from typing import Dict, Optional, TYPE_CHECKING
+from typing import Dict, Optional, Tuple, TYPE_CHECKING
 
 import datetime as dt
+import math
 import os
 import yaml
 
@@ -24,6 +26,20 @@ class RiskLimits:
     max_signals_per_hour: int = 20
     max_leverage: float = 1.0        # 1.0 = cash only, 2.0 = 2x margin allowed
     min_margin_cushion: float = 0.10  # minimum Cushion (excess liq / net liq)
+    # Cumulative OPENING notional per trading day. 0.0 = OFF (the default, so
+    # deploying this is byte-identical until an operator opts in).
+    #
+    # Every other limit here is per-order: size, leverage, loss, open-order
+    # count. None of them bound cumulative activity, so open/close/open/close
+    # churns indefinitely with each individual order passing every check.
+    # max_signals_per_hour is the closest existing control and counts ORDERS,
+    # not value — 20/hour is nothing at $500 each and $1M at $50k each.
+    #
+    # These cap the OPENING side only, which is what lets the cap exist at all:
+    # exits must never be refusable, and you cannot churn without opening, so
+    # bounding opens bounds the loop while leaving every close untouchable.
+    max_daily_open_notional: float = 0.0              # whole account
+    max_daily_open_notional_per_strategy: float = 0.0  # one runaway strategy
 
     @staticmethod
     def load(path: Optional[str] = None) -> 'RiskLimits':
@@ -231,8 +247,142 @@ class RiskGate:
             )
         checks['order_rate'] = 'pass'
 
+        turnover_result = self._check_daily_turnover(
+            signal, checks, position_value, position_value_evaluable, sec_type)
+        if turnover_result is not None:
+            return turnover_result
+
         logging.debug(f'risk gate approved signal from {signal.source_name}')
         return RiskGateResult(approved=True, checks=checks)
+
+    def _check_daily_turnover(
+        self, signal: Signal, checks: Dict[str, str],
+        position_value: float, position_value_evaluable: bool, sec_type: str,
+    ) -> Optional[RiskGateResult]:
+        """Cumulative OPENING notional for the trading day, per strategy and
+        for the account. Returns a refusal, or None to allow.
+
+        Bounds what no other limit does: total activity. Every other check is
+        per-order, so open/close/open/close passes all of them forever while
+        bleeding commissions, slippage and market impact.
+
+        Only opens are counted, and that is what makes the cap compatible with
+        "an exit is never refusable": a churn cycle needs an open, so bounding
+        opens bounds the cycle without ever standing in the way of a close.
+        This method is only reached on the non-exit path.
+        """
+        account_cap = float(self.limits.max_daily_open_notional or 0.0)
+        strategy_cap = float(self.limits.max_daily_open_notional_per_strategy or 0.0)
+        if account_cap <= 0 and strategy_cap <= 0:
+            # Record NOTHING when the feature is off, matching the approver
+            # tier: `checks` describes how THIS order was evaluated, not which
+            # features the deployment has enabled. It is also the difference
+            # between satisfying and revising the human-owned property that an
+            # approved order carries no unexplained skip
+            # (tests/invariants/test_gate_properties.py).
+            return None
+
+        # Forex is exempt, for the same reason concentration exempts it: a
+        # currency conversion is not a position, and its notional is not
+        # comparable to an equity order's. Turnover in a CASH pair is real, so
+        # this is a known limitation rather than a claim that it does not
+        # matter (recorded in docs/SAFETY_ROADMAP.md).
+        if str(sec_type).upper() == 'CASH':
+            logging.debug('daily turnover cap does not apply to a CASH order')
+            return None
+
+        # No fail-closed branch for an unvaluable order here, deliberately: the
+        # concentration check above already refuses a non-evaluable
+        # position_value for every non-CASH order, and CASH is exempt from this
+        # cap, so such an order can never reach this line. A branch that cannot
+        # fire is worse than no branch — it reads as protection while doing
+        # nothing. A zero notional DOES arrive here (concentration records
+        # skipped:zero-notional and allows it); it simply contributes nothing to
+        # the running total.
+        this_order = position_value if position_value > 0 else 0.0
+
+        spent, spent_by_strategy, unvaluable = self._daily_open_notional()
+        if unvaluable:
+            # A lower bound is not a bound. Refusing is the same fail-closed
+            # rule the rest of the gate follows, and it self-clears: every
+            # submission recorded from 2026-07-27 carries its own notional, so
+            # only same-day history written by an older build can trigger this.
+            checks['daily_turnover'] = 'skipped:unvaluable-history'
+            return RiskGateResult(
+                approved=False,
+                reason=f'{unvaluable} of today\'s opening submissions cannot be valued, '
+                       f'so today\'s turnover (>= ${spent:,.0f}) is only a lower bound — '
+                       f'refusing to open while a turnover cap is active (fail-closed). '
+                       f'Clears once today\'s history is all from a build that records '
+                       f'order notionals.',
+                checks=checks,
+            )
+
+        mine = spent_by_strategy.get(signal.source_name, 0.0)
+        if strategy_cap > 0 and mine + this_order > strategy_cap:
+            checks['daily_turnover'] = 'fail'
+            return RiskGateResult(
+                approved=False,
+                reason=f'daily turnover cap for {signal.source_name}: '
+                       f'${mine:,.0f} opened today + ${this_order:,.0f} this order '
+                       f'> ${strategy_cap:,.0f}',
+                checks=checks,
+            )
+        if account_cap > 0 and spent + this_order > account_cap:
+            checks['daily_turnover'] = 'fail'
+            return RiskGateResult(
+                approved=False,
+                reason=f'daily account turnover cap: ${spent:,.0f} opened today + '
+                       f'${this_order:,.0f} this order > ${account_cap:,.0f}',
+                checks=checks,
+            )
+        checks['daily_turnover'] = 'pass'
+        return None
+
+    def _daily_open_notional(self) -> Tuple[float, Dict[str, float], int]:
+        """Today's opening notional as ``(total, per_strategy, unvaluable_count)``.
+
+        Read from the event store, so it survives a restart. In-memory counters
+        would reset on every crash, and supervise() restarts the service
+        automatically — a crash loop would hand back a fresh budget each time.
+
+        Exit-class submissions are excluded by their stamp, so a session's own
+        closes and protective stops never consume the opening budget.
+        """
+        start_of_day = dt.datetime.combine(dt.date.today(), dt.time.min)
+        events = self.event_store.query_since(
+            since=start_of_day, event_type=EventType.ORDER_SUBMITTED)
+        total = 0.0
+        per_strategy: Dict[str, float] = {}
+        unvaluable = 0
+        for e in events:
+            meta = e.metadata or {}
+            if meta.get('exit_class'):
+                continue
+            notional = None
+            raw = meta.get('notional')
+            if meta.get('notional_evaluable') and raw is not None:
+                # metadata is JSON off disk, so `raw` can be any shape. A gate
+                # that raises while reading history refuses nothing and breaks
+                # every open, so every conversion here is guarded.
+                try:
+                    candidate = float(raw)
+                except (TypeError, ValueError):
+                    candidate = None
+                if candidate is not None and math.isfinite(candidate) and candidate >= 0:
+                    notional = candidate
+            if notional is None:
+                # Fall back to the event's own price column. Usable for limit
+                # orders; order_notional rejects ib_async's unset sentinel, which
+                # is what a MARKET order's recorded price actually is.
+                value, ok = order_notional((e.price,), e.quantity)
+                notional = value if ok else None
+            if notional is None:
+                unvaluable += 1
+                continue
+            total += notional
+            per_strategy[e.strategy_name] = per_strategy.get(e.strategy_name, 0.0) + notional
+        return (total, per_strategy, unvaluable)
 
     def check_instrument(
         self,

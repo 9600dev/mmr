@@ -58,6 +58,7 @@ TARGETS = [
     ("trader.trading.protective_stop.protective_stop_plan", 10),
     "trader.trading.order_split.split_order",
     "trader.trading.order_math.reducible_quantity",
+    "trader.trading.order_math.order_notional",
     "trader.trading.order_math.whole_shares_for_notional",
     "trader.trading.order_math._floor_shares_for_notional",
     "trader.trading.position_sizing._confidence_scale",

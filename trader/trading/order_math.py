@@ -22,8 +22,14 @@ A fatal ``@deal.pre`` there would turn those documented ``ValueError``\\s into
 """
 
 import math
+import sys
 
 import deal
+
+# ib_async represents an unset numeric order field as sys.float_info.max
+# (its UNSET_DOUBLE). Named here rather than imported so this module stays
+# free of broker dependencies and CrossHair-checkable.
+_UNSET_SENTINEL = sys.float_info.max
 
 
 def _all_finite_positive(*values: float) -> bool:
@@ -140,3 +146,74 @@ def whole_shares_for_notional(amount: float, price: float, multiplier: float = 1
             raise ValueError(f'{name} must be a finite number > 0, got {value!r}')
 
     return _floor_shares_for_notional(amount, price, multiplier)
+
+
+@deal.has()  # side-effect free (no I/O, no global mutation)
+@deal.pure
+@deal.ensure(
+    lambda _: _.result[0] >= 0.0,
+    message='a notional cannot be negative')
+@deal.ensure(
+    lambda _: _.result[1] or _.result[0] == 0.0,
+    message='a non-evaluable notional must be reported as 0.0, never guessed')
+def order_notional(
+    price_candidates: tuple, quantity: float, multiplier: float = 1.0,
+) -> tuple:
+    """Value an order as ``(notional, evaluable)`` from the first usable price.
+
+    ``price_candidates`` is tried in order; the first finite, strictly-positive
+    one wins. Callers own the ORDER of that tuple, because the right price
+    policy differs by purpose and must not be silently unified:
+
+      * the approver tier anchors on a live snapshot and takes
+        ``max(snapshot, client_limit)``, so a proposer can push the valuation UP
+        but never DOWN, and refuses to value at all without a snapshot;
+      * the audit trail wants best-effort valuation from whatever is already to
+        hand, and records that it could not value rather than refusing to place.
+
+    What IS shared is the arithmetic and the honesty about failure. Returning
+    ``(0.0, False)`` rather than a zero notional is the whole point: a market
+    order carries no usable limit price, and inventing a number for it is how a
+    cumulative notional limit ends up meaningless. That was real: every
+    ORDER_SUBMITTED event before 2026-07-27 recorded ``price=order.lmtPrice``,
+    which for a MARKET or STOP order is ib_async's unset sentinel — verified in
+    the live event store, where market submissions sit at
+    1.7976931348623157e+308.
+
+    Quantity is taken as ``abs`` — a notional is a size, not a direction.
+
+    THE LARGEST FINITE DOUBLE IS A SENTINEL, NOT A PRICE. ib_async represents an
+    unset numeric order field as ``sys.float_info.max`` (``UNSET_DOUBLE``), so a
+    MARKET order's ``lmtPrice`` and a STOP order's ``lmtPrice`` both read
+    1.7976931348623157e+308. That value is FINITE and POSITIVE, so the obvious
+    guard — ``math.isfinite(price) and price > 0`` — waves it straight through,
+    and at a quantity of 1.0 the product is still finite: a $1.8e308 notional
+    reported as a valid valuation. One of those in a cumulative total exceeds
+    every conceivable cap forever. Callers strip the sentinel at the boundary
+    where they know it is ib_async's; this rule is here as well because the
+    consequence is severe and the guard that misses it looks correct.
+    """
+    try:
+        qty = abs(float(quantity))
+        mult = float(multiplier)
+    except (TypeError, ValueError):
+        return (0.0, False)
+    if not (math.isfinite(qty) and qty > 0):
+        return (0.0, False)
+    if not (math.isfinite(mult) and mult > 0):
+        return (0.0, False)
+
+    for candidate in price_candidates:
+        try:
+            price = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if not (math.isfinite(price) and price > 0):
+            continue
+        if price >= _UNSET_SENTINEL:
+            continue      # an unset field, not a price — see the docstring
+        value = qty * price * mult
+        if math.isfinite(value):
+            return (value, True)
+        return (0.0, False)   # overflowed to inf — not a usable valuation
+    return (0.0, False)

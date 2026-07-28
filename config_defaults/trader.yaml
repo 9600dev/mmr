@@ -118,3 +118,38 @@ default_data_source: twelvedata
 #   none      no decimation (legacy bloat)
 #   <int>     uniform sample down to N points
 equity_decimation: daily
+
+# Pre-trade risk limits (trader/trading/risk_gate.py). Omit the section
+# entirely for code defaults; an unknown key or malformed value logs an ERROR
+# and falls back to that key's default rather than crash-looping the stack.
+# Gates apply ONLY to exposure-increasing orders — an exit is never refusable.
+#
+# risk_limits:
+#   max_position_size_pct: 0.10
+#   max_daily_loss: 1000.0
+#   max_open_orders: 15
+#   max_signals_per_hour: 20
+#   max_leverage: 1.0
+#   min_margin_cushion: 0.10
+#
+#   # Cumulative OPENING notional per trading day. 0.0 = OFF (default).
+#   #
+#   # Every other limit above is per-order, so open/close/open/close churns
+#   # indefinitely with each order passing every check. max_signals_per_hour is
+#   # the nearest existing control and counts ORDERS, not value.
+#   #
+#   # These bound the OPENING side only, which is what makes the cap compatible
+#   # with "an exit is never refusable": you cannot churn without opening.
+#   #
+#   # CALIBRATE FROM YOUR OWN HISTORY, not from these numbers. A cap that trips
+#   # in normal operation gets raised or switched off, and then protects
+#   # nothing. Measure actual daily opening notional from the event store first.
+#   # The values below came from 7 live paper days (2026-07): peak day $5,856
+#   # (mostly manual probe traffic), peak genuine strategy-day $1,241.
+#   max_daily_open_notional: 35000.0               # ~6x peak observed day
+#   max_daily_open_notional_per_strategy: 10000.0  # ~8x peak strategy-day
+#
+#   # Known limitation: forex (sec_type CASH) is exempt, for the same reason
+#   # the concentration check exempts it — a currency conversion is not a
+#   # position and its notional is not comparable. Turnover in a CASH pair is
+#   # real, so this is a gap, not a judgement that it does not matter.

@@ -512,6 +512,92 @@ closed (below).
 
 ---
 
+---
+
+## Turnover caps — SHIPPED, default OFF (2026-07-27)
+
+The last unbuilt control from Tranche 2, and the complement to everything above.
+
+**What no other limit does.** Every existing gate is per-ORDER: position size,
+leverage, daily loss, open-order count, approver notional. None bounds
+cumulative activity, so this passes every check indefinitely:
+
+```
+open 100 shares   (within size limit, gated, approved)
+close             (exit-class, ungated, unrefusable)
+open 100 shares   (gated again, approved again)
+...
+```
+
+No single order is wrong. The damage is commissions, slippage and market impact
+bleeding out over hours, plus a wash-trade pattern that looks bad to a broker.
+`max_signals_per_hour` is the nearest existing control and counts ORDERS, not
+value: 20/hour is trivial at $500 each and $1M at $50k each.
+
+**Why it can exist at all.** The obvious objection is that a turnover cap could
+refuse an exit, which breaks the rule the whole system rests on. It resolves
+cleanly: **you cannot churn without opening.** Cap the OPENING side and the loop
+halts at the cap while every close stays untouchable. That also means the check
+drops into `risk_gate.evaluate()` and inherits exits-exempt, tri-state
+recording, and fail-closed behaviour with no new exemption path — which matters,
+since three of the four bugs found on 2026-07-27 were exemption paths
+disagreeing with each other.
+
+**A prerequisite that nearly made it useless.** `ORDER_SUBMITTED` recorded
+`price=order.lmtPrice`, and ib_async leaves an unused numeric field at
+`UNSET_DOUBLE` = `sys.float_info.max`. Verified in the live event store: market
+submissions sit at `1.7976931348623157e+308`. Nothing looked broken, because the
+only consumer was the order-rate limit, which counts rows and never reads value.
+
+The sentinel is the dangerous part, and not for the predicted reason. It is
+FINITE and POSITIVE, so it passes the natural `isfinite(price) and price > 0`
+guard — including the first version of the new valuation. At a quantity of 1.0
+the product stays finite, so that version reported a $1.8e308 notional as VALID.
+One of those in a cumulative total exceeds every conceivable cap forever: not a
+fail-open, a system-bricking fail-closed. Now rejected in the pure kernel AND
+stripped at the boundary, and pinned in `tests/invariants/test_order_notional.py`.
+
+**Design.**
+
+| decision | choice |
+|---|---|
+| Unit | Notional USD (shares are not comparable across instruments) |
+| Scope | Per-strategy AND account — per-strategy catches a runaway, the account cap catches ten strategies each just under their own |
+| Window | Per trading day: predictable reset, and a refusal an operator can explain |
+| Source | Event store, so it survives restarts. In-memory counters would reset on every crash, and `supervise()` restarts automatically — a crash loop would hand back a fresh budget each time |
+| Default | `0.0` = OFF, so deploying is byte-identical until an operator opts in |
+
+**Calibration decides whether it works.** A cap that trips in normal operation
+gets raised or switched off, and then protects nothing. Measured from 7 live
+paper days: peak day $5,856 (mostly manual probe traffic that day), peak genuine
+strategy-day $1,241. Recommended values are in `config_defaults/trader.yaml`
+with that rationale attached, and the instruction to re-measure rather than
+copy them.
+
+**What it does not cover.**
+
+* Forex (`sec_type` CASH) is exempt, for the same reason concentration exempts
+  it — a currency conversion is not a position and its notional is not
+  comparable. Turnover in a CASH pair is real, so this is a gap, not a
+  judgement that it does not matter.
+* A single oversized order: that is sizing, the approver tier, the risk gate.
+* A bad position held too long: that is the protective stop.
+* Cancel/replace storms on the EXIT side: bounded in notional (you can only
+  close to flat) but not in order count, and the count limit skips exits.
+
+**Verification.** 27 behavioural tests, and the mutation gate did the real work.
+The first measurement dropped both touched modules well below baseline (87.7% /
+85.6% against 95.9% / 90.9%) with 51 survivors, nearly all genuine test gaps
+rather than equivalents. Two findings came out of the code rather than the
+tests: a fail-closed branch that was UNREACHABLE (concentration already refuses
+that input upstream), i.e. protection-shaped dead code, now removed with a note
+so it is not re-added; and a zero-notional order that was refused and now
+correctly contributes nothing. Final: 97.3% / 91.9%, both above baseline, 8
+documented equivalents. The full survivor triage is in
+`scripts/run_mutation.sh`.
+
+---
+
 ## Flip residual CLOSED — order-splitting (2026-07-27)
 
 The last documented hole in the exit-class rule. Exit-class is direction-aware
@@ -624,10 +710,10 @@ one that puts everything in `reduce_qty` preserves exits and leaves the hole
 untouched. Conservation (the halves sum to the request) is the property that
 catches both, plus any arithmetic slip.
 
-**Still open:** turnover caps, the complementary control. Splitting bounds
-*classification*; a turnover cap bounds *volume* per interval regardless of
-classification, which limits the damage from any ungated path rather than this
-one specifically.
+**The complementary control, turnover caps, is now BUILT** (2026-07-27) — see
+the section below. Splitting bounds *classification*; a turnover cap bounds
+*volume* regardless of classification, which limits the damage from any ungated
+path rather than this one specifically.
 
 ---
 

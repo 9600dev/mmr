@@ -645,3 +645,314 @@ class TestCheckInstrumentForwardsEveryField:
 
         allowed = gate.check_instrument(symbol='AMD', exchange='NASDAQ', sec_type='STK')
         assert allowed.approved is True
+
+
+class TestDailyTurnoverCap:
+    """Cumulative OPENING notional per trading day — the only limit here that
+    bounds total activity rather than a single order.
+
+    Every other check is per-order, so open/close/open/close passes all of them
+    indefinitely while bleeding commissions, slippage and market impact.
+    max_signals_per_hour is the closest existing control and counts ORDERS, not
+    value: 20/hour is trivial at $500 each and $1M at $50k each.
+
+    The cap applies to OPENS only, which is what makes it compatible with "an
+    exit is never refusable". You cannot churn without opening, so bounding
+    opens bounds the loop while leaving every close untouchable.
+    """
+
+    def _gate(self, event_store, **limits):
+        from trader.trading.risk_gate import RiskGate, RiskLimits
+        return RiskGate(limits=RiskLimits(**limits), event_store=event_store)
+
+    def _submit(self, event_store, strategy, notional, exit_class=False,
+                evaluable=True, price=0.0, quantity=0.0):
+        """Record an ORDER_SUBMITTED exactly as the executioner does."""
+        import datetime as dt
+        from trader.data.event_store import EventType, TradingEvent
+        meta = {'notional': notional, 'notional_evaluable': evaluable}
+        if exit_class:
+            meta['exit_class'] = True
+        event_store.append(TradingEvent(
+            event_type=EventType.ORDER_SUBMITTED,
+            timestamp=dt.datetime.now(),
+            strategy_name=strategy,
+            conid=4391, symbol='AMD', action='BUY',
+            quantity=quantity, price=price, order_id=1, metadata=meta))
+
+    def _evaluate(self, gate, name='test_strat', position_value=1_000.0, **kw):
+        return gate.evaluate(
+            _make_signal(name), open_order_count=0, daily_pnl=0.0,
+            portfolio_value=1_000_000.0, position_value=position_value, **kw)
+
+    def test_off_by_default(self, event_store):
+        """Deploying this must be byte-identical until an operator opts in."""
+        gate = self._gate(event_store)
+        assert gate.limits.max_daily_open_notional == 0.0
+        assert gate.limits.max_daily_open_notional_per_strategy == 0.0
+        self._submit(event_store, 'test_strat', 5_000_000.0)
+        assert self._evaluate(gate).approved is True
+
+    def test_account_cap_refuses_once_the_day_is_spent(self, event_store):
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        self._submit(event_store, 'a', 6_000.0)
+        self._submit(event_store, 'b', 3_500.0)
+        result = self._evaluate(gate, position_value=1_000.0)
+        assert not result.approved
+        assert result.checks['daily_turnover'] == 'fail'
+        assert '9,500' in result.reason and '10,000' in result.reason
+
+    def test_account_cap_allows_an_order_that_fits(self, event_store):
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        self._submit(event_store, 'a', 6_000.0)
+        result = self._evaluate(gate, position_value=1_000.0)
+        assert result.approved is True
+        assert result.checks['daily_turnover'] == 'pass'
+
+    def test_the_cap_counts_the_order_being_evaluated(self, event_store):
+        """Not just history. A cap that only looked backwards would always
+        allow one more order of unbounded size."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        assert not self._evaluate(gate, position_value=10_001.0).approved
+        assert self._evaluate(gate, position_value=9_999.0).approved
+
+    def test_per_strategy_cap_isolates_a_runaway(self, event_store):
+        """One strategy burning its budget must not refuse the others."""
+        gate = self._gate(event_store, max_daily_open_notional_per_strategy=5_000.0)
+        self._submit(event_store, 'runaway', 4_800.0)
+        refused = self._evaluate(gate, name='runaway', position_value=500.0)
+        assert not refused.approved
+        assert refused.checks['daily_turnover'] == 'fail'
+        # The refusal must name the strategy and both figures: it is the only
+        # window the operator has into a cap they cannot otherwise see.
+        assert 'runaway' in refused.reason
+        assert '4,800' in refused.reason and '5,000' in refused.reason
+        assert self._evaluate(gate, name='innocent', position_value=500.0).approved
+
+    def test_the_account_cap_catches_what_per_strategy_caps_miss(self, event_store):
+        """Ten strategies each just under their own cap. This is why both
+        scopes exist rather than only the per-strategy one."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0,
+                          max_daily_open_notional_per_strategy=5_000.0)
+        for i in range(10):
+            self._submit(event_store, f'strat_{i}', 900.0)
+        result = self._evaluate(gate, name='strat_0', position_value=2_000.0)
+        assert not result.approved
+        assert 'account turnover' in result.reason
+
+    def test_exit_class_submissions_do_not_consume_the_budget(self, event_store):
+        """A session's own closes and protective stops must not spend the
+        opening budget — otherwise holding positions would starve new entries
+        and, worse, the cap would effectively penalise exiting."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        for _ in range(20):
+            self._submit(event_store, 'test_strat', 5_000.0, exit_class=True)
+        assert self._evaluate(gate, position_value=1_000.0).approved is True
+
+    def test_an_unvaluable_order_is_refused_upstream_not_by_this_cap(self, event_store):
+        """The concentration check already fails closed on a non-evaluable
+        position value, so the turnover cap never has to. Pinned so nobody adds
+        a second, unreachable fail-closed branch here believing there is a
+        hole."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        result = self._evaluate(gate, position_value=0.0,
+                                position_value_evaluable=False)
+        assert not result.approved
+        assert result.checks['concentration'] == 'skipped:no-price'
+        assert 'daily_turnover' not in result.checks
+
+    def test_a_zero_notional_order_contributes_nothing(self, event_store):
+        """A zero notional does reach the cap (concentration allows it as
+        skipped:zero-notional). It must add nothing rather than refuse."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        self._submit(event_store, 'test_strat', 10_000.0)   # exactly at the cap
+        assert self._evaluate(gate, position_value=0.0).approved is True
+
+    def test_unvaluable_history_refuses_rather_than_undercounting(self, event_store):
+        """A lower bound is not a bound. History written by a build that did not
+        record notionals would silently make the day look cheap."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        self._submit(event_store, 'test_strat', 0.0, evaluable=False, price=0.0)
+        result = self._evaluate(gate, position_value=100.0)
+        assert not result.approved
+        assert result.checks['daily_turnover'] == 'skipped:unvaluable-history'
+        assert 'lower bound' in result.reason
+
+    def test_the_unset_price_sentinel_does_not_become_a_huge_turnover(self, event_store):
+        """A market order recorded by an older build carries
+        price=sys.float_info.max. Treating that as a price would put ~1e308 into
+        the running total and refuse every open forever."""
+        import sys as _sys
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        self._submit(event_store, 'test_strat', 0.0, evaluable=False,
+                     price=_sys.float_info.max, quantity=1.0)
+        result = self._evaluate(gate, position_value=100.0)
+        # Refused as UNVALUABLE, not as a 1e308 breach — the distinction is the
+        # whole point: one is an honest "cannot tell", the other is nonsense
+        # presented as fact.
+        assert result.checks['daily_turnover'] == 'skipped:unvaluable-history'
+
+    def test_a_limit_order_from_older_history_is_valued_from_its_price(self, event_store):
+        """The fallback that keeps this from refusing everything on day one:
+        pre-existing LIMIT submissions have a real price column."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        self._submit(event_store, 'test_strat', 0.0, evaluable=False,
+                     price=100.0, quantity=100.0)
+        result = self._evaluate(gate, position_value=100.0)
+        assert not result.approved
+        assert result.checks['daily_turnover'] == 'fail', result.checks
+        assert '10,000' in result.reason
+
+
+    def test_a_tiny_cap_is_honoured_not_treated_as_off(self, event_store):
+        """0.0 means OFF and anything above it is a real cap. A boundary
+        written as `<= 1` would silently disable a $1 cap — and a cap that
+        cannot be set small is a cap that cannot be smoke-tested in place."""
+        gate = self._gate(event_store, max_daily_open_notional=1.0)
+        assert not self._evaluate(gate, position_value=500.0).approved
+        gate = self._gate(event_store, max_daily_open_notional_per_strategy=1.0)
+        assert not self._evaluate(gate, position_value=500.0).approved
+
+    def test_an_order_landing_exactly_on_the_cap_is_allowed(self, event_store):
+        """The cap is a ceiling, not a strict inequality: spending exactly the
+        budget is permitted, exceeding it is not. Pinned because `>` vs `>=`
+        here is invisible in every test that does not sit on the boundary."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        self._submit(event_store, 'test_strat', 9_000.0)
+        assert self._evaluate(gate, position_value=1_000.0).approved is True
+        assert not self._evaluate(gate, position_value=1_000.01).approved
+
+    def test_the_same_boundary_holds_for_the_per_strategy_cap(self, event_store):
+        gate = self._gate(event_store, max_daily_open_notional_per_strategy=5_000.0)
+        self._submit(event_store, 'test_strat', 4_000.0)
+        assert self._evaluate(gate, position_value=1_000.0).approved is True
+        assert not self._evaluate(gate, position_value=1_000.01).approved
+
+    def test_a_strategy_with_no_history_starts_from_zero(self, event_store):
+        """Not from a placeholder. A default of anything but 0.0 would make a
+        strategy's first order of the day already partly spent."""
+        gate = self._gate(event_store, max_daily_open_notional_per_strategy=1_000.0)
+        assert self._evaluate(gate, name='never_traded',
+                              position_value=1_000.0).approved is True
+
+    def test_a_sub_dollar_order_still_counts_toward_the_cap(self, event_store):
+        """Small orders are exactly how a churn loop stays under per-order
+        limits, so they must not be rounded out of the total."""
+        gate = self._gate(event_store, max_daily_open_notional=10.0)
+        self._submit(event_store, 'test_strat', 9.5)
+        assert not self._evaluate(gate, position_value=0.75).approved
+
+    def test_only_order_submissions_count(self, event_store):
+        """SIGNAL, ORDER_FILLED and ORDER_CANCELLED events must not be summed.
+        Counting fills as well as submissions would double every order, and
+        counting signals would charge the budget for orders never placed."""
+        import datetime as dt
+        from trader.data.event_store import EventType, TradingEvent
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        for event_type in (EventType.SIGNAL, EventType.ORDER_FILLED,
+                           EventType.ORDER_CANCELLED):
+            event_store.append(TradingEvent(
+                event_type=event_type, timestamp=dt.datetime.now(),
+                strategy_name='test_strat', conid=4391, symbol='AMD',
+                action='BUY', quantity=1000.0, price=500.0, order_id=1,
+                metadata={'notional': 500_000.0, 'notional_evaluable': True}))
+        result = self._evaluate(gate, position_value=1_000.0)
+        assert result.approved is True, (
+            f'non-submission events were counted: {result.reason}')
+
+
+    def test_an_exit_stops_nothing_that_follows_it(self, event_store):
+        """`continue`, not `break`. A single exit-class submission early in the
+        day would otherwise stop the count dead and make the rest of the day
+        free — and exits are common, so the budget would nearly always look
+        empty."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        # An exit on BOTH sides of the opening submission, so this holds
+        # whichever direction the store iterates (it is newest-first today).
+        self._submit(event_store, 'test_strat', 5_000.0, exit_class=True)
+        self._submit(event_store, 'test_strat', 9_500.0)
+        self._submit(event_store, 'test_strat', 5_000.0, exit_class=True)
+        result = self._evaluate(gate, position_value=1_000.0)
+        assert not result.approved, 'an exit stopped the count of what followed it'
+        assert '9,500' in result.reason
+
+    def test_a_malformed_recorded_notional_does_not_crash_the_gate(self, event_store):
+        """Metadata is JSON from disk, so it can be anything. A gate that raises
+        while reading history refuses nothing and breaks every open."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        self._submit(event_store, 'test_strat', 'not-a-number', price=0.0)
+        result = self._evaluate(gate, position_value=100.0)
+        assert not result.approved
+        assert result.checks['daily_turnover'] == 'skipped:unvaluable-history'
+
+    def test_a_nonsense_recorded_notional_is_not_trusted(self, event_store):
+        """NaN and negative recorded notionals must be treated as unreadable,
+        not folded into the total (NaN would poison every comparison after it,
+        and a negative would hand back budget)."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        for bad in (float('nan'), float('inf'), -5_000.0):
+            store_gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+            self._submit(event_store, 'test_strat', bad, price=0.0)
+            result = self._evaluate(store_gate, position_value=100.0)
+            assert result.checks['daily_turnover'] == 'skipped:unvaluable-history', bad
+            assert not result.approved
+
+    def test_a_genuinely_zero_notional_record_is_readable_not_unvaluable(self, event_store):
+        """Zero is a value. Treating a recorded $0 as unreadable would refuse
+        every open for the rest of the day over an order that cost nothing."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        self._submit(event_store, 'test_strat', 0.0, evaluable=True)
+        result = self._evaluate(gate, position_value=100.0)
+        assert result.approved is True, result.reason
+        assert result.checks['daily_turnover'] == 'pass'
+
+    def test_the_refusal_says_how_many_records_it_could_not_read(self, event_store):
+        """The operator has to know whether this is one stale row or the whole
+        day, because the fix differs."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        self._submit(event_store, 'test_strat', 0.0, evaluable=False, price=0.0)
+        self._submit(event_store, 'test_strat', 0.0, evaluable=False, price=0.0)
+        result = self._evaluate(gate, position_value=100.0)
+        assert result.reason.startswith('2 of'), result.reason
+
+    def test_the_lower_bound_in_the_refusal_counts_what_it_could_read(self, event_store):
+        """An unreadable row must not stop the sum: the operator is told
+        '>= $X', and X has to include everything that WAS readable."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        self._submit(event_store, 'test_strat', 0.0, evaluable=False, price=0.0)
+        self._submit(event_store, 'test_strat', 5_000.0)
+        result = self._evaluate(gate, position_value=100.0)
+        assert '5,000' in result.reason, result.reason
+
+    def test_a_strategys_orders_accumulate_against_its_own_budget(self, event_store):
+        """Two orders from one strategy must sum. Keying the per-strategy total
+        wrongly would leave each strategy showing only its most recent order."""
+        gate = self._gate(event_store, max_daily_open_notional_per_strategy=10_000.0)
+        self._submit(event_store, 'test_strat', 4_000.0)
+        self._submit(event_store, 'test_strat', 5_500.0)
+        result = self._evaluate(gate, position_value=1_000.0)
+        assert not result.approved, 'the two orders did not accumulate'
+        assert result.checks['daily_turnover'] == 'fail'
+        assert '9,500' in result.reason and '1,000' in result.reason
+
+    def test_every_refusal_carries_a_reason(self, event_store):
+        """A refusal with no reason is unactionable, and this gate's refusals
+        are the operator's only window into a cap they cannot see otherwise."""
+        gate = self._gate(event_store, max_daily_open_notional=100.0,
+                          max_daily_open_notional_per_strategy=100.0)
+        self._submit(event_store, 'test_strat', 500.0)
+        result = self._evaluate(gate, position_value=100.0)
+        assert not result.approved
+        assert result.reason and result.reason.strip()
+        gate2 = self._gate(event_store, max_daily_open_notional=100.0)
+        result2 = self._evaluate(gate2, position_value=100.0)
+        assert result2.reason and result2.reason.strip()
+
+    def test_forex_is_exempt(self, event_store):
+        """A currency conversion is not a position, exactly as the
+        concentration check treats it. A known limitation, not a claim that
+        forex turnover does not matter."""
+        gate = self._gate(event_store, max_daily_open_notional=100.0)
+        self._submit(event_store, 'test_strat', 50_000.0)
+        assert self._evaluate(gate, position_value=50_000.0,
+                              sec_type='CASH').approved is True
