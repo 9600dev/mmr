@@ -477,3 +477,82 @@ class TestWritesRefuseImpossibleBars:
         with caplog.at_level(stdlib_logging.WARNING):
             td.write(4394, df)
         assert any('REFUSED' in r.message for r in caplog.records)
+
+
+class TestQuarantineKeepsTheEvidence:
+    """Rejected bars are KEPT, not discarded.
+
+    That a source SENT an impossible bar is evidence in its own right: it is
+    how vendor quality gets measured over time, and how "130 impossible bars
+    last month" becomes something you can substantiate rather than assert. The
+    write guard originally dropped them, which destroyed exactly that record.
+
+    A separate TABLE rather than a flag column, deliberately. A flag puts the
+    burden on every reader to remember to filter, and a reader who forgets
+    silently trains a strategy on fiction — which is the failure being removed,
+    reintroduced one layer down. With a separate table, `tick_data` holds an
+    invariant instead: everything in it passed validation.
+    """
+
+    def _tick_data(self, tmp_duckdb_path):
+        from trader.data.data_access import TickData
+        from trader.objects import BarSize
+        return TickData(tmp_duckdb_path, BarSize.Mins1)
+
+    def _frame(self, rows):
+        import datetime as dt
+        import pandas as pd
+        idx = pd.DatetimeIndex(
+            [dt.datetime(2026, 7, 28, 13, 30) + dt.timedelta(minutes=i)
+             for i in range(len(rows))], name='date').tz_localize('UTC')
+        return pd.DataFrame(rows, index=idx)
+
+    def _quarantined(self, tmp_duckdb_path):
+        from trader.data.duckdb_store import DuckDBConnection
+        db = DuckDBConnection.get_instance(tmp_duckdb_path)
+        return db.execute('SELECT symbol, high, close, reason '
+                          'FROM tick_data_quarantine', fetch='all') or []
+
+    def test_a_rejected_bar_is_recorded_not_lost(self, tmp_duckdb_path):
+        td = self._tick_data(tmp_duckdb_path)
+        td.write(4391, self._frame([
+            {'open': 76.81, 'high': 76.825, 'low': 76.80, 'close': 76.83,
+             'volume': 5994.0},
+        ]))
+        rows = self._quarantined(tmp_duckdb_path)
+        assert len(rows) == 1, 'the evidence was destroyed'
+        assert float(rows[0][1]) == 76.825
+        assert 'impossible' in (rows[0][3] or '')
+
+    def test_the_main_table_never_holds_it(self, tmp_duckdb_path):
+        """The invariant that makes the separation worth having."""
+        td = self._tick_data(tmp_duckdb_path)
+        td.write(4391, self._frame([
+            {'open': 76.81, 'high': 76.825, 'low': 76.80, 'close': 76.83,
+             'volume': 5994.0},
+        ]))
+        assert len(td.read(4391)) == 0
+
+    def test_good_bars_are_not_quarantined(self, tmp_duckdb_path):
+        td = self._tick_data(tmp_duckdb_path)
+        td.write(4392, self._frame([
+            {'open': 10.0, 'high': 11.0, 'low': 9.0, 'close': 10.5, 'volume': 5.0},
+        ]))
+        assert self._quarantined(tmp_duckdb_path) == []
+        assert len(td.read(4392)) == 1
+
+    def test_a_quarantine_failure_does_not_lose_the_good_bars(self, tmp_duckdb_path):
+        """Recording the evidence is secondary to not corrupting the store. If
+        quarantine itself fails, the good bars must still land and the bad ones
+        must still be refused."""
+        from unittest.mock import patch
+        td = self._tick_data(tmp_duckdb_path)
+        df = self._frame([
+            {'open': 76.81, 'high': 76.825, 'low': 76.80, 'close': 76.83,
+             'volume': 5994.0},
+            {'open': 10.0, 'high': 11.0, 'low': 9.0, 'close': 10.5, 'volume': 5.0},
+        ])
+        with patch.object(type(td.library), 'quarantine',
+                          side_effect=RuntimeError('disk full')):
+            td.write(4393, df)
+        assert len(td.read(4393)) == 1

@@ -414,12 +414,28 @@ class Data():
                 bad = impossible_mask(data_frame)
                 n_bad = int(bad.sum())
                 if n_bad:
-                    sample = data_frame[bad].head(1).to_dict('records')
+                    rejected = cast(pd.DataFrame, data_frame[bad])
+                    sample = rejected.head(1).to_dict('records')
+                    # QUARANTINED, not discarded. The fact that a source SENT
+                    # us an impossible bar is itself evidence worth keeping —
+                    # it is how vendor quality gets measured over time, and how
+                    # a claim like "130 impossible bars last month" can be
+                    # substantiated rather than asserted. The trading and
+                    # backtesting paths never read that table.
+                    n_kept = 0
+                    try:
+                        n_kept = self.library.quarantine(
+                            symbol, rejected,
+                            reason='structurally impossible bar (bar_quality)')
+                    except Exception as ex:
+                        logging.warning('could not quarantine rejected bars '
+                                        'for %s: %s', symbol, ex)
                     logging.warning(
                         'REFUSED %d of %d structurally impossible bar(s) for %s '
                         '(a bar whose high is below its own open/close, or with '
-                        'partial/negative values, cannot have happened). '
-                        'First: %s', n_bad, len(data_frame), symbol, sample)
+                        'partial/negative values, cannot have happened); '
+                        '%d quarantined for the record. First: %s',
+                        n_bad, len(data_frame), symbol, n_kept, sample)
                     data_frame = cast(pd.DataFrame, data_frame[~bad])
                 if len(data_frame) == 0:
                     return

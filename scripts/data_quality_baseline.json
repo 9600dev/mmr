@@ -4,8 +4,6 @@
     "1 day|empty_bar": 113,
     "1 day|large_jump": 10,
     "1 min|duplicate_timestamp": 49,
-    "1 min|empty_bar": 312,
-    "1 min|high_not_highest": 1761,
-    "1 min|low_not_lowest": 819
+    "1 min|empty_bar": 312
   }
 }

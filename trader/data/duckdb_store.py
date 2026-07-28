@@ -198,7 +198,33 @@ class DuckDBDataStore(DataStore):
     def _ensure_table(self):
         self._db.execute_atomic(lambda conn: self._create_table(conn))
 
+    QUARANTINE_TABLE = 'tick_data_quarantine'
+
     def _create_table(self, conn):
+        # The quarantine holds bars a vendor sent us that cannot describe a
+        # real market. They are KEPT, deliberately: dropping them destroys the
+        # evidence that the source shipped them, and vendor quality over time
+        # is worth measuring. Nothing reads this table for trading or
+        # backtesting — that is the whole point of it being a separate table
+        # rather than a flag column, which every reader would have to remember
+        # to filter on.
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self.QUARANTINE_TABLE} (
+                symbol VARCHAR NOT NULL,
+                date TIMESTAMPTZ NOT NULL,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                volume DOUBLE,
+                average DOUBLE,
+                bar_count INTEGER,
+                bar_size VARCHAR,
+                what_to_show INTEGER,
+                quarantined_at TIMESTAMPTZ NOT NULL,
+                reason VARCHAR
+            )
+        """)
         conn.execute(f"""
             CREATE TABLE IF NOT EXISTS {self.TABLE_NAME} (
                 symbol VARCHAR NOT NULL,
@@ -272,6 +298,38 @@ class DuckDBDataStore(DataStore):
         df.index.name = 'date'
 
         return df
+
+
+    def quarantine(self, symbol: str, df: pd.DataFrame, reason: str) -> int:
+        """Persist rejected bars with the reason they were rejected.
+
+        Append-only and never read by the trading or backtesting paths. Returns
+        the number of rows recorded so the caller can log it.
+        """
+        if df is None or len(df) == 0:
+            return 0
+        frame = df.copy()
+        frame['symbol'] = symbol
+        frame['quarantined_at'] = pd.Timestamp.now(tz='UTC')
+        frame['reason'] = reason
+        if frame.index.name == 'date' or isinstance(frame.index, pd.DatetimeIndex):
+            frame = frame.reset_index().rename(columns={'index': 'date'})
+        cols = ['symbol', 'date', 'open', 'high', 'low', 'close', 'volume',
+                'average', 'bar_count', 'bar_size', 'what_to_show',
+                'quarantined_at', 'reason']
+        for c in cols:
+            if c not in frame.columns:
+                frame[c] = None
+        frame = frame[cols]
+
+        def _run(conn):
+            conn.register('quarantine_df', frame)
+            conn.execute(
+                f'INSERT INTO {self.QUARANTINE_TABLE} SELECT * FROM quarantine_df')
+            conn.unregister('quarantine_df')
+            return len(frame)
+
+        return int(self._db.execute_atomic(_run))
 
     def write(self, symbol: str, df: pd.DataFrame) -> None:
         if df.empty:

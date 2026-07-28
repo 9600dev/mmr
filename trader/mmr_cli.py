@@ -1743,6 +1743,14 @@ def build_parser() -> argparse.ArgumentParser:
              '(requires trader_service)',
     )
 
+    _quar = data_sub.add_parser(
+        'quarantine-bad-bars',
+        help='MOVE structurally impossible bars out of tick_data into '
+             'tick_data_quarantine (evidence kept, consumers protected)',
+    )
+    _quar.add_argument('--dry-run', action='store_true',
+                       help='report what would move, change nothing')
+
     _audit = data_sub.add_parser(
         'audit',
         help='Quality-check stored OHLCV against a recorded baseline; '
@@ -8611,6 +8619,8 @@ def _handle_data(args: argparse.Namespace):
         _handle_data_status()
     elif action == 'audit':
         _handle_data_audit(args)
+    elif action == 'quarantine-bad-bars':
+        _handle_quarantine_bad_bars(args)
     else:
         console.print(f'[yellow]Unknown data action: {action}[/yellow]')
 
@@ -9683,6 +9693,64 @@ def _handle_data_refresh(args: argparse.Namespace):
 
 
 DATA_QUALITY_BASELINE = pathlib.Path(__file__).resolve().parent.parent / 'scripts' / 'data_quality_baseline.json'
+
+
+def _handle_quarantine_bad_bars(args: argparse.Namespace):
+    """Move already-stored impossible bars into the quarantine table.
+
+    A MOVE, never a delete. The rows are evidence that a source shipped them,
+    and that record is worth more than the disk it costs. Afterwards
+    `tick_data` holds an invariant — every bar in it passed validation — and
+    the audit can assert that rather than merely counting violations.
+    """
+    from trader.container import Container
+    from trader.data.duckdb_store import DuckDBConnection, DuckDBDataStore
+
+    cfg = Container.instance().config()
+    history = os.path.expanduser(cfg.get('history_duckdb_path', '')
+                                 or cfg.get('duckdb_path', ''))
+    # Constructing the store creates the quarantine table if this database has
+    # never had one. A raw connection would not, and the move would fail on the
+    # first database to be migrated — which is every existing one.
+    DuckDBDataStore(history)
+    db = DuckDBConnection(history)
+    # The SQL mirrors bar_quality's ERROR rules. It is expressed here rather
+    # than looping through the pure predicate because this walks ~25M rows;
+    # the pure rules remain the spec and `mmr data audit` re-checks the result
+    # through them, so a mismatch would show up immediately as a non-zero
+    # error count where zero is now expected.
+    where = ("high IS NOT NULL AND low IS NOT NULL AND open IS NOT NULL "
+             "AND close IS NOT NULL AND ("
+             "  high < greatest(open, close) OR low > least(open, close) "
+             "  OR high < low OR open <= 0 OR high <= 0 OR low <= 0 OR close <= 0"
+             ")")
+    n = db.execute(f'SELECT count(*) FROM tick_data WHERE {where}',
+                   fetch='one')[0]
+    if not n:
+        print_status('no impossible bars in tick_data — nothing to move')
+        return
+    if getattr(args, 'dry_run', False):
+        rows = db.execute(
+            f'SELECT bar_size, count(*) FROM tick_data WHERE {where} '
+            f'GROUP BY bar_size ORDER BY 2 DESC', fetch='all') or []
+        print_status(f'{n:,} impossible bar(s) would move to quarantine '
+                     f'(dry run): ' + ', '.join(f'{b}={c:,}' for b, c in rows))
+        return
+
+    def _move(conn):
+        conn.execute(f"""
+            INSERT INTO tick_data_quarantine
+            SELECT symbol, date, open, high, low, close, volume, average,
+                   bar_count, bar_size, what_to_show,
+                   now(), 'structurally impossible bar (backfilled audit)'
+            FROM tick_data WHERE {where}
+        """)
+        conn.execute(f'DELETE FROM tick_data WHERE {where}')
+        return conn.execute('SELECT count(*) FROM tick_data_quarantine').fetchone()[0]
+
+    total = db.execute_atomic(_move)
+    print_status(f'moved {n:,} impossible bar(s) out of tick_data; '
+                 f'quarantine now holds {total:,}')
 
 
 def _handle_data_audit(args: argparse.Namespace):
