@@ -45,12 +45,16 @@ def make_work(**kwargs) -> SignalWork:
     return SignalWork(**defaults)
 
 
+# A healthy bar age. Leaving this unset used to mean "undatable", which the
+# stale-bar gate silently let through; it now refuses. Tests that are not
+# about bar freshness should present a NORMAL bar, not an unreadable one.
 def decide(work, *, kill_switch=False, paper_trading=True, held_qty=0.0,
-           already_executed_bar=False, cooldown_active=False):
+           already_executed_bar=False, cooldown_active=False,
+           bar_age_seconds=10.0):
     return decide_signal(
         work, kill_switch=kill_switch, paper_trading=paper_trading,
         held_qty=held_qty, already_executed_bar=already_executed_bar,
-        cooldown_active=cooldown_active)
+        cooldown_active=cooldown_active, bar_age_seconds=bar_age_seconds)
 
 
 # ---------------------------------------------------------------------------

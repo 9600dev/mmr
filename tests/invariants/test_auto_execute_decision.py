@@ -123,7 +123,11 @@ class TestLiveDoubleArm:
         gate must be about LIVE mode specifically."""
         d = decide_signal(
             _work(Action.BUY), kill_switch=False, paper_trading=True,
-            held_qty=0.0, already_executed_bar=False, cooldown_active=False)
+            held_qty=0.0, already_executed_bar=False, cooldown_active=False,
+            # A normal bar: this property is about LIVE arming, not bar
+            # freshness, and must not depend on how the gate treats an
+            # unstated age.
+            bar_age_seconds=10.0)
         assert d.kind == 'open'
 
 

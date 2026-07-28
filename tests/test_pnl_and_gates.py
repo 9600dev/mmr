@@ -189,7 +189,10 @@ def _work(action, bar_size_seconds=60.0, **kw):
         bar_size_seconds=bar_size_seconds, **kw)
 
 
-def _decide(work, bar_age=None, multiple=3.0, held=0.0, paper=True, armed=False):
+# A healthy bar age. Leaving this unset used to mean "undatable", which the
+# stale-bar gate silently let through; it now refuses. Tests that are not
+# about bar freshness should present a NORMAL bar, not an unreadable one.
+def _decide(work, bar_age=10.0, multiple=3.0, held=0.0, paper=True, armed=False):
     return decide_signal(
         work, kill_switch=False, paper_trading=paper, held_qty=held,
         already_executed_bar=False, cooldown_active=False,
