@@ -407,6 +407,44 @@ class TestTraderServiceRestartResubscribes:
         rt.subscribe(strat, self._contract(101))
         assert rt.strategies[101] == [strat], 'the strategy was duplicated or dropped'
 
+    def test_publishes_we_cannot_attribute_to_the_live_process_are_resent(self, tmp_path):
+        """The hole in the first version of this fix, found on its first live
+        test rather than by any test written for it.
+
+        The two facts are learned INDEPENDENTLY, so they can disagree.
+        strategy_service published its subscriptions to trader_service instance
+        A, then trader_service restarted inside the startup window, so the
+        FIRST status read that succeeded came from instance B. With `previous
+        is None` treated as "first read, nothing to compare", the publishes
+        made to A were kept, never re-sent, and the feed stayed dead — the
+        exact outage this fix exists to prevent, surviving the fix.
+
+        A publish that cannot be attributed to the live process must be
+        re-sent. The cost of being wrong is a duplicate subscription; the cost
+        of the other choice is silence.
+        """
+        rt = self._runtime_with(tmp_path, ['boot-B'])
+
+        class _S:
+            name = 's'
+        strat = _S()
+
+        # Published to an instance we never got a status read from.
+        rt.subscribe(strat, self._contract(101))
+        assert rt._published == [101]
+        assert rt._trader_boot_id is None, 'precondition: no boot id observed yet'
+
+        assert rt._note_trader_boot() is True
+        rt.subscribe(strat, self._contract(101))
+        assert rt._published == [101, 101]
+
+    def test_a_clean_start_does_not_log_a_phantom_restart(self, tmp_path):
+        """The converse. With nothing published yet there is nothing to
+        re-send, so the first status read is not a restart."""
+        rt = self._runtime_with(tmp_path, ['boot-A'])
+        assert rt._note_trader_boot() is False
+        assert rt._published == []
+
     def test_an_unreadable_status_is_not_treated_as_a_restart(self, tmp_path):
         """Re-publishing every conId on a transient RPC failure would hammer
         trader_service with duplicate subscriptions on exactly the cycles it is

@@ -955,15 +955,31 @@ class StrategyRuntime():
             return False   # older trader_service; nothing to compare against
 
         previous, self._trader_boot_id = self._trader_boot_id, boot_id
-        if previous is None or previous == boot_id:
+        if previous == boot_id:
             return False
 
-        logging.warning(
-            'trader_service restarted (boot %s -> %s) — its market-data '
-            'subscriptions died with it; re-subscribing %d conId(s)',
-            previous, boot_id, len(self._published_conids))
-        self._published_conids.clear()
-        return True
+        # `previous is None` counts as a mismatch, and that is the whole point.
+        # Normally there is nothing to discard, because a fresh process has
+        # published nothing. But the two facts are learned INDEPENDENTLY, so
+        # they can disagree: subscriptions can be published to instance A while
+        # the first status read only succeeds against instance B, if
+        # trader_service restarts inside our startup window. Then we hold
+        # publishes we cannot attribute to the live process. Treating that as
+        # "first read, nothing to compare" left the feed dead — observed on the
+        # very first live test of this fix, which is why it is not written that
+        # way. Unattributable publishes are re-sent; the cost is a duplicate
+        # subscription, the alternative is silence.
+        stale = len(self._published_conids)
+        if stale:
+            logging.warning(
+                'trader_service boot %s -> %s — its market-data subscriptions '
+                'died with it; re-subscribing %d conId(s)',
+                previous or 'unknown', boot_id, stale)
+            self._published_conids.clear()
+            return True
+
+        logging.info('trader_service boot id is %s', boot_id)
+        return False
 
     def subscribe_universe(self, strategy: Strategy, universe_name: str) -> None:
         logging.debug('strategy_runtime.subscribe_universe() universe: {} strategy: {}'.format(universe_name, strategy))
