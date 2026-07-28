@@ -35,23 +35,23 @@ from trader.strategy import auto_executor as auto_executor_module
 TS = pd.Timestamp('2026-07-06 10:39:00')
 
 @pytest.fixture(autouse=True)
-def _freeze_bar_age(monkeypatch):
-    """Freeze the stale-bar gate's clock for this module.
+def _freeze_clock(monkeypatch):
+    """Pin "now" for this module, without stubbing anything real.
 
-    `_process_signal` computes the bar's age against the wall clock, so a test
-    fixture is only "fresh" relative to when the test runs. Making the fixture
-    timestamp dynamic fixed that and introduced NONDETERMINISM: two mutation
-    runs over identical code disagreed on ~30 mutants in this module, because
-    each mutant runs in its own pytest invocation at a different instant.
+    The stale-bar gate measures a bar against the wall clock, so these tests
+    are time-dependent. Making the fixture timestamp dynamic fixed that and
+    made the mutation score move without the code moving (~30 mutants flipping
+    between identical runs). Stubbing `bar_age_seconds` fixed THAT and cost ~26
+    points of coverage, because the function's own mutants became unreachable.
 
-    A verification gate whose number moves without the code moving is a gate
-    whose alarms cannot be trusted, so the age is frozen instead. The bar
-    timestamp stays fixed and reproducible, and these tests present a healthy
-    age because none of them are ABOUT bar freshness. The ones that are call
-    `decide_signal` directly with an explicit age, and are unaffected by this.
+    Overriding only the clock costs neither: the real `bar_age_seconds` runs
+    against the real fixture timestamp, and the age it computes is a fixed 10
+    seconds. Tests that are actually about staleness call `decide_signal`
+    directly with an explicit age and are untouched by this.
     """
-    monkeypatch.setattr(auto_executor_module, 'bar_age_seconds',
-                        lambda bar_ts, now_utc=None: 10.0)
+    frozen = TS.tz_localize('UTC') + pd.Timedelta(seconds=10)
+    monkeypatch.setattr(auto_executor_module.AutoExecutor, '_now_utc',
+                        lambda self: frozen.to_pydatetime())
 
 
 
