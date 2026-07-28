@@ -149,6 +149,7 @@ def driftless_session_bars(
     seed: int = 0,
     start_price: float = 100.0,
     annual_vol: float = 0.32,
+    annual_drift: float = 0.0,
     session_tz: str = 'America/New_York',
     open_minute: int = 9 * 60 + 30,
     close_minute: int = 16 * 60,
@@ -180,6 +181,16 @@ def driftless_session_bars(
     and the result would no longer be unambiguously manufactured.
 
     ``annual_vol`` defaults to 32%, roughly a liquid US large-cap.
+
+    ``annual_drift`` defaults to 0 — the pure null. Set it to the realised
+    market return over the comparison window to answer a SHARPER question. A
+    long-biased strategy on real equities earns the market's rise for free, so
+    a zero-drift control understates what a no-skill strategy would have made
+    and flatters the real result by the whole equity risk premium. With drift
+    matched, anything the real data still shows above the control is not beta.
+    Drift is added to the mean of the SAME i.i.d. process, so it introduces a
+    trend without introducing any predictability: no rule computable from bars
+    0..t forecasts bar t+1 any better than the constant.
     """
     rng = np.random.default_rng(seed)
 
@@ -201,7 +212,8 @@ def driftless_session_bars(
     # Close-to-close log returns, zero mean. Overnight boundaries get the same
     # distribution scaled up a little, which is the only concession to realism
     # and cannot create predictability (it is still zero-mean and independent).
-    steps = rng.normal(0.0, sigma, n)
+    mu = annual_drift / (252.0 * per_session)
+    steps = rng.normal(mu, sigma, n)
     session_start = np.zeros(n, dtype=bool)
     session_start[::per_session] = True
     steps[session_start] *= 3.0

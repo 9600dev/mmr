@@ -59,7 +59,8 @@ _BASE_CONID = 900_000_000
 
 
 def _run_instrument(db_dir: str, config, strategy: str, class_name: str,
-                    index: int, days: int, start_date: str, cells: list):
+                    index: int, days: int, start_date: str, cells: list,
+                    annual_drift: float = 0.0):
     """Generate ONE instrument and run every parameter cell against it.
 
     Each worker owns its own single-instrument DuckDB. That is not a
@@ -76,7 +77,8 @@ def _run_instrument(db_dir: str, config, strategy: str, class_name: str,
 
     df = driftless_session_bars(days=days, seed=1000 + index,
                                 start_price=50.0 + 5.0 * index,
-                                start_date=start_date)
+                                start_date=start_date,
+                                annual_drift=annual_drift)
     storage = TickStorage(path)
     # Written through the ordinary chokepoint, so bar_quality validates these
     # bars exactly as it would a vendor's.
@@ -113,6 +115,11 @@ def main() -> int:
     ap.add_argument('--instruments', type=int, default=20)
     ap.add_argument('--days', type=int, default=250)
     ap.add_argument('--start-date', default='2025-07-01')
+    ap.add_argument('--annual-drift', type=float, default=0.0,
+                    help='annualised drift for the null. 0 = pure noise. Set to '
+                         'the market return over the window to strip beta out '
+                         'of the comparison, so what remains above the control '
+                         'cannot be explained by the market having risen.')
     ap.add_argument('--live-semantics', action='store_true',
                     help='AutoExecutor semantics (no pyramiding, fixed notional)')
     ap.add_argument('--db', default=None, help='where to put the throwaway store')
@@ -132,6 +139,9 @@ def main() -> int:
           f'edge-free instruments x {len(cells)} parameter cells '
           f'= {args.instruments * len(cells)} runs')
     print(f'stores: {db_dir}/  (isolated — the live history is never touched)')
+    print(f'null: driftless random walk'
+          + (f' + {args.annual_drift:.1%}/yr drift (beta-matched)'
+             if args.annual_drift else ' (pure noise, no drift)'))
 
     start = dt.datetime.fromisoformat(args.start_date)
     config = BacktestConfig(
@@ -147,7 +157,8 @@ def main() -> int:
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         futures = {
             pool.submit(_run_instrument, db_dir, config, args.strategy,
-                        args.class_name, i, args.days, args.start_date, cells): i
+                        args.class_name, i, args.days, args.start_date, cells,
+                        args.annual_drift): i
             for i in range(args.instruments)
         }
         for fut in as_completed(futures):
