@@ -551,9 +551,51 @@ held +3, SELL 5  ->  reduce 3  (exit-class, ungated, never refusable)
 - Any exit spec (bracket, trailing stop) rides with the **remainder**, since
   the new position is what needs protection; the reduction is a plain close.
 
+**It did not work the first time.** Splitting was correct and still left the
+hole open on the direct path, because a gate UPSTREAM of the splitter had
+already exempted the order. The RPC layer asked
+`order_reduces_exposure(contract, action, FULL quantity)` — direction-aware and
+not size-clamped, so `SELL 3` against 1 held answered "exit" and the whole
+order skipped `require_proposal_approval`, opening half included. The splitter
+downstream then placed both halves past a gate that had decided not to look.
+
+Found live within minutes of deploying the split, by running the control
+alongside the probe:
+
+| probe | held | result |
+|---|---|---|
+| `mmr sell GOOGL --limit 900 --quantity 3` | 1 | **placed both halves** |
+| `mmr sell AAPL --limit 900 --quantity 2` | 0 | correctly refused |
+
+Same path, same session, same config. Without the control the first result
+looks like the split working.
+
+The fix makes `Trader.split_for_order()` the ONE place that answers "how much
+of this opens exposure" — the proposal gate, the approver notional tier and
+both order paths now call it, and the gate passes `allow_open=False` down
+rather than computing a quantity upstream and trusting it. The tier's
+`_opening_exposure_quantity` had been a second implementation of the same
+question, resolving the position slightly differently; it is now a thin
+accessor.
+
+**The transferable lesson.** A decomposition is only as strong as the agreement
+between everyone who classifies the thing being decomposed. Two components each
+asking a locally reasonable question, in the wrong order, restored the exact
+hole the decomposition removed. Look for the OTHER askers before declaring a
+classification bug fixed.
+
 **Verification.** Pure, `deal`-contracted (conservation, non-negativity, and
-"the reduction never exceeds the position"), CrossHair-clean, 95.2% mutation
-with two proven equivalents. `tests/invariants/test_order_split.py` pins both
+"the reduction never exceeds the position"), CrossHair-clean, 95.4% mutation
+with three proven equivalents. The `deal` postcondition then rejected exact
+float conservation as unachievable (`held=-1.2890519581908961`,
+`BUY 513.7350762451457`): one half is pinned to `|held|` and the other is a
+subtraction, so they can miss by an ULP. The spec was revised to be asymmetric
+and STRICTER where it counts — summing to MORE than the request is refused
+exactly, summing to less is tolerated to one ULP — and `split_order` steps the
+opening half down to guarantee the exact half. Mutation testing then showed
+that step-down was never exercised: it only runs when `qty > 2*|held|`, which
+at ordinary sizes forces a remainder far above 1.0, so its sub-1.0 path is
+reachable only at denormal magnitudes. Pinned. `tests/invariants/test_order_split.py` pins both
 directions, because each alone is satisfiable by a broken splitter: one that
 puts everything in `open_qty` closes the hole and makes exits refusable, and
 one that puts everything in `reduce_qty` preserves exits and leaves the hole
