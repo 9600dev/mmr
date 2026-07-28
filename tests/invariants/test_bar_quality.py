@@ -201,3 +201,68 @@ class TestJumpsAreReportedNeverJudged:
     def test_an_ordinary_move_is_not_flagged(self):
         b = Bar(ts=0.0, open=100.0, high=100.0, low=100.0, close=100.0, volume=1.0)
         assert unexplained_jumps([b, b._replace(ts=60.0, close=103.0)]) == []
+
+
+class TestTheFastPathAgreesWithTheSpec:
+    """The write path cannot afford to build a NamedTuple per bar, so it uses a
+    vectorised mask. Two implementations of one rule is precisely the shape
+    that produced the flip-residual bug, where a gate and a splitter answered
+    different questions about the same order.
+
+    So the mask is not allowed its own opinion: it must select exactly the rows
+    the spec calls errors. If they ever disagree, the spec wins and the mask is
+    wrong.
+    """
+
+    @_SETTINGS
+    @given(rows=st.lists(
+        st.one_of(
+            coherent_bar(),
+            st.builds(Bar,
+                      ts=st.floats(min_value=0, max_value=4e9,
+                                   allow_nan=False, allow_infinity=False),
+                      open=st.one_of(_PRICE, st.just(float('nan')), st.just(0.0)),
+                      high=st.one_of(_PRICE, st.just(float('nan'))),
+                      low=st.one_of(_PRICE, st.just(float('nan'))),
+                      close=st.one_of(_PRICE, st.just(float('nan'))),
+                      volume=st.one_of(_VOL, st.just(float('nan')),
+                                       st.just(-1.0)))),
+        min_size=1, max_size=40))
+    def test_the_mask_selects_exactly_the_spec_errors(self, rows):
+        import pandas as pd
+        from trader.data.bar_quality import impossible_mask
+
+        df = pd.DataFrame({
+            'open': [b.open for b in rows], 'high': [b.high for b in rows],
+            'low': [b.low for b in rows], 'close': [b.close for b in rows],
+            'volume': [b.volume for b in rows],
+        })
+        by_spec = [any(f.severity == 'error' for f in check_bar(b, i))
+                   for i, b in enumerate(rows)]
+        by_mask = list(impossible_mask(df))
+        assert by_mask == by_spec, (
+            f'mask and spec disagree at '
+            f'{[i for i, (a, b) in enumerate(zip(by_mask, by_spec)) if a != b]}')
+
+    def test_an_empty_frame_is_handled(self):
+        import pandas as pd
+        from trader.data.bar_quality import impossible_mask
+        assert len(impossible_mask(pd.DataFrame())) == 0
+
+    def test_a_frame_without_ohlc_columns_rejects_nothing(self):
+        """Refusing here would block legitimate non-OHLC writes rather than
+        protect anything."""
+        import pandas as pd
+        from trader.data.bar_quality import impossible_mask
+        df = pd.DataFrame({'something_else': [1, 2, 3]})
+        assert not impossible_mask(df).any()
+
+    def test_placeholder_rows_are_never_selected(self):
+        """All-NaN rows record 'the source had nothing for this date'. They may
+        be load-bearing for the incremental refresh, so dropping them could
+        send it re-fetching the same empty range forever."""
+        import numpy as np, pandas as pd
+        from trader.data.bar_quality import impossible_mask
+        df = pd.DataFrame({'open': [np.nan], 'high': [np.nan], 'low': [np.nan],
+                           'close': [np.nan], 'volume': [np.nan]})
+        assert not impossible_mask(df).any()
