@@ -584,6 +584,28 @@ asking a locally reasonable question, in the wrong order, restored the exact
 hole the decomposition removed. Look for the OTHER askers before declaring a
 classification bug fixed.
 
+**Applying that lesson immediately found a third.** An audit of every caller of
+`order_reduces_exposure` turned up `enforce_approver_tier` doing the same
+thing: it exempts anything the classifier calls a reduction, and a split flip's
+opening half still reads as one, because the reduction it follows may not have
+filled. So the notional tier — the control meant to stand between a compromised
+proposer context and a large position — handed the remainder the very exemption
+the split exists to remove. Measured: a $50,000 opening short with no approver
+key was EXEMPTED as a flip remainder while the identical order from flat was
+refused.
+
+Latent rather than live, since the tier is off by default
+(`approver_required_above_usd = 0`). Fixed by passing `force_open` through, not
+by recomputing the opening remainder there: a second position read that came
+back unreadable would gate a GENUINE exit, which is the failure this tier's
+design deliberately avoids. Pure exits keep their exemption; the three cases
+are pinned together so a later "simplification" cannot trade one for the other.
+
+Worth noting how the two were found. The RPC gate needed a live probe WITH A
+CONTROL — the flip alone looked like the split working, and only the plain open
+short beside it showed the difference. The tier needed no probe at all, just
+the grep the first bug earned.
+
 **Verification.** Pure, `deal`-contracted (conservation, non-negativity, and
 "the reduction never exceeds the position"), CrossHair-clean, 95.4% mutation
 with three proven equivalents. The `deal` postcondition then rejected exact

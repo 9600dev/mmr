@@ -357,14 +357,17 @@ class TradeExecutioner():
         # approve() path. Called unconditionally: it no-ops when the feature is
         # off and for ALL exit-class orders, so it is safe on every direct order —
         # but it DOES gate an above-threshold pure open that arrived through the
-        # direct buy/sell path without a valid key. NOTE: it does NOT gate a
-        # flip's net-new remainder — enforce_approver_tier exempts anything
-        # order_reduces_exposure calls a reduction, flips included (documented
-        # residual, see SAFETY_ROADMAP). This comment used to claim otherwise.
+        # direct buy/sell path without a valid key. It also gates a split flip's
+        # opening remainder: `force_open` is passed through, because that half's
+        # position read still shows the pre-reduction size and would otherwise
+        # claim the exit exemption. (Until 2026-07-27 it did exactly that, and
+        # this comment described it as a documented residual; splitting plus
+        # force_open closes it.)
         tier_error = await self.trader.enforce_approver_tier(
             contract, str(order.action), float(order.totalQuantity or 0),
             str(getattr(order, 'orderType', '') or ''),
-            getattr(order, 'lmtPrice', 0.0), approver_key)
+            getattr(order, 'lmtPrice', 0.0), approver_key,
+            force_open=force_open)
         if tier_error:
             self._log_event(EventType.RISK_GATE_REJECTED, contract, order)
             logging.warning('approver tier rejected order: %s', tier_error)

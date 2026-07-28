@@ -1376,6 +1376,30 @@ class TestFlipSplitting:
         assert len(t._placed) == 1
         assert t._placed[0] == ('BUY', 5.0, False)
 
+    def test_the_approver_tier_is_told_the_remainder_is_an_open(self):
+        """Wiring, not logic. `enforce_approver_tier` decides correctly when it
+        is told `force_open=True`; the failure mode is nobody telling it.
+
+        That is not hypothetical — it is how the tier came to exempt split
+        remainders in the first place: the classifier said "exit" because the
+        pre-reduction position was still live, and the call site had no way to
+        say otherwise. A test that calls the tier directly cannot catch a
+        missing keyword at the call site, so this one goes through
+        `place_expressive_order`.
+        """
+        import asyncio
+        from trader.trading.proposal import ExecutionSpec
+        t = self._trader(held=3.0)
+        spec = ExecutionSpec(order_type='MARKET', exit_type='NONE').to_dict()
+        asyncio.run(t.place_expressive_order(self._contract(), 'SELL', 5.0, spec))
+
+        opens = [c for c in t.enforce_approver_tier.await_args_list
+                 if c.kwargs.get('force_open')]
+        assert len(opens) == 1, (
+            'the opening remainder must reach the approver tier flagged as an '
+            f'open; tier calls were {t.enforce_approver_tier.await_args_list}')
+        assert opens[0].args[2] == 2.0, 'the flagged call must be the remainder'
+
     def test_a_short_flip_splits_symmetrically(self):
         import asyncio
         from trader.trading.proposal import ExecutionSpec

@@ -1259,6 +1259,7 @@ class Trader():
     async def enforce_approver_tier(
         self, contract: Contract, action: str, quantity: float,
         order_type: str, limit_price: Optional[float], approver_key: str,
+        force_open: bool = False,
     ) -> Optional[str]:
         """The single server-side approver notional-tier enforcement point.
         Returns an error string to REFUSE the order, else ``None``.
@@ -1277,19 +1278,26 @@ class Trader():
         threshold = getattr(self, 'approver_required_above_usd', 0.0) or 0.0
         if threshold <= 0:
             return None  # feature OFF
-        # Exit-class orders — a SELL against ANY held long, a BUY against ANY
-        # held short, INCLUDING an oversized "flip" that crosses zero — are
-        # NEVER gated, using the same server-side classifier the rest of the
-        # system trusts (order_reduces_exposure). Two reasons this, not an
-        # opening-remainder computation: (1) roadmap principle 2 — an order that
-        # reduces the live position must never be blocked by an approval
-        # requirement, and refusing an atomic flip refuses its embedded exit;
-        # (2) a second position read here could race and gate a GENUINE exit on
-        # a momentary unreadable position. The pure exit (SELL <= held) is
-        # always available; a flip's net-new opening remainder is a documented
-        # residual (SAFETY_ROADMAP), closed by turnover caps / order-splitting,
-        # never by refusing a reduction.
-        if self.order_reduces_exposure(contract, action, quantity):
+        # Exit-class orders are NEVER gated, using the same server-side
+        # classifier the rest of the system trusts. The reason to keep asking
+        # `order_reduces_exposure` here rather than recomputing an opening
+        # remainder still holds: an order that reduces the live position must
+        # never be blocked by an approval requirement, and a second position
+        # read that comes back unreadable would gate a GENUINE exit.
+        #
+        # `force_open` is what keeps that exemption honest. It is set for the
+        # OPENING half of a split flip, whose live position read still shows
+        # the pre-reduction size and would therefore classify as an exit — so
+        # without it this tier hands the remainder the very exemption the split
+        # exists to take away. Verified: a $50k opening short with no approver
+        # key was exempted as a flip remainder while the identical order from
+        # flat was refused. Same shape as the RPC proposal-gate hole found live
+        # the same day, in a third layer; found by auditing the other askers
+        # rather than by another probe.
+        #
+        # A flip should never reach this method unsplit — both order paths
+        # decompose upstream — so this is defence in depth for the remainder.
+        if not force_open and self.order_reduces_exposure(contract, action, quantity):
             return None
         notional, evaluable = await self._tier_notional(
             contract, action, quantity, order_type, limit_price)
@@ -1734,7 +1742,8 @@ class Trader():
             # order path calls the same method unconditionally.
             tier_error = await self.enforce_approver_tier(
                 contract, action, quantity,
-                spec.order_type, spec.limit_price, approver_key)
+                spec.order_type, spec.limit_price, approver_key,
+                force_open=force_open)
             if tier_error is not None:
                 return SuccessFail.fail(error=tier_error)
 

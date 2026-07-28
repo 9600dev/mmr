@@ -14,10 +14,10 @@
       "score": 1.0
     },
     "trader/strategy/auto_executor.py": {
-      "killed": 1212,
-      "survived": 685,
+      "killed": 1263,
+      "survived": 634,
       "timeout": 25,
-      "score": 0.6436
+      "score": 0.670135
     },
     "trader/trading/exit_class.py": {
       "killed": 29,
@@ -37,6 +37,12 @@
       "timeout": 1,
       "score": 0.958904
     },
+    "trader/trading/order_split.py": {
+      "killed": 62,
+      "survived": 3,
+      "timeout": 3,
+      "score": 0.955882
+    },
     "trader/trading/order_structure.py": {
       "killed": 86,
       "survived": 3,
@@ -44,10 +50,10 @@
       "score": 0.966292
     },
     "trader/trading/position_sizing.py": {
-      "killed": 412,
-      "survived": 168,
+      "killed": 413,
+      "survived": 167,
       "timeout": 0,
-      "score": 0.710345
+      "score": 0.712069
     },
     "trader/trading/protective_stop.py": {
       "killed": 53,
@@ -60,12 +66,6 @@
       "survived": 32,
       "timeout": 0,
       "score": 0.909091
-    },
-    "trader/trading/order_split.py": {
-      "killed": 40,
-      "survived": 2,
-      "timeout": 0,
-      "score": 0.952381
     }
   }
 }
