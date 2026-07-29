@@ -75,6 +75,7 @@ TARGETS = [
     "trader.simulation.walk_forward.plan_fold_offsets",
     "trader.simulation.walk_forward.pick_best",
     "trader.simulation.walk_forward.selection_stability",
+    "trader.data.bar_quality.price_spikes",
     "trader.data.bar_quality.check_bar",
     ("trader.data.bar_quality.check_series", 10),
     ("trader.data.bar_quality.spacing_findings", 10),
