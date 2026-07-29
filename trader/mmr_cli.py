@@ -8360,16 +8360,24 @@ def _handle_walk_forward(args: argparse.Namespace):
         return float(v)
 
     total_runs = len(folds) * (len(cells) + 1)
-    console.print(
-        f'\n[bold]walk-forward[/bold] {args.class_name} — {len(folds)} folds x '
-        f'({len(cells)} cells fitted + 1 tested) = up to {total_runs} backtests')
-    console.print(
-        f'  {"anchored" if args.anchored else "rolling"} '
-        f'train={args.train_days}d test={args.test_days}d, '
-        f'selecting on {args.metric}, '
-        f'{"live" if args.live_semantics else "accumulate"} semantics\n')
+    if not _json_mode:
+        console.print(
+            f'\n[bold]walk-forward[/bold] {args.class_name} — {len(folds)} folds x '
+            f'({len(cells)} cells fitted + 1 tested) = up to {total_runs} backtests')
+        console.print(
+            f'  {"anchored" if args.anchored else "rolling"} '
+            f'train={args.train_days}d test={args.test_days}d, '
+            f'selecting on {args.metric}, '
+            f'{"live" if args.live_semantics else "accumulate"} semantics\n')
 
     def _progress(res):
+        # Silent under --json: a progress line on stdout lands INSIDE the JSON
+        # document and makes the whole thing unparseable. Found by consuming
+        # our own output. Folds take minutes each, so the human-facing run
+        # still needs the running commentary — it just cannot share stdout
+        # with a machine-readable payload.
+        if _json_mode:
+            return
         m = res.test_metrics or {}
         chosen = json.dumps(res.chosen) if res.chosen else '—'
         ret = m.get('total_return')
