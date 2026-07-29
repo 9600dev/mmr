@@ -23,7 +23,8 @@ import numpy as np      # noqa: E402
 import pandas as pd     # noqa: E402
 
 
-def load_panel(min_bars: int = 500) -> pd.DataFrame:
+def load_panel(min_bars: int = 500,
+               max_daily_move: float = 1.0) -> pd.DataFrame:
     from trader.container import Container
     from trader.data.duckdb_store import DuckDBConnection
 
@@ -44,7 +45,27 @@ def load_panel(min_bars: int = 500) -> pd.DataFrame:
     wide = rows.pivot_table(index='day', columns='symbol', values='close',
                             aggfunc='last')
     wide.index = pd.to_datetime(wide.index)
-    return wide.sort_index()
+    wide = wide.sort_index()
+
+    # Exclude instruments carrying sequence-level defects. Per-bar quality
+    # rules cannot see these: every bar is internally coherent and it is the
+    # SEQUENCE that is impossible. Two classes, both found in the live store:
+    # a spike that reverses the next day (a bad print), and a sustained level
+    # shift of the kind an unadjusted split produces.
+    #
+    # Dropped whole rather than repaired. Patching a price means inventing
+    # one, and an instrument whose history contains a defect we cannot explain
+    # should not be silently half-trusted. The count is printed because a
+    # silent exclusion is indistinguishable from having no problem.
+    rets = wide.pct_change()
+    suspect = rets.abs().max() > max_daily_move
+    dropped = [str(c) for c in wide.columns[suspect.fillna(False)]]
+    if dropped:
+        print(f'  excluded {len(dropped)} instrument(s) with a daily move over '
+              f'{max_daily_move:.0%}: {", ".join(dropped[:8])}'
+              + (' ...' if len(dropped) > 8 else ''))
+        wide = wide.drop(columns=wide.columns[suspect.fillna(False)])
+    return wide
 
 
 def build_signals(px: pd.DataFrame) -> dict:
@@ -72,8 +93,13 @@ def build_signals(px: pd.DataFrame) -> dict:
     }
 
 
-def panel_conids(min_bars: int = 500) -> list:
-    """Conids with enough daily history for a panel backtest."""
+def panel_conids(min_bars: int = 500, max_daily_move: float = 1.0) -> list:
+    """Conids with enough daily history AND no sequence-level price defect.
+
+    Applies the same exclusion as `load_panel`, deliberately: if the scan and
+    the backtest saw different universes, an IC measured on one would be
+    attributed to a book built from the other.
+    """
     from trader.container import Container
     from trader.data.duckdb_store import DuckDBConnection
     cfg = Container.instance().config()
@@ -82,8 +108,11 @@ def panel_conids(min_bars: int = 500) -> list:
         """SELECT symbol FROM tick_data WHERE bar_size='1 day'
            GROUP BY symbol HAVING count(*) >= ? ORDER BY symbol""",
         [min_bars], fetch='all') or []
+    keep = set(load_panel(min_bars, max_daily_move).columns.astype(str))
     out = []
     for (sym,) in rows:
+        if str(sym) not in keep:
+            continue
         try:
             out.append(int(sym))
         except (TypeError, ValueError):

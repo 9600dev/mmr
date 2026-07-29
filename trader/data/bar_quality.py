@@ -237,6 +237,56 @@ def unexplained_jumps(bars: Sequence[Bar], threshold: float = 0.25) -> List[Find
     return out
 
 
+@deal.has()
+@deal.pure
+@deal.ensure(
+    lambda _: all(f.severity == 'error' for f in _.result),
+    message='a round-tripping spike cannot be a real price move')
+def price_spikes(bars: Sequence[Bar], threshold: float = 0.6,
+                 tolerance: float = 0.35) -> List[Finding]:
+    """A move that REVERSES the next bar: a bad print, not a market.
+
+    Distinct from `unexplained_jumps`, which reports any large move as a
+    warning because a crash and an unadjusted split look identical from
+    prices alone. This rule is narrower and therefore an ERROR: a price that
+    leaps and comes back to within ``tolerance`` of where it started did not
+    go anywhere. Real moves of that size do not round-trip.
+
+    Found in the live daily store on 2026-07-28: 11 such days across 5
+    instruments, including +606% followed by -85.8% (net x1.00) on consecutive
+    days spanning a year boundary. They are invisible to every per-bar rule,
+    because each bar is internally coherent - it is the SEQUENCE that cannot
+    have happened. One of them was enough to make an equal-weight
+    buy-and-hold benchmark report a CAGR of 116%.
+
+    Deliberately does NOT flag a sustained level shift (a jump that stays).
+    That is the signature of an unadjusted split, which needs a
+    corporate-actions feed to tell from a real re-rating, and guessing would
+    delete genuine history.
+    """
+    out: List[Finding] = []
+    if not (_finite(threshold) and threshold > 0):
+        return out
+    if not (_finite(tolerance) and tolerance > 0):
+        return out
+    for i in range(1, len(bars) - 1):
+        prev, cur, nxt = bars[i - 1].close, bars[i].close, bars[i + 1].close
+        if not all(_finite(x) and x > 0 for x in (prev, cur, nxt)):
+            continue
+        up = cur / prev - 1.0
+        back = nxt / cur - 1.0
+        if abs(up) < threshold:
+            continue
+        # Did the round trip return to roughly the starting level?
+        net = (1.0 + up) * (1.0 + back) - 1.0
+        if abs(net) <= tolerance:
+            out.append(Finding(
+                'price_spike', 'error', i,
+                f'close {prev:g} -> {cur:g} -> {nxt:g}: a {up:+.1%} move that '
+                f'reversed to {net:+.1%} net cannot be a real price'))
+    return out
+
+
 # --------------------------------------------------------------------------
 # Vectorised counterpart, for the write path.
 #
