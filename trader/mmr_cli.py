@@ -1632,6 +1632,15 @@ def build_parser() -> argparse.ArgumentParser:
                       help='What the fit optimises (default sharpe)')
     wf_p.add_argument('--capital', type=float, default=100000)
     wf_p.add_argument('--bar-size', default='1 min')
+    wf_p.add_argument('--panel', action='store_true',
+                      help='Cross-sectional book: the strategy sees every '
+                           'instrument at once and returns target weights. '
+                           'Selection still happens on the train window only.')
+    wf_p.add_argument('--no-trade-band', type=float, default=0.0,
+                      help='Panel only: minimum change, as a fraction of the '
+                           'target, that justifies rebalancing a held name')
+    wf_p.add_argument('--borrow-bps', type=float, default=0.0,
+                      help='Panel only: annualised short borrow cost')
     wf_p.add_argument('--live-semantics', action='store_true',
                       help='AutoExecutor semantics — validate the way you deploy')
     wf_p.add_argument('--trade-notional', type=float, default=None)
@@ -8337,9 +8346,13 @@ def _handle_walk_forward(args: argparse.Namespace):
         )
         if args.live_semantics and args.trade_notional:
             config.trade_notional = args.trade_notional
+        if getattr(args, 'panel', False):
+            config.panel_no_trade_band = args.no_trade_band
+            config.short_borrow_bps_annual = args.borrow_bps
         try:
             r = Backtester(storage, config).run_from_module(
-                args.strategy, args.class_name, args.conids, params=dict(cell))
+                args.strategy, args.class_name, args.conids, params=dict(cell),
+                panel=getattr(args, 'panel', False))
         except Exception as exc:                         # noqa: BLE001
             logging.warning('walk-forward: %s %s..%s failed: %s',
                             cell, start, end, exc)
