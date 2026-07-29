@@ -249,6 +249,121 @@ runs. Infer the period from the curve (`infer_periods_per_year`).
 
 ---
 
+## Cross-sectional research: a different question, with power behind it
+
+Everything above evaluates a TIME-SERIES strategy - one instrument, "is this
+going up". That shape is why the 2026-07 research had no statistical power: it
+produced 20-44 trades per ten-month walk-forward, and at 44 trades you can
+only detect a per-trade Sharpe above 0.30, which is enormous. The experiments
+could not have found a realistic edge if one existed.
+
+A cross-sectional strategy asks "which of these is cheap RELATIVE to the
+others". Same data, orders of magnitude more evidence: 490 names over 10 years
+is 1.15M observations and ~2,400 periods.
+
+### Step 1 - is there any information? (`scripts/signal_scan.py`)
+
+**Do this before building or running any backtest.** A backtest checks that a
+KNOWN signal survives costs; it is a bad instrument for discovering whether the
+signal exists, because it discards most of the evidence. If the IC is zero,
+there is nothing to backtest, and you have learned that in milliseconds.
+
+* **Information Coefficient** - rank correlation, within each period, between
+  the signal and the return that FOLLOWS it. Rank rather than Pearson: a
+  signal only has to get the ORDER right.
+* **Quantile spread** - bucket by signal, average forward return per bucket. A
+  real signal is roughly monotone. A good IC with a non-monotone spread means
+  one extreme is doing all the work, which is a more fragile claim.
+* **Turnover** - how much the ranking churns. Costs scale with it, and a
+  strong IC that reshuffles daily can be unprofitable at any realistic spread.
+
+**Always carry a pure-noise control column.** It is not a formality - it caught
+a real defect the first time it ran. See below.
+
+### The overlapping-observations trap
+
+At horizon `h` sampled daily, consecutive observations share `h-1` days of the
+same forward return. They are nowhere near independent, and the naive standard
+error is too small by roughly `sqrt(h)`, inflating every t-statistic by that
+factor.
+
+This is not hypothetical. First run of the scan:
+
+| signal | h | mean IC | t-stat |
+|---|---|---|---|
+| momentum_12_1 | 21 | 0.0176 | **4.06** |
+| **random_control** | 21 | 0.0021 | **2.07** |
+
+Pure noise scored "significant". Since noise cannot predict returns, the
+statistic was wrong. Newey-West with Bartlett weights corrects it, and the
+correction is brutal: momentum_12_1 at h=21 falls from **4.06 to 1.19** - the
+strongest-looking row in the table was not significant at all.
+
+`summarise_ic(ic, horizon=h)` applies it. Pass the same horizon the forward
+returns were built with, and read `t(NW)`, never `t(raw)`.
+
+### Measured, 2026-07-28 - what survived
+
+490 instruments x 2,572 days, 1,154,416 observations:
+
+| signal | h | mean IC | t(NW) | hit% | turnover |
+|---|---|---|---|---|---|
+| **momentum_12_1** | **1** | **0.0181** | **3.45** | 54.5 | **0.036** |
+| momentum_12_1 | 5 | 0.0229 | 2.61 | 55.7 | 0.036 |
+| reversal_5d | 1 | 0.0105 | 2.65 | 51.5 | 0.144 |
+| momentum_6_1 | 1 | 0.0095 | 2.00 | 53.1 | 0.045 |
+| low_vol_63d | 21 | -0.0257 | -1.21 | 47.7 | 0.010 |
+| random_control | 1 | 0.0011 | 1.01 | 51.4 | 0.333 |
+
+12-1 momentum is the one with evidence: 2,154 independent periods, needs 722
+for significance, has them. Its turnover of 0.036 matters as much as the IC -
+the ranking barely moves day to day, which is what makes it survivable after
+costs. Short-horizon reversal scored a comparable IC at four times the churn.
+
+### Step 2 - does it survive execution? (`Backtester.run_panel`)
+
+Only now is a backtest the right instrument. The IC says the ranking is
+slightly better than random; it knows nothing about spreads. Whether a book
+capturing an IC of 0.018 at 3.6% daily turnover clears costs is exactly what a
+portfolio simulation is for.
+
+```bash
+# panel=True selects the cross-sectional loop; the strategy implements
+# precompute_panel/on_panel and returns target WEIGHTS, not Signals.
+```
+
+Two semantics that are easy to get wrong and are pinned in
+`tests/invariants/test_panel_execution.py`:
+
+* returning `None` means **no instruction** and holds the book; returning `{}`
+  means **hold nothing** and liquidates. A signal in its warm-up returns
+  `None` every period, and if that flattened, no cross-sectional strategy
+  could hold a position through its own warm-up.
+* sizing uses the **decision bar's close**, not the fill price. When the next
+  open gaps, realised notional misses the target weight - correct, since
+  sizing off the fill would hit it exactly by using a price that had not
+  happened yet.
+
+### First result, and the caveats that go with it
+
+120 names, 2016-2026, 5bps slippage + $0.005/share:
+
+| | total | CAGR | Sharpe | max DD |
+|---|---|---|---|---|
+| long-only | +571.8% | +18.8% | 0.87 | -36.9% |
+| **long/short** | +21.0% | **+1.7%** | **0.20** | -32.9% |
+
+The long/short line is the closest thing to isolated alpha, and **Sharpe 0.20
+is not deployable**. A real IC (t = 3.45) converted into a traded,
+cost-bearing, market-neutral book leaves almost nothing. That is the gap the
+IC could never have shown, and the reason step 2 exists.
+
+Outstanding before this number means anything: the long-only row has not been
+benchmarked against equal-weight buy-and-hold of the same universe (without
+it, 18.8% is uninterpretable - it may be pure beta), only 120 of 490 names
+were used, no borrow cost is modelled on the short leg, and survivorship bias
+flatters the long side.
+
 ## Where to look next
 
 The one strategy that was never armed is the one with the best evidence:

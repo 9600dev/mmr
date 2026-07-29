@@ -1744,10 +1744,238 @@ you already trusted.
 
 ---
 
-## 13. The loop, restated
+## 13. Layer 7: controls that must fail
+
+Every layer so far checks code against a spec. There is a failure mode none of
+them can catch, and it only appears when the code being verified is a
+**measurement instrument** - a backtester, a statistic, an evaluator.
+
+An instrument can be correctly implemented and still measure the wrong thing.
+Contracts, properties and mutation testing all verify that the code does what
+you said. None of them can tell you that what you said was the wrong question.
+
+The fix is old and comes from the lab, not from software: run the instrument
+on a sample whose true answer you already know, and check it reports that
+answer.
+
+### The null control
+
+```python
+# trader/simulation/synthetic_markets.py
+def driftless_session_bars(days=250, seed=0, annual_drift=0.0, ...):
+    """A year of 1-minute bars containing, by construction, NOTHING to find."""
+    sigma = annual_vol / np.sqrt(252.0 * per_session)
+    mu = annual_drift / (252.0 * per_session)
+    steps = rng.normal(mu, sigma, n)      # i.i.d. - no bar predicts the next
+    close = start_price * np.exp(np.cumsum(steps))
+```
+
+Run the real pipeline over it - same strategy class, same grid, same
+Backtester, same execution semantics - and read off what it reports. On this
+repo, the best of 180 searched configurations scored **Sharpe 2.26, profit
+factor 2.40, +22.0% return** on data with nothing in it.
+
+That is not a bug. It is the **zero of the scale**. Every result the pipeline
+produces has to be read against it, and until you have measured it, "profit
+factor 1.8" is a number without a unit.
+
+Two details that decide whether the control is honest:
+
+**Match the beta.** A long-biased strategy on real equities earns the market's
+rise for free. A zero-drift null hands the real result the entire equity risk
+premium and calls it edge. `annual_drift` adds a constant to the *mean* of the
+same i.i.d. process, so the series trends without becoming predictable - no
+rule computable from bars `0..t` forecasts `t+1` better than the constant does.
+
+**Assert that the null is null.** The whole argument rests on the claim that
+the data contains nothing. If the generator accidentally carried drift or
+autocorrelation, the "manufactured" result would be partly real, the zero
+would sit too high, and genuine strategies would be rejected against a rigged
+benchmark - silently. So `tests/invariants/test_null_market.py` states each
+way a strategy could make money there and asserts all of them fail:
+
+```python
+def test_no_serial_correlation(self, seed):
+    """Momentum and mean reversion both show up here. A breakout strategy
+    needs positive lag-1 correlation to work; a fade needs negative."""
+    r = _log_returns(driftless_session_bars(days=120, seed=seed))
+    rho = float(np.corrcoef(r[:-1], r[1:])[0, 1])
+    assert abs(rho) < 0.02, f'lag-1 autocorrelation {rho:+.4f} is exploitable'
+```
+
+### The null control catching a live bug
+
+The null market calibrates. A null *column* inside a real analysis does
+something stronger - it catches the instrument being wrong.
+
+`scripts/signal_scan.py` scores cross-sectional signals against forward
+returns. Among the real signals it carries one deliberate fake:
+
+```python
+# A deliberate control: pure noise. Its IC must be indistinguishable from
+# zero, and if it is not, the harness is broken rather than the market
+# being predictable.
+'random_control': pd.DataFrame(
+    np.random.default_rng(0).normal(size=px.shape),
+    index=px.index, columns=px.columns),
+```
+
+First run:
+
+```
+signal                h   mean IC   t-stat   ...
+momentum_12_1        21    0.0176     4.06        <- looks like the best row
+random_control       21    0.0021     2.07        <- pure noise, "significant"
+```
+
+The control was significant. Since noise cannot predict returns, the
+**statistic** was wrong, not the market.
+
+The cause: at horizon 21 sampled daily, consecutive observations share 20 of
+21 days of the same forward return. They are nowhere near independent, and the
+naive standard error is too small by roughly `sqrt(h)` - inflating *every*
+t-statistic at `h > 1` by the same factor. Newey-West with Bartlett weights
+corrects it:
+
+```
+signal                h   mean IC   t(NW)  t(raw)
+momentum_12_1        21    0.0176    1.19    4.06   <- not significant at all
+random_control       21    0.0021    1.97    2.07   <- correctly unremarkable
+```
+
+Without the control, three false discoveries would have been reported as
+findings, and the strongest-looking row in the table was noise.
+
+### The oracle control
+
+The null catches an instrument that sees signal where there is none. Its
+mirror catches one that is *blind* to signal that is definitely there - and
+you need both, because an instrument can be broken in either direction.
+
+```python
+# tests/invariants/test_signal_eval.py
+def test_a_perfect_oracle_scores_one(self):
+    """A signal that IS the next period's return must score IC = 1.0. If
+    this fails low, the signal is being compared against the wrong bar."""
+    prices = _panel()
+    oracle = prices.shift(-1) / prices - 1.0
+    ic = information_coefficient(oracle, prices, horizon=1)
+    assert ic.mean() == pytest.approx(1.0, abs=1e-9)
+
+def test_yesterdays_return_is_not_predictive_of_tomorrow(self):
+    """The same construction shifted the other way. On a random walk this
+    must be ~0; if it comes back near 1.0 the frame is being correlated
+    with itself."""
+    past = prices / prices.shift(1) - 1.0
+    assert abs(information_coefficient(past, prices, horizon=1).mean()) < 0.2
+```
+
+Those two are a pair. If the forward-return alignment were off by one, their
+results would **swap** - and nothing else in the output would look different.
+That is the whole reason they exist: the bug is invisible in every other
+symptom.
+
+### Why the other layers cannot do this
+
+A property test asks *"does `f` satisfy `P` for all inputs?"* A control asks
+*"on this specific input, is the answer the one the physics demands?"*
+
+Hypothesis will never generate "a column that is literally tomorrow's return".
+It is not an edge case to be discovered - it is a **designed** case whose
+answer is known analytically. Mutation testing has the same blind spot: it
+confirms your tests notice when the code changes, not that the code was
+measuring the right quantity to begin with.
+
+So: **whenever the code under test produces a number a human will act on, add
+a case whose right answer you know, in both directions.**
+
+### Contracts fire far from the bug
+
+One more thing this session demonstrated, which is an argument for contracting
+pure kernels even when the bugs live in the orchestration around them.
+
+`run_panel` had a marking bug: positions whose bar was missing on a given day
+were skipped when valuing the book, so a holding's value vanished from equity
+and reappeared the next day. The visible symptom was a reported **-96%
+drawdown** - implausible, but drawdowns happen, and nothing else looked wrong.
+
+What actually stopped it was this, three call-frames away:
+
+```python
+# trader/simulation/panel.py
+@deal.pre(lambda weights, equity, prices, allow_fractional=False: equity >= 0.0)
+def target_positions(weights, equity, prices, allow_fractional=False):
+```
+
+With shorts in the book the same erasure drove marked equity *negative*, and
+`target_positions` - a small pure function that knows nothing about marking -
+refused to size against it. The contract on the **consumer** caught a bug in
+the **producer**.
+
+The lesson generalises: state invariants on the small pure functions even when
+you expect the bugs to be elsewhere. They are cheap to state there, and a
+violated precondition is a tripwire for anything upstream that corrupts their
+inputs.
+
+### What caught the agent's mistakes, and what did not
+
+This tutorial's premise is that a human is directing an LLM rather than
+reading every line. So the honest question is: over one working session, what
+actually caught the LLM's errors?
+
+| mistake | caught by |
+|---|---|
+| `BacktestTrade` constructed without required fields | **ty gate**, statically, before any result was reported |
+| holdings erased from equity when a bar was missing | **`deal` precondition**, three frames away |
+| a wrong expectation about position sizing | **the invariant itself** - writing it forced the real semantic to be learned |
+| staging spec and implementation in one commit | **pre-commit spec guard** |
+| every t-statistic inflated by overlapping returns | **the noise control** |
+| denormal underflow in `ic_t_statistic` | **CrossHair** |
+| **calling conId 756733 "GOOGL" when it is SPY - twice** | **nothing. Only checking by hand.** |
+| **inventing a deadlock diagnosis from a bad `ps` grep** | **nothing. Only checking by hand.** |
+
+The first six are the toolchain working exactly as designed, including one
+case where a test failure taught the agent something it had wrong rather than
+revealing a code defect.
+
+The last two are the gap, and they are worth naming precisely. Both were
+**narrative** errors, not code errors. In the first, a number was attributed
+to the wrong entity - every figure computed correctly, about the wrong stock,
+and reported with confidence through an entire analysis. In the second, an
+observation ("2 processes, 0% CPU") was explained by a cause that had never
+been checked (DuckDB lock contention), and the explanation was then *written
+into a code comment* as established fact. The processes were fine; the `grep`
+was wrong, because `ProcessPoolExecutor` spawns children under a different
+command line.
+
+No type system, contract, property or mutation score has anything to say about
+either. The code was correct in both cases. The **claim about** the code was
+wrong, and claims are not in the scope of any static gate.
+
+The mitigations are procedural rather than technical, and they are worth
+adopting explicitly when an agent is doing the work:
+
+- **Resolve identifiers at the point of use, every time.** Never carry a
+  remembered symbol-to-id mapping across steps. `mmr resolve <conid>` costs a
+  second; the alternative cost a full analysis and its write-up.
+- **Separate the observation from the inference, and say which is which.**
+  "0% CPU" was an observation about a `grep`, not about a process. Writing
+  those as one sentence is what turned a measurement error into a fabricated
+  failure mode.
+- **Before writing a cause into a comment or a commit message, ask what would
+  falsify it.** A diagnosis that cannot be falsified in the next thirty
+  seconds has not been made yet.
+- **Prefer a second measurement to a better explanation.** Checking
+  `docker stats` would have shown 931% CPU immediately.
+
+That is the honest boundary of this toolchain. It hardens the code
+extremely well. It does not check what you *say* about the code, and an LLM
+generates far more prose than code.
+
+## 14. The loop, restated
 
 The premise: `human intent → LLM → code → ??? → ship` needs something better
-than "the tests pass" in the `???`. That something is five practices:
+than "the tests pass" in the `???`. That something is six practices:
 
 **1. State intent where a machine can check it, and where the LLM cannot
 quietly edit it.**
@@ -1776,6 +2004,17 @@ Hand-maintained registries drift silently. Write a test that fails when a
 module, contract, or spec file is left unwired. That test is worth more than
 any instruction to "remember to update the list".
 
+**6. When the code produces a number a human will act on, test it against a
+sample whose answer you already know - in both directions.**
+Contracts and properties verify the code does what you said. They cannot tell
+you that what you said was the wrong question. A null control (feed it noise,
+demand it report nothing) catches an instrument that sees signal where there
+is none; an oracle control (feed it the answer, demand it report certainty)
+catches one that is blind to signal that is definitely there. In this repo the
+null caught every t-statistic being inflated by overlapping observations, and
+the pair together pin an alignment bug that is invisible in every other
+symptom.
+
 ### What the static toolchain bought
 
 Each of these was invisible to a green test suite:
@@ -1790,6 +2029,10 @@ Each of these was invisible to a green test suite:
 | Mutation | 51 gaps in tests written the same hour. One example: every test for a valuation used a multiplier of 1.0, where multiplying and dividing by it agree, so nothing could tell the two apart. |
 | Mutation | Two mutants of a float step-down that survived because the code only does work at denormal magnitudes, which no test had ever reached. |
 | Contract | Exact float conservation, asserted in a hand-written property, turned out to be unsatisfiable by any implementation. The `deal` postcondition found the counterexample. |
+| Null control | Every t-statistic at horizon > 1 inflated by ~sqrt(h) from overlapping forward returns. The pure-noise column scored "significant"; three findings would have been reported. |
+| Contract | Holdings erased from equity whenever a bar was missing, reported as a -96% drawdown. Caught by a precondition three call-frames away, on a function that knows nothing about marking. |
+| Type gate | A dataclass constructed without its required fields, in code written minutes earlier. Flagged statically, before the first run reported anything. |
+| CrossHair | Denormal underflow again, in a new module: `std > 0` passes, then `std/sqrt(n)` underflows to exactly zero and the division raises. The same class as the order-math bug, two years of code apart. |
 | Wiring test | A newly contracted function that was not in the symbolic-execution target list. The toolchain refused to let its own coverage rot. |
 
 ### What the full loop bought: the 2026-07-27 case
