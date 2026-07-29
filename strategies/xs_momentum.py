@@ -78,16 +78,16 @@ class XsMomentum(Strategy):
         if self.SHORT_ENABLED:
             per_leg = 0.5
             for c in longs:
-                weights[int(c)] = per_leg / len(longs)
+                weights[c] = per_leg / len(longs)
             for c in shorts:
-                weights[int(c)] = -per_leg / len(shorts)
+                weights[c] = -per_leg / len(shorts)
         else:
             for c in longs:
-                weights[int(c)] = 1.0 / len(longs)
+                weights[c] = 1.0 / len(longs)
 
         # Everything else is explicitly flat. A name that has left the top or
         # bottom slice must be closed, and omitting it would leave the old
         # position in place forever.
         for c in row.index:
-            weights.setdefault(int(c), 0.0)
+            weights.setdefault(c, 0.0)
         return weights

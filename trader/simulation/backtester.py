@@ -932,6 +932,7 @@ class Backtester:
         self,
         strategy: Strategy,
         conids: List[int],
+        frames: Optional[Dict[Any, 'pd.DataFrame']] = None,
     ) -> BacktestResult:
         """Cross-sectional backtest: the strategy sees every instrument at once.
 
@@ -951,9 +952,21 @@ class Backtester:
             apply_no_trade_band, normalise_weights, rebalance_orders,
             target_positions)
 
+        # `frames` may be injected so a caller can supply a panel that is not
+        # conid-keyed in tick_data - specifically the point-in-time universe,
+        # which must be ticker-keyed because delisted instruments have no conId
+        # and never will. Injecting rather than reimplementing keeps this one
+        # execution loop as the only one: a second copy of fill-at-next-open,
+        # marking and cost accounting is exactly the divergence that produced
+        # the flip residual.
         date_range = DateRange(start=self.config.start_date,
                                end=self.config.end_date)
-        frames: Dict[int, pd.DataFrame] = {}
+        if frames is None:
+            frames = self._load_panel_frames(conids, date_range)
+        return self._run_panel_frames(strategy, frames)
+
+    def _load_panel_frames(self, conids, date_range):
+        frames: Dict[Any, pd.DataFrame] = {}
         tickdata = self.storage.get_tickdata(self.config.bar_size)
         for conid in conids:
             try:
@@ -966,10 +979,18 @@ class Backtester:
             norm = normalize_historical(data).dropna(subset=['close'])
             if len(norm):
                 frames[conid] = norm
+        return frames
+
+    def _run_panel_frames(self, strategy: Strategy,
+                          frames: Dict[Any, 'pd.DataFrame']) -> BacktestResult:
+        import numpy as np
+        from trader.simulation.panel import (
+            apply_no_trade_band, normalise_weights, rebalance_orders,
+            target_positions)
         if len(frames) < 2:
             raise ValueError(
                 f'panel backtest needs at least 2 instruments with data, '
-                f'got {len(frames)} of {len(conids)} requested')
+                f'got {len(frames)}')
 
         # Wide panel: columns are (field, conid) so panel['close'] is a
         # (time x instrument) frame and a cross-sectional indicator is one

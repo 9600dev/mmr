@@ -332,6 +332,86 @@ not appear, so the true result is weaker than shown.
 
 ---
 
+## 2026-07-29 - point-in-time universe built; momentum's IC rose, its P&L fell
+
+**2,496 sessions, 1,996,800 rows, 3,176 names** after filtering 17 exchange
+TEST tickers (ZWZZT closed at 199,999.00 in the raw tape). Membership decided
+monthly from the PRIOR month's dollar-volume rank, so it uses only what was
+known. Validated by a clean monotone survivorship decay: 24% of the 2016
+universe is absent from the recent liquid list, falling to 0% for 2026. If the
+build were still survivorship-conditioned every year would read near 0%.
+
+### Same signals, two universes (h=1, non-overlapping)
+
+| signal | survivorship IC | t | point-in-time IC | t |
+|---|---|---|---|---|
+| **momentum_12_1** | 0.0174 | 3.29 | **0.0247** | **4.42** |
+| reversal_5d | 0.0101 | 2.54 | 0.0100 | 2.24 |
+| low_vol_63d | -0.0000 | 0.00 | 0.0019 | 0.35 |
+| inv_price (size proxy) | -0.0024 | -0.78 | 0.0006 | 0.25 |
+| random_control | - | - | -0.0000 | 0.00 |
+
+**Momentum got STRONGER on the honest universe** - IC +42%, t 3.29 -> 4.42. I
+predicted the opposite and said so in advance. The mechanism: momentum's SHORT
+leg wants the losers, and survivorship had removed exactly those. The bias was
+holding momentum DOWN, not up. My reasoning (winners selected after winning)
+is right for the long-only version and wrong for long/short.
+
+The size effect was never there: -0.0024 -> 0.0006.
+
+### But the traded result got WORSE
+
+| | survivorship | point-in-time |
+|---|---|---|
+| 12-1 L/S | Sharpe 0.26 | **0.16** |
+| 12-1 L/S + band | 0.35 | **0.26** |
+| 12-1 long-only | 1.07 | **0.75** |
+| max drawdown (L/S) | -32.2% | **-46.4%** |
+
+Long-only lost a third of its return and a third of its Sharpe, which is
+survivorship being removed from the long leg as expected. But long/short fell
+too, while its IC rose - rank accuracy and realised P&L came apart. Restoring
+the dead names gives the short leg the losers it wants (better IC) and those
+are precisely the names that gap, squeeze and become unborrowable (worse P&L,
+-46% drawdown).
+
+**Surviving number: Sharpe 0.26**, pre-registered parameters, survivorship-free
+universe, costs and borrow charged. The same 0.26 as before, now re-derived
+rather than re-quoted.
+
+### Two corrections to my own claims, both caught by the operator or the data
+
+**1. "The drawdown is probably understated because a delisting-at-zero short
+shows up as a position that simply stops rather than one you couldn't close."**
+Wrong twice. Delisting does not trap you - for a short, a name going to zero is
+the BEST case, closed out near zero. And empirically the residual gap is not
+collapses: of names stopping while still members, 82% end within 20% of their
+own 1-year high and the median final/high ratio is 1.00. They are acquisitions
+closing. The missing piece is a further jump to the deal price, so the bias is
+DOWNWARD - a missed gain on longs, a missed loss on shorts.
+
+  The real unmodelled short-side risk is BORROW RECALL and forced buy-in, which
+  does bias optimistically. I conflated "the position stops" with "you are
+  trapped"; only the second would have supported the claim.
+
+**2. Two survivorship metrics reported as one.** I first said 84% of historical
+top-500 membership was gone, then 79% of names "stop mid-sample". Both were
+inflated: 1,520 tickers entered the top 500 on exactly ONE day, and most
+"stops" were names leaving the liquid set rather than delisting. A name you
+would have stopped holding is correctly excluded, not lost. The honest figure
+is names that stop while STILL members: 413 in the filtered panel. The first
+claim was 16x too high.
+
+### Remaining limits
+
+* 812 of 3,176 names carry the 252-day lookback (300+ sessions required), which
+  reintroduces a mild frame-level survivorship filter - much weaker than
+  survived-to-today, but not zero.
+* Borrow recall / forced buy-in unmodelled, biasing long/short optimistically.
+* 413 terminal-return gaps, biasing downward.
+
+---
+
 ## Method errors worth not repeating
 
 Recorded because they cost real time and two of them were invisible to every

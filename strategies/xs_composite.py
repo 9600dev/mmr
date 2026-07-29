@@ -126,12 +126,12 @@ class XsComposite(Strategy):
             held_long = frozenset(self._held_long)
             held_short = frozenset(self._held_short)
             longs = sorted(buffered_membership(
-                {int(c): float(v) for c, v in pct.items()},
+                {c: float(v) for c, v in pct.items()},
                 held_long, self.LONG_PCT, self.EXIT_PCT))
             # Shorts are the same rule read from the other end: invert the
             # percentile so "most attractive to short" is the top of the scale.
             shorts = sorted(buffered_membership(
-                {int(c): 1.0 - float(v) for c, v in pct.items()},
+                {c: 1.0 - float(v) for c, v in pct.items()},
                 held_short, self.SHORT_PCT, self.EXIT_PCT))
             self._held_long, self._held_short = set(longs), set(shorts)
             if not longs or (self.SHORT_ENABLED and not shorts):
@@ -145,12 +145,12 @@ class XsComposite(Strategy):
         weights: Dict[int, float] = {}
         if self.SHORT_ENABLED:
             for c in longs:
-                weights[int(c)] = 0.5 / len(longs)
+                weights[c] = 0.5 / len(longs)
             for c in shorts:
-                weights[int(c)] = -0.5 / len(shorts)
+                weights[c] = -0.5 / len(shorts)
         else:
             for c in longs:
-                weights[int(c)] = 1.0 / len(longs)
+                weights[c] = 1.0 / len(longs)
         for c in row.index:
-            weights.setdefault(int(c), 0.0)
+            weights.setdefault(c, 0.0)
         return weights
