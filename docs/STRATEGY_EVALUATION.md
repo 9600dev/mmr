@@ -145,6 +145,31 @@ two different trading processes.
 
 ---
 
+### 4. If the signal is a ratio, decompose it before believing it
+
+`numerator / denominator` is two signals, and the IC may belong entirely to
+one of them. Test three things:
+
+* the ratio as measured;
+* the ratio with the **numerator frozen** per name (its time-average), which
+  removes all numerator variation;
+* each component alone.
+
+**If the ratio does not beat both parts, you have found a part.**
+
+Measured 2026-07-29: `sales_to_price` scored IC 0.0425 (t=2.58) and looked
+like the best result of the day. With revenue frozen it scored **0.0591
+(t=3.40)** - stronger without the fundamental - and `1/marketcap` alone scored
+**0.0637 (t=4.07)**. The "value signal" was the size effect, and four of the
+six fundamental signals tested shared market cap as their denominator, so they
+were one measurement wearing four labels.
+
+> A delay probe (shift every timestamp forward and check the IC degrades) is
+> the right test for an EVENT signal and the wrong one for a slow ratio. A
+> valuation ratio's numerator moves quarterly while its denominator moves
+> daily, so announcement timing is not where its information lives, and a flat
+> probe means the test does not apply - not that the signal is clean.
+
 ## The gates, as thresholds
 
 Nothing arms unless all of these hold. They are deliberately blunt; a gate

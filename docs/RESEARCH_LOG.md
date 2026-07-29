@@ -176,6 +176,88 @@ would have to be chosen on grounds other than backtested rank.
 
 ---
 
+## 2026-07-29 (later still) - fundamentals carry no signal; the denominator does
+
+**Finding: what looked like a value effect is the size effect, and the size
+effect here is survivorship.**
+
+Point-in-time fundamentals ingested for 496 instruments, 2009-2026, 25,326
+filings keyed by EDGAR acceptance instant. 58.5% of filings are accepted at or
+after 16:00 ET, so more than half are NOT tradeable on their filing date - a
+date-only source would trade those a day early.
+
+As-of IC, Newey-West corrected:
+
+| signal | h=63 IC | t(NW) |
+|---|---|---|
+| sales_to_price | 0.0425 | **2.58** |
+| cash_flow_yield | 0.0283 | 1.77 |
+| low_accruals | 0.0223 | 1.85 |
+| gross_profitability | 0.0173 | 0.93 |
+| earnings_yield | 0.0161 | 1.27 |
+| book_to_price | 0.0176 | 1.05 |
+| random_control | 0.0005 | 0.56 |
+
+Two cleared t=2 and sales_to_price looked like the strongest result of the
+day - more than double momentum's IC, at a horizon that decays over quarters
+rather than days, which is exactly the shape that could survive costs.
+
+**It was not real.** Decomposing the ratio:
+
+| variant | IC (h=63) | t(NW) |
+|---|---|---|
+| sales_to_price as measured | 0.0425 | 2.58 |
+| **revenue FROZEN per name** | **0.0591** | **3.40** |
+| shares FROZEN per name | 0.0216 | 0.93 |
+| 1/price alone | 0.0458 | 2.34 |
+| **1/marketcap alone** | **0.0637** | **4.07** |
+
+Replacing each company's actual sales with a constant makes the signal
+STRONGER. The fundamental was subtracting, not adding. `1/marketcap` alone
+beats every variant.
+
+So the signal is the size effect (Banz 1981), and four of the six signals
+tested - earnings yield, book-to-price, cash-flow yield, sales-to-price - share
+market cap in the denominator. They were not six tests of fundamental
+information; they were four measurements of size with different noise on top.
+The two that divide by total assets instead scored t=1.32 and t=1.76.
+
+**And the size effect here is survivorship.** The universe is today's top 500
+by dollar volume, so its "small" names are the ones that GREW into the list.
+They are small-and-present precisely because they went up.
+
+### The leak probe was the wrong instrument
+
+Delaying every acceptance instant by 7 days changed nothing (0.0425 ->
+0.0427). That was designed to detect lookahead, and its flatness was read as
+suspicious - wrongly. A slow valuation ratio does not depend on announcement
+timing, because its numerator moves quarterly while its denominator moves
+daily. The probe tests something the signal never claimed.
+
+**New standing rule:** a ratio signal must be DECOMPOSED before it is
+believed. Freeze the numerator per name, freeze the denominator, and test each
+component alone. If the ratio does not beat both parts, you have found a part,
+not the ratio. This is now in STRATEGY_EVALUATION.md.
+
+Without that decomposition the reported finding would have been
+"sales-to-price works, IC 0.0425, t=2.58" - wrong in the most expensive
+direction, since it is the only positive result that survived a full day of
+honest testing.
+
+### Where this leaves the search
+
+Every positive result found today has resolved to one of three things: a
+parameter search with no skill (PBO 47.7%), sector momentum rather than stock
+selection, or survivorship expressed as a factor. Nothing has survived.
+
+**Survivorship is now the binding constraint.** It contaminated long-only
+momentum (Sharpe 1.07 vs benchmark 0.96 - the excess was concentration) and it
+contaminates the size effect entirely. Until the universe is point-in-time,
+"edge" and "we selected the winners" are indistinguishable, and no further
+signal work is worth doing on top of it.
+
+---
+
 ## Method errors worth not repeating
 
 Recorded because they cost real time and two of them were invisible to every
