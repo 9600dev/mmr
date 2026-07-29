@@ -972,6 +972,9 @@ class Backtester:
 
         cash = self.config.initial_capital
         positions: Dict[int, float] = {}
+        # Last finite close per conid, so a missing bar does not erase a
+        # holding's value from equity.
+        last_price: Dict[int, float] = {}
         pending: Optional[Dict[int, float]] = None
         trades: List[BacktestTrade] = []
         equity_values: List[float] = []
@@ -1009,11 +1012,22 @@ class Backtester:
                         signal_probability=0.0, signal_risk=0.0))
                 pending = None
 
-            # 2. Mark the book at this bar's close.
-            mark = cash
-            for conid, qty in positions.items():
+            # 2. Mark the book at this bar's close, carrying the last known
+            #    price forward for anything that did not print today.
+            #
+            #    Skipping unpriceable holdings instead makes a position's value
+            #    VANISH from equity on any day its bar is missing, and reappear
+            #    the next — which on a 120-name panel produced a -96% drawdown
+            #    that never happened. A position is worth what it was last
+            #    worth; the absence of a print is not the absence of the asset.
+            for conid in row_close.index:
                 px = row_close.get(conid)
                 if px is not None and np.isfinite(px) and px > 0:
+                    last_price[conid] = float(px)
+            mark = cash
+            for conid, qty in positions.items():
+                px = last_price.get(conid)
+                if px is not None and px > 0:
                     mark += qty * px
             equity_values.append(mark)
             equity_timestamps.append(ts)
@@ -1026,8 +1040,7 @@ class Backtester:
             if weights is None:
                 continue                 # no instruction != flatten
             weights = normalise_weights(weights, max_gross=self.config.panel_max_gross)
-            prices = {c: float(row_close[c]) for c in row_close.index
-                      if np.isfinite(row_close.get(c, np.nan))}
+            prices = dict(last_price)
             target = target_positions(weights, mark, prices)
             orders = rebalance_orders(positions, target, min_shares=0.0)
             pending = orders or None
