@@ -170,6 +170,22 @@ were one measurement wearing four labels.
 > daily, so announcement timing is not where its information lives, and a flat
 > probe means the test does not apply - not that the signal is clean.
 
+### 5. A narrow grid can invent a story; sign consistency is not evidence
+
+Nested thresholds on nested horizons over one panel are perhaps 2-3 effective
+tests, not one per cell. Twelve adjacent cells agreeing is close to one
+observation repeated twelve times.
+
+Measured 2026-07-29: idiosyncratic drops looked like "consistent continuation,
+all 12 cells negative" over thresholds 3-6% and horizons 1-10. Widened to 49
+cells, the same measurement is 23/49 positive - no sign at all.
+
+So when sweeping, state the multiple-testing arithmetic BEFORE reading any
+cell: at N tests you expect ~0.045N cells beyond |t|=2 from noise, and the
+exceedance count against that expectation is the result. A real effect appears
+as a **contiguous region** across a wide grid; noise appears as scattered
+singletons, and a narrow grid cannot tell the two apart.
+
 ## The gates, as thresholds
 
 Nothing arms unless all of these hold. They are deliberately blunt; a gate

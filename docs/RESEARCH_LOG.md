@@ -258,6 +258,80 @@ signal work is worth doing on top of it.
 
 ---
 
+## 2026-07-29 - swing reversal in tech: no effect, and a lesson about narrow grids
+
+**Hypothesis (operator's own observation):** after a drop of 5-6% a tech name
+climbs back, and after a spike it falls back. Tested on 138 tech names (SIC
+35/36/73), 2021-07 to 2026-07, 1,335 days.
+
+**Finding: no effect, in any variant, at any threshold or horizon.**
+
+Run as an EVENT STUDY rather than a backtest - the prior question is whether
+the conditional mean differs from an ordinary day, not what a portfolio would
+have earned. Three confounds handled up front:
+
+* **Drift.** Tech's unconditional daily mean over this window is +0.079%, so
+  the 21-day baseline forward return is +2.18% for ANY random day. Every number
+  is an excess over that. Without the subtraction the -6% bucket's raw +4.57%
+  looks like a strong bounce when more than half is simply tech rising.
+* **Clustering.** Hundreds of names fall 6% on the same market-wide day. At the
+  -6% threshold there are 4,119 events but only 784 distinct DATES, so
+  statistics are computed on per-date means.
+* **Overlap.** Consecutive dates' h-day forward windows share h-1 days.
+  Newey-West applied; see below, because this one bit twice.
+
+### The wide sweep is the result
+
+196 cells (7 thresholds x 7 horizons x drop/spike x raw/idiosyncratic):
+**4 beyond |t|=2, against ~9 expected from noise.** Fewer significant cells
+than chance produces. Individual cells are not findings at that width.
+
+| variant | positive cells | mean t |
+|---|---|---|
+| raw after drop | 38/49 | +0.53 |
+| raw after spike | 45/49 | +0.89 |
+| idio after drop | 23/49 | -0.03 |
+| idio after spike | 46/49 | +1.21 |
+
+Raw drops AND raw spikes are both followed by above-baseline returns (38/49,
+45/49). No directional effect can do that. A VOLATILITY effect can: a large
+move in either direction marks an elevated-vol period, and in this window
+elevated vol was followed by recovery - the 2022 drawdown and its rebound.
+
+### Two of my own errors, both caught by widening the test
+
+**1. Overlap manufactured significance, again.** The first run showed t =
+2.19-2.48 at h=21 across every threshold, monotone in threshold, starred as
+significant. Corrected for the 20-day window overlap, all fell to 0.89-1.27.
+The tell was that significance appeared ONLY at h=21, where overlap is largest,
+and vanished at h=1 where there is none. This was the FOURTH time in one day
+that raw statistics on overlapping windows produced a false positive, and the
+second time it fooled me personally after I had documented it that morning.
+
+**2. A narrow grid produced a false story.** I reported idiosyncratic drops as
+showing "consistent continuation - all 12 cells negative", from thresholds
+3-6% and horizons 1-10. Widened to 49 cells the same measurement is 23/49
+positive: no consistent sign. Twelve adjacent cells agreed because they are
+nested subsets of the same data, not because the effect was real.
+
+**Standing rule added:** sign consistency across nested cells is NOT
+independent evidence. Nested thresholds on nested horizons over one panel are
+perhaps 2-3 effective tests, and a real effect shows as a CONTIGUOUS region
+across a wide grid, not as agreement within a narrow one.
+
+### What the operator observed is real; the inference was not
+
+Big drops in tech during 2021-2026 were often followed by recovery. That is
+what tech DID - the unconditional 21-day forward return was already +2.18%.
+The bounce was not predicted by the drop. And the variant that would isolate a
+genuine reversal - the name falling alone while the market holds - shows
+nothing at all (t between -0.90 and +0.87 across 12 cells).
+
+**Survivorship still biases "drops recover" upward** and the effect still did
+not appear, so the true result is weaker than shown.
+
+---
+
 ## Method errors worth not repeating
 
 Recorded because they cost real time and two of them were invisible to every
