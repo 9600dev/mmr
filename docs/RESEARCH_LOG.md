@@ -135,6 +135,47 @@ the day before.
 
 ---
 
+## 2026-07-29 (later) - the momentum parameter search has no skill
+
+**Finding: PBO 47.7%. DSR 0.745. The cross-sectional grid is a coin flip.**
+
+Nine cells, lookback x rebalance, full period, T=2,511:
+
+| lookback | reb 5 | reb 10 | reb 21 |
+|---|---|---|---|
+| 189 | 0.43 | 0.43 | 0.30 |
+| 252 | 0.43 | **0.44** | 0.35 |
+| 315 | **0.12** | **0.11** | **0.10** |
+
+PBO 47.7% is the coin-flip line: choosing the best-performing cell in sample
+tells you nothing about which will perform out of sample. DSR 0.745 on the
+best cell, below the 0.95 bar.
+
+**A correction to an earlier claim in this log.** The parameter surface was
+described as "a plateau and a gradient, not a spike", and that was wrong. With
+lookback 126 (-0.09%) and 315 (0.11) both collapsing, only 189-252 works. That
+is a narrow ridge between two cliffs. The earlier reading came from sampling
+only 126/189/252, which made the failure look one-sided.
+
+**Walk-forward, first attempt: INVALID.** Reported -18.22%, but three of seven
+folds returned exactly 0.00% because they made no trades. Cause was the
+experiment design, not the strategy: each test window is ~252 bars and the
+backtest began AT test_start with no prior history, so a strategy needing 252
+bars of lookback never reached its first tradeable index. Folds choosing
+LOOKBACK 252 did nothing; folds choosing 189 traded only at the very end.
+
+Re-run with a warm-up period preceding each test window. The strategy holds
+nothing during warm-up (on_panel returns None below its lookback), so the
+equity curve is flat there and the measured return is the test period's.
+
+**Reading the PBO result on its own:** the in-sample Sharpe of 0.44 was
+selected from nine cells whose ordering carries no out-of-sample information.
+Whatever walk-forward returns, the *selection procedure* for this strategy is
+already known to be uninformative - which means any deployed configuration
+would have to be chosen on grounds other than backtested rank.
+
+---
+
 ## Method errors worth not repeating
 
 Recorded because they cost real time and two of them were invisible to every
