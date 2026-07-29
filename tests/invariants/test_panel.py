@@ -257,3 +257,75 @@ class TestTheNoTradeBandCanOnlyReduceTurnover:
         from trader.simulation.panel import apply_no_trade_band
         with pytest.raises((deal.PreContractError, ValueError)):
             apply_no_trade_band({1: 1.0}, {1: 2.0}, band=-0.1)
+
+
+class TestMembershipHysteresis:
+    """The weight-band failed because the turnover was never in the weights -
+    it was in decile membership, where almost every trade is a whole position
+    opening or closing. These properties pin the buffer that attacks that."""
+
+    def _ranks(self, **kw):
+        return kw
+
+    def test_a_name_above_the_entry_bar_is_taken(self):
+        from trader.simulation.panel import buffered_membership
+        out = buffered_membership({1: 0.95, 2: 0.5}, frozenset(), 0.10, 0.25)
+        assert out == frozenset({1})
+
+    def test_a_held_name_inside_the_buffer_is_kept(self):
+        """Rank 0.80 is below the 0.90 entry bar but above the 0.75 exit bar.
+        A name already held stays; that is the entire mechanism."""
+        from trader.simulation.panel import buffered_membership
+        assert buffered_membership({1: 0.80}, frozenset({1}), 0.10, 0.25) \
+            == frozenset({1})
+
+    def test_the_same_name_is_not_BOUGHT_inside_the_buffer(self):
+        """Asymmetry both ways: the buffer holds what you have, it does not
+        admit what you do not. Otherwise the entry bar is just exit_pct."""
+        from trader.simulation.panel import buffered_membership
+        assert buffered_membership({1: 0.80}, frozenset(), 0.10, 0.25) \
+            == frozenset()
+
+    def test_a_name_below_the_exit_bar_is_dropped_even_if_held(self):
+        from trader.simulation.panel import buffered_membership
+        assert buffered_membership({1: 0.40}, frozenset({1}), 0.10, 0.25) \
+            == frozenset()
+
+    def test_equal_bars_reduce_to_no_buffer(self):
+        """enter == exit is the un-buffered book, and must behave exactly as
+        the plain decile rule - the degenerate case the buffer generalises."""
+        from trader.simulation.panel import buffered_membership
+        ranks = {1: 0.95, 2: 0.85, 3: 0.5}
+        assert buffered_membership(ranks, frozenset({2}), 0.10, 0.10) \
+            == frozenset({1})
+
+    @_SETTINGS
+    @given(rs=st.lists(st.floats(min_value=0.0, max_value=1.0,
+                                 allow_nan=False, allow_infinity=False),
+                       min_size=1, max_size=40),
+           enter=st.floats(min_value=0.05, max_value=0.5, allow_nan=False,
+                           allow_infinity=False),
+           extra=st.floats(min_value=0.0, max_value=0.5, allow_nan=False,
+                           allow_infinity=False))
+    def test_the_buffer_can_only_widen_what_is_held(self, rs, enter, extra):
+        """Buffering must never hold FEWER names than the plain rule, or it
+        would be creating churn rather than damping it."""
+        from trader.simulation.panel import buffered_membership
+        ranks = {i: r for i, r in enumerate(rs)}
+        held = frozenset(ranks)
+        plain = buffered_membership(ranks, held, enter, enter)
+        buffered = buffered_membership(ranks, held, enter, min(1.0, enter + extra))
+        assert plain <= buffered
+
+    def test_an_exit_bar_tighter_than_the_entry_bar_is_refused(self):
+        """It would eject names faster than it admitted them and churn MORE -
+        the opposite of the purpose."""
+        import deal
+        from trader.simulation.panel import buffered_membership
+        with pytest.raises((deal.PreContractError, ValueError)):
+            buffered_membership({1: 0.9}, frozenset(), 0.25, 0.10)
+
+    def test_a_nonfinite_rank_is_skipped_not_held(self):
+        from trader.simulation.panel import buffered_membership
+        assert buffered_membership({1: float('nan')}, frozenset({1}),
+                                   0.10, 0.25) == frozenset()
