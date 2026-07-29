@@ -53,6 +53,10 @@ class BacktestConfig:
     # (compounding), so you can tell which amplifier a legacy result
     # actually came from.
     execution_mode: str = 'accumulate'
+    # Cross-sectional books only: cap on gross exposure (sum of |weight|).
+    # 1.0 = fully invested, 2.0 = 2x levered. Scaling is DOWN only — an
+    # under-invested book is a choice the strategy made, not a budget to fill.
+    panel_max_gross: float = 1.0
     # Per-trade notional in ``live`` mode. None -> 2% of initial_capital
     # (mirrors the PositionSizer's base_position default). Live sizing also
     # ATR-scales each trade (~0.4-1.5x); a fixed notional keeps per-trade
@@ -847,6 +851,190 @@ class Backtester:
                 applied[key] = coerced
         return applied
 
+    def _summarise(
+        self,
+        equity_curve: 'pd.Series',
+        trades: List[BacktestTrade],
+        signals: List[TradingEvent],
+        positions: Dict[int, float],
+    ) -> BacktestResult:
+        """Metrics from an equity curve plus a trade log.
+
+        Trade-based statistics (win rate, profit factor, expectancy) come from
+        FIFO round-trip pairing rather than counting legs: in a rebalanced book
+        a single "trade" is a partial adjustment, and calling each leg a win or
+        a loss would score a trim of a winner as a separate winning trade.
+        """
+        import numpy as np
+        from trader.simulation.backtest_stats import round_trip_pnls
+
+        cap = self.config.initial_capital
+        if len(equity_curve) == 0:
+            return BacktestResult([], trades, equity_curve, 0.0, 0.0, 0.0,
+                                  0.0, 0)
+
+        total_return = float(equity_curve.iloc[-1] / cap - 1.0)
+        rets = equity_curve.pct_change().dropna()
+        bars_per_year = self._bars_per_year(self.config.bar_size)
+        ann = math.sqrt(bars_per_year)
+
+        sharpe = sortino = 0.0
+        if len(rets) > 1 and rets.std(ddof=1) > 0:
+            sharpe = float(rets.mean() / rets.std(ddof=1) * ann)
+        downside = rets[rets < 0]
+        if len(downside) > 1 and downside.std(ddof=1) > 0:
+            sortino = float(rets.mean() / downside.std(ddof=1) * ann)
+
+        running_max = equity_curve.cummax()
+        dd = (equity_curve - running_max) / running_max
+        max_dd = float(dd.min()) if len(dd) else 0.0
+        years = max(len(equity_curve) / bars_per_year, 1e-9)
+        calmar = float((total_return / years) / abs(max_dd)) if max_dd < 0 else 0.0
+
+        pnls = round_trip_pnls([{
+            'timestamp': str(t.timestamp), 'conid': t.conid,
+            'quantity': t.quantity, 'price': t.price,
+            'commission': t.commission, 'action': str(t.action),
+        } for t in trades])
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p < 0]
+        win_rate = (len(wins) / len(pnls)) if pnls else 0.0
+        gross_win, gross_loss = sum(wins), abs(sum(losses))
+        profit_factor = (gross_win / gross_loss) if gross_loss > 0 else (
+            float('inf') if gross_win > 0 else 0.0)
+        expectancy_bps = ((float(np.mean(pnls)) / cap) * 10_000.0) if pnls else 0.0
+
+        return BacktestResult(
+            signals=signals, trades=trades, equity_curve=equity_curve,
+            total_return=total_return, sharpe_ratio=sharpe,
+            max_drawdown=max_dd, win_rate=win_rate, total_trades=len(pnls),
+            sortino_ratio=sortino, calmar_ratio=calmar,
+            profit_factor=profit_factor, expectancy_bps=expectancy_bps,
+            time_in_market_pct=1.0 if positions else 0.0,
+            start_date=self.config.start_date, end_date=self.config.end_date,
+        )
+
+    def run_panel(
+        self,
+        strategy: Strategy,
+        conids: List[int],
+    ) -> BacktestResult:
+        """Cross-sectional backtest: the strategy sees every instrument at once.
+
+        Differs from `run` in what is being simulated. `run` walks one
+        instrument's bars and reacts to Signals; this holds a BOOK of target
+        weights over the whole universe and rebalances it. A signal that is
+        only meaningful in comparison — "this name is cheap relative to its
+        peers" — cannot be expressed in the per-instrument loop at all.
+
+        Lookahead is handled the same way and for the same reason: weights
+        computed while observing bar t are filled at bar t+1's OPEN. The
+        strategy may see t's close, because that is public at that moment, but
+        it cannot trade on it.
+        """
+        import numpy as np
+        from trader.simulation.panel import (
+            normalise_weights, rebalance_orders, target_positions)
+
+        date_range = DateRange(start=self.config.start_date,
+                               end=self.config.end_date)
+        frames: Dict[int, pd.DataFrame] = {}
+        tickdata = self.storage.get_tickdata(self.config.bar_size)
+        for conid in conids:
+            try:
+                data = tickdata.read(conid, date_range=date_range)
+            except Exception as exc:                      # noqa: BLE001
+                logging.warning('panel: conid %s unreadable: %s', conid, exc)
+                continue
+            if data is None or len(data) == 0:
+                continue
+            norm = normalize_historical(data).dropna(subset=['close'])
+            if len(norm):
+                frames[conid] = norm
+        if len(frames) < 2:
+            raise ValueError(
+                f'panel backtest needs at least 2 instruments with data, '
+                f'got {len(frames)} of {len(conids)} requested')
+
+        # Wide panel: columns are (field, conid) so panel['close'] is a
+        # (time x instrument) frame and a cross-sectional indicator is one
+        # vectorised expression.
+        fields = ['open', 'high', 'low', 'close', 'volume']
+        panel = pd.concat(
+            {f: pd.DataFrame({c: df[f] for c, df in frames.items()
+                              if f in df.columns})
+             for f in fields}, axis=1).sort_index()
+        closes, opens = panel['close'], panel['open']
+        n = len(panel)
+        logging.info('panel: %d instruments x %d periods', len(frames), n)
+
+        state = strategy.precompute_panel(panel)
+
+        cash = self.config.initial_capital
+        positions: Dict[int, float] = {}
+        pending: Optional[Dict[int, float]] = None
+        trades: List[BacktestTrade] = []
+        equity_values: List[float] = []
+        equity_timestamps: List[Any] = []
+        commission = self.config.commission_per_share
+        slip = self.config.slippage_bps / 10_000.0
+
+        for i in range(n):
+            ts = panel.index[i]
+            row_open = opens.iloc[i]
+            row_close = closes.iloc[i]
+
+            # 1. Fill what was decided while observing the PREVIOUS bar, at
+            #    this bar's open. This ordering is the no-lookahead rule.
+            if pending:
+                for conid, delta in pending.items():
+                    px = row_open.get(conid)
+                    if px is None or not np.isfinite(px) or px <= 0:
+                        continue        # cannot fill what cannot be priced
+                    fill = px * (1 + slip) if delta > 0 else px * (1 - slip)
+                    cost = abs(delta) * commission
+                    cash -= delta * fill + cost
+                    positions[conid] = positions.get(conid, 0.0) + delta
+                    if abs(positions[conid]) < 1e-9:
+                        positions.pop(conid, None)
+                    trades.append(BacktestTrade(
+                        timestamp=ts, conid=conid,
+                        action=Action.BUY if delta > 0 else Action.SELL,
+                        quantity=abs(delta), price=fill, commission=cost,
+                        # A rebalance carries no per-name conviction: the
+                        # weight came from a rank, not from a probability.
+                        # Recording a fabricated 1.0 would make these trades
+                        # look like high-confidence calls in any downstream
+                        # analysis that reads the field.
+                        signal_probability=0.0, signal_risk=0.0))
+                pending = None
+
+            # 2. Mark the book at this bar's close.
+            mark = cash
+            for conid, qty in positions.items():
+                px = row_close.get(conid)
+                if px is not None and np.isfinite(px) and px > 0:
+                    mark += qty * px
+            equity_values.append(mark)
+            equity_timestamps.append(ts)
+
+            if i >= n - 1:
+                break                    # nothing left to fill into
+
+            # 3. Ask for target weights, observing up to and including i.
+            weights = strategy.on_panel(panel, state, i)
+            if weights is None:
+                continue                 # no instruction != flatten
+            weights = normalise_weights(weights, max_gross=self.config.panel_max_gross)
+            prices = {c: float(row_close[c]) for c in row_close.index
+                      if np.isfinite(row_close.get(c, np.nan))}
+            target = target_positions(weights, mark, prices)
+            orders = rebalance_orders(positions, target, min_shares=0.0)
+            pending = orders or None
+
+        equity_curve = pd.Series(equity_values, index=pd.Index(equity_timestamps))
+        return self._summarise(equity_curve, trades, [], positions)
+
     def run_from_module(
         self,
         module_path: str,
@@ -854,6 +1042,7 @@ class Backtester:
         conids: List[int],
         universe_accessor: Optional[UniverseAccessor] = None,
         params: Optional[Dict[str, Any]] = None,
+        panel: bool = False,
     ) -> BacktestResult:
         class_object = self._load_strategy_class(module_path, class_name)
         instance = class_object()
@@ -880,7 +1069,12 @@ class Backtester:
         # value regardless of which idiom the strategy uses.
         applied_params = self.apply_param_overrides(instance, params)
 
-        result = self.run(instance, conids)
+        # Panel mode holds a BOOK of weights over the whole universe; the
+        # default walks each instrument's bars reacting to Signals. They are
+        # different simulations, not two settings of one, so the caller says
+        # which rather than the runner guessing from the strategy's methods.
+        result = (self.run_panel(instance, conids) if panel
+                  else self.run(instance, conids))
         # Attach effective param overrides so the CLI can persist them on
         # the BacktestRecord. The backtester itself doesn't know about
         # storage, so we stash on the result object.

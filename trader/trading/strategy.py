@@ -265,6 +265,58 @@ class Strategy(ABC):
         """
         return self.on_prices(prices.iloc[:index + 1])
 
+    # ---------------------------------------------------------------
+    # CROSS-SECTIONAL (panel) API — a different question from the above.
+    #
+    # `on_prices`/`on_bar` ask "is THIS instrument going up", one name at a
+    # time. That shape is what capped the 2026-07 research at 20-44 trades per
+    # ten-month walk-forward, which cannot detect any edge small enough to
+    # still exist in liquid names.
+    #
+    # `on_panel` asks "which of these names is cheap RELATIVE to the others",
+    # sees the whole cross-section at once, and returns target WEIGHTS rather
+    # than a Signal. It is answered with every name in every period instead of
+    # a selected subset.
+    # ---------------------------------------------------------------
+
+    def precompute_panel(self, panel: pd.DataFrame) -> Dict[str, Any]:
+        """Optional: called ONCE with the full panel before iteration.
+
+        ``panel`` is wide with a two-level column index — level 0 is the field
+        (``open``/``high``/``low``/``close``/``volume``), level 1 the conid —
+        so ``panel['close']`` is a (time x instrument) frame and a whole
+        cross-sectional indicator is one vectorised expression.
+
+        Same lookahead contract as `precompute`: anything returned must be
+        aligned 1:1 with ``panel`` such that position i depends only on rows
+        [0..i]. Rolling and shifting satisfy that; ``shift(-1)``, centered
+        windows and full-series normalisation do not.
+        """
+        return {}
+
+    def on_panel(
+        self,
+        panel: pd.DataFrame,
+        state: Dict[str, Any],
+        index: int,
+    ) -> Optional[Dict[int, float]]:
+        """Target portfolio weights for this period, keyed by conid.
+
+        Return ``None`` to leave the book unchanged — which is NOT the same as
+        returning an empty dict. Empty means "hold nothing" and will liquidate;
+        None means "no instruction this period". A signal that is undefined
+        during its warm-up must return None, or it will flatten the book on
+        every bar until its window fills.
+
+        Weights are fractions of equity: +0.02 is 2% long, -0.02 is 2% short.
+        A conid omitted from the dict is left alone rather than closed, so a
+        strategy that only expresses a view on part of the universe does not
+        implicitly liquidate the rest.
+
+        Only read ``panel.iloc[:index+1]`` and ``state[k][:index+1]``.
+        """
+        return None
+
     def on_error(self, error: Exception) -> None:
         self.state = StrategyState.ERROR
 

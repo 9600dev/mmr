@@ -72,6 +72,25 @@ def build_signals(px: pd.DataFrame) -> dict:
     }
 
 
+def panel_conids(min_bars: int = 500) -> list:
+    """Conids with enough daily history for a panel backtest."""
+    from trader.container import Container
+    from trader.data.duckdb_store import DuckDBConnection
+    cfg = Container.instance().config()
+    db = DuckDBConnection(cfg.get('history_duckdb_path', ''))
+    rows = db.execute(
+        """SELECT symbol FROM tick_data WHERE bar_size='1 day'
+           GROUP BY symbol HAVING count(*) >= ? ORDER BY symbol""",
+        [min_bars], fetch='all') or []
+    out = []
+    for (sym,) in rows:
+        try:
+            out.append(int(sym))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--horizons', type=int, nargs='+', default=[1, 5, 21])

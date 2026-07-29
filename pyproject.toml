@@ -213,6 +213,7 @@ pytest_add_cli_args_test_selection = [
     "tests/invariants/test_walk_forward.py",
     "tests/invariants/test_panel.py",
     "tests/invariants/test_signal_eval.py",
+    "tests/invariants/test_panel_execution.py",
     "tests/invariants/test_null_market.py",
     "tests/invariants/test_gate_properties.py",
     "tests/invariants/test_order_notional.py",
