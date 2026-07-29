@@ -266,3 +266,39 @@ class TestTheFastPathAgreesWithTheSpec:
         df = pd.DataFrame({'open': [np.nan], 'high': [np.nan], 'low': [np.nan],
                            'close': [np.nan], 'volume': [np.nan]})
         assert not impossible_mask(df).any()
+
+
+class TestASpikeThatReversesIsNotAPrice:
+    """Found in the live daily store, 2026-07-28: 11 days across 5
+    instruments, including +606% then -85.8% on consecutive days (net x1.00).
+    Every bar involved is internally coherent, so no per-bar rule can see it -
+    it is the SEQUENCE that cannot have happened. One was enough to make an
+    equal-weight buy-and-hold benchmark report a CAGR of 116%.
+    """
+
+    def _series(self, closes):
+        from trader.data.bar_quality import Bar
+        return [Bar(ts=float(i * 86400), open=c, high=c, low=c, close=c,
+                    volume=1.0) for i, c in enumerate(closes)]
+
+    def test_the_real_signature_found_in_the_store(self):
+        from trader.data.bar_quality import price_spikes
+        found = price_spikes(self._series([12.34, 87.11, 12.38, 12.40]))
+        assert 'price_spike' in {f.rule for f in found}
+        assert all(f.severity == 'error' for f in found)
+
+    def test_a_sustained_move_is_not_flagged(self):
+        """A jump that STAYS is the signature of an unadjusted split, which
+        needs a corporate-actions feed to tell from a real re-rating. Guessing
+        would delete genuine history, so this rule declines to."""
+        from trader.data.bar_quality import price_spikes
+        assert price_spikes(self._series([4.26, 33.90, 46.0, 45.0])) == []
+
+    def test_an_ordinary_series_is_clean(self):
+        from trader.data.bar_quality import price_spikes
+        assert price_spikes(self._series([100, 103, 101, 105, 102])) == []
+
+    def test_a_crash_that_does_not_recover_is_not_flagged(self):
+        """A -70% day that stays down is a catastrophe, not a bad print."""
+        from trader.data.bar_quality import price_spikes
+        assert price_spikes(self._series([100.0, 30.0, 31.0, 29.0])) == []
