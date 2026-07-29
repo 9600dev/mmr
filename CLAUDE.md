@@ -8,6 +8,14 @@
 > params), and this repo is public. It will not exist in a fresh clone — see
 > [`docs/OPERATIONAL_STATE.README.md`](docs/OPERATIONAL_STATE.README.md).
 > Code backlog is in `docs/AUDIT_ROADMAP.md`.
+> **Before believing any backtest, read
+> [`docs/STRATEGY_EVALUATION.md`](docs/STRATEGY_EVALUATION.md)** — the three
+> questions a backtest cannot answer about itself (what the pipeline reports
+> on nothing, how much came from searching, what the rule earns without
+> knowing the future), the deploy thresholds, and the 2026-07-28 post-mortem
+> in which every armed strategy failed all three. Note in particular that
+> **PSR is not a gate** — it blessed all thirteen sweeps at ≥0.96, including
+> ones with PBO 90%.
 > The live-session operating loop (monitors, pulse lines, escalation policy,
 > triage order) is [`docs/MONITORING.md`](docs/MONITORING.md). The staged
 > safety-hardening plan (shipped tranche 1: exit-class boundary, order math,
