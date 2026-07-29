@@ -63,7 +63,7 @@ class ICSummary(NamedTuple):
 
 @deal.pure
 @deal.pre(lambda values, lags: lags >= 0)
-def newey_west_variance(values: tuple, lags: int) -> Optional[float]:
+def newey_west_variance(values: tuple[float, ...], lags: int) -> Optional[float]:
     """Variance of the mean, corrected for serial correlation (Newey-West).
 
     REQUIRED whenever the forward horizon exceeds the sampling interval. At
@@ -109,7 +109,14 @@ def ic_t_statistic(mean: float, std: float, n: int) -> Optional[float]:
     """
     if n < 2 or not (math.isfinite(mean) and math.isfinite(std)) or std <= 0:
         return None
-    return mean / (std / math.sqrt(n))
+    # std can be denormal, in which case std/sqrt(n) UNDERFLOWS to exactly
+    # zero and the division below raises. CrossHair found it at
+    # (6.5e-319, 5e-324, 4) — the same denormal class it caught in
+    # order_math. A dispersion that small is not a measurement anyway.
+    se = std / math.sqrt(n)
+    if not (math.isfinite(se) and se > 0):
+        return None
+    return mean / se
 
 
 @deal.pure
@@ -126,9 +133,15 @@ def periods_needed_for_significance(mean_ic: float, std_ic: float,
     """
     if not (math.isfinite(mean_ic) and math.isfinite(std_ic)):
         return None
+    # target_t was unvalidated: a NaN target returned NaN, which is neither a
+    # period count nor None and silently violated the postcondition. Found by
+    # CrossHair at target_t=nan.
+    if not (math.isfinite(target_t) and target_t > 0):
+        return None
     if mean_ic == 0.0 or std_ic <= 0:
         return None
-    return (target_t * std_ic / abs(mean_ic)) ** 2
+    result = (target_t * std_ic / abs(mean_ic)) ** 2
+    return result if math.isfinite(result) else None
 
 
 # --------------------------------------------------------------------------
