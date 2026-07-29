@@ -171,6 +171,10 @@ only_mutate = [
     # (highs below the close, from quote-midpoint synthesis). A wrong rule here
     # either buries that finding or floods the report with false alarms.
     "trader/data/bar_quality.py",
+    # Point-in-time fundamentals. Using the period-end date instead of the
+    # filing acceptance time trades on results 18-60 days before they were
+    # public, and produces a beautiful equity curve while doing it.
+    "trader/data/fundamentals.py",
     # Selection-bias correction. Not on the order path, but it is what says
     # whether a strategy family is real, and its failure mode is silent: a
     # deflation that never deflates, or a PBO that never reaches 0.5, would
@@ -219,6 +223,7 @@ pytest_add_cli_args_test_selection = [
     "tests/invariants/test_signal_eval.py",
     "tests/invariants/test_panel_execution.py",
     "tests/invariants/test_signal_combine.py",
+    "tests/invariants/test_fundamentals.py",
     "tests/invariants/test_null_market.py",
     "tests/invariants/test_gate_properties.py",
     "tests/invariants/test_order_notional.py",

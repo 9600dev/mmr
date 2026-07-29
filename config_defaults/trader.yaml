@@ -95,6 +95,20 @@ zmq_data_rpc_server_port: 42003
 
 # Massive.com (formerly Polygon.io)
 massive_api_key: ''
+
+# sec-api.io — point-in-time SEC filings. Preferred over the Polygon
+# fundamentals path because it carries the ACCEPTANCE TIMESTAMP, not merely a
+# filing date: a 10-Q accepted 06:01 ET is tradeable at that day's close, one
+# accepted 16:45 is not, and a date-only source forces a defensive next-day
+# assumption that costs a day of signal on every name. It also preserves
+# original-vs-amended filings, so a restatement cannot silently rewrite what a
+# backtest believed at the time.
+#
+# Leave BLANK here. The Container reads env vars before YAML, so exporting
+# SEC_API_KEY (e.g. in ~/.zshrc) is the intended route and keeps the secret
+# out of a bind-mounted file. Pass it into the container by NAME, never by
+# value: `docker exec -e SEC_API_KEY ...`.
+sec_api_key: ''
 massive_feed: stocks
 massive_delayed: false
 
