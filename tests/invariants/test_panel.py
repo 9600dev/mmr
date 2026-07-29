@@ -181,3 +181,79 @@ class TestExposureScalingOnlyEverReduces:
         """Not 0.0 — an unknown exposure must not read as no exposure."""
         assert gross_exposure({1: float('nan')}) is None
         assert gross_exposure({1: float('inf')}) is None
+
+
+class TestTheNoTradeBandCanOnlyReduceTurnover:
+    """A band exists to stop the book paying for adjustments too small to
+    matter. It must never do the opposite, and it must never suppress the two
+    decisions that are not adjustments at all: opening and closing."""
+
+    def test_a_small_move_is_held(self):
+        from trader.simulation.panel import apply_no_trade_band
+        out = apply_no_trade_band({1: 100.0}, {1: 103.0}, band=0.10)
+        assert out[1] == 100.0
+
+    def test_a_large_move_is_taken(self):
+        from trader.simulation.panel import apply_no_trade_band
+        out = apply_no_trade_band({1: 100.0}, {1: 150.0}, band=0.10)
+        assert out[1] == 150.0
+
+    def test_an_entry_is_never_banded(self):
+        """Going from nothing to a position is a decision, not drift. Banding
+        it would leave the book unable to act on its own signal."""
+        from trader.simulation.panel import apply_no_trade_band
+        out = apply_no_trade_band({}, {1: 5.0}, band=0.99)
+        assert out[1] == 5.0
+
+    def test_an_exit_is_never_banded(self):
+        from trader.simulation.panel import apply_no_trade_band
+        out = apply_no_trade_band({1: 1000.0}, {1: 0.0}, band=0.99)
+        assert out[1] == 0.0
+
+    def test_a_sign_flip_is_never_banded(self):
+        """Long to short is not an adjustment however small the numbers."""
+        from trader.simulation.panel import apply_no_trade_band
+        out = apply_no_trade_band({1: 1.0}, {1: -1.0}, band=0.99)
+        assert out[1] == -1.0
+
+    @_SETTINGS
+    @given(cur=st.floats(min_value=1.0, max_value=1e5, allow_nan=False,
+                         allow_infinity=False),
+           tgt=st.floats(min_value=1.0, max_value=1e5, allow_nan=False,
+                         allow_infinity=False),
+           band=st.floats(min_value=0.0, max_value=1.0, allow_nan=False,
+                          allow_infinity=False))
+    def test_banding_never_increases_the_trade(self, cur, tgt, band):
+        """The whole point. Whatever the band does, the resulting order must
+        be no larger than the unbanded one."""
+        from trader.simulation.panel import apply_no_trade_band
+        banded = apply_no_trade_band({1: cur}, {1: tgt}, band=band)
+        assert abs(banded[1] - cur) <= abs(tgt - cur) + 1e-9
+
+    @_SETTINGS
+    @given(cur=st.floats(min_value=1.0, max_value=1e4, allow_nan=False,
+                         allow_infinity=False),
+           tgt=st.floats(min_value=1.0, max_value=1e4, allow_nan=False,
+                         allow_infinity=False))
+    def test_a_zero_band_changes_nothing(self, cur, tgt):
+        from trader.simulation.panel import apply_no_trade_band
+        assert apply_no_trade_band({1: cur}, {1: tgt}, band=0.0)[1] == tgt
+
+    def test_the_band_is_measured_in_notional_when_prices_are_given(self):
+        """Cost scales with dollars traded, not share counts. A 3-share move
+        in a $5,000 stock is not the same trade as a 3-share move in a $2 one."""
+        from trader.simulation.panel import apply_no_trade_band
+        # Same share delta, same fraction of target -> both banded or neither,
+        # regardless of price. What price changes is nothing here; the point is
+        # that supplying prices must not corrupt the ratio.
+        cheap = apply_no_trade_band({1: 100.0}, {1: 103.0}, band=0.10,
+                                    prices={1: 2.0})
+        dear = apply_no_trade_band({1: 100.0}, {1: 103.0}, band=0.10,
+                                   prices={1: 5000.0})
+        assert cheap[1] == 100.0 and dear[1] == 100.0
+
+    def test_a_negative_band_is_refused(self):
+        import deal
+        from trader.simulation.panel import apply_no_trade_band
+        with pytest.raises((deal.PreContractError, ValueError)):
+            apply_no_trade_band({1: 1.0}, {1: 2.0}, band=-0.1)
