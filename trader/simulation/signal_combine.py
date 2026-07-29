@@ -169,13 +169,26 @@ def neutralise(signal: Any, groups: Mapping[int, str]) -> Any:
 
     if not groups:
         return signal
-    labels = pd.Series({c: groups.get(int(c)) for c in signal.columns})
+
+    def _group(col):
+        # A column label that is not a conid has no sector, which is the same
+        # situation as a conid with no metadata: leave it alone. Raising here
+        # would take down the whole book because two instruments in a
+        # 490-name panel happen to be stored under their ticker rather than
+        # their conid, which is a store inconsistency and not this function's
+        # business.
+        try:
+            return groups.get(int(col))
+        except (TypeError, ValueError):
+            return None
+
+    labels = pd.Series({c: _group(c) for c in signal.columns})
     known = labels.dropna()
     if known.empty:
         return signal
     out = signal.copy()
     for label in known.unique():
-        cols = [c for c in signal.columns if groups.get(int(c)) == label]
+        cols = [c for c in signal.columns if _group(c) == label]
         if len(cols) < 2:
             continue          # a group of one cannot be demeaned meaningfully
         block = signal[cols]

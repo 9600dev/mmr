@@ -1782,6 +1782,15 @@ def build_parser() -> argparse.ArgumentParser:
              'not have coverage — requires trader_service / IB Gateway.',
     )
     data_dl_p.add_argument(
+        '--allow-unresolved',
+        action='store_true',
+        help=('Store data under the TICKER when no conId can be resolved. Off by '
+              'default, and deliberately so: a ticker is not a unique instrument '
+              'identifier, so such rows are invisible to every conId-keyed read '
+              '(sector maps, strategy subscriptions, resolve) and silently split '
+              'the history if the symbol later does resolve.'),
+    )
+    data_dl_p.add_argument(
         '--force', '-f',
         action='store_true',
         help=('Bypass the freshness guard and fetch the full requested window. '
@@ -9341,6 +9350,36 @@ def _handle_data_download(args: argparse.Namespace):
                 if not _json_mode:
                     console.print(f'[dim]  resolve via trader_service failed for {symbol}: {ex}[/dim]')
 
+        # A symbol that would not resolve is REFUSED, not stored under its
+        # ticker. This used to fall back to a ticker-keyed write, which
+        # contradicts the project's own first design principle: a conId must
+        # resolve exactly or fail, never coerce to a string.
+        #
+        # The harm is concrete rather than theoretical. A ticker is not a
+        # unique instrument identifier - that is the entire reason conIds
+        # exist - so a ticker-keyed row does not say WHICH instrument it
+        # describes. It is invisible to every conId-keyed read (sector maps,
+        # strategy subscriptions, `resolve`), and if the symbol later does
+        # resolve, the same instrument ends up split across two keys with no
+        # error and no way for a backtest to notice it read half a history.
+        # Found 2026-07-29: 13 such keys already in the store, four of them
+        # 1-minute series of ~200,000 rows each.
+        if conid is None:
+            failed += 1
+            if not _json_mode:
+                console.print(
+                    f'[yellow]  {symbol}: refused - could not resolve to a '
+                    f'conId.[/yellow] Storing under the ticker would make the '
+                    f'data invisible to every conId-keyed read. Add it first '
+                    f'(`mmr universe add downloads {symbol}`), or pass '
+                    f'--allow-unresolved to store it ticker-keyed anyway.')
+            if not getattr(args, 'allow_unresolved', False):
+                continue
+            if not _json_mode:
+                console.print(
+                    f'[yellow]  {symbol}: --allow-unresolved given, writing '
+                    f'ticker-keyed. `mmr data audit` will report it.[/yellow]')
+
         # Freshness guard: use tick_data.missing() to skip date ranges already
         # stored, so repeat runs are cheap (no API calls when fully covered).
         # Only possible when we have a SecurityDefinition for the exchange
@@ -9827,8 +9866,28 @@ def _handle_data_migrate_symbols(args: argparse.Namespace):
                         u.security_definitions.append(sec_def)
                 accessor.update(u)
 
-                # Atomically re-key the tick_data rows
+                # Atomically re-key the tick_data rows.
+                #
+                # The DELETE is the whole correctness of this: a bare UPDATE
+                # renames the ticker key onto a conId that may ALREADY hold
+                # bars for the same dates, and DuckDB has no unique constraint
+                # here to stop it, so the instrument silently ends up with two
+                # rows per date. Hit for real on 2026-07-29 - four instruments
+                # gained exactly +250 rows each because a 250-bar ticker-keyed
+                # series was renamed on top of a 10-year conId-keyed one, and
+                # the data audit caught it as 1,255 duplicate daily timestamps.
+                #
+                # Conid-keyed rows win, because they are the ones every reader
+                # can already see; the ticker-keyed copy is the orphan being
+                # folded in. Dates present ONLY under the ticker still migrate.
                 def _rekey(conn, _sym=symbol, _cid=conid):
+                    conn.execute(
+                        "DELETE FROM tick_data WHERE symbol = ? AND EXISTS ("
+                        "  SELECT 1 FROM tick_data t2 WHERE t2.symbol = ?"
+                        "    AND t2.date = tick_data.date"
+                        "    AND t2.bar_size = tick_data.bar_size)",
+                        [_sym, _cid],
+                    )
                     conn.execute(
                         "UPDATE tick_data SET symbol = ? WHERE symbol = ?",
                         [_cid, _sym],
@@ -10189,6 +10248,23 @@ def _handle_data_audit(args: argparse.Namespace):
     tally: Counter = Counter()
     worst: dict = {}
     scanned = 0
+
+    # A series keyed by its TICKER rather than its conId. Not a bar defect, so
+    # no per-bar rule can find it - but it is a store defect with the same
+    # shape of consequence: the rows are invisible to every conId-keyed read
+    # (sector maps, strategy subscriptions, `resolve`), and if the symbol later
+    # does resolve, the same instrument ends up split across two keys with
+    # nothing raising. Repair with `mmr data migrate-symbols`.
+    unkeyed = db.execute(
+        'SELECT symbol, bar_size, count(*) FROM tick_data '
+        'WHERE try_cast(symbol AS BIGINT) IS NULL GROUP BY 1, 2 ORDER BY 1',
+        fetch='all') or []
+    for sym, bs, n in unkeyed:
+        key = f'{bs}|ticker_keyed_series'
+        tally[key] += 1
+        if tally[key] > worst.get(key, (0, ''))[0]:
+            worst[key] = (tally[key], f'{sym} ({n:,} rows)')
+
     for bar_size in sizes:
         symbols = [r[0] for r in db.execute(
             'SELECT DISTINCT symbol FROM tick_data WHERE bar_size = ? ORDER BY symbol',
