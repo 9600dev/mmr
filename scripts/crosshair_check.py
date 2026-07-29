@@ -70,6 +70,7 @@ TARGETS = [
     "trader.simulation.signal_eval.periods_needed_for_significance",
     "trader.simulation.panel.target_positions",
     "trader.simulation.panel.rebalance_orders",
+    "trader.simulation.panel.apply_no_trade_band",
     "trader.simulation.panel.gross_exposure",
     "trader.simulation.panel.normalise_weights",
     "trader.simulation.walk_forward.plan_fold_offsets",

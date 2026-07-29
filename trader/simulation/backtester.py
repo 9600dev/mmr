@@ -61,6 +61,12 @@ class BacktestConfig:
     # of that, which is itself a reason a cross-sectional short leg concentrated
     # in losers costs more than the average suggests.
     short_borrow_bps_annual: float = 0.0
+    # Cross-sectional books only: minimum change, as a fraction of the target
+    # position, that justifies rebalancing a name it is already holding.
+    # 0 = rebalance to target exactly, which is what produced 62x annual
+    # turnover and gave up two thirds of the signal to costs. Entries and
+    # exits are never suppressed.
+    panel_no_trade_band: float = 0.0
     # Cross-sectional books only: cap on gross exposure (sum of |weight|).
     # 1.0 = fully invested, 2.0 = 2x levered. Scaling is DOWN only — an
     # under-invested book is a choice the strategy made, not a budget to fill.
@@ -942,7 +948,8 @@ class Backtester:
         """
         import numpy as np
         from trader.simulation.panel import (
-            normalise_weights, rebalance_orders, target_positions)
+            apply_no_trade_band, normalise_weights, rebalance_orders,
+            target_positions)
 
         date_range = DateRange(start=self.config.start_date,
                                end=self.config.end_date)
@@ -1063,6 +1070,10 @@ class Backtester:
             weights = normalise_weights(weights, max_gross=self.config.panel_max_gross)
             prices = dict(last_price)
             target = target_positions(weights, mark, prices)
+            if self.config.panel_no_trade_band > 0:
+                target = apply_no_trade_band(
+                    positions, target, self.config.panel_no_trade_band,
+                    prices=prices)
             orders = rebalance_orders(positions, target, min_shares=0.0)
             pending = orders or None
 

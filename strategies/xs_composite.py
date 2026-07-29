@@ -52,7 +52,33 @@ class XsComposite(Strategy):
     W_REVERSAL = 1.0
     W_LOWVOL = 0.0        # scored t(NW) = -1.07 in the scan; off by default
 
+    # Loaded from instrument_meta on first use rather than injected by the
+    # caller. Setting it on the class from outside does not survive
+    # `run_from_module`, which re-imports the module and hands back a FRESH
+    # class object - so the injected map silently vanished and neutralisation
+    # became a no-op that produced results identical to the un-neutralised
+    # book. Owning the lookup here removes the failure mode entirely.
     sector_map: Dict[int, str] = {}
+
+    def _sectors(self) -> Dict[int, str]:
+        if self.sector_map:
+            return self.sector_map
+        try:
+            from trader.container import Container
+            from trader.data.duckdb_store import DuckDBConnection
+            cfg = Container.instance().config()
+            db = DuckDBConnection(cfg.get('duckdb_path', ''))
+            rows = db.execute(
+                'SELECT conid, sic_code FROM instrument_meta '
+                'WHERE sic_code IS NOT NULL', fetch='all') or []
+            # 2-digit SIC major group. The 174 fine-grained descriptions are
+            # mostly groups of one or two, and a group of one cannot be
+            # demeaned - it would just delete that name's signal.
+            type(self).sector_map = {int(c): str(x)[:2] for c, x in rows
+                                     if str(x).strip()}
+        except Exception:
+            type(self).sector_map = {}
+        return self.sector_map
 
     def precompute_panel(self, panel: pd.DataFrame) -> Dict[str, Any]:
         close = panel['close']
@@ -68,8 +94,10 @@ class XsComposite(Strategy):
         weights = {'momentum': self.W_MOMENTUM, 'reversal': self.W_REVERSAL,
                    'lowvol': self.W_LOWVOL}
         composite = combine(signals, weights=weights)
-        if composite is not None and self.SECTOR_NEUTRAL and self.sector_map:
-            composite = neutralise(composite, self.sector_map)
+        if composite is not None and self.SECTOR_NEUTRAL:
+            smap = self._sectors()
+            if smap:
+                composite = neutralise(composite, smap)
         return {'composite': composite}
 
     def on_panel(self, panel, state, index) -> Optional[Dict[int, float]]:
