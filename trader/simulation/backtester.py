@@ -53,6 +53,14 @@ class BacktestConfig:
     # (compounding), so you can tell which amplifier a legacy result
     # actually came from.
     execution_mode: str = 'accumulate'
+    # Annualised borrow cost charged on SHORT positions, in basis points.
+    # Default 0 so existing results are unchanged, but any long/short result
+    # quoted without it is optimistic: borrowing stock is not free, and the
+    # fee is charged on the value of the short every day it is held. Liquid US
+    # large-caps run roughly 25-75bps/yr; hard-to-borrow names are multiples
+    # of that, which is itself a reason a cross-sectional short leg concentrated
+    # in losers costs more than the average suggests.
+    short_borrow_bps_annual: float = 0.0
     # Cross-sectional books only: cap on gross exposure (sum of |weight|).
     # 1.0 = fully invested, 2.0 = 2x levered. Scaling is DOWN only — an
     # under-invested book is a choice the strategy made, not a budget to fill.
@@ -981,6 +989,9 @@ class Backtester:
         equity_timestamps: List[Any] = []
         commission = self.config.commission_per_share
         slip = self.config.slippage_bps / 10_000.0
+        borrow_per_period = (
+            (self.config.short_borrow_bps_annual / 10_000.0)
+            / max(self._bars_per_year(self.config.bar_size), 1.0))
 
         for i in range(n):
             ts = panel.index[i]
@@ -1024,6 +1035,16 @@ class Backtester:
                 px = row_close.get(conid)
                 if px is not None and np.isfinite(px) and px > 0:
                     last_price[conid] = float(px)
+            # Borrow accrues on shorts BEFORE marking, so the fee is paid out
+            # of cash rather than quietly reducing the position's value.
+            if borrow_per_period > 0:
+                for conid, qty in positions.items():
+                    if qty >= 0:
+                        continue
+                    px = last_price.get(conid)
+                    if px is not None and px > 0:
+                        cash -= abs(qty) * px * borrow_per_period
+
             mark = cash
             for conid, qty in positions.items():
                 px = last_price.get(conid)
