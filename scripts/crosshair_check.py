@@ -71,6 +71,7 @@ TARGETS = [
     "trader.simulation.panel.target_positions",
     "trader.simulation.panel.rebalance_orders",
     "trader.simulation.panel.apply_no_trade_band",
+    "trader.simulation.panel.buffered_membership",
     "trader.simulation.panel.gross_exposure",
     "trader.simulation.panel.normalise_weights",
     "trader.simulation.walk_forward.plan_fold_offsets",

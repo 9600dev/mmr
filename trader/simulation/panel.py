@@ -109,6 +109,47 @@ def rebalance_orders(
 
 
 @deal.pure
+@deal.pre(lambda ranks, held, enter_pct, exit_pct:
+          0.0 < enter_pct <= 1.0 and enter_pct <= exit_pct <= 1.0)
+def buffered_membership(
+    ranks: Mapping[int, float],
+    held: frozenset,
+    enter_pct: float,
+    exit_pct: float,
+) -> frozenset:
+    """Which names the book should hold, with a buffer against boundary churn.
+
+    A decile book re-sorts its universe every period, and a name sitting near
+    the tenth-percentile line crosses it constantly - generating a full entry
+    and a full exit each time for a signal that never really changed. Measured
+    on this repo: a weight-level no-trade band moved turnover from 60.3x to
+    59.0x, i.e. barely at all, because the turnover was never in the weights.
+    It was in MEMBERSHIP. Almost every trade was a whole position opening or
+    closing.
+
+    So the buffer goes on membership instead. A name must rank in the top
+    ``enter_pct`` to be bought, but is only sold once it falls out of the top
+    ``exit_pct``. With 0.10 and 0.25 a name entering at the 9th percentile has
+    to decay all the way to the 25th before the book pays to leave, instead of
+    being traded twice a week while it hovers.
+
+    ``ranks`` maps conid to percentile rank in [0, 1], where 1.0 is the most
+    attractive. ``held`` is what the book currently owns. The asymmetry is the
+    whole mechanism: ``exit_pct >= enter_pct`` is a precondition, because the
+    reverse would eject names faster than it admitted them and churn MORE.
+    """
+    keep: set = set()
+    for conid, r in ranks.items():
+        if r is None or not math.isfinite(r):
+            continue
+        if r >= 1.0 - enter_pct:
+            keep.add(conid)                   # clears the entry bar
+        elif conid in held and r >= 1.0 - exit_pct:
+            keep.add(conid)                   # inside the buffer: hold, do not pay
+    return frozenset(keep)
+
+
+@deal.pure
 @deal.pre(lambda current, target, band, prices=None: band >= 0.0)
 def apply_no_trade_band(
     current: Mapping[int, float],

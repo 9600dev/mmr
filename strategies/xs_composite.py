@@ -43,6 +43,12 @@ class XsComposite(Strategy):
     REBALANCE_EVERY = 5
     SHORT_ENABLED = 1
     SECTOR_NEUTRAL = 1
+    # Membership hysteresis: a name must reach the top EXIT_PCT... see
+    # `buffered_membership`. 0 disables (exit bar == entry bar). Attacks the
+    # churn a weight-level band could not touch, because in a decile book
+    # almost every trade is a whole position opening or closing rather than an
+    # adjustment to one being kept.
+    EXIT_PCT = 0.0
 
     # Weights per signal. Deliberately equal by default: IC-weighting fits the
     # weights on the same data the result is read from, which is the selection
@@ -81,6 +87,10 @@ class XsComposite(Strategy):
         return self.sector_map
 
     def precompute_panel(self, panel: pd.DataFrame) -> Dict[str, Any]:
+        # Membership carries across bars, so it is instance state rather than
+        # precomputed: what the book holds depends on what it held.
+        self._held_long: set = set()
+        self._held_short: set = set()
         close = panel['close']
         ret1 = close.pct_change()
         signals = {
@@ -110,10 +120,27 @@ class XsComposite(Strategy):
         if len(row) < self.MIN_NAMES:
             return None
 
-        ranked = row.sort_values()
-        n_long = max(1, int(len(ranked) * self.LONG_PCT))
-        n_short = max(1, int(len(ranked) * self.SHORT_PCT))
-        longs, shorts = ranked.index[-n_long:], ranked.index[:n_short]
+        if self.EXIT_PCT and self.EXIT_PCT > self.LONG_PCT:
+            from trader.simulation.panel import buffered_membership
+            pct = row.rank(pct=True)
+            held_long = frozenset(self._held_long)
+            held_short = frozenset(self._held_short)
+            longs = sorted(buffered_membership(
+                {int(c): float(v) for c, v in pct.items()},
+                held_long, self.LONG_PCT, self.EXIT_PCT))
+            # Shorts are the same rule read from the other end: invert the
+            # percentile so "most attractive to short" is the top of the scale.
+            shorts = sorted(buffered_membership(
+                {int(c): 1.0 - float(v) for c, v in pct.items()},
+                held_short, self.SHORT_PCT, self.EXIT_PCT))
+            self._held_long, self._held_short = set(longs), set(shorts)
+            if not longs or (self.SHORT_ENABLED and not shorts):
+                return None
+        else:
+            ranked = row.sort_values()
+            n_long = max(1, int(len(ranked) * self.LONG_PCT))
+            n_short = max(1, int(len(ranked) * self.SHORT_PCT))
+            longs, shorts = list(ranked.index[-n_long:]), list(ranked.index[:n_short])
 
         weights: Dict[int, float] = {}
         if self.SHORT_ENABLED:
