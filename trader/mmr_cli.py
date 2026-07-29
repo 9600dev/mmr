@@ -1782,15 +1782,6 @@ def build_parser() -> argparse.ArgumentParser:
              'not have coverage — requires trader_service / IB Gateway.',
     )
     data_dl_p.add_argument(
-        '--allow-unresolved',
-        action='store_true',
-        help=('Store data under the TICKER when no conId can be resolved. Off by '
-              'default, and deliberately so: a ticker is not a unique instrument '
-              'identifier, so such rows are invisible to every conId-keyed read '
-              '(sector maps, strategy subscriptions, resolve) and silently split '
-              'the history if the symbol later does resolve.'),
-    )
-    data_dl_p.add_argument(
         '--force', '-f',
         action='store_true',
         help=('Bypass the freshness guard and fetch the full requested window. '
@@ -9181,9 +9172,10 @@ def _handle_data_download(args: argparse.Namespace):
     """Download data from the selected source directly to local DuckDB.
 
     Incremental by default: uses TickData.missing() to skip date ranges
-    already present in storage. If the symbol can't be resolved to a
-    SecurityDefinition (no local universe entry and trader_service down),
-    falls back to a full-range download keyed by the ticker string.
+    already present in storage. A symbol that cannot be resolved to a
+    SecurityDefinition is REFUSED - storing it under its ticker would make the
+    rows invisible to every conId-keyed read and split the instrument's
+    history the moment the symbol did resolve.
     """
     import datetime as dt
     from trader.container import Container
@@ -9364,21 +9356,20 @@ def _handle_data_download(args: argparse.Namespace):
         # error and no way for a backtest to notice it read half a history.
         # Found 2026-07-29: 13 such keys already in the store, four of them
         # 1-minute series of ~200,000 rows each.
+        #
+        # There is deliberately NO escape hatch. An --allow-unresolved flag
+        # existed for one commit and was removed: while the system is being
+        # built and paper-traded there is nothing to stay compatible with, and
+        # an override that is easier than adding the symbol to a universe is
+        # the override everyone reaches for.
         if conid is None:
             failed += 1
             if not _json_mode:
                 console.print(
                     f'[yellow]  {symbol}: refused - could not resolve to a '
-                    f'conId.[/yellow] Storing under the ticker would make the '
-                    f'data invisible to every conId-keyed read. Add it first '
-                    f'(`mmr universe add downloads {symbol}`), or pass '
-                    f'--allow-unresolved to store it ticker-keyed anyway.')
-            if not getattr(args, 'allow_unresolved', False):
-                continue
-            if not _json_mode:
-                console.print(
-                    f'[yellow]  {symbol}: --allow-unresolved given, writing '
-                    f'ticker-keyed. `mmr data audit` will report it.[/yellow]')
+                    f'conId.[/yellow] Add it first: '
+                    f'`mmr universe add downloads {symbol}`')
+            continue
 
         # Freshness guard: use tick_data.missing() to skip date ranges already
         # stored, so repeat runs are cheap (no API calls when fully covered).
