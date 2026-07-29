@@ -1,0 +1,101 @@
+"""Multi-signal cross-sectional book, optionally sector-neutral.
+
+WHY A COMPOSITE
+    12-1 momentum alone scores IC 0.018 and converts to Sharpe ~0.31 after
+    costs. That is the normal size of a real anomaly in liquid US equities,
+    not a failure - and it is why books that work stack many weak,
+    weakly-correlated signals instead of hunting for one strong one. Combining
+    k signals of average IC c and average pairwise correlation rho gives
+    roughly c * sqrt(k / (1 + (k-1) rho)).
+
+    The correlation term does the work. Adding a second momentum variant buys
+    almost nothing; adding short-horizon reversal, which is nearly orthogonal
+    by construction, buys most of the available uplift.
+
+WHY NEUTRALISE
+    Equal-weighting within quantiles makes sector bets nobody chose - a
+    momentum book over 2016-2026 was structurally long technology. Removing
+    that does not add return, it removes variance nobody was paid for.
+
+    Set SECTOR_NEUTRAL=0 to compare directly against the un-neutralised book;
+    the sector map is supplied by the caller through `sector_map`, and an
+    empty map makes neutralisation a no-op rather than an error, so the
+    strategy runs identically when metadata is unavailable.
+"""
+
+from typing import Any, Dict, Optional
+
+import pandas as pd
+
+from trader.simulation.signal_combine import combine, neutralise
+from trader.trading.strategy import Strategy
+
+
+class XsComposite(Strategy):
+
+    LOOKBACK = 252
+    SKIP = 21
+    REVERSAL_DAYS = 5
+    VOL_WINDOW = 63
+    LONG_PCT = 0.1
+    SHORT_PCT = 0.1
+    MIN_NAMES = 20
+    REBALANCE_EVERY = 5
+    SHORT_ENABLED = 1
+    SECTOR_NEUTRAL = 1
+
+    # Weights per signal. Deliberately equal by default: IC-weighting fits the
+    # weights on the same data the result is read from, which is the selection
+    # bias this whole codebase exists to avoid. Equal weights are a
+    # pre-registered choice.
+    W_MOMENTUM = 1.0
+    W_REVERSAL = 1.0
+    W_LOWVOL = 0.0        # scored t(NW) = -1.07 in the scan; off by default
+
+    sector_map: Dict[int, str] = {}
+
+    def precompute_panel(self, panel: pd.DataFrame) -> Dict[str, Any]:
+        close = panel['close']
+        ret1 = close.pct_change()
+        signals = {
+            'momentum': close.shift(self.SKIP) / close.shift(self.LOOKBACK) - 1.0,
+            # Negated so that for EVERY signal, high means expected-high
+            # return. Without that the combination would cancel rather than
+            # reinforce.
+            'reversal': -(close / close.shift(self.REVERSAL_DAYS) - 1.0),
+            'lowvol': -ret1.rolling(self.VOL_WINDOW).std(),
+        }
+        weights = {'momentum': self.W_MOMENTUM, 'reversal': self.W_REVERSAL,
+                   'lowvol': self.W_LOWVOL}
+        composite = combine(signals, weights=weights)
+        if composite is not None and self.SECTOR_NEUTRAL and self.sector_map:
+            composite = neutralise(composite, self.sector_map)
+        return {'composite': composite}
+
+    def on_panel(self, panel, state, index) -> Optional[Dict[int, float]]:
+        comp = state.get('composite')
+        if comp is None or index < self.LOOKBACK:
+            return None
+        if self.REBALANCE_EVERY > 1 and index % self.REBALANCE_EVERY:
+            return None
+        row = comp.iloc[index].dropna()
+        if len(row) < self.MIN_NAMES:
+            return None
+
+        ranked = row.sort_values()
+        n_long = max(1, int(len(ranked) * self.LONG_PCT))
+        n_short = max(1, int(len(ranked) * self.SHORT_PCT))
+        longs, shorts = ranked.index[-n_long:], ranked.index[:n_short]
+
+        weights: Dict[int, float] = {}
+        if self.SHORT_ENABLED:
+            for c in longs:
+                weights[int(c)] = 0.5 / len(longs)
+            for c in shorts:
+                weights[int(c)] = -0.5 / len(shorts)
+        else:
+            for c in longs:
+                weights[int(c)] = 1.0 / len(longs)
+        for c in row.index:
+            weights.setdefault(int(c), 0.0)
+        return weights
