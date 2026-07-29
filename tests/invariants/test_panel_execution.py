@@ -219,3 +219,43 @@ class TestSlippageIsChargedAgainstYou:
         buy, sell = result.trades[0], result.trades[1]
         assert buy.price > float(frames[1]['open'].iloc[3])
         assert sell.price < float(frames[1]['open'].iloc[6])
+
+
+class TestAMissingBarDoesNotEraseAHolding:
+    """Found in the field, 2026-07-28. Positions whose bar was absent on a
+    given day were SKIPPED when marking, so their value vanished from equity
+    and reappeared the next day. On a 120-name panel that produced a reported
+    -96% drawdown that never happened — and nothing else in the output looked
+    wrong, which is why it is pinned rather than trusted to review.
+
+    A position is worth what it was last worth. The absence of a print is not
+    the absence of the asset.
+    """
+
+    def _gappy(self):
+        frames = _frames(n=12)
+        # conid 1 stops printing for three days in the middle, as a halted or
+        # thinly-traded name would.
+        frames[1].iloc[5:8] = np.nan
+        return frames
+
+    def test_equity_does_not_collapse_when_a_holding_stops_printing(self):
+        result = _run(_BuyOnceAt(at=2), self._gappy(), capital=100_000.0)
+        ec = result.equity_curve
+        # Fully invested in conid 1 from index 3. Across the gap the marked
+        # value must stay near the pre-gap level, not fall to cash.
+        pre_gap = float(ec.iloc[4])
+        during = [float(ec.iloc[i]) for i in (5, 6, 7)]
+        assert all(v > pre_gap * 0.5 for v in during), (
+            f'equity fell to {during} from {pre_gap:.0f} while the holding '
+            f'had no price — the position was erased, not valued')
+
+    def test_the_carried_value_is_the_last_known_price(self):
+        frames = self._gappy()
+        result = _run(_BuyOnceAt(at=2), frames, capital=100_000.0)
+        qty = result.trades[0].quantity
+        fill = float(frames[1]['open'].iloc[3])
+        cash = 100_000.0 - qty * fill
+        last_close = float(frames[1]['close'].iloc[4])
+        assert float(result.equity_curve.iloc[6]) == pytest.approx(
+            cash + qty * last_close)
