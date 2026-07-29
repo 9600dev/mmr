@@ -29,7 +29,8 @@ import pytest
 from hypothesis import given, settings, strategies as st
 
 from trader.simulation.signal_eval import (
-    forward_returns, ic_t_statistic, information_coefficient, period_ic,
+    forward_returns, ic_t_statistic, information_coefficient,
+    newey_west_variance, period_ic,
     periods_needed_for_significance, quantile_returns, rank_turnover,
     summarise_ic)
 
@@ -193,3 +194,35 @@ class TestQuantilesAndTurnover:
         sig = pd.DataFrame(rng.normal(size=(60, 30)),
                            index=prices.index, columns=prices.columns)
         assert rank_turnover(sig).mean() > 0.2
+
+
+class TestCounterexamplesFoundBySymbolicExecution:
+    """Pinned regressions. Each was found by CrossHair, not by sampling, and
+    each returned a plausible-looking value or raised where the contract said
+    it could not."""
+
+    def test_a_denormal_dispersion_does_not_divide_by_zero(self):
+        """std/sqrt(n) underflows to exactly zero for a denormal std, so the
+        division raised. Same class as the order_math denormal bug."""
+        assert ic_t_statistic(6.4758e-319, 5e-324, 4) is None
+
+    def test_a_non_finite_target_yields_none_not_nan(self):
+        """NaN is neither a period count nor 'not measurable', and returning it
+        silently violated the postcondition."""
+        assert periods_needed_for_significance(-0.5, 0.5,
+                                               target_t=float('nan')) is None
+        assert periods_needed_for_significance(0.05, 0.1, target_t=0.0) is None
+
+    def test_newey_west_refuses_a_degenerate_sample(self):
+        assert newey_west_variance((1.0,), 0) is None
+        assert newey_west_variance((), 3) is None
+
+    def test_newey_west_on_independent_data_matches_the_naive_variance(self):
+        """With lags=0 the correction reduces to the plain variance of the
+        mean — the property that makes the h=1 rows comparable to the
+        corrected ones."""
+        vals = tuple(float(x) for x in [0.1, -0.2, 0.3, 0.05, -0.15, 0.2])
+        n = len(vals)
+        mean = sum(vals) / n
+        naive = sum((v - mean) ** 2 for v in vals) / n / n
+        assert newey_west_variance(vals, 0) == pytest.approx(naive)
