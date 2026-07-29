@@ -259,3 +259,56 @@ class TestAMissingBarDoesNotEraseAHolding:
         last_close = float(frames[1]['close'].iloc[4])
         assert float(result.equity_curve.iloc[6]) == pytest.approx(
             cash + qty * last_close)
+
+
+class TestShortsPayToBorrow:
+    """Borrowing stock is not free, and a long/short result quoted without it
+    is optimistic by however long the shorts were held. The fee comes out of
+    CASH rather than reducing the position's marked value, because that is
+    what actually happens: you owe the lender regardless of what the stock
+    did."""
+
+    def _cfg(self, borrow_bps):
+        return dict(borrow=borrow_bps)
+
+    def _run_short(self, borrow_bps):
+        class _ShortOnce(_BuyOnceAt):
+            def on_panel(self, panel, state, index):
+                if index != 2:
+                    return None
+                return {1: -1.0, 2: 0.0, 3: 0.0}
+
+        config = BacktestConfig(
+            start_date=dt.datetime(2023, 12, 1), end_date=dt.datetime(2024, 3, 1),
+            initial_capital=100_000.0, bar_size=BarSize.Days1,
+            slippage_bps=0.0, commission_per_share=0.0,
+            short_borrow_bps_annual=borrow_bps)
+        frames = _frames(n=12)
+        return Backtester(_FakeStorage(frames), config).run_panel(
+            _ShortOnce(), list(frames.keys()))
+
+    def test_a_short_held_costs_more_than_one_not_held(self):
+        free = self._run_short(0.0)
+        paid = self._run_short(500.0)          # 5%/yr, deliberately visible
+        assert float(paid.equity_curve.iloc[-1]) < float(free.equity_curve.iloc[-1]), (
+            'holding a short cost nothing - the borrow fee is not being charged')
+
+    def test_a_long_only_book_pays_no_borrow(self):
+        """The fee applies to shorts alone. Charging it on longs would be a
+        silent drag on every result."""
+        config = BacktestConfig(
+            start_date=dt.datetime(2023, 12, 1), end_date=dt.datetime(2024, 3, 1),
+            initial_capital=100_000.0, bar_size=BarSize.Days1,
+            slippage_bps=0.0, commission_per_share=0.0,
+            short_borrow_bps_annual=5000.0)
+        frames = _frames(n=12)
+        a = Backtester(_FakeStorage(frames), config).run_panel(
+            _BuyOnceAt(at=2), list(frames.keys()))
+        config.short_borrow_bps_annual = 0.0
+        b = Backtester(_FakeStorage(frames), config).run_panel(
+            _BuyOnceAt(at=2), list(frames.keys()))
+        assert float(a.equity_curve.iloc[-1]) == pytest.approx(
+            float(b.equity_curve.iloc[-1]))
+
+    def test_the_default_is_free_so_old_results_are_unchanged(self):
+        assert BacktestConfig().short_borrow_bps_annual == 0.0
