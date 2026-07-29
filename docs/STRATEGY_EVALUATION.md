@@ -180,7 +180,7 @@ same thing, and each said it more sharply than the last:
 | DSR vs. all 875 ORB evaluations | **0.111** |
 | beta-matched negative control, best-of-180 | Sharpe 2.26, +22.0% |
 | **walk-forward, GOOGL, live semantics** | **+0.097%** over 5 folds, stability 50% |
-| GOOGL buy-and-hold, same window | **+8.22%** |
+| GOOGL buy-and-hold, same window | **+13.97%** |
 | live paper ledger, 6 closed trades | **−$128.76**, 2 wins |
 
 The per-fold detail is the clearest thing in this document:
@@ -198,7 +198,13 @@ folds**. Fold 1 was selected on a train Sharpe of 0.10 and produced the best
 out-of-sample result. Over these five folds the selection signal points the
 wrong way — which is precisely what PBO 70% measures.
 
-SPY, same procedure: **+0.11%**, stability 25%.
+SPY, same procedure: **+0.11%** against SPY's own +8.22%, stability 25%.
+
+> The +8.22% figure was initially reported as GOOGL's. It is SPY's — the
+> same conId confusion, caught a second time in the same session. GOOGL
+> returned +13.97% over that window, so the real gap is wider than first
+> stated. Resolve the conId every time; the habit is cheaper than the
+> correction.
 
 ### What was NOT the problem
 
