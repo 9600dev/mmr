@@ -185,6 +185,10 @@ only_mutate = [
     # mode is silent: it changes leverage or liquidates a position without
     # raising, and the equity curve still looks plausible.
     "trader/simulation/panel.py",
+    # Signal evaluation. The forward-return alignment fails invisibly: off by
+    # one and you correlate a signal with the return that produced it, which
+    # yields a large stable fake IC that looks exactly like a discovery.
+    "trader/simulation/signal_eval.py",
     # Decides which bars a strategy is allowed to see at all. Not on the
     # order path, but a wrong answer either starves a strategy of real bars
     # or feeds it bars that never traded.
@@ -208,6 +212,7 @@ pytest_add_cli_args_test_selection = [
     "tests/invariants/test_selection_bias.py",
     "tests/invariants/test_walk_forward.py",
     "tests/invariants/test_panel.py",
+    "tests/invariants/test_signal_eval.py",
     "tests/invariants/test_null_market.py",
     "tests/invariants/test_gate_properties.py",
     "tests/invariants/test_order_notional.py",

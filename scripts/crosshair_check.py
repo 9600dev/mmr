@@ -65,6 +65,8 @@ TARGETS = [
     "trader.trading.position_sizing._volatility_multiplier",
     "trader.trading.position_sizing.compute_atr",
     "trader.simulation.selection_bias.infer_periods_per_year",
+    "trader.simulation.signal_eval.ic_t_statistic",
+    "trader.simulation.signal_eval.periods_needed_for_significance",
     "trader.simulation.panel.target_positions",
     "trader.simulation.panel.rebalance_orders",
     "trader.simulation.panel.gross_exposure",
