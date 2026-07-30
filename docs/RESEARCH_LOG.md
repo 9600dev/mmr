@@ -412,6 +412,94 @@ claim was 16x too high.
 
 ---
 
+## 2026-07-30 — long-only momentum through walk-forward: the benchmark kills it
+
+**Finding: long-only 12-1 momentum on the point-in-time universe does not beat
+owning the universe. Walk-forward out-of-sample Sharpe 0.71 vs 0.94 for an
+equal-weight book of the same panel over the identical windows, through the
+identical execution path. The last undischarged positive number is
+discharged — not by overfitting this time, but by the benchmark.**
+
+Setup held identical to the prior work: same PIT panel (monthly membership
+from the prior month's dollar-volume rank), same execution (fill at t+1's
+open, 5bps slippage + $0.005/sh), same grid as the L/S PBO run
+(lookback 189/252/315 x rebalance 5/10/21), `SHORT_ENABLED=0`. Borrow does
+not apply long-only. Script: `scripts/momentum_wf_pbo.py`; full results in
+`~/.local/share/mmr/reports/momentum_wf_pbo.json`. 87 panel runs, 4m33s.
+
+### Phase A — full-period grid (2018-01 measured start, costs charged)
+
+| Sharpe | reb 5 | reb 10 | reb 21 |
+|---|---|---|---|
+| lookback 189 | 0.66 | 0.65 | 0.67 |
+| lookback 252 | **0.78** | 0.74 | 0.77 |
+| lookback 315 | 0.63 | 0.62 | 0.62 |
+| **equal-weight benchmark** | | | **0.99** |
+
+* Best cell lb252/rb5 at 0.78 is the 07-29 "Sharpe 0.75" re-derived (the
+  small difference is the measured-window start). The harness is faithful.
+* The surface is FLAT (0.62–0.78) — no 315-cliff like the L/S grid, because
+  the long-only book carries the equity premium everywhere; parameters barely
+  matter. PBO 0.11/0.21/0.21 at S=8/12/16 (9-trial caveat applies): the
+  parameter selection is NOT the problem.
+* DSR 0.976, and misleading BY CONSTRUCTION: it deflates against a
+  zero-Sharpe null, and a long-only book's honest null is the market — the
+  same beta-matched-null lesson the negative control taught on 07-28. The
+  equal-weight benchmark IS the beta-matched null here, and it wins: Sharpe
+  0.99, return +324.5%, maxDD −34.0% vs the best cell's −39.7%.
+
+### Phase B — walk-forward (rolling, train 2y, trade 1y, 7 folds)
+
+| fold | test window | chose | train SR | test SR | test ret |
+|---|---|---|---|---|---|
+| 0 | 2019-07 → 2020-07 | lb189/rb21 | 0.94 | 0.64 | +18.9% |
+| 1 | 2020-07 → 2021-07 | lb315/rb21 | 0.53 | 1.40 | +47.8% |
+| 2 | 2021-07 → 2022-07 | lb189/rb10 | **1.13** | **−0.97** | **−28.8%** |
+| 3 | 2022-07 → 2023-07 | lb252/rb21 | 0.42 | 0.50 | +7.6% |
+| 4 | 2023-07 → 2024-07 | lb252/rb10 | **−0.15** | 1.34 | **+33.7%** |
+| 5 | 2024-07 → 2025-07 | lb252/rb5 | 1.02 | 1.11 | +33.5% |
+| 6 | 2025-07 → 2026-07 | lb252/rb5 | 1.14 | 1.06 | +38.9% |
+
+| | Sharpe | CAGR | maxDD |
+|---|---|---|---|
+| walk-forward momentum | 0.71 | +18.97% | −42.0% |
+| equal-weight, same windows | **0.94** | +17.92% | (−34.0% full-period) |
+
+* **Selection stability 0.17** — five distinct cells across seven folds. This
+  coexists with the low PBO without contradiction: on a flat surface the
+  cells are nearly interchangeable, so the in-sample winner's out-of-sample
+  rank is weakly preserved (low PBO) while the identity of the winner is
+  noise (no stability). Low PBO here means "the choice doesn't matter", not
+  "the choice is skilled".
+* The train score carries no information about the test outcome: the highest
+  train Sharpe to that point (1.13) preceded the only losing fold (−28.8%,
+  the 2021-22 momentum crash), while a NEGATIVE train Sharpe (−0.15, best
+  available in fold 4) preceded +33.7%.
+* Net: the ranking buys +1.0pp of CAGR over owning the universe, and pays
+  0.23 of Sharpe and ~8pp of extra drawdown for it. That is concentration,
+  not selection — the same decomposition the 07-29 survivorship comparison
+  suggested (long-only 1.07 vs benchmark 0.96), now confirmed with honest
+  selection on the honest universe.
+
+### Honesty notes, stated before the result was known
+
+The grid prices 9 trials. It does not price the upstream choices made after
+seeing data — long-only itself (chosen after L/S disappointed), quintiles,
+the 21-day skip. And fold 0's warm-up is slightly short (the panel starts
+2016-08); cells with lookback 315 start a few weeks late inside a 2-year
+training window.
+
+### Where this leaves the search
+
+Momentum long/short: real signal, Sharpe 0.16–0.26 traded, undeployable.
+Momentum long-only: the market plus concentration risk, dominated by
+equal-weight ownership of the same universe. **The price-signal well is dry —
+both remaining configurations of the one surviving signal are now discharged.
+Raising the ceiling requires genuinely different information, not more
+price-derived signals or better parameters on this one.**
+
+---
+
 ## Method errors worth not repeating
 
 Recorded because they cost real time and two of them were invisible to every
