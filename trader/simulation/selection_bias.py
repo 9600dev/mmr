@@ -215,9 +215,26 @@ def _pooled_sharpe(counts, sums, sumsqs, chosen) -> np.ndarray:
         return np.zeros(sums.shape[1])
     mean = s / n
     var = (ss - n * mean ** 2) / (n - 1.0)
+
+    # CATASTROPHIC CANCELLATION. For a near-constant column, `ss` and
+    # `n * mean**2` are nearly equal large numbers, so their difference is
+    # floating-point noise - tiny, but often positive. sqrt of that noise is a
+    # denominator close to zero, and the Sharpe explodes: a genuinely constant
+    # column of 0.005 returned 38,214,751 before this guard. Such a trial then
+    # wins the in-sample argmax in every CSCV split and corrupts the PBO.
+    #
+    # The docstring's claim that this pooled form is "numerically identical" to
+    # the direct computation was therefore FALSE precisely where it mattered;
+    # numpy's std() uses a stable two-pass method and does not cancel. Rather
+    # than abandon the aggregates - CSCV needs them to be runnable at all - the
+    # variance is compared against the noise floor its own inputs imply: if it
+    # is negligible relative to the mean square, it is unresolvable and the
+    # column carries no information, which is 0.0 in a ranking.
+    scale = ss / n
     with np.errstate(invalid='ignore', divide='ignore'):
+        resolvable = var > 1e-10 * np.maximum(scale, np.finfo(float).tiny)
         sd = np.sqrt(np.maximum(var, 0.0))
-        sharpe = np.where(sd > 0, mean / sd, 0.0)
+        sharpe = np.where(resolvable & (sd > 0), mean / sd, 0.0)
     return np.nan_to_num(sharpe, nan=0.0, posinf=0.0, neginf=0.0)
 
 

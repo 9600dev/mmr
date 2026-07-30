@@ -82,6 +82,7 @@ TARGETS = [
     "trader.data.fundamentals.latest_known",
     "trader.data.fundamentals.reporting_lag_days",
     "trader.data.fundamentals.safe_ratio",
+    "trader.data.bar_quality.is_test_ticker",
     "trader.data.bar_quality.price_spikes",
     "trader.data.bar_quality.check_bar",
     ("trader.data.bar_quality.check_series", 10),

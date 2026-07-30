@@ -85,13 +85,21 @@ def newey_west_variance(values: tuple[float, ...], lags: int) -> Optional[float]
     n = len(values)
     if n < 2:
         return None
+    # The requested bandwidth is CLAMPED to what the sample can support, and
+    # the Bartlett weights are computed from the clamped value. Using the
+    # requested one instead makes every weight approach 1.0 when the bandwidth
+    # exceeds the sample - asking for 99 lags on four observations weights the
+    # single computable lag at 0.99 instead of 0.75, over-correcting by 25x on
+    # this example. Found by writing a test that assumed the two agreed; they
+    # did not, and the requested-bandwidth version was the wrong one.
+    effective = min(lags, n - 1)
     mean = sum(values) / n
     dev = [v - mean for v in values]
     gamma0 = sum(d * d for d in dev) / n
     total = gamma0
-    for lag in range(1, min(lags, n - 1) + 1):
+    for lag in range(1, effective + 1):
         cov = sum(dev[i] * dev[i + lag] for i in range(n - lag)) / n
-        total += 2.0 * (1.0 - lag / (lags + 1.0)) * cov
+        total += 2.0 * (1.0 - lag / (effective + 1.0)) * cov
     if not math.isfinite(total) or total <= 0:
         return None
     return total / n
