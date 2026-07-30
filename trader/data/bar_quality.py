@@ -301,6 +301,30 @@ def price_spikes(bars: Sequence[Bar], threshold: float = 0.6,
 # frames. The spec stays the source of truth; this is an optimisation of it.
 # --------------------------------------------------------------------------
 
+# Exchange TEST securities, published on the consolidated tape and not
+# tradeable. ZWZZT closed at 199,999.00 in this store, which would dominate any
+# cross-sectional ranking it touched. Defined HERE rather than in each consumer
+# so the writer and the reader cannot disagree - filtering only at read means
+# every future consumer has to remember, and one that forgets gets a 200,000
+# dollar phantom in its top decile.
+EXCHANGE_TEST_TICKERS = frozenset({
+    'ZWZZT', 'ZVZZT', 'ZXZZT', 'ZJZZT', 'ZAZZT', 'ZBZZT', 'ZCZZT',
+    'ZEXIT', 'ZIEXT', 'ZTEST', 'ZTST', 'IBM.TEST', 'CBO', 'CBX', 'TESTA',
+})
+
+
+@deal.has()
+@deal.pure
+def is_test_ticker(symbol: str) -> bool:
+    """True for an exchange test security, which is not a tradeable instrument.
+
+    Matched on the exact set rather than a 'Z...ZZT' pattern: a pattern would
+    also swallow real tickers, and there is no recovering a name you silently
+    refused to store.
+    """
+    return str(symbol).strip().upper() in EXCHANGE_TEST_TICKERS
+
+
 _OHLC = ('open', 'high', 'low', 'close')
 
 

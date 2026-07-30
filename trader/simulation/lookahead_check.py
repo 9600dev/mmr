@@ -204,3 +204,73 @@ def assert_no_lookahead(
                     hidden_bars=hide,
                     total_bars=total_bars,
                 )
+
+
+def assert_no_panel_lookahead(
+    strategy,
+    panel: 'pd.DataFrame',
+    *,
+    hide_bars_sequence: Sequence[int] = (1, 2, 5, 10),
+    tolerance: float = 1e-9,
+) -> None:
+    """The same walk-forward consistency check, for `precompute_panel`.
+
+    Every piece of cross-sectional research in this repo runs through the panel
+    path, and until now nothing checked it for leaks. The per-instrument checker
+    cannot: it passes a single OHLCV frame, while `precompute_panel` takes a
+    wide two-level (field, conid) panel, so it would fail on the shape long
+    before it examined a value.
+
+    The leak this catches is the one that produced a large stable fake IC
+    elsewhere today: anything that normalises across TIME rather than across
+    names. A cross-sectional z-score is safe because each row uses only that
+    row; a time-series z-score divides by a standard deviation computed from
+    the whole sample INCLUDING THE FUTURE, and the resulting signal knows how
+    volatile the next five years will be. Truncating the panel changes that
+    denominator, so a past value shifts - which is exactly what this asserts
+    cannot happen.
+
+    Also catches `shift(-1)`, centred rolling windows, `fit_transform` on the
+    complete history, and cumulative statistics taken over the full frame.
+    """
+    import numpy as np
+    import pandas as pd
+
+    full = strategy.precompute_panel(panel)
+    if not isinstance(full, dict) or not full:
+        return                          # nothing precomputed, nothing to leak
+
+    n = len(panel)
+    for hide in hide_bars_sequence:
+        if hide >= n - 1:
+            continue
+        truncated = strategy.precompute_panel(panel.iloc[:n - hide])
+        for key, full_val in full.items():
+            trunc_val = truncated.get(key)
+            if trunc_val is None:
+                raise AssertionError(
+                    f'precompute_panel returned key {key!r} on the full panel '
+                    f'but not with the last {hide} bar(s) hidden; the set of '
+                    f'outputs must not depend on how much future exists')
+            if not hasattr(full_val, 'iloc') or not hasattr(trunc_val, 'iloc'):
+                continue                # not frame-like; nothing to align
+            common = min(len(full_val), len(trunc_val))
+            a = np.asarray(full_val.iloc[:common], dtype=float)
+            b = np.asarray(trunc_val.iloc[:common], dtype=float)
+            if a.shape != b.shape:
+                raise AssertionError(
+                    f'precompute_panel key {key!r} changed shape when the last '
+                    f'{hide} bar(s) were hidden: {a.shape} vs {b.shape}')
+            # NaN in the same places, finite values equal. A value that was NaN
+            # with the future hidden and became a number with it visible is a
+            # leak even when the number looks reasonable.
+            both_nan = np.isnan(a) & np.isnan(b)
+            differ = ~both_nan & ~(np.abs(a - b) <= tolerance)
+            if differ.any():
+                where = np.argwhere(differ)
+                first = tuple(int(x) for x in where[0])
+                raise AssertionError(
+                    f'LOOKAHEAD in precompute_panel key {key!r}: hiding the '
+                    f'last {hide} bar(s) changed a PAST value at index {first} '
+                    f'({a[first]!r} -> {b[first]!r}). Something is normalising '
+                    f'across time rather than across names, or reading forward.')

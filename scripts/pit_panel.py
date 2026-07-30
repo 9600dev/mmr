@@ -49,10 +49,12 @@ def load_pit_panel(top_n: int = 500, start: str = '2016-08-01',
     # NASDAQ/NYSE publish TEST tickers in the consolidated tape - ZWZZT closed
     # at 199,999.00 in this store. They are not securities and would dominate
     # any cross-sectional ranking they touched.
-    _TEST = ('ZWZZT', 'ZVZZT', 'ZXZZT', 'ZJZZT', 'ZAZZT', 'ZBZZT', 'ZCZZT',
-             'ZTEST', 'IBM.TEST', 'CBO', 'CBX')
+    # Belt and braces: the WRITER refuses these now, but rows predating that
+    # change are still in the table. One shared definition, so the two cannot
+    # drift apart.
+    from trader.data.bar_quality import EXCHANGE_TEST_TICKERS
     before = df['ticker'].nunique()
-    df = df[~df['ticker'].isin(_TEST)]
+    df = df[~df['ticker'].isin(EXCHANGE_TEST_TICKERS)]
     df = df[(df['close'] > 0.01) & (df['close'] < 100_000)]
     dropped = before - df['ticker'].nunique()
 

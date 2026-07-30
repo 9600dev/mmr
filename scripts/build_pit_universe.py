@@ -58,8 +58,10 @@ def main() -> int:
     ap.add_argument('--sleep', type=float, default=0.02)
     args = ap.parse_args()
 
+    import pandas as pd
     import yaml
     from massive import RESTClient
+    from trader.data.bar_quality import impossible_mask, is_test_ticker
     from trader.container import Container, default_config_path
     from trader.data.duckdb_store import DuckDBConnection
 
@@ -84,7 +86,7 @@ def main() -> int:
     print(f'{args.start} -> {end}, {len(done)} sessions already stored',
           flush=True)
 
-    sessions = empty = rows = 0
+    sessions = empty = rows = n_test = n_impossible = 0
     while day <= end:
         if day.weekday() >= 5 or day in done:
             day += dt.timedelta(days=1)
@@ -107,6 +109,9 @@ def main() -> int:
             t = getattr(b, 'ticker', None)
             if not t or not c or not v or c <= 0 or v <= 0:
                 continue
+            if is_test_ticker(t):
+                n_test += 1
+                continue
             scored.append((c * v, b))
         scored.sort(key=lambda x: -x[0])
         keep = scored[:args.top]
@@ -115,6 +120,19 @@ def main() -> int:
                     getattr(b, 'high', None), getattr(b, 'low', None),
                     b.close, b.volume, dv, i + 1)
                    for i, (dv, b) in enumerate(keep)]
+
+        # Same chokepoint discipline as TickData.write: nothing structurally
+        # impossible is stored. Research data earns this as much as trading
+        # data does - a high below the close is a row that never happened, and
+        # a signal fitted through it has been fitted to fiction. Refused rows
+        # are COUNTED, because a filter whose effect you cannot size is a claim
+        # rather than a control.
+        frame = pd.DataFrame(payload, columns=[
+            'day', 'ticker', 'open', 'high', 'low', 'close', 'volume',
+            'dollar_volume', 'dv_rank'])
+        bad = impossible_mask(frame)
+        n_impossible += int(bad.sum())
+        payload = [row for row, is_bad in zip(payload, bad) if not is_bad]
         db.execute_atomic(lambda conn, p=payload: conn.executemany(
             'INSERT OR REPLACE INTO pit_daily_bars VALUES (?,?,?,?,?,?,?,?,?)', p))
         rows += len(payload)
@@ -124,8 +142,9 @@ def main() -> int:
         day += dt.timedelta(days=1)
         time.sleep(args.sleep)
 
-    print(f'done: {sessions} sessions, {rows:,} rows, {empty} empty days',
-          flush=True)
+    print(f'done: {sessions} sessions, {rows:,} rows, {empty} empty days, '
+          f'{n_test} test-ticker bars refused, {n_impossible} structurally '
+          f'impossible bars refused', flush=True)
 
     # The validation that proves it worked: how much of the historical
     # membership is GONE today? If this is near zero the build is still
