@@ -237,6 +237,40 @@ def unexplained_jumps(bars: Sequence[Bar], threshold: float = 0.25) -> List[Find
     return out
 
 
+@deal.pure
+@deal.pre(lambda move, split_to, split_from, tolerance=0.15:
+          split_to > 0 and split_from > 0 and tolerance > 0)
+def explained_by_split(move: float, split_to: float, split_from: float,
+                       tolerance: float = 0.15) -> bool:
+    """Is this price move what the given split ratio would produce?
+
+    `unexplained_jumps` reports every large move as a WARNING and declines to
+    judge, on the stated grounds that telling an unadjusted split from a real
+    re-rating "needs a corporate-actions feed this module does not take". That
+    was true when written and is no longer: 799 warnings sat permanently
+    accepted in the baseline because nobody could classify them.
+
+    A k-for-1 split multiplies the price by 1/k, so the fractional move is
+    ``split_from/split_to - 1``: a 4:1 split shows as -75%, a 1:10 reverse split
+    as +900%. Matched within ``tolerance`` because the split day carries genuine
+    trading on top of the mechanical adjustment, so an exact equality would
+    reject nearly every real case.
+
+    Returns False rather than raising for a nonsense ratio, because "this move
+    is not explained" is the safe answer - it keeps the finding visible instead
+    of dismissing it on bad reference data.
+    """
+    if not (math.isfinite(move) and math.isfinite(split_to)
+            and math.isfinite(split_from)):
+        return False
+    expected = split_from / split_to - 1.0
+    if expected == 0:
+        return False
+    # Relative comparison: a -75% expectation should not be matched by the same
+    # absolute slack as a +900% one.
+    return abs(move - expected) <= tolerance * abs(expected)
+
+
 @deal.has()
 @deal.pure
 @deal.ensure(
