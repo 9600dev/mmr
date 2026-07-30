@@ -193,3 +193,100 @@ class TestCorrelationDiagnostic:
         c = signal_correlations({'a': _frame(rows=60, cols=40, seed=11),
                                  'b': _frame(rows=60, cols=40, seed=12)})
         assert abs(c['a|b']) < 0.25
+
+    def test_a_non_conid_column_label_does_not_take_down_the_book(self):
+        """Found in the field: a 490-name panel contained two instruments
+        stored under their TICKER rather than their conid (BRK.B, ORCL), and
+        int() on the column label raised - taking down the whole
+        neutralisation for a store inconsistency that is not this function's
+        business. A label that cannot be a conid has no sector, which is the
+        same situation as a conid with no metadata: leave it alone.
+        """
+        f = _frame(rows=3, cols=4)
+        f.columns = [100, 101, 'BRK.B', 'ORCL']
+        out = neutralise(f, {100: 'x', 101: 'x'})
+        assert np.allclose(out[['BRK.B', 'ORCL']].to_numpy(),
+                           f[['BRK.B', 'ORCL']].to_numpy())
+        assert np.allclose(out[[100, 101]].mean(axis=1).to_numpy(), 0.0,
+                           atol=1e-12)
+
+
+class TestCombineArithmeticAndCorrelationBoundaries:
+    """`combine` carried 26 surviving mutants and `signal_correlations` 12 - the
+    largest concentrations in this module. The existing tests establish the
+    contract; these pin the arithmetic that implements it."""
+
+    def test_the_weighted_mean_is_actually_weighted(self):
+        """Two signals at 3:1 must land three-quarters of the way toward the
+        first. A mutant that ignores weights, or sums instead of averaging,
+        passes every equal-weight test."""
+        a = pd.DataFrame({10: [1.0], 11: [-1.0], 12: [0.0]})
+        b = pd.DataFrame({10: [-1.0], 11: [1.0], 12: [0.0]})
+        out = combine({'a': a, 'b': b}, weights={'a': 3.0, 'b': 1.0},
+                      min_names=3)
+        za = cross_sectional_zscore(a, min_names=3)
+        zb = cross_sectional_zscore(b, min_names=3)
+        expected = (3.0 * za + 1.0 * zb) / 4.0
+        assert np.allclose(out.to_numpy(), expected.to_numpy(),
+                           atol=1e-9, equal_nan=True)
+
+    def test_a_negative_weight_inverts_a_signal(self):
+        """Weights are signed on purpose: a signal believed backwards can be
+        flipped rather than rewritten. A mutant taking abs() of the weight
+        before applying it would silently stop honouring that."""
+        a = pd.DataFrame({10: [2.0], 11: [-2.0], 12: [0.0], 13: [1.0], 14: [-1.0]})
+        pos = combine({'a': a}, weights={'a': 1.0})
+        neg = combine({'a': a}, weights={'a': -1.0})
+        assert np.allclose(pos.to_numpy(), -neg.to_numpy(),
+                           atol=1e-9, equal_nan=True)
+
+    def test_the_divisor_counts_CONTRIBUTING_signals_per_name(self):
+        """A name present in one of two signals must be averaged over one, not
+        two - otherwise a missing input halves its score, which is the 'missing
+        is bearish' error in disguise."""
+        a = _frame(rows=1, cols=6, seed=1)
+        b = _frame(rows=1, cols=6, seed=2)
+        b.iloc[0, 0] = np.nan
+        out = combine({'a': a, 'b': b}, min_names=5)
+        za = cross_sectional_zscore(a, min_names=5)
+        assert out.iloc[0, 0] == pytest.approx(za.iloc[0, 0])
+
+    def test_all_zero_weights_yield_nothing(self):
+        a, b = _frame(seed=1), _frame(seed=2)
+        assert combine({'a': a, 'b': b}, weights={'a': 0.0, 'b': 0.0}) is None
+
+    def test_a_non_finite_weight_is_skipped_not_propagated(self):
+        """One bad weight must not NaN the whole book."""
+        a, b = _frame(seed=3), _frame(seed=4)
+        out = combine({'a': a, 'b': b},
+                      weights={'a': 1.0, 'b': float('nan')})
+        assert out is not None
+        assert np.allclose(out.to_numpy(),
+                           cross_sectional_zscore(a).to_numpy(),
+                           atol=1e-9, equal_nan=True)
+
+    def test_correlation_is_signed(self):
+        """An inverted copy must correlate -1, not +1. A mutant taking abs()
+        would report a perfectly hedged pair as perfectly redundant, which is
+        the exact opposite conclusion."""
+        a = _frame(rows=40, cols=25, seed=5)
+        c = signal_correlations({'a': a, 'inv': -a})
+        assert c['a|inv'] == pytest.approx(-1.0, abs=1e-9)
+
+    def test_every_pair_is_reported_once(self):
+        """Three signals give three pairs, not six and not nine. A mutant that
+        double-counts would halve every mean-rho estimate fed to the
+        combination formula."""
+        f = {k: _frame(rows=30, cols=20, seed=i)
+             for i, k in enumerate(('a', 'b', 'c'))}
+        assert len(signal_correlations(f)) == 3
+
+    def test_a_single_signal_has_no_pairs(self):
+        assert signal_correlations({'a': _frame(rows=30, cols=20)}) == {}
+
+    def test_a_too_thin_cross_section_is_skipped_not_zeroed(self):
+        """Correlating 4 names is noise. Reporting 0.0 for it would drag a mean
+        rho toward zero and overstate how diversified a set is."""
+        a = _frame(rows=30, cols=4, seed=7)
+        b = _frame(rows=30, cols=4, seed=8)
+        assert signal_correlations({'a': a, 'b': b}) == {}

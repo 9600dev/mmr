@@ -289,3 +289,195 @@ class TestAnnualisationIsInferredNotAssumed:
         """Falling back to 252 here would be a silent wrong answer. The caller
         can choose a fallback; this function must not choose one for it."""
         assert infer_periods_per_year(['not-a-date', 'nor-this', 'x']) is None
+
+
+class TestThePooledArithmeticEqualsTheDirectComputation:
+    """`_pooled_sharpe` computes a Sharpe from per-block (n, sum, sum-of-squares)
+    aggregates rather than from the rows themselves, because CSCV scores 12,870
+    train/test pairs and recomputing over half the rows each time would make the
+    test unrunnable. Its docstring claims the two are numerically identical.
+
+    That claim had NO test. It is the same shape as `impossible_mask` versus
+    `check_bar` - an optimisation standing in for a specification - which this
+    codebase already treats as load-bearing, because the flip residual came from
+    exactly that pattern drifting. If the pooled form is wrong, every PBO figure
+    ever reported here is wrong, and nothing about the output would look odd.
+    """
+
+    def _direct_sharpe(self, matrix, chosen, n_splits):
+        """Sharpe computed straightforwardly over the selected rows."""
+        T = matrix.shape[0]
+        bounds = np.linspace(0, T, n_splits + 1).astype(int)
+        rows = np.concatenate([np.arange(bounds[i], bounds[i + 1])
+                               for i in sorted(chosen)])
+        sub = matrix[rows, :]
+        mean = sub.mean(axis=0)
+        sd = sub.std(axis=0, ddof=1)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            out = np.where(sd > 0, mean / sd, 0.0)
+        return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+
+    @settings(max_examples=120, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=2_000),
+           n_names=st.integers(min_value=2, max_value=8),
+           n_splits=st.sampled_from([4, 6, 8]))
+    def test_pooled_equals_direct_on_every_block_subset(self, seed, n_names,
+                                                       n_splits):
+        import itertools
+        from trader.simulation.selection_bias import (_block_moments,
+                                                      _pooled_sharpe)
+        rng = np.random.default_rng(seed)
+        m = rng.normal(0.0, 0.01, size=(n_splits * 12, n_names))
+        counts, sums, sumsqs = _block_moments(m, n_splits)
+        for chosen in itertools.combinations(range(n_splits), n_splits // 2):
+            pooled = _pooled_sharpe(counts, sums, sumsqs, chosen)
+            direct = self._direct_sharpe(m, chosen, n_splits)
+            assert np.allclose(pooled, direct, atol=1e-9), (
+                f'pooled and direct Sharpe disagree on blocks {chosen}: '
+                f'{pooled} vs {direct}')
+
+    def test_the_blocks_partition_every_row_exactly_once(self):
+        """A row counted twice, or dropped, silently changes every pooled
+        statistic. The partition is the foundation the aggregates rest on."""
+        from trader.simulation.selection_bias import _block_moments
+        for T, S in ((100, 8), (97, 8), (13, 4), (16, 16)):
+            m = np.arange(T, dtype=float).reshape(T, 1)
+            counts, sums, _ = _block_moments(m, S)
+            assert counts.sum() == T, f'blocks cover {counts.sum()} of {T} rows'
+            # Every value appears once, so the summed block sums equal the total.
+            assert sums.sum() == pytest.approx(m.sum())
+
+    def test_a_single_row_block_yields_no_sharpe_rather_than_infinity(self):
+        """One observation has no dispersion. Returning a number there would
+        put a divide-by-almost-zero into the ranking."""
+        from trader.simulation.selection_bias import (_block_moments,
+                                                      _pooled_sharpe)
+        m = np.array([[0.01], [0.02], [0.03], [0.04]])
+        counts, sums, sumsqs = _block_moments(m, 4)
+        out = _pooled_sharpe(counts, sums, sumsqs, (0,))
+        assert np.all(np.isfinite(out))
+        assert out[0] == 0.0
+
+    def test_a_constant_column_scores_zero_not_a_spurious_giant(self):
+        """Found a real bug. The pooled variance (sum-sq - n*mean^2) is a
+        catastrophic cancellation for a near-constant column: two nearly-equal
+        large numbers subtracted, leaving float noise that is tiny but positive,
+        so mean/sqrt(noise) explodes. A constant column of 0.005 returned
+        38,214,751 - and such a trial wins the in-sample argmax in EVERY CSCV
+        split, corrupting the PBO.
+
+        The docstring claimed the pooled form was numerically identical to the
+        direct computation. It was not, precisely where it mattered: numpy's
+        std() uses a stable two-pass method and does not cancel."""
+        from trader.simulation.selection_bias import (_block_moments,
+                                                      _pooled_sharpe)
+        m = np.full((40, 2), 0.005)
+        m[:, 1] = np.linspace(0, 1, 40)
+        counts, sums, sumsqs = _block_moments(m, 4)
+        out = _pooled_sharpe(counts, sums, sumsqs, (0, 1))
+        assert np.all(np.isfinite(out))
+        assert out[0] == 0.0
+
+    @settings(max_examples=80, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=500),
+           k=st.floats(min_value=0.1, max_value=50.0, allow_nan=False,
+                       allow_infinity=False))
+    def test_pooled_sharpe_is_scale_invariant(self, seed, k):
+        """Sharpe is a ratio, so multiplying returns by a constant must not move
+        it. Kills mutants that drop the division or square the wrong term."""
+        from trader.simulation.selection_bias import (_block_moments,
+                                                      _pooled_sharpe)
+        rng = np.random.default_rng(seed)
+        m = rng.normal(0.001, 0.02, size=(48, 3))
+        a = _pooled_sharpe(*_block_moments(m, 4), (0, 1))
+        b = _pooled_sharpe(*_block_moments(m * k, 4), (0, 1))
+        assert np.allclose(a, b, atol=1e-7)
+
+
+class TestCSCVMechanicsAndAlignment:
+    """`pbo_cscv` carried 42 survivors and `align_equity_curves` 33 - the two
+    largest concentrations in this module. The existing tests establish the
+    statistical behaviour (noise -> 0.5, real edge -> low); these pin the
+    mechanics that produce it."""
+
+    def _noise(self, T=200, N=8, seed=0):
+        return np.random.default_rng(seed).normal(0, 0.01, size=(T, N))
+
+    def test_the_combination_count_is_exactly_C_S_half_S(self):
+        """S=8 gives C(8,4)=70 splits, S=10 gives 252. A mutant that enumerates
+        permutations, or halves the set, changes the estimate's precision
+        silently - the PBO would still look like a probability."""
+        from math import comb
+        for S in (4, 6, 8, 10):
+            r = pbo_cscv(self._noise(T=S * 20, N=6), n_splits=S)
+            assert r is not None
+            assert r.n_combinations == comb(S, S // 2), S
+
+    def test_train_and_test_are_complementary_halves(self):
+        """Every block is used exactly once per split, as training or testing.
+        The symmetry is what makes CSCV trustworthy: a block that appeared in
+        both, or in neither, would bias the estimate toward whichever period it
+        favoured."""
+        import itertools
+        S = 8
+        for train in itertools.combinations(range(S), S // 2):
+            test = tuple(sorted(set(range(S)) - set(train)))
+            assert len(train) == len(test) == S // 2
+            assert not set(train) & set(test)
+            assert set(train) | set(test) == set(range(S))
+
+    def test_the_reported_trial_count_is_the_matrix_width(self):
+        for N in (3, 7, 15):
+            r = pbo_cscv(self._noise(N=N), n_splits=6)
+            assert r is not None and r.n_trials == N
+
+    def test_median_oos_rank_is_a_fraction(self):
+        r = pbo_cscv(self._noise(), n_splits=6)
+        assert r is not None and 0.0 < r.median_oos_rank < 1.0
+
+    def test_pbo_and_the_logits_agree(self):
+        """PBO is defined as the fraction of splits with lambda <= 0. A mutant
+        that changes the threshold or the direction breaks the identity."""
+        r = pbo_cscv(self._noise(seed=4), n_splits=8)
+        assert r is not None
+        recomputed = sum(1 for x in r.logits if x <= 0.0) / len(r.logits)
+        assert r.pbo == pytest.approx(recomputed)
+
+    def test_an_all_identical_family_lands_at_one_half(self):
+        """Every trial the same means the winner's OOS rank is a tie, resolved
+        to the middle. A mutant breaking ties by column order would report 0 or
+        1 - a confident answer about a family carrying no information."""
+        m = np.tile(self._noise(N=1, seed=9), (1, 6))
+        r = pbo_cscv(m, n_splits=8)
+        assert r is not None
+        assert r.median_oos_rank == pytest.approx(0.5, abs=0.02)
+
+    def test_alignment_requires_a_quorum_not_unanimity(self):
+        """A day present in most curves survives; one present in a minority does
+        not. A mutant using unanimity reintroduces the intersection collapse
+        that turned 250 rows into 12."""
+        base = [{'timestamp': f'2026-01-{i:02d} 00:00:00-05:00',
+                 'value': 100.0 + i} for i in range(1, 21)]
+        curves = [list(base) for _ in range(9)]
+        curves.append(base + [{'timestamp': '2026-02-01 00:00:00-05:00',
+                               'value': 200.0}])
+        aligned = align_equity_curves(curves)
+        assert aligned is not None
+        m, used, dropped = aligned
+        assert used == 10 and dropped == 0
+        assert m.shape[0] == 19, 'the minority day should not enter the index'
+
+    def test_returns_are_computed_from_consecutive_index_rows(self):
+        """The matrix holds RETURNS, not levels. A mutant that forgot the diff
+        would feed price levels into a Sharpe and produce enormous values."""
+        curves = [[{'timestamp': f'2026-01-{i:02d} 00:00:00-05:00',
+                    'value': float(100 * (1.1 ** (i - 1)))}
+                   for i in range(1, 11)] for _ in range(3)]
+        aligned = align_equity_curves(curves)
+        assert aligned is not None
+        m, _, _ = aligned
+        assert np.allclose(m, 0.10, atol=1e-9), (
+            'a series compounding at 10% per period must yield 0.10 returns')
+
+    def test_a_single_curve_is_refused(self):
+        assert align_equity_curves([[{'timestamp': 'd1', 'value': 1.0}]]) is None

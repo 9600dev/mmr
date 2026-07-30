@@ -114,8 +114,15 @@ class TestTheShippedStrategiesAreClean:
     def test_shipped_panel_strategies_have_no_lookahead(self, module, cls):
         import importlib.util
         import pathlib
-        spec = importlib.util.spec_from_file_location(
-            f'_lc_{cls}', pathlib.Path(module).resolve())
+        # Resolve from THIS FILE upward, not from the CWD. Under mutmut the CWD
+        # is the mutants/ sandbox, which does not contain strategies/ - so a
+        # relative path made this test fail there and aborted the whole
+        # mutation run. The gate failing closed is what surfaced it.
+        root = pathlib.Path(__file__).resolve().parents[2]
+        target = root / module
+        if not target.exists():
+            pytest.skip(f'{module} not present in this tree')
+        spec = importlib.util.spec_from_file_location(f'_lc_{cls}', target)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         inst = getattr(mod, cls)()

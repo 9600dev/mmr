@@ -329,3 +329,94 @@ class TestMembershipHysteresis:
         from trader.simulation.panel import buffered_membership
         assert buffered_membership({1: float('nan')}, frozenset({1}),
                                    0.10, 0.25) == frozenset()
+
+
+class TestTheBandsInteractionWithRebalancing:
+    """`apply_no_trade_band` carried 23 surviving mutants - the second-largest
+    concentration in the panel kernel. The existing tests cover single-name
+    cases; these cover the arithmetic boundaries and the multi-name behaviour
+    that a rebalanced book actually exercises."""
+
+    def test_the_band_is_a_strict_threshold_not_inclusive(self):
+        """A move of exactly `band` TRADES. Making it inclusive would suppress
+        the marginal trade, and over a 500-name book the boundary case is not
+        rare - it is where most of the distribution sits."""
+        from trader.simulation.panel import apply_no_trade_band
+        # target 100 -> 110 is exactly 10/110 = 0.0909... of target
+        out = apply_no_trade_band({1: 100.0}, {1: 110.0}, band=10.0 / 110.0)
+        assert out[1] == 110.0
+
+    def test_each_name_is_banded_independently(self):
+        """A small move on one name must not suppress a large move on another.
+        A mutant that bands the whole dict on one name's ratio would pass every
+        single-name test."""
+        from trader.simulation.panel import apply_no_trade_band
+        out = apply_no_trade_band({1: 100.0, 2: 100.0},
+                                  {1: 101.0, 2: 200.0}, band=0.10)
+        assert out[1] == 100.0        # 1% move: held
+        assert out[2] == 200.0        # 100% move: taken
+
+    def test_shorts_are_banded_on_magnitude_not_sign(self):
+        """A short growing from -100 to -103 is a 3% adjustment, same as a long.
+        A mutant comparing signed values would band the wrong side."""
+        from trader.simulation.panel import apply_no_trade_band
+        assert apply_no_trade_band({1: -100.0}, {1: -103.0}, band=0.10)[1] == -100.0
+        assert apply_no_trade_band({1: -100.0}, {1: -150.0}, band=0.10)[1] == -150.0
+
+    def test_a_name_absent_from_the_target_is_not_invented(self):
+        """The band decides whether to ACT on an instruction, never to create
+        one. A held name the strategy did not mention must not appear."""
+        from trader.simulation.panel import apply_no_trade_band
+        out = apply_no_trade_band({1: 100.0, 2: 50.0}, {1: 101.0}, band=0.10)
+        assert set(out) == {1}
+
+    def test_a_nonfinite_target_is_dropped_not_held(self):
+        from trader.simulation.panel import apply_no_trade_band
+        for bad in (float('nan'), float('inf')):
+            assert apply_no_trade_band({1: 10.0}, {1: bad}, band=0.1) == {}
+
+    def test_prices_only_scale_the_comparison_not_the_result(self):
+        """Supplying prices changes WHETHER a trade happens, never the quantity
+        traded. A mutant that returned a price-scaled quantity would corrupt
+        every order."""
+        from trader.simulation.panel import apply_no_trade_band
+        out = apply_no_trade_band({1: 100.0}, {1: 200.0}, band=0.10,
+                                  prices={1: 37.5})
+        assert out[1] == 200.0
+
+    def test_an_unpriced_name_still_bands_on_share_count(self):
+        """Prices are optional per name. A name missing from the price map must
+        fall back to the share comparison rather than being dropped."""
+        from trader.simulation.panel import apply_no_trade_band
+        out = apply_no_trade_band({1: 100.0, 2: 100.0}, {1: 101.0, 2: 300.0},
+                                  band=0.10, prices={1: 5.0})
+        assert out[1] == 100.0 and out[2] == 300.0
+
+
+class TestNormalisationBoundaries:
+    """`normalise_weights` had 8 survivors; the existing tests cover the
+    scale-down path but not its edges."""
+
+    def test_gross_exactly_at_the_cap_is_untouched(self):
+        from trader.simulation.panel import gross_exposure, normalise_weights
+        w = {1: 0.5, 2: -0.5}
+        assert gross_exposure(normalise_weights(w, 1.0)) == pytest.approx(1.0)
+        assert normalise_weights(w, 1.0) == w
+
+    def test_a_non_finite_cap_leaves_the_book_alone(self):
+        """An unusable cap must not silently scale to zero or raise; the book is
+        the caller's expressed intent and a bad parameter is not a reason to
+        discard it."""
+        from trader.simulation.panel import normalise_weights
+        w = {1: 2.0, 2: -3.0}
+        for bad in (float('nan'), float('inf'), 0.0, -1.0):
+            assert normalise_weights(w, bad) == w
+
+    def test_a_non_finite_weight_is_dropped_from_the_result(self):
+        from trader.simulation.panel import normalise_weights
+        out = normalise_weights({1: 0.5, 2: float('nan')}, 1.0)
+        assert set(out) == {1}
+
+    def test_an_all_zero_book_survives_untouched(self):
+        from trader.simulation.panel import normalise_weights
+        assert normalise_weights({1: 0.0, 2: 0.0}, 1.0) == {1: 0.0, 2: 0.0}

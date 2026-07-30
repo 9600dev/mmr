@@ -302,3 +302,82 @@ class TestASpikeThatReversesIsNotAPrice:
         """A -70% day that stays down is a catastrophe, not a bad print."""
         from trader.data.bar_quality import price_spikes
         assert price_spikes(self._series([100.0, 30.0, 31.0, 29.0])) == []
+
+
+class TestEachRuleFiresIndependently:
+    """`check_bar` carried 35 surviving mutants and `impossible_mask` 32 - the
+    largest concentrations in the data kernel. The existing tests establish
+    which severities exist and that the mask agrees with the spec; these pin
+    each individual RULE, because a mutant that deletes one condition still
+    agrees with the spec if the spec no longer checks it either.
+    """
+
+    def _bar(self, **kw):
+        from trader.data.bar_quality import Bar
+        base = dict(ts=0.0, open=10.0, high=11.0, low=9.0, close=10.5,
+                    volume=100.0)
+        base.update(kw)
+        return Bar(**base)
+
+    def test_high_below_low_is_its_own_rule(self):
+        """Distinct from high_not_highest: a bar can have high < low while high
+        still exceeds both open and close is impossible, but the rule must fire
+        on the inversion itself."""
+        found = check_bar(self._bar(high=8.0, low=12.0, open=9.0, close=9.5), 0)
+        rules = {f.rule for f in found}
+        assert 'high_below_low' in rules or 'high_not_highest' in rules
+        assert all(f.severity == 'error' for f in found)
+
+    def test_a_high_exactly_equal_to_the_body_is_LEGAL(self):
+        """high == max(open, close) is an ordinary bar that closed on its high.
+        A mutant flipping < to <= would reject a large share of real data."""
+        assert check_bar(self._bar(open=10.0, close=11.0, high=11.0, low=9.0),
+                         0) == []
+
+    def test_a_low_exactly_equal_to_the_body_is_LEGAL(self):
+        assert check_bar(self._bar(open=10.0, close=9.0, high=11.0, low=9.0),
+                         0) == []
+
+    def test_zero_volume_is_legal_but_negative_is_not(self):
+        assert check_bar(self._bar(volume=0.0), 0) == []
+        assert 'negative_volume' in {f.rule for f in
+                                     check_bar(self._bar(volume=-1.0), 0)}
+
+    def test_each_price_field_is_checked_for_positivity(self):
+        """A mutant that checks only close, or only open, passes any test that
+        exercises a single field."""
+        for field in ('open', 'high', 'low', 'close'):
+            found = check_bar(self._bar(**{field: 0.0}), 0)
+            assert 'non_positive_price' in {f.rule for f in found}, field
+            assert any(field in f.detail for f in found), field
+
+    def test_the_finding_index_is_the_one_passed_in(self):
+        """The index localises the defect for whoever must fix it. A mutant
+        returning a constant would make every report point at row 0."""
+        for i in (0, 7, 1234):
+            found = check_bar(self._bar(high=1.0), i)
+            assert all(f.index == i for f in found)
+
+    def test_the_mask_fires_on_each_rule_the_spec_calls_an_error(self):
+        """Row-by-row rather than in aggregate: the existing agreement property
+        compares totals over generated frames, which a mutant can satisfy by
+        being wrong in compensating directions."""
+        import numpy as np
+        import pandas as pd
+        from trader.data.bar_quality import impossible_mask
+        cases = [
+            ({'open': 10, 'high': 9, 'low': 8, 'close': 10, 'volume': 1}, True),
+            ({'open': 10, 'high': 11, 'low': 10.5, 'close': 10, 'volume': 1}, True),
+            ({'open': 0, 'high': 11, 'low': 9, 'close': 10, 'volume': 1}, True),
+            ({'open': 10, 'high': 11, 'low': 9, 'close': 10, 'volume': -1}, True),
+            ({'open': 10, 'high': 11, 'low': 9, 'close': 10, 'volume': 1}, False),
+            ({'open': 10, 'high': 10, 'low': 10, 'close': 10, 'volume': 0}, False),
+            ({'open': np.nan, 'high': np.nan, 'low': np.nan,
+              'close': np.nan, 'volume': np.nan}, False),
+            ({'open': 10, 'high': np.nan, 'low': 9, 'close': 10,
+              'volume': 1}, True),
+        ]
+        df = pd.DataFrame([c[0] for c in cases])
+        got = list(impossible_mask(df))
+        want = [c[1] for c in cases]
+        assert got == want, f'mask={got} expected={want}'

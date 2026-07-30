@@ -226,3 +226,130 @@ class TestCounterexamplesFoundBySymbolicExecution:
         mean = sum(vals) / n
         naive = sum((v - mean) ** 2 for v in vals) / n / n
         assert newey_west_variance(vals, 0) == pytest.approx(naive)
+
+
+class TestNeweyWestIsActuallyPinned:
+    """The mutation run put this module at 56.1%, worst of all 18 measured, with
+    survivors concentrated here - in the one function whose correction killed
+    four false positives in a single day. Two tests were constraining the
+    Bartlett weighting, the lag loop and the autocovariance sum between them,
+    which is to say: nothing was.
+
+    A statistic carrying this much inferential weight needs properties with
+    known answers, not just degenerate-input guards.
+    """
+
+    def test_the_exact_value_on_a_hand_computed_case(self):
+        """Arithmetic pinned end to end. Any mutation to the autocovariance sum,
+        the Bartlett weight, or the /n normalisation moves this."""
+        vals = (1.0, 2.0, 3.0, 4.0)
+        # mean 2.5; deviations -1.5 -0.5 0.5 1.5
+        # gamma0 = (2.25+0.25+0.25+2.25)/4 = 1.25
+        # gamma1 = ((-1.5)(-0.5) + (-0.5)(0.5) + (0.5)(1.5))/4 = (0.75-0.25+0.75)/4 = 0.3125
+        # Bartlett weight at lag 1 with lags=1: 1 - 1/2 = 0.5
+        # total = 1.25 + 2*0.5*0.3125 = 1.5625;  /n = 0.390625
+        assert newey_west_variance(vals, 1) == pytest.approx(0.390625)
+
+    def test_lags_zero_is_the_naive_variance_of_the_mean(self):
+        vals = (0.4, -0.2, 0.7, 0.1, -0.5, 0.3)
+        n = len(vals)
+        mean = sum(vals) / n
+        naive = sum((v - mean) ** 2 for v in vals) / n / n
+        assert newey_west_variance(vals, 0) == pytest.approx(naive)
+
+    def test_positive_serial_correlation_INCREASES_the_variance(self):
+        """The entire purpose of the correction. A mutant that makes it a no-op,
+        or flips the sign of the covariance term, fails here - and that mutant
+        would have let today's four false positives through."""
+        rng = np.random.default_rng(0)
+        e = rng.normal(size=400)
+        # AR(1) with strong positive autocorrelation.
+        x, prev = [], 0.0
+        for v in e:
+            prev = 0.8 * prev + v
+            x.append(prev)
+        vals = tuple(float(v) for v in x)
+        naive = newey_west_variance(vals, 0)
+        corrected = newey_west_variance(vals, 10)
+        assert naive is not None and corrected is not None
+        assert corrected > naive * 1.5, (
+            f'correction barely moved on a strongly autocorrelated series: '
+            f'{naive:.3e} -> {corrected:.3e}')
+
+    def test_negative_serial_correlation_DECREASES_it(self):
+        rng = np.random.default_rng(1)
+        e = rng.normal(size=400)
+        x, prev = [], 0.0
+        for v in e:
+            prev = -0.7 * prev + v
+            x.append(prev)
+        vals = tuple(float(v) for v in x)
+        assert newey_west_variance(vals, 6) < newey_west_variance(vals, 0)
+
+    @settings(max_examples=150, deadline=None)
+    @given(k=st.floats(min_value=0.1, max_value=100.0, allow_nan=False,
+                       allow_infinity=False),
+           seed=st.integers(min_value=0, max_value=500))
+    def test_scaling_the_series_scales_the_variance_by_k_squared(self, k, seed):
+        """A variance is quadratic in scale. Kills mutants that swap a
+        multiplication for an addition or drop a squaring."""
+        rng = np.random.default_rng(seed)
+        vals = tuple(float(v) for v in rng.normal(size=60))
+        base = newey_west_variance(vals, 4)
+        scaled = newey_west_variance(tuple(v * k for v in vals), 4)
+        assert base is not None and scaled is not None
+        assert scaled == pytest.approx(base * k * k, rel=1e-9)
+
+    @settings(max_examples=150, deadline=None)
+    @given(shift=st.floats(min_value=-1e3, max_value=1e3, allow_nan=False,
+                           allow_infinity=False),
+           seed=st.integers(min_value=0, max_value=500))
+    def test_shifting_the_series_leaves_the_variance_alone(self, shift, seed):
+        """Deviations are taken from the mean, so a constant offset cannot
+        matter. Kills mutants that drop the mean subtraction."""
+        rng = np.random.default_rng(seed)
+        vals = tuple(float(v) for v in rng.normal(size=60))
+        base = newey_west_variance(vals, 3)
+        moved = newey_west_variance(tuple(v + shift for v in vals), 3)
+        assert base is not None and moved is not None
+        assert moved == pytest.approx(base, rel=1e-6, abs=1e-12)
+
+    def test_a_constant_series_has_no_variance(self):
+        assert newey_west_variance((5.0,) * 20, 3) is None
+
+    def test_a_bandwidth_larger_than_the_sample_is_clamped(self):
+        """Writing this test found a real defect. The Bartlett weight is
+        1 - lag/(bandwidth+1), and the implementation used the REQUESTED
+        bandwidth - so asking for 99 lags on four observations weighted the one
+        computable lag at 0.99 instead of 0.75, over-correcting 25x. The
+        bandwidth is now clamped to n-1 before the weights are formed, so an
+        over-wide request behaves as the widest supportable one."""
+        vals = (1.0, 2.0, 1.5, 2.5)
+        assert newey_west_variance(vals, 99) == newey_west_variance(vals, 3)
+        assert newey_west_variance(vals, 3) == newey_west_variance(vals, 3)
+
+    def test_the_clamp_matters_for_a_realistic_case(self):
+        """Not just a toy: the event study passes horizon-1 as the bandwidth,
+        which can exceed the number of event dates on a thin threshold."""
+        vals = tuple(float(v) for v in (0.1, -0.2, 0.15, 0.05, -0.1, 0.2))
+        wide = newey_west_variance(vals, 62)      # h=63 on 6 dates
+        supportable = newey_west_variance(vals, 5)
+        assert wide == pytest.approx(supportable)
+
+    def test_the_bartlett_weight_declines_with_lag(self):
+        """Weight at lag l is 1 - l/(lags+1), so a series whose only
+        correlation sits at a FAR lag gets less correction than the same
+        correlation at lag 1. A mutant using a constant weight fails."""
+        n = 200
+        near = [0.0] * n
+        far = [0.0] * n
+        rng = np.random.default_rng(3)
+        base = rng.normal(size=n)
+        for i in range(n):
+            near[i] = base[i] + (base[i - 1] if i >= 1 else 0.0)
+            far[i] = base[i] + (base[i - 8] if i >= 8 else 0.0)
+        a = newey_west_variance(tuple(float(v) for v in near), 10)
+        b = newey_west_variance(tuple(float(v) for v in far), 10)
+        assert a is not None and b is not None
+        assert a > b, ('lag-1 correlation should attract more weight than '
+                       'lag-8 correlation under Bartlett weighting')
