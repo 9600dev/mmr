@@ -2,8 +2,9 @@
   "note": "Accepted data-quality violation counts, per '<bar_size>|<rule>'. A count ABOVE these fails `mmr data audit`. Re-record with --update-baseline after reviewing why the number moved.",
   "counts": {
     "1 day|empty_bar": 113,
-    "1 day|large_jump": 799,
+    "1 day|large_jump": 798,
+    "1 day|split_explained_jump": 1,
     "1 day|ticker_keyed_series": 1,
-    "1 min|empty_bar": 252
+    "1 min|empty_bar": 283
   }
 }

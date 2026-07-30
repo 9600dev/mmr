@@ -10347,6 +10347,70 @@ def _handle_quarantine_bad_bars(args: argparse.Namespace):
                  f'quarantine now holds {total:,}')
 
 
+def _classify_jumps_against_splits(jumps, bars, dates, splits):
+    """Re-key each `large_jump` a known corporate split accounts for.
+
+    `unexplained_jumps` reports every large daily move and declines to judge —
+    correct for a pure rule that takes prices alone, and it left 799 warnings
+    permanently accepted in the baseline. With `corporate_splits` fetched the
+    judgement is possible: a move matching the ratio of a split executing
+    close to it in time becomes `split_explained_jump` —
+    still a warning (the stored series is unadjusted through that date, which a
+    backtest reading it should know), but its own baseline line, so a NEW
+    unadjusted split entering the store fails the audit as itself instead of
+    hiding among earnings gaps.
+
+    The date window is ``prev_date < execution <= jump_date + 7 days``, because
+    the defect comes in two shapes. Vendor-unadjusted data puts the jump ON the
+    execution-date bar: ``prev < exec <= cur``. But a store built by
+    INCREMENTAL refresh puts the seam at the last download before the split —
+    the vendor adjusts all history retroactively at execution, old rows are
+    never re-fetched, so the discontinuity lands at the download boundary,
+    which PRECEDES execution by up to the refresh cadence. The one live
+    instance (CRWD 4:1, 2026-07-02) has its seam 4 days early; 7 covers a
+    weekly gap. Measured over all 799 stored jumps, widening to 14 days admits
+    nothing further — the magnitude test is what carries the match.
+
+    ``dates`` are per-bar dates aligned with ``bars``; ``splits`` are
+    ``(execution_date, split_to, split_from)`` rows. A split with a nonsense
+    ratio is ignored rather than raised on — "not explained" keeps the finding
+    visible, where excusing it on bad reference data would hide a real event.
+    """
+    import datetime as _dt
+    import math as _math
+
+    from trader.data.bar_quality import explained_by_split
+
+    slack = _dt.timedelta(days=7)
+    out = []
+    for f in jumps:
+        if f.rule != 'large_jump' or f.index is None:
+            out.append(f)
+            continue
+        i = f.index
+        prev, cur = bars[i - 1].close, bars[i].close
+        if not (_math.isfinite(prev) and _math.isfinite(cur) and prev > 0):
+            out.append(f)
+            continue
+        move = (cur - prev) / prev
+        match = next(
+            (s for s in splits
+             if dates[i - 1] < s[0] <= dates[i] + slack
+             and _math.isfinite(s[1]) and s[1] > 0
+             and _math.isfinite(s[2]) and s[2] > 0
+             and explained_by_split(move, split_to=s[1], split_from=s[2])),
+            None)
+        if match is None:
+            out.append(f)
+        else:
+            exec_date, to, frm = match
+            out.append(f._replace(
+                rule='split_explained_jump',
+                detail=f.detail + f' matches {to:g}:{frm:g} split '
+                                  f'on {exec_date}'))
+    return out
+
+
 def _handle_data_audit(args: argparse.Namespace):
     """Quality-check the stored OHLCV series against a recorded baseline.
 
@@ -10385,6 +10449,17 @@ def _handle_data_audit(args: argparse.Namespace):
     tally: Counter = Counter()
     worst: dict = {}
     scanned = 0
+
+    # Split classification is best-effort reference data, not a precondition:
+    # without the table every jump stays `large_jump` (the status quo), but say
+    # so — a silently-unclassified audit looks identical to a clean one.
+    try:
+        db.execute('SELECT 1 FROM corporate_splits LIMIT 1', fetch='one')
+        have_splits = True
+    except Exception:
+        have_splits = False
+        print_status('corporate_splits table not found — large jumps reported '
+                     'unclassified (run scripts/fetch_splits.py)', success=False)
 
     # A series keyed by its TICKER rather than its conId. Not a bar defect, so
     # no per-bar rule can find it - but it is a store defect with the same
@@ -10434,7 +10509,15 @@ def _handle_data_audit(args: argparse.Namespace):
             if step and step < 86400.0:
                 findings += spacing_findings(bars, step)
             if bar_size == '1 day':
-                findings += unexplained_jumps(bars, threshold=0.30)
+                jumps = unexplained_jumps(bars, threshold=0.30)
+                if jumps and have_splits:
+                    srows = db.execute(
+                        'SELECT execution_date, split_to, split_from '
+                        'FROM corporate_splits WHERE conid = ? OR ticker = ?',
+                        [sym, sym], fetch='all') or []
+                    jumps = _classify_jumps_against_splits(
+                        jumps, bars, [r[0].date() for r in rows], srows)
+                findings += jumps
             for f in findings:
                 key = f'{bar_size}|{f.rule}'
                 tally[key] += 1
