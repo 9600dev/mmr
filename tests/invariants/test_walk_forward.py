@@ -166,7 +166,9 @@ class TestSelectionStabilityIsReported:
     def _fr(self, i, cell):
         from trader.simulation.walk_forward import Fold
         d = dt.date(2026, 1, 1)
-        return FoldResult(Fold(i, d, d, d, d), cell, 1.0, {})
+        # Fold gained train_data_start/test_data_start when warm-up moved into
+        # the harness; with no warm-up they equal the window starts.
+        return FoldResult(Fold(i, d, d, d, d, d, d), cell, 1.0, {})
 
     def test_a_procedure_that_never_changes_its_mind_scores_one(self):
         rs = [self._fr(i, {'A': 1}) for i in range(5)]
@@ -238,3 +240,65 @@ class TestTheProcedureSelectsOnTrainOnly:
         assert all(r.chosen is None and r.test_metrics == {} for r in results)
         for fold in folds:
             assert (fold.test_start, fold.test_end) not in calls
+
+
+class TestWarmUpBelongsToTheHarness:
+    """A 252-day lookback in a 252-day test window never reaches its first
+    tradeable index. Three of seven folds came back at exactly 0.00% having
+    made no trades, and the fold planner was not at fault - the CALLER had to
+    extend the data range and did not.
+
+    So the Fold now carries where DATA should start, separately from the window
+    being measured. These properties pin the separation, because a warm-up that
+    moved the measured window would quietly change what is being reported."""
+
+    def _folds(self, warm=0):
+        return resolve_folds(dt.date(2020, 1, 1),
+                             plan_fold_offsets(1200, 400, 200), warmup_days=warm)
+
+    def test_warmup_moves_data_start_earlier(self):
+        for f in self._folds(warm=365):
+            assert f.test_data_start == f.test_start - dt.timedelta(days=365)
+            assert f.train_data_start == f.train_start - dt.timedelta(days=365)
+
+    def test_warmup_does_NOT_move_the_measured_window(self):
+        """The property that matters. Results with and without warm-up must
+        describe the same period, or they are not comparable and the warm-up
+        has silently become a different experiment."""
+        plain = self._folds(warm=0)
+        warmed = self._folds(warm=500)
+        for a, b in zip(plain, warmed):
+            assert (a.train_start, a.train_end) == (b.train_start, b.train_end)
+            assert (a.test_start, a.test_end) == (b.test_start, b.test_end)
+
+    def test_zero_warmup_leaves_data_start_at_the_window(self):
+        for f in self._folds(warm=0):
+            assert f.test_data_start == f.test_start
+            assert f.train_data_start == f.train_start
+
+    def test_a_negative_warmup_is_refused(self):
+        """It would load data starting AFTER the window, which is not a
+        degenerate case to tolerate - it is lookahead with the sign flipped."""
+        with pytest.raises(ValueError):
+            resolve_folds(dt.date(2020, 1, 1), plan_fold_offsets(1200, 400, 200),
+                          warmup_days=-1)
+
+    def test_the_runner_loads_from_the_warmed_start(self):
+        """The whole point: the injected runner must be CALLED with the warmed
+        start, not the window start. This is what the earlier bug got wrong."""
+        from trader.simulation.walk_forward import run_walk_forward
+        calls = []
+
+        def run_backtest(cell, start, end):
+            calls.append((start, end))
+            return {'sharpe': 1.0}
+
+        folds = self._folds(warm=365)
+        run_walk_forward(folds, [{'A': 1}], run_backtest,
+                         lambda m: m.get('sharpe'))
+        for f in folds:
+            assert (f.train_data_start, f.train_end) in calls
+            assert (f.test_data_start, f.test_end) in calls
+            assert (f.test_start, f.test_end) not in calls, (
+                'the runner used the un-warmed window start, which is the bug '
+                'that produced three no-trade folds')
