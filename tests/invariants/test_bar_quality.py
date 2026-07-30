@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from hypothesis import assume, given, settings, strategies as st
 
 from trader.data.bar_quality import (
@@ -381,3 +383,57 @@ class TestEachRuleFiresIndependently:
         got = list(impossible_mask(df))
         want = [c[1] for c in cases]
         assert got == want, f'mask={got} expected={want}'
+
+
+class TestSplitClassification:
+    """`unexplained_jumps` declined to judge large moves because telling an
+    unadjusted split from a real re-rating "needs a corporate-actions feed this
+    module does not take". We now have one, and 799 warnings had been sitting
+    permanently accepted in the baseline for want of it."""
+
+    def test_a_four_for_one_split_explains_a_75_percent_drop(self):
+        from trader.data.bar_quality import explained_by_split
+        assert explained_by_split(-0.75, split_to=4, split_from=1)
+
+    def test_a_one_for_ten_reverse_split_explains_a_900_percent_rise(self):
+        """The sustained-jump case price_spikes deliberately refuses to judge:
+        4.26 -> 33.90 and staying there is a ~7:1 reverse split, not a bad
+        print."""
+        from trader.data.bar_quality import explained_by_split
+        assert explained_by_split(9.0, split_to=1, split_from=10)
+
+    def test_real_trading_on_the_split_day_is_tolerated(self):
+        """The split day has genuine price action on top of the mechanical
+        adjustment, so exact equality would reject nearly every real case."""
+        from trader.data.bar_quality import explained_by_split
+        assert explained_by_split(-0.73, split_to=4, split_from=1)
+        assert explained_by_split(-0.77, split_to=4, split_from=1)
+
+    def test_a_move_the_split_cannot_explain_is_not_excused(self):
+        """A 2:1 split predicts -50%. A -90% day on the same date is a crash
+        that happened to coincide, and excusing it would hide a real event."""
+        from trader.data.bar_quality import explained_by_split
+        assert not explained_by_split(-0.90, split_to=2, split_from=1)
+
+    def test_the_tolerance_is_relative_not_absolute(self):
+        """A -75% expectation must not be matched by the same absolute slack as
+        a +900% one, or large reverse splits would excuse almost anything."""
+        from trader.data.bar_quality import explained_by_split
+        assert not explained_by_split(2.0, split_to=1, split_from=10)
+
+    def test_the_wrong_direction_is_never_explained(self):
+        from trader.data.bar_quality import explained_by_split
+        assert not explained_by_split(0.75, split_to=4, split_from=1)
+
+    def test_a_nonsense_ratio_returns_false_rather_than_excusing(self):
+        """'Not explained' is the safe answer: it keeps the finding visible
+        instead of dismissing it on bad reference data."""
+        from trader.data.bar_quality import explained_by_split
+        assert not explained_by_split(-0.5, split_to=1, split_from=1)
+        assert not explained_by_split(float('nan'), split_to=2, split_from=1)
+
+    def test_an_invalid_ratio_is_refused_at_the_contract(self):
+        import deal
+        from trader.data.bar_quality import explained_by_split
+        with pytest.raises((deal.PreContractError, ValueError)):
+            explained_by_split(-0.5, split_to=0, split_from=1)
