@@ -1027,3 +1027,193 @@ class TestDailyTurnoverCap:
         self._submit(event_store, 'test_strat', 50_000.0)
         assert self._evaluate(gate, position_value=50_000.0,
                               sec_type='CASH').approved is True
+
+
+class TestTurnoverCapArithmeticBoundaries:
+    """The full mutation pass put risk_gate at 89.2%, below its 91.9% floor,
+    with survivors concentrated in _check_daily_turnover and
+    _daily_open_notional. The module GREW by 47 mutants when the turnover caps
+    landed - the tests still catch everything they used to, but the new code
+    arrived with thinner coverage than the module's average, and re-baselining
+    at the lower number would have banked that erosion.
+
+    These pin the arithmetic boundaries rather than the behaviour the existing
+    class already covers.
+    """
+
+    def _gate(self, event_store, **limits):
+        from trader.trading.risk_gate import RiskGate, RiskLimits
+        return RiskGate(limits=RiskLimits(**limits), event_store=event_store)
+
+    def _submit(self, event_store, strategy, notional, exit_class=False,
+                evaluable=True):
+        import datetime as dt
+        from trader.data.event_store import EventType, TradingEvent
+        meta = {'notional': notional, 'notional_evaluable': evaluable}
+        if exit_class:
+            meta['exit_class'] = True
+        event_store.append(TradingEvent(
+            event_type=EventType.ORDER_SUBMITTED, timestamp=dt.datetime.now(),
+            strategy_name=strategy, conid=4391, symbol='AMD', action='BUY',
+            quantity=0.0, price=0.0, order_id=1, metadata=meta))
+
+    def _evaluate(self, gate, name='test_strat', position_value=1_000.0, **kw):
+        return gate.evaluate(
+            _make_signal(name), open_order_count=0, daily_pnl=0.0,
+            portfolio_value=1_000_000.0, position_value=position_value, **kw)
+
+    def test_the_cap_is_a_strict_ceiling_not_an_inclusive_one(self):
+        """Spending EXACTLY the cap is allowed; exceeding it is not. A mutant
+        flipping > to >= refuses the order that lands precisely on the limit,
+        which is the one an operator sizing to the cap will send."""
+        from trader.data.event_store import EventStore
+        import tempfile, os
+        for spent, order, expect in ((9_000.0, 1_000.0, True),
+                                     (9_000.0, 1_001.0, False)):
+            path = os.path.join(tempfile.mkdtemp(), 'e.duckdb')
+            es = EventStore(path)
+            gate = self._gate(es, max_daily_open_notional=10_000.0)
+            self._submit(es, 'a', spent)
+            got = self._evaluate(gate, position_value=order).approved
+            assert got is expect, (
+                f'spent {spent} + order {order} vs cap 10,000: '
+                f'approved={got}, expected {expect}')
+
+    def test_an_exit_submission_never_counts_toward_the_cap(self, event_store):
+        """The compatibility rule: bounding opens must never be reachable by
+        closing. A mutant that dropped the exit_class filter would let a day of
+        exits exhaust the budget for opens."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        for _ in range(20):
+            self._submit(event_store, 'a', 5_000.0, exit_class=True)
+        assert self._evaluate(gate, position_value=9_000.0).approved is True
+
+    def test_a_zero_notional_order_consumes_no_budget(self, event_store):
+        """Concentration records skipped:zero-notional and allows it, so such
+        an order reaches here; it must contribute nothing rather than being
+        treated as unvaluable."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        self._submit(event_store, 'a', 9_999.0)
+        assert self._evaluate(gate, position_value=0.0).approved is True
+
+    def test_the_per_strategy_cap_is_scoped_to_its_own_strategy(self, event_store):
+        """A mutant summing across strategies would make one strategy's
+        activity refuse another's - the caps would stop being per-strategy
+        while still passing any single-strategy test."""
+        gate = self._gate(event_store, max_daily_open_notional_per_strategy=5_000.0)
+        self._submit(event_store, 'other', 4_900.0)
+        assert self._evaluate(gate, name='mine', position_value=4_000.0).approved is True
+
+    def test_both_caps_apply_and_either_can_refuse(self, event_store):
+        """With both set, the binding one refuses. A mutant checking only the
+        account cap passes every per-strategy test in isolation."""
+        gate = self._gate(event_store, max_daily_open_notional=1_000_000.0,
+                          max_daily_open_notional_per_strategy=5_000.0)
+        self._submit(event_store, 'test_strat', 4_900.0)
+        r = self._evaluate(gate, position_value=1_000.0)
+        assert r.approved is False
+        assert 'test_strat' in r.reason
+
+    def test_a_negative_position_value_does_not_credit_the_budget(self, event_store):
+        """`this_order = position_value if > 0 else 0.0`. A mutant dropping the
+        guard would let a negative value SUBTRACT from the day's spend and
+        create budget out of nothing."""
+        gate = self._gate(event_store, max_daily_open_notional=10_000.0)
+        self._submit(event_store, 'a', 9_999.0)
+        assert self._evaluate(gate, position_value=-50_000.0).approved is True
+        # ...and it must not have manufactured room for a real order after it.
+        self._submit(event_store, 'a', 1.0)
+        assert self._evaluate(gate, position_value=5_000.0).approved is False
+
+
+class TestDailyOpenNotionalAccumulation:
+    """`_daily_open_notional` carried 12 survivors. It reads history off disk to
+    survive restarts, which means every value it touches is JSON of arbitrary
+    shape - and a gate that RAISES while reading history refuses nothing and
+    breaks every open. These pin the accumulation itself."""
+
+    def _gate(self, event_store, **limits):
+        from trader.trading.risk_gate import RiskGate, RiskLimits
+        return RiskGate(limits=RiskLimits(**limits), event_store=event_store)
+
+    def _raw(self, event_store, strategy, meta, order_id=1, price=0.0,
+             quantity=0.0):
+        import datetime as dt
+        from trader.data.event_store import EventType, TradingEvent
+        event_store.append(TradingEvent(
+            event_type=EventType.ORDER_SUBMITTED, timestamp=dt.datetime.now(),
+            strategy_name=strategy, conid=4391, symbol='AMD', action='BUY',
+            quantity=quantity, price=price, order_id=order_id, metadata=meta))
+
+    def test_notionals_are_summed_not_maxed_or_counted(self, event_store):
+        """Three orders of 1,000 must total 3,000. A mutant taking a max would
+        report 1,000; one counting orders would report 3."""
+        gate = self._gate(event_store)
+        for i in range(3):
+            self._raw(event_store, 'a',
+                      {'notional': 1_000.0, 'notional_evaluable': True},
+                      order_id=i + 1)
+        total, per_strategy, unvaluable, legacy = gate._daily_open_notional()
+        assert total == pytest.approx(3_000.0)
+        assert per_strategy['a'] == pytest.approx(3_000.0)
+        assert unvaluable == 0 and legacy == 0
+
+    def test_per_strategy_totals_are_kept_apart(self, event_store):
+        gate = self._gate(event_store)
+        self._raw(event_store, 'a', {'notional': 1_000.0,
+                                     'notional_evaluable': True}, order_id=1)
+        self._raw(event_store, 'b', {'notional': 400.0,
+                                     'notional_evaluable': True}, order_id=2)
+        total, per_strategy, _, _ = gate._daily_open_notional()
+        assert total == pytest.approx(1_400.0)
+        assert per_strategy['a'] == pytest.approx(1_000.0)
+        assert per_strategy['b'] == pytest.approx(400.0)
+
+    def test_legacy_and_unvaluable_are_counted_separately(self, event_store):
+        """The distinction the design turns on: legacy is history from before
+        the feature (proceed on a lower bound), unvaluable is THIS build failing
+        to value an order it placed (fail closed). A mutant merging them turns
+        'enable the cap' into 'no opens for the rest of today'."""
+        gate = self._gate(event_store)
+        self._raw(event_store, 'a', {}, order_id=1)                  # legacy
+        self._raw(event_store, 'a', {'notional': None,
+                                     'notional_evaluable': False}, order_id=2)
+        _, _, unvaluable, legacy = gate._daily_open_notional()
+        assert legacy == 1, 'metadata with no notional key at all is LEGACY'
+        assert unvaluable == 1, 'an explicit not-evaluable stamp is LIVE failure'
+
+    def test_a_malformed_notional_does_not_raise(self, event_store):
+        """Metadata is JSON off disk and can be any shape. A gate that raises
+        while reading history refuses nothing and breaks every open."""
+        gate = self._gate(event_store)
+        for i, bad in enumerate(['abc', {}, [], float('nan'), float('inf'), -5.0]):
+            self._raw(event_store, 'a',
+                      {'notional': bad, 'notional_evaluable': True},
+                      order_id=i + 1)
+        total, _, unvaluable, _ = gate._daily_open_notional()
+        assert total >= 0.0 and total < 1e12
+        assert unvaluable >= 1, 'unusable values must be COUNTED, not ignored'
+
+    def test_a_fill_price_rescues_a_submission_that_could_not_be_valued(
+            self, event_store):
+        """Most submissions that matter do fill, and a fill carries a real
+        avgFillPrice - so the unvaluable set shrinks to orders that never
+        traded. A mutant dropping this makes the cap fail closed far more often
+        than it should."""
+        import datetime as dt
+        from trader.data.event_store import EventType, TradingEvent
+        gate = self._gate(event_store)
+        # A real quantity: the rescue values the order as price x quantity, so
+        # a zero-quantity submission has nothing to rescue and correctly stays
+        # unvaluable. (My first version of this test omitted the quantity and
+        # blamed the implementation.)
+        self._raw(event_store, 'a', {'notional': None,
+                                     'notional_evaluable': False},
+                  order_id=7, quantity=10.0)
+        event_store.append(TradingEvent(
+            event_type=EventType.ORDER_FILLED, timestamp=dt.datetime.now(),
+            strategy_name='a', conid=4391, symbol='AMD', action='BUY',
+            quantity=10.0, price=50.0, order_id=7, metadata={}))
+        total, _, unvaluable, _ = gate._daily_open_notional()
+        assert unvaluable == 0, 'the fill should have valued it'
+        assert total > 0.0

@@ -169,6 +169,28 @@
 #   90.9%; the 94.8% -> 90.9% drop is DENOMINATOR GROWTH, not lost coverage —
 #   the three new refusal messages contribute ~14 unkillable-by-policy string
 #   mutants, and every DECISION mutant is killed):
+#   2026-07-30 — risk_gate 91.9% -> 89.2% -> 90.1%, and NOT re-baselined down.
+#     The module GREW by 47 mutants when the turnover caps and the four-state
+#     check vocabulary landed (507 -> 554). Tests still catch everything they
+#     caught before — killed went 466 -> 499 — so nothing regressed; the new
+#     code simply arrived with thinner coverage than the module's average, and
+#     a score is a ratio.
+#
+#     Thirteen tests were added for the turnover arithmetic and the notional
+#     accumulator (strict-ceiling boundary, exit-class exclusion, per-strategy
+#     scoping, negative position_value not crediting the budget, legacy vs
+#     unvaluable counted separately, malformed JSON not raising, fill-price
+#     rescue). That recovered 0.9 points.
+#
+#     The floor is DELIBERATELY LEFT AT 91.9%, which the module currently fails.
+#     Lowering it would bank the erosion, and the whole point of a ratchet is
+#     that it does not move down quietly. The remaining survivors are dominated
+#     by check_leverage's documented equivalents (below) plus reason-string
+#     mutants in the new turnover branches, which are the same class. Closing
+#     the last ~2 points means either more string-contract tests or ruling the
+#     new reason strings equivalent — a judgement call for a human, not
+#     something to grant myself by re-recording the number.
+#
 #     * check_leverage 4/6/13/15 — get('initMarginAfter'/'equityWithLoanAfter',
 #       0) -> None / omitted default. TRUE EQUIVALENTS post-flip, by a NEW
 #       argument: both defaults are falsy, the falsy guard now routes both to
