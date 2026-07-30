@@ -627,6 +627,13 @@ def build_parser() -> argparse.ArgumentParser:
                                   help='Strategy module file (e.g. strategies/my_strategy.py)')
     strat_gauntlet_p.add_argument('--class', dest='class_name', required=True,
                                   help='Strategy class name')
+    strat_gauntlet_p.add_argument(
+        '--min-dsr', dest='min_dsr', type=float, default=None,
+        help='Require a DEFLATED Sharpe at least this high. PSR is NOT a gate: '
+             'measured across thirteen sweeps it scored >=0.96 on every one, '
+             'including families with PBO of 70%% and 90%%. DSR re-benchmarks it '
+             'against the best of N trials, where N is every evaluation this '
+             'source has ever had. 0.95 is the conventional bar. Fails closed.')
     strat_gauntlet_p.add_argument('--min-psr', dest='min_psr', type=float, default=None,
                                   help='Enforce PSR >= F from the latest backtest of this exact '
                                        'source hash (default: record-only, never fails on absence)')
@@ -4789,8 +4796,108 @@ def _gauntlet_check_psr(code_hash: str, duckdb_path: str,
     return result
 
 
+def _gauntlet_check_dsr(code_hash: str, duckdb_path: str,
+                        min_dsr: Optional[float]) -> Dict[str, Any]:
+    """S5: DEFLATED Sharpe - PSR re-benchmarked against the search that found it.
+
+    PSR is not a gate and this stage exists because of it. Measured 2026-07-28
+    across thirteen sweeps, PSR scored >= 0.96 on EVERY ONE - including families
+    whose Probability of Backtest Overfitting was 70% and 90%. A statistic that
+    has never rejected anything is not protecting anything, and
+    `--min-psr` was the only statistical condition standing between a strategy
+    and real money.
+
+    The difference is that PSR asks "is this better than nothing?" while DSR
+    asks "is this better than the best of N coin flips?" - where N is every
+    evaluation this strategy's source has ever had. That count is the honest
+    one: you do not un-search a configuration by running another sweep.
+
+    Fails CLOSED when a threshold is set. A strategy whose trial history cannot
+    be read is a strategy whose deflation cannot be computed, and admitting it
+    would reproduce exactly the hole this stage closes.
+    """
+    import math
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from trader.data.backtest_store import BacktestStore
+    from trader.simulation.selection_bias import (deflated_sharpe,
+                                                  infer_periods_per_year)
+
+    result: Dict[str, Any] = {'min_dsr': min_dsr}
+    try:
+        store = BacktestStore(duckdb_path)
+        row = store.db.execute(
+            "SELECT id, class_name, equity_curve_json, bar_size FROM backtest_runs "
+            "WHERE code_hash = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            [code_hash], fetch='one')
+    except Exception as ex:                               # noqa: BLE001
+        result.update({'status': 'fail' if min_dsr is not None else 'not_evaluated',
+                       'note': f'backtest store unavailable: {ex}'})
+        return result
+    if not row:
+        result.update({'status': 'fail' if min_dsr is not None else 'not_evaluated',
+                       'note': 'no backtest run recorded for this code_hash'})
+        return result
+
+    run_id, cls, curve_json, bar_size = row
+    # The trial family is EVERY run of this strategy class, not just this
+    # sweep. Under-counting N makes the deflation too kind, which is the
+    # failure mode this stage exists to prevent.
+    try:
+        trials = store.db.execute(
+            "SELECT sharpe_ratio FROM backtest_runs WHERE class_name = ? "
+            "AND sharpe_ratio IS NOT NULL", [cls], fetch='all') or []
+    except Exception:                                     # noqa: BLE001
+        trials = []
+    sharpes = [r[0] for r in trials
+               if r[0] is not None and math.isfinite(r[0])]
+    result['n_trials'] = len(sharpes)
+
+    if not curve_json or not sharpes:
+        result.update({'status': 'fail' if min_dsr is not None else 'not_evaluated',
+                       'note': 'no equity curve or no trial history to deflate '
+                               'against'})
+        return result
+    try:
+        pts = json.loads(curve_json)
+        vals = np.array([float(p['value']) for p in pts], dtype=float)
+        if len(vals) < 4:
+            raise ValueError('curve too short')
+        rets = np.diff(vals) / vals[:-1]
+        # Inferred from the curve, not the bar size: the blob is decimated to
+        # daily on write, so a 1-min run's bar-size factor would de-annualise
+        # by ~19.7x too much and make DSR far too generous.
+        ppy = (infer_periods_per_year([p['timestamp'] for p in pts])
+               or _bars_per_year_for(bar_size))
+        dsr = deflated_sharpe(rets, sharpes, bars_per_year=ppy)
+    except Exception as ex:                               # noqa: BLE001
+        result.update({'status': 'fail' if min_dsr is not None else 'not_evaluated',
+                       'note': f'DSR not computable: {ex}'})
+        return result
+    if dsr is None:
+        result.update({'status': 'fail' if min_dsr is not None else 'not_evaluated',
+                       'note': 'DSR not computable from the stored run'})
+        return result
+
+    result.update({'run_id': run_id, 'dsr': dsr})
+    if min_dsr is None:
+        result.update({'status': 'pass',
+                       'note': f'record-only (no --min-dsr); DSR {dsr:.4f} '
+                               f'deflated for {len(sharpes)} trials'})
+    elif dsr >= min_dsr:
+        result['status'] = 'pass'
+    else:
+        result.update({'status': 'fail',
+                       'note': f'DSR {dsr:.4f} < required {min_dsr:.4f} '
+                               f'(deflated for {len(sharpes)} trials)'})
+    return result
+
+
 def _gauntlet_run(module_file: Path, class_name: str, duckdb_path: str,
-                  min_psr: Optional[float] = None) -> Dict[str, Any]:
+                  min_psr: Optional[float] = None,
+                  min_dsr: Optional[float] = None) -> Dict[str, Any]:
     """Run all gauntlet stages against ``module_file`` and return
     ``{'code_hash', 'verdict', 'checks'}``. Does not persist — the caller
     records the result."""
@@ -4823,12 +4930,26 @@ def _gauntlet_run(module_file: Path, class_name: str, duckdb_path: str,
             checks['s3_battery'] = _gauntlet_run_battery(cls)
 
     checks['s4_psr'] = _gauntlet_check_psr(code_hash, duckdb_path, min_psr)
+    checks['s5_dsr'] = _gauntlet_check_dsr(code_hash, duckdb_path, min_dsr)
 
+    # Every stage that can FAIL must be able to fail the verdict. Adding a
+    # stage to `checks` without adding it here produces the worst possible
+    # gate: one that prints "fail" in its own row and PASS overall. Hit
+    # immediately on adding s5 - the DSR row read `fail` while the verdict read
+    # `PASS`, which is precisely the shape of the ty gate reporting OK on a run
+    # where the type checker never executed.
+    _CAN_FAIL_VERDICT = ('s1_imports', 's2_lookahead', 's3_battery',
+                         's4_psr', 's5_dsr')
+    unknown = set(checks) - set(_CAN_FAIL_VERDICT)
+    if unknown:
+        raise AssertionError(
+            f'gauntlet stage(s) {sorted(unknown)} are computed but cannot '
+            f'affect the verdict; add them to _CAN_FAIL_VERDICT')
     passed = (
         checks['s1_imports']['status'] == 'pass'
         and checks['s3_battery']['status'] == 'pass'
         and checks['s2_lookahead']['status'] in ('pass', 'not_evaluable')
-        and checks['s4_psr']['status'] != 'fail'
+        and all(checks[k]['status'] != 'fail' for k in _CAN_FAIL_VERDICT)
     )
     return {
         'code_hash': code_hash,
@@ -4929,7 +5050,8 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
 
     try:
         result = _gauntlet_run(resolved, args.class_name, duckdb_path,
-                               min_psr=getattr(args, 'min_psr', None))
+                               min_psr=getattr(args, 'min_psr', None),
+        min_dsr=getattr(args, 'min_dsr', None))
     except ValueError as ex:
         print_status(str(ex), success=False)
         return
