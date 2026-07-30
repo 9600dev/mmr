@@ -61,12 +61,27 @@ class FoldOffsets(NamedTuple):
 
 
 class Fold(NamedTuple):
-    """A FoldOffsets resolved onto the calendar."""
+    """A FoldOffsets resolved onto the calendar.
+
+    ``train_data_start`` and ``test_data_start`` are where DATA LOADING should
+    begin, which is earlier than the window being measured whenever the
+    strategy needs history to warm up. They exist because getting this wrong
+    produced a silently empty result: a 252-day lookback in a 252-day test
+    window never reaches its first tradeable index, and three of seven folds
+    came back at exactly 0.00% having made no trades at all. The fold planner
+    was correct; the CALLER had to remember, and did not.
+
+    The measured window is unchanged by warm-up. That separation is the whole
+    point - a warm-up that shifted ``test_start`` would quietly change what is
+    being reported on.
+    """
     index: int
     train_start: dt.date
     train_end: dt.date
     test_start: dt.date
     test_end: dt.date
+    train_data_start: dt.date
+    test_data_start: dt.date
 
 
 class FoldResult(NamedTuple):
@@ -139,13 +154,29 @@ def plan_fold_offsets(
     return folds
 
 
-def resolve_folds(start: dt.date, offsets: Sequence[FoldOffsets]) -> List[Fold]:
-    """Put integer offsets onto the calendar. Deliberately trivial — all the
-    logic that can be wrong lives in the pure planner above."""
+def resolve_folds(start: dt.date, offsets: Sequence[FoldOffsets],
+                  warmup_days: int = 0) -> List[Fold]:
+    """Put integer offsets onto the calendar, with optional warm-up.
+
+    ``warmup_days`` is how much history the strategy needs before it can act -
+    its lookback, in CALENDAR days, so roughly 1.45x a trading-day count. It
+    moves only where data loading starts. The train and test windows themselves
+    are untouched, so a result measured with warm-up covers the same period as
+    one measured without it, and the two are comparable.
+
+    Deliberately trivial otherwise: all the logic that can be wrong lives in
+    the pure planner above.
+    """
+    if warmup_days < 0:
+        raise ValueError(f'warmup_days must be >= 0, got {warmup_days}')
+
     def d(n: int) -> dt.date:
         return start + dt.timedelta(days=n)
+    warm = dt.timedelta(days=warmup_days)
     return [Fold(f.index, d(f.train_start), d(f.train_end),
-                 d(f.test_start), d(f.test_end)) for f in offsets]
+                 d(f.test_start), d(f.test_end),
+                 d(f.train_start) - warm, d(f.test_start) - warm)
+            for f in offsets]
 
 
 @deal.pure
@@ -192,7 +223,9 @@ def run_walk_forward(
     for fold in folds:
         scored = []
         for cell in cells:
-            metrics = run_backtest(cell, fold.train_start, fold.train_end)
+            # Data from train_data_start so the strategy can warm up; the
+            # window being fitted is still [train_start, train_end).
+            metrics = run_backtest(cell, fold.train_data_start, fold.train_end)
             scored.append((cell, score(metrics) if metrics else None))
         chosen = pick_best(scored, higher_is_better=higher_is_better)
 
@@ -205,7 +238,7 @@ def run_walk_forward(
         test_metrics: Dict[str, Any] = {}
         if chosen is not None:
             test_metrics = run_backtest(
-                chosen, fold.test_start, fold.test_end) or {}
+                chosen, fold.test_data_start, fold.test_end) or {}
 
         result = FoldResult(fold, chosen, train_score, test_metrics)
         out.append(result)

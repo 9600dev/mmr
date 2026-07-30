@@ -8450,7 +8450,18 @@ def _handle_walk_forward(args: argparse.Namespace):
         return
 
     period_start = (dt.datetime.now() - dt.timedelta(days=args.days)).date()
-    folds = resolve_folds(period_start, offsets)
+    # Warm-up in CALENDAR days, from the largest lookback the grid can select.
+    # Without it a strategy needing 252 bars in a 252-bar test window never
+    # reaches its first tradeable index, and the fold silently reports 0.00%
+    # having made no trades. The harness now carries this rather than each
+    # caller remembering.
+    lookbacks = [v for cell in cells for k, v in cell.items()
+                 if 'LOOKBACK' in k.upper() and isinstance(v, (int, float))]
+    warmup = int(max(lookbacks) * 1.45) + 10 if lookbacks else 0
+    folds = resolve_folds(period_start, offsets, warmup_days=warmup)
+    if warmup and not _json_mode:
+        console.print(f'  warm-up: {warmup} calendar days before each window, '
+                      f'from the largest LOOKBACK in the grid')
 
     cfg = Container.instance().config()
     storage = TickStorage(cfg.get('history_duckdb_path', '')
