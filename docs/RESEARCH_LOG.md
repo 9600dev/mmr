@@ -500,6 +500,42 @@ price-derived signals or better parameters on this one.**
 
 ---
 
+## 2026-08-17 — OpeningDriveFade under live semantics: the last pre-registered thread closes negative
+
+The one intraday strategy that consistently scored BELOW the PBO coin-flip
+line (35/39/22% across sweeps 16/22/25) had never been re-run under the two
+corrections built since: AutoExecutor live semantics (no pyramiding, fixed
+notional, cooldown) and the quarantine-cleaned store. Sweep 43 is that re-run,
+pre-registered: grid and symbols identical to sweep 25 (10 mega-caps, 1-min,
+365d, DRIVE_WINDOW_MIN × DRIVE_ATR_MULT 3×3), `live_semantics: true`, nothing
+new searched. 90/90 runs completed.
+
+| | sweep 25 (accumulate, 2026-06) | sweep 43 (live, clean store) |
+|---|---|---|
+| PBO | 22% | **67.8%** (S=16, 12,870 splits, T=248) |
+| best Sharpe | — | 0.91 (GOOGL W=15 ATR=2.0, 174 trades) |
+| best DSR | — | 0.426 (deflated for 90 trials) |
+| median Sharpe | — | **−0.35**; 33/90 cells positive |
+
+Calibration: the negative control's best-of-180 on pure i.i.d. noise was
+Sharpe 2.04 (beta-matched 2.26). A best-of-90 at 0.91 sits far below what a
+noise search of this size routinely produces.
+
+**Conclusion: the below-coin-flip PBO did not survive live semantics + clean
+data — OpeningDriveFade looks like every other intraday family, and its
+earlier promise was a property of pyramiding/compounding execution measured
+on a dirtier store, not of the signal.** Walk-forward was not run: with the
+sweep-level surface this flat there is nothing left for a selection rule to
+select. This closes the last pre-registered price-signal thread; the
+2026-07-30 conclusion stands unqualified — raising the ceiling requires
+genuinely different information.
+
+(Not attributable to the trade-count reliability penalty: median 122 trades
+per cell. Runs are `_execution_mode=live`, `_trade_notional=2000`, stamped in
+params for reproducibility; `mmr sweep overfit 43` reproduces the PBO/DSR.)
+
+---
+
 ## Method errors worth not repeating
 
 Recorded because they cost real time and two of them were invisible to every
