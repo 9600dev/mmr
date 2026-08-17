@@ -1,6 +1,18 @@
 {
   "note": "Per-module mutation SCORE floor. Regenerate with scripts/run_mutation.sh baseline after a human-reviewed change. Scores are keyed on the module, not mutant ids, which renumber.",
   "modules": {
+    "trader/data/bar_quality.py": {
+      "killed": 373,
+      "survived": 130,
+      "timeout": 0,
+      "score": 0.741551
+    },
+    "trader/data/fundamentals.py": {
+      "killed": 80,
+      "survived": 11,
+      "timeout": 0,
+      "score": 0.879121
+    },
     "trader/data/market_session.py": {
       "killed": 144,
       "survived": 49,
@@ -13,11 +25,41 @@
       "timeout": 0,
       "score": 1.0
     },
+    "trader/simulation/panel.py": {
+      "killed": 118,
+      "survived": 34,
+      "timeout": 0,
+      "score": 0.776316
+    },
+    "trader/simulation/selection_bias.py": {
+      "killed": 357,
+      "survived": 119,
+      "timeout": 1,
+      "score": 0.750524
+    },
+    "trader/simulation/signal_combine.py": {
+      "killed": 141,
+      "survived": 44,
+      "timeout": 0,
+      "score": 0.762162
+    },
+    "trader/simulation/signal_eval.py": {
+      "killed": 285,
+      "survived": 12,
+      "timeout": 0,
+      "score": 0.959596
+    },
+    "trader/simulation/walk_forward.py": {
+      "killed": 121,
+      "survived": 15,
+      "timeout": 3,
+      "score": 0.892086
+    },
     "trader/strategy/auto_executor.py": {
-      "killed": 1367,
-      "survived": 530,
+      "killed": 1502,
+      "survived": 438,
       "timeout": 25,
-      "score": 0.724246
+      "score": 0.777099
     },
     "trader/trading/exit_class.py": {
       "killed": 29,
@@ -50,10 +92,10 @@
       "score": 0.966292
     },
     "trader/trading/position_sizing.py": {
-      "killed": 415,
-      "survived": 165,
+      "killed": 411,
+      "survived": 169,
       "timeout": 0,
-      "score": 0.715517
+      "score": 0.708621
     },
     "trader/trading/protective_stop.py": {
       "killed": 53,
@@ -62,10 +104,10 @@
       "score": 0.915254
     },
     "trader/trading/risk_gate.py": {
-      "killed": 466,
-      "survived": 41,
+      "killed": 510,
+      "survived": 44,
       "timeout": 0,
-      "score": 0.919132
+      "score": 0.920578
     }
   }
 }
