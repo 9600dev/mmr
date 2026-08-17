@@ -536,6 +536,66 @@ params for reproducibility; `mmr sweep overfit 43` reproduces the PBO/DSR.)
 
 ---
 
+## 2026-08-17 — fundamentals on the honest universe: size is NOT survivorship
+
+The 07-29 conclusion had two parts: "the value ratios are the size effect"
+(measured, decomposition) and "the size effect here is survivorship"
+(hypothesis — the universe was today's top-500, so its small names were the
+ones that grew into the list). The second part could only be tested on a
+universe that keeps the losers. It now has been, and it is FALSE.
+
+**Setup.** Fundamentals extended from 496 present-day names to the
+point-in-time membership: every name with >=3 member-months (rank<=500 at a
+month-end), 2,339 fetched, 1,394 with 10-K/Q filings -> 81,120 filings across
+1,890 tickers, all EDGAR-acceptance-keyed as before. Coverage now includes
+the failures' final filings: SIVB's last 10-K before the collapse, TWTR to
+going-private, ATVI/VMW/XLNX to acquisition. (Known gaps: FRC returned
+nothing from sec-api's ticker index; AABA correctly absent — investment
+company, no 10-K/Q. Ticker-recycling merges two companies' filings into one
+column — same accepted residual as pit_daily_bars.) Scan machinery:
+`fundamental_signals.py --pit`, ticker-joined, same as-of rule (acceptance
+instant strictly before the 16:00 ET read).
+
+**Honest-universe scan (h=63, NW-corrected):** sales_to_price IC 0.0477
+(t 2.83), cash_flow_yield 0.0402 (t 2.40), earnings_yield h=21 0.0200
+(t 2.25); random control clean (t 0.16); +7d leak probe flat, as expected
+for slow ratios. Ratio-signal coverage is ~10% of the full frame against a
+~17% membership ceiling (only ~500 of ~3,000 columns are live members on any
+day; TTM warm-up and missing shares_diluted account for the rest).
+
+**Decomposition (all variants on sales_to_price's own cells, h=63):**
+
+| variant | IC | t(NW) |
+|---|---|---|
+| sales_to_price as measured | 0.0477 | 2.83 |
+| revenue FROZEN per name | 0.0431 | 2.43 |
+| shares FROZEN per name | 0.0266 | 1.32 |
+| 1/price alone | 0.0371 | 2.06 |
+| **1/marketcap alone** | **0.0443** | **3.34** |
+
+Two reversals from 07-29:
+
+1. **Size survives the honest universe.** 1/marketcap, WITH the delisted
+   losers included, is the strongest and most consistent line in the table.
+   The survivorship explanation predicted it would collapse; it did not.
+2. **Revenue now ADDS (a whisker).** On the survivor universe, freezing
+   revenue made the signal STRONGER (0.0425 -> 0.0591) — the fundamental was
+   subtracting. Here freezing it weakens the ratio (0.0477 -> 0.0431): the
+   actual revenue numbers contribute ~10% of the IC. First time a
+   fundamental has added anything, and it is small, with a LOWER t than size
+   alone.
+
+**What this is NOT yet:** tradeable. The next test is the one that killed
+momentum: rank accuracy and tradeability came apart there (IC rose on the
+honest universe while traded Sharpe fell), and a small-cap tilt is long the
+names that gap, halt and cost the most to trade. Required before belief:
+panel backtest of the size tilt vs EQUAL-WEIGHT ownership of the same
+universe (the benchmark that killed long-only momentum), walk-forward, with
+costs. A size tilt that cannot beat owning the universe is concentration,
+not selection — we have measured that decomposition once already.
+
+---
+
 ## Method errors worth not repeating
 
 Recorded because they cost real time and two of them were invisible to every
