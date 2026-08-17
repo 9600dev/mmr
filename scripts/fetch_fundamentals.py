@@ -58,6 +58,13 @@ def sec_filing_index(client, ticker: str, key: str, forms=('10-Q', '10-K')):
     acceptances overwrite earlier ones for the same period, which is exactly
     the restatement rule: the most recently filed version of a period is the
     current knowledge, and an as-of read filters by acceptance anyway.
+
+    Returns None on a TRANSPORT/HTTP error with nothing yet collected, and {}
+    when the API answered cleanly with no filings. The distinction matters at
+    scale: an ETF genuinely files no 10-K/Q (an empty answer, skip it), while
+    a run of consecutive errors is quota exhaustion or an outage — burning the
+    rest of a 2,000-name list recording "failed" on each would spend nothing
+    but time and hide the real problem.
     """
     out = {}
     form_clause = ' OR '.join(f'formType:"{f}"' for f in forms)
@@ -66,13 +73,15 @@ def sec_filing_index(client, ticker: str, key: str, forms=('10-Q', '10-K')):
                 'from': str(start), 'size': '50',
                 'sort': [{'filedAt': {'order': 'desc'}}]}
         try:
-            r = client.post(_SEC_QUERY, json=body, params={'token': key},
-                            timeout=30)
+            # Token in the Authorization header, NOT a query param: httpx logs
+            # request URLs at DEBUG, and a token in the URL lands in debug.log.
+            r = client.post(_SEC_QUERY, json=body,
+                            headers={'Authorization': key}, timeout=30)
             if r.status_code != 200:
-                break
+                return out if out else None
             filings = r.json().get('filings', [])
         except Exception:
-            break
+            return out if out else None
         if not filings:
             break
         for f in filings:
@@ -86,11 +95,61 @@ def sec_filing_index(client, ticker: str, key: str, forms=('10-Q', '10-K')):
     return out
 
 
+def pit_membership_todo(db, hist_db, min_months: int):
+    """(conid, ticker) work list from POINT-IN-TIME membership, not from
+    today's universe — today's universe is the survivorship hole this fetch
+    exists to close (the 2026-07 run covered 33.5k member-months; the names
+    absent from it hold 39.1k).
+
+    Membership = rank <= 500 by dollar volume at a month-end (the same rule
+    `pit_panel.load_pit_panel` trades on). ``min_months`` drops one-month
+    transients: at >=3 the list is ~2.3k names carrying ~90% of the missing
+    observations. Names already holding ANY fundamentals row are skipped, so
+    an interrupted run resumes for the cost of the membership query. Ordered
+    longest-membership first: if the API quota dies mid-run, the names that
+    carry the most panel weight are already in. Delisted names have no conId
+    and never will — rows are written with conid = '' and joined by ticker,
+    the same reasoning as `pit_daily_bars` being ticker-keyed.
+    """
+    import pandas as pd
+    from trader.data.bar_quality import EXCHANGE_TEST_TICKERS
+
+    df = hist_db.execute(
+        'SELECT day, ticker, dv_rank FROM pit_daily_bars', fetch='df')
+    df = df[~df['ticker'].isin(EXCHANGE_TEST_TICKERS)]
+    df['day'] = pd.to_datetime(df['day'])
+    df['month'] = df['day'].dt.to_period('M')
+    month_end = (df.sort_values('day').groupby(['month', 'ticker'])
+                 .agg(rank=('dv_rank', 'last')).reset_index())
+    months = (month_end[month_end['rank'] <= 500]
+              .groupby('ticker').size().sort_values(ascending=False))
+    have = {r[0] for r in db.execute(
+        'SELECT DISTINCT ticker FROM fundamentals', fetch='all') or []}
+    todo = [('', t) for t, n in months.items()
+            if n >= min_months and t not in have]
+    print(f'pit membership: {len(months)} names >=1 month, '
+          f'{len(todo)} to fetch (>={min_months} months, '
+          f'{len(have)} already covered)', flush=True)
+    return todo
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--limit', type=int, default=0, help='cap tickers (0 = all)')
     ap.add_argument('--sleep', type=float, default=0.05)
+    ap.add_argument('--pit-min-months', type=int, default=0,
+                    help='fetch by POINT-IN-TIME membership instead of the '
+                         'present-day universe: every name with at least this '
+                         'many member-months (rank<=500 at a month-end) that '
+                         'has no fundamentals yet. 0 = off (legacy universe '
+                         'mode).')
     args = ap.parse_args()
+
+    import logging as _logging
+    # httpx/httpcore DEBUG chatter is ~50 lines per name; at 2,000+ names it
+    # drowns the log files for zero information.
+    for noisy in ('httpx', 'httpcore'):
+        _logging.getLogger(noisy).setLevel(_logging.WARNING)
 
     import httpx
     import yaml
@@ -120,27 +179,49 @@ def main() -> int:
         shares_diluted DOUBLE, fetched_at TIMESTAMPTZ,
         PRIMARY KEY (conid, period_end, accession_no))""", fetch='none')
 
-    ua = UniverseAccessor(cfg.get('duckdb_path', ''),
-                          cfg.get('universe_library', 'Universes'))
-    mapping = {}
-    for name in ua.list_universes():
-        for d in getattr(ua.get(name), 'security_definitions', []):
-            mapping[str(d.conId)] = d.symbol
-    todo = sorted(mapping.items())
+    if args.pit_min_months > 0:
+        hist_db = DuckDBConnection(cfg.get('history_duckdb_path', ''))
+        todo = pit_membership_todo(db, hist_db, args.pit_min_months)
+    else:
+        ua = UniverseAccessor(cfg.get('duckdb_path', ''),
+                              cfg.get('universe_library', 'Universes'))
+        mapping = {}
+        for name in ua.list_universes():
+            for d in getattr(ua.get(name), 'security_definitions', []):
+                mapping[str(d.conId)] = d.symbol
+        todo = sorted(mapping.items())
     if args.limit:
         todo = todo[:args.limit]
     print(f'{len(todo)} instruments', flush=True)
 
-    written = no_timestamp = no_values = failed = 0
+    written = no_timestamp = no_values = failed = no_filings = 0
+    consecutive_errors = 0
     with httpx.Client() as client:
         for i, (conid, ticker) in enumerate(todo):
             try:
                 index = sec_filing_index(client, ticker, key)
             except Exception:
+                index = None
+            if index is None:
                 failed += 1
+                consecutive_errors += 1
+                if consecutive_errors >= 15:
+                    # 15 straight TRANSPORT errors is quota exhaustion or an
+                    # outage, not 15 unlucky tickers. Stop spending the list;
+                    # the run resumes from here for free (fetched names are
+                    # skipped by construction in pit mode).
+                    print(f'ABORT: {consecutive_errors} consecutive sec-api '
+                          f'errors at {ticker} ({i}/{len(todo)}) — quota '
+                          f'exhausted or endpoint down. {written} rows '
+                          f'written so far; re-run the same command to '
+                          f'resume.', flush=True)
+                    return 2
                 continue
+            consecutive_errors = 0
             if not index:
-                failed += 1
+                # A clean answer with no 10-K/Q: an ETF/trust/unit, not an
+                # error. Skip the Polygon call — there is nothing to date.
+                no_filings += 1
                 continue
             try:
                 fins = list(poly.vx.list_stock_financials(
@@ -176,12 +257,13 @@ def main() -> int:
             if (i + 1) % 25 == 0:
                 print(f'  {i+1}/{len(todo)}  rows={written} '
                       f'undated={no_timestamp} novalues={no_values} '
-                      f'failed={failed}', flush=True)
+                      f'nofilings={no_filings} failed={failed}', flush=True)
             time.sleep(args.sleep)
 
     print(f'done: {written} rows written, {no_timestamp} periods dropped for '
           f'having no establishable filing time, {no_values} tickers with no '
-          f'values, {failed} failed', flush=True)
+          f'values, {no_filings} with no 10-K/Q filings (funds/trusts), '
+          f'{failed} failed', flush=True)
     return 0
 
 

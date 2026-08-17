@@ -28,31 +28,49 @@ import numpy as np      # noqa: E402
 import pandas as pd     # noqa: E402
 
 
-def build(delay_days: int = 0):
+def build(delay_days: int = 0, pit: bool = False, with_frames: bool = False):
     """(price panel, {signal name: as-of frame}) with acceptance delayed by
-    ``delay_days`` - 0 is the honest read, positive is the leak probe."""
-    from signal_scan import load_panel
+    ``delay_days`` - 0 is the honest read, positive is the leak probe.
+
+    ``pit=True`` swaps the present-day conid-keyed universe for the
+    point-in-time panel (`pit_panel.load_pit_panel`) and joins fundamentals by
+    TICKER, because delisted members have no conId and never will. This is the
+    re-run the 2026-07-29 finding called for: "the size effect here is
+    survivorship" was measured on a universe of names that grew into today's
+    liquid list, so the honest universe is the only place the question can be
+    answered. Known residual: a ticker recycled by a later listing merges two
+    companies' filings into one column — the same residual pit_daily_bars
+    carries, accepted rather than hidden.
+    """
     from trader.container import Container
     from trader.data.duckdb_store import DuckDBConnection
 
-    px = load_panel(500)
+    if pit:
+        from pit_panel import load_pit_panel
+        px, _ = load_pit_panel(500, verbose=False)
+        key = 'ticker'
+    else:
+        from signal_scan import load_panel
+        px = load_panel(500)
+        key = 'conid'
     cfg = Container.instance().config()
     db = DuckDBConnection(cfg.get('duckdb_path', ''))
     rows = db.execute(
-        """SELECT conid, period_end, accepted_at, revenue, net_income,
+        """SELECT conid, ticker, period_end, accepted_at, revenue, net_income,
                   gross_profit, total_assets, stockholders_equity,
                   cash_from_operations, shares_diluted
            FROM fundamentals ORDER BY conid, accepted_at""", fetch='df')
     if rows is None or len(rows) == 0:
         return px, {}
+    rows = rows[rows[key].astype(str) != '']
 
     rows['known_at'] = (pd.to_datetime(rows['accepted_at'], utc=True)
                         + pd.Timedelta(days=delay_days))
     # Trailing-twelve-month sums for FLOW items; balance-sheet items are
     # point-in-time and must not be summed.
-    rows = rows.sort_values(['conid', 'known_at'])
+    rows = rows.sort_values([key, 'known_at'])
     for f in ('revenue', 'net_income', 'gross_profit', 'cash_from_operations'):
-        rows[f + '_ttm'] = (rows.groupby('conid')[f]
+        rows[f + '_ttm'] = (rows.groupby(key)[f]
                             .rolling(4, min_periods=4).sum()
                             .reset_index(level=0, drop=True))
 
@@ -63,8 +81,8 @@ def build(delay_days: int = 0):
               'revenue_ttm']
     frames = {f: pd.DataFrame(index=px.index, columns=px.columns, dtype=float)
               for f in fields}
-    for conid, grp in rows.groupby('conid'):
-        col = str(conid)
+    for keyval, grp in rows.groupby(key):
+        col = str(keyval)
         if col not in px.columns:
             continue
         g = grp.dropna(subset=['known_at']).sort_values('known_at')
@@ -91,17 +109,78 @@ def build(delay_days: int = 0):
                             / frames['total_assets'])
     for k in out:
         out[k] = out[k].replace([np.inf, -np.inf], np.nan)
+    if with_frames:
+        return px, out, frames
     return px, out
+
+
+def _freeze_per_name(frame):
+    """Each column becomes its FIRST observed value, held wherever the
+    original was observed — the same knowledge mask, the information removed.
+    This is the decomposition instrument from the 2026-07-29 standing rule: if
+    a ratio does not beat its own frozen-numerator variant, the numerator was
+    subtracting, and what you measured is the denominator."""
+    first = frame.apply(lambda col: col.dropna().iloc[0]
+                        if col.notna().any() else np.nan)
+    # NaN * 0 stays NaN, an observed cell becomes 0 + its column's constant —
+    # the knowledge mask survives, the variation does not.
+    return frame * 0 + first
+
+
+def run_decomposition(pit: bool, horizons):
+    """sales_to_price against its own parts, per the standing rule: freeze
+    the numerator, freeze the denominator's slow half (shares), and score
+    1/price and 1/marketcap alone — every variant masked to the ratio's OWN
+    observed cells so all rows score the same observations."""
+    from trader.simulation.signal_eval import evaluate
+
+    px, sigs, frames = build(0, pit=pit, with_frames=True)
+    mcap = px * frames['shares_diluted']
+    ratio = sigs['sales_to_price']
+    mask = ratio.notna()
+
+    variants = {
+        'sales_to_price (as measured)': ratio,
+        'revenue FROZEN per name': _freeze_per_name(frames['revenue_ttm']) / mcap,
+        'shares FROZEN per name': frames['revenue_ttm'] / (px * _freeze_per_name(frames['shares_diluted'])),
+        '1/price alone': 1.0 / px,
+        '1/marketcap alone': 1.0 / mcap,
+    }
+    print(f"\n=== DECOMPOSITION ({'point-in-time' if pit else 'present-day'} "
+          f"universe; all variants scored on sales_to_price's cells) ===")
+    print(f"{'variant':<32}{'h':>4}{'mean IC':>10}{'t(NW)':>8}")
+    print('-' * 54)
+    for name, v in variants.items():
+        v = v.replace([np.inf, -np.inf], np.nan).where(mask)
+        for h in horizons:
+            r = evaluate(v, px, horizon=h)
+            if r['mean_ic'] is None:
+                print(f'{name:<32}{h:>4}   (not computable)'); continue
+            t = r['ic_t_stat']
+            print(f"{name:<32}{h:>4}{r['mean_ic']:>10.4f}"
+                  f"{(t if t is not None else float('nan')):>8.2f}", flush=True)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--horizons', type=int, nargs='+', default=[21, 63])
+    ap.add_argument('--pit', action='store_true',
+                    help='score on the point-in-time universe (ticker-keyed, '
+                         'delisted members included) instead of the '
+                         'present-day conid universe')
+    ap.add_argument('--decompose', action='store_true',
+                    help='run the standing-rule ratio decomposition '
+                         '(sales_to_price vs its frozen parts and 1/mcap) '
+                         'instead of the signal table')
     args = ap.parse_args()
     from trader.simulation.signal_eval import evaluate
 
+    if args.decompose:
+        run_decomposition(args.pit, args.horizons)
+        return 0
+
     for delay, label in ((0, 'AS-OF (honest)'), (7, 'DELAYED +7d (leak probe)')):
-        px, sigs = build(delay)
+        px, sigs = build(delay, pit=args.pit)
         if not sigs:
             print('no fundamentals', file=sys.stderr); return 1
         rng = np.random.default_rng(0)
