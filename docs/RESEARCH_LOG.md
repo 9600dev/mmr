@@ -596,6 +596,68 @@ not selection — we have measured that decomposition once already.
 
 ---
 
+## 2026-08-17 (later) — the size tilt is TRADEABLE: first construction to survive its benchmark
+
+The gap momentum died in — IC rose on the honest universe, traded Sharpe
+fell — is where the size finding had to be tested next. It survived.
+
+**Pre-registered design** (`scripts/size_tilt_backtest.py`, written before
+the result): two trials, no grid — bottom-marketcap quintile and top
+sales_to_price quintile of the covered PIT universe, monthly rebalance,
+equal weight within the slice, long only, `run_panel` execution identical to
+the momentum test (t+1 open, 5bps, $0.005/sh). Decisive benchmark:
+equal weight over the SAME covered names. No fitted parameters, so PBO does
+not apply; the benchmark comparison is the test.
+
+| book | Sharpe | CAGR | maxDD |
+|---|---|---|---|
+| small-cap quintile (1/mcap) | 1.15 | 32.7% | −42% |
+| **top sales_to_price quintile** | **1.26** | 31.3% | −42% |
+| EW covered set (benchmark) | 1.04 | 20.2% | −37% |
+| EW whole panel (context) | 1.04 | 18.5% | −34% |
+
+Momentum LOST 0.23 Sharpe to this benchmark; the size tilt beats it by
++0.11 and +12.5pp CAGR, and s2p by +0.22 Sharpe.
+
+**The bias that had to be priced first: truncated terminal losses.** A held
+name whose series ends exits at its last stored price. 224 tilt-held names'
+series end while held (9.9y) — but most are NOT deaths: they fell below the
+PIT build's top-800-by-volume storage cutoff while continuing to trade
+(TROW, IRM, FLS...), for which last-price exit is approximately realizable.
+The genuine-collapse class (fall ≥80% from 1y peak: AMC, BBBY, NVAX, RAD,
+SPCE, SPWR...) is 13 events, and zero-stressing their ENTIRE entry weight —
+an overstatement, since 80–97% of each fall is already inside the data —
+costs −2.0%/yr. The absurd bound (every ≥50% faller worthless at exit,
+51 events) costs −7.8%/yr. The +12.5pp edge survives both.
+
+**Per-year excess vs the covered-EW benchmark:** size tilt positive 8 of 10
+years; **s2p positive 9 of 10, including +17.2% in the 2022 bear** (the raw
+size tilt's one bad year, −9.2%) and +11.6% in 2026 YTD. 2021 is the
+largest single contribution (+54/+35pp — the meme era) but the excess does
+not depend on it. s2p is the better book on every robustness cut, which is
+consistent with the decomposition: revenue adds, and it adds most exactly
+when smallness alone is being punished.
+
+**Honesty notes.** Two trials priced; quintile width, monthly cadence and
+long-only are unpriced upstream choices. 5bps flat slippage is optimistic
+for the smallest names in a liquid universe (monthly cadence keeps the
+sensitivity modest: tripling the cost assumption costs well under 1pp/yr).
+Absolute levels reflect an equal-weight liquid-universe book in a strong
+decade — the CLAIM is the spread over the benchmark, nothing else. Coverage
+gaps (FRC absent from sec-api; ticker recycling) are inherited from the
+fundamentals store.
+
+**Where this leaves the search:** the 2026-07-30 "the well is dry"
+conclusion was about PRICE-derived signals, and it stands. This is the
+new-information direction it called for, and it is the first result in the
+program's history to clear: an honest universe, a pre-registered design,
+its own benchmark, a bias stress, and a per-year robustness cut. Next
+decisions are operational, not statistical: whether/how a monthly ~60-name
+rebalance book fits MMR's execution machinery, and paper-trading it before
+any capital.
+
+---
+
 ## Method errors worth not repeating
 
 Recorded because they cost real time and two of them were invisible to every
