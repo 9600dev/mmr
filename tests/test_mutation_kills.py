@@ -307,3 +307,144 @@ class TestRiskGateBoundaryMutationKills:
         result = _gate.check_leverage({'equityWithLoanAfter': 50_000.0}, 100_000.0)
         assert result.approved is False
         assert 'initMarginAfter' in result.reason
+
+
+class TestDailyOpenNotionalMutationKills:
+    """Kills for the fill-price fallback survivors in RiskGate._daily_open_notional
+    (2026-08-17 pass). The fallback exists so a market order with no usable
+    submission price can still be valued from what it actually FILLED at; each
+    mutant below quietly changed which fills are allowed to provide that value.
+    """
+
+    def _gate(self, tmp_path, **limits):
+        es = EventStore(str(tmp_path / 'don_kills_events.duckdb'))
+        return RiskGate(limits=RiskLimits(**limits), event_store=es), es
+
+    def _submit_unvaluable(self, es, order_id, quantity):
+        """A submission this build could not value: the fallback is its only
+        path to a notional."""
+        import datetime as dt
+        from trader.data.event_store import EventType, TradingEvent
+        es.append(TradingEvent(
+            event_type=EventType.ORDER_SUBMITTED, timestamp=dt.datetime.now(),
+            strategy_name='mk', conid=4391, symbol='AMD', action='BUY',
+            quantity=quantity, price=0.0, order_id=order_id,
+            metadata={'notional': None, 'notional_evaluable': False}))
+
+    def _fill(self, es, order_id, price):
+        import datetime as dt
+        from trader.data.event_store import EventType, TradingEvent
+        es.append(TradingEvent(
+            event_type=EventType.ORDER_FILLED, timestamp=dt.datetime.now(),
+            strategy_name='mk', conid=4391, symbol='AMD', action='BUY',
+            quantity=10.0, price=price, order_id=order_id, metadata={}))
+
+    def _evaluate(self, gate):
+        return gate.evaluate(_signal(), open_order_count=0, daily_pnl=0.0,
+                             portfolio_value=1_000_000.0, position_value=100.0)
+
+    def test_a_bad_fill_does_not_stop_the_scan(self, tmp_path):
+        """Kills xǁRiskGateǁ_daily_open_notional__mutmut_18 (continue -> break).
+
+        A fill whose price cannot even be parsed must be SKIPPED, not end the
+        scan. query_since returns NEWEST FIRST, so the unparsable fill is
+        appended last: the scan hits it before the valid fill, and a `break`
+        there means the valid one never values its submission."""
+        gate, es = self._gate(tmp_path, max_daily_open_notional=10_000.0)
+        self._fill(es, order_id=7, price=50.0)      # values the submission
+        self._fill(es, order_id=3, price=None)      # unparsable, scanned FIRST
+        self._submit_unvaluable(es, order_id=7, quantity=10.0)
+        result = self._evaluate(gate)
+        assert result.approved is True
+        assert result.checks['daily_turnover'] == 'pass'
+
+    def test_unusable_fill_prices_never_shadow_the_real_one(self, tmp_path):
+        """Kills xǁRiskGateǁ_daily_open_notional__mutmut_19, _20 and _22
+        (`isfinite(price) and price > 0 and f.order_id` with either `and`
+        flipped to `or`, or `> 0` loosened to `>= 0`).
+
+        Partial fills, with the real price the OLDEST print (query_since
+        returns newest first, so the scan meets the bad prints before it).
+        Under any mutant a bad print enters the index, and setdefault then
+        blocks the REAL price — turning a valuable order unvaluable and the
+        refusal fail-closed for no reason."""
+        gate, es = self._gate(tmp_path, max_daily_open_notional=10_000.0)
+        self._fill(es, order_id=7, price=50.0)      # real, scanned LAST
+        self._fill(es, order_id=7, price=0.0)
+        self._fill(es, order_id=7, price=float('nan'))
+        self._fill(es, order_id=7, price=float('inf'))
+        self._submit_unvaluable(es, order_id=7, quantity=10.0)
+        result = self._evaluate(gate)
+        assert result.approved is True
+        assert result.checks['daily_turnover'] == 'pass'
+
+    def test_a_sub_dollar_fill_still_values_its_submission(self, tmp_path):
+        """Kills xǁRiskGateǁ_daily_open_notional__mutmut_23 (`price > 0` ->
+        `price > 1`).
+
+        A $0.50 fill is a real price. Excluding sub-dollar fills from the
+        index makes every penny-stock market order unvaluable and the cap
+        refuse opens on exactly the instruments where notional is smallest."""
+        gate, es = self._gate(tmp_path, max_daily_open_notional=10_000.0)
+        self._fill(es, order_id=7, price=0.50)
+        self._submit_unvaluable(es, order_id=7, quantity=100.0)
+        result = self._evaluate(gate)
+        assert result.approved is True
+        assert result.checks['daily_turnover'] == 'pass'
+
+    def test_an_idless_submission_never_borrows_order_ones_fill(self, tmp_path):
+        """Kills xǁRiskGateǁ_daily_open_notional__mutmut_71 (`e.order_id or 0`
+        -> `or 1`) and __mutmut_47 (the refusal's `approved=False` -> `None`).
+
+        Order id 1 is a real id IB hands out. A submission with NO id must
+        count as unvaluable — not silently borrow order 1's fill price and
+        report a notional for an order nothing can tie to a fill."""
+        gate, es = self._gate(tmp_path, max_daily_open_notional=10_000.0)
+        self._fill(es, order_id=1, price=50.0)
+        self._submit_unvaluable(es, order_id=None, quantity=10.0)
+        result = self._evaluate(gate)
+        assert result.approved is False        # `is`: None must not pass for False
+        assert result.checks['daily_turnover'] == 'unevaluable:turnover-history'
+        assert 'could not be valued' in result.reason
+
+    def test_only_fills_may_value_a_submission(self, tmp_path):
+        """Kills xǁRiskGateǁ_daily_open_notional__mutmut_13 and _15 (the
+        fill-price query's `event_type=ORDER_FILLED` -> None / omitted).
+
+        A REJECTED order's recorded price is not a traded price. If any event
+        type can enter the fill index, a rejection values the very submission
+        that never traded, and the cap counts notional that never existed."""
+        import datetime as dt
+        from trader.data.event_store import EventType, TradingEvent
+        gate, es = self._gate(tmp_path, max_daily_open_notional=10_000.0)
+        es.append(TradingEvent(
+            event_type=EventType.ORDER_REJECTED, timestamp=dt.datetime.now(),
+            strategy_name='mk', conid=4391, symbol='AMD', action='BUY',
+            quantity=10.0, price=50.0, order_id=7, metadata={}))
+        self._submit_unvaluable(es, order_id=7, quantity=10.0)
+        result = self._evaluate(gate)
+        assert result.approved is False
+        assert result.checks['daily_turnover'] == 'unevaluable:turnover-history'
+
+
+class TestCheckInstrumentDefaultsMutationKills:
+    """Kills xǁRiskGateǁcheck_instrument__mutmut_1 and _2 (the `exchange` /
+    `sec_type` parameter defaults '' -> 'XXXX').
+
+    The defaults reach the trading filter verbatim. A caller that only knows
+    the symbol must present "no exchange stated", not a fabricated venue
+    string that a deny/allow rule could accidentally match."""
+
+    def test_omitted_exchange_and_sec_type_reach_the_filter_as_empty(self, _gate):
+        seen = {}
+
+        class _CaptureFilter:
+            def is_allowed(self, symbol, exchange, sec_type):
+                seen.update(symbol=symbol, exchange=exchange, sec_type=sec_type)
+                return True, ''
+
+        _gate.trading_filter = _CaptureFilter()
+        result = _gate.check_instrument(symbol='AMD')
+        assert result.approved is True
+        assert seen['exchange'] == ''
+        assert seen['sec_type'] == ''

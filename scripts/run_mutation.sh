@@ -191,6 +191,34 @@
 #     new reason strings equivalent — a judgement call for a human, not
 #     something to grant myself by re-recording the number.
 #
+#     RESOLVED 2026-08-17 at 92.1% (510/44), ABOVE the floor, by the third
+#     path the paragraph above did not enumerate: eleven of the "reason-string
+#     class" survivors were nothing of the sort. The _daily_open_notional
+#     fill-price fallback — which values a market-order submission from what
+#     it actually FILLED at — had NO test pinning which fills may provide that
+#     value. Killed (tests in test_mutation_kills.py, TestDailyOpenNotional*):
+#       * 13/15  any event type could enter the fill index (a REJECTED order's
+#                price valuing the submission that never traded)
+#       * 18     one unparsable fill price ended the whole scan (break)
+#       * 19/20/22  inf/nan/zero fill prices entered the index and, via
+#                setdefault, SHADOWED the real print of a partial fill
+#       * 23     sub-$1 fills excluded -> every penny-stock order unvaluable
+#       * 71     an id-less submission borrowed ORDER 1's fill price
+#       * 47     the unvaluable refusal's approved=False -> None (is-False pin)
+#       * check_instrument 1/2  the ''-defaults reach the filter verbatim
+#     Test-gap note: the first kill attempt for 18/19/20/22 asserted on fills
+#     appended valid-LAST — but query_since returns newest FIRST, so the scan
+#     met the valid fill before the bad ones and the mutants survived a full
+#     run. The fills in those tests are now appended real-first/bad-last and
+#     the docstrings say why. Remaining 44 survivors, all classified: 32
+#     reason/log-string mutants (policy unchanged) + evaluate 1/2/3/8 +
+#     check_instrument's killed pair's siblings (API defaults unused by any
+#     production caller), evaluate 192 (arg to a parameter _check_daily_turnover
+#     deliberately never reads — see its in-code comment), turnover 24
+#     (>0 -> >=0 where both arms yield 0.0 at the boundary), notional 80
+#     (legacy count feeds only the warning text), __init__ 3 + leverage
+#     4/6/13/15 (falsy equivalents, unchanged).
+#
 #     * check_leverage 4/6/13/15 — get('initMarginAfter'/'equityWithLoanAfter',
 #       0) -> None / omitted default. TRUE EQUIVALENTS post-flip, by a NEW
 #       argument: both defaults are falsy, the falsy guard now routes both to
@@ -513,6 +541,15 @@
 # machines; when runs disagree, manually verify a SAMPLE of the disputed
 # verdicts IN BOTH DIRECTIONS before recording either number; `baseline`
 # records without checking first, so never run it casually.
+#   * Third instance, 2026-08-17: position_sizing FAILED the check at 70.9%
+#     (411/169) against a 71.6% (415/165) baseline with zero changes to the
+#     module or its tests — while auto_executor moved UP 54 kills in the same
+#     pass, also unchanged. A targeted re-run scored 71.0% (412/168), agreeing
+#     with the full pass against the baseline, and 5 of 5 sampled survivors
+#     verified GENUINE in single-mutant runs (all reasoning-text/field mutants
+#     in the no-size refusal path — the class this module's ledger entry
+#     already accepts). Conclusion: the 415/165 baseline was recorded from an
+#     over-kill-inflated singleton; ~71.0% is the honest floor.
 #
 # Usage:
 #   scripts/run_mutation.sh            # all 4 modules, then per-module score
