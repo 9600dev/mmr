@@ -556,3 +556,108 @@ class TestQuarantineKeepsTheEvidence:
                           side_effect=RuntimeError('disk full')):
             td.write(4393, df)
         assert len(td.read(4393)) == 1
+
+
+class TestSameInstantDuplicatesCannotBeWritten:
+    """A single frame carrying two rows at the same instant must store one row.
+
+    The upsert DELETE clears previously STORED rows in the frame's range — it
+    cannot touch two rows that arrive together, so nothing downstream stopped
+    a same-instant pair from landing as a duplicate key. Observed live as 14
+    GLD/XLK 1-min pairs (2026-05/07, quarantined 2026-07-30): an all-NULL
+    placeholder beside a real bar at the same minute. The tz representations
+    differed upstream (one naive, one aware), so every pandas index dedup saw
+    two distinct keys; the write path's utc=True normalization then collapsed
+    them onto one instant at INSERT time. The store enforces the invariant at
+    its own chokepoint rather than trusting every producer.
+    """
+
+    def _store(self, tmp_duckdb_path):
+        from trader.data.duckdb_store import DuckDBDataStore
+        return DuckDBDataStore(tmp_duckdb_path)
+
+    def _row(self, when, close, bar_size='1 min'):
+        import numpy as np
+        empty = close is None
+        return {
+            'date': when,
+            'open': np.nan if empty else close,
+            'high': np.nan if empty else close + 0.5,
+            'low': np.nan if empty else close - 0.5,
+            'close': np.nan if empty else close,
+            'volume': np.nan if empty else 100.0,
+            'average': np.nan, 'bar_count': 0,
+            'bar_size': bar_size, 'what_to_show': 1,
+        }
+
+    def _dup_keys(self, store):
+        return store._db.execute(
+            "SELECT symbol, bar_size, date, count(*) FROM tick_data "
+            "GROUP BY 1, 2, 3 HAVING count(*) > 1", fetch='all') or []
+
+    def test_the_live_shape_placeholder_beside_real_bar(self, tmp_duckdb_path):
+        """The exact pair found in the store: naive-UTC placeholder, aware-ET
+        real bar, same instant. One row must survive — the real one."""
+        import datetime as dt
+        import pandas as pd
+        import pytz
+        store = self._store(tmp_duckdb_path)
+        aware = pytz.timezone('US/Eastern').localize(dt.datetime(2026, 5, 4, 4, 0))
+        naive_same_instant = dt.datetime(2026, 5, 4, 8, 0)
+        df = pd.DataFrame([
+            self._row(naive_same_instant, close=None),   # placeholder
+            self._row(aware, close=50.0),                # real bar
+        ])
+        store.write('51529211', df)
+        assert self._dup_keys(store) == []
+        rows = store._db.execute(
+            "SELECT close FROM tick_data WHERE symbol = '51529211'",
+            fetch='all')
+        assert len(rows) == 1
+        assert rows[0][0] == 50.0, 'the placeholder won over the real bar'
+
+    def test_real_bar_wins_regardless_of_frame_order(self, tmp_duckdb_path):
+        import datetime as dt
+        import pandas as pd
+        store = self._store(tmp_duckdb_path)
+        when = dt.datetime(2026, 5, 4, 8, 0, tzinfo=dt.timezone.utc)
+        df = pd.DataFrame([
+            self._row(when, close=50.0),     # real first this time
+            self._row(when, close=None),     # placeholder last
+        ])
+        store.write('4215230', df)
+        rows = store._db.execute(
+            "SELECT close FROM tick_data WHERE symbol = '4215230'",
+            fetch='all')
+        assert len(rows) == 1
+        assert rows[0][0] == 50.0
+
+    def test_same_instant_different_bar_size_is_not_a_duplicate(self, tmp_duckdb_path):
+        """A 1-min bar and a daily bar can legitimately share a timestamp."""
+        import datetime as dt
+        import pandas as pd
+        store = self._store(tmp_duckdb_path)
+        when = dt.datetime(2026, 5, 4, 8, 0, tzinfo=dt.timezone.utc)
+        df = pd.DataFrame([
+            self._row(when, close=50.0, bar_size='1 min'),
+            self._row(when, close=51.0, bar_size='1 day'),
+        ])
+        store.write('265598', df)
+        rows = store._db.execute(
+            "SELECT count(*) FROM tick_data WHERE symbol = '265598'",
+            fetch='one')
+        assert rows[0] == 2
+
+    def test_the_drop_is_logged_not_silent(self, tmp_duckdb_path, caplog):
+        import datetime as dt
+        import logging as stdlib_logging
+        import pandas as pd
+        store = self._store(tmp_duckdb_path)
+        when = dt.datetime(2026, 5, 4, 8, 0, tzinfo=dt.timezone.utc)
+        df = pd.DataFrame([
+            self._row(when, close=None),
+            self._row(when, close=50.0),
+        ])
+        with caplog.at_level(stdlib_logging.WARNING):
+            store.write('51529211', df)
+        assert any('same-instant duplicate' in r.message for r in caplog.records)

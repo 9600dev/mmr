@@ -9,7 +9,10 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
+from trader.common.logging_helper import setup_logging
 from trader.data.store import DataStore, ObjectStore
+
+logging = setup_logging(module_name='duckdb_store')
 
 
 # Marker file written by `docker.sh up()` into the HOST data directory. Inside
@@ -364,6 +367,31 @@ class DuckDBDataStore(DataStore):
         cols = ['symbol', 'date', 'open', 'high', 'low', 'close', 'volume',
                 'average', 'bar_count', 'bar_size', 'what_to_show']
         write_df = write_df[[c for c in cols if c in write_df.columns]]
+
+        # A frame carrying two rows at the same instant (same bar_size) would
+        # INSERT a same-instant duplicate the DELETE below cannot touch — both
+        # rows are new, and the utc=True normalization above can collapse
+        # timestamps that were distinct upstream (a tz-naive row beside a
+        # tz-aware one survives every pandas index dedup, then lands on the
+        # same instant here). Observed live as 14 GLD/XLK 1-min pairs: an
+        # all-NULL placeholder beside a real bar at the same minute. Keep the
+        # row that carries a close — a real bar beats a placeholder.
+        dup_mask = write_df.duplicated(subset=['date', 'bar_size'], keep=False)
+        if dup_mask.any():
+            n_before = len(write_df)
+            write_df = (
+                write_df
+                .assign(_has_close=write_df['close'].notna())
+                .sort_values(['date', '_has_close'], kind='stable')
+                .drop_duplicates(subset=['date', 'bar_size'], keep='last')
+                .drop(columns='_has_close')
+                .sort_values('date', kind='stable')
+            )
+            logging.warning(
+                'dropped %d same-instant duplicate row(s) for %s before write '
+                '(same date + bar_size twice in one frame; kept the row with '
+                'a close where one side was a placeholder)',
+                n_before - len(write_df), symbol)
 
         # Upsert: delete existing rows for this symbol in the date range, then insert.
         # CRITICAL: filter the DELETE by bar_size too — otherwise writing a
