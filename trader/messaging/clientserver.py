@@ -446,8 +446,13 @@ def _convert_return_type(obj, return_type):
         if inner:
             return [_convert_return_type(o, inner[0]) for o in obj]
         return list(obj)
-    elif return_type == type(list):
-        return list(obj)
+    elif return_type is list:
+        # A bare (unparameterized) list wants the payload as-is. The previous
+        # guard compared against type(list) — i.e. `type` — so this branch never
+        # matched and a bare-list caller fell through to return_type(*obj),
+        # which raises for any non-empty payload while an EMPTY result
+        # coincidentally works: the failure reads as "nothing resolved".
+        return list(obj) if isinstance(obj, (list, tuple)) else obj
     elif isinstance(obj, (list, tuple)) and hasattr(return_type, '__origin__') and return_type.__origin__ is tuple:
         return return_type(obj)
     elif isinstance(obj, (list, tuple)):

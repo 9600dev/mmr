@@ -110,6 +110,25 @@ class TestConvertReturnType:
         d = {'k': 'v'}
         assert _convert_return_type(d, dict) is d
 
+    def test_bare_list_returns_payload_as_is(self):
+        # Regression: the bare-list branch compared return_type against
+        # type(list) — i.e. `type` — so it never matched and a non-empty
+        # payload fell through to list(*objs), which raises. The ideas
+        # scanner's international path (return_type=list at
+        # idea_scanner._resolve_symbols) reported every successfully resolved
+        # ticker as unresolvable for a month, while its empty-result case
+        # coincidentally worked. Found live 2026-08-17 on an ASX scan.
+        obj = CustomBusinessError('a real deserialized object')
+        assert _convert_return_type([obj], list) == [obj]
+        assert _convert_return_type([obj, obj], list) == [obj, obj]
+        assert _convert_return_type([], list) == []
+        assert _convert_return_type((1, 2), list) == [1, 2]
+
+    def test_bare_list_with_scalar_payload_does_not_wrap(self):
+        # A scalar arriving where a list was expected is surfaced unchanged
+        # rather than guessed into a single-element list.
+        assert _convert_return_type(5, list) == 5
+
 
 # ---------------------------------------------------------------------------
 # Pure unit tests on the error reconstructor (no sockets, no threads)
