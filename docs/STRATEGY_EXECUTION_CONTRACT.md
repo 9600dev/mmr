@@ -500,6 +500,46 @@ Unpriced current opening receipts may recover price-only evidence even after
 their quantity is final. Finalized priced fills are not automatically reopened
 for broker price corrections or execution busts.
 
+### Operator release of a deferred state (2026-09-14)
+
+Deferral has no natural end, so every state that holds a fail-closed block
+has exactly one explicit release act. Each requires `--attest`, is available
+to the operator role only, records an audit event with the stated reason, and
+is never invoked automatically:
+
+| Held state | Symptom | Read | Release |
+|---|---|---|---|
+| Unconfirmed-send reservation | `DEFERRED: ... reserved by ... unconfirmed earlier sends` | `mmr reservations` | `mmr reservations settle INTENT CLIENT_ID ORDER_ID --reason --attest`; refused while a live broker observation matches the identity |
+| Never-submitted or lost-reply intent | BUYs skipped as `unresolved execution intent reserves exposure`; a SELL stays WAITING | `mmr strategies intents` | `mmr strategies resolve-intent ID --reason --attest`; refused while the intent has an order with a non-terminal status or the intent-scoped snapshot matches an order |
+| Restore marker | every open `unevaluable:restored-state` | `mmr restore-ack --status` | `mmr restore-ack --reason --attest` |
+
+The server settles one narrow class of reservation automatically: a claim
+with full scope under this trader's own client id, reserved after this
+process's execution replay completed in the current IB session, at least 30
+seconds old, that neither the lifecycle tracker, the session's trades nor the
+working-order set has ever observed. That send would have produced an order
+status callback if it had reached IB. The automatic settlement writes the
+same durable audit row as an operator settlement, marked as automatic. Legacy
+rows without a reservation time and emergency-cache rows are never settled
+automatically.
+
+The executor also resolves a never-submitted OPEN itself when that is
+provable: no proposal carries its intent id, or the proposal is still PENDING
+and is rejected, or approve was called and the complete intent-scoped snapshot
+shows no reserved physical order. A server `DEFERRED` verdict on a close is a
+retryable deferral with backoff and one pending request, not a rejection and
+not an unknown. Non-terminal intents are reconciled with per-intent backoff;
+a CANCELLED intent leaves the reconciliation set once its fill checkpoint is
+settled.
+
+`SESSION_TZ` is a runtime-owned parameter: any class may receive it, it is
+validated as an IANA zone, and it reaches the instance only when the class
+declares it. Worker budgets are configuration: `strategy_isolate_callbacks`,
+`strategy_callback_timeout_s`, `strategy_startup_timeout_s`,
+`strategy_max_frame_bytes`, `strategy_memory_limit_bytes` in `trader.yaml`,
+with the defaults stated above. A strategy whose load fails transiently is
+retried on the next reconciliation up to three times before ERROR.
+
 ## Opening authorization and money units
 
 Whole-share sizing floors the affordable quantity and refuses a budget below

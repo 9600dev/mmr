@@ -16,6 +16,12 @@ class EventType(str, Enum):
     ORDER_CANCELLED = 'ORDER_CANCELLED'
     ORDER_REJECTED = 'ORDER_REJECTED'
     RISK_GATE_REJECTED = 'RISK_GATE_REJECTED'
+    # Operator/automatic release of a fail-closed block (2026-09-14). The
+    # durable record lives where the act happened (SQLite reservation
+    # settlement table, restore acknowledgment file); these mirror it into the
+    # cross-service audit trail so `strategies signals`-style reads see it.
+    RESERVATION_SETTLED = 'RESERVATION_SETTLED'
+    RESTORE_MARKER_ACKNOWLEDGED = 'RESTORE_MARKER_ACKNOWLEDGED'
 
 
 @dataclass

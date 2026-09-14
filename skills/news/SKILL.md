@@ -1,6 +1,6 @@
 ---
 name: news
-description: Fetch, search, and summarize financial news articles via the local news-service at http://127.0.0.1:8089. Handles Cloudflare, paywalls (FT/WSJ/Bloomberg/NYT via archive.ph fallback), and HTML→Markdown extraction. Purpose-built for mmr — includes ticker_news() and portfolio_news() helpers that compose search+scrape for an mmr portfolio or idea scan.
+description: Fetch, search, and summarize financial news articles via the local scraper service (~/dev/scraper) at http://127.0.0.1:8089. Handles Cloudflare, paywalls (FT/WSJ/Bloomberg/NYT via archive.ph fallback), and HTML→Markdown extraction. Purpose-built for mmr — includes ticker_news() and portfolio_news() helpers that compose search+scrape for an mmr portfolio or idea scan.
 metadata:
   author: mmr
   version: "0.1"
@@ -10,7 +10,7 @@ metadata:
 
 **LLMVM**: Use `<helpers>...</helpers>` blocks to call `NewsHelpers` methods. All methods are `async`. Returns are dicts in the mmr convention — check `result.get("ok")` and report `fetcher_source` before trusting content.
 
-This skill wraps a local Dockerized scraper that lives in `~/dev/news`. The service provides browser-style fetching (Playwright + stealth), an `httpx → playwright → archive.ph` fallback chain, aggressive HTML→Markdown extraction via `rustdown`, and (optionally) LLM extraction over the scraped body.
+This skill wraps a local Dockerized scraper that lives in `~/dev/scraper` (renamed from `~/dev/news` in mid-2026; config is `~/.config/scraper/scraper.yaml`). The service provides browser-style fetching (Playwright + stealth), an `httpx → playwright → scrapingbee → archive.ph` fallback chain, aggressive HTML→Markdown extraction via `rustdown`, a persistent searchable scrape store (`use_cache`, `GET /v1/scrapes`), server-side image handling (`images: urls|hosted|embed`), and (optionally) LLM extraction over the scraped body. The generic, always-current description of the service is the scraper repo's own skill at `~/dev/scraper/scraper-service-skill/`; the `reference/` docs here are copied from it. What this skill adds is the mmr composition layer (`ticker_news`, `portfolio_news`, the freshness recipes, `FINANCIAL_SOURCES.md`).
 
 ## When to invoke this skill
 
@@ -32,30 +32,35 @@ Do **not** invoke for:
 
 ```python
 h = await NewsHelpers.health()
-# {"status": "ok", "version": "0.1.0", "llm_enabled": false, "ok": true}
+# {"status": "ok", "version": "0.1.0", "llm_enabled": true, "llm_verified": true,
+#  "mathpix_enabled": true, "scrapingbee_enabled": true, "store_enabled": true,
+#  "agent_enabled": true, "scrapingbee_usage": {"calls_24h": 0, "credits_24h": 0, ...},
+#  "degraded_reasons": [], "egress_filter": "enforced"}
 ```
+
+`status` is `"ok"` only when the core pipeline is up AND no enabled optional subsystem is failing; a non-empty `degraded_reasons` names the subsystem and its last error. `scrapingbee_usage` is the paid-tier spend — glance at it before a batch run.
 
 If this returns `ok: False` with `"connection refused"`, the service isn't running. Start it:
 
 ```bash
-cd ~/dev/news && ./docker.sh -g
+cd ~/dev/scraper && ./docker.sh -g
 ```
 
-`-g` builds (if needed), starts, and tails logs. Wait for `news service ready on http://...` in the log, then re-check health.
+`-g` builds (if needed), starts, and tails logs. Wait for `scraper service ready on http://...` in the log, then re-check health.
 
 ## `NewsHelpers` — Method Summary
 
 | Method | Purpose |
 |--------|---------|
 | `NewsHelpers.health()` | Ping the service — run before any scrape batch |
-| `NewsHelpers.search(query, engine="auto", max_results=10, exclude_regex=None)` | Search only. Engines: `auto`, `ddg`, `google`, `google_news`. Use `google_news` for freshness + source attribution |
-| `NewsHelpers.scrape(url, extract=None, follow_links=0, allow_archive_fallback=True, include_html=False)` | Scrape one URL. Optional LLM extraction (requires `llm_enabled: true`), optional N-hop follow |
+| `NewsHelpers.search(query, engine="auto", max_results=10, exclude_regex=None)` | Search only. Engines: `auto`, `ddg`, `google`, `google_news`, `google_scholar`, `arxiv`, `research`. Use `google_news` for freshness + source attribution. Empty result with `rate_limited: true` = incomplete, retry; missing SerpAPI key = 422, not empty |
+| `NewsHelpers.scrape(url, extract=None, follow_links=0, allow_archive_fallback=True, include_html=False, use_cache=False, allow_paid_fallback=True, images=None)` | Scrape one URL. Optional LLM extraction (requires `llm_enabled: true`), optional N-hop follow. `use_cache=True` replays a recent stored result; `allow_paid_fallback=False` skips the ScrapingBee tier (use on batch sweeps); `images="hosted"` mirrors images to the service for LLM-visible refs |
 | `NewsHelpers.markdown(url)` | Convenience: returns just the article body markdown string |
 | `NewsHelpers.search_and_scrape(query, max_results=5, concurrency=3, engine="google_news")` | Composite: search + parallel scrape of top N results. Preserves search metadata (source, published_at) per article |
 | `NewsHelpers.ticker_news(ticker, max_results=5, extract=None, exchange_hint=None)` | **mmr-native**: google_news search `"{TICKER} stock [exchange_hint] news"` + parallel scrape |
 | `NewsHelpers.portfolio_news(tickers, max_results_per_ticker=3, exchange_hint=None)` | **mmr-native**: fan out `ticker_news()` across a list of tickers |
 | `NewsHelpers.get_images(url, max_images=5, min_bytes=5000, max_bytes=1_500_000)` | Extract inline images from an article as llmvm `ImageContent` (LLM-visible). Filters logos/icons/tracking pixels. `og:image` / `twitter:image` are ranked first so the hero photo wins over sidebar promos |
-| `NewsHelpers.pdf(url, use_cache=True, timeout=300)` | Convert a PDF to Markdown via Mathpix. Returns the same `ScrapeResponse` shape — `article.markdown` is the body, `article.metadata.pdf_pages` / `pdf_id` / `pdf_cached` carry diagnostics. `/v1/scrape` on a `.pdf` URL transparently delegates here, so most callers won't need to invoke this directly |
+| `NewsHelpers.pdf(url, use_cache=True, timeout=300, images="urls")` | Convert a PDF to Markdown via Mathpix. The helper forces `images="urls"` because the service's own `/v1/pdf` default is `"embed"` (base64 inline, tens of MB). URL must be public `https://`; for a local file use `POST /v1/convert` multipart (see `reference/api.md`). Returns the same `ScrapeResponse` shape — `article.markdown` is the body, `article.metadata.pdf_pages` / `pdf_id` / `pdf_cached` carry diagnostics. `/v1/scrape` on a `.pdf` URL transparently delegates here, so most callers won't need to invoke this directly |
 
 ## Core patterns
 
@@ -399,6 +404,7 @@ The news skill is safe to use inside a `loop()` iteration — it's fully async, 
 | `ok` | Article fetched and extracted | Use `article.markdown`; report `fetcher_source` |
 | `blocked` | All fetchers (including archive) blocked | Try a different source; don't retry blindly |
 | `not_found` | Genuine 404 | Double-check URL; don't retry |
+| `not_an_article` | Fetched cleanly but it's a section index / listing page / non-HTML asset | The prose extractor can't help. Pick a specific article URL, or pull the raw HTML via `POST /v1/scrapingbee/scrape` and parse headlines yourself. Don't retry `/v1/scrape` |
 | `timeout` | Fetcher exceeded timeout | Retry once; then report the URL as slow/hung |
 | `paywalled` | Direct fetch paywalled AND archive had nothing | Suggest alternate source |
 | `extraction_error` | Fetched HTML but rustdown failed to parse | Report URL — something's off with page structure |
@@ -409,15 +415,18 @@ Top-level failures (connection refused, timeout) appear as `{"ok": false, "error
 
 ## Gotchas
 
-- **Stateless service** — no caching. Each call is a fresh fetch.
+- **Fresh fetch by default, but there IS a store now.** Every scrape is archived to a SQLite scrape store and searchable via `GET /v1/scrapes?q=...`; pass `use_cache=True` to replay a recent stored result instead of re-fetching (bounded by `store_cache_ttl_seconds`). Don't rely on two uncached calls agreeing on flaky sites.
+- **The paid ScrapingBee tier is ON by default** (`scrapingbee_enabled: true` in health). It sits between playwright and archive in the fallback chain and bills 25–100 credits per blocked URL. Pass `allow_paid_fallback=False` on probes, debugging, and batch sweeps. Check `scrapingbee_usage` in health before a big run.
+- **Images are handled server-side now.** `images="hosted"` on `scrape()` rewrites refs to `GET /v1/images/<sha256>.<ext>` on the service — compact and durable. `get_images()` below predates this and does the extraction client-side; prefer `images="hosted"` for new code. `embed_images` (the old bool) is gone — sending it is a 422.
+- **Really hard scrapes → `/v1/agent`** (health `agent_enabled: true`): an LLM agent plans deep crawls / heavy-JS interaction as an async job. Minutes + LLM spend per job. Always try plain `scrape()` first. See `reference/api.md`.
 - **Playwright adds latency** — clean `httpx` is ~1s, Cloudflare-challenged Playwright can be 10–30s, archive tier can stack another 20–60s per provider. The helper defaults to a **120s** timeout so the full fallback chain can finish before the client drops — shorter deadlines were clipping the archive tier mid-submission and returning an empty `attempts` trace.
-- **LLM extraction is opt-in** — `extract=` requires `llm_enabled: true` on the service (`~/.config/news/news.yaml`). Returns HTTP 422 otherwise.
+- **LLM extraction is opt-in** — `extract=` requires `llm_enabled: true` on the service (`~/.config/scraper/scraper.yaml`). Returns HTTP 422 otherwise.
 - **LLM extraction failures don't discard the article.** If the extraction prompt fails (auth, rate-limit, provider 5xx), the response still has `article.markdown` populated — the failure is surfaced on `extraction.error`. Check that field before treating the response as a total failure.
 - **`follow_links>0` requires `extract=`.** The LLM uses the extract prompt to decide which links are relevant; without one there's nothing to route on. Server rejects the combination with HTTP 422.
 - **`follow_links` is server-capped at 5.** Deeper chains are a scan-multiple-seeds problem, not a deeper-follow problem — the return on extra hops drops fast and the cost climbs.
 - **`allow_archive_fallback=False`** for live-only content. Default is `True` because paywall bypass is usually what you want.
 - **Per-article isolation** — `ticker_news()` / `portfolio_news()` / `search_and_scrape()` never fail the whole batch when one URL fails. Each article comes back with its own `ok` / `status` / `attempts`, so a blocked Bloomberg URL doesn't poison the rest of the bundle.
-- **PDF conversion** — `.pdf` URLs on `/v1/scrape` auto-delegate to Mathpix via `/v1/pdf`. Covers SEC EDGAR 10-K / 10-Q / 8-K, Federal Reserve speeches, earnings-deck PDFs, IR press releases. Results are cached on the service keyed by URL hash — repeat calls for the same PDF don't rebill Mathpix. `health.mathpix_enabled` tells you if the capability is live; `article.metadata.pdf_cached` tells you if a specific response came from cache. Tables and equations survive — `mathpix_output_format: mmd` in news.yaml (default) keeps `$math$` + Mathpix Markdown tables; switch to `md` for plain CommonMark.
+- **PDF conversion** — `.pdf` URLs on `/v1/scrape` auto-delegate to Mathpix via `/v1/pdf`. Covers SEC EDGAR 10-K / 10-Q / 8-K, Federal Reserve speeches, earnings-deck PDFs, IR press releases. Results are cached on the service keyed by URL hash — repeat calls for the same PDF don't rebill Mathpix. `health.mathpix_enabled` tells you if the capability is live; `article.metadata.pdf_cached` tells you if a specific response came from cache. Tables and equations survive — `mathpix_output_format: mmd` in scraper.yaml (default) keeps `$math$` + Mathpix Markdown tables; switch to `md` for plain CommonMark.
 - **`include_html=True` is heavy** — raw HTML is 10–30× the size of markdown. Only set when you need to run your own extractor.
 - **Max 50 results per search** — server rejects `max_results > 50` with 422. `search_and_scrape` already clamps effective scrapes to `max_results`.
 

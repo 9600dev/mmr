@@ -16,7 +16,7 @@ SETUP_MODE=false
 RESTART_ALL=false
 DOCKER_MODE=false
 NEWS_MODE=false
-NEWS_DIR="${NEWS_DIR:-$HOME/dev/news}"
+NEWS_DIR="${NEWS_DIR:-$HOME/dev/scraper}"
 
 # PIDs of child service processes
 DATA_PID=""
@@ -132,12 +132,12 @@ print_api_keys() {
     api_key_status "TwelveData"       "twelvedata_api_key"  "TWELVEDATA_API_KEY"  "$yaml_file"
 }
 
-# Bring up the sibling news scraper docker stack (~/dev/news by default,
+# Bring up the sibling news scraper docker stack (~/dev/scraper by default,
 # override with NEWS_DIR=...). Used by the `news` skill which talks to
-# http://127.0.0.1:8089. Idempotent: news/docker.sh -u reuses the
+# http://127.0.0.1:8089. Idempotent: scraper/docker.sh -u reuses the
 # existing container; `--news -g` does a build → down → up cycle.
 #
-# We deliberately never invoke `news/docker.sh -g` directly from here:
+# We deliberately never invoke `scraper/docker.sh -g` directly from here:
 # that command ends with `compose logs -f` and would block start_mmr.sh
 # forever, preventing the rest of the MMR boot from running. Build +
 # down + up gives the same end-state without tailing.
@@ -153,7 +153,7 @@ start_news_stack() {
     fi
     if [ ! -d "$NEWS_DIR" ]; then
         fail "--news: NEWS_DIR=$NEWS_DIR not found"
-        info "  clone the news repo to ~/dev/news, or set NEWS_DIR=/path/to/news"
+        info "  clone the scraper repo to ~/dev/scraper, or set NEWS_DIR=/path/to/scraper"
         exit 1
     fi
     if [ ! -x "$NEWS_DIR/docker.sh" ]; then
@@ -257,7 +257,7 @@ Modes (pick at most one):
 
 Add-ons (combine with any mode above):
   --news               Also bring up the news scraper container stack
-                       (sibling repo, default $HOME/dev/news; override
+                       (sibling repo, default $HOME/dev/scraper; override
                        with NEWS_DIR=...). Idempotent: reuses the
                        container if it's already running. Combine with
                        `-g` to do a clean rebuild + restart of news.

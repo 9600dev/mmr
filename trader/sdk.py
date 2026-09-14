@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import asyncio
 import dataclasses
+import json
 import datetime as dt
 import logging
 import math
@@ -2395,6 +2396,63 @@ class MMR:
         return consume(self._rpc.rpc(return_type=SuccessFail[dict]).adopt_legacy_holding(
             strategy, int(conid), avg_cost))
 
+    # -- operator reconciliation tools (2026-09-14) ---------------------------
+    # The execution contract replaced "refuse" with "defer" for exits whose
+    # capacity is uncertain (unconfirmed sends, never-submitted intents, a
+    # restore marker). Every deferral needs a HUMAN path out, or a stuck state
+    # becomes a naked position with an actionable-sounding log line and no
+    # action. None of these is ever invoked automatically; the settle/resolve/
+    # acknowledge calls record an audit event naming the reason.
+
+    def list_execution_intents(self, strategy: Optional[str] = None,
+                               conid: Optional[int] = None,
+                               active_only: bool = True) -> list[dict]:
+        """Executor intents from the strategy_service SQLite journal.
+
+        Forwarded by trader_service to strategy_service like adopt. Each row
+        says what it is (kind/status), what it blocks (opens, exits) and why.
+        """
+        rows = self._rpc.rpc(return_type=list[dict]).list_execution_intents(
+            strategy, None if conid is None else int(conid), bool(active_only))
+        return list(rows or [])
+
+    def resolve_execution_intent(self, intent_id: str, reason: str) -> SuccessFail:
+        """Operator resolution of an intent that has NO broker evidence.
+
+        Refused server-side when the intent has order ids with a live status or
+        the intent-scoped broker snapshot shows matching orders — resolving
+        those would hide real exposure. Never automatic.
+        """
+        return consume(self._rpc.rpc(return_type=SuccessFail[dict]).resolve_execution_intent(
+            str(intent_id), str(reason)))
+
+    def list_order_reservations(self, account: Optional[str] = None,
+                                include_settled: bool = False) -> list[dict]:
+        """Server-side physical order reservations (the capacity ledger that
+        makes a second executable exit impossible). ``blocking`` rows are the
+        ones currently deferring reductions on their instrument."""
+        rows = self._rpc.rpc(return_type=list[dict]).list_order_reservations(
+            account, bool(include_settled))
+        return list(rows or [])
+
+    def settle_order_reservation(self, intent_id: str, client_id: int,
+                                 order_id: int, reason: str) -> dict:
+        """Operator settlement of a reservation with no matching broker
+        observation. Refused server-side if a live observation matches."""
+        return self._rpc.rpc(return_type=dict).settle_order_reservation(
+            str(intent_id), int(client_id), int(order_id), str(reason))
+
+    def restore_marker_status(self) -> dict:
+        """Whether a restore-time BROKER_RECONCILIATION_REQUIRED marker is
+        refusing opens, and what it records."""
+        return self._rpc.rpc(return_type=dict).restore_marker_status()
+
+    def acknowledge_restore_marker(self, reason: str) -> dict:
+        """Acknowledge the restore marker after reviewing broker truth. This
+        is the deliberate human act the backup contract requires before the
+        stack may open new exposure again."""
+        return self._rpc.rpc(return_type=dict).acknowledge_restore_marker(str(reason))
+
     def check_ib_upstream(self) -> Optional[str]:
         """Check if IB Gateway has upstream connectivity. Returns error string or None if OK."""
         try:
@@ -2849,16 +2907,27 @@ class MMR:
                 flat[full_key] = v
         return flat
 
-    def _td_fundamentals_to_df(self, payload: Dict[str, Any], list_key: str) -> pd.DataFrame:
+    def _td_fundamentals_to_df(self, payload: Union[Dict[str, Any], List[Any], None], list_key: str) -> pd.DataFrame:
         """Convert a TwelveData fundamentals payload into a DataFrame.
 
         Each entry in the ``<list_key>`` array (e.g. "balance_sheet") becomes
         one row; nested group dicts are flattened with dot-notation column
         names. Newest period first.
+
+        Accepts both shapes the twelvedata client has returned from
+        ``.as_json()``: the documented envelope ``{"meta": ..., "<list_key>":
+        [...]}`` and (current library) the bare list of period entries.
+        The bare list used to fall through to an empty frame, so
+        ``financials balance AAPL`` printed "No data" against a 200 response.
         """
-        if not payload or list_key not in payload:
+        if not payload:
             return pd.DataFrame()
-        entries = payload.get(list_key) or []
+        if isinstance(payload, list):
+            entries = payload
+        elif isinstance(payload, dict) and list_key in payload:
+            entries = payload.get(list_key) or []
+        else:
+            return pd.DataFrame()
         rows = [self._flatten_td_dict(entry) for entry in entries if isinstance(entry, dict)]
         if not rows:
             return pd.DataFrame()
@@ -2869,10 +2938,22 @@ class MMR:
         return df
 
     def _financials_to_df(self, results, limit: int = 0) -> pd.DataFrame:
-        """Convert an iterator of financial dataclass objects to a DataFrame."""
+        """Convert an iterator of financial dataclass objects to a DataFrame.
+
+        Massive's financials endpoints return each period TWICE as
+        byte-identical rows (checked 2026-09-14: AAPL quarterly balance
+        sheets, every field equal), so `limit=4` used to yield two periods
+        rendered as "Q3 2026 | Q3 2026 | Q2 2026 | Q2 2026". Duplicates are
+        dropped as they stream so `limit` counts DISTINCT rows.
+        """
         rows = []
+        seen: set = set()
         for item in results:
             row = dataclasses.asdict(item)
+            key = json.dumps(row, sort_keys=True, default=str)
+            if key in seen:
+                continue
+            seen.add(key)
             rows.append(row)
             if limit and len(rows) >= limit:
                 break
@@ -2920,6 +3001,9 @@ class MMR:
             return df.head(limit) if limit and not df.empty else df
         results = self._massive_client.list_financials_balance_sheets(
             tickers=symbol, timeframe=timeframe, limit=limit,
+            # Server default is period_end ASCENDING, so limit=4 without a
+            # sort returned AAPL's 2010 quarters (seen live 2026-09-14).
+            sort='period_end.desc',
         )
         return self._financials_to_df(results, limit=limit)
 
@@ -2940,6 +3024,9 @@ class MMR:
             return df.head(limit) if limit and not df.empty else df
         results = self._massive_client.list_financials_income_statements(
             tickers=symbol, timeframe=timeframe, limit=limit,
+            # Server default is period_end ASCENDING, so limit=4 without a
+            # sort returned AAPL's 2010 quarters (seen live 2026-09-14).
+            sort='period_end.desc',
         )
         return self._financials_to_df(results, limit=limit)
 
@@ -2960,6 +3047,9 @@ class MMR:
             return df.head(limit) if limit and not df.empty else df
         results = self._massive_client.list_financials_cash_flow_statements(
             tickers=symbol, timeframe=timeframe, limit=limit,
+            # Server default is period_end ASCENDING, so limit=4 without a
+            # sort returned AAPL's 2010 quarters (seen live 2026-09-14).
+            sort='period_end.desc',
         )
         return self._financials_to_df(results, limit=limit)
 
@@ -3014,8 +3104,13 @@ class MMR:
             'section': section,
             'limit': limit,
         }
+        # The endpoint is versioned `vX`, not `v1` — `v1` is a 404 on both
+        # api.massive.com and api.polygon.io (checked 2026-09-14). Kept as a
+        # raw GET because the host venv's massive 2.2.0 predates the
+        # `list_stocks_filings_10k_sections` wrapper that 2.8.0 ships.
+        # Default server sort is period_end.desc, so limit=1 is the newest.
         resp = self._massive_client._get(
-            '/stocks/filings/10-K/v1/sections',
+            '/stocks/filings/10-K/vX/sections',
             params=params,
             result_key='results',
             raw=False,

@@ -81,8 +81,12 @@ class _Work:
 class _NoRuntime:
     def __getattr__(self, name):
         raise UnsupportedStrategyAPI(
-            f'strategy_runtime.{name} is unavailable in isolated callbacks; '
-            'declare subscriptions in conids/universe and return Signal for execution')
+            f'strategy_runtime.{name}() is unsupported live: strategy code runs in an isolated '
+            'child process with NO strategy-runtime mutation API (no subscribe/unsubscribe, no '
+            'order placement, no runtime state). Fix the strategy: remove the '
+            f'self.strategy_runtime.{name}(...) call — declare every instrument it needs under '
+            '`conids:`/`universe:` in strategy_runtime.yaml (the runtime subscribes on its behalf '
+            'before enable()) and return a Signal from on_prices for execution.')
 
 
 class _ReadOnlyData:
@@ -314,7 +318,8 @@ class StrategyCallbackWorker:
                  callback_timeout_s: float = 5.0, startup_timeout_s: float = 60.0,
                  max_pending: int = 1, max_frame_bytes: int = 32 * 1024 * 1024,
                  memory_limit_bytes: int | None = None,
-                 deployment_config: dict | None = None):
+                 deployment_config: dict | None = None,
+                 on_fatal: Callable[[CallbackFailure], None] | None = None):
         for name, value in (('callback_timeout_s', callback_timeout_s), ('startup_timeout_s', startup_timeout_s)):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f'{name} must be positive and finite')
@@ -343,6 +348,12 @@ class StrategyCallbackWorker:
         self._last_work: _Work | None = None
         self.ready_metadata: dict = {}
         self._generation = str(getattr(context, 'deployment_generation', ''))
+        # Fired exactly once, on the FIRST recorded failure, whether or not a
+        # callback was in flight. ``on_error`` is per submitted work; a child
+        # that exits while idle has no work to report through, and before this
+        # hook such a death left the strategy RUNNING with opening authority
+        # and the pulse reading N/N.
+        self._on_fatal = on_fatal
 
     @property
     def pid(self) -> int | None:
@@ -412,11 +423,17 @@ class StrategyCallbackWorker:
             work.conid if work else None, work.bar_ts if work else None,
             work.generation if work else self._generation, error_type, message)
         with self._lock:
-            if self._error is None:
+            first = self._error is None
+            if first:
                 self._error = failure
         self._stop.set()
         if work is not None:
             self._notify_error(work, failure)
+        if first and self._on_fatal is not None:
+            try:
+                self._on_fatal(failure)
+            except Exception:
+                logging.exception('strategy worker fatal-error reporter raised')
 
     def _exchange(self, work, timeout):
         """Bound both pipe writes and reads, including a peer halted mid-frame."""

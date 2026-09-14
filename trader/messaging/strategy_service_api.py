@@ -78,6 +78,44 @@ class StrategyServiceApi(RPCHandler):
             return SuccessFail.fail(error=str(ex) or type(ex).__name__, exception=ex)
 
     @rpcmethod
+    async def list_execution_intents(self, strategy: Optional[str] = None, conid: Optional[int] = None,
+                                     active_only: bool = True) -> List[dict]:
+        """Executor intents (the SQLite intent journal) as JSON-safe rows.
+
+        Each row carries kind/status/order ids/proposal id, the payload flags
+        that matter (attribution_unresolved, never_submitted, operator_resolved,
+        deferred_*) and a ``blocking`` sentence saying what the intent holds
+        back. Read-only; served even while the worker is busy. An executor-less
+        service returns no rows rather than an error so `mmr strategies
+        intents` degrades to "nothing to show".
+        """
+        executor = getattr(self.strategy, 'auto_executor', None)
+        if executor is None:
+            return []
+        return await asyncio.to_thread(executor.list_execution_intents, strategy,
+                                       None if conid is None else int(conid), bool(active_only))
+
+    @rpcmethod
+    async def resolve_execution_intent(self, intent_id: str, reason: str) -> SuccessFail[dict]:
+        """Operator resolution of an intent that has no broker evidence.
+
+        An explicit human act, never invoked automatically. Runs on the
+        executor worker; refused (success False, reason in ``error``) when the
+        intent recorded order ids not proven terminal or the intent-scoped
+        broker snapshot still shows matching orders.
+        """
+        executor = getattr(self.strategy, 'auto_executor', None)
+        if executor is None:
+            return SuccessFail.fail(error='auto-executor is not running in this strategy service')
+        if not str(reason or '').strip():
+            return SuccessFail.fail(error='operator resolution requires a non-empty reason')
+        try:
+            resolved = await asyncio.to_thread(executor.resolve_execution_intent, str(intent_id), str(reason))
+            return SuccessFail.success(obj=resolved)
+        except Exception as ex:
+            return SuccessFail.fail(error=str(ex) or type(ex).__name__, exception=ex)
+
+    @rpcmethod
     async def reload_strategies(self) -> SuccessFail[List[StrategyConfig]]:
         try:
             # Explicit reload is an application acknowledgment, independent

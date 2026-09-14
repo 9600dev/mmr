@@ -12,6 +12,91 @@ _MMR_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 # uv run --project handles dep resolution without a local .venv.
 _UV_PREFIX = ["uv", "run", "--project", _MMR_ROOT]
 
+# ---------------------------------------------------------------------------
+# Host vs container routing (2026-09-14).
+#
+# trader.yaml has ONE duckdb_path, but docker-compose overlays the data dir
+# with the `mmr_db_data` named volume, so the same path string is a DIFFERENT
+# FILE on the host than inside the container. `docker.sh up()` drops a
+# `.db_in_container_volume` marker next to the host-side stub, and
+# DuckDBConnection refuses to open a DB beside that marker
+# (ShadowedDatabaseError) — which is what every DuckDB-backed helper here
+# (propose / proposals / approve, backtest*, sweep*, universe*, group*, data*,
+# strategy_deploy) returned when run from the host, while the RPC-backed ones
+# (status, portfolio, orders) kept working and hid the problem.
+#
+# So: when the marker is present AND the mmr container is running, execute
+# the CLI *inside the container* via `docker exec`. Overrides:
+#   MMR_SKILL_EXEC=host|container|auto   (default auto)
+#   MMR_CONTAINER=<name>                 (default mmr-mmr-1)
+# MMR_ALLOW_HOST_DB=1 also forces host mode (you deliberately want a host DB).
+# In container mode, host absolute paths under the repo root or $HOME are
+# rewritten to their container equivalents, and MMR_* env vars are forwarded
+# by NAME (`docker exec -e NAME` copies the value without putting it in argv).
+# The container has its OWN copy of the repo: run `./docker.sh -s` after
+# editing a strategy before backtesting/gauntleting it in container mode.
+# ---------------------------------------------------------------------------
+_CONTAINER = os.environ.get("MMR_CONTAINER", "mmr-mmr-1")
+_CONTAINER_ROOT = "/home/trader/mmr"
+_CONTAINER_HOME = "/home/trader"
+_DB_MARKER = Path.home() / ".local" / "share" / "mmr" / "data" / ".db_in_container_volume"
+_ENV_FORWARD_SKIP = {"MMR_SKILL_EXEC", "MMR_CONTAINER", "MMR_LOG_DIR", "MMR_ALLOW_HOST_DB"}
+_exec_mode_cache: Optional[str] = None
+
+
+def _container_running() -> bool:
+    try:
+        r = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", _CONTAINER],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0 and r.stdout.strip() == "true"
+
+
+def _exec_mode() -> str:
+    """'host' or 'container'. Decided once per process; see the block above."""
+    global _exec_mode_cache
+    if _exec_mode_cache is None:
+        forced = os.environ.get("MMR_SKILL_EXEC", "auto").strip().lower()
+        if forced in ("host", "container"):
+            _exec_mode_cache = forced
+        elif os.environ.get("MMR_ALLOW_HOST_DB") == "1":
+            _exec_mode_cache = "host"
+        elif _DB_MARKER.exists() and _container_running():
+            _exec_mode_cache = "container"
+        else:
+            _exec_mode_cache = "host"
+    return _exec_mode_cache
+
+
+def _py_prefix() -> List[str]:
+    """Command prefix that lands us in the mmr venv: `uv run --project` on the
+    host, or `docker exec ... <container>` where bare `python` IS the venv.
+    Call sites append `["python", "-m", "trader.mmr_cli", ...]` etc."""
+    if _exec_mode() != "container":
+        return list(_UV_PREFIX)
+    cmd = ["docker", "exec", "-i", "-w", _CONTAINER_ROOT,
+           "-e", "NO_COLOR=1", "-e", "PYTHONDONTWRITEBYTECODE=1"]
+    for name in sorted(os.environ):
+        if name.startswith("MMR_") and name not in _ENV_FORWARD_SKIP:
+            cmd += ["-e", name]
+    return cmd + [_CONTAINER]
+
+
+def _translate_paths(cmd: List[str]) -> List[str]:
+    """Rewrite host absolute paths (repo root, $HOME) to container paths."""
+    home = str(Path.home())
+    out: List[str] = []
+    for a in cmd:
+        if a.startswith(_MMR_ROOT):
+            a = _CONTAINER_ROOT + a[len(_MMR_ROOT):]
+        elif a.startswith(home + "/"):
+            a = _CONTAINER_HOME + a[len(home):]
+        out.append(a)
+    return out
+
 # Bounded-parallel slots for concurrent subprocess launches. DuckDB retries
 # lock contention at the storage layer, so N parallel `mmr backtest` calls
 # are safe; the cap just prevents fork-bombing on big batches.
@@ -23,6 +108,8 @@ _ENV = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1"}
 
 def _invoke(cmd: List[str], timeout: int) -> subprocess.CompletedProcess:
     """Run a subprocess; caller handles TimeoutExpired."""
+    if _exec_mode() == "container":
+        cmd = _translate_paths(cmd)
     return subprocess.run(
         cmd, capture_output=True, text=True,
         cwd=_MMR_ROOT, timeout=timeout, env=_ENV,
@@ -31,7 +118,7 @@ def _invoke(cmd: List[str], timeout: int) -> subprocess.CompletedProcess:
 
 def _run_cli_sync(*args: str, timeout: int = 30) -> str:
     """Run an mmr CLI command and return combined stdout+stderr."""
-    cmd = _UV_PREFIX + ["python", "-m", "trader.mmr_cli"] + list(args)
+    cmd = _py_prefix() + ["python", "-m", "trader.mmr_cli"] + list(args)
     try:
         result = _invoke(cmd, timeout)
     except subprocess.TimeoutExpired:
@@ -43,7 +130,7 @@ def _run_cli_sync(*args: str, timeout: int = 30) -> str:
 def _run_cli_json_sync(*args: str, timeout: int = 30) -> dict:
     """Run mmr CLI with --json; parse stdout only (stderr carries uv / logging
     noise that would break json.loads)."""
-    cmd = _UV_PREFIX + ["python", "-m", "trader.mmr_cli", "--json"] + list(args)
+    cmd = _py_prefix() + ["python", "-m", "trader.mmr_cli", "--json"] + list(args)
     try:
         result = _invoke(cmd, timeout)
     except subprocess.TimeoutExpired:
@@ -58,7 +145,7 @@ def _run_cli_json_sync(*args: str, timeout: int = 30) -> dict:
 
 def _run_sdk_script_sync(script: str, timeout: int = 30) -> str:
     """Run a Python script in the mmr venv and return cleaned output."""
-    cmd = _UV_PREFIX + ["python", "-c", script]
+    cmd = _py_prefix() + ["python", "-c", script]
     try:
         result = _invoke(cmd, timeout)
     except subprocess.TimeoutExpired:
@@ -239,6 +326,30 @@ async def _massive_daily_closes(
 class MMRHelpers:
     """MMR trading platform helpers. All methods are async and return strings or dicts."""
 
+    @staticmethod
+    async def exec_mode() -> dict:
+        """
+        Where CLI commands are being executed: on the host via `uv run`, or
+        inside the mmr Docker container via `docker exec`.
+
+        Call this first if a DuckDB-backed helper (proposals, backtests_list,
+        data_summary, universe_list, ...) returns ShadowedDatabaseError — it
+        means we are on the host while the live DB lives in the container
+        volume. Auto mode picks the container whenever the
+        `.db_in_container_volume` marker exists and the container is running.
+        Override with MMR_SKILL_EXEC=host|container.
+
+        Returns: {"mode": "host"|"container", "container": name,
+                  "container_running": bool, "db_marker_present": bool}
+        """
+        return {
+            "mode": _exec_mode(),
+            "container": _CONTAINER,
+            "container_running": _container_running(),
+            "db_marker_present": _DB_MARKER.exists(),
+            "override": os.environ.get("MMR_SKILL_EXEC", "auto"),
+        }
+
     # ------------------------------------------------------------------
     # Portfolio & Account
     # ------------------------------------------------------------------
@@ -372,7 +483,7 @@ class MMRHelpers:
         """
         # Run as subprocess so this stays consistent with other helpers
         # and doesn't drag ib_async into the skill's import surface.
-        cmd = _UV_PREFIX + [
+        cmd = _py_prefix() + [
             "python", "-m", "trader.tools.ib_health",
             "--host", str(host),
             "--port", str(port),
@@ -1203,7 +1314,7 @@ class MMRHelpers:
         result = await MMRHelpers.universe_delete("old_universe")
         """
         # Pipe "y" to auto-confirm the deletion prompt
-        cmd = _UV_PREFIX + ["python", "-m", "trader.mmr_cli", "universe", "delete", name]
+        cmd = _py_prefix() + ["python", "-m", "trader.mmr_cli", "universe", "delete", name]
         result = subprocess.run(
             cmd,
             input="y\n",
@@ -2832,7 +2943,7 @@ class MMRHelpers:
         result = await MMRHelpers.close_all_positions()
         """
         # Pipe "y" to auto-confirm
-        cmd = _UV_PREFIX + ["python", "-m", "trader.mmr_cli", "close-all-positions"]
+        cmd = _py_prefix() + ["python", "-m", "trader.mmr_cli", "close-all-positions"]
         result = subprocess.run(
             cmd, input="y\n", capture_output=True, text=True,
             cwd=_MMR_ROOT, timeout=120,
@@ -2899,7 +3010,7 @@ class MMRHelpers:
         ``action``: "BUY" | "SELL". ``group`` auto-registers the symbol
         into the named group. ``exchange``/``currency`` for international.
 
-        ``enrich_news=True`` calls the local ``~/dev/news`` scraper at
+        ``enrich_news=True`` calls the local ``~/dev/scraper`` scraper at
         ``http://127.0.0.1:8089`` (or ``$NEWS_SERVICE_URL``) and appends
         the top ``enrich_news_limit`` article excerpts as a
         "## News context (auto-enriched)" section to ``reasoning``. The
@@ -3080,7 +3191,7 @@ class MMRHelpers:
         :param news: Enrich with latest news + sentiment from the underlying
             data provider (Polygon/Massive). MASSIVE ONLY — headline only.
         :param news_bodies: Enrich the top ``news_bodies_limit`` results
-            with FULL article bodies via the local ~/dev/news scraper at
+            with FULL article bodies via the local ~/dev/scraper scraper at
             ``http://127.0.0.1:8089``. Adds ``news_title``/``news_url``/
             ``news_body`` columns (~400 char excerpt). Answers "WHY is it
             moving?" rather than just "what's moving". Slower (~3-5s per
@@ -3129,7 +3240,7 @@ class MMRHelpers:
         """
         Get market news headlines via Polygon/Benzinga. For full article
         bodies use ``news_fetch``/``news_enrich`` (calls the local
-        ~/dev/news scraper instead — different backend).
+        ~/dev/scraper scraper instead — different backend).
 
         Requires massive_api_key. Does NOT require trader_service.
 
@@ -3153,12 +3264,12 @@ class MMRHelpers:
     async def news_fetch(url: str, use_cache: bool = True,
                          allow_archive_fallback: bool = True) -> dict:
         """
-        Scrape one article URL via the local ~/dev/news service. Returns
+        Scrape one article URL via the local ~/dev/scraper service. Returns
         the article as clean Markdown — handles Cloudflare, paywalls
         (FT/WSJ/NYT/Bloomberg fall through to archive.ph), bot blocks.
 
         REQUIRES the news service to be running:
-            cd ~/dev/news && ./docker.sh -g
+            cd ~/dev/scraper && ./docker.sh -g
         If unreachable, the CLI fails fast with that exact start command.
 
         Returned dict (``ok=True`` case)::
@@ -3188,7 +3299,7 @@ class MMRHelpers:
     async def news_search(query: str, engine: str = "google_news",
                           limit: int = 10) -> dict:
         """
-        Web search via the local ~/dev/news service. Returns ranked result
+        Web search via the local ~/dev/scraper service. Returns ranked result
         list with source / published_at / title / url. Doesn't scrape;
         pair with ``news_fetch`` for bodies, or use ``news_enrich``
         (which composes both).

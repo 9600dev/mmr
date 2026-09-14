@@ -26,6 +26,22 @@ The trader_service can be configured to **refuse direct buy/sell RPCs entirely**
 
 **If a written plan (trade_notes.md, user message) says "4 fresh longs via propose/approve", do EXACTLY that — do not invent a rotation on existing positions, do not decide to trim/cover/cut based on current portfolio state unless the user explicitly authorised that action in the same instruction.** Drift from written plans is the failure mode this policy exists to prevent.
 
+## Where commands run: host vs container (read before any DuckDB-backed call)
+
+`trader.yaml` has ONE `duckdb_path`, but docker-compose overlays the data dir with the `mmr_db_data` named volume, so **the same path is a different file on the host than inside the container**. RPC-backed helpers (`status`, `portfolio`, `orders`, `buy`/`sell`, `approve`'s execution leg) work from anywhere because the ZMQ ports are mapped to `127.0.0.1`. DuckDB-backed helpers — `propose`, `proposals`, `proposal_show`, `backtest*`, `sweep_*`, `backtests_*`, `universe_*`, `group_*`, `data_*`, `strategy_deploy`/`undeploy`, `session_status`'s proposal count — must run **inside the container** while it is up. From the host they return `ShadowedDatabaseError` (the CLI refuses on purpose, because DuckDB would otherwise create an empty stub and return `{"data": []}`).
+
+`MMRHelpers` handles this automatically (since 2026-09-14): when `~/.local/share/mmr/data/.db_in_container_volume` exists and the `mmr-mmr-1` container is running, every CLI call is executed via `docker exec` inside the container. Host paths under the repo root or `$HOME` are rewritten to their container equivalents, and `MMR_*` env vars (`MMR_ROLE`, `MMR_APPROVER_KEY`, …) are forwarded by name.
+
+```python
+await MMRHelpers.exec_mode()
+# {"mode": "container", "container": "mmr-mmr-1", "container_running": true, "db_marker_present": true, "override": "auto"}
+```
+
+- **Override**: `MMR_SKILL_EXEC=host` or `=container`; `MMR_CONTAINER=<name>` for a non-default container name. `MMR_ALLOW_HOST_DB=1` forces host mode (a deliberately separate host-side DB).
+- **The container has its own copy of the repo.** After editing a strategy file on the host, run `./docker.sh -s` before `backtest` / `strategies_gauntlet` / `strategy_deploy` in container mode, or the container will test the old file (and the gauntlet's source hash will not match what you deployed).
+- **If `exec_mode()` says `host` but the container is up**, the marker is missing — `docker.sh -u` writes it; check `ls -la ~/.local/share/mmr/data/`.
+- **New runtime dependency? Rebuild, don't sync.** `docker.sh -s` copies code only; a new import needs `docker.sh -b` (or a one-off `docker exec mmr-mmr-1 pip install …` to survive until the rebuild).
+
 ## Service Requirements
 
 - **trader_service required**: portfolio, positions, orders, trades, account, resolve, snapshot, depth, buy, sell, cancel, cancel_all, close_all_positions, resize_positions, approve, strategies (list/enable/disable/reload), `universe_add`, `buy_option`, `sell_option`, `risk`, `scan`, `ideas` (with `--location` for international markets), `listen`, `watch`
@@ -1050,7 +1066,7 @@ emit(ideas)
 
 The `mmr news` command (Polygon headlines) tells you WHAT happened.
 For WHY — actual article bodies — there's a separate optional service
-at `~/dev/news` exposing an HTTP scraper at `http://127.0.0.1:8089`.
+at `~/dev/scraper` exposing an HTTP scraper at `http://127.0.0.1:8089`.
 It handles Cloudflare, paywalls (via archive.ph fallback), and returns
 clean Markdown. Three helpers wrap it:
 
@@ -1082,7 +1098,7 @@ for row in result.get("data", []):
 ```
 
 **Each requires the news service to be running.** If unreachable, the
-CLI fails with `cd ~/dev/news && ./docker.sh -g` instructions. None of
+CLI fails with `cd ~/dev/scraper && ./docker.sh -g` instructions. None of
 these block trading paths — they're optional research helpers.
 
 **Inline enrichment on the core commands:**

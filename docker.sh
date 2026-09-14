@@ -5,9 +5,9 @@ set -o errexit -o pipefail -o noclobber -o nounset
 # usually /home/trader/mmr
 BUILDDIR=$(cd $(dirname "$0"); pwd)
 
-# Sibling news scraper repo. Default to ~/dev/news so the standard checkout
-# layout works out of the box; override with NEWS_DIR=/path/to/news.
-NEWS_DIR="${NEWS_DIR:-$HOME/dev/news}"
+# Sibling news scraper repo. Default to ~/dev/scraper so the standard checkout
+# layout works out of the box; override with NEWS_DIR=/path/to/scraper.
+NEWS_DIR="${NEWS_DIR:-$HOME/dev/scraper}"
 
 # Detect container runtime.
 # 1. Use whichever is already running.
@@ -60,7 +60,7 @@ _try_start_runtime() {
 # whichever answers `info` first, which can flip between invocations and
 # leaves you with a half-podman / half-docker stack where containers from
 # one runtime hold ports the other tries to bind. The same env var is
-# honoured by news/docker.sh so the entire stack can be pinned in one
+# honoured by scraper/docker.sh so the entire stack can be pinned in one
 # place via your shell rc.
 if [[ -n "${MMR_CONTAINER_RUNTIME:-}" ]]; then
     case "$MMR_CONTAINER_RUNTIME" in
@@ -357,7 +357,7 @@ echo_usage() {
     echo "  -r (restart-ib: restart the IB Gateway container)"
     echo "  -e (exec: shell into running MMR container)"
     echo "  -n (news: bring up the news scraper stack at \$NEWS_DIR"
-    echo "      — default ~/dev/news; idempotent. Used by the news skill.)"
+    echo "      — default ~/dev/scraper; idempotent. Used by the news skill.)"
     echo "  -B [name] (backup DuckDB files from the named volume to"
     echo "      ~/.local/share/mmr/backups/<name>/ — defaults to a timestamp"
     echo "      if no name given. Briefly stops the MMR container so the"
@@ -693,18 +693,18 @@ restart_ib() {
 }
 
 # Bring up the sibling news scraper docker stack at $NEWS_DIR (default
-# ~/dev/news). Used by the `news` skill (skills/news/) which talks to
+# ~/dev/scraper). Used by the `news` skill (skills/news/) which talks to
 # the news service over http://127.0.0.1:8089. Idempotent — leans on
-# news/docker.sh -u, which itself reuses any already-running container.
+# scraper/docker.sh -u, which itself reuses any already-running container.
 #
-# Why we don't call news/docker.sh -g here: that command tails compose
+# Why we don't call scraper/docker.sh -g here: that command tails compose
 # logs (`compose logs -f`) at the end and never returns, which would
 # block this script. If the user wants a clean rebuild they can run
 # `cd $NEWS_DIR && ./docker.sh -g` directly.
 news_up() {
     if [[ ! -d "$NEWS_DIR" ]]; then
         echo "Error: NEWS_DIR=$NEWS_DIR not found."
-        echo "  Clone the news repo to ~/dev/news, or set NEWS_DIR=/path/to/news."
+        echo "  Clone the scraper repo to ~/dev/scraper, or set NEWS_DIR=/path/to/scraper."
         exit 1
     fi
     if [[ ! -x "$NEWS_DIR/docker.sh" ]]; then

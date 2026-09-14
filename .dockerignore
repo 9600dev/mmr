@@ -9,6 +9,8 @@
 !.env.example
 secrets.env
 *.secrets
+# Local-only account/strategy state must not enter a distributable image.
+docs/OPERATIONAL_STATE.md
 .venv
 .devcontainer
 .vscode
@@ -24,4 +26,3 @@ third_party
 mutants
 __pycache__
 logs
-!data/*.csv

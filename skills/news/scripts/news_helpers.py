@@ -61,7 +61,7 @@ def _get_sync(path: str, timeout: float = _DEFAULT_TIMEOUT) -> dict[str, Any]:
         return {
             "ok": False,
             "error": "connection refused — news-service is not running",
-            "hint": "cd ~/dev/news && ./docker.sh -g",
+            "hint": "cd ~/dev/scraper && ./docker.sh -g",
             "url": url,
         }
     except httpx.TimeoutException:
@@ -97,7 +97,7 @@ def _post_sync(path: str, payload: dict[str, Any], timeout: float = _DEFAULT_TIM
         return {
             "ok": False,
             "error": "connection refused — news-service is not running",
-            "hint": "cd ~/dev/news && ./docker.sh -g",
+            "hint": "cd ~/dev/scraper && ./docker.sh -g",
             "url": url,
         }
     except httpx.TimeoutException:
@@ -445,8 +445,23 @@ class NewsHelpers:
         allow_archive_fallback: bool = True,
         include_html: bool = False,
         timeout: float = _DEFAULT_TIMEOUT,
+        use_cache: bool = False,
+        allow_paid_fallback: bool = True,
+        images: str | None = None,
     ) -> dict[str, Any]:
         """Scrape a single article URL.
+
+        New since the service was renamed to ``~/dev/scraper`` (Sep 2026):
+            use_cache: replay a recent stored result from the scrape store
+                instead of re-fetching (bounded by ``store_cache_ttl_seconds``).
+            allow_paid_fallback: set ``False`` to drop the paid ScrapingBee
+                tier for this request — do this on batch sweeps, where each
+                blocked URL otherwise bills 25-100 credits before failing.
+            images: ``"urls"`` (service default on /v1/scrape — refs untouched),
+                ``"hosted"`` (mirrored to ``/v1/images/<sha>``, LLM-friendly),
+                or ``"embed"`` (base64 inline — huge, avoid for LLM context).
+            A new terminal status ``not_an_article`` means the URL fetched
+            cleanly but is a section index / listing page — do not retry.
 
         Handles Cloudflare challenges, paywalls, and HTML→Markdown extraction.
         The response always contains ``article.markdown`` on success plus an
@@ -498,6 +513,12 @@ class NewsHelpers:
             payload["allow_archive_fallback"] = False
         if include_html:
             payload["include_html"] = True
+        if use_cache:
+            payload["use_cache"] = True
+        if not allow_paid_fallback:
+            payload["allow_paid_fallback"] = False
+        if images is not None:
+            payload["images"] = images
         return await _post("/v1/scrape", payload, timeout=timeout)
 
     # ------------------------------------------------------------------
@@ -509,15 +530,22 @@ class NewsHelpers:
         url: str,
         use_cache: bool = True,
         timeout: float = 300.0,
+        images: str = "urls",
     ) -> dict[str, Any]:
         """Convert a PDF at ``url`` to Markdown via Mathpix.
+
+        ``images`` defaults to ``"urls"`` here deliberately: the service's own
+        default on ``/v1/pdf`` is ``"embed"`` (base64 inline), which can make a
+        long report tens of MB and blow an LLM context window. Pass
+        ``"hosted"`` for compact refs that stay fetchable from the service, or
+        ``"embed"`` for a self-contained archival copy.
 
         Hits ``POST /v1/pdf`` on the news-service, which talks to Mathpix
         (``https://api.mathpix.com/v3/pdf``), polls the async job, and
         returns the same ``ScrapeResponse`` envelope that ``scrape()``
         uses. ``article.markdown`` is the converted body (Mathpix
         Markdown with inline ``$math$`` by default — set
-        ``mathpix_output_format: md`` in news.yaml for plain CommonMark).
+        ``mathpix_output_format: md`` in scraper.yaml for plain CommonMark).
 
         ``use_cache=True`` (default) returns the result of a prior
         conversion for the same URL without rebilling Mathpix. Flip to
@@ -546,7 +574,7 @@ class NewsHelpers:
                 md = res["article"]["markdown"]
                 pages = res["article"]["metadata"].get("pdf_pages")
         """
-        payload: dict[str, Any] = {"url": url, "use_cache": bool(use_cache)}
+        payload: dict[str, Any] = {"url": url, "use_cache": bool(use_cache), "images": images}
         return await _post("/v1/pdf", payload, timeout=timeout)
 
     @staticmethod

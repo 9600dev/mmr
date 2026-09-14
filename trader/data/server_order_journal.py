@@ -59,7 +59,8 @@ class EmergencyOrderJournal:
             raise ValueError('physical reservation metadata is immutable')
         if prior is None:
             self._reservations[key] = dict(intent_id=intent_id, client_id=client_id,
-                                          order_id=order_id, settled=0, **(metadata or {
+                                          order_id=order_id, settled=0, reserved_at=time.time(),
+                                          **(metadata or {
                                               'conid': None, 'action': None, 'quantity': None,
                                               'is_exit': None, 'broker_reference': None}))
         identity = dict(orderId=order_id, clientId=client_id)
@@ -77,14 +78,31 @@ class EmergencyOrderJournal:
         self._reservations.pop((intent_id, client_id, order_id), None)
 
     def reservations(self, account: str) -> list[dict]:
-        return [dict(item, account=account, leg_count=len(self.rows[item['intent_id']]['orders']))
+        return self.list_reservations(account, include_settled=False)
+
+    def list_reservations(self, account: str | None, include_settled: bool = False) -> list[dict]:
+        # In-memory claims have no durable creation checkpoint: created_at is
+        # None so nothing downstream can treat them as provably recent.
+        return [dict(item, account=self.rows[item['intent_id']]['account'],
+                     leg_count=len(self.rows[item['intent_id']]['orders']),
+                     created_at=None, intent_status=self.rows[item['intent_id']]['status'],
+                     intent_error=self.rows[item['intent_id']]['error'])
                 for item in self._reservations.values()
-                if not item['settled'] and self.rows[item['intent_id']]['account'] == account]
+                if (include_settled or not item['settled'])
+                and (account is None or self.rows[item['intent_id']]['account'] == account)]
 
     def settle_reservations(self, keys: list[tuple]) -> None:
         for key in keys:
             if key in self._reservations:
                 self._reservations[key]['settled'] = 1
+
+    def record_settlement(self, intent_id: str, client_id: int, order_id: int, *,
+                          account: str, reason: str, actor: str, evidence: dict | None = None) -> dict:
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError('reservation settlement requires a non-empty reason')
+        self.settle_reservations([(intent_id, client_id, order_id)])
+        return dict(intent_id=intent_id, client_id=client_id, order_id=order_id, account=account,
+                    reason=reason.strip(), actor=actor, evidence=evidence or {}, settled_at=time.time())
 
 
 class ServerOrderJournal:
@@ -112,8 +130,21 @@ class ServerOrderJournal:
             reservation_columns = {row['name'] for row in conn.execute('PRAGMA table_info(server_order_reservations)')}
             if 'broker_reference' not in reservation_columns:
                 conn.execute('ALTER TABLE server_order_reservations ADD COLUMN broker_reference TEXT')
+            if 'reserved_at' not in reservation_columns:
+                # When the physical ID was claimed, i.e. the earliest the send
+                # could have happened. Pre-existing rows stay NULL: no
+                # provenance, so no absence-based settlement can ever apply.
+                conn.execute('ALTER TABLE server_order_reservations ADD COLUMN reserved_at REAL')
             conn.execute('CREATE INDEX IF NOT EXISTS server_unsettled_reservations '
                          'ON server_order_reservations(settled,intent_id)')
+            # Every retirement of executable capacity that did NOT come from
+            # exact broker final-quantity evidence is recorded here with who
+            # asked and why. The reservation row itself only knows it is
+            # settled; this table is the audit trail behind that bit.
+            conn.execute('''CREATE TABLE IF NOT EXISTS server_reservation_settlements (
+                intent_id TEXT NOT NULL, client_id INTEGER NOT NULL, order_id INTEGER NOT NULL,
+                account TEXT NOT NULL, reason TEXT NOT NULL, actor TEXT NOT NULL,
+                evidence TEXT, settled_at REAL NOT NULL)''')
             if not existed:
                 # Old claims prove an attempted physical identity, not its
                 # instrument/side/size. Never manufacture those at migration.
@@ -186,9 +217,10 @@ class ServerOrderJournal:
                 values = metadata or {'conid': None, 'action': None, 'quantity': None,
                                       'is_exit': None, 'broker_reference': None}
                 conn.execute('INSERT INTO server_order_reservations '
-                             '(intent_id,client_id,order_id,conid,action,quantity,is_exit,broker_reference) VALUES (?,?,?,?,?,?,?,?)',
+                             '(intent_id,client_id,order_id,conid,action,quantity,is_exit,broker_reference,reserved_at) '
+                             'VALUES (?,?,?,?,?,?,?,?,?)',
                              (intent_id, client_id, order_id, values['conid'], values['action'],
-                              values['quantity'], values['is_exit'], values['broker_reference']))
+                              values['quantity'], values['is_exit'], values['broker_reference'], time.time()))
             orders = json.loads(row['orders'])
             identity = {'orderId': order_id, 'clientId': client_id}
             if identity not in orders:
@@ -214,10 +246,27 @@ class ServerOrderJournal:
 
     def reservations(self, account: str) -> list[dict]:
         """Only unsettled physical attempts; intent completion is not broker proof."""
+        return self.list_reservations(account, include_settled=False)
+
+    def list_reservations(self, account: str | None, include_settled: bool = False) -> list[dict]:
+        """Physical attempts joined with their intent's provenance.
+
+        ``created_at`` is the intent CLAIM time (a lower bound for when the
+        reservation was made); legacy claims carry None. ``account=None``
+        lists every account — operator inspection only, never capacity math.
+        """
         with self.journal.transaction() as conn:
-            rows = conn.execute('''SELECT r.*,i.account,i.orders FROM server_order_reservations r
-                JOIN server_order_intents i ON i.intent_id=r.intent_id
-                WHERE r.settled=0 AND i.account=?''', (account,)).fetchall()
+            clauses, params = [], []
+            if not include_settled:
+                clauses.append('r.settled=0')
+            if account is not None:
+                clauses.append('i.account=?')
+                params.append(account)
+            where = ('WHERE ' + ' AND '.join(clauses)) if clauses else ''
+            rows = conn.execute(f'''SELECT r.*,i.account,i.orders,i.created_at,
+                i.status AS intent_status,i.error AS intent_error
+                FROM server_order_reservations r
+                JOIN server_order_intents i ON i.intent_id=r.intent_id {where}''', params).fetchall()
             result = []
             for row in rows:
                 item = dict(row)
@@ -230,3 +279,36 @@ class ServerOrderJournal:
         with self.journal.transaction() as conn:
             conn.executemany('UPDATE server_order_reservations SET settled=1 '
                              'WHERE intent_id=? AND client_id=? AND order_id=?', keys)
+
+    def record_settlement(self, intent_id: str, client_id: int, order_id: int, *,
+                          account: str, reason: str, actor: str, evidence: dict | None = None) -> dict:
+        """Settle ONE reservation without broker final-quantity evidence and
+        say why. Same transaction for the bit and its audit row, so a
+        settled reservation can never lack the reason that settled it."""
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError('reservation settlement requires a non-empty reason')
+        record = dict(intent_id=intent_id, client_id=client_id, order_id=order_id, account=account,
+                      reason=reason.strip(), actor=actor, evidence=evidence or {}, settled_at=time.time())
+        with self.journal.transaction() as conn:
+            conn.execute('UPDATE server_order_reservations SET settled=1 '
+                         'WHERE intent_id=? AND client_id=? AND order_id=?', (intent_id, client_id, order_id))
+            conn.execute('INSERT INTO server_reservation_settlements '
+                         '(intent_id,client_id,order_id,account,reason,actor,evidence,settled_at) '
+                         'VALUES (?,?,?,?,?,?,?,?)',
+                         (intent_id, client_id, order_id, account, record['reason'], actor,
+                          json.dumps(record['evidence'], sort_keys=True, default=str), record['settled_at']))
+        return record
+
+    def settlements(self, account: str | None = None) -> list[dict]:
+        with self.journal.transaction() as conn:
+            if account is None:
+                rows = conn.execute('SELECT * FROM server_reservation_settlements ORDER BY settled_at').fetchall()
+            else:
+                rows = conn.execute('SELECT * FROM server_reservation_settlements WHERE account=? '
+                                    'ORDER BY settled_at', (account,)).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                item['evidence'] = json.loads(item['evidence']) if item.get('evidence') else {}
+                result.append(item)
+            return result

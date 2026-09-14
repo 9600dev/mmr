@@ -136,7 +136,15 @@ class UniverseAccessor():
                              if row[1].secType in self.sorted_types else len(self.sorted_types))
                 cached = tuple(results)
                 SecurityDefinition.validate_multiplier_consistency([d for _, d in cached])
-                self._resolver_cache[key] = cached
+                # Cache HITS only. An empty result is "not in the catalogue
+                # RIGHT NOW", and this accessor cannot see writes made through
+                # another accessor or the object store directly (it only
+                # invalidates on its own mutations). Caching the miss made a
+                # symbol added by another process unresolvable here for the
+                # life of the process; re-querying a miss costs one catalogue
+                # read and is always correct.
+                if cached:
+                    self._resolver_cache[key] = cached
             # Validate before truncation, on a cache hit as well as a miss.
             SecurityDefinition.validate_multiplier_consistency([d for _, d in cached])
             return list(cached[:1] if first_only else cached)

@@ -47,6 +47,12 @@ class AccountIB:
     def managedAccounts(self):
         return [ACCOUNT]
 
+    def openTrades(self):
+        # This fake has no working orders. The competing-order read now fails
+        # LOUD when it cannot read the broker (2026-09-14), so a fake must
+        # answer explicitly rather than rely on the old swallowed exception.
+        return []
+
     def accountValues(self):
         return [SimpleNamespace(account=ACCOUNT, tag='NetLiquidation',
                                 currency='USD', value='100000')]

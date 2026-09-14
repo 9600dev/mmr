@@ -33,6 +33,7 @@ import importlib.util
 import inspect
 import hashlib
 import json
+import math
 import os
 import pandas as pd
 import sys
@@ -52,6 +53,58 @@ error_table = {
     'trader.common.exceptions.TraderException': TraderException,
     'trader.common.exceptions.TraderConnectionException': TraderConnectionException
 }
+
+
+# A strategy whose load fails for a reason that may clear (the 60s isolated
+# init deadline on a loaded host, a transient DB lock while hashing) is
+# retried on the next reconcile ticks, then parked with a clear ERROR until
+# its YAML entry or source changes. Unbounded retries would spawn a child
+# process every 30s forever for a genuinely broken strategy.
+_MAX_LOAD_ATTEMPTS = 3
+
+# Contract defaults for the isolated callback worker (STRATEGY_EXECUTION_CONTRACT
+# "Identity and supported deployment"): 60s init, 5s per callback, 32 MiB per
+# serialized frame, no per-process memory limit.
+DEFAULT_CALLBACK_TIMEOUT_S = 5.0
+DEFAULT_STARTUP_TIMEOUT_S = 60.0
+DEFAULT_MAX_FRAME_BYTES = 32 * 1024 * 1024
+
+
+def worker_limits(
+    callback_timeout_s: float = DEFAULT_CALLBACK_TIMEOUT_S,
+    startup_timeout_s: float = DEFAULT_STARTUP_TIMEOUT_S,
+    max_frame_bytes: int = DEFAULT_MAX_FRAME_BYTES,
+    memory_limit_bytes: int = 0,
+) -> dict:
+    """Validate the callback-worker budgets ONCE, at service start, and return
+    the ``StrategyCallbackWorker`` keyword arguments they map to.
+
+    These reach the runtime as ``strategy_callback_timeout_s`` /
+    ``strategy_startup_timeout_s`` / ``strategy_max_frame_bytes`` /
+    ``strategy_memory_limit_bytes`` constructor parameters (Container-resolved
+    from ``trader.yaml`` or the upper-cased env var). Validating here rather
+    than per strategy means a typo refuses to START the service with one clear
+    message instead of failing every strategy load with the same one.
+    ``memory_limit_bytes == 0`` means OFF (the only portable default); a
+    positive value is Linux-only and refused elsewhere rather than ignored.
+    """
+    for name, value in (('strategy_callback_timeout_s', callback_timeout_s),
+                        ('strategy_startup_timeout_s', startup_timeout_s)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or not math.isfinite(value) or value <= 0:
+            raise ValueError(f'{name} must be a positive finite number of seconds, got {value!r}')
+    if isinstance(max_frame_bytes, bool) or not isinstance(max_frame_bytes, int) or max_frame_bytes < 1:
+        raise ValueError(f'strategy_max_frame_bytes must be a positive integer, got {max_frame_bytes!r}')
+    if isinstance(memory_limit_bytes, bool) or not isinstance(memory_limit_bytes, int) or memory_limit_bytes < 0:
+        raise ValueError(f'strategy_memory_limit_bytes must be 0 (off) or a positive integer, got {memory_limit_bytes!r}')
+    if memory_limit_bytes and sys.platform != 'linux':
+        raise ValueError('strategy_memory_limit_bytes requires Linux RLIMIT_AS; set it to 0 on this platform')
+    return {
+        'callback_timeout_s': float(callback_timeout_s),
+        'startup_timeout_s': float(startup_timeout_s),
+        'max_frame_bytes': int(max_frame_bytes),
+        'memory_limit_bytes': int(memory_limit_bytes) or None,
+    }
 
 
 def _serialized_deployment(method):
@@ -256,10 +309,20 @@ def build_runtime_status(
     last_dispatched_bar: Dict[tuple, pd.Timestamp],
     auto_exec_open: int,
     oos_bars: Optional[Dict[int, int]] = None,
+    last_trade_ts: Optional[Dict[int, Any]] = None,
 ) -> dict:
     """Pure snapshot of pipeline health: strategy states, tick flow per conId,
     freshest dispatched-bar age per conId, last-trade age per conId, and open
     auto-exec positions.
+
+    ``last_trade_ts`` is the per-conId scalar the ingest path maintains (the
+    timestamp of the last tick where cumulative volume ROSE). When supplied it
+    is THE source of ``trade_age_s``; the raw tick stream is only consulted
+    when it is None (legacy callers). The runtime always supplies it, because
+    ``streams`` is capped at 2,048 ticks once a bar buffer exists and a
+    quote-heavy instrument can roll its last trade out of that window in
+    minutes — which would read as "no trade seen" mid-session, the exact
+    escalation condition the field exists to report.
 
     Consumed two ways: formatted by ``format_pulse`` into the periodic log
     line, and returned raw by the ``runtime_status`` RPC for `mmr verify` /
@@ -274,8 +337,8 @@ def build_runtime_status(
 
     ``trade_age_s`` is the age of the last tick where cumulative volume rose,
     i.e. when the instrument last actually traded. Absent for a conId means no
-    trade is visible in the retained stream — normal out of session, an
-    ESCALATION during one.
+    trade has been observed since the feed was subscribed — normal out of
+    session, an ESCALATION during one.
     """
     states = {}
     running = 0
@@ -294,10 +357,16 @@ def build_runtime_status(
                  for conid, df in streams.items()}
 
     trade_age_s: Dict[int, int] = {}
-    for conid, df in streams.items():
-        age = _last_trade_age(df, now_utc)
-        if age is not None:
-            trade_age_s[int(conid)] = age
+    if last_trade_ts is not None:
+        for conid, ts in last_trade_ts.items():
+            age = _age_seconds(ts, now_utc)
+            if age is not None:
+                trade_age_s[int(conid)] = age
+    else:
+        for conid, df in streams.items():
+            age = _last_trade_age(df, now_utc)
+            if age is not None:
+                trade_age_s[int(conid)] = age
 
     bar_age_s: Dict[int, int] = {}
     for key, ts in last_dispatched_bar.items():
@@ -374,7 +443,20 @@ class StrategyRuntime():
         paper_trading: bool = False,
         simulation: bool = False,
         trading_mode: str = 'paper',
+        strategy_isolate_callbacks: bool = True,
+        strategy_callback_timeout_s: float = DEFAULT_CALLBACK_TIMEOUT_S,
+        strategy_startup_timeout_s: float = DEFAULT_STARTUP_TIMEOUT_S,
+        strategy_max_frame_bytes: int = DEFAULT_MAX_FRAME_BYTES,
+        strategy_memory_limit_bytes: int = 0,
     ):
+        # Callback-worker budgets (trader.yaml / STRATEGY_* env). Validated
+        # here so a bad value refuses to start the service, not every strategy.
+        self._worker_limits = worker_limits(
+            callback_timeout_s=strategy_callback_timeout_s,
+            startup_timeout_s=strategy_startup_timeout_s,
+            max_frame_bytes=strategy_max_frame_bytes,
+            memory_limit_bytes=strategy_memory_limit_bytes,
+        )
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
         self.strategy_runtime_ib_client_id: int = strategy_runtime_ib_client_id
@@ -449,8 +531,22 @@ class StrategyRuntime():
         self._contracts: Dict[int, Contract] = {}
         self._live_bar_buffers: Dict[tuple, Any] = {}
         self._frame_cache: Dict[tuple, Any] = {}
-        self._isolate_callbacks = True
+        # Production default: strategy code runs in spawned child processes.
+        # ``strategy_isolate_callbacks: false`` is a debugging aid only.
+        self._isolate_callbacks = bool(strategy_isolate_callbacks)
         self._callback_workers: Dict[str, Any] = {}
+        # Last tick where cumulative day volume ROSE, per conId, plus the last
+        # cumulative volume seen. Feeds ``trade_age_s`` independently of the
+        # capped raw tick stream (see ``_note_trade``).
+        self._last_trade_ts: Dict[int, Any] = {}
+        self._last_cum_volume: Dict[int, float] = {}
+        # Days of history each (conId, bar_size) frame was last primed with, and
+        # strategies whose load is in progress (their declared lookback counts
+        # before they are subscribed). See ``_declared_lookback_days``.
+        self._hist_primed_days: Dict[tuple, int] = {}
+        self._loading_strategies: Dict[str, Strategy] = {}
+        # Bounded retry of failed strategy loads (see ``_note_load_failure``).
+        self._load_failures: Dict[str, dict] = {}
         self._history_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='strategy-history')
         self._history_jobs: Dict[tuple, Any] = {}
         self._history_retry_at: Dict[tuple, float] = {}
@@ -677,6 +773,7 @@ class StrategyRuntime():
             last_dispatched_bar=self._last_dispatched_bar,
             oos_bars=self._oos_bars,
             auto_exec_open=auto_open,
+            last_trade_ts=getattr(self, '_last_trade_ts', None),
         )
         if executor is not None and hasattr(executor, 'status_metrics'):
             status['execution'] = executor.status_metrics()
@@ -710,7 +807,14 @@ class StrategyRuntime():
 
     def _cap_tick_stream(self, conId: int) -> None:
         """Bound the raw tick buffer to the retention window so resampling stays
-        cheap over a long session."""
+        cheap over a long session.
+
+        Once a bar buffer exists for the conId the raw stream is ALSO capped at
+        the last 2,048 ticks (completed bars live in the buffer; the raw ticks
+        are only a health/sample view). Anything the pulse must know about a
+        tick older than that (``trade_age_s``) is kept as a per-conId scalar
+        by ``_note_trade``, not derived from this stream.
+        """
         df = self.streams.get(conId)
         if df is None or df.empty:
             return
@@ -733,8 +837,63 @@ class StrategyRuntime():
         self._hist_bars.pop((conId, bar_size), None)
         getattr(self, '_frame_cache', {}).pop((conId, bar_size), None)
 
+    def _primed_days(self) -> Dict[tuple, int]:
+        primed = getattr(self, '_hist_primed_days', None)
+        if primed is None:
+            primed = self._hist_primed_days = {}
+        return primed
+
+    def _declared_lookback_days(self, conId: int, bar_size: BarSize) -> int:
+        """Maximum ``historical_days_prior`` declared by EVERY strategy configured
+        for this (conId, bar_size), not just its current subscribers: loaded
+        strategies naming the conId (subscription lags a load by up to one
+        reconcile tick), a strategy mid-load, strategies being replaced (still
+        receiving management bars), and persisted exit-policy contexts.
+
+        Sizing from subscribers alone was the bug: a source edit retired the
+        90-day strategy, the next tick re-primed the shared conId with the
+        remaining 5-day subscriber's window, and the replacement was then
+        subscribed to a frame too short for its indicators — NaN signals, no
+        log. Over-priming is cheap; under-priming is silent.
+        """
+        candidates = list(self.strategies.get(conId, []))
+        for group in (getattr(self, 'strategy_implementations', ()),
+                      getattr(self, '_retired_strategies', ()),
+                      list(getattr(self, '_loading_strategies', {}).values())):
+            for s in group:
+                declared = getattr(s, '_declared_conids', None)
+                if declared is None:
+                    declared = set(getattr(s, 'conids', None) or [])
+                if conId in declared and s not in candidates:
+                    candidates.append(s)
+        candidates += [s for (name, cid), s in getattr(self, '_managed_contexts', {}).items() if cid == conId]
+        return max((int(getattr(s, 'historical_days_prior', 0) or 0)
+                    for s in candidates if getattr(s, 'bar_size', None) == bar_size), default=0)
+
+    def _ensure_lookback(self, conId: int, strategy) -> None:
+        """A new subscriber declaring MORE history than the shared frame was
+        primed with invalidates that frame; the next tick re-primes it wider."""
+        bar_size = getattr(strategy, 'bar_size', None)
+        if bar_size is None:
+            return
+        key = (conId, bar_size)
+        primed = self._primed_days().get(key)
+        if primed is None or key not in getattr(self, '_hist_bars', {}):
+            return
+        declared = self._declared_lookback_days(conId, bar_size)
+        if declared > primed:
+            logging.info('strategy %s declares %d days of history for conId %s %s but the shared '
+                         'frame was primed with %d — re-priming with the larger window',
+                         getattr(strategy, 'name', '?'), declared, conId, bar_size, primed)
+            self._invalidate_history(conId, bar_size)
+
     def _prime_hist_bars(self, conId: int, bar_size: BarSize) -> None:
-        """Only successful reads populate the cache; failed reads are retryable."""
+        """Only successful reads populate the cache; failed reads are retryable.
+
+        The window is the MAXIMUM declared lookback across every strategy
+        configured for the conId (``_declared_lookback_days``); a re-prime
+        that widens the window over the previous one is logged.
+        """
         from trader.data.duckdb_store import DuckDBDataStore
         from trader.data.market_data import normalize_historical
         key = (conId, bar_size)
@@ -742,11 +901,7 @@ class StrategyRuntime():
         try:
             ds = DuckDBDataStore(self.history_duckdb_path)
             end = dt.datetime.now(dt.timezone.utc)
-            candidates = list(self.strategies.get(conId, [])) + [
-                s for (name, cid), s in getattr(self, '_managed_contexts', {}).items() if cid == conId]
-            requested_days = max((getattr(s, 'historical_days_prior', 0) or 0
-                                  for s in candidates
-                                  if s.bar_size == bar_size), default=0)
+            requested_days = self._declared_lookback_days(conId, bar_size)
             start = end - dt.timedelta(days=max(requested_days, self._tick_retention_days, 5) + 5)
             df = ds.read(str(conId), start=start, end=end, bar_size=str(bar_size))
             norm = pd.DataFrame()
@@ -755,6 +910,12 @@ class StrategyRuntime():
                 norm.index = self._utc_index(norm.index)
             if version == getattr(self, '_history_versions', {}).get(key, 0):
                 self._hist_bars[key] = norm
+                previous_days = self._primed_days().get(key)
+                self._primed_days()[key] = requested_days
+                if previous_days is not None and requested_days > previous_days:
+                    logging.info('re-primed history for conId %s %s with a larger window: '
+                                 '%d -> %d declared days (%d bars)',
+                                 conId, bar_size, previous_days, requested_days, len(norm))
         except Exception as ex:
             if hasattr(self, '_history_retry_at'):
                 self._history_retry_at[key] = time.monotonic() + 5
@@ -926,6 +1087,7 @@ class StrategyRuntime():
             if normalized.index[-1] < previous_ticks.index[-1]:
                 logging.warning('ignoring out-of-order ticker for conId %s at %s', conId, normalized.index[-1])
                 return
+        self._note_trade(conId, normalized)
         for key, buffer in getattr(self, '_live_bar_buffers', {}).items():
             if key[0] == conId:
                 buffer.append(normalized)
@@ -1028,6 +1190,50 @@ class StrategyRuntime():
 
             self._handle_signal(strategy, conId, signal, last_bar)
 
+    def _note_trade(self, conId: int, normalized: pd.DataFrame) -> None:
+        """Remember the last tick where cumulative day volume ROSE, per conId.
+
+        This is the scalar behind the pulse's ``trade_age_s``. It is kept here,
+        on the ingest path, because the raw tick stream it used to be derived
+        from is capped at 2,048 ticks once a bar buffer exists — on a
+        quote-heavy instrument the last trade rolls out of that window in
+        minutes and the pulse would then say "no trade seen" during a live
+        session, which docs/MONITORING.md rightly treats as an escalation.
+        Same rule as ``_last_trade_age``: an increase is a trade, a decrease is
+        the day-boundary reset (not a trade, but it re-bases the counter), and
+        a NaN volume is ignored.
+        """
+        if not hasattr(self, '_last_trade_ts'):
+            self._last_trade_ts = {}
+            self._last_cum_volume = {}
+        try:
+            volume = float(normalized['volume'].iloc[-1])
+        except Exception:
+            return
+        if not math.isfinite(volume):
+            return
+        previous = self._last_cum_volume.get(conId)
+        self._last_cum_volume[conId] = volume
+        if previous is not None and volume > previous:
+            self._last_trade_ts[conId] = normalized.index[-1]
+
+    def _note_dropped_buy(self, strategy, result, reason: str) -> None:
+        """Say so ONCE per (strategy, reason) when a worker's BUY is not acted on.
+
+        A strategy in WAITING_HISTORICAL_DATA still receives bars and may emit
+        BUYs; dropping them is correct but was silent, so an operator watching
+        a roster that never trades had nothing to read.
+        """
+        logged = getattr(self, '_dropped_buy_logged', None)
+        if logged is None:
+            logged = self._dropped_buy_logged = set()
+        key = (strategy.name, reason)
+        if key in logged:
+            return
+        logged.add(key)
+        logging.warning('dropping BUY from %s for conId %s at %s because %s (logged once per reason)',
+                        strategy.name, result.conid, result.bar_ts, reason)
+
     def _note_worker_pending(self, name: str, conId: int) -> None:
         logged = getattr(self, '_worker_pending_logged', None)
         if logged is None:
@@ -1111,12 +1317,19 @@ class StrategyRuntime():
         if strategy.universe:
             universe = self.universe_accessor.get(strategy.universe)
             conids.update(sd.conId for sd in universe.security_definitions)
+        limits = getattr(self, '_worker_limits', None) or worker_limits()
         worker = StrategyCallbackWorker(
             source_path=strategy._source_path, source_hash=strategy._source_hash,
             class_name=strategy.ctx.class_name, context=strategy.ctx,
             initial_state=strategy.state,
             max_pending=max(1, min(256, len(conids))),
             deployment_config=deployment_config,
+            # A worker that dies with NO callback in flight (idle child exit,
+            # OOM between bars) has no per-work error to report through; this
+            # is how the runtime still learns of it and moves the strategy to
+            # ERROR instead of leaving it RUNNING with opening authority.
+            on_fatal=lambda error, s=strategy: self._post_callback(self._callback_error, s, error),
+            **limits,
         )
         try:
             worker.start()
@@ -1138,13 +1351,29 @@ class StrategyRuntime():
             worker.stop()
 
     def _post_callback(self, callback, strategy, value):
-        self._loop.call_soon_threadsafe(callback, strategy, value)
+        loop = getattr(self, '_loop', None)
+        if loop is None or loop.is_closed():
+            # No service loop (tests, or a runtime torn down mid-report): the
+            # state change must still land rather than be lost.
+            callback(strategy, value)
+            return
+        loop.call_soon_threadsafe(callback, strategy, value)
 
     def _callback_result(self, strategy, result):
         if result.signal is not None and result.signal.action == Action.BUY:
-            if (self._deployment_generations.get(strategy.name) != result.generation
-                    or strategy.state != StrategyState.RUNNING):
+            if self._deployment_generations.get(strategy.name) != result.generation:
+                self._note_dropped_buy(strategy, result, 'its deployment generation was superseded')
                 return
+            if strategy.state != StrategyState.RUNNING:
+                self._note_dropped_buy(
+                    strategy, result,
+                    f'the strategy is {getattr(strategy.state, "name", strategy.state)}, not RUNNING')
+                return
+            logged = getattr(self, '_dropped_buy_logged', None)
+            if logged:
+                # A BUY got through: a later drop for this strategy is news again.
+                for key in [k for k in logged if k[0] == strategy.name]:
+                    logged.discard(key)
         self._handle_signal(strategy, result.conid, result.signal, result.bar_ts)
 
     def _callback_error(self, strategy, error):
@@ -1317,6 +1546,7 @@ class StrategyRuntime():
         subscribers = self.strategies.setdefault(contract.conId, [])
         if strategy not in subscribers:
             subscribers.append(strategy)
+            self._ensure_lookback(contract.conId, strategy)
         if contract.conId not in self._published_conids:
             self.trader_client.rpc().publish_contract(contract=contract, delayed=False)
             self._published_conids.add(contract.conId)
@@ -1525,6 +1755,7 @@ class StrategyRuntime():
                 raise
             return getattr(module, classname, None)
 
+        fingerprint: Optional[str] = None
         try:
             filepath = resolve_module_path(module)
             parsed_bar_size = BarSize.parse_str(bar_size_str)
@@ -1594,7 +1825,7 @@ class StrategyRuntime():
             isolated = getattr(self, '_isolate_callbacks', False)
             class_object = Strategy if isolated else load_class_from_file(filepath, class_name)
             if not class_object:
-                return
+                raise ValueError(f'class {class_name!r} not found in {filepath}')
 
             if isolated or (inspect.isclass(class_object) and issubclass(class_object, Strategy) and class_object is not Strategy):
                 logging.debug('found implementation of Strategy {}'.format(class_object))
@@ -1636,6 +1867,13 @@ class StrategyRuntime():
                 instance._source_hash = source_hash
                 instance._requested_fingerprint = fingerprint
                 instance._requested_params = dict(params or {})
+                # The full subscription set (explicit conids + universe
+                # expansion) and the in-progress registration both feed
+                # ``_declared_lookback_days`` so this strategy's history window
+                # counts from now, not from its first subscribe() a tick later.
+                setattr(instance, '_declared_conids', set(subscription_conids))
+                if hasattr(self, '_loading_strategies'):
+                    self._loading_strategies[name] = instance
                 # Give the strategy a reference to the runtime for subscriptions
                 instance.strategy_runtime = self
 
@@ -1659,6 +1897,7 @@ class StrategyRuntime():
                         sort_keys=True, allow_nan=False).encode()).hexdigest()
 
                 self.strategy_implementations.append(cast(Strategy, instance))
+                getattr(self, '_load_failures', {}).pop(name, None)
                 for conid in conids or []:
                     if hasattr(self, '_hist_bars'):
                         self._invalidate_history(conid, context.bar_size)
@@ -1672,8 +1911,38 @@ class StrategyRuntime():
                 self._retire_strategy(existing)
             # Load failures used to be swallowed at DEBUG; a config typo could
             # silently disable a strategy. Log at ERROR with the cause so the
-            # operator sees it.
-            logging.error('failed to load strategy %s (%s): %s', name, class_name, ex)
+            # operator sees it, and schedule a bounded retry.
+            self._note_load_failure(name, class_name, fingerprint, ex)
+        finally:
+            getattr(self, '_loading_strategies', {}).pop(name, None)
+
+    def _note_load_failure(self, name: str, class_name: str, fingerprint: Optional[str], ex) -> None:
+        """Record a failed load and decide whether reconcile should retry it.
+
+        ``_reconcile_sync`` only re-runs the loader when the YAML mtime or a
+        LOADED strategy's source hash changes, so a strategy that failed to
+        load (e.g. the isolated worker missed its 60s init deadline on a busy
+        host) stayed absent until an operator touched a file. Attempts are
+        counted per name and reset when the requested fingerprint changes.
+        """
+        failures: Dict[str, Dict[str, Any]] = getattr(self, '_load_failures', None) or {}
+        self._load_failures = failures
+        record: Dict[str, Any] = failures.get(name) or {}
+        if not record or (fingerprint and record.get('fingerprint') and record['fingerprint'] != fingerprint):
+            record = {'attempts': 0, 'fingerprint': None}
+        record['attempts'] = int(record.get('attempts') or 0) + 1
+        record['fingerprint'] = fingerprint or record.get('fingerprint')
+        failures[name] = record
+        if record['attempts'] >= _MAX_LOAD_ATTEMPTS:
+            logging.error('failed to load strategy %s (%s) after %d attempts — giving up until its YAML '
+                          'entry or source changes: %s', name, class_name, record['attempts'], ex)
+        else:
+            logging.error('failed to load strategy %s (%s): %s — will retry on the next reconcile '
+                          '(attempt %d/%d)', name, class_name, ex, record['attempts'], _MAX_LOAD_ATTEMPTS)
+
+    def _load_retry_pending(self) -> List[str]:
+        return sorted(name for name, record in getattr(self, '_load_failures', {}).items()
+                      if record.get('attempts', 0) < _MAX_LOAD_ATTEMPTS)
 
     @_serialized_deployment
     def config_loader(self, config_file: str):
@@ -1747,8 +2016,12 @@ class StrategyRuntime():
                         source_changed |= hashlib.sha256(source.read()).hexdigest() != getattr(strategy, '_source_hash', None)
                 except OSError:
                     source_changed = True
-        if current_mtime != self._config_mtime or source_changed:
-            logging.info('strategy config changed, reloading')
+        retry_names = self._load_retry_pending()
+        if current_mtime != self._config_mtime or source_changed or retry_names:
+            if current_mtime != self._config_mtime or source_changed:
+                logging.info('strategy config changed, reloading')
+            else:
+                logging.info('retrying failed strategy load(s): %s', ', '.join(retry_names))
             try:
                 self.config_loader(self.strategy_config_file)
             except (yaml.YAMLError, ValueError, FileNotFoundError) as ex:

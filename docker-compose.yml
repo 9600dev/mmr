@@ -36,6 +36,8 @@ services:
       XVFB_SCREEN: ${XVFB_SCREEN:-1920x1080x24}
     volumes:
       - ./scripts/ib-gateway-run.sh:/home/ibgateway/scripts/run.sh:ro
+      - ./scripts/ib_gateway_healthcheck.sh:/home/ibgateway/scripts/mmr-healthcheck.sh:ro
+      - ./scripts/ib_gateway_watchdog.sh:/home/ibgateway/scripts/mmr-watchdog.sh:ro
       # Persist TWS runtime settings (auto-restart state, login sessions) across restarts
       - ${HOME}/.local/share/mmr/tws_settings:/home/ibgateway/tws_settings
     ports:
@@ -44,16 +46,17 @@ services:
       - "127.0.0.1:7497:4004"
       # VNC for viewing IB Gateway GUI
       - "127.0.0.1:5901:5900"
-    # "Up (healthy)" == login completed and the API port is listening — the
-    # exact condition the 2026-07-04 hung auto-restart violated for 10.5h
-    # while `docker ps` said plain "Up". bash /dev/tcp avoids needing nc in
-    # the image. $$ defers env expansion to container runtime (paper 4004 /
-    # live 4003). Docker only REPORTS unhealthy; the host launchd watchdog
-    # (scripts/ib_gateway_watchdog.sh) remains the restart actor.
+    # Probe Java's internal API ports (paper 4002 / live 4001). Socat's
+    # forwarding ports 4004/4003 accept connections even when Java is stuck
+    # at login, so checking them falsely reports a healthy gateway.
+    # Listening is not proof of upstream IB connectivity; `mmr verify` also
+    # performs a real broker round-trip. Docker only REPORTS unhealthy;
+    # run.sh supervises native-API recovery inside this gateway container;
+    # a confirmed outage exits PID1 so restart: unless-stopped recovers it.
     healthcheck:
-      test: ["CMD", "bash", "-c", "p=4004; [ \"$$TRADING_MODE\" = live ] && p=4003; exec 3<>/dev/tcp/127.0.0.1/$$p"]
+      test: ["CMD", "bash", "/home/ibgateway/scripts/mmr-healthcheck.sh"]
       interval: 60s
-      timeout: 5s
+      timeout: 8s
       retries: 5
       # Gateway login takes ~2 min on a good day; 2FA/restart paths longer.
       start_period: 300s
@@ -162,4 +165,3 @@ volumes:
   mmr_db_data:
     external: true
     name: mmr_mmr_db_data
-

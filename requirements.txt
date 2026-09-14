@@ -58,4 +58,5 @@ uniplot>=0.21
 vectorbt>=0.28
 massive>=2.2.0
 twelvedata[pandas]>=1.3
+websocket-client>=1.8  # twelvedata streaming imports `websocket` lazily; `mmr watch` dies without it
 pandas-market-calendars>=5.4.0

@@ -38,6 +38,11 @@ class TraderServiceApi(RPCHandler):
     def __init__(self, trader):
         self.trader: runtime.Trader = trader
 
+    @staticmethod
+    def _placement_deadline_s() -> float:
+        from trader.trading.executioner import TradeExecutioner
+        return TradeExecutioner.placement_deadline_s()
+
     # json can't encode Dict's with keys that aren't primitive and hashable
     # so we often have to convert to weird containers like List[Tuple]
     @rpcmethod
@@ -208,11 +213,19 @@ class TraderServiceApi(RPCHandler):
         )
         disposable = observable.pipe(ops.take(1)).subscribe(observer)
 
+        # The bound is derived from the chokepoint's documented waits (own
+        # reduction cancel 8s + broker receipt 8s + submission audit 5s, plus
+        # slack) rather than a flat 10s that expired on placements which
+        # then completed. It stays under the SDK's 30s RPC timeout.
         try:
-            await asyncio.wait_for(task.wait(), timeout=10.0)
+            await asyncio.wait_for(task.wait(), timeout=self._placement_deadline_s())
         except asyncio.TimeoutError:
             if result is None:
-                result = SuccessFail.fail(error='order placement timed out waiting for confirmation')
+                result = SuccessFail.fail(error=(
+                    f'UNKNOWN: order placement did not confirm within {self._placement_deadline_s():.0f}s; '
+                    'the order MAY have been placed. Do not resend: reconcile with '
+                    '`mmr execution-snapshot` and `mmr reservations`'
+                    + (f' (intent {client_intent_id})' if client_intent_id else '')))
         disposable.dispose()
         if result is not None:
             result.client_intent_id = getattr(observable, 'client_intent_id', client_intent_id)
@@ -311,6 +324,52 @@ class TraderServiceApi(RPCHandler):
         """Operator-attested ownership for a holding attributed before ownership
         epochs; forwarded to strategy_service like enable/disable/reload."""
         return await self.trader.adopt_legacy_holding(strategy, int(conid), avg_cost)
+
+    @rpcmethod
+    async def list_execution_intents(self, strategy: Optional[str] = None, conid: Optional[int] = None,
+                                     active_only: bool = True) -> list[dict]:
+        """Executor intents from strategy_service's journal; forwarded like
+        adopt_legacy_holding. Raises ConnectionError when strategy_service is
+        unreachable (a list has no failure channel)."""
+        return await self.trader.list_execution_intents(
+            strategy, None if conid is None else int(conid), bool(active_only))
+
+    @rpcmethod
+    async def resolve_execution_intent(self, intent_id: str, reason: str) -> SuccessFail[dict]:
+        """Operator resolution of an executor intent with no broker evidence;
+        forwarded to strategy_service like adopt_legacy_holding."""
+        return await self.trader.resolve_execution_intent(str(intent_id), str(reason))
+
+    # -- operator reconciliation tools -----------------------------------------
+    # Every DEFERRED exit and every refused open needs a human path out. None
+    # of these is ever invoked automatically; the settle/acknowledge calls
+    # require a reason and leave a durable audit record.
+
+    @rpcmethod
+    async def list_order_reservations(self, account: Optional[str] = None,
+                                      include_settled: bool = False) -> list[dict]:
+        """The physical reservation ledger with, per row, the matching tracker
+        observation (or None) and whether it currently blocks reductions."""
+        return await self.trader.list_order_reservations(account, bool(include_settled))
+
+    @rpcmethod
+    async def settle_order_reservation(self, intent_id: str, client_id: int, order_id: int,
+                                       reason: str) -> dict:
+        """Explicit operator settlement of a reservation with no broker
+        observation. Refused while a live observation matches the identity."""
+        return await self.trader.settle_order_reservation(str(intent_id), int(client_id), int(order_id), str(reason))
+
+    @rpcmethod
+    def restore_marker_status(self) -> dict:
+        """Whether a restore-time BROKER_RECONCILIATION_REQUIRED marker is
+        refusing opens, and what it records."""
+        return self.trader.restore_marker_status()
+
+    @rpcmethod
+    async def acknowledge_restore_marker(self, reason: str) -> dict:
+        """Deliberate operator acknowledgment of the restore marker after
+        reviewing a complete broker snapshot; re-enables opens."""
+        return await self.trader.acknowledge_restore_marker(str(reason))
 
     @rpcmethod
     def get_status(self) -> dict:

@@ -33,6 +33,38 @@ escalation** — the stack won't trade the open without intervention.
 Container recreation (`./docker.sh -d && -u`, `-g`) kills exec-based monitor
 sessions — **re-arm both monitors immediately after**, then run `mmr verify`.
 
+## Gateway recovery
+
+The standard Docker stack starts `scripts/ib_gateway_watchdog.sh` **inside the
+IB Gateway container**, under the existing `scripts/ib-gateway-run.sh` lifecycle.
+No host scheduler, LaunchAgent, Docker socket, or separate recovery service is
+needed. Pycron remains responsible for scheduled MMR jobs and preflight reports;
+it starts after gateway readiness, so it cannot recover a gateway stuck during
+initial login.
+
+The monitor checks Java's native API ports (paper 4002, live 4001; both in dual
+mode) every five minutes, beginning five minutes after startup. Three consecutive
+failed observations trigger recovery — approximately 10–15 minutes after the
+listener disappears. The monitor records a 30-minute cooldown in
+`tws_settings/.mmr-recovery/last_restart`, then exits with code 42. The gateway
+entrypoint exits and Docker's existing `restart: unless-stopped` policy restarts
+it. The cooldown survives container recreation through the existing settings
+mount. A stopped container remains stopped. Probe/tool failures and invalid or
+unwritable recovery state are logged without requesting a gateway restart;
+unexpected monitor exits restart only the monitor after five minutes.
+
+Use `docker compose logs --since 30m ib-gateway` and look for
+`[gateway recovery]`. The monitor starts automatically when the gateway is
+recreated on this Compose configuration. Do not also schedule the old host cron
+version of the watchdog.
+
+Docker's gateway health check uses the same native API probe. Socat forwarding
+ports 4004/4003 may accept connections while Java is stuck at login. A native
+listener still does not establish upstream broker readiness: `mmr verify`
+performs an actual IB round-trip, while MMR's own Docker health check reports
+service RPC availability. A login requiring human intervention can still need
+attention; the cooldown bounds automated retries.
+
 ## Log topology (which file carries what)
 
 Files live in `~/.local/share/mmr/logs/` (bind-mounted — identical from host
@@ -58,20 +90,52 @@ dead pipeline is silent too. The 10.5h gateway outage of 2026-07-05
 (AUDIT_ROADMAP G3) produced *no* error lines; the failure signature was
 absence. The pulses make liveness positively visible:
 
-- `trader_service` every 30s: `pulse ib_connected=True ib_upstream=True open_orders=0`
+- `trader_service` every 30s: `pulse ib_connected=True ib_upstream=True open_orders=0
+  dropped_ticks=0 replay_required=False unsettled_reservations=0` (the last
+  three since 2026-09-14: ticks the bounded publisher queue rejected, whether
+  the startup execution replay is still owed, and reservations currently
+  holding reduction capacity — see the reads below)
 - `strategy_service` every 30s (reconcile tick):
   `pulse strategies=5/5 ticks_60s=[208813719:42,…] bar_age_s=[208813719:75,…]
-  trade_age_s=[208813719:61,…] auto_exec_open=1`
+  trade_age_s=[208813719:61,…] oos_bars=[…] auto_exec_open=1`
 
 Reads:
 - `ticks_60s` **all zero while a traded market is open** → the feed is dead
   (gateway hang, dropped subscription, pubsub break) even if every flag
-  still says connected. This is THE line that would have caught G3.
+  still says connected. This is THE line that would have caught G3. It is
+  counted from the RAW tick stream, which is retained only as a health/sample
+  view: once a bar buffer exists for the conId the stream is capped at its last
+  **2,048 ticks**, so the count saturates at 2048 (read it as "≥ 2048").
 - `bar_age_s` ≳ 2–3× the strategy's bar size during market hours → bars are
   not forming / not dispatching. **It is not a data-freshness metric** — see
   the pair rule below.
 - `trade_age_s` missing for a conId, or ≫ `bar_age_s`, **during a session** →
-  bars are being manufactured from QUOTES, not trades.
+  bars are being manufactured from QUOTES, not trades. Since 2026-09-14 this
+  is a per-conId scalar kept by the ingest path (the last tick where
+  cumulative volume rose), NOT derived from the retained tick stream — so the
+  2,048-tick cap cannot make a quote-heavy instrument's last trade "disappear"
+  mid-session. "Missing" therefore means no trade has been observed since the
+  feed was subscribed (or since the service started).
+- `oos_bars` — per-conId count of DISTINCT bars refused by the session gate.
+  It counts refused LIVE bars **and** refusals of historical rows filtered out
+  of a primed frame (`_filter_session_frame` runs on every row of the
+  hist+live frame and notes its refused tail; one increment per distinct
+  refused tail, not per row), so a small non-zero count right after a
+  (re)start or a history re-prime is normally priming, not a feed fault. A
+  count that keeps RISING for an instrument that should be trading means its
+  venue is mapped wrongly in `market_session._EXCHANGE_CALENDARS`.
+- `dropped_ticks` **rising** → the 1,024-slot publisher queue is saturating
+  (dill-packing tickers slower than IB delivers them); the broadcast keeps
+  running but subscribers are missing ticks. Before 2026-09-14 a single full
+  queue killed the whole ticker stream until restart.
+- `replay_required=True` for more than a minute after connect → the IB
+  open-orders/executions replay has not completed; every OPEN is refused
+  (`execution journal degraded`) until it does. It is retried every 30 s and
+  logs `RECOVERED` when it succeeds; if it never does, the gateway is not
+  answering `reqCompletedOrders` — check it via VNC.
+- `unsettled_reservations` **> 0 with nothing working at IB** → a send that
+  IB never acknowledged is holding exit capacity. `mmr reservations` names
+  it; Triage order step 5 says how to release it.
 - **No pulse line for >2 intervals** → the service's loop is wedged
   (`last_pulse.sh` exits non-zero on this).
 
@@ -126,8 +190,8 @@ arrives after the competing session is genuinely gone (~5+ min).
   `ib_socket` check failing (live round-trip — trust it over the flags).
 - `raised on_prices … disabling it` — a strategy crashed and was disabled;
   it will NOT re-enable itself.
-- Watchdog restarts (`~/.local/share/mmr/logs/ib_gateway_watchdog.log`)
-  more than once per day.
+- Gateway recovery restarts (`[gateway recovery]` in
+  `docker compose logs ib-gateway`) more than once per day.
 
 ## Triage order (before concluding anything)
 
@@ -138,6 +202,27 @@ arrives after the competing session is genuinely gone (~5+ min).
 3. **Verify against IB** when money is in question: `mmr orders`, `mmr trades`,
    `mmr portfolio` — the broker is the source of truth, not our tables.
 4. Only then restart things. After any restart: re-arm monitors, `mmr verify`.
+5. **A deferred exit is a triage item, not a retry item.** Since the
+   September 2026 execution contract an exit is never *refused* by a policy
+   gate, but it can be *deferred* while capacity or identity is uncertain, and
+   a deferral has no natural end. Three states hold a block and each has one
+   operator tool, all of which require `--attest` and record an audit event:
+   - `DEFERRED: ... reserved by ... unconfirmed earlier sends` → `mmr reservations`
+     shows the server-side capacity ledger; a row with `blocking` and no
+     broker `observation` is a send IB never acknowledged. Confirm with
+     `mmr orders` / `mmr trades`, then
+     `mmr reservations settle <intent_id> <client_id> <order_id> --reason "..." --attest`.
+   - `skip: unresolved execution intent reserves exposure` / a SELL that stays
+     WAITING → `mmr strategies intents [--strategy NAME]` lists the executor's
+     SQLite intents with what each blocks; an intent with no order ids and no
+     broker order is resolved with
+     `mmr strategies resolve-intent <id> --reason "..." --attest`. The server
+     refuses to resolve one whose order is live.
+   - `unevaluable:restored-state` on every open after a restore →
+     `mmr restore-ack --status`, reconcile against IB, then
+     `mmr restore-ack --reason "..." --attest`.
+   Never script these; each one releases a fail-closed block that exists
+   because broker truth was uncertain at the time.
 
 ## Sharp edges
 

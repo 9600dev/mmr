@@ -30,10 +30,70 @@ logger = logging.getLogger(__name__)
 _SUFFIX = '_clean'   # only auto-snapshots carry this; manual backups are untouched by pruning
 MANIFEST = 'manifest.json'
 RESTORE_MARKER = 'BROKER_RECONCILIATION_REQUIRED.json'
+# An acknowledged marker is renamed, not deleted: the record of WHO cleared
+# the restore gap and WHY stays beside the databases it applied to.
+ACKNOWLEDGED_MARKER_PREFIX = 'BROKER_RECONCILIATION_ACKNOWLEDGED_'
 
 
 def _utcnow() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def read_restore_marker(data_dir) -> dict:
+    """Whether the restore marker is present and what it says. Never raises:
+    an unreadable marker is reported as present with an error, because the
+    runtime treats an unreadable marker as blocking."""
+    path = Path(data_dir) / RESTORE_MARKER
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return {'present': False, 'path': str(path), 'marker': None, 'error': None}
+    except OSError as ex:
+        return {'present': True, 'path': str(path), 'marker': None, 'error': f'{type(ex).__name__}: {ex}'}
+    try:
+        marker = json.loads(text)
+    except ValueError:
+        marker = None
+    if not isinstance(marker, dict):
+        marker = {'raw': text}
+    return {'present': True, 'path': str(path), 'marker': marker, 'error': None}
+
+
+def acknowledge_restore_marker(data_dir, reason: str, actor: str = 'operator',
+                               evidence: Optional[dict] = None) -> dict:
+    """The deliberate human act the restore contract requires.
+
+    Writes the acknowledgment (reason, actor, evidence, the original marker)
+    durably FIRST, then removes the marker, so there is never a moment where
+    opens are allowed without a record of who allowed them. Raises
+    ``FileNotFoundError`` when there is no marker and ``ValueError`` on an
+    empty reason. Nothing here reads the broker: the caller supplies the
+    reconciliation evidence it reviewed.
+    """
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError('acknowledging the restore marker requires a non-empty reason')
+    directory = Path(data_dir)
+    status = read_restore_marker(directory)
+    if not status['present']:
+        raise FileNotFoundError(f'no restore marker at {status["path"]}')
+    acknowledged_at = dt.datetime.now(dt.timezone.utc)
+    record = {
+        'version': 1,
+        'status': 'BROKER_RECONCILIATION_ACKNOWLEDGED',
+        'acknowledged_at': acknowledged_at.isoformat(),
+        'reason': reason.strip(),
+        'actor': actor,
+        'evidence': evidence or {},
+        'marker': status['marker'],
+        'marker_error': status['error'],
+    }
+    target = directory / (f'{ACKNOWLEDGED_MARKER_PREFIX}'
+                          f'{acknowledged_at.strftime("%Y%m%dT%H%M%SZ")}_{uuid.uuid4().hex[:8]}.json')
+    _write_json(target, record)
+    (directory / RESTORE_MARKER).unlink()
+    _sync_directory(directory)
+    record['path'] = str(target)
+    return record
 
 
 def _database_files(directory: Path) -> list[Path]:

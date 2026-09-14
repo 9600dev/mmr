@@ -17,6 +17,17 @@ await load_skill("mmr", "all")
 await load_skill("mmr-loop", "all")
 ```
 
+## Where the loop's commands run
+
+The loop's core cycle is DuckDB-backed (`portfolio_risk` reads the group store, `session_status` counts proposals, `propose` writes one). While the mmr Docker container is up, the live DuckDB lives in the `mmr_db_data` volume and those calls **must execute inside the container** — from the host they return `ShadowedDatabaseError` and the cycle stalls at PROPOSE. `MMRHelpers` routes through `docker exec` automatically when the `.db_in_container_volume` marker is present and `mmr-mmr-1` is running; confirm once at loop start:
+
+```python
+mode = await MMRHelpers.exec_mode()
+assert mode["mode"] == "container" or not mode["db_marker_present"], mode
+```
+
+The "run sequentially, DuckDB is single-writer" guidance below is about the **lock**, not about which database file is open — both apply. See `mmr-skill` § *Where commands run* for overrides (`MMR_SKILL_EXEC`, `MMR_CONTAINER`).
+
 ## How It Works
 
 The loop runs a repeating cycle with four phases:

@@ -32,7 +32,7 @@ from trader.listeners.ibreactive import IBAIORx, IBAIORxError
 from trader.messaging.clientserver import MessageBusServer, MultithreadedTopicPubSub, RPCClient, RPCServer
 from trader.objects import Action, ContractOrderPair, ExecutorCondition
 from trader.trading.book import BookSubject
-from trader.trading.executioner import TradeExecutioner, _working_reduction_quantity
+from trader.trading.executioner import TradeExecutioner, WorkingOrdersUnreadableError, _working_reduction_quantity
 from trader.trading.portfolio import Portfolio
 from trader.trading.strategy import Strategy, StrategyConfig, StrategyState
 from typing import Any, Callable, cast, Dict, List, NamedTuple, Optional, Tuple, Union
@@ -68,6 +68,17 @@ logging = setup_logging(module_name='trading_runtime')
 # when it changes. Found live 2026-07-27: restarting trader_service alone left
 # every strategy blind for 30 minutes with both services reporting healthy.
 _BOOT_ID = uuid.uuid4().hex
+
+# Order-path parameters that carry a credential rather than describe the
+# order. They are excluded from the durable intent fingerprint.
+_SECRET_ARGUMENT_NAMES = frozenset({'approver_key'})
+_SECRET_ARGUMENT_SUFFIXES = ('_key', '_secret', '_password', '_token')
+
+
+def _is_secret_argument(name: str) -> bool:
+    return name in _SECRET_ARGUMENT_NAMES or name.endswith(_SECRET_ARGUMENT_SUFFIXES)
+
+
 _CURRENT_INTENT: ContextVar[Optional[str]] = ContextVar('mmr_order_intent', default=None)
 _CURRENT_JOURNAL: ContextVar[Any] = ContextVar('mmr_order_journal', default=None)
 
@@ -216,6 +227,15 @@ class Trader():
         # die with the previous session). Survives reconnects; reset on a fresh
         # connect(). Without this the strategy tick feed silently dies on reconnect.
         self.zmq_pubsub_published_contracts: Dict[int, Tuple[Contract, bool]] = {}
+        # Ticks the bounded publisher queue refused. Counted, never raised into
+        # the shared Rx ticker stream: an exception there is terminal for every
+        # subscriber and silenced the whole broadcast until restart.
+        self.zmq_pubsub_dropped_ticks: int = 0
+        self._pubsub_drop_logged_at: float = 0.0
+        self._pubsub_drops_at_last_log: int = 0
+        # Monotonic times the shared ticker subscription was rebuilt after an
+        # error; bounds a tight rebuild loop on a broken source.
+        self._publish_reestablish_times: List[float] = []
         # Coalesces the connected_event double-fire (eventkit emit + explicit call
         # on reconnect) so re-subscription doesn't run twice concurrently.
         self._in_connected_event: bool = False
@@ -227,6 +247,15 @@ class Trader():
         self.order_tracker = OrderLifecycleTracker(None)
         self._execution_history_ready = False
         self._execution_replay_lock = asyncio.Lock()
+        # Wall-clock instant the CURRENT session's broker replay completed;
+        # None until it has. Reservations claimed after this instant, under
+        # this client id, would have produced an order-status callback had
+        # their send reached IB (see unobserved_reduction_quantity).
+        self._execution_replay_completed_epoch: Optional[float] = None
+        self._execution_replay_failed: bool = False
+        # Identities behind the most recent unobserved-capacity evaluation,
+        # so a DEFERRED reason can name what is reserving the shares.
+        self._unobserved_reservation_detail: List[dict] = []
 
         self.zmq_strategy_client: RPCClient[strategy_bus.StrategyServiceApi]
         self.zmq_messagebus: MessageBusServer
@@ -242,6 +271,7 @@ class Trader():
         self._ib_upstream_connected: bool = True
         self._ib_upstream_error: str = ''
         self._ib_upstream_ib: Any = None
+        self._ib_ping_completed: tuple[Any, float] | None = None
 
         self.disposables: List[DisposableBase] = []
 
@@ -645,6 +675,9 @@ class Trader():
         # never blocks the loop.
         pulse_disposable = self.scheduler.schedule_periodic(30, lambda x: self._log_pulse())
         self.disposables.append(pulse_disposable)
+        # A startup replay that timed out leaves replay_required=True, which
+        # refuses every open. Keep retrying on the same scheduler.
+        self._start_execution_replay_retry()
 
     def _on_ib_error(self, error: IBAIORxError):
         """Track IB upstream connectivity from error codes.
@@ -652,8 +685,9 @@ class Trader():
         IB distinguishes two severities we care about:
 
         1. **1100 / 1101 / 1102**: full gateway↔IBKR connectivity. 1100 means
-           trading is actually disabled. This is the ONLY signal that
-           should flip ``ib_upstream_connected`` to False.
+           trading is actually disabled. This is the only IB error code
+           that clears ``ib_upstream_connected``; local socket loss also
+           makes the upstream session unavailable.
 
         2. **2103 / 2105 / 2157**: per-data-farm status messages. IB
            Gateway has multiple farms (``usfarm``, ``euhmds``,
@@ -795,6 +829,12 @@ class Trader():
     @log_method
     async def disconnected_event(self):
         self._invalidate_account_pnl()
+        # A delayed event from the replaced IB object must not clear an
+        # already connected replacement. Keep any explicit 1100 cause.
+        if self.client.ib.isConnected() is not True:
+            if self._ib_upstream_connected or not self._ib_upstream_error:
+                self._ib_upstream_error = 'IB Gateway socket disconnected'
+            self._ib_upstream_connected = False
         # Guard against multiple concurrent reconnection attempts
         if hasattr(self, '_reconnecting') and self._reconnecting:
             logging.debug('reconnection already in progress, skipping')
@@ -838,7 +878,8 @@ class Trader():
                     await self.connected_event()
                     return
                 except Exception as ex:
-                    logging.error('reconnection attempt %d failed: %s', attempt, ex)
+                    logging.error('reconnection attempt %d failed: %s: %s',
+                                  attempt, type(ex).__name__, ex)
         finally:
             self._reconnecting = False
 
@@ -891,6 +932,34 @@ class Trader():
                 self.zmq_strategy_client.rpc(timeout=60).adopt_legacy_holding, strategy, int(conid), avg_cost)
         except Exception as ex:
             logging.error('adopt_legacy_holding: {}'.format(ex))
+            return SuccessFail.fail(error=str(ex) or type(ex).__name__, exception=ex)
+
+    @log_method
+    async def list_execution_intents(self, strategy: Optional[str] = None, conid: Optional[int] = None,
+                                     active_only: bool = True) -> list[dict]:
+        """Forward the executor intent listing to strategy_service (like adopt).
+
+        The list return type has no failure channel, so an unreachable
+        strategy_service raises ``ConnectionError`` — the RPC layer preserves
+        stdlib exception types to the caller.
+        """
+        try:
+            rows = await asyncio.to_thread(
+                self.zmq_strategy_client.rpc(timeout=60).list_execution_intents,
+                strategy, None if conid is None else int(conid), bool(active_only))
+            return list(rows or [])
+        except Exception as ex:
+            logging.error('list_execution_intents: {}'.format(ex))
+            raise ConnectionError(f'strategy_service unreachable: {str(ex) or type(ex).__name__}') from ex
+
+    @log_method
+    async def resolve_execution_intent(self, intent_id: str, reason: str) -> SuccessFail[dict]:
+        """Forward an operator's intent resolution to strategy_service (like adopt)."""
+        try:
+            return await asyncio.to_thread(
+                self.zmq_strategy_client.rpc(timeout=60).resolve_execution_intent, str(intent_id), str(reason))
+        except Exception as ex:
+            logging.error('resolve_execution_intent: {}'.format(ex))
             return SuccessFail.fail(error=str(ex) or type(ex).__name__, exception=ex)
 
     @log_method
@@ -991,18 +1060,25 @@ class Trader():
         if contract.conId in self.zmq_pubsub_contract_filters:
             return self.zmq_pubsub_contracts[contract.conId]
 
+        # These three callbacks observe the SHARED ticker stream
+        # (client.contracts_subject, one subscription for every published
+        # contract). With reactivex an exception escaping on_next is turned
+        # into a terminal on_error on that chain, after which no ticker for
+        # ANY contract is published again. So on_next must never raise, and
+        # on_error must rebuild the whole chain rather than forget one conId.
         def on_next(ticker: Ticker):
-            self.zmq_pubsub_server.put(('ticker', ticker))
+            try:
+                self.zmq_pubsub_server.put(('ticker', ticker))
+            except Exception as ex:
+                self._note_dropped_tick(ex)
 
         def on_completed():
-            del self.zmq_pubsub_contracts[contract.conId]
-            del self.zmq_pubsub_contract_filters[contract.conId]
-            logging.debug('publish_contract.aclose() for {}'.format(contract))
+            logging.info('ticker publish stream completed; clearing %d published contract filter(s)',
+                         len(self.zmq_pubsub_contract_filters))
+            self._clear_ticker_publish_state()
 
         def on_error(ex):
-            del self.zmq_pubsub_contracts[contract.conId]
-            del self.zmq_pubsub_contract_filters[contract.conId]
-            raise trader_exception(self, TraderException, message='publish_contract() on_error', inner=ex)
+            self._reestablish_ticker_publishing(ex)
 
         if len(self.zmq_pubsub_contract_filters) == 0:
             # setup the observable for the first time
@@ -1018,6 +1094,61 @@ class Trader():
         self.zmq_pubsub_contract_filters[contract.conId] = True
         self.zmq_pubsub_contracts[contract.conId] = error_observable
         return error_observable
+
+    # A full publisher queue is logged at most this often; the count says how
+    # many ticks went missing in between.
+    _PUBSUB_DROP_LOG_INTERVAL_S = 10.0
+    # More rebuilds than this inside the window means the source itself is
+    # broken; stop rebuilding and wait for the reconnect path to do it.
+    _PUBLISH_REESTABLISH_WINDOW_S = 60.0
+    _PUBLISH_REESTABLISH_LIMIT = 5
+
+    def _note_dropped_tick(self, ex: Exception) -> None:
+        """Count a tick the publisher refused (queue full, publisher stopped)
+        and log it at a bounded rate. Never raises: it runs inside the shared
+        Rx ticker chain, where an exception is terminal for every contract."""
+        self.zmq_pubsub_dropped_ticks = getattr(self, 'zmq_pubsub_dropped_ticks', 0) + 1
+        now = time.monotonic()
+        if now - getattr(self, '_pubsub_drop_logged_at', 0.0) >= self._PUBSUB_DROP_LOG_INTERVAL_S:
+            since_last = self.zmq_pubsub_dropped_ticks - getattr(self, '_pubsub_drops_at_last_log', 0)
+            logging.error('ticker publish dropped %d tick(s) since last report (%d total): %s: %s',
+                          since_last, self.zmq_pubsub_dropped_ticks, type(ex).__name__, ex)
+            self._pubsub_drop_logged_at = now
+            self._pubsub_drops_at_last_log = self.zmq_pubsub_dropped_ticks
+
+    def _clear_ticker_publish_state(self) -> None:
+        """Drop the shared subscription and every per-contract filter. The
+        remembered publish requests survive, so a rebuild knows what to ask for."""
+        try:
+            self.zmq_pubsub_contract_subscription.dispose()
+        except Exception:
+            pass
+        self.zmq_pubsub_contract_subscription = Disposable()
+        self.zmq_pubsub_contracts = {}
+        self.zmq_pubsub_contract_filters = {}
+
+    def _reestablish_ticker_publishing(self, ex: Exception) -> None:
+        """on_error for the shared ticker chain: the chain is dead for ALL
+        contracts, so clear everything and rebuild from the remembered
+        requests. Bounded so a source that errors on every subscribe cannot
+        spin; past the bound the state is left cleared for connected_event."""
+        logging.error('ticker publish stream errored (%d published contract(s)); rebuilding: %s: %s',
+                      len(self.zmq_pubsub_contract_filters), type(ex).__name__, ex)
+        self._clear_ticker_publish_state()
+        now = time.monotonic()
+        self._publish_reestablish_times = [
+            t for t in getattr(self, '_publish_reestablish_times', [])
+            if now - t < self._PUBLISH_REESTABLISH_WINDOW_S]
+        if len(self._publish_reestablish_times) >= self._PUBLISH_REESTABLISH_LIMIT:
+            logging.error('ticker publish stream failed %d times in %.0fs; not rebuilding until the next '
+                          'IB (re)connect. Live ticker broadcast is DOWN.',
+                          len(self._publish_reestablish_times), self._PUBLISH_REESTABLISH_WINDOW_S)
+            return
+        self._publish_reestablish_times.append(now)
+        try:
+            self._republish_ticker_subscriptions()
+        except Exception as rebuild_error:
+            logging.error('ticker publish rebuild failed: %s: %s', type(rebuild_error).__name__, rebuild_error)
 
     async def update_portfolio_universe(self, portfolio_item: PortfolioItem):
         """Add new positions to the 'portfolio' universe so history downloads
@@ -1096,14 +1227,11 @@ class Trader():
             logging.debug('updating portfolio universe with {}'.format(portfolio_item))
             self.universe_accessor.update(universe)
 
-    @log_method
-    async def place_order(
-        self,
-        contract: Contract,
-        order: Order,
-        condition: ExecutorCondition,
-    ) -> Observable[Trade]:
-        return await self.executioner.place_order(contract_order=ContractOrderPair(contract, order), condition=condition)
+    # Trader.place_order used to sit here: a direct call into
+    # executioner.place_order outside serialized_orders() and outside any
+    # durable intent, with no callers. Every placement now enters through
+    # place_order_simple / place_expressive_order / place_standalone_order /
+    # resize_position, all of which run under _run_order_intent.
 
     @log_method
     async def _margin_impact_or_refusal(self, contract: Contract, probe_order: Order):
@@ -1228,20 +1356,90 @@ class Trader():
         return self.risk_gate.check_leverage(
             impact, inputs.portfolio_value if inputs.portfolio_value_evaluable else 0.0)
 
-    def opening_restore_error(self) -> Optional[str]:
-        """A restored journal cannot authorize exposure until explicitly reconciled."""
+    def _restore_marker_directory(self) -> Optional[str]:
         database_path = getattr(self, 'duckdb_path', None)
         if not isinstance(database_path, (str, os.PathLike)):
             return None
-        marker = os.path.join(os.path.dirname(os.fspath(database_path)),
-                              'BROKER_RECONCILIATION_REQUIRED.json')
+        return os.path.dirname(os.fspath(database_path))
+
+    def opening_restore_error(self) -> Optional[str]:
+        """A restored journal cannot authorize exposure until explicitly reconciled."""
+        directory = self._restore_marker_directory()
+        if directory is None:
+            return None
+        marker = os.path.join(directory, 'BROKER_RECONCILIATION_REQUIRED.json')
         try:
             os.stat(marker)
         except FileNotFoundError:
             return None
         except OSError as ex:
             return f'broker reconciliation marker cannot be read: {ex}'
-        return 'broker reconciliation is required after database restore; new exposure is disabled'
+        return ('broker reconciliation is required after database restore; new exposure is disabled '
+                '(review `mmr execution-snapshot`, then `mmr restore-marker ack --reason "..."`)')
+
+    def restore_marker_status(self) -> dict:
+        """What the restore marker says and whether it is refusing opens."""
+        from trader.data.db_backup import read_restore_marker
+        directory = self._restore_marker_directory()
+        if directory is None:
+            status: dict = {'present': False, 'path': None, 'marker': None, 'error': None}
+        else:
+            status = read_restore_marker(directory)
+        reason = self.opening_restore_error()
+        status['opening_blocked'] = bool(reason)
+        status['reason'] = reason
+        return status
+
+    async def acknowledge_restore_marker(self, reason: str) -> dict:
+        """Operator acknowledgment of the restore marker: the deliberate human
+        act after which the stack may open exposure again.
+
+        Requires a non-empty reason and a FRESH, COMPLETE broker snapshot —
+        the acknowledgment says "I reviewed reconciliation against broker
+        truth", and a snapshot that is incomplete (IB down, replay pending,
+        account unconfirmed) is not something that could have been reviewed.
+        The snapshot's identity is recorded as evidence beside the reason.
+        Never invoked automatically.
+        """
+        from trader.data.db_backup import acknowledge_restore_marker, read_restore_marker
+        if not isinstance(reason, str) or not reason.strip():
+            return {'acknowledged': False, 'error': 'a non-empty reason is required'}
+        directory = self._restore_marker_directory()
+        if directory is None:
+            return {'acknowledged': False, 'error': 'no database directory configured; nothing to acknowledge'}
+        if not read_restore_marker(directory)['present']:
+            return {'acknowledged': False, 'error': 'no restore marker present; opens are not blocked by a restore'}
+        try:
+            snapshot = await self.execution_snapshot()
+        except Exception as ex:
+            return {'acknowledged': False, 'error': f'refused: broker snapshot unavailable: {type(ex).__name__}: {ex}'}
+        summary = {field: snapshot.get(field) for field in (
+            'complete', 'positions_complete', 'orders_complete', 'executions_complete',
+            'account_confirmed', 'journal_healthy', 'observed_at')}
+        if not (snapshot.get('complete') and snapshot.get('positions_complete')):
+            return {'acknowledged': False,
+                    'error': 'refused: broker snapshot is not complete; reconciliation cannot have been '
+                             'reviewed against it (see snapshot fields)',
+                    'snapshot': summary}
+        evidence = dict(summary, account=self.ib_account, boot_id=_BOOT_ID,
+                        positions=len(snapshot.get('positions') or []),
+                        orders=len(snapshot.get('orders') or []))
+        # Serialized with placements so an open cannot evaluate the marker in
+        # the middle of its removal.
+        async with self.serialized_orders():
+            try:
+                record = await asyncio.to_thread(acknowledge_restore_marker, directory, reason, 'operator', evidence)
+            except FileNotFoundError:
+                return {'acknowledged': False, 'error': 'no restore marker present; opens are not blocked by a restore'}
+            except Exception as ex:
+                return {'acknowledged': False, 'error': f'acknowledgment not persisted: {type(ex).__name__}: {ex}'}
+        logging.warning('RESTORE MARKER ACKNOWLEDGED by operator: %s (record %s); new exposure is enabled again',
+                        reason.strip(), record['path'])
+        await self._mirror_audit_event(
+            'RESTORE_MARKER_ACKNOWLEDGED', strategy_name='operator',
+            metadata={'reason': record['reason'], 'path': record['path'], 'evidence': evidence,
+                      'acknowledged_at': record['acknowledged_at']})
+        return {'acknowledged': True, **record}
 
     def fx_rates_to_base(self) -> dict[str, float]:
         """Finite, account-scoped conversion rates, with an explicit base row.
@@ -1304,18 +1502,32 @@ class Trader():
         for trade in self.working_trades(contract):
             order = trade.order
             if str(order.action).upper() == str(action).upper():
-                pending += float(trade.orderStatus.remaining or 0.0)
+                # Not orderStatus.remaining alone: a native PendingSubmit
+                # reports remaining=0 until IB acknowledges it, which read a
+                # just-submitted same-direction open as no exposure at all.
+                # Same treatment as the reduction coordinator.
+                pending += _working_reduction_quantity(trade)
         return abs(held + sign * (quantity + pending)) * (order_value / quantity)
 
     def working_trades(self, contract: Contract) -> list:
-        """Broker-known working orders plus locally submitted orders awaiting updates."""
+        """Broker-known working orders plus locally submitted orders awaiting updates.
+
+        Raises ``WorkingOrdersUnreadableError`` when the broker set cannot be
+        read. It used to swallow that and continue with the locally submitted
+        list alone, i.e. report the broker's working orders as EMPTY — the one
+        answer that lets a second executable close be sent against the same
+        shares and lets the concentration check under-count. Callers treat the
+        raise as unevaluable: opens refuse, reductions defer.
+        """
         self._submitted_trades = [t for t in getattr(self, '_submitted_trades', [])
                                   if t.orderStatus.status not in {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}]
         candidates = list(self._submitted_trades)
         try:
-            candidates.extend(self.client.ib.openTrades())
-        except (AttributeError, TypeError):
-            pass
+            open_trades = self.client.ib.openTrades()
+            candidates.extend(open_trades)
+        except Exception as ex:
+            raise WorkingOrdersUnreadableError(
+                f'UNKNOWN: working orders unreadable: {type(ex).__name__}: {ex}') from ex
         unique = {}
         for trade in candidates:
             order = trade.order
@@ -1838,8 +2050,14 @@ class Trader():
             bound = inspect.signature(call).bind(*args, **kwargs)
             bound.apply_defaults()
             # Positional/keyword spelling and mapping insertion order are not
-            # part of an intent. The complete semantic payload is.
-            payload = {'operation': operation, 'arguments': bound.arguments}
+            # part of an intent. The complete semantic payload is. Credentials
+            # are not: the approver key authorizes the attempt, it does not
+            # describe the order, so a retry carrying a different (or newly
+            # supplied) key is the SAME intent — and the journal must never
+            # hold an unsalted hash of a secret.
+            payload = {'operation': operation,
+                       'arguments': {name: value for name, value in bound.arguments.items()
+                                     if not _is_secret_argument(name)}}
             def encode(value):
                 if isinstance(value, Contract):
                     from dataclasses import asdict
@@ -1926,19 +2144,38 @@ class Trader():
             self._server_order_journal = journal
         return journal
 
-    async def unobserved_reduction_quantity(self, contract: Contract, action: str) -> float:
-        """Capacity of attempted orders absent from the live Trade collection.
+    # Reservation classification --------------------------------------------
+    #
+    # A reservation is a physical (intent, client, order) identity claimed
+    # BEFORE a broker send. Until exact broker evidence retires it, it holds
+    # executable capacity on its instrument. The decision of whether a claim
+    # is retired, matched to a broker row, or still reserving lives in ONE
+    # place, _classify_reservation, and both the capacity sum a close is
+    # deferred on (unobserved_reduction_quantity) and the row an operator
+    # sees (list_order_reservations) read that verdict. Two implementations
+    # of one rule is the shape that produced the flip residual.
 
-        A complete open-order read cannot prove that an older unknown send
-        never executed. Only exact broker final-quantity evidence retires a
-        claim. Reads/writes of the indexed active claims stay off the IB loop.
-        """
-        account = self.ib_account
+    _TERMINAL_STATUSES = frozenset({'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'})
+    # A same-session, own-client reservation this young may still have its
+    # order-status callback in flight; its absence proves nothing yet.
+    _PHANTOM_SETTLE_GRACE_S = 30.0
+
+    async def _load_reservations(self, account: str, include_settled: bool = False) -> tuple[list[dict], Any, Any]:
+        """Durable reservation rows (else the complete process cache) merged
+        with the emergency journal. Reads stay off the IB loop. Returns
+        ``(rows, journal_or_None, emergency_or_None)``; ``journal`` is None
+        when the durable read failed and the cache answered."""
         journal = None
         try:
             journal = await asyncio.to_thread(self.server_order_journal)
-            rows = await asyncio.to_thread(journal.reservations, account)
-            self._server_reservation_cache = (account, rows)
+            # reservations() is the unsettled read every capacity decision goes
+            # through (and the seam tests fail on purpose); the wider listing
+            # is operator-only and never feeds the cache.
+            if include_settled:
+                rows = await asyncio.to_thread(journal.list_reservations, account, True)
+            else:
+                rows = await asyncio.to_thread(journal.reservations, account)
+                self._server_reservation_cache = (account, rows)
             self._reservation_cache_error = ''
             self._journal_recovered()
         except Exception as ex:
@@ -1953,7 +2190,9 @@ class Trader():
             logging.warning('durable capacity read failed; using complete process cache: %s', ex)
         emergency = getattr(self, '_emergency_order_journal', None)
         merged = {(r['intent_id'], r['client_id'], r['order_id']): r for r in rows}
-        for row in emergency.reservations(account) if emergency is not None else []:
+        emergency_rows = [] if emergency is None else (
+            emergency.list_reservations(account, True) if include_settled else emergency.reservations(account))
+        for row in emergency_rows:
             key = (row['intent_id'], row['client_id'], row['order_id'])
             previous = merged.get(key)
             if previous is not None and any(previous.get(field) != row.get(field)
@@ -1963,6 +2202,14 @@ class Trader():
                 counts = (previous['leg_count'], row['leg_count'])
                 row = dict(row, leg_count=max(counts) if all(counts) else 0)
             merged[key] = row
+        return list(merged.values()), journal, emergency
+
+    def _reservation_view(self, account: str, rows: list[dict]) -> dict:
+        """Everything a classification needs besides the claim itself: the
+        tracker's observations indexed by reference and by identity, the
+        per-reference topology of the claims, whether the broker view is
+        complete, and which identities this IB session has handed to
+        ``placeOrder`` (None when that cannot be read)."""
         tracker = getattr(self, 'order_tracker', None)
         by_reference: dict[str, list[dict]] = {}
         by_identity: dict[tuple, list[dict]] = {}
@@ -1984,92 +2231,417 @@ class Trader():
         broker_view_complete = bool(
             getattr(self, '_execution_history_ready', False) and tracker is not None
             and not tracker.health['replay_required'] and self.client.ib.isConnected())
-        own_client_id = getattr(self, 'trading_runtime_ib_client_id', None)
-        visible = {(split_order_reference(trade.order.orderRef)[1], trade.order.clientId, trade.order.orderId):
-                   _working_reduction_quantity(trade)
-                   for trade in self.working_trades(contract) if trade.order.action == action}
         topology: dict[str, set[tuple]] = {}
         topology_counts: dict[str, list[int]] = {}
-        for reservation in merged.values():
+        for reservation in rows:
             reference = reservation.get('broker_reference') or reservation['intent_id']
             topology.setdefault(reference, set()).add((reservation['client_id'], reservation['order_id']))
             topology_counts.setdefault(reference, []).append(reservation['leg_count'])
-        settled = []
+        # Identities ib_async has seen this session (placeOrder records the
+        # Trade before the wire send) plus our own receipts. Unreadable is
+        # None, and None never certifies a phantom.
+        session_identities: Optional[set[tuple]] = None
+        try:
+            identities = {(t.order.clientId, t.order.orderId) for t in self.client.ib.trades()}
+            identities |= {(t.order.clientId, t.order.orderId) for t in getattr(self, '_submitted_trades', [])}
+            session_identities = identities
+        except Exception:
+            session_identities = None
+        return dict(by_reference=by_reference, by_identity=by_identity, topology=topology,
+                    topology_counts=topology_counts, broker_view_complete=broker_view_complete,
+                    own_client_id=getattr(self, 'trading_runtime_ib_client_id', None),
+                    session_identities=session_identities,
+                    replay_completed_epoch=getattr(self, '_execution_replay_completed_epoch', None),
+                    now=time.time())
+
+    def _is_unobserved_own_session_send(self, reservation: dict, identity_rows: list,
+                                        related_rows: list, view: dict) -> bool:
+        """The narrow case in which absence IS evidence: a normally scoped
+        claim under THIS client id, reserved in the CURRENT IB session after
+        this process's broker replay completed, that the tracker has never
+        seen under any identity, that ib_async never handed to placeOrder,
+        and that is old enough for its status callback to have arrived. Had
+        the send reached IB, this session would have received orderStatus
+        for it. Anything predating the replay, or from another session, or
+        from another client, or whose provenance cannot be read, is left to
+        exact broker evidence."""
+        if reservation.get('conid') is None or identity_rows or related_rows:
+            return False
+        if not view['broker_view_complete'] or reservation['client_id'] != view['own_client_id']:
+            return False
+        session = view['session_identities']
+        if session is None or (reservation['client_id'], reservation['order_id']) in session:
+            return False
+        reserved_at = reservation.get('reserved_at')
+        completed = view['replay_completed_epoch']
+        if (not isinstance(reserved_at, (int, float)) or isinstance(reserved_at, bool)
+                or not math.isfinite(reserved_at) or reserved_at <= 0
+                or not isinstance(completed, (int, float)) or isinstance(completed, bool)
+                or not math.isfinite(completed)):
+            return False
+        if reserved_at < completed:
+            return False  # predates this session's replay: IB's bounded history decides, not absence
+        return view['now'] - reserved_at >= self._PHANTOM_SETTLE_GRACE_S
+
+    def _classify_reservation(self, reservation: dict, view: dict) -> dict:
+        """One verdict for one physical claim. Pure with respect to storage.
+
+        ``settle`` means broker evidence (or, narrowly, its proven absence)
+        retires the claim; ``settle_reason`` says which rule. ``scope_error``
+        is set when a legacy claim's instrument or direction cannot be proven,
+        which defers every reduction until replay completes. Otherwise the
+        claim's scope (``conid``, ``side``, ``quantity``) and the single
+        unambiguous tracker ``observation`` (or None) are returned for the
+        capacity arithmetic in ``_reserved_quantity``.
+        """
+        client_id, order_id = reservation['client_id'], reservation['order_id']
+        reference = reservation.get('broker_reference') or reservation['intent_id']
+        candidates = view['by_reference'].get(reference, [])
+        matching = [row for row in candidates if row.get('clientId') == client_id
+                    and row.get('orderId') == order_id]
+        if (not matching and len(view['topology'][reference]) == 1
+                and all(count == 1 for count in view['topology_counts'][reference]) and len(candidates) == 1):
+            row = candidates[0]
+            if (row.get('orderId') == 0 and row.get('permId', 0) > 0
+                    and row.get('clientId') in (0, client_id)):
+                matching = [row]
+        observation = matching[0] if len(matching) == 1 and not matching[0].get('identityAmbiguous', False) else None
+        conid, side, quantity = (reservation.get('conid'), reservation.get('action'), reservation.get('quantity'))
+        identity_rows = view['by_identity'].get((client_id, order_id), [])
+        verdict = dict(physical_key=(reference, client_id, order_id), reference=reference,
+                       observation=None, conid=conid, side=side, quantity=quantity,
+                       settle=False, settle_reason=None, scope_error=None)
+        if observation is None and conid is None:
+            # Legacy claim: the only evidence is its physical identity, and
+            # legacy orderRefs need not carry the intent reference, so
+            # look the identity up directly rather than by reference.
+            if len(identity_rows) == 1 and not identity_rows[0].get('identityAmbiguous', False):
+                observation = identity_rows[0]
+            elif not identity_rows and view['broker_view_complete'] and client_id == view['own_client_id']:
+                verdict.update(settle=True, settle_reason='legacy-own-client-absent-after-replay')
+                return verdict
+        if observation is not None and (conid is not None and observation.get('conId') != conid
+                                         or side is not None and observation.get('action') != side):
+            observation = None  # a contradictory row cannot release this physical claim
+        verdict['observation'] = observation
+        if (observation is not None and observation.get('fillQuantityKnown') is True
+                and observation.get('status') in self._TERMINAL_STATUSES):
+            verdict.update(settle=True, settle_reason='terminal-known-fill')
+            return verdict
+        if observation is None and conid is not None:
+            related = [row for row in candidates if row.get('orderId') in (0, order_id)]
+            if self._is_unobserved_own_session_send(reservation, identity_rows, related, view):
+                verdict.update(settle=True, settle_reason='phantom-own-session')
+                return verdict
+        # For a legacy reservation, only the exact broker row can supply
+        # scope/quantity. The migration itself supplies none of these.
+        if conid is None and observation is not None:
+            conid, side, quantity = (observation.get('conId'), observation.get('action'), observation.get('totalQuantity'))
+            verdict.update(conid=conid, side=side, quantity=quantity)
+        if (not isinstance(conid, int) or isinstance(conid, bool) or conid <= 0
+                or side not in {'BUY', 'SELL'}):
+            verdict['scope_error'] = (
+                'UNKNOWN: legacy competing order has no proven instrument or direction '
+                f'(intent {reservation["intent_id"]}, client {client_id}, order {order_id}); '
+                'deferring until the broker open-order and execution replay completes')
+        return verdict
+
+    def _reserved_quantity(self, verdict: dict, visible: dict) -> float:
+        """Executable capacity a classified, still-open claim reserves, net of
+        the confirmed fills and the visible working remainder of its own
+        broker row. Raises ``RuntimeError('UNKNOWN: ...')`` when a quantity
+        it needs cannot be read."""
+        quantity = verdict['quantity']
+        observation = verdict['observation']
+        if (not isinstance(quantity, (int, float)) or isinstance(quantity, bool)
+                or not math.isfinite(quantity) or not 0 < quantity < UNSET_DOUBLE):
+            raise RuntimeError('UNKNOWN: competing order quantity is unavailable')
+        reserve = float(quantity)
+        if observation is not None and observation.get('status') != 'Unknown':
+            filled = observation.get('filled')
+            if (not isinstance(filled, (int, float)) or isinstance(filled, bool)
+                    or not math.isfinite(filled) or filled < 0 or filled >= UNSET_DOUBLE):
+                raise RuntimeError('UNKNOWN: competing cumulative fill quantity is unreadable')
+            reserve = max(0.0, reserve - filled - visible.get(verdict['physical_key'], 0.0))
+        return reserve
+
+    def _visible_working(self, contract: Contract, action: str) -> dict:
+        return {(split_order_reference(trade.order.orderRef)[1], trade.order.clientId, trade.order.orderId):
+                _working_reduction_quantity(trade)
+                for trade in self.working_trades(contract) if trade.order.action == action}
+
+    async def unobserved_reduction_quantity(self, contract: Contract, action: str) -> float:
+        """Capacity of attempted orders absent from the live Trade collection.
+
+        A complete open-order read cannot prove that an older unknown send
+        never executed. Only exact broker final-quantity evidence retires a
+        claim — plus one narrow, audited exception: a claim under this client
+        id, reserved in the current IB session after replay, that neither the
+        tracker nor ib_async has ever seen (see _is_unobserved_own_session_send).
+        Reads/writes of the indexed active claims stay off the IB loop.
+        """
+        account = self.ib_account
+        rows, journal, emergency = await self._load_reservations(account)
+        view = self._reservation_view(account, rows)
+        visible = self._visible_working(contract, action)
+        settled: list[tuple] = []
+        phantoms: list[tuple[tuple, dict]] = []
         missing: dict[tuple, float] = {}
-        for key, reservation in merged.items():
-            _parent, client_id, order_id = key
-            reference = reservation.get('broker_reference') or reservation['intent_id']
-            physical_key = (reference, client_id, order_id)
-            candidates = by_reference.get(reference, [])
-            matching = [row for row in candidates if row.get('clientId') == client_id
-                        and row.get('orderId') == order_id]
-            if (not matching and len(topology[reference]) == 1
-                    and all(count == 1 for count in topology_counts[reference]) and len(candidates) == 1):
-                row = candidates[0]
-                if (row.get('orderId') == 0 and row.get('permId', 0) > 0
-                        and row.get('clientId') in (0, client_id)):
-                    matching = [row]
-            observation = matching[0] if len(matching) == 1 and not matching[0].get('identityAmbiguous', False) else None
-            conid, side, quantity = (reservation.get('conid'), reservation.get('action'), reservation.get('quantity'))
-            if observation is None and conid is None:
-                # Legacy claim: the only evidence is its physical identity, and
-                # legacy orderRefs need not carry the intent reference, so
-                # look the identity up directly rather than by reference.
-                identity_rows = by_identity.get((client_id, order_id), [])
-                if len(identity_rows) == 1 and not identity_rows[0].get('identityAmbiguous', False):
-                    observation = identity_rows[0]
-                elif not identity_rows and broker_view_complete and client_id == own_client_id:
+        detail: list[dict] = []
+        for reservation in rows:
+            key = (reservation['intent_id'], reservation['client_id'], reservation['order_id'])
+            verdict = self._classify_reservation(reservation, view)
+            if verdict['settle']:
+                if verdict['settle_reason'] == 'phantom-own-session':
+                    phantoms.append((key, reservation))
+                else:
                     settled.append(key)
-                    continue
-            if observation is not None and (conid is not None and observation.get('conId') != conid
-                                             or side is not None and observation.get('action') != side):
-                observation = None  # a contradictory row cannot release this physical claim
-            if (observation is not None and observation.get('fillQuantityKnown') is True
-                    and observation.get('status') in {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}):
-                settled.append(key)
                 continue
-            # For a legacy reservation, only the exact broker row can supply
-            # scope/quantity. The migration itself supplies none of these.
-            if conid is None and observation is not None:
-                conid, side, quantity = (observation.get('conId'), observation.get('action'), observation.get('totalQuantity'))
-            if (not isinstance(conid, int) or isinstance(conid, bool) or conid <= 0
-                    or side not in {'BUY', 'SELL'}):
-                raise RuntimeError(
-                    'UNKNOWN: legacy competing order has no proven instrument or direction '
-                    f'(intent {reservation["intent_id"]}, client {client_id}, order {order_id}); '
-                    'deferring until the broker open-order and execution replay completes')
-            if conid != contract.conId or side != action:
+            if verdict['scope_error']:
+                raise RuntimeError(verdict['scope_error'])
+            if verdict['conid'] != contract.conId or verdict['side'] != action:
                 continue
-            if (not isinstance(quantity, (int, float)) or isinstance(quantity, bool)
-                    or not math.isfinite(quantity) or not 0 < quantity < UNSET_DOUBLE):
-                raise RuntimeError('UNKNOWN: competing order quantity is unavailable')
-            reserve = float(quantity)
-            if observation is not None and observation.get('status') != 'Unknown':
-                filled = observation.get('filled')
-                if (not isinstance(filled, (int, float)) or isinstance(filled, bool)
-                        or not math.isfinite(filled) or filled < 0 or filled >= UNSET_DOUBLE):
-                    raise RuntimeError('UNKNOWN: competing cumulative fill quantity is unreadable')
-                reserve = max(0.0, reserve - filled - visible.get(physical_key, 0.0))
+            reserve = self._reserved_quantity(verdict, visible)
             # A verified in-place modification preserves the original broker
             # reference and physical ID. Parent claims are not extra orders.
+            physical_key = verdict['physical_key']
             missing[physical_key] = max(missing.get(physical_key, 0.0), reserve)
+            if reserve > 0:
+                detail.append(dict(intent_id=reservation['intent_id'], client_id=reservation['client_id'],
+                                   order_id=reservation['order_id'], quantity=reserve))
+        self._unobserved_reservation_detail = detail
+        for key, reservation in phantoms:
+            # Absence-as-evidence is retired DURABLY with its reason, or not at
+            # all: an in-memory-only release would come back after a restart
+            # and, worse, would have let a close through in between.
+            if journal is None:
+                continue
+            evidence = dict(rule='phantom-own-session', reserved_at=reservation.get('reserved_at'),
+                            replay_completed_epoch=view['replay_completed_epoch'],
+                            client_id=view['own_client_id'], boot_id=_BOOT_ID)
+            try:
+                await asyncio.to_thread(
+                    journal.record_settlement, *key, account=account, actor='trader_service:automatic',
+                    reason='unconfirmed own-client send in the current IB session, after broker replay, '
+                           'never observed by the lifecycle tracker or ib_async; it did not reach IB',
+                    evidence=evidence)
+            except Exception as ex:
+                logging.warning('could not persist phantom reservation settlement %s: %s', key, ex)
+                continue
+            logging.warning('RESERVATION SETTLED automatically: intent %s client %s order %s (%s %s x %s) '
+                            'was reserved this session after replay and never observed; releasing its capacity',
+                            key[0], key[1], key[2], reservation.get('action'), reservation.get('conid'),
+                            reservation.get('quantity'))
+            settled.append(key)
         if settled:
             # Keep the source claim/audit intact. This index records only the
             # authoritative retirement of its executable capacity.
-            if journal is not None:
+            evidence_based = [key for key in settled if key not in {k for k, _ in phantoms}]
+            if journal is not None and evidence_based:
                 try:
-                    await asyncio.to_thread(journal.settle_reservations, settled)
+                    await asyncio.to_thread(journal.settle_reservations, evidence_based)
                 except Exception as ex:
                     logging.warning('could not persist terminal reduction capacity: %s', ex)
             if emergency is not None:
                 emergency.settle_reservations(settled)
             keys = set(settled)
-            self._server_reservation_cache = (account, [row for row in rows
-                if (row['intent_id'], row['client_id'], row['order_id']) not in keys])
+            cached = getattr(self, '_server_reservation_cache', None)
+            if cached is not None and cached[0] == account:
+                cached[1][:] = [row for row in cached[1]
+                                if (row['intent_id'], row['client_id'], row['order_id']) not in keys]
         total = sum(missing.values())
         if not math.isfinite(total):
             raise RuntimeError('UNKNOWN: competing reduction capacity overflow')
         return total
+
+    @staticmethod
+    def _iso(epoch: Any) -> Optional[str]:
+        if not isinstance(epoch, (int, float)) or isinstance(epoch, bool) or not math.isfinite(epoch):
+            return None
+        return dt.datetime.fromtimestamp(epoch, dt.timezone.utc).isoformat()
+
+    @staticmethod
+    def _observation_summary(observation: Optional[dict]) -> Optional[dict]:
+        if observation is None:
+            return None
+        return {field: observation.get(field) for field in (
+            'status', 'brokerStatus', 'filled', 'remaining', 'fillQuantityKnown', 'totalQuantity',
+            'permId', 'clientId', 'orderId', 'conId', 'action', 'clientIntentId', 'identityAmbiguous')}
+
+    async def list_order_reservations(self, account: Optional[str] = None,
+                                      include_settled: bool = False) -> list[dict]:
+        """Operator view of the physical reservation ledger.
+
+        Each row carries the claim, the matching tracker observation (or
+        None), and ``blocking``: whether it currently reserves executable
+        capacity on its instrument, computed by the SAME classification the
+        reduction coordinator uses. A blocking row with ``observation`` None
+        is the phantom-send signature. Read-only: it never settles anything.
+        """
+        account = account or self.ib_account
+        rows, _journal, _emergency = await self._load_reservations(account, include_settled)
+        view = self._reservation_view(account, rows)
+        visible_cache: dict[tuple, Any] = {}
+        result = []
+        for reservation in rows:
+            verdict = self._classify_reservation(reservation, view)
+            blocking = False
+            reserved: Optional[float] = None
+            note: Optional[str] = None
+            if reservation.get('settled'):
+                note = 'settled'
+            elif verdict['settle']:
+                note = f'retired on next evaluation: {verdict["settle_reason"]}'
+            elif verdict['scope_error']:
+                blocking = True
+                note = verdict['scope_error']
+            else:
+                scope = (verdict['conid'], verdict['side'])
+                try:
+                    if scope not in visible_cache:
+                        visible_cache[scope] = self._visible_working(Contract(conId=int(scope[0])), str(scope[1]))
+                    visible = visible_cache[scope]
+                    if isinstance(visible, Exception):
+                        raise visible
+                    reserved = self._reserved_quantity(verdict, visible)
+                    blocking = reserved > 0
+                    note = 'reserving executable capacity' if blocking else 'matched to a broker observation'
+                except Exception as ex:
+                    visible_cache.setdefault(scope, ex)
+                    blocking = True  # unreadable defers, exactly as the coordinator does
+                    note = str(ex)
+            result.append(dict(
+                intent_id=reservation['intent_id'], client_id=reservation['client_id'],
+                order_id=reservation['order_id'], account=reservation.get('account', account),
+                conid=verdict['conid'], action=verdict['side'], quantity=verdict['quantity'],
+                is_exit=None if reservation.get('is_exit') is None else bool(reservation.get('is_exit')),
+                broker_reference=reservation.get('broker_reference') or reservation['intent_id'],
+                created=self._iso(reservation.get('created_at')),
+                reserved_at=self._iso(reservation.get('reserved_at')),
+                intent_status=reservation.get('intent_status'),
+                leg_count=reservation.get('leg_count'),
+                settled=bool(reservation.get('settled')),
+                observation=self._observation_summary(verdict['observation']),
+                blocking=blocking, reserved_quantity=reserved, note=note))
+        return result
+
+    async def settle_order_reservation(self, intent_id: str, client_id: int, order_id: int,
+                                       reason: str) -> dict:
+        """Explicit operator retirement of a reservation that has NO broker
+        observation. Never invoked automatically. Refused while the broker
+        view is incomplete, while any tracker observation or session trade
+        matches the identity, or when the settlement cannot be made durable
+        with its reason. Serialized with placements so it cannot race a
+        capacity evaluation."""
+        if not isinstance(reason, str) or not reason.strip():
+            return {'settled': False, 'error': 'a non-empty reason is required'}
+        try:
+            client_id, order_id = int(client_id), int(order_id)
+        except (TypeError, ValueError):
+            return {'settled': False, 'error': 'client_id and order_id must be integers'}
+        key = (str(intent_id), client_id, order_id)
+        async with self.serialized_orders():
+            account = self.ib_account
+            try:
+                rows, journal, emergency = await self._load_reservations(account)
+            except RuntimeError as ex:
+                return {'settled': False, 'error': str(ex)}
+            target = next((r for r in rows if (r['intent_id'], r['client_id'], r['order_id']) == key), None)
+            if target is None:
+                return {'settled': False,
+                        'error': f'no unsettled reservation intent={key[0]} client={key[1]} order={key[2]} '
+                                 f'for account {account}'}
+            view = self._reservation_view(account, rows)
+            if not view['broker_view_complete']:
+                return {'settled': False,
+                        'error': 'refused: broker view incomplete (execution replay pending or IB disconnected); '
+                                 'retry after replay completes'}
+            verdict = self._classify_reservation(target, view)
+            reference = verdict['reference']
+            observations = list(view['by_identity'].get((client_id, order_id), []))
+            observations += [row for row in view['by_reference'].get(reference, [])
+                             if row.get('orderId') in (0, order_id) and row not in observations]
+            if observations and not verdict['settle']:
+                return {'settled': False,
+                        'error': 'refused: broker evidence matches this identity '
+                                 f'({", ".join(str(o.get("status")) for o in observations)}); '
+                                 'only exact broker final-quantity evidence can retire it',
+                        'observation': [self._observation_summary(o) for o in observations]}
+            session = view['session_identities']
+            if session is not None and (client_id, order_id) in session:
+                return {'settled': False,
+                        'error': 'refused: ib_async handed this identity to placeOrder in the current session'}
+            conid = verdict['conid']
+            if isinstance(conid, int) and not isinstance(conid, bool) and conid > 0:
+                try:
+                    working = [t for t in self.working_trades(Contract(conId=conid))
+                               if (t.order.clientId, t.order.orderId) == (client_id, order_id)]
+                except WorkingOrdersUnreadableError as ex:
+                    return {'settled': False, 'error': f'refused: {ex}'}
+                if working:
+                    return {'settled': False,
+                            'error': f'refused: a working broker order matches this identity '
+                                     f'({working[0].orderStatus.status})'}
+            if journal is None:
+                return {'settled': False,
+                        'error': 'refused: execution journal unavailable; a settlement must be durable'}
+            evidence = dict(rule='operator', broker_view_complete=True, boot_id=_BOOT_ID,
+                            conid=conid, action=verdict['side'], quantity=verdict['quantity'],
+                            reserved_at=target.get('reserved_at'), created_at=target.get('created_at'))
+            try:
+                record = await asyncio.to_thread(
+                    journal.record_settlement, *key, account=account, reason=reason,
+                    actor='operator', evidence=evidence)
+            except Exception as ex:
+                self._journal_degraded = str(ex)
+                return {'settled': False, 'error': f'settlement not persisted: {ex}'}
+            if emergency is not None:
+                emergency.settle_reservations([key])
+            cached = getattr(self, '_server_reservation_cache', None)
+            if cached is not None and cached[0] == account:
+                cached[1][:] = [row for row in cached[1]
+                                if (row['intent_id'], row['client_id'], row['order_id']) != key]
+            self._unobserved_reservation_detail = [
+                item for item in getattr(self, '_unobserved_reservation_detail', [])
+                if (item['intent_id'], item['client_id'], item['order_id']) != key]
+            logging.warning('RESERVATION SETTLED by operator: intent %s client %s order %s (%s %s x %s): %s',
+                            key[0], key[1], key[2], verdict['side'], conid, verdict['quantity'], reason.strip())
+            await self._mirror_audit_event(
+                'RESERVATION_SETTLED', strategy_name=record['actor'],
+                conid=conid, action=verdict['side'], quantity=verdict['quantity'], order_id=record['order_id'],
+                metadata={'intent_id': record['intent_id'], 'client_id': record['client_id'],
+                          'account': record['account'], 'reason': record['reason'],
+                          'evidence': record.get('evidence', {}), 'settled_at': record['settled_at']})
+            record['settled_at'] = self._iso(record['settled_at'])
+            return {'settled': True, **record, 'observation': None}
+
+    async def _mirror_audit_event(self, event_type_name: str, *, strategy_name: str, conid: Any = 0,
+                                  action: Any = '', quantity: Any = 0.0, order_id: Any = 0,
+                                  metadata: Optional[dict] = None) -> None:
+        """Mirror an operator/automatic audit record into the DuckDB event
+        store when its vocabulary has the named EventType. The durable record
+        already exists where the act happened (execution journal, marker
+        file); this is the cross-service trail. Writing an event type the
+        store cannot read back would poison every unfiltered query, so an
+        unknown name is logged and skipped rather than coerced."""
+        store = getattr(self, 'event_store', None)
+        event_type = getattr(EventType, event_type_name, None)
+        if event_type is None:
+            logging.info('EventType.%s is not defined; audit record kept at its source only', event_type_name)
+            return
+        if store is None:
+            return
+        try:
+            event = TradingEvent(
+                event_type=event_type, timestamp=dt.datetime.now(), strategy_name=strategy_name,
+                conid=int(conid) if isinstance(conid, int) and not isinstance(conid, bool) else 0,
+                action=str(action or ''),
+                quantity=float(quantity) if isinstance(quantity, (int, float)) and not isinstance(quantity, bool) else 0.0,
+                order_id=int(order_id) if isinstance(order_id, int) and not isinstance(order_id, bool) else 0,
+                metadata=metadata or {})
+            await asyncio.to_thread(store.append, event)
+        except Exception as ex:
+            logging.warning('%s audit event not mirrored to the event store: %s', event_type_name, ex)
 
     def _cache_broker_reservation(self, intent_id: str, order: Order, contract: Optional[Contract],
                                    is_exit: bool, broker_reference: str) -> None:
@@ -2086,7 +2658,8 @@ class Trader():
                          quantity=float(order.totalQuantity) if contract is not None else None,
                          is_exit=int(is_exit) if contract is not None else None,
                          broker_reference=broker_reference if contract is not None else None,
-                         settled=0, leg_count=0))
+                         settled=0, leg_count=0, reserved_at=time.time(), created_at=None,
+                         intent_status='SUBMITTING', intent_error=''))
         # Until the next complete journal read, a new physical leg makes this
         # cached topology unsuitable for single-leg orderId=0 association.
         legs = [row for row in rows if row['intent_id'] == intent_id]
@@ -2195,16 +2768,70 @@ class Trader():
                 await replay_execution_history(self.client.ib, tracker)
                 self._execution_history_ready = True
                 self._execution_replay_completed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+                self._execution_replay_completed_epoch = time.time()
                 # Broker completeness and journal durability are distinct.
                 # An unavailable journal must not hide fresh broker evidence
                 # from an already-owned emergency reduction.
                 await asyncio.to_thread(tracker.flush, 1.0)
                 tracker.mark_replay_complete()
+                if getattr(self, '_execution_replay_failed', False):
+                    logging.info('broker execution replay RECOVERED; opening readiness restored '
+                                 '(replay_required=%s)', tracker.health['replay_required'])
+                self._execution_replay_failed = False
                 return True
             except Exception as ex:
                 self._execution_history_ready = False
-                logging.warning('broker execution replay incomplete: %s', ex)
+                self._execution_replay_failed = True
+                logging.warning('broker execution replay incomplete: %s: %s (new exposure stays disabled; '
+                                'retrying every %ss while replay is required)',
+                                type(ex).__name__, ex, self._EXECUTION_REPLAY_RETRY_S)
                 return False
+
+    # A failed startup replay used to disable every open until something else
+    # (a reconnect, an execution_snapshot RPC) happened to trigger a replay.
+    # The tracker's replay_required stays True after a timeout and
+    # margin_checks refuses on it, so a 5s IB hiccup at connect was a silent,
+    # indefinite opening outage. Retry on the pulse scheduler instead.
+    _EXECUTION_REPLAY_RETRY_S = 30
+
+    def _start_execution_replay_retry(self) -> None:
+        """Schedule the bounded periodic retry (called from setup_subscriptions,
+        next to the pulse). Idempotent per setup: the disposable is tracked
+        with the other subscriptions and torn down on reconnect."""
+        if self.scheduler is None:
+            return
+        disposable = self.scheduler.schedule_periodic(
+            self._EXECUTION_REPLAY_RETRY_S, lambda _state: self._retry_execution_replay_if_required())
+        self.disposables.append(disposable)
+
+    def _retry_execution_replay_if_required(self) -> Optional['asyncio.Task']:
+        """One scheduler tick: if the broker replay is still required and IB
+        is connected, run another replay attempt as a task on the loop. Never
+        blocks the scheduler thread; never raises. Returns the task (or None
+        when nothing needed doing) so tests can await it."""
+        try:
+            tracker = getattr(self, 'order_tracker', None)
+            if tracker is None:
+                return None
+            if getattr(self, '_execution_history_ready', False) and not tracker.health['replay_required']:
+                return None
+            if not self.client.ib.isConnected():
+                return None  # the reconnect path replays when the socket is back
+            lock = getattr(self, '_execution_replay_lock', None)
+            if lock is not None and lock.locked():
+                return None  # an attempt is already in flight
+            loop = getattr(self, '_main_loop', None)
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            if loop is None or not loop.is_running():
+                return None
+            logging.info('broker execution replay still required; retrying')
+            return loop.create_task(self._replay_broker_executions())
+        except Exception as ex:
+            logging.warning('execution replay retry tick failed: %s', ex)
+            return None
 
     async def execution_snapshot(self, intent_id: str = '', order_ids: Optional[list[int]] = None) -> dict:
         """Fresh positions/orders plus IB's bounded execution-history replay.
@@ -2582,6 +3209,13 @@ class Trader():
             converted = self.convert_notional(position_value, contract.currency)
             position_value_evaluable = position_value_evaluable and converted is not None
             position_value = converted if converted is not None else 0.0
+            try:
+                aggregate_value = self.aggregate_position_value(contract, action, quantity, position_value)
+            except WorkingOrdersUnreadableError as ex:
+                # Working openings on this instrument are part of the
+                # concentration input. Unreadable is unevaluable: refuse.
+                logging.error('refusing open (fail-closed): %s', ex)
+                return SuccessFail.fail(error=f'Risk gate: concentration unevaluable — {ex}')
             gate_result = self.risk_gate.evaluate(
                 signal=signal,
                 open_order_count=inputs.open_order_count,
@@ -2592,8 +3226,7 @@ class Trader():
                 portfolio_value_evaluable=inputs.portfolio_value_evaluable,
                 position_value_evaluable=position_value_evaluable,
                 sec_type=contract.secType or '',
-                aggregate_position_value=self.aggregate_position_value(
-                    contract, action, quantity, position_value),
+                aggregate_position_value=aggregate_value,
             )
             if not gate_result.approved:
                 return SuccessFail.fail(error=f'Risk gate: {gate_result.reason}')
@@ -3288,11 +3921,19 @@ class Trader():
         monitor, unlike a silent hang."""
         try:
             book = getattr(self, 'book', None)
+            ib_connected = self.client.ib.isConnected()
+            tracker = getattr(self, 'order_tracker', None)
             logging.info(
-                'pulse ib_connected=%s ib_upstream=%s open_orders=%s',
-                self.client.ib.isConnected(),
-                self._ib_upstream_connected,
+                'pulse ib_connected=%s ib_upstream=%s open_orders=%s dropped_ticks=%d '
+                'replay_required=%s unsettled_reservations=%s',
+                ib_connected,
+                bool(ib_connected and self._ib_upstream_connected),
                 book.get_open_order_count() if book is not None else 0,
+                # Ticks the bounded publisher refused; a rising count is a
+                # degraded feed (subscribers see gaps), MONITORING.md.
+                getattr(self, 'zmq_pubsub_dropped_ticks', 0),
+                tracker.health['replay_required'] if tracker is not None else None,
+                self._unsettled_reservation_count(),
             )
         except Exception as ex:
             logging.warning('pulse failed: %s', ex)
@@ -3303,36 +3944,78 @@ class Trader():
         ``get_status()``'s flags can freeze true on a half-open socket —
         G3's 10.5h invisible outage — because they are driven by error
         codes that never arrive when the socket itself dies. An actual
-        request/response is the only honest liveness signal; `mmr verify`
-        and the container healthcheck use this instead of the flags.
+        request/response is the liveness signal used by `mmr verify`.
         """
-        try:
-            server_time = await asyncio.wait_for(
-                self.client.ib.reqCurrentTimeAsync(), timeout=5.0)
-            return {'ok': True, 'ib_server_time': str(server_time)}
-        except Exception as ex:
-            return {'ok': False, 'error': '{}: {}'.format(type(ex).__name__, ex)}
+        ib = self.client.ib
+        pending = getattr(self, '_ib_ping_request', None)
+        if pending is None or pending[0] is not ib or pending[1].done():
+            # ib_async uses one fixed 'currentTime' future per IB instance.
+            # Concurrent requests overwrite it and strand an earlier caller.
+            # RPC handlers share this loop; publish the task before yielding.
+            async def request():
+                async def round_trip():
+                    # Gateway can suppress subsecond currentTime requests.
+                    # Space new sends from the previous attempt's completion,
+                    # while still requiring a new response for every task.
+                    completed = getattr(self, '_ib_ping_completed', None)
+                    if completed is not None and completed[0] is ib:
+                        delay = 1.0 - (asyncio.get_running_loop().time() - completed[1])
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                    if self.client.ib is not ib:
+                        raise ConnectionError('IB connection replaced during ping')
+                    return await ib.reqCurrentTimeAsync()
+
+                try:
+                    server_time = await asyncio.wait_for(
+                        round_trip(), timeout=5.0)
+                    if self.client.ib is not ib:
+                        raise ConnectionError('IB connection replaced during ping')
+                    return {'ok': True, 'ib_server_time': str(server_time)}
+                except Exception as ex:
+                    return {'ok': False, 'error': '{}: {}'.format(type(ex).__name__, ex)}
+                finally:
+                    if self.client.ib is ib:
+                        self._ib_ping_completed = (ib, asyncio.get_running_loop().time())
+
+            pending = (ib, asyncio.create_task(request()))
+            self._ib_ping_request = pending
+        # One cancelled RPC must not cancel another caller's shared probe.
+        # The task owns one five-second deadline including any spacing wait;
+        # completed results are never reused, and an IB replacement gets an
+        # independent fresh request.
+        return await asyncio.shield(pending[1])
 
     @log_method
     def red_button(self):
         self.client.ib.reqGlobalCancel()
 
     # status() is polled heavily by strategy_service, the CLI, and the
-    # risk-gate. A 1-second TTL cache is invisible to every caller (these
-    # are idempotent-diagnostic reads, not trade decisions) and avoids
-    # re-walking IB state on every RPC. No @log_method — the decorator's
+    # risk-gate. Retain a 1-second cache, but sample the cheap local socket
+    # flag on every call: disconnects and upstream error events must bypass
+    # an otherwise fresh connected result. No @log_method — the decorator's
     # inspect.signature + repr for every call adds measurable overhead on a
     # hot path, and the RPC server already DEBUG-logs each dispatch.
     def status(self) -> dict:
+        ib_connected = self.client.ib.isConnected()
+        upstream_connected = bool(ib_connected and self._ib_upstream_connected)
+        upstream_error = None
+        if not upstream_connected:
+            upstream_error = self._ib_upstream_error
+            if not ib_connected and not upstream_error:
+                upstream_error = 'IB Gateway socket disconnected'
         now = time.monotonic()
         cached_ts = getattr(self, '_status_cache_ts', 0.0)
         if now - cached_ts < 1.0:
             cached = getattr(self, '_status_cache', None)
-            if cached is not None:
+            if (cached is not None
+                    and cached.get('ib_connected') == ib_connected
+                    and cached.get('ib_upstream_connected') == upstream_connected
+                    and cached.get('ib_upstream_error') == upstream_error):
                 return cached
         status = {
-            'ib_connected': self.client.ib.isConnected(),
-            'ib_upstream_connected': self._ib_upstream_connected,
+            'ib_connected': ib_connected,
+            'ib_upstream_connected': upstream_connected,
             'storage_connected': self.data is not None,
             # Identifies THIS trader_service process. Market-data
             # subscriptions live only in its memory, so when this value
@@ -3340,11 +4023,25 @@ class Trader():
             # again. strategy_service watches it; see _reconcile_sync.
             'boot_id': _BOOT_ID,
         }
-        if not self._ib_upstream_connected:
-            status['ib_upstream_error'] = self._ib_upstream_error
+        if not upstream_connected:
+            status['ib_upstream_error'] = upstream_error
+        # Unsettled physical reservations known to this process — from the
+        # cache the last complete journal read left behind (maintained by
+        # reserve/unreserve/settle), NOT a fresh SQLite read: status() must
+        # stay cheap. None until a complete read has happened. A nonzero value
+        # with nothing working at the broker is the phantom-send signal;
+        # `mmr reservations` (list_order_reservations) says which rows block.
+        status['unsettled_reservations'] = self._unsettled_reservation_count()
+        status['dropped_ticks'] = getattr(self, 'zmq_pubsub_dropped_ticks', 0)
         self._status_cache = status
         self._status_cache_ts = now
         return status
+
+    def _unsettled_reservation_count(self) -> Optional[int]:
+        cached = getattr(self, '_server_reservation_cache', None)
+        if cached is None or cached[0] != getattr(self, 'ib_account', None):
+            return None
+        return len(cached[1])
 
     def get_unique_client_id(self) -> int:
         new_client_id = max(self.tws_client_ids) + 1

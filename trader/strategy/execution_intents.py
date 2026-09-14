@@ -133,6 +133,12 @@ class IntentStore:
         result['payload'] = json.loads(result['payload'])
         return result
 
+    def get(self, intent_id: str) -> dict | None:
+        """Read one intent by its durable identity (None when unknown)."""
+        with self.journal.transaction() as conn:
+            row = conn.execute('SELECT * FROM execution_intents WHERE intent_id=?', [intent_id]).fetchone()
+        return self._remember(self._decode(row)) if row else None
+
     def all(self, *, strategy=None, conid=None, kind=None, active=False) -> list[dict]:
         query = 'SELECT * FROM execution_intents WHERE 1=1'
         params = []
@@ -315,7 +321,11 @@ class IntentStore:
     def submitted_recently(self, strategy: str, conid: int, seconds: float) -> bool:
         cutoff = time.time() - seconds
         for intent in self.all(strategy=strategy, conid=conid, kind='OPEN'):
-            if intent['payload'].get('submitted_at', 0) > cutoff and intent['status'] != 'REJECTED':
+            if intent['status'] == 'REJECTED':
+                continue
+            if intent['status'] == 'RESOLVED' and intent['payload'].get('never_submitted') is True:
+                continue  # proven unsent: it consumed no broker capacity and holds no cooldown
+            if intent['payload'].get('submitted_at', 0) > cutoff:
                 return True
         return False
 

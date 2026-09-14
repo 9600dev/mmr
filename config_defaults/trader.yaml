@@ -77,6 +77,30 @@ duckdb_path: ~/.local/share/mmr/data/mmr.duckdb
 history_duckdb_path: ~/.local/share/mmr/data/mmr_history.duckdb
 universe_library: 'Universes'
 
+# Strategy callback workers (strategy_service). Strategy import, construction,
+# install and every on_prices callback run in a spawned child process per
+# strategy; these are that process's budgets (docs/STRATEGY_EXECUTION_CONTRACT.md,
+# "Identity and supported deployment"). Exceeding a budget puts THAT strategy
+# into ERROR and revokes its opening authority; nothing here restarts it
+# silently. Env overrides: STRATEGY_CALLBACK_TIMEOUT_S etc. (upper-cased key).
+# The values below ARE the code defaults — omit any key to get the same thing.
+#
+# Seconds one on_prices callback may take before the worker is failed.
+strategy_callback_timeout_s: 5.0
+# Seconds for import + __init__ + install + enable in the child before it is
+# failed (a failed load is retried on up to 3 reconcile ticks, then parked).
+strategy_startup_timeout_s: 60.0
+# Byte cap on one serialized price frame handed to the child (32 MiB).
+strategy_max_frame_bytes: 33554432
+# Optional RLIMIT_AS on the child's virtual address space, bytes. 0 = off
+# (the only portable default). LINUX ONLY: a positive value on another OS
+# refuses to start the service rather than being silently ignored. Note it
+# bounds address space (numerical-library mmaps count), not heap alone.
+strategy_memory_limit_bytes: 0
+# Production default. false runs strategy code in-process (debugging aid:
+# no timeout/crash containment, and a hung callback stalls the tick feed).
+strategy_isolate_callbacks: true
+
 # Pycron process manager
 pycron_server_address: 127.0.0.1
 pycron_server_port: 7425

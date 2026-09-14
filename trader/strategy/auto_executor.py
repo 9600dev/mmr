@@ -50,19 +50,22 @@ import datetime as dt
 import hashlib
 import os
 import math
+import re
 import sys
 import time
 import uuid
 import queue
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from trader.common.logging_helper import setup_logging
 from trader.data.duckdb_store import DuckDBConnection
 from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.strategy.execution_intents import IntentStore, TERMINAL, merge_exit_scopes, timestamp_text
-from trader.strategy.execution_queue import ExecutionWorkQueue
+# ManagementWork lives with the queue so admission can use isinstance; it is
+# re-exported here because callers and tests import it from this module.
+from trader.strategy.execution_queue import ExecutionWorkQueue, ManagementWork, OperatorWork
 from trader.objects import Action
 from trader.trading.order_math import reducible_quantity
 from trader.trading.protective_stop import protective_stop_plan
@@ -78,6 +81,32 @@ logging = setup_logging(module_name='auto_executor')
 
 class AutoExecutionError(Exception):
     pass
+
+
+# Management runs at 1 Hz (the runtime pulse) plus every idle worker wake, and
+# every non-terminal intent used to cost one intent-scoped broker round-trip
+# per cycle, forever. A non-terminal intent is now re-read on this schedule
+# unless the (already fetched) global order snapshot shows its rows changed,
+# which forces an immediate read; explicit events (a SELL for the key, a
+# cancellation) bypass the schedule entirely.
+RECONCILE_BACKOFF_SECONDS: tuple[float, ...] = (2.0, 5.0, 15.0, 60.0)
+# IB can report Cancelled and then a late execution, so a CANCELLED intent is
+# still reconciled for a while. Once it has sat unchanged this long under a
+# complete snapshot it is settled for reconciliation purposes and never read
+# again (its fills are already checkpointed; an operator can still list it).
+TERMINAL_SETTLE_SECONDS = 300.0
+# A server DEFERRED verdict names foreign working orders that reserve the
+# shares. The close stays pending and is retried on this schedule.
+DEFERRED_RETRY_SECONDS: tuple[float, ...] = (5.0, 10.0, 20.0, 40.0, 60.0)
+# An RPC thread hands operator acts to the worker and waits this long. The
+# trader forwards these RPCs with a 60s client timeout; finish under it.
+OPERATOR_WORK_TIMEOUT_SECONDS = 45.0
+# After an emergency reduction was attempted, the durable close for the same
+# holding waits this long for that attempt to be reconciled (its placed order
+# found, or the trader's RETRYABLE proof) before it may submit itself.
+EMERGENCY_HANDOFF_SECONDS = 120.0
+_DEFERRED_ORDER_ID = re.compile(r'(\d+) \(owner ')
+_WORKING_STATUSES = frozenset({'PendingSubmit', 'ApiPending', 'PreSubmitted', 'Submitted', 'PendingCancel'})
 
 
 # ---------------------------------------------------------------------------
@@ -155,11 +184,6 @@ class BarWork:
     entry_bar_ts: Any = None
     observed_bar_timestamps: Optional[tuple[Any, ...]] = None
     observed_progress: Optional[tuple[str, int]] = None
-
-
-@dataclass
-class ManagementWork:
-    """Independent broker reconciliation; survives inactive strategy code."""
 
 
 @dataclass
@@ -869,11 +893,23 @@ class AutoExecutor:
         self.paper_trading = paper_trading
         self.cooldown_seconds = cooldown_seconds
         self.event_store = event_store
+        self._duckdb_path = duckdb_path
         self.state = AutoExecState(duckdb_path)
         self.intents = IntentStore(duckdb_path)
         self.authority_check = authority_check
+        # No submission started by an EARLIER process can still be in flight;
+        # an OPEN intent older than this instant with no broker evidence is a
+        # candidate for the never-submitted proof (see _resolve_unsubmitted_open).
+        self._started_at = time.time()
         self._management_queued = False
         self._snapshot_cache = None
+        # Process-local bookkeeping. None of it is a safety input: losing it
+        # on restart only means every intent is due for reconciliation again.
+        self._reconcile_schedule: dict[str, dict] = {}   # intent_id -> due/step/fingerprint
+        self._deferred_warned: dict[str, str] = {}       # intent_id -> last DEFERRED reason logged
+        self._unresolved_open_warned: set[str] = set()   # OPEN intents already explained once
+        self._env_warned: set = set()                    # keys of notices already emitted once
+        self._proposal_store = None                      # lazily opened; same DuckDB as the SDK
         self._emergency_exits: dict[tuple[str, int], dict] = {}
         self._exit_overflow: dict[tuple[str, int], SignalWork] = {}
         self._bar_overflow: dict[tuple[str, int], BarWork] = {}
@@ -976,12 +1012,43 @@ class AutoExecutor:
         exits fire long before it. It is the only protection that survives a
         dead feed / dead strategy_service while holding (the stale-bar gate
         only guards opens). Deliberately wide so it never competes with the
-        strategy's own exits, which the backtester does not model. 0 (or
-        malformed) disables."""
+        strategy's own exits, which the backtester does not model. 0 disables
+        explicitly; a malformed, non-finite or negative value falls back to the
+        documented default of 8 with one logged warning — it used to return 0,
+        which silently switched every disaster stop off on a typo."""
+        raw = os.environ.get('MMR_PROTECTIVE_STOP_PCT', '')
+        if raw == '':
+            return 8.0
         try:
-            return float(os.environ.get('MMR_PROTECTIVE_STOP_PCT', '') or 8.0)
+            value = float(raw)
         except ValueError:
-            return 0.0
+            value = float('nan')
+        if math.isfinite(value) and value >= 0:
+            return value
+        self._warn_once(('env', 'MMR_PROTECTIVE_STOP_PCT', raw), logging.warning,
+                        'auto-executor: MMR_PROTECTIVE_STOP_PCT=%r is not a finite non-negative number; '
+                        'using the default 8%% (set it to 0 to disable disaster stops deliberately)', raw)
+        return 8.0
+
+    def _warn_once(self, key, log, message, *args):
+        """Emit a deduplicated notice; the set is process-local by design."""
+        warned = self._volatile('_env_warned', set)
+        if key in warned:
+            return
+        warned.add(key)
+        log(message, *args)
+
+    def _volatile(self, name: str, factory: Callable[[], Any]) -> Any:
+        """Process-local bookkeeping, created on first use.
+
+        Several tests build a partially initialised executor and drive one
+        method; these caches must not make that construction path fail.
+        """
+        value = getattr(self, name, None)
+        if value is None:
+            value = factory()
+            setattr(self, name, value)
+        return value
 
     # -- loop-side API (called from the runtime's event loop; never blocks) ----
 
@@ -990,7 +1057,8 @@ class AutoExecutor:
             logging.info('auto-executor: signal suppressed by %s', self.KILL_SWITCH_ENV)
             return False
         self.start()
-        if self._queue.put(work):
+        refusal = self._queue.admit(work)
+        if refusal is None:
             return True
         if work.action == Action.SELL:
             # Like ordinary queue admission, this is not yet a durable
@@ -1006,8 +1074,10 @@ class AutoExecutor:
             logging.error('auto-executor: owned exit admitted to overflow mailbox for %s/%s',
                           work.strategy_name, work.conid)
             return True
-        logging.error('auto-executor: opening queue full; signal was NOT admitted for %s/%s',
-                      work.strategy_name, work.conid)
+        # Name the actual cause: a full opening queue and an exit already
+        # queued for this key are different failures with different remedies.
+        logging.error('auto-executor: %s; signal was NOT admitted for %s/%s',
+                      refusal, work.strategy_name, work.conid)
         return False
 
     def submit_bar(self, strategy_name: str, conid: int, bar_ts, bars_held: int,
@@ -1099,6 +1169,8 @@ class AutoExecutor:
                     self._process_signal(item)
                 elif isinstance(item, BarWork):
                     self._process_bar(item)
+                elif isinstance(item, OperatorWork):
+                    item.run()  # its exception travels back to the waiting RPC thread
                 elif isinstance(item, ManagementWork):
                     with self._view_lock:
                         self._management_queued = False
@@ -1106,17 +1178,46 @@ class AutoExecutor:
             except Exception:
                 logging.exception('auto-executor: error processing %s', item)
 
+    def _run_on_worker(self, fn: Callable[[], Any], description: str,
+                       timeout: float = OPERATOR_WORK_TIMEOUT_SECONDS) -> Any:
+        """Execute an operator act on the worker thread and return its result.
+
+        Worker-owned state must not be mutated from an RPC thread. Calls that
+        already run on the worker execute inline. A partially constructed
+        executor with no queue (test doubles) has no worker to race and also
+        runs inline.
+        """
+        if threading.current_thread() is getattr(self, '_worker', None):
+            return fn()
+        work_queue = getattr(self, '_queue', None)
+        if work_queue is None:
+            return fn()
+        work = OperatorWork(fn, description)
+        self.start()
+        refusal = work_queue.admit(work)
+        if refusal is not None:
+            raise AutoExecutionError(f'executor refused {description}: {refusal}')
+        return work.wait(timeout)
+
     def adopt_legacy_holding(self, strategy: str, conid: int, avg_cost: Optional[float] = None) -> dict:
         """Operator-attested ownership for a holding attributed before epochs existed.
 
-        Callable from any thread (the strategy_service RPC runs it off-loop).
+        Callable from any thread (the strategy_service RPC runs it off-loop);
+        the work itself runs ON THE WORKER, because it corroborates against a
+        fresh broker read (the snapshot cache), clears ownership warnings and
+        adopts the holding's working protective — all worker-owned state.
         Requires a complete broker position read corroborating at least the
         attributed quantity; the cost basis comes from the operator or, failing
-        that, the broker's average cost for the instrument. The worker picks
-        the adopted holding up on its next management cycle, at which point
-        its time exits, closes and protective repair resume.
+        that, the broker's average cost for the instrument. The holding's time
+        exits, closes and protective repair resume on the next management
+        cycle, which the adoption requests.
         """
         conid = int(conid)
+        return self._run_on_worker(
+            lambda: self._adopt_legacy_holding_on_worker(strategy, conid, avg_cost),
+            f'legacy adoption of {strategy}/{conid}')
+
+    def _adopt_legacy_holding_on_worker(self, strategy: str, conid: int, avg_cost: Optional[float]) -> dict:
         position = self.state.open_position(strategy, conid)
         if position is None:
             raise AutoExecutionError(f'{strategy}/{conid} has no attributed OPEN holding to adopt')
@@ -1146,9 +1247,223 @@ class AutoExecutor:
             'auto-executor: ADOPTED legacy holding %s/%s: %g @ %.4f (broker holds %g); ownership epoch %s '
             'assigned by operator attestation', strategy, conid, attributed, basis, held, adopted['ownership_epoch'])
         self._ownership_warnings.discard((strategy, conid, 'legacy holding'))
+        # The attestation covers the holding's own disaster stop too: without
+        # this the stop stayed attribution_unresolved forever (its broker claim
+        # predates the adoption instant, which is the only origin the observed
+        # adoption path accepts), and every close/repair path refused.
+        protectives = self._adopt_attested_protectives(
+            strategy, conid, position.get('protective_order_id'), adopted, attestation)
+        if protectives:
+            adopted['adopted_protective_intents'] = protectives
         self._snapshot_cache = None
         self.submit_management()
         return adopted
+
+    def _adopt_attested_protectives(self, strategy: str, conid: int, tracked, adopted: dict,
+                                    attestation: str) -> list[str]:
+        """Bind the holding's recorded, working stop to the attested ownership.
+
+        Only the stop whose identity the holding's row records (its
+        ``protective_order_id``) and whose broker observation is a working
+        SELL stop for this owner and conId belongs to the attested holding.
+        Any other unresolved protective keeps its refusal.
+        """
+        if not tracked:
+            return []
+        try:
+            self._snapshot_cache = None
+            rows = self._records(self._execution_snapshot().get('orders', []))
+        except Exception as exc:
+            logging.warning('auto-executor: adopted %s/%s but its tracked protective %s could not be observed '
+                            '(%s); that stop stays attribution-unresolved until reconciliation can see it',
+                            strategy, conid, tracked, exc)
+            return []
+        observed = [row for row in rows
+                    if int(row.get('orderId', 0) or 0) == int(tracked)
+                    and self._is_owned_protective(row, strategy, conid)
+                    and any(row.get(field) in _WORKING_STATUSES for field in ('status', 'brokerStatus'))]
+        if not observed:
+            logging.warning('auto-executor: adopted %s/%s but its tracked protective %s is not observed as a '
+                            'working %s SELL stop; no protective attribution was changed', strategy, conid,
+                            tracked, strategy)
+            return []
+        epoch, started = adopted['ownership_epoch'], adopted['ownership_started_at']
+        resolved: list[str] = []
+        for intent in self.intents.all(strategy=strategy, conid=conid, kind='PROTECTIVE', active=True):
+            payload = intent['payload']
+            if not payload.get('attribution_unresolved'):
+                continue
+            if int(tracked) not in [int(oid) for oid in payload.get('order_ids', [])]:
+                continue  # a stop that is not the recorded identity keeps its refusal
+            if payload.get('ownership_epoch') not in (None, epoch):
+                continue  # bound to another holding; never re-attribute it here
+            self.intents.update(intent, status='WORKING', attribution_unresolved=False,
+                                ownership_epoch=epoch, ownership_started_at=started,
+                                adopted_by_attestation=attestation)
+            self._ownership_warnings.discard((strategy, conid, intent['intent_id']))
+            resolved.append(intent['intent_id'])
+        if resolved:
+            logging.warning('auto-executor: attestation for %s/%s also adopts its working protective order %s '
+                            '(intents %s); closes, emergency exits and protective repair may proceed',
+                            strategy, conid, tracked, resolved)
+        return resolved
+
+    # -- operator surface (mmr strategies intents / resolve-intent) -------------
+
+    def list_execution_intents(self, strategy: Optional[str] = None, conid: Optional[int] = None,
+                               active_only: bool = True) -> list[dict]:
+        """JSON-safe intent rows with a plain-language ``blocking`` explanation.
+
+        Read-only, so it is safe from the RPC thread even when the worker is
+        blocked on a broker call — which is exactly when an operator needs it.
+        ``active_only`` keeps non-terminal intents plus terminal CLOSE intents
+        whose exit request is still pending (they will mint a residual close).
+        """
+        rows = self.intents.all(strategy=strategy, conid=None if conid is None else int(conid))
+        lock = getattr(self, '_view_lock', None)
+        if lock is not None:
+            with lock:
+                emergency = set(self._volatile('_emergency_exits', dict))
+        else:
+            emergency = set(self._volatile('_emergency_exits', dict))
+        listed = []
+        for intent in rows:
+            payload = intent['payload']
+            pending_request = (intent['kind'] == 'CLOSE'
+                               and bool(payload.get('exit_request_active') or payload.get('successor_exit')))
+            if active_only and intent['status'] in TERMINAL and not pending_request:
+                continue
+            listed.append(self._intent_row(intent, emergency))
+        return listed
+
+    def _intent_row(self, intent: dict, emergency_keys: set) -> dict:
+        payload = intent['payload']
+        flags = {name: payload.get(name) for name in (
+            'attribution_unresolved', 'never_submitted', 'operator_resolved', 'adopted',
+            'adopted_by_attestation', 'emergency', 'exit_request_active', 'reconciled_terminal',
+            'resume_approval', 'recovery_authority_unknown') if payload.get(name) is not None}
+        return dict(
+            intent_id=intent['intent_id'], kind=intent['kind'], status=intent['status'],
+            strategy=intent['strategy'], conid=int(intent['conid']),
+            created=self._iso(payload.get('intent_created_at')), updated=self._iso(intent.get('updated')),
+            submitted_at=self._iso(payload.get('submitted_at')),
+            order_ids=[int(oid) for oid in payload.get('order_ids', []) or []],
+            proposal_id=payload.get('proposal_id'), quantity=payload.get('quantity'),
+            cumulative_filled=payload.get('cumulative_filled'), bar_ts=payload.get('bar_ts'),
+            reason=payload.get('reason'), error=payload.get('error'),
+            deferred_reason=payload.get('deferred_reason'), deferred_at=self._iso(payload.get('deferred_at')),
+            deferred_count=payload.get('deferred_count'), operator_reason=payload.get('operator_reason'),
+            ownership_epoch=payload.get('ownership_epoch'), flags=flags,
+            blocking=self._intent_blocking(intent, emergency_keys))
+
+    @staticmethod
+    def _iso(value) -> Optional[str]:
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+            return None
+        return dt.datetime.fromtimestamp(float(value), dt.timezone.utc).isoformat()
+
+    @staticmethod
+    def _intent_blocking(intent: dict, emergency_keys: set) -> str:
+        payload, kind, status = intent['payload'], intent['kind'], intent['status']
+        notes: list[str] = []
+        if status in TERMINAL:
+            if kind == 'CLOSE' and (payload.get('exit_request_active') or payload.get('successor_exit')):
+                notes.append('exit request still pending; a residual close is minted once ownership reconciles')
+        elif kind == 'OPEN':
+            notes.append('blocks opens')
+            if not payload.get('order_ids'):
+                notes.append('blocks exits (no broker order evidence; exit sizing waits for it)')
+        elif kind == 'CLOSE':
+            if payload.get('deferred_at'):
+                notes.append(f"blocks opens; exit DEFERRED by the trader and retried with backoff "
+                             f"({payload.get('deferred_reason')})")
+            else:
+                notes.append('blocks opens; exit pending')
+        elif kind == 'PROTECTIVE':
+            if payload.get('attribution_unresolved'):
+                notes.append('blocks exits and protective repair (attribution unresolved; '
+                             '`mmr strategies adopt NAME CONID --attest` for a legacy holding)')
+            elif status != 'WORKING':
+                notes.append('blocks opens (protective placement not yet acknowledged)')
+        if (intent['strategy'], int(intent['conid'])) in emergency_keys:
+            notes.append('emergency exit pending for this instrument')
+        return '; '.join(notes) or 'none'
+
+    def resolve_execution_intent(self, intent_id: str, reason: str) -> dict:
+        """Operator resolution of an intent with NO broker evidence — never automatic.
+
+        Runs on the worker (it mutates the journal and the snapshot cache).
+        Refused when the intent recorded order ids that are not proven
+        terminal or when the intent-scoped snapshot still shows matching
+        orders: resolving those would hide real exposure.
+        """
+        reason = (reason or '').strip()
+        if not reason:
+            raise AutoExecutionError('operator resolution requires a non-empty reason')
+        return self._run_on_worker(
+            lambda: self._resolve_execution_intent_on_worker(str(intent_id), reason),
+            f'operator resolution of intent {intent_id}')
+
+    def _resolve_execution_intent_on_worker(self, intent_id: str, reason: str) -> dict:
+        intent = self.intents.get(intent_id)
+        if intent is None:
+            raise AutoExecutionError(f'intent {intent_id} is unknown to this executor')
+        if intent['status'] in TERMINAL:
+            raise AutoExecutionError(f'intent {intent_id} is already {intent["status"]}')
+        payload = intent['payload']
+        self._snapshot_cache = None
+        try:
+            snapshot = self._execution_snapshot(intent)
+        except Exception as exc:
+            raise AutoExecutionError(
+                f'cannot resolve {intent_id}: the intent-scoped broker snapshot is unavailable ({exc})') from exc
+        matched = self._matching_rows(intent, self._records(snapshot.get('orders', [])))
+        if matched:
+            described = ', '.join(
+                f"{int(row.get('orderId', 0) or 0)}:{row.get('status') or row.get('brokerStatus') or 'unknown'}"
+                for row in matched)
+            raise AutoExecutionError(
+                f'refusing to resolve {intent_id}: the broker snapshot still shows matching orders '
+                f'[{described}]; reconcile them (mmr orders / mmr reservations) instead of resolving')
+        ids = [int(oid) for oid in payload.get('order_ids', []) if int(oid) > 0]
+        if ids and not snapshot.get('complete', False):
+            raise AutoExecutionError(
+                f'refusing to resolve {intent_id}: it recorded broker order ids {ids} and the snapshot is '
+                f'incomplete, so their status cannot be checked')
+        for oid in ids:
+            if not self._order_is_terminal(oid):
+                raise AutoExecutionError(
+                    f'refusing to resolve {intent_id}: broker order {oid} is not proven terminal at IB')
+        previous = intent['status']
+        self.intents.update(intent, status='RESOLVED', operator_resolved=True, operator_reason=reason,
+                            operator_resolved_at=time.time())
+        self._volatile('_reconcile_schedule', dict).pop(intent_id, None)
+        strategy, conid = intent['strategy'], int(intent['conid'])
+        try:
+            bar_ts = (dt.datetime.fromisoformat(payload['bar_ts']) if payload.get('bar_ts')
+                      else dt.datetime.now(dt.timezone.utc))
+            self.state.log_decision(strategy, conid, bar_ts, 'BUY' if intent['kind'] == 'OPEN' else 'SELL',
+                                    'operator_resolved', f'{previous} -> RESOLVED by operator: {reason}',
+                                    intent_id=intent_id)
+        except Exception:
+            logging.exception('auto-executor: operator resolution audit row failed for %s', intent_id)
+        logging.warning('auto-executor: OPERATOR RESOLVED intent %s (%s %s/%s, was %s): %s',
+                        intent_id, intent['kind'], strategy, conid, previous, reason)
+        self._snapshot_cache = None
+        self._load_open_view()
+        self.submit_management()
+        return dict(intent_id=intent_id, kind=intent['kind'], strategy=strategy, conid=conid,
+                    status='RESOLVED', previous_status=previous, reason=reason)
+
+    @staticmethod
+    def _records(rows) -> list:
+        return rows.to_dict('records') if hasattr(rows, 'to_dict') else list(rows or [])
+
+    def _matching_rows(self, intent: dict, rows: list) -> list:
+        ids = {int(oid) for oid in intent['payload'].get('order_ids', []) if int(oid) > 0}
+        return [row for row in rows
+                if self._matches_intent_order(row, self._broker_intent_id(intent), ids)
+                and int(row.get('conId', 0) or 0) == int(intent['conid'])]
 
     def _broker_average_cost(self, conid: int) -> Optional[float]:
         sdk = self._get_sdk()
@@ -1578,6 +1893,12 @@ class AutoExecutor:
                 result = sdk.approve(proposal_id)
             self._snapshot_cache = None
         except Exception as exc:
+            deferral = self._deferral_text(str(exc)) if approve_started else None
+            if deferral is not None and action == 'SELL':
+                # The trader refused before any cancellation or send (contract:
+                # DEFERRED names the foreign orders and changes nothing).
+                self._defer_close(intent, deferral)
+                return
             # Even a connection error may occur after server receipt. The
             # absence of a reply is never proof that the broker did nothing.
             self.intents.update(intent, status='UNKNOWN' if approve_started else 'REJECTED', error=str(exc))
@@ -1585,6 +1906,14 @@ class AutoExecutor:
             return
         if not result.is_success():
             error = str(result.error)
+            deferral = self._deferral_text(error)
+            if deferral is not None and action == 'SELL':
+                # Both arrival forms land here: a bare 'DEFERRED: ...' result
+                # and the server wrapper 'REJECTED: intent <id>: DEFERRED: ...'.
+                # Neither is a refusal of the exit and neither is UNKNOWN: the
+                # request stays pending and is retried with backoff.
+                self._defer_close(intent, deferral)
+                return
             self.intents.update(intent, status='UNKNOWN', error=error)
             # A terminal rejection/cancellation can race with a real partial
             # fill. Recover executions before treating the response as refusal.
@@ -1594,6 +1923,10 @@ class AutoExecutor:
             explicit_rejection = (not any(word in error.lower() for word in
                                           ('unknown', 'timeout', 'timed out', 'connection'))
                                   and any(word in error.lower() for word in ('reject', 'refus', 'risk gate')))
+            if deferral is not None:
+                # An opening the trader deferred was, by contract, never sent;
+                # it is a clean refusal, not a reservation that blocks the key.
+                explicit_rejection = True
             self.intents.update(intent, status='REJECTED' if explicit_rejection else 'UNKNOWN', error=error)
             self.state.log_decision(intent['strategy'], intent['conid'],
                                     dt.datetime.fromisoformat(payload['bar_ts']), action,
@@ -1607,14 +1940,194 @@ class AutoExecutor:
         # Keep the receipt time with the durable submission receipt even if the
         # following DuckDB activity-log write fails. It still consumes
         # opening capacity after a delayed acknowledgement or restart.
+        cleared: dict[str, Any] = {}
+        if payload.get('deferred_at') is not None:
+            cleared = dict(deferred_at=None, deferred_reason=None, deferred_retry_requested=False)
+            self._volatile('_deferred_warned', dict).pop(intent['intent_id'], None)
+            logging.info('auto-executor: exit %s for %s/%s proceeds after %s deferral(s)',
+                         intent['intent_id'], intent['strategy'], intent['conid'],
+                         payload.get('deferred_count', 0))
         self.intents.update(intent, status='WORKING', order_ids=[int(oid) for oid in order_ids],
-                            receipt_observed_at=time.time())
+                            receipt_observed_at=time.time(), **cleared)
         self.state.log_decision(intent['strategy'], intent['conid'],
                                 dt.datetime.fromisoformat(payload['bar_ts']), action,
                                 'open' if action == 'BUY' else 'close', f'proposal #{proposal_id}; awaiting fills',
                                 intent_id=intent['intent_id'])
         self._last_exec[(intent['strategy'], intent['conid'])] = time.time()
         self._reconcile_intent(intent)
+
+    @staticmethod
+    def _deferral_text(message: str) -> Optional[str]:
+        """The trader's DEFERRED verdict inside ``message``, or None.
+
+        Recognised both bare (``DEFERRED: ...``) and behind the server's
+        status wrapper (``REJECTED: intent <id>: DEFERRED: ...``). A message
+        that declares UNKNOWN before any DEFERRED is a lost reply, not a
+        deferral: the broker may have acted.
+        """
+        text = str(message or '')
+        at = text.find('DEFERRED:')
+        if at < 0:
+            return None
+        unknown = text.find('UNKNOWN:')
+        if 0 <= unknown < at:
+            return None
+        return text[at:]
+
+    def _defer_close(self, intent: dict, reason: str) -> None:
+        """Keep ONE pending close request across a trader DEFERRED verdict.
+
+        The proposal the trader refused is terminal (the SDK moves it to
+        FAILED), so the retry proposes afresh; the durable request and its
+        exit authority are unchanged. Retries run on DEFERRED_RETRY_SECONDS
+        and wait while the named foreign orders are still observed working.
+        """
+        payload = intent['payload']
+        retired = list(payload.get('deferred_proposal_ids', []) or [])
+        if payload.get('proposal_id') is not None:
+            retired.append(payload['proposal_id'])
+        count = int(payload.get('deferred_count', 0) or 0) + 1
+        self.intents.update(intent, status='WAITING', proposal_id=None, resume_approval=False,
+                            deferred_reason=reason, deferred_at=time.time(), deferred_count=count,
+                            deferred_proposal_ids=retired, deferred_retry_requested=False, error=reason)
+        try:
+            self.state.log_decision(intent['strategy'], intent['conid'],
+                                    dt.datetime.fromisoformat(payload['bar_ts']), 'SELL',
+                                    'close_deferred', reason, intent_id=intent['intent_id'])
+        except Exception:
+            logging.exception('auto-executor: deferral audit row failed for %s', intent['intent_id'])
+        warned = self._volatile('_deferred_warned', dict)
+        if warned.get(intent['intent_id']) != reason:
+            warned[intent['intent_id']] = reason
+            logging.warning(
+                'auto-executor: exit %s for %s/%s DEFERRED by the trader (attempt %d): %s — the close request '
+                'stays pending and is retried with backoff (up to %gs); the named foreign orders must be '
+                'cancelled or retired by their owner (`mmr orders`, `mmr cancel <id>`, `mmr reservations`) '
+                'before this strategy exit can proceed. Protective repair continues meanwhile.',
+                intent['intent_id'], intent['strategy'], intent['conid'], count, reason,
+                DEFERRED_RETRY_SECONDS[-1])
+
+    def _deferral_due(self, intent: dict) -> bool:
+        """Has the deferred close waited out its current backoff step?"""
+        payload = intent['payload']
+        deferred_at = payload.get('deferred_at')
+        if not isinstance(deferred_at, (int, float)) or isinstance(deferred_at, bool):
+            return True
+        step = min(max(int(payload.get('deferred_count', 1) or 1) - 1, 0), len(DEFERRED_RETRY_SECONDS) - 1)
+        return time.time() - float(deferred_at) >= DEFERRED_RETRY_SECONDS[step]
+
+    def _deferral_still_holds(self, intent: dict) -> bool:
+        """Are the foreign orders the verdict named still working on this conId?
+
+        While they are, retrying would cancel our own stop only to be deferred
+        again, leaving the holding protected by the foreign order alone. If the
+        verdict named no order ids the retry proceeds on schedule.
+        """
+        named = {int(match) for match in _DEFERRED_ORDER_ID.findall(str(intent['payload'].get('deferred_reason') or ''))}
+        if not named:
+            return False
+        try:
+            rows = self._records(self._execution_snapshot().get('orders', []))
+        except Exception:
+            return True  # cannot see the book; keep waiting rather than churn protection
+        return any(int(row.get('orderId', 0) or 0) in named
+                   and int(row.get('conId', 0) or 0) == int(intent['conid'])
+                   and str(row.get('action', '')).upper() == 'SELL'
+                   and split_order_reference(row.get('orderRef'))[0] != intent['strategy']
+                   and any(row.get(field) in _WORKING_STATUSES for field in ('status', 'brokerStatus'))
+                   for row in rows)
+
+    def _foreign_reservation_covering(self, strategy: str, conid: int, held: float, rows: list) -> Optional[str]:
+        """A DEFERRED verdict the trader is certain to return, predicted locally.
+
+        The trader defers an exit when foreign working reductions reserve the
+        whole position. Observing that here, BEFORE cancelling our own stop,
+        keeps the holding under its own protection while the foreign order
+        stands. Only the single largest foreign reduction is compared, which is
+        a lower bound on the server's reserved capacity under any OCA grouping,
+        so this can only predict deferrals the server would issue anyway.
+        """
+        foreign = []
+        for row in rows:
+            if (int(row.get('conId', 0) or 0) != int(conid) or str(row.get('action', '')).upper() != 'SELL'
+                    or split_order_reference(row.get('orderRef'))[0] == strategy
+                    or not any(row.get(field) in _WORKING_STATUSES for field in ('status', 'brokerStatus'))):
+                continue
+            try:
+                total = float(row.get('totalQuantity', 0) or 0)
+                filled = float(row.get('filled', 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if not (math.isfinite(total) and math.isfinite(filled)):
+                continue
+            foreign.append((max(0.0, total - filled), row))
+        if not foreign:
+            return None
+        largest, row = max(foreign, key=lambda item: item[0])
+        if largest <= 0 or held - largest > 0:
+            return None
+        owner = split_order_reference(row.get('orderRef'))[0] or 'operator'
+        return (f"DEFERRED: SELL {held:g} not placed: all {held:g} held are reserved by working reductions "
+                f"owned elsewhere [{int(row.get('orderId', 0) or 0)} (owner {owner})]; that owner must retire "
+                f"them (or cancel them explicitly) before this close (predicted before cancelling own protection)")
+
+    def _holding_durably_gone(self, strategy: str, conid: int) -> bool:
+        """Durable inventory says flat and no opening can still add to it.
+
+        A storage failure answers False: an unreadable holding is not a
+        vanished one.
+        """
+        try:
+            if self.state.open_position(strategy, conid) is not None:
+                return False
+            return not self.intents.all(strategy=strategy, conid=conid, kind='OPEN', active=True)
+        except Exception:
+            return False
+
+    def _competing_reduction(self, intent: dict) -> Optional[str]:
+        """Why this durable close must not submit a physical reduction yet.
+
+        Two submitters for one holding is the failure this prevents: another
+        active CLOSE for the key that already holds broker order ids or is in
+        flight (a restored emergency attempt, a lost-reply submission), or an
+        emergency ATTEMPT that has not been reconciled yet. The emergency wait
+        is bounded by EMERGENCY_HANDOFF_SECONDS: the emergency path has that
+        long to find its placed order or the trader's RETRYABLE proof, after
+        which the server-side reservation ledger remains the arbiter (a still
+        reserved quantity comes back DEFERRED, which is retried, not refused).
+        A never-attempted mailbox entry owns nothing physical and does not
+        hold the durable close back — waiting for it could deadlock when the
+        emergency path cannot send at all.
+        """
+        strategy, conid = intent['strategy'], int(intent['conid'])
+        try:
+            # Last durable observations only: this runs on the exit path, which
+            # must not depend on a journal read succeeding right now.
+            closes = [item for item in self.intents.cached()
+                      if (item['strategy'], item['conid'], item['kind']) == (strategy, conid, 'CLOSE')]
+            for other in closes:
+                if other['intent_id'] == intent['intent_id'] or other['status'] in TERMINAL:
+                    continue
+                if other['payload'].get('order_ids') or other['status'] in ('SUBMITTING', 'UNKNOWN', 'WORKING'):
+                    return (f"close {other['intent_id']} ({other['status']}) already reserves this "
+                            f"holding's reduction")
+            with self._view_lock:
+                emergency = self._emergency_exits.get((strategy, conid))
+                if not (emergency and emergency.get('attempted')):
+                    return None
+                identity = emergency.get('intent_id')
+                attempted_at = emergency.setdefault('attempted_at', time.time())
+            if identity == intent['intent_id'] or any(item['intent_id'] == identity for item in closes):
+                # The attempt has been restored as a durable CLOSE intent; the
+                # journal (and the check above) governs it from here on.
+                return None
+            if (isinstance(attempted_at, (int, float)) and not isinstance(attempted_at, bool)
+                    and time.time() - float(attempted_at) < EMERGENCY_HANDOFF_SECONDS):
+                return f'emergency exit {identity} was attempted and awaits reconciliation'
+        except Exception as exc:
+            logging.warning('auto-executor: competing-reduction check unavailable for %s/%s: %s',
+                            strategy, conid, exc)
+        return None
 
     def _capture_exit_scope(self, strategy: str, conid: int) -> dict:
         """Capture authority once, when an explicit SELL is processed."""
@@ -1739,6 +2252,11 @@ class AutoExecutor:
                                entry_bar_ts=self._entry_text(position['entry_bar_ts']),
                                policy_entry_bar_ts=self._entry_text(entry_bar_ts))
                 self._retain_close_successor(outstanding[0], request)
+            if exit_scope is not None and outstanding[0]['payload'].get('deferred_at') is not None:
+                # A fresh explicit SELL retries a deferred close without waiting
+                # out its backoff (a timer re-evaluation respects it); the
+                # "foreign orders still working" check still applies.
+                self.intents.update(outstanding[0], deferred_retry_requested=True)
             self._advance_close(outstanding[0])
             self._finish_close_request(outstanding[0])
             return
@@ -1820,11 +2338,28 @@ class AutoExecutor:
 
         No policy gate refuses this exit. Cancellation uncertainty leaves a
         durable pending reduction that management retries independently of the
-        strategy, instead of submitting a second executable SELL.
+        strategy, instead of submitting a second executable SELL. A trader
+        DEFERRED verdict is a deferral, not a refusal: the same request is
+        retried with backoff (a fresh explicit SELL marks it
+        ``deferred_retry_requested`` and skips the wait) and only once the
+        foreign orders it named are no longer observed working.
         """
         self._reconcile_intent(intent)
         if (intent['status'] in TERMINAL or intent['payload'].get('order_ids')
                 or intent['payload'].get('attribution_unresolved')):
+            return
+        if intent['payload'].get('deferred_at') is not None:
+            due = bool(intent['payload'].get('deferred_retry_requested')) or self._deferral_due(intent)
+            if not due or self._deferral_still_holds(intent):
+                return
+        competing = self._competing_reduction(intent)
+        if competing is not None:
+            # Another submitter already owns this holding's physical reduction
+            # until its outcome is known. Waiting here, before any cancellation,
+            # also leaves our own protection in place meanwhile.
+            self._warn_once(('exclusive', intent['intent_id'], competing), logging.warning,
+                            'auto-executor: durable close %s for %s/%s waits: %s',
+                            intent['intent_id'], intent['strategy'], intent['conid'], competing)
             return
         if intent['status'] in ('SUBMITTING', 'UNKNOWN', 'WORKING') and (
                 intent['payload'].get('proposal_id') or intent['payload'].get('emergency')
@@ -1883,6 +2418,15 @@ class AutoExecutor:
                 # incomplete position read above. Letting the protective lookup
                 # raise here escalated a routine, still-WAITING close into the
                 # emergency path: two independent submitters for one holding.
+                return
+            # Learn a certain DEFERRED verdict BEFORE cancelling our own stop:
+            # if foreign working reductions already reserve the whole position
+            # the trader will defer this close, and cancelling first would
+            # leave the holding protected only by the foreign order.
+            predicted = self._foreign_reservation_covering(
+                strategy, conid, broker_qty, self._records(self._execution_snapshot().get('orders', [])))
+            if predicted is not None:
+                self._defer_close(intent, predicted)
                 return
             own = self._own_live_protectives(self._get_sdk(), strategy, conid)
             for protective in self.intents.all(strategy=strategy, conid=conid, kind='PROTECTIVE', active=True):
@@ -2057,9 +2601,15 @@ class AutoExecutor:
                             self._retain_close_successor(restored, emergency['successor_exit'])
                         self._reconcile_intent(restored)
                         if restored['status'] in TERMINAL:
-                            self._finish_close_request(restored)
+                            # The attempt is reconciled: release the mailbox
+                            # BEFORE the residual close is minted, or the
+                            # durable path would wait on an attempt that is
+                            # already accounted for. The restored intent is
+                            # durable, so a failure below is retried by the
+                            # next management pass.
                             with self._view_lock:
                                 self._emergency_exits.pop((strategy, conid), None)
+                            self._finish_close_request(restored)
                         continue
                     except Exception:
                         # The broker order still exists even if neither local
@@ -2096,7 +2646,18 @@ class AutoExecutor:
                 owned = next((row for row in positions
                               if row['strategy_name'] == strategy and row['conid'] == conid), None)
                 if owned is None:
-                    continue  # unavailable ownership is not permission to sell manual inventory
+                    # Unavailable ownership is not permission to sell manual
+                    # inventory. A never-attempted request whose holding is
+                    # durably gone (the durable close won, or it was closed
+                    # externally) has nothing left to reduce and must not keep
+                    # reserving the key against new opens.
+                    if not emergency['attempted'] and self._holding_durably_gone(strategy, conid):
+                        with self._view_lock:
+                            if self._emergency_exits.get((strategy, conid)) is emergency:
+                                self._emergency_exits.pop((strategy, conid), None)
+                        logging.info('auto-executor: emergency exit for %s/%s released: holding is gone and '
+                                     'no attempt was ever sent', strategy, conid)
+                    continue
                 scope = emergency.get('explicit_exit_scope')
                 scoped = scope is not None and self._scope_matches_position(scope, owned)
                 bound = (scope is None or emergency.get('request_entry_bar_ts') is not None) and (
@@ -2205,6 +2766,9 @@ class AutoExecutor:
                     emergency.update(ownership_epoch=epoch,
                                      ownership_started_at=owned.get('ownership_started_at'))
                 emergency['attempted'] = True
+                # The durable close for this key waits on this attempt until it
+                # is reconciled, bounded by EMERGENCY_HANDOFF_SECONDS from here.
+                emergency['attempted_at'] = time.time()
                 result = endpoint(con_id=conid, quantity=quantity, strategy_name=strategy,
                                   client_intent_id=emergency['intent_id'])
                 self._snapshot_cache = None
@@ -2376,8 +2940,21 @@ class AutoExecutor:
             cumulative_quote_notional=quote_notional if cost_evaluable else None)
         if delta and intent['kind'] == 'OPEN':
             self._unpublished_open_fills.add(intent['intent_id'])
+        now = time.time()
         if not unchanged:
-            self.intents.update(intent, status=status, cumulative_filled=cumulative)
+            stamp = dict(terminal_observed_at=now) if status in ('FILLED', 'CANCELLED') else {}
+            self.intents.update(intent, status=status, cumulative_filled=cumulative, **stamp)
+        elif status == 'CANCELLED' and not intent['payload'].get('reconciled_terminal'):
+            # IB can report Cancelled and then a late fill, so a cancelled
+            # intent keeps being read for a while. Unchanged under a complete
+            # snapshot for TERMINAL_SETTLE_SECONDS, it is settled: its fills are
+            # checkpointed and reconciliation stops spending a broker
+            # round-trip on it every cycle for the rest of the process's life.
+            observed_at = intent['payload'].get('terminal_observed_at')
+            if not isinstance(observed_at, (int, float)) or isinstance(observed_at, bool):
+                self.intents.update(intent, terminal_observed_at=now)
+            elif now - float(observed_at) >= TERMINAL_SETTLE_SECONDS:
+                self.intents.update(intent, reconciled_terminal=True)
         if delta:
             self._load_open_view()
 
@@ -2403,6 +2980,20 @@ class AutoExecutor:
             strategy, conid, identity)
 
     def _reconcile_intents(self, strategy=None, conid=None):
+        """Reconcile every intent that can still change, on a bounded schedule.
+
+        Live intents — WORKING orders, and UNKNOWN/SUBMITTING ones that hold
+        broker order ids — are read every cycle: their intent-scoped snapshot
+        carries completeness about legs the global snapshot cannot show, and
+        `tests/test_emergency_fill_checkpoint.py` pins that a missing leg is
+        reflected within one cycle. Settling intents — CANCELLED (kept for late
+        fills), an unpriced FILLED opening (price recovery) and an
+        UNKNOWN/SUBMITTING intent with no order evidence — are re-read on
+        RECONCILE_BACKOFF_SECONDS unless the global snapshot already fetched
+        this cycle shows their rows changed, which pulls them forward at once.
+        That bounds a cycle to the live set plus one shared round-trip, instead
+        of one round-trip per historical intent forever.
+        """
         self._adopt_observed_protectives(strategy, conid)
         # Terminal observations are replayed too: IB can report Cancelled and
         # then a late fill. Atomic checkpoints make both restart and late-fill
@@ -2418,11 +3009,186 @@ class AutoExecutor:
             if key not in self._ownership_warnings:
                 self._ownership_warnings.add(key)
                 logging.warning('auto-executor: owned fill price recovery deferred: %s', exc)
+        schedule = self._volatile('_reconcile_schedule', dict)
+        now = time.time()
+        observed: Optional[list] = None      # global rows, fetched at most once per call
+        observed_failed = False
         for intent in self.intents.all(strategy=strategy, conid=conid):
-            if (intent['status'] not in ('REJECTED', 'RESOLVED', 'FILLED')
-                    or (intent['kind'] == 'OPEN' and intent['status'] == 'FILLED'
-                        and intent['intent_id'] in unpriced)):
+            if intent['status'] in ('REJECTED', 'RESOLVED'):
+                continue
+            if intent['status'] == 'FILLED' and not (intent['kind'] == 'OPEN'
+                                                     and intent['intent_id'] in unpriced):
+                continue
+            if intent['status'] == 'CANCELLED' and intent['payload'].get('reconciled_terminal'):
+                continue  # settled: fills checkpointed, nothing left to observe
+            # Only broker-terminal statuses settle. An UNKNOWN/SUBMITTING
+            # intent is re-read every cycle even without order ids: a failed
+            # scoped read must be retried as soon as the transport recovers.
+            settling = intent['status'] in ('CANCELLED', 'FILLED')
+            entry = schedule.get(intent['intent_id'])
+            if settling and entry is not None and now < entry['due']:
+                if observed is None and not observed_failed:
+                    try:
+                        observed = self._records(self._execution_snapshot().get('orders', []))
+                    except Exception:
+                        observed_failed = True
+                if observed is None or self._observation_fingerprint(intent, observed) == entry['fingerprint']:
+                    continue  # nothing new to see before the next scheduled read
+            before = (intent['status'], intent['payload'].get('cumulative_filled'),
+                      tuple(intent['payload'].get('order_ids', []) or []))
+            self._reconcile_intent(intent)
+            self._resolve_unsubmitted_open(intent)
+            after = (intent['status'], intent['payload'].get('cumulative_filled'),
+                     tuple(intent['payload'].get('order_ids', []) or []))
+            step = 0 if (entry is None or before != after) else min(entry['step'] + 1,
+                                                                    len(RECONCILE_BACKOFF_SECONDS) - 1)
+            if observed is None and not observed_failed:
+                try:
+                    observed = self._records(self._execution_snapshot().get('orders', []))
+                except Exception:
+                    observed_failed = True
+            schedule[intent['intent_id']] = dict(
+                due=now + RECONCILE_BACKOFF_SECONDS[step], step=step,
+                fingerprint=self._observation_fingerprint(intent, observed) if observed is not None else None)
+
+    def _observation_fingerprint(self, intent: dict, rows: list) -> tuple:
+        """What the global snapshot currently says about this intent's orders.
+
+        Only a change in it can pull a backed-off intent forward. NaN cells
+        from frame adapters are normalised so they compare equal to themselves.
+        """
+        def cell(value):
+            # Absent and NaN both mean "not reported"; a plain string keeps
+            # the row tuples mutually comparable for the sort.
+            if value is None or (isinstance(value, float) and math.isnan(value)):
+                return ''
+            return str(value)
+        return tuple(sorted(
+            tuple(cell(row.get(field)) for field in (
+                'orderId', 'permId', 'clientId', 'status', 'brokerStatus', 'filled',
+                'fillQuantityKnown', 'identityAmbiguous', 'avgFillPrice', 'totalQuantity'))
+            for row in self._matching_rows(intent, rows)))
+
+    def _resolve_unsubmitted_open(self, intent: dict) -> None:
+        """Retire an OPEN intent that PROVABLY never reached the broker.
+
+        After a crash between SUBMITTING and the approve reply an OPEN intent
+        can sit with no order ids forever, and every BUY for the key is then
+        skipped as reserved exposure while every exit waits for its size. Only
+        an intent created by an EARLIER process is considered (nothing older
+        than this process can still be mid-submission). Proof, in order:
+
+        * no proposal recorded and none in the store carries this intent id
+          -> nothing was ever proposed;
+        * its proposal is PENDING -> reject it ('never approved'), nothing
+          was placed; REJECTED/EXPIRED -> never approved;
+        * approve was reached (APPROVED/EXECUTED/FAILED): adopt any order ids
+          the proposal recorded, otherwise resolve only when the trader's
+          intent-scoped snapshot says ``retry_safe`` (its journal claim is
+          RETRYABLE with zero reserved orders). Anything less stays UNKNOWN
+          and is explained once, naming the operator commands.
+        """
+        payload = intent['payload']
+        if intent['kind'] != 'OPEN' or intent['status'] in TERMINAL or payload.get('order_ids'):
+            return
+        started_at = getattr(self, '_started_at', None)
+        created = payload.get('intent_created_at')
+        if (not isinstance(started_at, (int, float)) or not isinstance(created, (int, float))
+                or isinstance(created, bool) or created >= started_at):
+            return  # possibly still in flight in this process; keep the reservation
+        strategy, conid, intent_id = intent['strategy'], intent['conid'], intent['intent_id']
+
+        def resolve(proof: str) -> None:
+            self.intents.update(intent, status='RESOLVED', never_submitted=True, never_submitted_proof=proof)
+            self._volatile('_unresolved_open_warned', set).discard(intent_id)
+            logging.warning('auto-executor: OPEN intent %s for %s/%s never reached the broker (%s); resolved so '
+                            'the instrument is no longer reserved', intent_id, strategy, conid, proof)
+
+        def unresolved(why: str) -> None:
+            warned = self._volatile('_unresolved_open_warned', set)
+            if intent_id in warned:
+                return
+            warned.add(intent_id)
+            logging.warning(
+                'auto-executor: OPEN intent %s for %s/%s has no broker order evidence and cannot be proven '
+                'unsent (%s); it blocks new opens and exit sizing for this instrument until resolved. Inspect '
+                'with `mmr strategies intents --strategy %s --conid %s`; after confirming at the broker '
+                '(`mmr orders`, `mmr trades`) that no order carries this intent id, resolve it with '
+                '`mmr strategies resolve-intent %s --reason "..." --attest`.',
+                intent_id, strategy, conid, why, strategy, conid, intent_id)
+
+        try:
+            store = self._proposal_store_or_none()
+            if store is None:
+                unresolved('the proposal store is unavailable to this executor')
+                return
+            proposal_id = payload.get('proposal_id')
+            if proposal_id is None:
+                found = store.db.execute(
+                    "SELECT id, status FROM trade_proposals "
+                    "WHERE json_extract_string(metadata, '$.client_intent_id') = ? ORDER BY id",
+                    [intent_id], fetch='all') or []
+                approved = [row for row in found if row[1] not in ('PENDING', 'REJECTED', 'EXPIRED')]
+                if not found:
+                    resolve('no proposal was ever created for it')
+                    return
+                if not approved:
+                    for pid, status in found:
+                        if status == 'PENDING':
+                            store.try_transition(int(pid), 'PENDING', 'REJECTED',
+                                                 rejection_reason='never approved; resolved on restart')
+                    resolve(f'its proposal(s) {[int(row[0]) for row in found]} were never approved')
+                    return
+                proposal_id = int(approved[0][0])
+                self.intents.update(intent, proposal_id=proposal_id)
+            proposal = store.get(int(proposal_id))
+            if proposal is None:
+                unresolved(f'proposal #{proposal_id} is not in the proposal store')
+                return
+            if proposal.status == 'PENDING':
+                store.try_transition(int(proposal_id), 'PENDING', 'REJECTED',
+                                     rejection_reason='never approved; resolved on restart')
+                resolve(f'proposal #{proposal_id} was still PENDING (never approved); rejected')
+                return
+            if proposal.status in ('REJECTED', 'EXPIRED'):
+                resolve(f'proposal #{proposal_id} is {proposal.status}; approval never happened')
+                return
+            recorded = [int(oid) for oid in (proposal.order_ids or []) if int(oid) > 0]
+            if recorded:
+                # The reply was lost but the proposal kept the physical ids:
+                # give them to the intent and let ordinary replay judge them.
+                self.intents.update(intent, status='UNKNOWN', order_ids=recorded)
                 self._reconcile_intent(intent)
+                return
+            snapshot = self._execution_snapshot(intent)  # the read _reconcile_intent just made, cached
+            if snapshot.get('retry_safe', False) and not self._matching_rows(
+                    intent, self._records(snapshot.get('orders', []))):
+                resolve(f'proposal #{proposal_id} is {proposal.status} and the trader reports its intent claim '
+                        f'RETRYABLE with no reserved order')
+                return
+            unresolved(f'proposal #{proposal_id} is {proposal.status} and the trader cannot prove no order was '
+                       f'reserved for it')
+        except Exception as exc:
+            unresolved(f'proof unavailable: {exc}')
+
+    def _proposal_store_or_none(self):
+        """The proposal store on this executor's DuckDB (the SDK uses the same file)."""
+        store = getattr(self, '_proposal_store', None)
+        if store is not None:
+            return store
+        path = getattr(self, '_duckdb_path', None) or getattr(
+            getattr(getattr(self, 'state', None), 'db', None), 'db_path', None)
+        if not path:
+            return None
+        try:
+            from trader.data.proposal_store import ProposalStore
+            store = ProposalStore(path)
+        except Exception as exc:
+            self._warn_once(('proposal-store', path), logging.warning,
+                            'auto-executor: proposal store unavailable at %s: %s', path, exc)
+            return None
+        self._proposal_store = store
+        return store
 
     def _adopt_observed_protectives(self, strategy=None, conid=None):
         positions = [row for row in self.state.all_open()
@@ -2654,7 +3420,7 @@ class AutoExecutor:
         try:
             self._reconcile_intents(strategy, conid)
             pos = self.state.open_position(strategy, conid)
-            if not pos or self.intents.all(strategy=strategy, conid=conid, kind='CLOSE', active=True):
+            if not pos or self._closes_blocking_protection(strategy, conid):
                 return
             snapshot = self._execution_snapshot()
             if not snapshot.get('complete', False):
@@ -2701,7 +3467,7 @@ class AutoExecutor:
                 self._snapshot_cache = None
                 self._reconcile_intents(strategy, conid)
             pos = self.state.open_position(strategy, conid)
-            if (not pos or self.intents.all(strategy=strategy, conid=conid, kind='CLOSE', active=True)
+            if (not pos or self._closes_blocking_protection(strategy, conid)
                     or self.intents.all(strategy=strategy, conid=conid, kind='PROTECTIVE', active=True)):
                 return
             snapshot = self._execution_snapshot()
@@ -2743,6 +3509,18 @@ class AutoExecutor:
             self.state.set_protective(strategy, conid, order_id)
         except Exception:
             logging.exception('auto-executor: protection repair deferred for %s conId %s', strategy, conid)
+
+    def _closes_blocking_protection(self, strategy: str, conid: int) -> list:
+        """Active closes that must hold protective repair back.
+
+        A close the trader DEFERRED has sent nothing and is waiting on a
+        foreign order; it must NOT stop repair, or the holding sits protected
+        only by that foreign order for as long as the deferral lasts. Every
+        other active close (about to submit, submitted, unknown) still does.
+        """
+        return [item for item in self.intents.all(strategy=strategy, conid=conid, kind='CLOSE', active=True)
+                if not (item['status'] == 'WAITING' and item['payload'].get('deferred_at') is not None
+                        and not item['payload'].get('order_ids') and not item['payload'].get('proposal_id'))]
 
     def _protective_plan(self, conid, position, snapshot):
         sdk = self._get_sdk()

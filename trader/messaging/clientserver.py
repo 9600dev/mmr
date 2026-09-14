@@ -657,8 +657,13 @@ class _SyncMethodCall:
                 if not isinstance(candidate, dict) or candidate.get('req_id') != req_id:
                     logging.warning('RPC %s: discarding reply for another request', method_str)
                     continue
-                if time_.monotonic() <= deadline:
-                    response = candidate
+                # A reply for THIS request is in hand: accept it even if the
+                # clock crossed the deadline while it was being read. It used
+                # to be discarded here, turning a KNOWN placement outcome into
+                # "timed out; outcome UNKNOWN" and forcing a reconcile for an
+                # answer the server had already delivered. The deadline bounds
+                # how long we WAIT, not whether we believe what arrived.
+                response = candidate
                 break
             if response is None:
                 # This discards queued messages and late replies; it CANNOT

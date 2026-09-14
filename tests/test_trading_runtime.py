@@ -244,9 +244,9 @@ async def test_bracket_rolls_back_when_tp_fails(monkeypatch):
 
 # ---------------------------------------------------------------------------
 # status() TTL cache — hot RPC path, polled several times/second by
-# strategy_service + risk_gate + CLI. Repeated walks of IB state starve
-# the event loop; the 1-second cache makes the status() RPC effectively
-# free.
+# strategy_service + risk_gate + CLI. Stable results reuse the cached
+# object; the cheap socket flag is sampled every time so a disconnect
+# cannot hide behind the 1-second TTL.
 # ---------------------------------------------------------------------------
 
 class TestStatusCache:
@@ -269,9 +269,10 @@ class TestStatusCache:
         r3 = trader.status()
 
         assert r1 == r2 == r3
-        # isConnected should only have been walked once (first call)
-        assert ib.isConnected.call_count == 1, (
-            f'expected 1 IB state read within TTL, got {ib.isConnected.call_count}'
+        # Cached output must still notice socket loss before its TTL expires.
+        assert r1 is r2 is r3
+        assert ib.isConnected.call_count == 3, (
+            f'expected a live socket read per call, got {ib.isConnected.call_count}'
         )
 
     def test_returns_fresh_data_after_ttl_expires(self, monkeypatch):

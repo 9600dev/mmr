@@ -3,8 +3,8 @@
 # Don't warn about unreachable commands in this file
 #
 # Patched run.sh for IB Gateway container.
-# Only change: start_xvfb() reads XVFB_SCREEN env var (default 1920x1080x24)
-# instead of hardcoding 1024x768x16.
+# Local changes: configurable Xvfb resolution, installed-JRE path repair,
+# and native-API recovery supervised by the existing container lifecycle.
 
 set -Eeo pipefail
 
@@ -15,39 +15,48 @@ echo "*************************************************************************"
 # shellcheck disable=SC1091
 source "${SCRIPT_PATH}/common.sh"
 
-# shellcheck disable=SC2329
-stop_ibc() {
-	echo ".> 😘 Received SIGINT or SIGTERM. Shutting down IB Gateway."
+# Capture the unsuffixed settings path before dual mode changes it below.
+RECOVERY_STATE_DIR="${TWS_SETTINGS_PATH:-$TWS_PATH}/.mmr-recovery"
+pid=()
+watchdog_pid=""
+stopping=false
 
-	#
-	if pgrep x11vnc >/dev/null; then
-		echo ".> Stopping x11vnc."
-		pkill x11vnc
-	fi
-	#
-	echo ".> Stopping Xvfb."
-	pkill Xvfb
-	#
-	if [ -n "$SSH_TUNNEL" ]; then
-		echo ".> Stopping ssh."
-		pkill run_ssh.sh
-		pkill ssh
-		echo ".> Stopping socat."
-		pkill run_socat.sh
-		pkill socat
-	else
-		echo ".> Stopping socat."
-		pkill run_socat.sh
-		pkill socat
-	fi
-	# Set TERM
-	echo ".> Stopping IBC."
-	kill -SIGTERM "${pid[@]}"
-	# Wait for exit
-	wait "${pid[@]}"
-	# All done.
-	echo ".> Done... $?"
+stop_ibc() {
+    if [ "$stopping" = true ]; then return; fi
+    stopping=true
+    trap '' SIGINT SIGTERM
+    echo ".> Shutting down IB Gateway."
+    if [ -n "$watchdog_pid" ]; then kill -TERM "$watchdog_pid" 2>/dev/null || true; fi
+    for child in "${pid[@]}"; do kill -TERM "$child" 2>/dev/null || true; done
+    # IBC forwards TERM to Java. Give it a bounded opportunity to close;
+    # PID1 exit then lets Docker dispose of remaining container processes.
+    for ((attempt = 0; attempt < 10; attempt++)); do
+        alive=false
+        for child in "${pid[@]}"; do
+            if kill -0 "$child" 2>/dev/null; then alive=true; fi
+        done
+        if [ "$alive" = false ]; then break; fi
+        sleep 1
+    done
+    for process in x11vnc Xvfb run_ssh.sh ssh run_socat.sh socat; do
+        pkill -TERM -x "$process" 2>/dev/null || true
+    done
 }
+
+start_watchdog() {
+    # An unexpected monitor failure only restarts the monitor after a delay;
+    # it is not evidence that the broker/container needs restarting.
+    local delay=$1
+    (
+        if [ "$delay" -gt 0 ]; then sleep "$delay"; fi
+        exec bash "${SCRIPT_PATH}/mmr-watchdog.sh" \
+            "${SCRIPT_PATH}/mmr-healthcheck.sh" "$RECOVERY_STATE_DIR"
+    ) &
+    watchdog_pid=$!
+}
+
+trap 'exit 0' SIGINT SIGTERM
+trap stop_ibc EXIT
 
 start_xvfb() {
 	# start Xvfb
@@ -197,6 +206,17 @@ if [ -n "$IBC_SCRIPTS" ]; then
 	run_scripts "$HOME/$IBC_SCRIPTS"
 fi
 
-trap stop_ibc SIGINT SIGTERM
-wait "${pid[@]}"
-exit $?
+start_watchdog 0
+while true; do
+    completed_pid=""
+    status=0
+    wait -n -p completed_pid "${pid[@]}" "$watchdog_pid" || status=$?
+    if [ "${completed_pid:-}" = "$watchdog_pid" ] && [ "$status" -ne 42 ]; then
+        echo ".> Recovery monitor exited ($status); restarting monitor after 300s."
+        start_watchdog 300
+        continue
+    fi
+    # A completed IBC child, or the monitor's confirmed recovery request,
+    # ends PID1. Docker's existing unless-stopped policy restarts the gateway.
+    exit "$status"
+done

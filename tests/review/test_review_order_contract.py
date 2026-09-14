@@ -83,6 +83,10 @@ def _trader(held=0, gate_enabled=True, portfolio_value=100_000):
             tag='NetLiquidation', currency='USD', account=trader.ib_account,
             value=str(portfolio_value))],
         cancelOrder=MagicMock(),
+        # working_trades() fails LOUD when the broker's working set cannot be
+        # read (an unreadable set is not an empty one); this fake broker has
+        # no working orders and says so explicitly.
+        openTrades=lambda: [],
     )
     trader.client.get_snapshot = AsyncMock(return_value=ticker)
     trader.check_order_margin = AsyncMock(return_value={

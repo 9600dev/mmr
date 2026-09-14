@@ -62,6 +62,27 @@ def _price_or_none(value):
     return price
 
 
+class WorkingOrdersUnreadableError(RuntimeError):
+    """The broker's working-order set could not be read.
+
+    Raised by ``Trader.working_trades`` instead of pretending the set is
+    empty. An empty set is the one answer that lets a second executable
+    close be sent against the same shares and lets a concentration check
+    under-count; "unreadable" is a different fact and callers must treat it
+    as unevaluable: an open is refused, a reduction is deferred.
+    """
+
+
+# What an operator does about an unconfirmed earlier send. Named in the
+# DEFERRED reason so the log line that describes the stuck state also names
+# the way out of it (the tooling is `mmr reservations`, wired to the
+# list_order_reservations / settle_order_reservation RPCs).
+_RESERVATION_TOOLING_HINT = (
+    'inspect them with `mmr reservations`; once the broker confirms a send never '
+    'reached IB, release it with `mmr reservations settle <intent_id> <client_id> '
+    '<order_id> --reason "..."` (refused while a live broker observation matches)')
+
+
 def _working_reduction_quantity(trade: Trade) -> float:
     try:
         total, filled, remaining = (float(trade.order.totalQuantity),
@@ -77,6 +98,18 @@ def _working_reduction_quantity(trade: Trade) -> float:
 
 
 class TradeExecutioner():
+    # Documented waits on the placement path, in seconds. A caller that bounds
+    # a whole placement (the RPC wrapper) derives its deadline from these so
+    # a legitimately slow-but-successful send is not reported as timed out.
+    CANCEL_WAIT_TIMEOUT_S = 8.0   # own competing reduction confirmed terminal
+    RECEIPT_TIMEOUT_S = 8.0       # broker submission receipt
+    AUDIT_TIMEOUT_S = 5.0         # durable ORDER_SUBMITTED before the send
+
+    @classmethod
+    def placement_deadline_s(cls) -> float:
+        """Upper bound for one placement through the chokepoint, plus slack."""
+        return cls.CANCEL_WAIT_TIMEOUT_S + cls.RECEIPT_TIMEOUT_S + cls.AUDIT_TIMEOUT_S + 2.0
+
     def __init__(
         self,
     ):
@@ -164,7 +197,7 @@ class TradeExecutioner():
             tracker = getattr(self.trader, 'order_tracker', None)
             record = getattr(tracker, 'record_submission', None)
             if event_type == EventType.ORDER_SUBMITTED and callable(record):
-                await asyncio.to_thread(record, event, getattr(self, '_audit_timeout', 5.0))
+                await asyncio.to_thread(record, event, getattr(self, '_audit_timeout', self.AUDIT_TIMEOUT_S))
             else:
                 await asyncio.to_thread(self.trader.event_store.append, event)
 
@@ -203,9 +236,17 @@ class TradeExecutioner():
         leaves the new reduction pending/unknown; it never submits a second
         independently executable close. Confirmed fills force a fresh clamp.
         """
-        unobserved = await self.trader.unobserved_reduction_quantity(contract, order.action)
-        working = [t for t in self.trader.working_trades(contract)
-                   if t.order.action == order.action and t.order.orderId != order.orderId]
+        try:
+            unobserved = await self.trader.unobserved_reduction_quantity(contract, order.action)
+            working = [t for t in self.trader.working_trades(contract)
+                       if t.order.action == order.action and t.order.orderId != order.orderId]
+        except WorkingOrdersUnreadableError as ex:
+            # Nothing has been sent, so this is a clean deferral, not an
+            # UNKNOWN: the broker's working set is what decides whether this
+            # close would be a second executable reduction of the same shares.
+            raise RuntimeError(
+                f'DEFERRED: {order.action} {float(order.totalQuantity):g} not placed: '
+                f'{str(ex).removeprefix("UNKNOWN: ")}; retry once the broker order book is readable') from ex
         if not working and not unobserved:
             return
         held = self.trader._signed_position(int(contract.conId or 0))
@@ -249,17 +290,24 @@ class TradeExecutioner():
                 f'{t.order.orderId} (owner {split_order_reference(t.order.orderRef)[0] or "operator"})'
                 for t in foreign)
             claims = f' and {unobserved:g} by unconfirmed earlier sends' if unobserved else ''
+            if unobserved:
+                # Name the reservations and the way out. Without this the
+                # operator sees a deferral that cites no order they can find
+                # on the broker and no command that would release it.
+                claims += self._unobserved_reservation_hint()
             raise RuntimeError(
                 f'DEFERRED: {order.action} {float(order.totalQuantity):g} not placed: all {abs(held):g} held '
                 f'are reserved by working reductions owned elsewhere [{competing}]{claims}; '
                 'that owner must retire them (or cancel them explicitly) before this close')
         for trade in own:
             self.trader.client.ib.cancelOrder(trade.order)
-            deadline = time.monotonic() + getattr(self, '_cancel_wait_timeout', 8.0)
+            deadline = time.monotonic() + getattr(self, '_cancel_wait_timeout', self.CANCEL_WAIT_TIMEOUT_S)
             while trade.orderStatus.status not in {'Cancelled', 'ApiCancelled', 'Filled', 'Inactive'}:
                 if time.monotonic() >= deadline:
                     raise RuntimeError('UNKNOWN: competing reduction cancellation not confirmed')
                 await asyncio.sleep(0.05)
+        # Own reductions have been cancelled above, so from here an unreadable
+        # broker view is UNKNOWN (the book has been touched), not DEFERRED.
         unobserved = await self.trader.unobserved_reduction_quantity(contract, order.action)
         held = self.trader._signed_position(int(contract.conId or 0))
         if held is None or not math.isfinite(held):
@@ -275,6 +323,18 @@ class TradeExecutioner():
                 'reduction %s %g clamped to %g: %g reserved by other working reductions or unconfirmed sends',
                 order.action, float(order.totalQuantity), available, remaining)
         order.totalQuantity = min(float(order.totalQuantity), available)
+
+    def _unobserved_reservation_hint(self) -> str:
+        """The identities behind the last unobserved-capacity evaluation, plus
+        the operator tooling that releases them. Formats nothing it cannot
+        read (a stub trader without the detail attribute gets the bare hint)."""
+        detail = getattr(self.trader, '_unobserved_reservation_detail', None)
+        identities = ''
+        if isinstance(detail, list) and detail:
+            identities = ' ' + ', '.join(
+                f'{item["intent_id"]}/{item["client_id"]}/{item["order_id"]} ({item["quantity"]:g})'
+                for item in detail if isinstance(item, dict)) + ';'
+        return f' (unconfirmed sends:{identities} {_RESERVATION_TOOLING_HINT})'
 
     # Manual paths stamp different algo names (``global`` for mmr buy/sell,
     # ``proposal`` for approve); they are all the operator and may displace
@@ -442,7 +502,7 @@ class TradeExecutioner():
             # Capture the placement receipt while the account decision lock is
             # still held. Returning an unsubscribed cold stream used to leave a
             # window in which a second close saw no reserved broker quantity.
-            trade = await asyncio.wait_for(observable.pipe(ops.take(1)), timeout=8.0)
+            trade = await asyncio.wait_for(observable.pipe(ops.take(1)), timeout=self.RECEIPT_TIMEOUT_S)
             if not hasattr(self.trader, '_submitted_trades'):
                 self.trader._submitted_trades = []
             self.trader._submitted_trades.append(trade)
@@ -576,6 +636,22 @@ class TradeExecutioner():
             if position_value_hint is not None:
                 position_value_hint = self.trader.convert_notional(
                     position_value_hint, getattr(contract, 'currency', ''))
+            try:
+                aggregate_value = self.trader.aggregate_position_value(
+                    contract, str(order.action), float(order.totalQuantity),
+                    position_value_hint or 0.0)
+            except WorkingOrdersUnreadableError as ex:
+                # The concentration check needs the working openings on this
+                # instrument. Unreadable is not zero: refuse the open.
+                await self._log_event(EventType.RISK_GATE_REJECTED, contract, order)
+                logging.error('refusing open (fail-closed): %s', ex)
+                return rx.throw(
+                    trader_exception(
+                        trader=self.trader,
+                        exception_type=TraderException,
+                        message=f'risk gate rejected: concentration unevaluable — {ex}'
+                    )
+                )
             result = gate.evaluate(
                 signal=signal,
                 open_order_count=inputs.open_order_count,
@@ -586,9 +662,7 @@ class TradeExecutioner():
                 portfolio_value_evaluable=inputs.portfolio_value_evaluable,
                 position_value_evaluable=position_value_hint is not None,
                 sec_type=contract.secType or '',
-                aggregate_position_value=self.trader.aggregate_position_value(
-                    contract, str(order.action), float(order.totalQuantity),
-                    position_value_hint or 0.0),
+                aggregate_position_value=aggregate_value,
             )
             if not result.approved:
                 await self._log_event(EventType.RISK_GATE_REJECTED, contract, order)

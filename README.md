@@ -43,6 +43,11 @@ cd mmr
 
 `./docker.sh -g` handles everything: builds the Docker image, prompts for your IB username/password/account, writes credentials to `.env` (gitignored), starts the IB Gateway sidecar + MMR container, and drops you into an SSH session. From there, run `./start_mmr.sh` to launch all services.
 
+Gateway recovery starts automatically inside the gateway container. It checks
+Java's native API and uses Docker's restart policy to recover a stalled login;
+no host cron or macOS service is required. See [monitoring](docs/MONITORING.md#gateway-recovery).
+Use `mmr verify` to check actual broker readiness.
+
 ```bash
 # Once inside the container:
 ./start_mmr.sh              # Paper trading (default)

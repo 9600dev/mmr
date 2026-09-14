@@ -607,6 +607,24 @@ def build_parser() -> argparse.ArgumentParser:
                          help='Cost basis per unit; defaults to the broker average cost')
     adopt_p.add_argument('--attest', action='store_true',
                          help='Required: you have verified the broker position is this strategy\'s holding')
+    intents_p = strat_sub.add_parser(
+        'intents',
+        help='List executor execution intents (the SQLite intent journal): what is blocking '
+             'opens or exits per strategy/conId and why')
+    intents_p.add_argument('--strategy', default=None, help='Filter by strategy name')
+    intents_p.add_argument('--conid', type=int, default=None, help='Filter by instrument conId')
+    intents_p.add_argument('--all', action='store_true',
+                           help='Include terminal (RESOLVED/FILLED/REJECTED) intents')
+    resolve_intent_p = strat_sub.add_parser(
+        'resolve-intent',
+        help='Operator resolution of an execution intent that has NO broker evidence '
+             '(a never-submitted open, a lost reply). Refused if the broker shows a matching order. '
+             'Never automatic.')
+    resolve_intent_p.add_argument('intent_id', help='Intent id from `strategies intents`')
+    resolve_intent_p.add_argument('--reason', required=True,
+                                  help='Why this intent is known to have produced no broker order')
+    resolve_intent_p.add_argument('--attest', action='store_true',
+                                  help='Required: you have checked `mmr orders`/`mmr trades` and the intent has no live order')
 
     # strategies available — scan the strategies directory for Strategy
     # subclasses. Shows what's on disk vs what's deployed.
@@ -1018,7 +1036,7 @@ def build_parser() -> argparse.ArgumentParser:
                                     '  news AAPL --source benzinga   # Use Benzinga source\n'
                                     '  news AAPL --detail            # Full article details + sentiment\n'
                                     '\n'
-                                    '  See also: news-fetch / news-search / news-enrich (~/dev/news scraper service)',
+                                    '  See also: news-fetch / news-search / news-enrich (~/dev/scraper scraper service)',
                              formatter_class=fmt)
     news_p.add_argument('ticker', nargs='?', default=None, help='Ticker to filter (optional)')
     news_p.add_argument('--limit', type=int, default=10, help='Number of articles (default: 10)')
@@ -1027,12 +1045,12 @@ def build_parser() -> argparse.ArgumentParser:
     news_p.add_argument('--detail', action='store_true', default=False,
                          help='Show full article details with descriptions/sentiment')
 
-    # ---- news-service (~/dev/news scraper) commands — top-level so they
+    # ---- news-service (~/dev/scraper scraper) commands — top-level so they
     # don't conflict with `news`'s positional ticker arg. The scraper is
     # an OPTIONAL separate Docker stack at http://127.0.0.1:8089; commands
     # fail loudly with start instructions if it isn't running.
     news_fetch_p = sub.add_parser('news-fetch',
-                                  help='Scrape one article URL via the local news service (~/dev/news at :8089)',
+                                  help='Scrape one article URL via the local news service (~/dev/scraper at :8089)',
                                   epilog='Examples:\n'
                                          '  news-fetch https://www.reuters.com/markets/...\n'
                                          '  news-fetch https://www.ft.com/...       # paywall → archive.ph fallback\n'
@@ -1059,7 +1077,7 @@ def build_parser() -> argparse.ArgumentParser:
                                help='Max results (default: 10)')
 
     news_enrich_p = sub.add_parser('news-enrich',
-                                   help='Search + scrape recent article bodies for a ticker (via ~/dev/news)',
+                                   help='Search + scrape recent article bodies for a ticker (via ~/dev/scraper)',
                                    epilog='Examples:\n'
                                           '  news-enrich AAPL              # top 5 article bodies\n'
                                           '  news-enrich BHP --exchange ASX --limit 3\n',
@@ -1286,7 +1304,7 @@ def build_parser() -> argparse.ArgumentParser:
                           help='Enrich results with latest news headline and sentiment')
     ideas_p.add_argument('--news-bodies', dest='news_bodies', action='store_true', default=False,
                           help='Fetch full article bodies via the local news service '
-                               '(~/dev/news at :8089) for the top N results — answers '
+                               '(~/dev/scraper at :8089) for the top N results — answers '
                                '"WHY is it moving?". Set --news-bodies-limit to control N.')
     ideas_p.add_argument('--news-bodies-limit', dest='news_bodies_limit', type=int, default=3,
                           help='How many top-ranked symbols to enrich with article bodies (default: 3)')
@@ -1328,7 +1346,7 @@ def build_parser() -> argparse.ArgumentParser:
     propose_p.add_argument('--source', default='manual', help='Source label (manual, llm, scanner)')
     propose_p.add_argument('--enrich-news', dest='enrich_news', action='store_true', default=False,
                            help='Fetch top news articles for the symbol via the news service '
-                                '(~/dev/news at :8089) and append a "News context" section to '
+                                '(~/dev/scraper at :8089) and append a "News context" section to '
                                 '--reasoning. Useful when an LLM will review the proposal — '
                                 'gives them the why behind the move. Requires news service running.')
     propose_p.add_argument('--enrich-news-limit', type=int, default=3,
@@ -1422,6 +1440,44 @@ def build_parser() -> argparse.ArgumentParser:
                           '  reconcile           # divergence report vs broker truth\n'
                           '  reconcile --json    # JSON for LLM consumption',
                    formatter_class=fmt)
+
+    # reservations — the server-side capacity ledger behind "DEFERRED: ...
+    # reserved by unconfirmed earlier sends". A reservation with no broker
+    # evidence holds its shares until an operator settles it; this is that tool.
+    res_p = sub.add_parser('reservations',
+                           help='Server-side physical order reservations (capacity held by working or '
+                                'unconfirmed sends); `settle` releases one with no broker evidence',
+                           epilog='Examples:\n'
+                                  '  reservations                       # blocking + working reservations\n'
+                                  '  reservations list --all            # include settled\n'
+                                  '  reservations settle INTENT 1 4711 --reason "no order at IB after 09/14 restart" --attest',
+                           formatter_class=fmt)
+    res_sub = res_p.add_subparsers(dest='res_action')
+    res_list_p = res_sub.add_parser('list', help='List reservations (default)')
+    res_list_p.add_argument('--all', action='store_true', help='Include settled reservations')
+    res_list_p.add_argument('--account', default=None, help='Account filter (default: the pinned account)')
+    res_settle_p = res_sub.add_parser('settle',
+                                      help='Operator settlement of a reservation with no matching broker observation')
+    res_settle_p.add_argument('intent_id', help='Intent id (from `reservations`)')
+    res_settle_p.add_argument('client_id', type=int, help='IB client id of the reservation')
+    res_settle_p.add_argument('order_id', type=int, help='Reserved broker order id')
+    res_settle_p.add_argument('--reason', required=True,
+                              help='Why you know this send produced no executable order at IB')
+    res_settle_p.add_argument('--attest', action='store_true',
+                              help='Required: you checked `mmr orders`/`mmr trades` and IB has no such order')
+
+    # restore-ack — the deliberate human act that clears a restore marker.
+    ack_p = sub.add_parser('restore-ack',
+                           help='Acknowledge a restore-time BROKER_RECONCILIATION_REQUIRED marker after '
+                                'reviewing broker truth (re-enables opening); --status to inspect only',
+                           epilog='Examples:\n'
+                                  '  restore-ack --status\n'
+                                  '  restore-ack --reason "positions/orders reconciled against IB 2026-09-14" --attest',
+                           formatter_class=fmt)
+    ack_p.add_argument('--status', action='store_true', help='Show the marker state without changing it')
+    ack_p.add_argument('--reason', default=None, help='What was reconciled and how (recorded in the audit event)')
+    ack_p.add_argument('--attest', action='store_true',
+                       help='Required with --reason: you have reconciled positions, orders and executions against IB')
 
     # portfolio-snapshot (compact JSON for LLM loop)
     sub.add_parser('portfolio-snapshot', aliases=['psnap'], help='Compact portfolio snapshot (JSON)')
@@ -1924,7 +1980,11 @@ _ROLE_CAPABILITIES = {
 _ROLE_OPEN_COMMANDS = frozenset({'buy', 'sell'})
 _ROLE_RESIZE_COMMANDS = frozenset({'resize-positions', 'resize'})
 # Strategy sub-actions that CONTROL the live roster (vs. read it).
-_ROLE_STRATEGY_CONTROL_ACTIONS = frozenset({'enable', 'disable', 'reload', 'adopt'})
+_ROLE_STRATEGY_CONTROL_ACTIONS = frozenset({'enable', 'disable', 'reload', 'adopt', 'resolve-intent'})
+# Reconciliation ACTS (as opposed to the reads beside them) are operator-only:
+# each one releases a fail-closed block that exists because broker truth was
+# uncertain, so a non-operator role must never be able to clear it.
+_ROLE_RECONCILIATION_ACTS = frozenset({'restore-ack'})
 
 
 def _role_allows(cmd: Optional[str], args: argparse.Namespace) -> Optional[str]:
@@ -1960,6 +2020,16 @@ def _role_allows(cmd: Optional[str], args: argparse.Namespace) -> Optional[str]:
         if getattr(args, 'opt_action', None) in ('buy', 'sell'):
             return _deny('placing option orders is not permitted')
         return None
+
+    # Reservation reads are fine for any role; settling one is an operator act.
+    if cmd == 'reservations':
+        if getattr(args, 'res_action', None) == 'settle':
+            return _deny('settling order reservations is an operator-only reconciliation act')
+        return None
+    if cmd in _ROLE_RECONCILIATION_ACTS:
+        if getattr(args, 'status', False) and not getattr(args, 'reason', None):
+            return None  # a read
+        return _deny('acknowledging a restore marker is an operator-only reconciliation act')
 
     if cmd in _ROLE_OPEN_COMMANDS:
         return _deny('opening positions (buy/sell) is not permitted; propose instead')
@@ -2544,6 +2614,12 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
         elif cmd == 'reconcile':
             _handle_reconcile(mmr, args)
 
+        elif cmd == 'reservations':
+            _handle_reservations(mmr, args)
+
+        elif cmd == 'restore-ack':
+            _handle_restore_ack(mmr, args)
+
         elif cmd in ('portfolio-snapshot', 'psnap'):
             print_dict(mmr.portfolio_snapshot(), title='Portfolio Snapshot')
 
@@ -2734,7 +2810,7 @@ def _handle_propose(mmr: MMR, args: argparse.Namespace):
                     console.print('[yellow]--enrich-news: no articles successfully scraped — proposal saved without news[/yellow]')
         except Exception as ex:
             if not _json_mode:
-                console.print(f'[yellow]--enrich-news skipped ({type(ex).__name__}: {ex}) — is the news service running? `cd ~/dev/news && ./docker.sh -g`. Proposal will be saved without news enrichment.[/yellow]')
+                console.print(f'[yellow]--enrich-news skipped ({type(ex).__name__}: {ex}) — is the news service running? `cd ~/dev/scraper && ./docker.sh -g`. Proposal will be saved without news enrichment.[/yellow]')
 
     proposal_id, leverage_info, snapshot_info = mmr.propose(
         symbol=args.symbol,
@@ -3153,6 +3229,138 @@ def _handle_reconcile(mmr: MMR, args: argparse.Namespace):
         tag = f'#{pid} ' if pid else ''
         console.print(f'  [{color}]{f.get("severity", "").upper()}[/{color}] '
                       f'{tag}{f.get("symbol", "")}: {f.get("detail", "")}')
+
+
+def _flatten_for_table(rows: list) -> list:
+    """Render nested dict/list cells as compact strings so a row table stays one line per row."""
+    out = []
+    for row in rows:
+        flat = {}
+        for k, v in (row or {}).items():
+            if isinstance(v, (dict, list, tuple)):
+                flat[k] = _json_dumps(v) if v else '-'
+            elif v is None:
+                flat[k] = '-'
+            else:
+                flat[k] = v
+        out.append(flat)
+    return out
+
+
+def _handle_reservations(mmr: MMR, args: argparse.Namespace):
+    """Server-side physical order reservations — list, or operator-settle one."""
+    import pandas as pd
+    action = getattr(args, 'res_action', None)
+    if action == 'settle':
+        if not getattr(args, 'attest', False):
+            print_status('settle requires --attest: confirm you have checked `mmr orders` and `mmr trades` '
+                         f'and IB holds no order {args.order_id} for client {args.client_id}', success=False)
+            return
+        try:
+            result = mmr.settle_order_reservation(args.intent_id, args.client_id, args.order_id, args.reason)
+        except Exception as e:
+            print_status(f'Settle failed: {e}', success=False)
+            return
+        ok = bool(result.get('settled', result.get('success', False)))
+        detail = result.get('error') or result.get('reason') or result.get('message') or ''
+        if ok:
+            print_status(f'Settled reservation {args.intent_id} (client {args.client_id}, order {args.order_id}). {detail}'.strip())
+        else:
+            print_status(f'Settle refused: {detail or result}', success=False)
+        return
+
+    include_settled = bool(getattr(args, 'all', False))
+    try:
+        rows = mmr.list_order_reservations(getattr(args, 'account', None), include_settled)
+    except Exception as e:
+        print_status(f'Could not read reservations: {e}', success=False)
+        return
+    if _json_mode:
+        print_dict({'reservations': rows}, title='Order reservations')
+        return
+    if not rows:
+        console.print('[green]No order reservations' + (' (including settled)' if include_settled else '') + '.[/green]')
+        return
+    print_df(pd.DataFrame(_flatten_for_table(rows)), title='Order reservations')
+    blocking = [r for r in rows if r.get('blocking')]
+    if blocking:
+        console.print(f'[yellow]{len(blocking)} reservation(s) currently hold reduction capacity. '
+                      'If IB shows no such order (`mmr orders`, `mmr trades`), release one with:\n'
+                      '  reservations settle <intent_id> <client_id> <order_id> --reason "..." --attest[/yellow]')
+
+
+def _handle_restore_ack(mmr: MMR, args: argparse.Namespace):
+    """Inspect or acknowledge the restore-time reconciliation marker."""
+    if getattr(args, 'status', False) or not getattr(args, 'reason', None):
+        try:
+            state = mmr.restore_marker_status()
+        except Exception as e:
+            print_status(f'Could not read restore marker: {e}', success=False)
+            return
+        if _json_mode:
+            print_dict(state, title='Restore marker')
+            return
+        if state.get('present'):
+            console.print('[red]Restore marker PRESENT — opening is refused until acknowledged.[/red]')
+            print_dict(state, title='Restore marker')
+            console.print('After reconciling positions, orders and executions against IB:\n'
+                          '  restore-ack --reason "..." --attest')
+        else:
+            console.print('[green]No restore marker; opening is not blocked by a restore.[/green]')
+        if not getattr(args, 'status', False):
+            print_status('restore-ack needs --reason and --attest to acknowledge', success=False)
+        return
+    if not getattr(args, 'attest', False):
+        print_status('restore-ack requires --attest: confirm you reconciled positions, orders and '
+                     'executions against IB before clearing the opening block', success=False)
+        return
+    try:
+        result = mmr.acknowledge_restore_marker(args.reason)
+    except Exception as e:
+        print_status(f'Acknowledge failed: {e}', success=False)
+        return
+    ok = bool(result.get('acknowledged', result.get('success', False)))
+    detail = result.get('error') or result.get('reason') or result.get('message') or ''
+    if ok:
+        print_status(f'Restore marker acknowledged; opening re-enabled. {detail}'.strip())
+    else:
+        print_status(f'Acknowledge refused: {detail or result}', success=False)
+
+
+def _handle_strategy_intents(mmr: MMR, args: argparse.Namespace):
+    """List executor execution intents — what blocks opens/exits and why."""
+    import pandas as pd
+    try:
+        rows = mmr.list_execution_intents(args.strategy, args.conid, active_only=not args.all)
+    except Exception as e:
+        print_status(f'Could not read execution intents: {e}', success=False)
+        return
+    if _json_mode:
+        print_dict({'intents': rows}, title='Execution intents')
+        return
+    if not rows:
+        console.print('[green]No ' + ('' if args.all else 'active ') + 'execution intents.[/green]')
+        return
+    print_df(pd.DataFrame(_flatten_for_table(rows)), title='Execution intents' + ('' if args.all else ' (active)'))
+    blocking = [r for r in rows if r.get('blocking')]
+    if blocking:
+        console.print(f'[yellow]{len(blocking)} intent(s) currently block opens or exits. An intent with NO '
+                      'broker order (check `mmr orders`/`mmr trades`) can be resolved with:\n'
+                      '  strategies resolve-intent <intent_id> --reason "..." --attest[/yellow]')
+
+
+def _handle_strategy_resolve_intent(mmr: MMR, args: argparse.Namespace):
+    if not getattr(args, 'attest', False):
+        print_status('resolve-intent requires --attest: confirm `mmr orders`/`mmr trades` show no live order '
+                     f'for intent {args.intent_id}', success=False)
+        return
+    result = mmr.resolve_execution_intent(args.intent_id, args.reason)
+    if result.is_success():
+        detail = result.obj or {}
+        print_status(f'Resolved intent {args.intent_id}: {detail.get("status", "RESOLVED")} '
+                     f'({detail.get("kind", "?")} {detail.get("strategy", "?")}/{detail.get("conid", "?")})')
+    else:
+        print_status(f'Resolve refused: {result.error}', success=False)
 
 
 def _handle_portfolio_risk(mmr: MMR, args: argparse.Namespace):
@@ -3844,6 +4052,10 @@ def _handle_strategies(mmr: MMR, args: argparse.Namespace):
                          f'{adopted.get("avg_cost")} (ownership epoch {adopted.get("ownership_epoch")})')
         else:
             print_status(f'Adopt failed: {result.error}', success=False)
+    elif action == 'intents':
+        _handle_strategy_intents(mmr, args)
+    elif action == 'resolve-intent':
+        _handle_strategy_resolve_intent(mmr, args)
     elif action == 'create':
         _handle_strategy_create(args)
     elif action == 'deploy':
@@ -5530,9 +5742,11 @@ def _collect_stack_checks(exchanges: str = 'NYSE,ASX',
         record('trader_service', 'FAIL', f'RPC unreachable: {ex}')
 
     if service_status is not None:
+        ib_ping_ok = False
         try:
             pong = vmmr.ping_ib()
             if pong.get('ok'):
+                ib_ping_ok = True
                 record('ib_socket', 'PASS',
                        f'live round-trip OK (IB time {pong.get("ib_server_time")})')
             else:
@@ -5543,11 +5757,14 @@ def _collect_stack_checks(exchanges: str = 'NYSE,ASX',
             record('ib_socket', 'FAIL',
                    f'ping_ib RPC failed: {ex} (a service predating `mmr verify` '
                    'needs a restart on current code)')
-        if service_status.get('ib_upstream_connected'):
-            record('ib_upstream', 'PASS', 'gateway reports upstream connected')
-        else:
+        if not service_status.get('ib_upstream_connected'):
             record('ib_upstream', 'FAIL',
                    f'upstream down: {service_status.get("ib_upstream_error", "?")}')
+        elif not ib_ping_ok:
+            record('ib_upstream', 'FAIL',
+                   'upstream unverified: live IB round-trip failed')
+        else:
+            record('ib_upstream', 'PASS', 'gateway reports upstream connected')
         if not service_status.get('storage_connected', True):
             record('storage', 'FAIL', 'DuckDB storage not connected')
     else:
@@ -11181,7 +11398,7 @@ def _resolve_expiration(mmr: MMR, symbol: str, expiration_arg: str | None, defau
     return best
 
 
-# ---- news service (~/dev/news scraper) integration -----------------------
+# ---- news service (~/dev/scraper scraper) integration -----------------------
 
 
 def _news_service_health_or_die():
@@ -11201,7 +11418,7 @@ def _news_service_health_or_die():
         if r.status_code != 200:
             print_status(
                 f'news service at {url} returned HTTP {r.status_code}. '
-                f'Check `cd ~/dev/news && ./docker.sh -l` for logs.',
+                f'Check `cd ~/dev/scraper && ./docker.sh -l` for logs.',
                 success=False,
             )
             sys.exit(1)
@@ -11213,7 +11430,7 @@ def _news_service_health_or_die():
     except httpx.ConnectError as ex:
         print_status(
             f'news service NOT REACHABLE at {url} ({ex}). '
-            f'Start it with: cd ~/dev/news && ./docker.sh -g '
+            f'Start it with: cd ~/dev/scraper && ./docker.sh -g '
             f'(or set NEWS_SERVICE_URL to a remote instance)',
             success=False,
         )
@@ -12081,7 +12298,7 @@ def _handle_ideas(mmr: MMR, args: argparse.Namespace):
             if not _json_mode:
                 console.print(
                     f'[yellow]--news-bodies skipped ({type(ex).__name__}: {ex}) — '
-                    f'is the news service running? `cd ~/dev/news && ./docker.sh -g`. '
+                    f'is the news service running? `cd ~/dev/scraper && ./docker.sh -g`. '
                     f'Scan results returned without article bodies.[/yellow]'
                 )
 
