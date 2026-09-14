@@ -586,8 +586,13 @@
 #   scripts/run_mutation.sh baseline   # full pass, then RE-RECORD the baseline (human-reviewed)
 set -euo pipefail
 
-PY="${MMR_PY:-$HOME/miniforge3/envs/mmr/bin/python3}"
 cd "$(dirname "$0")/.."
+# The uv venv is the canonical test interpreter; the legacy conda env is a
+# fallback for machines that still have it. MMR_PY overrides both.
+if [ -z "${MMR_PY:-}" ] && [ -x .venv/bin/python3 ]; then
+  MMR_PY="$PWD/.venv/bin/python3"
+fi
+PY="${MMR_PY:-$HOME/miniforge3/envs/mmr/bin/python3}"
 
 case "${1:-all}" in
   cores)

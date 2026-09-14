@@ -526,6 +526,27 @@ mmr/
 └── pyproject.toml                 # Package config + 58 dependencies
 ```
 
+## Git credential protection
+
+Install the local hooks once per clone after `uv sync`:
+
+```bash
+uv run python scripts/install_git_hooks.py
+```
+
+`.env` and `.env.*` files are ignored at every directory level; `.env.example`
+is allowed for placeholders. The commit hook checks the entire staged index,
+including files added with `git add -f`. The push hook checks the full history
+of every branch or commit tag being pushed, including files added and later
+deleted or renamed. A historical rejection requires removing the file from the
+affected commits; deleting it in the latest commit is insufficient. The guards
+read filenames only and never print credential values.
+
+The installer preserves the existing invariant and type gates and refuses to
+overwrite an unrelated push hook. These are local protections: hooks must be
+installed in each clone and can be bypassed with `--no-verify`. They do not scan
+for credentials copied into other filenames or into `.env.example`.
+
 ## Testing
 
 The suite includes unit, property, invariant and integration tests. Trading tests use temporary DuckDB/SQLite stores and modeled broker callbacks or local RPC peers; they do not require an IB session. With the test dependencies installed, run:

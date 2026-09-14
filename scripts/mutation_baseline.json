@@ -2,22 +2,22 @@
   "note": "Per-module mutation SCORE floor. Regenerate with scripts/run_mutation.sh baseline after a human-reviewed change. Scores are keyed on the module, not mutant ids, which renumber.",
   "modules": {
     "trader/data/bar_quality.py": {
-      "killed": 373,
-      "survived": 130,
+      "killed": 478,
+      "survived": 28,
       "timeout": 0,
-      "score": 0.741551
+      "score": 0.944664
     },
     "trader/data/fundamentals.py": {
-      "killed": 80,
-      "survived": 11,
+      "killed": 89,
+      "survived": 2,
       "timeout": 0,
-      "score": 0.879121
+      "score": 0.978022
     },
     "trader/data/market_session.py": {
-      "killed": 144,
-      "survived": 49,
+      "killed": 205,
+      "survived": 26,
       "timeout": 0,
-      "score": 0.746114
+      "score": 0.887446
     },
     "trader/data/proposal_transitions.py": {
       "killed": 8,
@@ -26,40 +26,40 @@
       "score": 1.0
     },
     "trader/simulation/panel.py": {
-      "killed": 118,
-      "survived": 34,
+      "killed": 147,
+      "survived": 5,
       "timeout": 0,
-      "score": 0.776316
+      "score": 0.967105
     },
     "trader/simulation/selection_bias.py": {
-      "killed": 357,
-      "survived": 119,
-      "timeout": 1,
-      "score": 0.750524
+      "killed": 451,
+      "survived": 26,
+      "timeout": 0,
+      "score": 0.945493
     },
     "trader/simulation/signal_combine.py": {
-      "killed": 141,
-      "survived": 44,
+      "killed": 172,
+      "survived": 13,
       "timeout": 0,
-      "score": 0.762162
+      "score": 0.92973
     },
     "trader/simulation/signal_eval.py": {
-      "killed": 285,
-      "survived": 12,
+      "killed": 359,
+      "survived": 5,
       "timeout": 0,
-      "score": 0.959596
+      "score": 0.986264
     },
     "trader/simulation/walk_forward.py": {
-      "killed": 121,
-      "survived": 15,
+      "killed": 135,
+      "survived": 1,
       "timeout": 3,
-      "score": 0.892086
+      "score": 0.992806
     },
     "trader/strategy/auto_executor.py": {
-      "killed": 1502,
-      "survived": 438,
-      "timeout": 25,
-      "score": 0.777099
+      "killed": 6430,
+      "survived": 965,
+      "timeout": 2,
+      "score": 0.869542
     },
     "trader/trading/exit_class.py": {
       "killed": 29,
@@ -68,16 +68,16 @@
       "score": 0.935484
     },
     "trader/trading/order_lifecycle.py": {
-      "killed": 260,
-      "survived": 73,
-      "timeout": 1,
-      "score": 0.781437
+      "killed": 1820,
+      "survived": 86,
+      "timeout": 6,
+      "score": 0.955021
     },
     "trader/trading/order_math.py": {
-      "killed": 110,
-      "survived": 3,
-      "timeout": 2,
-      "score": 0.973913
+      "killed": 119,
+      "survived": 1,
+      "timeout": 4,
+      "score": 0.991935
     },
     "trader/trading/order_split.py": {
       "killed": 62,
@@ -92,22 +92,22 @@
       "score": 0.966292
     },
     "trader/trading/position_sizing.py": {
-      "killed": 411,
-      "survived": 169,
+      "killed": 552,
+      "survived": 29,
       "timeout": 0,
-      "score": 0.708621
+      "score": 0.950086
     },
     "trader/trading/protective_stop.py": {
-      "killed": 53,
+      "killed": 62,
       "survived": 5,
-      "timeout": 1,
-      "score": 0.915254
+      "timeout": 4,
+      "score": 0.929577
     },
     "trader/trading/risk_gate.py": {
-      "killed": 510,
-      "survived": 44,
+      "killed": 557,
+      "survived": 38,
       "timeout": 0,
-      "score": 0.920578
+      "score": 0.936134
     }
   }
 }

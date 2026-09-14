@@ -672,7 +672,7 @@ Key runtime packages: `ib_async`, `duckdb`, `pyzmq`, `msgpack`, `reactivex`, `pa
 
 Dev/verification tooling (never in the container — see below): `ty`, `crosshair-tool`, `mutmut`, `pre-commit`, `hypothesis`.
 
-Python >= 3.12. The project is **uv-managed** (`uv.lock`); dev tools run via `uv run`. Install: `uv sync` (or `pip install -e .`). The pytest suite runs in the `mmr` conda env (`~/miniforge3/envs/mmr/bin/python3`), which also needs `pydantic`/`deal`/`hypothesis` installed for the tests that import them.
+Python >= 3.12. The project is **uv-managed** (`uv.lock`); dev tools run via `uv run`. Install: `uv sync` (or `pip install -e .`). The pytest suite runs in the uv venv (`uv run python -m pytest ...`), which `uv sync` provisions with `pydantic`/`deal`/`hypothesis`/`twelvedata`. A legacy `mmr` conda env (`~/miniforge3/envs/mmr/bin/python3`) works too where it exists, but it is not present on every development machine.
 
 ## Verification toolchain (read before modifying trading-critical code)
 
@@ -682,18 +682,18 @@ Any change under `trader/trading/` (risk gate, order construction, sizing, the p
 - **Property layer — Hypothesis in `tests/invariants/`** (the human-owned spec — see below).
 - **Contracts + symbolic execution — `deal` + CrossHair.** `deal` pre/postconditions live on the pure kernel functions (`order_math.whole_shares_for_notional`/`_floor_shares_for_notional`, `order_structure.structural_rejection`, `protective_stop.protective_stop_plan`, the `position_sizing` helpers, `data/proposal_transitions.py`); `uv run python scripts/crosshair_check.py` runs CrossHair symbolically over them (strictly stronger than Hypothesis's sampling — it already found a denormal-underflow bug the sampled tests missed). Also wired as a **manual-stage** pre-commit hook (too slow for every commit): `uv run pre-commit run crosshair-check --hook-stage manual`. The contracts double as runtime checks and test oracles.
 - **Mutation testing — `mutmut` ("verify the verifier").** `scripts/run_mutation.sh` mutates the pure kernel and confirms the tests (esp. `tests/invariants/`) actually *catch* the change; `scripts/mutation_score.py` reports the score. **Always run via `scripts/run_mutation.sh`, never a bare `mutmut run`** — mutmut 3.x silently *skips* `@deal`-decorated functions (which is the entire contracted safety kernel) and reports a false 100%; the runner patches mutmut to mutate their bodies (never the contract lambdas). A surviving mutant = a real test gap (add a test) or a documented **equivalent** mutant (state why — the ledger of derivations is in `run_mutation.sh`). Do NOT change production code to raise the score — only add tests. The score is **machine-checked**: `scripts/mutation_baseline.json` records a per-module floor, `scripts/run_mutation.sh check` fails on any drop, and `scripts/run_mutation.sh baseline` re-records it (a human-reviewed act, after a FULL pass). It **fails closed** — a missing baseline, absent mutation data, or a baselined module that a partial run didn't exercise are all failures, never a silent pass. The gate score counts timeouts as caught, because mutmut's killed-vs-timeout split is timing-dependent and excluding them made identical runs disagree by ~0.1%.
-- **Full suite:** `~/miniforge3/envs/mmr/bin/python3 -m pytest tests/ --timeout=60 -q --ignore=tests/test_ibrx_async.py`.
+- **Full suite:** `uv run python -m pytest tests/ --timeout=60 -q --ignore=tests/test_ibrx_async.py`.
 
-**Pre-commit** (`.pre-commit-config.yaml`, install with `uv run pre-commit install`) enforces the **spec-protection guard** (`scripts/invariants_guard.py`: no single commit may touch both `tests/invariants/` and implementation — so a property can't be weakened in the same breath as the code it checks) plus the `ty` gate; CrossHair is a manual-stage hook. The repo has no CI — pre-commit is the enforcement point.
+**Git hooks** (install with `uv run python scripts/install_git_hooks.py`) include the `.env` credential index guard, a native pre-push guard covering every pushed ref's full history, and the existing **spec-protection guard** (`scripts/invariants_guard.py`: no single commit may touch both `tests/invariants/` and implementation — so a property can't be weakened in the same breath as the code it checks) plus the `ty` gate. `.pre-commit-config.yaml` supplies the commit and commit-message gates; CrossHair remains manual-stage. The native push guard is separate because pre-commit's push dispatcher selects only one ref from a multi-ref push. Only `.env.example` is permitted; no credential contents are read. Hooks are local and bypassable; install them in each clone. The repo has no CI.
 
 **Norm:** a red invariant or a CrossHair/mutation counterexample means the *implementation* is wrong — never weaken a property to pass. Every counterexample becomes a pinned regression in `tests/invariants/` before its fix lands.
 
 ## Testing
 
-Tests use pytest with shared fixtures in `tests/conftest.py`. All tests are unit tests that use temporary DuckDB databases (no IB connection required). The full suite runs in a few minutes with zero failures (run it in the `mmr` conda env — `~/miniforge3/envs/mmr/bin/python3` — other envs lack `twelvedata` and error at collection):
+Tests use pytest with shared fixtures in `tests/conftest.py`. All tests are unit tests that use temporary DuckDB databases (no IB connection required). The full suite runs in about five minutes with zero failures. Run it in the uv venv (a bare system interpreter lacks `twelvedata` and errors at collection):
 
 ```bash
-~/miniforge3/envs/mmr/bin/python3 -m pytest tests/ --timeout=30 -q --ignore=tests/test_ibrx_async.py
+uv run python -m pytest tests/ --timeout=60 -q --ignore=tests/test_ibrx_async.py
 ```
 
 Known flake: `test_bar_size_filtering.py::TestNewStrategies::test_vbt_macd_bb_strategy` occasionally fails in the full run (numba/vectorbt ordering interaction) but passes in isolation and on re-run.

@@ -71,7 +71,7 @@ Properties live in `tests/invariants/`. They assert universally-quantified
 facts, not examples. Run them like any test, in the canonical env:
 
 ```
-~/miniforge3/envs/mmr/bin/python3 -m pytest tests/invariants/ -q
+uv run python -m pytest tests/invariants/ -q
 ```
 
 When Hypothesis prints a falsifying example, that example is the spec telling
@@ -144,7 +144,7 @@ edit the file, re-run the gauntlet.
 ### 6. Full suite
 
 ```
-~/miniforge3/envs/mmr/bin/python3 -m pytest tests/ --timeout=60 -q --ignore=tests/test_ibrx_async.py
+uv run python -m pytest tests/ --timeout=60 -q --ignore=tests/test_ibrx_async.py
 ```
 
 ## The workflow, end to end

@@ -174,6 +174,7 @@ Point 4 was the whole review. The revision was accepted on that sentence.
 | `test_proposal_gate_split.py` | No opening quantity survives `require_proposal_approval`, at any size from any position, AND a reduction is never blocked. One resolver answers "how much of this opens exposure" for every gate. |
 | `test_proposal_machine.py` | Proposal state machine: exactly the documented transition table; terminal rows immutable (status, metadata, deletion-without-force); proposals are born PENDING. |
 | `test_protective_stop.py` | The disaster stop never oversells and never sits at or above entry. |
+| `test_reduction_coordination.py` | Physical reduction coordination at the chokepoint (distinct from the gates above, which never refuse an exit): an exit with no competing reservation is always placed as requested; an exit may displace only working reductions of its own owner class (a strategy is its own class, every operator path is one class); when another owner's working reduction claims the shares, the exit is refused `DEFERRED` before any cancel is sent and that order is left working, and a partial claim clamps the exit around it. |
 | `test_sizing_properties.py` | PositionSizer: amount respects every active cap; ATR↑ ⇒ size non-increasing; confidence↑ ⇒ size non-decreasing; amount ≥ 0; degenerate spread configs never crash. |
 
 Deeper example-based cases live in the ordinary unit-test files

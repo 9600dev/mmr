@@ -456,8 +456,12 @@ the mutation scope): a targeted pass over the four changed functions against
 their new tests scored 598 killed / 59 survived; every survivor in the new code
 is a documented equivalent (SQL keyword case, log text, pandas orient case,
 conId-default arithmetic, falsy defaults) recorded in the ledger in
-`scripts/run_mutation.sh`. The interim full pass held the module at 88.6%
-against its 77.7% floor with the remaining modules all at or above theirs.
+`scripts/run_mutation.sh`. The full pass completed on 2026-09-13 with every
+module at or above its floor and fourteen improved; the baseline was
+re-recorded from it (`auto_executor.py` floor 77.7% → 87.0%). The reduction
+ownership rule is also pinned in the human-owned spec as
+`tests/invariants/test_reduction_coordination.py` (a pure addition), alongside
+the gate properties that say no policy gate refuses an exit.
 
 Smaller items from the same review: the strategy callback worker encodes
 numpy/pandas scalars in signal metadata instead of failing permanently

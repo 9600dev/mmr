@@ -1,17 +1,28 @@
 # Pre-commit hooks — the local enforcement point (this repo has no CI).
-# Install once:  uv run pre-commit install
+# Install commit/message hooks AND the native push guard:
+#     uv run python scripts/install_git_hooks.py
 # Run manually:  uv run pre-commit run --all-files
 #
 # These make the safe path the lazy path: the kernel stays type-clean and the
 # human-owned invariants spec can't be silently weakened alongside the code it
-# checks. Both hooks are dev-only and never enter the container.
+# checks. Hooks are dev-only and never enter the container.
+default_install_hook_types: [pre-commit, commit-msg]
 repos:
   - repo: local
     hooks:
+      - id: env-credentials-guard
+        name: refuse tracked .env credentials (templates allowed)
+        entry: python3 scripts/env_guard.py staged
+        language: system
+        stages: [pre-commit]
+        pass_filenames: false
+        always_run: true
+
       - id: invariants-guard
         name: spec-protection guard (tests/invariants is human-owned)
         entry: python3 scripts/invariants_guard.py
         language: system
+        stages: [pre-commit]
         pass_filenames: false
         always_run: true
 
@@ -30,6 +41,7 @@ repos:
         name: ty type-check gate (kernel + advisory, no new diagnostics beyond baseline)
         entry: uv run python scripts/ty_gate.py
         language: system
+        stages: [pre-commit]
         pass_filenames: false
         # Must cover EVERY gated scope, not just the kernel. This was
         # ^trader/trading/.*\.py$, so a commit touching only trader/data/ or
