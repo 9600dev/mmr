@@ -248,6 +248,8 @@ def _executioner():
     trader.client.subscribe_place_order = AsyncMock(
         return_value=rx.from_iterable([MagicMock()]))
     trader.order_reduces_exposure = MagicMock(return_value=True)
+    # This fixture has no outstanding physical broker reservations.
+    trader.unobserved_reduction_quantity = AsyncMock(return_value=0.0)
     ex = TradeExecutioner()
     ex.connect(trader)
     return ex, trader

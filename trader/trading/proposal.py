@@ -3,6 +3,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import datetime as dt
+import math
 
 
 class ProposalStatus(str, Enum):
@@ -51,12 +52,46 @@ class ExecutionSpec:
         return {k: v for k, v in asdict(self).items() if v is not None}
 
     @classmethod
-    def from_dict(cls, d: dict) -> 'ExecutionSpec':
-        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+    def from_dict(cls, d: dict, *, ignore_unknown: bool = False) -> 'ExecutionSpec':
+        """Strict at the RPC boundary; ``ignore_unknown=True`` for stored rows.
+
+        A proposal persisted by a newer build can carry a field this build
+        does not know. Refusing to load it made every proposal listing fail
+        after a rollback; the store drops such fields (and says so) instead.
+        """
+        if not isinstance(d, dict):
+            raise ValueError('execution spec must be a mapping')
+        unknown = set(d) - set(cls.__dataclass_fields__)
+        if unknown and not ignore_unknown:
+            raise ValueError(f'unknown execution fields: {sorted(unknown)}')
+        return cls(**{key: value for key, value in d.items() if key not in unknown})
 
     def validate(self) -> List[str]:
         """Return a list of validation errors (empty if valid)."""
         errors = []
+        if self.order_type not in {member.value for member in OrderType}:
+            errors.append(f'unsupported order_type {self.order_type!r}')
+        if self.exit_type not in {member.value for member in ExitType}:
+            errors.append(f'unsupported exit_type {self.exit_type!r}')
+        if self.tif not in {'DAY', 'GTC', 'IOC', 'FOK', 'GTD', 'OPG'}:
+            errors.append(f'unsupported time in force {self.tif!r}')
+        if self.tif == 'GTD' and not self.good_till_date:
+            errors.append('GTD requires good_till_date')
+        if not isinstance(self.outside_rth, bool):
+            errors.append('outside_rth must be a boolean')
+        for name in ('limit_price', 'take_profit_price', 'stop_loss_price',
+                     'trailing_stop_percent', 'trailing_stop_amount'):
+            value = getattr(self, name)
+            if value is not None:
+                try:
+                    valid = (isinstance(value, (float, int)) and not isinstance(value, bool)
+                             and math.isfinite(value) and value > 0)
+                except (TypeError, ValueError):
+                    valid = False
+                if not valid:
+                    errors.append(f'{name} must be finite and positive')
+        if self.trailing_stop_percent is not None and self.trailing_stop_amount is not None:
+            errors.append('specify only one trailing stop distance')
         if self.order_type == 'LIMIT' and self.limit_price is None:
             errors.append('LIMIT order requires limit_price')
         if self.exit_type == 'BRACKET':

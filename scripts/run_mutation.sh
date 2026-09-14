@@ -161,6 +161,32 @@
 #       False`) makes that state unreachable at the comparison. -0.0 == 0.0 in
 #       Python, so a negative zero is filtered too. TRUE EQUIVALENTS.
 #       (Re-derive if the flat-position guard is ever relaxed.)
+#
+#   auto_executor.py — 2026-09-11 review fixes (legacy adoption, close deferral).
+#   Measured by a targeted re-run of the four touched functions against
+#   tests/test_legacy_holding_adoption.py + tests/test_advance_close_incomplete_orders.py:
+#   598 killed / 59 survived, of which the 35 in _advance_close pre-date the change
+#   except the two below. The remaining survivors in the new code:
+#     xǁAutoExecStateǁadopt_legacy_ownership__mutmut_{25,26,29,49,50,53,57,58,65,66}
+#       SQL keyword/identifier case changes (select/SELECT, AUTO_EXEC_POSITIONS...).
+#       DuckDB keywords and unquoted identifiers are case-insensitive; the same
+#       statement executes. TRUE EQUIVALENTS.
+#     xǁAutoExecutorǁadopt_legacy_holding__mutmut_{68,69,73,81,82,84,85}
+#       Edits to the ADOPTED audit log line's text/format. Log text only, the
+#       same class as position_sizing's reasoning/warning text. EQUIVALENT (text).
+#     xǁAutoExecutorǁ_broker_average_cost__mutmut_{20,31}
+#       to_dict('records') -> to_dict('RECORDS'). pandas lower-cases orient
+#       before validating (verified on the pinned pandas). TRUE EQUIVALENTS.
+#     xǁAutoExecutorǁ_broker_average_cost__mutmut_{38,40,44,45}
+#       Defaults in `int(row.get('conId', 0) or 0) != conid` for a row with no
+#       conId: the original yields 0, the mutants 0 or 1, and either differs from
+#       the original only when the sought conId is itself 0 or 1 — never a real
+#       IB contract. TRUE EQUIVALENTS for any valid conId.
+#     xǁAutoExecutorǁ_advance_close__mutmut_{176,178}
+#       `.get('complete', False)` -> default None / omitted. Both falsy: an
+#       absent completeness flag still defers. TRUE EQUIVALENTS.
+#     xǁAutoExecutorǁ_advance_close__mutmut_313
+#       record_close reason text for the externally-closed case. Text only.
 #       NB exit_class went 61.3% -> 93.5% only once tests/invariants/test_exit_class.py
 #       was added to the ORACLE selection in pyproject.toml — adding the spec file
 #       alone changed nothing, the drift tests/test_verification_wiring.py now catches.

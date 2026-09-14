@@ -81,17 +81,24 @@ class TestPortfolioUpdateRouting:
         blocking sync disk-IO fallback."""
         trader = _minimal_trader()
         trader.portfolio = MagicMock()
-        trader.update_portfolio_universe = MagicMock(return_value=asyncio.sleep(0))
+        update_completed = threading.Event()
+
+        async def update_universe(portfolio_item):
+            update_completed.set()
+
+        trader.update_portfolio_universe = AsyncMock(side_effect=update_universe)
         trader._update_portfolio_universe_sync = MagicMock()
 
         # Wire up a loop running on another thread
         loop = asyncio.new_event_loop()
+        loop_ready = threading.Event()
+        loop.call_soon(loop_ready.set)
         loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
         loop_thread.start()
-        time.sleep(0.05)
         trader._main_loop = loop
 
         try:
+            assert loop_ready.wait(timeout=2.0), 'background event loop did not start'
             portfolio_item = MagicMock()
             portfolio_item.contract = MagicMock()
             portfolio_item.contract.conId = 123
@@ -101,9 +108,14 @@ class TestPortfolioUpdateRouting:
             assert trader._update_portfolio_universe_sync.call_count == 0
             # update_portfolio_universe should have been scheduled
             assert trader.update_portfolio_universe.call_count == 1
+            # Submission is not completion. Stopping the loop immediately can
+            # strand its newly scheduled task and leak an unawaited coroutine.
+            assert update_completed.wait(timeout=2.0), 'portfolio update did not run'
+            trader.update_portfolio_universe.assert_awaited_once_with(portfolio_item)
         finally:
             loop.call_soon_threadsafe(loop.stop)
             loop_thread.join(timeout=2.0)
+            assert not loop_thread.is_alive(), 'background event loop did not stop'
             loop.close()
 
     def test_no_loop_and_no_main_loop_falls_back_to_sync(self):
@@ -111,7 +123,7 @@ class TestPortfolioUpdateRouting:
         we still reach the sync fallback — not crash."""
         trader = _minimal_trader()
         trader.portfolio = MagicMock()
-        trader.update_portfolio_universe = MagicMock(return_value=asyncio.sleep(0))
+        trader.update_portfolio_universe = AsyncMock(return_value=None)
         trader._update_portfolio_universe_sync = MagicMock()
         trader._main_loop = None  # no captured loop
 
@@ -121,6 +133,8 @@ class TestPortfolioUpdateRouting:
         trader._Trader__update_portfolio(portfolio_item)
 
         assert trader._update_portfolio_universe_sync.call_count == 1
+        trader.update_portfolio_universe.assert_called_once_with(portfolio_item)
+        trader.update_portfolio_universe.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -789,14 +803,12 @@ class TestOrderReducesExposure:
         # Oversize of the summed long is still exit-class (flip), not an open.
         assert t.order_reduces_exposure(_FakeContract(1), 'SELL', 101) is True
 
-    def test_missing_conid_sell_falls_back_to_same_symbol_long(self):
-        """conId briefly missing from the cache after a fill (or a conId
-        change): a SELL whose contract has no resolvable conId but a
-        same-symbol long exists is exit-class, not a gated open."""
+    def test_missing_conid_never_falls_back_to_same_symbol_long(self):
+        """Only the exact conId can authorize a gate-exempt reduction."""
         held = _FakePos(contract=_ContractSym(conId=0, symbol='AMD'), position=100.0)
         t = _trader_with_positions([held])
         order_contract = _ContractSym(conId=0, symbol='AMD')
-        assert t.order_reduces_exposure(order_contract, 'SELL', 100) is True
+        assert t.order_reduces_exposure(order_contract, 'SELL', 100) is False
 
     def test_symbol_fallback_requires_matching_symbol(self):
         """A different symbol must NOT match — precision preserved."""
@@ -819,30 +831,38 @@ class _FakeAV:
         self.currency = currency
 
 
-class _FakePnL:
-    def __init__(self, daily):
-        self.dailyPnL = daily
-
-
 class TestGatherRiskInputs:
-    def _trader(self, pnl=(), account_values=(), account='DU12345',
+    def _trader(self, daily_pnl=None, account_values=(), account='DU12345',
                 positions=(), fills_today=0):
+        from eventkit import Event
+        from ib_async import PnL
+
         t = _minimal_trader()
         t.ib_account = account
+        t._ib_upstream_connected = True
         t.book = MagicMock()
         t.book.get_open_order_count = MagicMock(return_value=2)
-        t.get_pnl = lambda: list(pnl)
+        t.get_pnl = lambda: []
         t.get_positions = lambda: list(positions)
         t.event_store = MagicMock()
         t.event_store.count_since = MagicMock(return_value=fills_today)
         t.client = MagicMock()
         t.client.ib.accountValues = MagicMock(return_value=list(account_values))
         t.client.ib.managedAccounts = MagicMock(return_value=[account])
+        t.client.ib.isConnected.return_value = True
+        t.client.ib.pnlEvent = Event('pnlEvent')
+        item = PnL(account=account, modelCode='')
+        t.client.ib.reqPnL.return_value = item
+        t.client.ib.pnl.return_value = [item]
+        t._ensure_account_pnl_subscription()
+        if daily_pnl is not None:
+            item.dailyPnL = daily_pnl
+            t.client.ib.pnlEvent.emit(item)
         return t
 
     def test_all_readable(self):
         t = self._trader(
-            pnl=[_FakePnL(-100.0), _FakePnL(25.0)],
+            daily_pnl=-75.0,
             account_values=[_FakeAV('DU12345', 'NetLiquidation', '50000', 'CAD')],
         )
         inputs = t.gather_risk_inputs()
@@ -852,8 +872,9 @@ class TestGatherRiskInputs:
         assert inputs.portfolio_value == 50000.0
         assert inputs.portfolio_value_evaluable is True
 
-    def test_empty_pnl_is_a_legitimate_zero(self):
+    def test_observed_account_zero_is_a_legitimate_zero(self):
         t = self._trader(
+            daily_pnl=0.0,
             account_values=[_FakeAV('DU12345', 'NetLiquidation', '50000', 'CAD')])
         inputs = t.gather_risk_inputs()
         assert inputs.daily_pnl == 0.0
@@ -861,19 +882,17 @@ class TestGatherRiskInputs:
 
     def test_pnl_read_failure_not_evaluable(self):
         t = self._trader(
+            daily_pnl=0.0,
             account_values=[_FakeAV('DU12345', 'NetLiquidation', '50000', 'CAD')])
 
-        def _boom():
-            raise RuntimeError('no pnl')
-        t.get_pnl = _boom
+        t.client.ib.pnl.side_effect = RuntimeError('cannot verify active account subscription')
         inputs = t.gather_risk_inputs()
         assert inputs.daily_pnl_evaluable is False
 
     def test_nan_pnl_not_evaluable(self):
-        """IB streams nan until the PnL subscription warms — summing it would
-        be a lie, not a zero."""
+        """IB's unknown account value cannot be read as a zero."""
         t = self._trader(
-            pnl=[_FakePnL(float('nan'))],
+            daily_pnl=float('nan'),
             account_values=[_FakeAV('DU12345', 'NetLiquidation', '50000', 'CAD')])
         inputs = t.gather_risk_inputs()
         assert inputs.daily_pnl_evaluable is False
@@ -911,15 +930,14 @@ class TestGatherRiskInputs:
         inputs = t.gather_risk_inputs()
         assert inputs.daily_pnl_evaluable is False
 
-    def test_empty_pnl_genuinely_no_activity_is_evaluable_zero(self):
-        """Flat book, no fills today: an empty cache is a real 0.0 — evaluable
-        so a fresh session can still open."""
+    def test_no_local_activity_cannot_certify_account_zero(self):
+        """Closed trades from another client are absent from local history."""
         t = self._trader(
             account_values=[_FakeAV('DU12345', 'NetLiquidation', '50000', 'CAD')],
             positions=(), fills_today=0)
         inputs = t.gather_risk_inputs()
         assert inputs.daily_pnl == 0.0
-        assert inputs.daily_pnl_evaluable is True
+        assert inputs.daily_pnl_evaluable is False
 
 
 # ---------------------------------------------------------------------------
@@ -1492,7 +1510,9 @@ class TestFlipSplitting:
         spec = ExecutionSpec(order_type='MARKET', exit_type='NONE').to_dict()
         result = asyncio.run(t.place_expressive_order(self._contract(), 'SELL', 5.0, spec))
         assert not result.is_success()
-        assert 'reduced 3' in str(result.error) and 'refused' in str(result.error)
+        assert 'reduction 3 submitted' in str(result.error) and 'refused' in str(result.error)
+        assert result.obj['reduction']['order_ids'] == [5001]
+        assert result.obj['opening']['status'] == 'REJECTED'
         assert len(t._placed) == 1, 'the reduction must still have been placed'
         assert t._placed[0][1] == 3.0
 

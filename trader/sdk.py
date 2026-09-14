@@ -28,9 +28,11 @@ import asyncio
 import dataclasses
 import datetime as dt
 import logging
+import math
 import os
 import pandas as pd
 import threading
+import uuid
 import zmq
 
 logger = logging.getLogger(__name__)
@@ -309,7 +311,7 @@ class MMR:
         IB's ``reqContractDetails`` returns one row per exchange the
         instrument trades on — so a US stock comes back as NASDAQ + BATS +
         ARCA + ISLAND + …, all with the same ``conId``. We want one row
-        per *listing*, not per venue. Keying on ``(conId, currency)`` does
+        per *listing*, not per venue. Keying on ``(conId, secType, currency)`` does
         the right thing: venue duplicates share a conId so they collapse;
         the ADR on a different currency has a different conId anyway so it
         survives as real ambiguity.
@@ -321,9 +323,10 @@ class MMR:
         """
         if not candidates:
             return candidates
+        SecurityDefinition.validate_multiplier_consistency(candidates)
         by_key: Dict[tuple, SecurityDefinition] = {}
         for c in candidates:
-            key = (c.conId, c.currency)
+            key = (c.conId, c.secType, c.currency)
             existing = by_key.get(key)
             if existing is None:
                 by_key[key] = c
@@ -337,64 +340,46 @@ class MMR:
                           exchange: str = '', currency: str = '') -> Contract:
         """Resolve *symbol* to a single Contract, raising on ambiguity.
 
-        When *exchange* or *currency* are provided, prefer definitions matching
-        those hints (e.g. exchange='ASX', currency='AUD' for Australian stocks).
-        Otherwise, prefers USD contracts on US exchanges.
+        Exchange/currency hints are requirements. Multiple distinct conIds
+        require explicit disambiguation; venue copies of one conId collapse.
         """
         definitions = self.resolve(symbol, sec_type=sec_type, exchange=exchange, currency=currency)
         if not definitions:
             raise ValueError(f"Could not resolve symbol: {symbol}")
 
-        sec = definitions[0]
-        if exchange or currency:
-            # Prefer definition matching the exchange/currency hint
-            for d in definitions:
-                d_exchange = getattr(d, 'exchange', '') or ''
-                d_primary = getattr(d, 'primaryExchange', '') or ''
-                d_currency = getattr(d, 'currency', '') or ''
-                if exchange and exchange.upper() not in (d_exchange.upper(), d_primary.upper()):
-                    continue
-                if currency and d_currency.upper() != currency.upper():
-                    continue
-                sec = d
-                break
-            else:
-                # No definition matched the hints — re-resolve via IB directly
-                if isinstance(symbol, str):
-                    direct = consume(
-                        self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_contract(
-                            Contract(
-                                symbol=symbol,
-                                exchange=exchange or 'SMART',
-                                secType=sec_type or 'STK',
-                                currency=currency or 'USD',
-                            )
-                        )
-                    )
-                    if direct:
-                        sec = direct[0]
-        elif len(definitions) > 1:
-            # Default: prefer USD on a US exchange
-            us_exchanges = {'SMART', 'NYSE', 'NASDAQ', 'AMEX', 'ARCA', 'BATS', 'IEX', 'ISLAND'}
-            for d in definitions:
-                d_currency = getattr(d, 'currency', '')
-                d_exchange = getattr(d, 'exchange', '')
-                d_primary = getattr(d, 'primaryExchange', '')
-                if d_currency == 'USD' and (d_exchange in us_exchanges or d_primary in us_exchanges):
-                    sec = d
-                    break
-            else:
-                # Fallback: prefer USD even if exchange isn't explicitly US
-                for d in definitions:
-                    if getattr(d, 'currency', '') == 'USD':
-                        sec = d
-                        break
+        def matches(definition):
+            con_id = getattr(definition, 'conId', None)
+            if type(con_id) is not int or con_id <= 0:
+                return False
+            if isinstance(symbol, int) and con_id != symbol:
+                return False
+            if sec_type and str(getattr(definition, 'secType', '')).upper() != sec_type.upper():
+                return False
+            venues = {str(getattr(definition, name, '') or '').upper()
+                      for name in ('exchange', 'primaryExchange')}
+            return ((not exchange or exchange.upper() in venues)
+                    and (not currency or str(getattr(definition, 'currency', '')).upper() == currency.upper()))
 
-        # Use SMART routing for non-US exchanges to avoid IB Error 10311
-        # ("direct routed orders may result in higher trade fees").
-        # Keep the real exchange in primaryExchange so IB routes correctly.
+        matching = [definition for definition in definitions if matches(definition)]
+        if not matching and isinstance(symbol, str) and (exchange or currency):
+            direct = consume(self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_contract(
+                Contract(symbol=symbol, exchange=exchange, secType=sec_type, currency=currency)))
+            matching = [definition for definition in (direct or []) if matches(definition)]
+        matching = self._dedupe_venue_duplicates(matching)
+        if not matching:
+            raise ValueError(f'No exact contract for {symbol!r} with sec_type={sec_type!r}, '
+                             f'exchange={exchange!r}, currency={currency!r}')
+        if len(matching) != 1:
+            raise ValueError(f'Ambiguous contract {symbol!r}: conIds '
+                             f'{[definition.conId for definition in matching]}; specify conId or exact exchange/currency')
+        sec = matching[0]
+
+        # SMART is a capability of this exact listing, not a universal venue.
+        # Some Hong Kong listings accept only SEHK and reject SMART outright.
         sec_exchange = sec.exchange or ''
         sec_primary = getattr(sec, 'primaryExchange', '') or ''
+        valid_exchanges = {venue.strip().upper()
+                           for venue in str(getattr(sec, 'validExchanges', '') or '').split(',')}
         us_smart = {'SMART', 'NYSE', 'NASDAQ', 'AMEX', 'ARCA', 'BATS', 'IEX', 'ISLAND'}
         if (getattr(sec, 'secType', '') or sec_type or '').upper() == 'CASH':
             # Forex is ALWAYS direct-routed on IDEALPRO — SMART cannot route
@@ -410,10 +395,12 @@ class MMR:
         elif sec_exchange.upper() in us_smart:
             order_exchange = sec_exchange
             primary_exchange = sec_primary
-        else:
-            # Non-US exchange (ASX, TSE, SEHK, etc.) — use SMART routing
+        elif 'SMART' in valid_exchanges:
             order_exchange = 'SMART'
             primary_exchange = sec_primary or sec_exchange
+        else:
+            order_exchange = sec_exchange or sec_primary
+            primary_exchange = sec_primary
 
         return Contract(
             conId=sec.conId,
@@ -439,7 +426,8 @@ class MMR:
         if isinstance(contract, dict):
             exchange = contract.get('exchange', '') or ''
             primary = contract.get('primaryExchange', '') or ''
-            if exchange.upper() not in us:
+            valid = {venue.strip().upper() for venue in str(contract.get('validExchanges', '')).split(',')}
+            if exchange.upper() not in us and 'SMART' in valid:
                 primary = primary or exchange
                 exchange = 'SMART'
             return Contract(
@@ -449,11 +437,13 @@ class MMR:
                 exchange=exchange,
                 primaryExchange=primary,
                 currency=contract.get('currency', ''),
+                multiplier=str(contract.get('multiplier', '') or ''),
             )
         # Contract object (or any object with matching attributes)
         exchange = getattr(contract, 'exchange', '') or ''
         primary = getattr(contract, 'primaryExchange', '') or ''
-        if exchange.upper() not in us:
+        valid = {venue.strip().upper() for venue in str(getattr(contract, 'validExchanges', '')).split(',')}
+        if exchange.upper() not in us and 'SMART' in valid:
             primary = primary or exchange
             exchange = 'SMART'
         return Contract(
@@ -463,6 +453,7 @@ class MMR:
             exchange=exchange,
             primaryExchange=primary,
             currency=getattr(contract, 'currency', ''),
+            multiplier=str(getattr(contract, 'multiplier', '') or ''),
         )
 
     @staticmethod
@@ -529,26 +520,29 @@ class MMR:
     def _fx_rates(self) -> dict:
         """Per-currency multipliers to the account's base currency (base → 1.0).
 
-        Degrades to an empty dict on RPC failure; callers then treat unknown
-        currencies as already-base (rate 1.0).
+        A failed read is unavailable input, never an implicit rate of one.
         """
         try:
             return consume(self._rpc.rpc(return_type=dict).get_fx_rates()) or {}
         except Exception as ex:
-            logging.warning('could not fetch FX rates, treating values as base: %s', ex)
-            return {}
+            raise ValueError(f'could not fetch account FX rates: {ex}') from ex
 
     @staticmethod
     def _to_base(value: float, currency: str, fx_rates: dict) -> float:
         """Convert a local-currency amount to base using fx_rates.
 
-        An unknown currency (or empty rates) falls back to rate 1.0 — i.e. it is
-        treated as already base. That's the safe degradation: no worse than the
-        old unconverted behaviour, and correct for the common single-currency case.
+        Unknown currency, missing rate or nonfinite input refuses valuation.
         """
-        if not currency:
-            return value
-        return value * float(fx_rates.get(currency, 1.0) or 1.0)
+        import math
+        if not currency or currency not in fx_rates:
+            raise ValueError(f'FX rate unavailable for {currency!r}')
+        rate = float(fx_rates[currency])
+        if not math.isfinite(rate) or rate <= 0 or not math.isfinite(value):
+            raise ValueError(f'invalid FX valuation for {currency!r}')
+        result = value * rate
+        if not math.isfinite(result):
+            raise ValueError(f'FX valuation overflow for {currency!r}')
+        return result
 
     def positions(self) -> pd.DataFrame:
         """Raw positions (no P&L)."""
@@ -725,6 +719,17 @@ class MMR:
     # Trading
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _cached_contract_matches(contract, sec_type: str, exchange: str,
+                                 currency: str, con_id: Optional[int] = None) -> bool:
+        if contract is None or (con_id is not None and contract.conId != con_id):
+            return False
+        venues = {str(getattr(contract, name, '') or '').upper()
+                  for name in ('exchange', 'primaryExchange')}
+        return ((not sec_type or str(getattr(contract, 'secType', '')).upper() == sec_type.upper())
+                and (not exchange or exchange.upper() in venues)
+                and (not currency or str(getattr(contract, 'currency', '')).upper() == currency.upper()))
+
     def _place_order(
         self,
         symbol: Union[str, int],
@@ -739,6 +744,7 @@ class MMR:
         exchange: str = '',
         currency: str = '',
         approver_key: Optional[str] = None,
+        client_intent_id: str = '',
     ) -> SuccessFail:
         if not market and limit_price is None:
             raise ValueError("Specify market=True or provide a limit_price")
@@ -747,7 +753,7 @@ class MMR:
 
         # Use cached contract from portfolio if available (international stocks).
         contract = self._contract_map.get(symbol) if isinstance(symbol, str) else None
-        if contract is None:
+        if not self._cached_contract_matches(contract, sec_type, exchange, currency):
             contract = self._resolve_contract(symbol, sec_type=sec_type,
                                               exchange=exchange, currency=currency)
 
@@ -759,19 +765,34 @@ class MMR:
             approver_key if approver_key is not None
             else os.environ.get('MMR_APPROVER_KEY')) or ''
 
-        return consume(
-            self._rpc.rpc(return_type=SuccessFail[Trade]).place_order_simple(
-                contract=contract,
-                action=action,
-                equity_amount=amount,
-                quantity=quantity,
-                limit_price=limit_price,
-                market_order=market,
-                stop_loss_percentage=stop_loss_percentage,
-                debug=debug,
-                approver_key=resolved_approver_key,
+        intent_id = client_intent_id or f'direct:{uuid.uuid4().hex}'
+        try:
+            result = consume(
+                self._rpc.rpc(return_type=SuccessFail[Trade]).place_order_simple(
+                    contract=contract,
+                    action=action,
+                    equity_amount=amount,
+                    quantity=quantity,
+                    limit_price=limit_price,
+                    market_order=market,
+                    stop_loss_percentage=stop_loss_percentage,
+                    debug=debug,
+                    approver_key=resolved_approver_key,
+                    client_intent_id=intent_id,
+                )
             )
-        )
+        except Exception as ex:
+            result = SuccessFail.fail(
+                error=f'UNKNOWN: direct order intent {intent_id}: {ex}; reconcile before retrying',
+                exception=ex)
+        result.client_intent_id = intent_id
+        outcome = getattr(result, 'execution_outcome', None)
+        if isinstance(outcome, dict) and outcome['opening']['status'] != 'SUBMITTED':
+            partial = SuccessFail.fail(error=result.error)
+            partial.obj = outcome
+            partial.client_intent_id = intent_id
+            return partial
+        return result
 
     def buy(
         self,
@@ -786,12 +807,14 @@ class MMR:
         exchange: str = '',
         currency: str = '',
         approver_key: Optional[str] = None,
+        client_intent_id: str = '',
     ) -> SuccessFail:
         """Place a buy order."""
         return self._place_order(
             symbol, 'BUY', amount, quantity, limit_price, market,
             stop_loss_percentage, debug, sec_type=sec_type,
             exchange=exchange, currency=currency, approver_key=approver_key,
+            client_intent_id=client_intent_id,
         )
 
     def sell(
@@ -807,12 +830,14 @@ class MMR:
         exchange: str = '',
         currency: str = '',
         approver_key: Optional[str] = None,
+        client_intent_id: str = '',
     ) -> SuccessFail:
         """Place a sell order."""
         return self._place_order(
             symbol, 'SELL', amount, quantity, limit_price, market,
             stop_loss_percentage, debug, sec_type=sec_type,
             exchange=exchange, currency=currency, approver_key=approver_key,
+            client_intent_id=client_intent_id,
         )
 
     def cancel(self, order_id: int) -> SuccessFail:
@@ -1250,7 +1275,6 @@ class MMR:
                     _cached_snap = self.snapshot(symbol, exchange=exchange, currency=currency)
                     snap = _cached_snap
                     if snap:
-                        import math
                         _bid = snap.get('bid', 0) or 0
                         _ask = snap.get('ask', 0) or 0
                         _last = snap.get('last', 0) or 0
@@ -1400,9 +1424,21 @@ class MMR:
                 # Estimate order value using snapshot price if no limit
                 snap_price = snap.get('last') or snap.get('ask') or 0 if snap else 0
                 price = spec.limit_price or snap_price
-                order_value = quantity * price if quantity and price else amount or 0
+                if quantity is not None:
+                    from trader.trading.executioner import TradeExecutioner
+                    from trader.trading.order_math import order_notional
+                    valuation_contract = self._resolve_contract(
+                        metadata.get('con_id', metadata.get('conId', symbol)),
+                        sec_type=sec_type, exchange=exchange, currency=currency)
+                    local_value, evaluable = order_notional(
+                        (price,), quantity, TradeExecutioner._multiplier(valuation_contract))
+                    if not evaluable:
+                        raise ValueError('proposal leverage notional is unavailable')
+                    order_value = self._to_base(local_value, valuation_contract.currency, self._fx_rates())
+                else:
+                    order_value = amount or 0  # Amount is explicitly account-base currency.
 
-                if net_liq > 0:
+                if net_liq > 0 and all(math.isfinite(value) for value in (net_liq, gross_pos, order_value)):
                     current_leverage = gross_pos / net_liq
                     estimated_leverage = (gross_pos + order_value) / net_liq
                     leverage_info = {
@@ -1569,7 +1605,8 @@ class MMR:
         return self._proposal_store().try_transition(
             proposal_id, 'PENDING', 'REJECTED', rejection_reason=reason)
 
-    def approve(self, proposal_id: int, approver_key: Optional[str] = None) -> SuccessFail:
+    def approve(self, proposal_id: int, approver_key: Optional[str] = None,
+                resume: bool = False) -> SuccessFail:
         """Approve and execute a proposal. REQUIRES trader_service.
 
         ``approver_key`` is the out-of-band secret for the server-side notional
@@ -1586,25 +1623,30 @@ class MMR:
         proposal = store.get(proposal_id)
         if not proposal:
             return SuccessFail.fail(error=f'Proposal #{proposal_id} not found')
-        if proposal.status != 'PENDING':
+        resuming = proposal.status == 'APPROVED' and resume
+        if proposal.status != 'PENDING' and not resuming:
             return SuccessFail.fail(error=f'Proposal #{proposal_id} is {proposal.status}, not PENDING')
 
         # Atomically claim the proposal. This is a compare-and-swap on the DB row
         # (UPDATE ... WHERE status='PENDING'), so if a second process — the LLM
         # loop and a human, or two `approve --all` shells — races us, exactly one
         # wins and the loser aborts here instead of placing a duplicate live order.
-        if not store.try_transition(proposal_id, 'PENDING', 'APPROVED'):
+        if not resuming and not store.try_transition(proposal_id, 'PENDING', 'APPROVED'):
             return SuccessFail.fail(
                 error=f'Proposal #{proposal_id} was already claimed by another approver')
 
+        placement_started = False
+        receipt_obj = None
+        outcome = None
+        order_ids = []
         try:
             contract = self._resolve_contract(
-                proposal.symbol, sec_type=proposal.sec_type,
+                proposal.metadata.get('con_id', proposal.metadata.get('conId', proposal.symbol)), sec_type=proposal.sec_type,
                 exchange=proposal.exchange, currency=proposal.currency,
             )
 
             # Determine quantity
-            qty = proposal.quantity
+            qty = proposal.metadata.get('submission_quantity', proposal.quantity)
             if qty is None and proposal.amount is not None:
                 import math
                 ticker = consume(
@@ -1630,8 +1672,8 @@ class MMR:
                 # the correct quantity for a foreign instrument. Without this, a
                 # base amount was divided by a foreign price directly — e.g. an
                 # AUD-priced ASX name sized as if the price were in the base
-                # currency, over/under-sizing by the FX factor. Degrades to no
-                # conversion (rate 1.0) when FX is unavailable or same-currency.
+                # currency, over/under-sizing by the FX factor. Missing FX
+                # refuses sizing; it is never an implicit rate of one.
                 _cur = getattr(contract, 'currency', '') or proposal.currency or ''
                 _price_base = self._to_base(price, _cur, self._fx_rates())
                 # Contract multiplier (OPT/FUT: e.g. 100) scales notional per
@@ -1639,7 +1681,8 @@ class MMR:
                 # $500/contract, not $5. Without this, `amount` was divided by the
                 # bare premium and over-sized by the multiplier (100x). Stocks/forex
                 # report no multiplier → default 1.
-                _mult = float(getattr(contract, 'multiplier', None) or 1) or 1.0
+                from trader.trading.executioner import TradeExecutioner
+                _mult = TradeExecutioner._multiplier(contract)
                 from trader.trading.order_math import whole_shares_for_notional
                 try:
                     qty = whole_shares_for_notional(
@@ -1675,6 +1718,11 @@ class MMR:
             resolved_approver_key = (
                 approver_key if approver_key is not None
                 else os.environ.get('MMR_APPROVER_KEY')) or ''
+            # Persist the exact sized payload before transport. An ambiguous
+            # retry must not re-size an amount at a different market price.
+            store.update_metadata(proposal_id, {'submission_quantity': float(qty),
+                                                 'con_id': int(contract.conId)})
+            placement_started = True
             try:
                 result = consume(
                     self._rpc.rpc(return_type=SuccessFail[list[Trade]]).place_expressive_order(
@@ -1684,6 +1732,8 @@ class MMR:
                         execution_spec=proposal.execution.to_dict(),
                         algo_name=algo_name,
                         approver_key=resolved_approver_key,
+                        client_intent_id=str(proposal.metadata.get('client_intent_id') or f'proposal:{proposal_id}'),
+                        proposal_id=proposal_id,
                     )
                 )
             except TimeoutError as ex:
@@ -1698,26 +1748,60 @@ class MMR:
                     ),
                     exception=ex,
                 )
-            except ConnectionError as ex:
-                # The request could not be sent at all (no route to
-                # trader_service). No order was placed — safe to fail cleanly.
-                store.try_transition(proposal_id, 'APPROVED', 'FAILED')
-                return SuccessFail.fail(error=str(ex), exception=ex)
+            except Exception as ex:
+                # A transport exception alone does not prove that a request
+                # was never received. Keep the durable claim for reconciliation.
+                return SuccessFail.fail(error=f'UNKNOWN: proposal #{proposal_id}: {ex}', exception=ex)
 
+            # Keep observed receipt evidence available if later bookkeeping
+            # fails. Neither IDs nor submitted quantities establish a fill.
+            receipt_obj = result.obj
+            outcome = getattr(result, 'execution_outcome', None)
             if result.is_success():
-                order_ids = []
                 if result.obj:
                     for t in result.obj:
                         oid = getattr(t, 'orderId', None) or getattr(getattr(t, 'order', None), 'orderId', None)
                         if oid:
                             order_ids.append(oid)
+                # Terminal proposal metadata is immutable. Save the actual
+                # split outcome while APPROVED, then commit the terminal state.
+                if isinstance(outcome, dict):
+                    store.update_metadata(proposal_id, {'submission_outcome': outcome})
                 store.try_transition(proposal_id, 'APPROVED', 'EXECUTED', order_ids=order_ids)
-                return SuccessFail.success(obj=order_ids)
+                reply = SuccessFail.success(obj=order_ids)
+                if isinstance(outcome, dict):
+                    reply.execution_outcome = outcome
+                return reply
             else:
+                if 'UNKNOWN:' in str(result.error):
+                    return result
+                if isinstance(result.obj, dict) and 'reduction' in result.obj:
+                    # A refused opening half does not erase the already
+                    # submitted reduction or misrepresent its fill status.
+                    store.update_metadata(proposal_id, {'submission_outcome': result.obj})
+                    store.try_transition(proposal_id, 'APPROVED', 'FAILED',
+                                         order_ids=result.obj['reduction'].get('order_ids', []))
+                    return result
                 store.try_transition(proposal_id, 'APPROVED', 'FAILED')
                 return SuccessFail.fail(error=result.error, exception=result.exception)
 
         except Exception as ex:
+            if placement_started:
+                # A receipt-processing or persistence failure cannot prove that
+                # no order was submitted. Do not turn an uncertain submission
+                # into FAILED, even if a later status write would succeed.
+                reply = SuccessFail.fail(
+                    error=(f'UNKNOWN: proposal #{proposal_id}: could not record the '
+                           f'submission result; reconcile broker orders before retrying. ({ex})'),
+                    exception=ex,
+                )
+                if isinstance(receipt_obj, dict) and 'reduction' in receipt_obj:
+                    reply.obj = receipt_obj
+                elif order_ids:
+                    reply.obj = list(order_ids)
+                if isinstance(outcome, dict):
+                    reply.execution_outcome = outcome
+                return reply
             # Pre-order failures (contract resolution, price snapshot, quantity):
             # no order was placed, so FAILED is the correct terminal state.
             store.try_transition(proposal_id, 'APPROVED', 'FAILED')
@@ -1726,6 +1810,18 @@ class MMR:
     # ------------------------------------------------------------------
     # Protective orders for existing positions
     # ------------------------------------------------------------------
+
+    def execution_snapshot(self, intent_id: str = '', order_ids: Optional[list[int]] = None,
+                           client_intent_id: str = '') -> dict:
+        return consume(self._rpc.rpc(return_type=dict).execution_snapshot(
+            intent_id=intent_id or client_intent_id, order_ids=order_ids))
+
+    def emergency_close_position(self, con_id: int, quantity: float,
+                                 strategy_name: str, client_intent_id: str) -> SuccessFail:
+        """Submit a broker-clamped reduction without reading the proposal store."""
+        return consume(self._rpc.rpc(return_type=SuccessFail).emergency_close_position(
+            con_id=con_id, quantity=quantity, strategy_name=strategy_name,
+            client_intent_id=client_intent_id))
 
     def place_protective_order(
         self,
@@ -1742,6 +1838,7 @@ class MMR:
         currency: str = '',
         con_id: Optional[int] = None,
         order_ref: str = '',
+        client_intent_id: str = '',
     ) -> SuccessFail:
         """Place a standalone protective order (STP / TRAIL / LMT) for an existing
         position. Resolves the contract (preferring a cached one from the last
@@ -1755,26 +1852,33 @@ class MMR:
             return SuccessFail.fail(error='quantity must be positive')
 
         contract = self._contract_map.get(symbol)
-        if contract is None:
+        if not self._cached_contract_matches(contract, sec_type, exchange, currency, con_id):
             try:
                 contract = self._resolve_contract(
                     con_id or symbol, sec_type=sec_type, exchange=exchange, currency=currency)
             except Exception as ex:
                 return SuccessFail.fail(error=f"Could not resolve symbol {symbol}: {ex}")
 
-        return consume(
-            self._rpc.rpc(return_type=SuccessFail[Trade]).place_standalone_order(
-                contract=contract,
-                action=action.upper(),
-                quantity=quantity,
-                order_type=order_type,
-                aux_price=aux_price,
-                limit_price=limit_price,
-                trailing_percent=trailing_percent,
-                tif=tif,
-                order_ref=order_ref,
+        intent_id = client_intent_id or f'protective:{uuid.uuid4().hex}'
+        try:
+            result = consume(
+                self._rpc.rpc(return_type=SuccessFail[Trade]).place_standalone_order(
+                    contract=contract,
+                    action=action.upper(),
+                    quantity=quantity,
+                    order_type=order_type,
+                    aux_price=aux_price,
+                    limit_price=limit_price,
+                    trailing_percent=trailing_percent,
+                    tif=tif,
+                    order_ref=order_ref,
+                    client_intent_id=intent_id,
+                )
             )
-        )
+        except Exception as ex:
+            result = SuccessFail.fail(error=f'UNKNOWN: protective intent {intent_id}: {ex}', exception=ex)
+        result.client_intent_id = intent_id
+        return result
 
     # ------------------------------------------------------------------
     # Position closing
@@ -1995,169 +2099,41 @@ class MMR:
             time.sleep(interval)
 
     def execute_resize_plan(self, plan: dict) -> dict:
-        """Execute a resize plan: cancel protective orders, place deltas, re-create protectives.
+        """Submit each resize to the server's broker-aware coordinator.
 
-        Returns a summary dict with successes, failures, and warnings.
+        The response acknowledges submission, never execution. Unsupported
+        protective handoffs are deferred without an uncoordinated client-side
+        cancel/place fallback; a timeout keeps the same intent for recovery.
         """
-        results = {
-            'successes': [],
-            'failures': [],
-            'warnings': [],
-        }
-
+        import uuid
+        results = {'successes': [], 'failures': [], 'warnings': []}
         for adj in plan.get('adjustments', []):
             symbol = adj['symbol']
-            delta_qty = adj['delta_qty']
-            action = adj['action']
-            target_qty = adj['target_qty']
-            associated = adj.get('associated_orders', [])
-
-            # 1. Place the delta market order FIRST, while the existing protective
-            #    orders are still live. If the delta fails (risk gate, timeout, IB
-            #    reject) we simply skip this symbol: the position is unchanged and
-            #    its original protectives still match it exactly. This is the fix
-            #    for the naked-position hole — the old ordering cancelled stops
-            #    first and then `continue`d past a delta failure, leaving the full
-            #    position with no stop-loss.
+            intent = adj.setdefault('client_intent_id', f'resize:{uuid.uuid4().hex}')
             try:
-                cached_contract = self._contract_map.get(symbol)
-                if cached_contract:
-                    order_result = consume(
-                        self._rpc.rpc(return_type=SuccessFail[Trade]).place_order_simple(
-                            contract=cached_contract,
-                            action=action,
-                            equity_amount=None,
-                            quantity=abs(delta_qty),
-                            limit_price=None,
-                            market_order=True,
-                            stop_loss_percentage=0.0,
-                            debug=False,
-                        )
-                    )
-                else:
-                    order_result = self._place_order(
-                        symbol=symbol,
-                        action=action,
-                        quantity=abs(delta_qty),
-                        market=True,
-                    )
-                if order_result.is_success():
-                    results['successes'].append(
-                        f'{symbol}: {action} {abs(delta_qty)} shares'
-                    )
-                else:
-                    results['failures'].append(
-                        f'{symbol}: {action} {abs(delta_qty)} failed — {order_result.error} '
-                        f'(protective orders left untouched; position still protected)'
-                    )
+                con_id = adj.get('conId')
+                contract = self._contract_map.get(symbol)
+                if contract is None or (con_id and contract.conId != con_id):
+                    contract = self._resolve_contract(con_id or symbol)
+                result = consume(self._rpc.rpc(return_type=SuccessFail).resize_position(
+                    contract=contract, target_quantity=adj['target_qty'],
+                    client_intent_id=intent))
+                if not isinstance(result, SuccessFail):
+                    raise RuntimeError('server does not support coordinated resize')
+                if not result.is_success():
+                    results['failures'].append(f'{symbol}: {result.error}')
                     continue
-            except TimeoutError as ex:
-                # Ambiguous: the trim may have executed. Do NOT touch protectives —
-                # if it filled they're now slightly oversized (still protective),
-                # if it didn't they still match. Flag for manual reconciliation.
-                results['failures'].append(
-                    f'{symbol}: {action} {abs(delta_qty)} TIMED OUT — status unknown, '
-                    f'protectives left in place; reconcile manually — {ex}'
-                )
-                continue
+                outcome = result.obj
+                if not isinstance(outcome, dict) or outcome.get('status') not in {'SUBMITTED', 'UNCHANGED'}:
+                    raise RuntimeError('invalid coordinated resize acknowledgement')
+                adj['order_ids'] = outcome.get('order_ids', [])
+                results['successes'].append(
+                    f"{symbol}: {outcome['status']} target {adj['target_qty']} (intent {intent})")
+                if outcome['status'] == 'SUBMITTED':
+                    results['warnings'].append(f'{symbol}: execution pending; reconcile intent {intent}')
             except Exception as ex:
                 results['failures'].append(
-                    f'{symbol}: {action} {abs(delta_qty)} error — {ex} '
-                    f'(protective orders left untouched)'
-                )
-                continue
-
-            # 2. The delta filled: now bring each protective to the new quantity,
-            #    one at a time — cancel, confirm, then re-create. If a cancel does
-            #    NOT confirm we must not place a second protective (that would
-            #    double-cover the position and can flip it on a trigger), so we
-            #    leave the old one and flag it. If the re-create fails after a
-            #    confirmed cancel the position is momentarily unprotected — that
-            #    is surfaced as a loud, explicit warning for manual action.
-            contract = self._contract_map.get(symbol)
-            if contract is None:
-                try:
-                    contract = self._resolve_contract(symbol)
-                except Exception as ex:
-                    results['warnings'].append(
-                        f'{symbol}: RESIZED but could not resolve contract to reset protectives '
-                        f'({ex}); old protectives remain at old quantity — manual review needed'
-                    )
-                    continue
-            new_qty = abs(target_qty)
-
-            # GROW deltas (target magnitude > current) increase the position via
-            # a market order that place_order_simple resolves on SUBMISSION, not
-            # fill. Until the fill lands and the position event propagates, the
-            # broker still shows the OLD (smaller) quantity, and
-            # place_standalone_order's exit-class check refuses a protective whose
-            # quantity exceeds the held position. If we cancelled the old stop
-            # and then got refused, the grown position would be left NAKED. So
-            # wait (bounded) for the fill; if it doesn't confirm — outside RTH a
-            # market order may not fill for hours — leave the existing protectives
-            # IN PLACE (smaller-quantity protection is strictly safer than none)
-            # and flag for manual widening once the delta fills. Trims shrink the
-            # position and never enter this branch — their re-create is always
-            # <= held, so their path is unchanged.
-            if abs(target_qty) > abs(adj['current_qty']):
-                if not self._await_grown_position(adj.get('conId', 0), new_qty):
-                    held = abs(self._live_position_qty(adj.get('conId', 0)))
-                    results['warnings'].append(
-                        f'{symbol}: GREW toward {target_qty} but the delta had not filled '
-                        f'in time (likely outside RTH); existing protective orders LEFT IN '
-                        f'PLACE, still protecting the current {held:g}-share position — widen '
-                        f'to {new_qty} manually once the delta fills'
-                    )
-                    continue
-
-            for order_info in associated:
-                oid = order_info['orderId']
-                otype = order_info['orderType']
-                try:
-                    cancel_result = self.cancel(oid)
-                    cancelled = cancel_result.is_success()
-                except Exception as ex:
-                    cancelled = False
-                    cancel_result = None
-                    results['warnings'].append(f'{symbol}: error cancelling {otype} #{oid}: {ex}')
-
-                if not cancelled:
-                    err = getattr(cancel_result, 'error', 'unknown') if cancel_result else 'exception'
-                    results['warnings'].append(
-                        f'{symbol}: could not confirm cancel of {otype} #{oid} ({err}); '
-                        f'leaving it at old quantity to avoid double protection — manual review needed'
-                    )
-                    continue
-
-                try:
-                    place_result = consume(
-                        self._rpc.rpc(return_type=SuccessFail[Trade]).place_standalone_order(
-                            contract=contract,
-                            action=order_info['action'],
-                            quantity=new_qty,
-                            order_type=otype,
-                            aux_price=order_info['auxPrice'],
-                            limit_price=order_info['lmtPrice'],
-                            trailing_percent=order_info['trailingPercent'],
-                            tif=order_info['tif'],
-                            order_ref=order_info.get('orderRef', ''),
-                        )
-                    )
-                    if getattr(place_result, 'is_success', lambda: True)():
-                        results['successes'].append(
-                            f'{symbol}: re-created {otype} {order_info["action"]} {new_qty}'
-                        )
-                    else:
-                        results['warnings'].append(
-                            f'{symbol}: CANCELLED {otype} #{oid} but re-create FAILED '
-                            f'({getattr(place_result, "error", "?")}) — POSITION UNPROTECTED, act now'
-                        )
-                except Exception as ex:
-                    results['warnings'].append(
-                        f'{symbol}: CANCELLED {otype} #{oid} but re-create raised ({ex}) — '
-                        f'POSITION UNPROTECTED, act now'
-                    )
-
+                    f'{symbol}: UNKNOWN or unsupported resize ({ex}); reconcile intent {intent}')
         return results
 
     # ------------------------------------------------------------------
@@ -2395,17 +2371,29 @@ class MMR:
             return pd.DataFrame(rows)
         return pd.DataFrame()
 
-    def enable_strategy(self, name: str) -> SuccessFail:
+    def enable_strategy(self, name: str, *, timeout: float = 125.0) -> SuccessFail:
         """Enable a strategy by name."""
-        return consume(self._rpc.rpc().enable_strategy(name))
+        return consume(self._rpc.rpc(timeout=timeout).enable_strategy(name))
 
     def disable_strategy(self, name: str) -> SuccessFail:
         """Disable a strategy by name."""
         return consume(self._rpc.rpc().disable_strategy(name))
 
-    def reload_strategies(self) -> SuccessFail:
+    def reload_strategies(self, *, timeout: float = 125.0) -> SuccessFail:
         """Reload strategies from YAML config and re-subscribe to instruments."""
-        return consume(self._rpc.rpc().reload_strategies())
+        return consume(self._rpc.rpc(timeout=timeout).reload_strategies())
+
+    def adopt_legacy_holding(self, strategy: str, conid: int,
+                             avg_cost: Optional[float] = None) -> SuccessFail:
+        """Attest that a holding attributed before ownership epochs belongs to *strategy*.
+
+        Forwarded by trader_service to strategy_service like enable/disable/
+        reload. Assigns the epoch and cost basis the executor needs to close,
+        emergency-close and re-protect the holding; the broker position must
+        corroborate the attributed quantity.
+        """
+        return consume(self._rpc.rpc(return_type=SuccessFail[dict]).adopt_legacy_holding(
+            strategy, int(conid), avg_cost))
 
     def check_ib_upstream(self) -> Optional[str]:
         """Check if IB Gateway has upstream connectivity. Returns error string or None if OK."""

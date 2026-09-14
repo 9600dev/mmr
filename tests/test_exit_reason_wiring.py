@@ -46,9 +46,14 @@ def _is_literal_false(node: ast.Call, arg: str) -> bool:
 def test_mint_sites_exist_and_are_found():
     """Guard the guard: if the AST walk finds nothing, every test below passes
     vacuously — the same fail-open shape as the old ty gate."""
-    assert len(_mint_calls()) >= 6, (
-        f'expected the known mint sites, found {len(_mint_calls())} — has the '
-        'function been renamed? These tests would silently pass on zero.'
+    # Expressive legs now share one _place_and_wait mint site. The number of
+    # calls is an implementation detail; the scanner must still see BOTH
+    # production order boundaries before its per-site checks can be trusted.
+    found = {rel for rel, _line, _kwargs, _node in _mint_calls()}
+    required = {'trader/trading/executioner.py', 'trader/trading/trading_runtime.py'}
+    assert required <= found, (
+        f'expected mint sites in both order boundaries, missing {required - found} '
+        '— has mint_approved_order been renamed? Per-site checks cannot pass vacuously.'
     )
 
 

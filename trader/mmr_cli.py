@@ -597,6 +597,16 @@ def build_parser() -> argparse.ArgumentParser:
     disable_p = strat_sub.add_parser('disable', help='Disable a strategy')
     disable_p.add_argument('name', help='Strategy name')
     strat_sub.add_parser('reload', help='Reload strategies from YAML and re-subscribe')
+    adopt_p = strat_sub.add_parser(
+        'adopt',
+        help='Attest that a holding attributed before ownership epochs belongs to a strategy '
+             '(assigns the epoch and cost basis its closes and protective repair need)')
+    adopt_p.add_argument('name', help='Strategy name')
+    adopt_p.add_argument('conid', type=int, help='Instrument conId of the attributed holding')
+    adopt_p.add_argument('--avg-cost', type=float, default=None,
+                         help='Cost basis per unit; defaults to the broker average cost')
+    adopt_p.add_argument('--attest', action='store_true',
+                         help='Required: you have verified the broker position is this strategy\'s holding')
 
     # strategies available — scan the strategies directory for Strategy
     # subclasses. Shows what's on disk vs what's deployed.
@@ -1914,7 +1924,7 @@ _ROLE_CAPABILITIES = {
 _ROLE_OPEN_COMMANDS = frozenset({'buy', 'sell'})
 _ROLE_RESIZE_COMMANDS = frozenset({'resize-positions', 'resize'})
 # Strategy sub-actions that CONTROL the live roster (vs. read it).
-_ROLE_STRATEGY_CONTROL_ACTIONS = frozenset({'enable', 'disable', 'reload'})
+_ROLE_STRATEGY_CONTROL_ACTIONS = frozenset({'enable', 'disable', 'reload', 'adopt'})
 
 
 def _role_allows(cmd: Optional[str], args: argparse.Namespace) -> Optional[str]:
@@ -3822,12 +3832,24 @@ def _handle_strategies(mmr: MMR, args: argparse.Namespace):
             print_status('Strategies reloaded')
         else:
             print_status(f'Reload failed: {result.error}', success=False)
+    elif action == 'adopt':
+        if not getattr(args, 'attest', False):
+            print_status('adopt requires --attest: confirm you have verified the broker position '
+                         f'is {args.name}\'s holding before assigning it ownership', success=False)
+            return
+        result = mmr.adopt_legacy_holding(args.name, args.conid, args.avg_cost)
+        if result.is_success():
+            adopted = result.obj or {}
+            print_status(f'Adopted {args.name} conId {args.conid}: {adopted.get("quantity")} @ '
+                         f'{adopted.get("avg_cost")} (ownership epoch {adopted.get("ownership_epoch")})')
+        else:
+            print_status(f'Adopt failed: {result.error}', success=False)
     elif action == 'create':
         _handle_strategy_create(args)
     elif action == 'deploy':
-        _handle_strategy_deploy(args)
+        _handle_strategy_deploy(args, mmr)
     elif action == 'undeploy':
-        _handle_strategy_undeploy(args)
+        _handle_strategy_undeploy(args, mmr)
     elif action == 'signals':
         _handle_strategy_signals(args)
     elif action == 'pnl':
@@ -4204,7 +4226,7 @@ def _handle_strategies_available(args: argparse.Namespace):
         return
 
     # 2. Load deployed strategies from strategy_runtime.yaml for cross-reference
-    config_path = Path('~/.config/mmr/strategy_runtime.yaml').expanduser()
+    config_path = _strategy_config_path()
     deployed_by_file: Dict[str, list[str]] = {}
     if config_path.exists():
         try:
@@ -4295,7 +4317,7 @@ def _handle_strategies_from_config():
     import pandas as pd
     import yaml
 
-    config_path = Path('~/.config/mmr/strategy_runtime.yaml').expanduser()
+    config_path = _strategy_config_path()
     if not config_path.exists():
         print_status('No strategy_runtime.yaml found', success=False)
         return
@@ -4997,7 +5019,7 @@ def _gauntlet_enable_refusal(name: str) -> Optional[str]:
     gauntlet closes."""
     import yaml
 
-    config_path = Path('~/.config/mmr/strategy_runtime.yaml').expanduser()
+    config_path = _strategy_config_path()
     if not config_path.exists():
         return (f'enable refused: no strategy_runtime.yaml at {config_path} — '
                 f'cannot verify gauntlet status for {name!r}')
@@ -5117,7 +5139,74 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
                      success=False)
 
 
-def _handle_strategy_deploy(args: argparse.Namespace):
+def _strategy_config_path():
+    """Use the same deployment file as the selected runtime configuration."""
+    from trader.container import Container
+    configured = Container.instance().config().get('strategy_config_file')
+    return Path(configured or '~/.config/mmr/strategy_runtime.yaml').expanduser()
+
+
+def _write_strategy_config(config_path, config):
+    """Readers see a complete old or new generation, never half a YAML file."""
+    import os
+    import tempfile
+    import yaml
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=config_path.parent,
+                                         prefix='.strategy-', suffix='.yaml', delete=False) as file:
+            temporary = file.name
+            yaml.safe_dump(config, file, default_flow_style=False, sort_keys=False)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, config_path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            os.unlink(temporary)
+
+
+def _ack_strategy_config(mmr, name, present, expected=None, source_hash=None):
+    if mmr is None:
+        print_status(f'Configuration saved for {name}; runtime application pending', success=False)
+        return False
+    try:
+        result = mmr.reload_strategies()
+        if not result.is_success():
+            raise RuntimeError(result.error)
+        strategies = result.obj
+        if not isinstance(strategies, list):
+            raise RuntimeError('runtime did not return an applied deployment snapshot')
+        deployed = next((s for s in strategies if s.name == name), None)
+        if present:
+            if deployed is None or not getattr(deployed, 'deployment_generation', ''):
+                raise RuntimeError('runtime did not acknowledge a loaded generation')
+            if expected is not None:
+                from trader.objects import BarSize
+                fields = dict(class_name=expected['class_name'],
+                              bar_size=BarSize.parse_str(expected['bar_size']),
+                              conids=expected.get('conids', []),
+                              universe=expected.get('universe'),
+                              historical_days_prior=expected['historical_days_prior'],
+                              auto_execute=expected.get('auto_execute', False),
+                              paper_only=expected.get('paper_only', False),
+                              requested_params=expected.get('params', {}),
+                              source_hash=source_hash)
+                mismatched = [key for key, value in fields.items()
+                              if getattr(deployed, key, None) != value]
+                if mismatched:
+                    raise RuntimeError(f'applied deployment differs in {", ".join(mismatched)}')
+                if not getattr(deployed, 'effective_config_hash', ''):
+                    raise RuntimeError('runtime did not report its effective configuration hash')
+        elif deployed is not None:
+            raise RuntimeError('runtime still reports the removed deployment')
+        return True
+    except Exception as ex:
+        print_status(f'Configuration saved for {name}, but runtime application is unconfirmed: {ex}', success=False)
+        return False
+
+
+def _handle_strategy_deploy(args: argparse.Namespace, mmr=None):
     """Deploy a strategy to strategy_runtime.yaml.
 
     Writes to ``~/.config/mmr/strategy_runtime.yaml`` (the runtime's actual
@@ -5128,7 +5217,7 @@ def _handle_strategy_deploy(args: argparse.Namespace):
     import yaml
 
     name = args.name
-    config_path = Path('~/.config/mmr/strategy_runtime.yaml').expanduser()
+    config_path = _strategy_config_path()
 
     if not config_path.exists():
         config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5333,8 +5422,11 @@ def _handle_strategy_deploy(args: argparse.Namespace):
     strategies.append(entry)
     config['strategies'] = strategies
 
-    with open(config_path, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+    _write_strategy_config(config_path, config)
+    import hashlib
+    if not _ack_strategy_config(mmr, name, present=True, expected=entry,
+                                source_hash=hashlib.sha256(strategy_file.read_bytes()).hexdigest()):
+        return
 
     param_note = f' with params={params_dict}' if params_dict else ''
     print_status(
@@ -5342,12 +5434,12 @@ def _handle_strategy_deploy(args: argparse.Namespace):
     )
 
 
-def _handle_strategy_undeploy(args: argparse.Namespace):
+def _handle_strategy_undeploy(args: argparse.Namespace, mmr=None):
     """Remove a strategy from strategy_runtime.yaml."""
     import yaml
 
     name = args.name
-    config_path = Path('~/.config/mmr/strategy_runtime.yaml').expanduser()
+    config_path = _strategy_config_path()
 
     if not config_path.exists():
         print_status(f'No strategy_runtime.yaml found', success=False)
@@ -5367,8 +5459,9 @@ def _handle_strategy_undeploy(args: argparse.Namespace):
 
     config['strategies'] = strategies
 
-    with open(config_path, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False)
+    _write_strategy_config(config_path, config)
+    if not _ack_strategy_config(mmr, name, present=False):
+        return
 
     print_status(f'Undeployed strategy: {name}')
 
@@ -5483,7 +5576,7 @@ def _collect_stack_checks(exchanges: str = 'NYSE,ASX',
 
     # -- armed roster: YAML auto_execute:true names must be loaded + RUNNING --
     yaml_armed: list = []
-    config_path = Path('~/.config/mmr/strategy_runtime.yaml').expanduser()
+    config_path = _strategy_config_path()
     if config_path.exists():
         try:
             with open(config_path) as f:
@@ -5628,12 +5721,12 @@ def _handle_strategy_pnl(args: argparse.Namespace):
 
     Realized numbers come purely from the event store (no service needed):
     ORDER_FILLED events tagged with the strategy name via orderRef, paired
-    long-only. Unrealized marks are best-effort — they need trader_service
-    for current prices and degrade to '-' when it's down.
+    long-only. Missing fill prices leave affected PnL unavailable. Unrealized
+    marks also need trader_service and every open lot's price and cost basis.
     """
     import pandas as pd
     from trader.container import Container
-    from trader.data.event_store import EventStore
+    from trader.data.event_store import EventStore, fill_price_or_none
 
     cfg = Container.instance().config()
     duckdb_path = cfg.get('duckdb_path', '')
@@ -5670,9 +5763,9 @@ def _handle_strategy_pnl(args: argparse.Namespace):
             contract = getattr(item, 'contract', None)
             conid = int(getattr(contract, 'conId', 0) or 0)
             if conid:
-                prices[conid] = float(getattr(item, 'marketPrice', 0.0) or 0.0)
+                prices[conid] = fill_price_or_none(getattr(item, 'marketPrice', None))
     except Exception as e:
-        rpc_error = e  # service down — realized is still exact, unrealized shows '-'
+        rpc_error = e  # service down — the realized ledger is still available
 
     rows = []
     for name in sorted(strategies):
@@ -5683,25 +5776,38 @@ def _handle_strategy_pnl(args: argparse.Namespace):
             unrealized = 0.0
             for lot in s['open_lots']:
                 mkt = prices.get(lot['conid'])
-                if mkt:
-                    unrealized += (mkt - lot['entry_price']) * lot['quantity']
+                basis = fill_price_or_none(lot['entry_price'])
+                if mkt is None or basis is None:
+                    unrealized = None
+                    break
+                unrealized += (mkt - basis) * lot['quantity']
         closed = s['closed_trades']
         rows.append({
             'strategy': name,
-            'realized_today': round(s['realized_today'], 2),
-            'realized_total': round(s['realized_total'], 2),
+            'realized_today': (round(s['realized_today'], 2)
+                               if s['realized_today'] is not None else None),
+            'realized_total': (round(s['realized_total'], 2)
+                               if s['realized_total'] is not None else None),
             'trades': closed,
-            'win_rate': f"{s['wins'] / closed:.0%}" if closed else '-',
+            'win_rate': (f"{s['wins'] / closed:.0%}"
+                         if closed and s['wins'] is not None else None),
+            'unevaluable_trades': s.get('unevaluable_trades', 0),
             'open_qty': open_qty,
-            'unrealized': round(unrealized, 2) if unrealized is not None else '-',
+            'unrealized': round(unrealized, 2) if unrealized is not None else None,
         })
 
     if _json_mode:
         print_dict({'strategies': strategies,
                     'unmatched_sells': report['unmatched_sells'],
+                    'unevaluable_trades': report.get('unevaluable_trades', 0),
                     'rows': rows}, title='Strategy PnL')
         return
-    print_df(pd.DataFrame(rows), title='Per-strategy PnL (attributed fills)')
+    display_rows = [{k: '-' if v is None else v for k, v in row.items()} for row in rows]
+    print_df(pd.DataFrame(display_rows), title='Per-strategy PnL (attributed fills)')
+    if report.get('unevaluable_trades'):
+        console.print(f"[dim]{report['unevaluable_trades']} matched close(s) lack "
+                      'a usable fill price or cost basis — affected PnL and '
+                      'win rates are unavailable. Quantities remain matched.[/dim]')
     if report['unmatched_sells']:
         console.print(f"[dim]{report['unmatched_sells']} SELL fill(s) had no matching "
                       'attributed BUY (manual interleaving or pre-tagging fills) — '
@@ -5711,17 +5817,17 @@ def _handle_strategy_pnl(args: argparse.Namespace):
                       "(see 'strategies fills') — not counted above.[/dim]")
     if rpc_error is not None:
         console.print(f'[dim]trader_service unreachable ({rpc_error}) — unrealized '
-                      'marks unavailable (realized numbers are exact).[/dim]')
+                      'marks unavailable; the realized ledger needs no service.[/dim]')
     elif not prices:
         console.print('[dim]no live portfolio positions to mark against — '
-                      'unrealized shows "-" (realized numbers are exact).[/dim]')
+                      'unrealized shows "-".[/dim]')
 
 
 def _handle_strategy_fills(args: argparse.Namespace):
     """List ORDER_FILLED events with ids — the handles for exclude-fill."""
     import pandas as pd
     from trader.container import Container
-    from trader.data.event_store import EventStore
+    from trader.data.event_store import EventStore, fill_price_or_none
 
     cfg = Container.instance().config()
     duckdb_path = cfg.get('duckdb_path', '')
@@ -5738,14 +5844,16 @@ def _handle_strategy_fills(args: argparse.Namespace):
         'symbol': e.symbol,
         'action': e.action,
         'qty': e.quantity,
-        'price': e.price,
+        'price': fill_price_or_none(
+            e.price, price_evaluable=e.metadata.get('price_evaluable', True)),
         'excluded': bool(e.metadata.get('excluded')),
         'reason': e.metadata.get('exclude_reason', ''),
     } for e in fills]
     if _json_mode:
         print_dict({'fills': rows}, title='Fills')
         return
-    print_df(pd.DataFrame(rows), title='Attributed fills (newest first)')
+    display_rows = [{k: '-' if v is None else v for k, v in row.items()} for row in rows]
+    print_df(pd.DataFrame(display_rows), title='Attributed fills (newest first)')
 
 
 def _handle_fill_exclusion(args: argparse.Namespace, excluded: bool):
@@ -5811,7 +5919,7 @@ def _handle_strategy_backtest(args: argparse.Namespace):
     import yaml
 
     name = args.name
-    config_path = Path('~/.config/mmr/strategy_runtime.yaml').expanduser()
+    config_path = _strategy_config_path()
 
     if not config_path.exists():
         print_status(f'No strategy_runtime.yaml found', success=False)
@@ -9703,13 +9811,15 @@ def _handle_data_backup(args: argparse.Namespace):
 
     if _json_mode:
         print(json.dumps({'data': summary, 'title': 'DB Backup'}))
+        if not summary.get('complete', False):
+            raise SystemExit(1)
         return
-    if not summary['ok']:
-        print_status('DB backup FAILED — no databases were snapshotted:', success=False)
+    if not summary.get('complete', False):
+        print_status('DB backup INCOMPLETE — not promoted to latest:', success=False)
         for d in summary['databases']:
             if not d['ok']:
                 console.print(f"  [red]{d['db']}: {d.get('error')}[/red]")
-        return
+        raise SystemExit(1)
     console.print(f'[bold]DB backup → {summary["dir"]}[/bold]\n')
     for d in summary['databases']:
         if d['ok']:
@@ -12887,7 +12997,7 @@ def repl(mmr: MMR):
 # ------------------------------------------------------------------
 
 _LOCAL_ONLY_COMMANDS = {'backtest', 'bt', 'data', 'propose', 'proposals', 'reject', 'market-hours', 'mh', 'session', 'group'}
-_LOCAL_ONLY_STRAT_ACTIONS = {'create', 'deploy', 'undeploy', 'signals', 'backtest', 'pnl'}
+_LOCAL_ONLY_STRAT_ACTIONS = {'create', 'signals', 'backtest', 'pnl'}
 
 
 def main():

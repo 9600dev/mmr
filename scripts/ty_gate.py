@@ -49,7 +49,12 @@ SCOPES: dict[str, dict[str, object]] = {
         # diagnostics and would break the zero. A NEW file under
         # trader/strategy/ is therefore not automatically covered;
         # tests/test_verification_wiring.py fails if one appears uncovered.
-        "dirs": ["trader/trading/", "trader/strategy/auto_executor.py"],
+        "dirs": ["trader/trading/", "trader/strategy/auto_executor.py",
+                 "trader/strategy/callback_worker.py",
+                 "trader/strategy/execution_intents.py",
+                 "trader/strategy/execution_queue.py",
+                 "trader/strategy/live_bars.py",
+                 "trader/strategy/parameters.py"],
         "baseline": REPO / "scripts" / "ty_baseline.json",
     },
     "advisory": {

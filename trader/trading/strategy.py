@@ -85,12 +85,22 @@ class StrategyContext:
     manifest_max_opens_per_day: Optional[int] = None
     manifest_max_opens_per_hour: Optional[int] = None
     params: Dict[str, Any] = field(default_factory=dict)
+    # Runtime authority token. Rotated on enable/replacement and revoked on
+    # disable/removal; queued signals cannot retain superseded authority.
+    deployment_generation: str = ''
+    effective_config_hash: str = ''
 
 
 class Strategy(ABC):
     def __init__(self):
         self._context: Optional[StrategyContext] = None
         self.state: StrategyState = StrategyState.NOT_INSTALLED
+        self._pending_params: Dict[str, Any] = {}
+        self._source_path: str = ''
+        self._source_hash: str = ''
+        self._requested_fingerprint: str = ''
+        self._requested_params: Dict[str, Any] = {}
+        self.strategy_runtime: Any = None
 
     @property
     def ctx(self) -> StrategyContext:
@@ -177,6 +187,9 @@ class Strategy(ABC):
         return self._context.logger if self._context else None
 
     def install(self, context: StrategyContext) -> bool:
+        if self._pending_params:
+            context.params.update(self._pending_params)
+            self._pending_params.clear()
         self._context = context
         self.state = StrategyState.INSTALLED
         return True
@@ -337,6 +350,10 @@ class StrategyConfig():
         paper_only: bool = False,
         auto_execute: bool = False,
         params: Optional[Dict[str, Any]] = None,
+        deployment_generation: str = '',
+        effective_config_hash: str = '',
+        source_hash: str = '',
+        requested_params: Optional[Dict[str, Any]] = None,
     ):
         self.name = name
         self.bar_size = bar_size
@@ -351,6 +368,10 @@ class StrategyConfig():
         self.paper_only = paper_only
         self.auto_execute = auto_execute
         self.params = params or {}
+        self.deployment_generation = deployment_generation
+        self.effective_config_hash = effective_config_hash
+        self.source_hash = source_hash
+        self.requested_params = requested_params or {}
 
     @staticmethod
     def from_strategy(strategy: Strategy) -> 'StrategyConfig':
@@ -368,4 +389,8 @@ class StrategyConfig():
             paper_only=strategy.paper_only,
             auto_execute=strategy._context.auto_execute if strategy._context else False,
             params=strategy.params,
+            deployment_generation=strategy.ctx.deployment_generation,
+            effective_config_hash=strategy.ctx.effective_config_hash,
+            source_hash=strategy._source_hash,
+            requested_params=strategy._requested_params,
         )

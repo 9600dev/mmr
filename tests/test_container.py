@@ -3,6 +3,12 @@ import pytest
 from trader.container import Container
 
 
+@pytest.fixture(autouse=True)
+def _use_explicit_test_config(monkeypatch):
+    """Config-path tests must not inherit a service's environment override."""
+    monkeypatch.delenv('TRADER_CONFIG', raising=False)
+
+
 class _SimpleService:
     """A dummy service class whose __init__ params match config keys."""
     def __init__(self, duckdb_path: str = '', ib_server_address: str = ''):
@@ -129,4 +135,3 @@ class TestContainerHardening:
         with pytest.raises(yaml.constructor.ConstructorError):
             Container(str(malicious))
         Container._instance = None
-

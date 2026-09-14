@@ -1,0 +1,61 @@
+{
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "python": "3.12.13",
+  "dependencies": {
+    "pandas": "3.0.1",
+    "numpy": "2.4.2",
+    "ib_async": "2.1.0"
+  },
+  "scope": "Synthetic same-bar tick dispatch; excludes broker, DB, calendars, signal execution and network.",
+  "measurements": [
+    {
+      "retained_ticks": 10000,
+      "strategies_on_same_instrument_and_interval": 1,
+      "retained_frame_bytes": 960000,
+      "samples": 9,
+      "median_ms_per_tick": 3.908,
+      "p95_ms_per_tick": 4.087
+    },
+    {
+      "retained_ticks": 10000,
+      "strategies_on_same_instrument_and_interval": 4,
+      "retained_frame_bytes": 960000,
+      "samples": 9,
+      "median_ms_per_tick": 14.287,
+      "p95_ms_per_tick": 16.026
+    },
+    {
+      "retained_ticks": 50000,
+      "strategies_on_same_instrument_and_interval": 1,
+      "retained_frame_bytes": 4800000,
+      "samples": 9,
+      "median_ms_per_tick": 4.861,
+      "p95_ms_per_tick": 19.794
+    },
+    {
+      "retained_ticks": 50000,
+      "strategies_on_same_instrument_and_interval": 4,
+      "retained_frame_bytes": 4800000,
+      "samples": 9,
+      "median_ms_per_tick": 18.184,
+      "p95_ms_per_tick": 21.017
+    },
+    {
+      "retained_ticks": 200000,
+      "strategies_on_same_instrument_and_interval": 1,
+      "retained_frame_bytes": 19200000,
+      "samples": 9,
+      "median_ms_per_tick": 9.725,
+      "p95_ms_per_tick": 10.732
+    },
+    {
+      "retained_ticks": 200000,
+      "strategies_on_same_instrument_and_interval": 4,
+      "retained_frame_bytes": 19200000,
+      "samples": 9,
+      "median_ms_per_tick": 34.797,
+      "p95_ms_per_tick": 36.392
+    }
+  ],
+  "reviewed_commit": "e6918526d4915c44473996278322146188a8ce6a"
+}

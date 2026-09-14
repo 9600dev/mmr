@@ -1,0 +1,397 @@
+{
+  "additional_modules_tested_but_not_directly_mutated": [
+    "trader/strategy/execution_intents.py",
+    "trader/strategy/execution_queue.py",
+    "trader/data/execution_journal.py",
+    "trader/strategy/callback_worker.py"
+  ],
+  "baseline_file_sha256": "e6997640e912a2c0e1b5d11613e0fe12e7664e5aaccac8448e9d7f082dc59d9c",
+  "baseline_unchanged_during_run": true,
+  "changed_source_files": [],
+  "gate": "NOT_RUN_INCOMPLETE_DIAGNOSTIC",
+  "gate_command": null,
+  "gate_exit_code": null,
+  "gate_run": null,
+  "gate_score_definition": "(killed + timeout) / (killed + timeout + survived)",
+  "generated_at_utc": "2026-09-09T13:04:24.631244+00:00",
+  "incomplete": true,
+  "interpretation": [
+    "These results cover only the configured modules, not the entire repository.",
+    "Uncovered and not-checked mutants are excluded from the score denominators and reported separately.",
+    "A baseline pass does not classify every surviving mutant as equivalent or acceptable."
+  ],
+  "modules": {
+    "trader/data/bar_quality.py": {
+      "at_or_above_baseline": true,
+      "baseline_score": 0.741551,
+      "counts": {
+        "killed": 376,
+        "survived": 130
+      },
+      "gate_score": 0.743083,
+      "not_checked": 0,
+      "raw_score": 0.7430830039525692,
+      "surviving_mutants": 130
+    },
+    "trader/data/fundamentals.py": {
+      "at_or_above_baseline": true,
+      "baseline_score": 0.879121,
+      "counts": {
+        "killed": 80,
+        "survived": 11
+      },
+      "gate_score": 0.879121,
+      "not_checked": 0,
+      "raw_score": 0.8791208791208791,
+      "surviving_mutants": 11
+    },
+    "trader/data/market_session.py": {
+      "at_or_above_baseline": true,
+      "baseline_score": 0.746114,
+      "counts": {
+        "killed": 176,
+        "survived": 55
+      },
+      "gate_score": 0.761905,
+      "not_checked": 0,
+      "raw_score": 0.7619047619047619,
+      "surviving_mutants": 55
+    },
+    "trader/data/proposal_transitions.py": {
+      "at_or_above_baseline": true,
+      "baseline_score": 1.0,
+      "counts": {
+        "killed": 8
+      },
+      "gate_score": 1.0,
+      "not_checked": 0,
+      "raw_score": 1.0,
+      "surviving_mutants": 0
+    },
+    "trader/simulation/panel.py": {
+      "at_or_above_baseline": true,
+      "baseline_score": 0.776316,
+      "counts": {
+        "killed": 118,
+        "survived": 34
+      },
+      "gate_score": 0.776316,
+      "not_checked": 0,
+      "raw_score": 0.7763157894736842,
+      "surviving_mutants": 34
+    },
+    "trader/simulation/selection_bias.py": {
+      "at_or_above_baseline": true,
+      "baseline_score": 0.750524,
+      "counts": {
+        "killed": 357,
+        "survived": 119,
+        "timeout": 1
+      },
+      "gate_score": 0.750524,
+      "not_checked": 0,
+      "raw_score": 0.75,
+      "surviving_mutants": 119
+    },
+    "trader/simulation/signal_combine.py": {
+      "at_or_above_baseline": true,
+      "baseline_score": 0.762162,
+      "counts": {
+        "killed": 141,
+        "survived": 44
+      },
+      "gate_score": 0.762162,
+      "not_checked": 0,
+      "raw_score": 0.7621621621621621,
+      "surviving_mutants": 44
+    },
+    "trader/simulation/signal_eval.py": {
+      "at_or_above_baseline": true,
+      "baseline_score": 0.959596,
+      "counts": {
+        "killed": 352,
+        "survived": 12
+      },
+      "gate_score": 0.967033,
+      "not_checked": 0,
+      "raw_score": 0.967032967032967,
+      "surviving_mutants": 12
+    },
+    "trader/simulation/walk_forward.py": {
+      "at_or_above_baseline": true,
+      "baseline_score": 0.892086,
+      "counts": {
+        "killed": 121,
+        "survived": 15,
+        "timeout": 3
+      },
+      "gate_score": 0.892086,
+      "not_checked": 0,
+      "raw_score": 0.8897058823529411,
+      "surviving_mutants": 15
+    },
+    "trader/strategy/auto_executor.py": {
+      "at_or_above_baseline": null,
+      "baseline_score": 0.777099,
+      "counts": {
+        "killed": 756,
+        "no tests": 11,
+        "not checked": 3927,
+        "survived": 319,
+        "timeout": 1
+      },
+      "gate_score": 0.703532,
+      "not_checked": 3927,
+      "raw_score": 0.7032558139534884,
+      "surviving_mutants": 319
+    },
+    "trader/trading/exit_class.py": {
+      "at_or_above_baseline": true,
+      "baseline_score": 0.935484,
+      "counts": {
+        "killed": 29,
+        "survived": 2
+      },
+      "gate_score": 0.935484,
+      "not_checked": 0,
+      "raw_score": 0.9354838709677419,
+      "surviving_mutants": 2
+    },
+    "trader/trading/order_lifecycle.py": {
+      "at_or_above_baseline": true,
+      "baseline_score": 0.781437,
+      "counts": {
+        "killed": 1410,
+        "survived": 222,
+        "timeout": 8
+      },
+      "gate_score": 0.864634,
+      "not_checked": 0,
+      "raw_score": 0.8639705882352942,
+      "surviving_mutants": 222
+    },
+    "trader/trading/order_math.py": {
+      "at_or_above_baseline": null,
+      "baseline_score": 0.973913,
+      "counts": {
+        "killed": 90,
+        "not checked": 20,
+        "survived": 3,
+        "timeout": 2
+      },
+      "gate_score": 0.968421,
+      "not_checked": 20,
+      "raw_score": 0.967741935483871,
+      "surviving_mutants": 3
+    },
+    "trader/trading/order_split.py": {
+      "at_or_above_baseline": true,
+      "baseline_score": 0.955882,
+      "counts": {
+        "killed": 62,
+        "survived": 3,
+        "timeout": 3
+      },
+      "gate_score": 0.955882,
+      "not_checked": 0,
+      "raw_score": 0.9538461538461539,
+      "surviving_mutants": 3
+    },
+    "trader/trading/order_structure.py": {
+      "at_or_above_baseline": true,
+      "baseline_score": 0.966292,
+      "counts": {
+        "killed": 86,
+        "survived": 3
+      },
+      "gate_score": 0.966292,
+      "not_checked": 0,
+      "raw_score": 0.9662921348314607,
+      "surviving_mutants": 3
+    },
+    "trader/trading/position_sizing.py": {
+      "at_or_above_baseline": true,
+      "baseline_score": 0.708621,
+      "counts": {
+        "killed": 413,
+        "survived": 168
+      },
+      "gate_score": 0.710843,
+      "not_checked": 0,
+      "raw_score": 0.7108433734939759,
+      "surviving_mutants": 168
+    },
+    "trader/trading/protective_stop.py": {
+      "at_or_above_baseline": null,
+      "baseline_score": 0.915254,
+      "counts": {
+        "not checked": 59
+      },
+      "gate_score": 0.0,
+      "not_checked": 59,
+      "raw_score": null,
+      "surviving_mutants": 0
+    },
+    "trader/trading/risk_gate.py": {
+      "at_or_above_baseline": true,
+      "baseline_score": 0.920578,
+      "counts": {
+        "killed": 553,
+        "survived": 42
+      },
+      "gate_score": 0.929412,
+      "not_checked": 0,
+      "raw_score": 0.9294117647058824,
+      "surviving_mutants": 42
+    }
+  },
+  "mutated_sources_sha256": {
+    "trader/data/bar_quality.py": "ab8a2b418f84fa01efe8b76394932f5d5b28b182025cd08bab83e86f79dbdca0",
+    "trader/data/fundamentals.py": "9e803f266e0d5ade712062f20c1cdcb0112c7e4184841fc4d1526ab24ba23bba",
+    "trader/data/market_session.py": "18c52b4249463782b509c8c059d15ce1c85aa7c5d82bbed693ef1985a8e999fe",
+    "trader/data/proposal_transitions.py": "743943319f425c688e5664bdf548f29bcc4da54d098ee734d3caf8bebd9c7b8c",
+    "trader/simulation/panel.py": "034f6570048a7c8ceec3d5352755adcf8dc42d42722e3dce67651f379d925862",
+    "trader/simulation/selection_bias.py": "72ebc376f962e7f2bf4983bd9f2edd89ba811e3db521fca78d599857f2f30994",
+    "trader/simulation/signal_combine.py": "b97321f8b3bf138c5c1300aff66557755f520beae84a16afaecf45573e56268d",
+    "trader/simulation/signal_eval.py": "a48f21a79547ec5b272209991298420441ff1a92b633369fdfba9356e4664c7e",
+    "trader/simulation/walk_forward.py": "547086c68595160b0976ab81f3727607762092a79d9ae314fbb936a803b71810",
+    "trader/strategy/auto_executor.py": "b722c87c3f68988cbe407d95762651753d12d7bb7475a1ba00e53e3fd1f2363a",
+    "trader/trading/exit_class.py": "23cd3109f9bef6a6324e78f6b783ec30197f567817f003127538bc3d10443be3",
+    "trader/trading/order_lifecycle.py": "3153d2d7df7fa3116542adf39f701900cc9d251fff177ea93af297bde2048696",
+    "trader/trading/order_math.py": "d891e94c453625ef8837fde2d59b6aa7deadd5da5492487f08bf9503e4032f2c",
+    "trader/trading/order_split.py": "ea7db6c8417b23f7366aa7bbdae54be8f62defbd4f1b4c55a704bc5fab06ee2c",
+    "trader/trading/order_structure.py": "f7d063ead4b7e11dc7dde7bd69385188c191794bd67d35e54b7e1b1aa7c4c375",
+    "trader/trading/position_sizing.py": "ca3c048bd3494732a2869a1fcf5726950d23136e6f9cf8ecebe14d1bf39f8cda",
+    "trader/trading/protective_stop.py": "919d54c62007a670cedd5bb944755dcab9e33a2a815524ff92ca13b58cba65de",
+    "trader/trading/risk_gate.py": "17ab0ca3a45075f8f4f64f22710f9dfe6ff7e4a4839a87caf2f09f82f97e80fa"
+  },
+  "mutation_baseline_test_skips": [
+    {
+      "reason": "Strategy file is absent from the mutmut sandbox; this check runs in the normal full suite.",
+      "strategy_file": "strategies/xs_momentum.py",
+      "test": "tests/invariants/test_panel_lookahead.py::TestTheShippedStrategiesAreClean::test_shipped_panel_strategies_have_no_lookahead"
+    },
+    {
+      "reason": "Strategy file is absent from the mutmut sandbox; this check runs in the normal full suite.",
+      "strategy_file": "strategies/xs_composite.py",
+      "test": "tests/invariants/test_panel_lookahead.py::TestTheShippedStrategiesAreClean::test_shipped_panel_strategies_have_no_lookahead"
+    }
+  ],
+  "mutation_scope": [
+    "trader/trading/order_math.py",
+    "trader/data/proposal_transitions.py",
+    "trader/trading/exit_class.py",
+    "trader/trading/order_structure.py",
+    "trader/trading/protective_stop.py",
+    "trader/trading/order_split.py",
+    "trader/trading/order_lifecycle.py",
+    "trader/data/bar_quality.py",
+    "trader/data/fundamentals.py",
+    "trader/simulation/selection_bias.py",
+    "trader/simulation/walk_forward.py",
+    "trader/simulation/panel.py",
+    "trader/simulation/signal_eval.py",
+    "trader/simulation/signal_combine.py",
+    "trader/data/market_session.py",
+    "trader/strategy/auto_executor.py",
+    "trader/trading/position_sizing.py",
+    "trader/trading/risk_gate.py"
+  ],
+  "no_tests_census": [
+    {
+      "function": "trader.strategy.auto_executor.x\u01c1AutoExecutor\u01c1_broker_positions",
+      "module": "trader/strategy/auto_executor.py",
+      "mutants": 10
+    },
+    {
+      "function": "trader.strategy.auto_executor.x\u01c1AutoExecutor\u01c1_now_utc",
+      "module": "trader/strategy/auto_executor.py",
+      "mutants": 1
+    }
+  ],
+  "oracle_files": [
+    "tests/invariants/test_exit_class.py",
+    "tests/test_auto_executor.py",
+    "tests/test_execution_recovery.py",
+    "tests/test_execution_bar_progress.py",
+    "tests/test_execution_exit_handoff.py",
+    "tests/test_terminal_exit_lifetime.py",
+    "tests/test_execution_admission_contract.py",
+    "tests/test_emergency_fill_checkpoint.py",
+    "tests/test_execution_snapshot.py",
+    "tests/test_execution_snapshot_topology.py",
+    "tests/test_auto_long_only_custody.py",
+    "tests/test_terminal_opening.py",
+    "tests/test_execution_queue.py",
+    "tests/test_execution_journal.py",
+    "tests/test_execution_replay.py",
+    "tests/test_strategy_dispatch_contract.py",
+    "tests/review/test_review_strategy_contract.py",
+    "tests/review/test_review_order_contract.py",
+    "tests/invariants/test_auto_execute_decision.py",
+    "tests/invariants/test_bar_quality.py",
+    "tests/test_exchange_test_tickers.py",
+    "tests/invariants/test_selection_bias.py",
+    "tests/invariants/test_walk_forward.py",
+    "tests/invariants/test_panel.py",
+    "tests/invariants/test_signal_eval.py",
+    "tests/test_signal_report.py",
+    "tests/invariants/test_panel_execution.py",
+    "tests/invariants/test_signal_combine.py",
+    "tests/invariants/test_fundamentals.py",
+    "tests/invariants/test_gauntlet_verdict.py",
+    "tests/invariants/test_panel_lookahead.py",
+    "tests/invariants/test_null_market.py",
+    "tests/invariants/test_gate_properties.py",
+    "tests/invariants/test_order_notional.py",
+    "tests/invariants/test_order_split.py",
+    "tests/invariants/test_proposal_gate_split.py",
+    "tests/invariants/test_order_structure.py",
+    "tests/invariants/test_protective_stop.py",
+    "tests/test_market_session.py",
+    "tests/test_order_validator.py",
+    "tests/test_order_lifecycle.py",
+    "tests/test_order_lifecycle_contract.py",
+    "tests/test_order_lifecycle_startup.py",
+    "tests/test_order_identity_promotion.py",
+    "tests/test_seams.py",
+    "tests/invariants/test_proposal_machine.py",
+    "tests/invariants/test_sizing_properties.py",
+    "tests/test_order_math.py",
+    "tests/test_position_sizing.py",
+    "tests/test_position_sizing_config_path.py",
+    "tests/test_proposal_store.py",
+    "tests/test_risk_gate.py",
+    "tests/test_aggregate_risk_inputs.py",
+    "tests/test_deal_contracts.py",
+    "tests/test_mutation_kills.py"
+  ],
+  "raw_score_definition": "killed / (killed + survived)",
+  "run": {
+    "command": [
+      "bash",
+      "scripts/run_mutation.sh",
+      "all"
+    ],
+    "elapsed_seconds": 3125.366038,
+    "exit_code": 0,
+    "finished_at_utc": "2026-09-09T13:03:29.913923+00:00",
+    "head": "e6918526d4915c44473996278322146188a8ce6a",
+    "started_at_utc": "2026-09-09T12:11:24.547885+00:00"
+  },
+  "separately_verified_invariant_files_excluded_from_mutation_oracle": [
+    {
+      "file": "tests/invariants/test_approved_order.py",
+      "reason": "Existing explicit exclusion for subprocess type-check assertions; covered by the normal full suite and type gate."
+    }
+  ],
+  "source_unchanged_during_run": true,
+  "total_counts": {
+    "killed": 5128,
+    "no tests": 11,
+    "not checked": 4006,
+    "survived": 1182,
+    "timeout": 18
+  },
+  "total_generated_mutants": 10345
+}

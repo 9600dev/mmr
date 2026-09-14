@@ -224,7 +224,9 @@ mmr reject 42 --reason "Group over budget"
 
 Position sizing is automatic: `base_position × risk_multiplier × confidence_scale × ATR_volatility_adjustment`. Volatile stocks (high ATR%) get smaller positions; stable stocks get larger ones. Configured in `config_defaults/position_sizing.yaml`.
 
-Proposal statuses follow a strict state machine: `PENDING → APPROVED | REJECTED | EXPIRED | FAILED`, then `APPROVED → EXECUTED | FAILED | REJECTED`. Terminal statuses are immutable — a proposal can't be executed twice, resurrected after rejection, or approved after it's already been executed. Illegal transitions raise `InvalidProposalTransition` instead of silently clobbering the row.
+Proposal statuses follow a strict state machine: `PENDING → APPROVED | REJECTED | EXPIRED | FAILED`, then `APPROVED → EXECUTED | FAILED | REJECTED`. Terminal proposal rows are immutable: an executed or rejected proposal cannot be approved again. Broker submission, uncertain receipts and fills have their own reconciliation lifecycle. Illegal transitions raise `InvalidProposalTransition` instead of silently clobbering the row.
+
+An `EXECUTED` proposal records submission, not broker acceptance or a fill. If receipt processing or persistence fails after placement begins, approval reports `UNKNOWN`; reconcile the same intent against durable broker evidence before retrying. See the [strategy execution contract](docs/STRATEGY_EXECUTION_CONTRACT.md).
 
 
 ## CLI Reference
@@ -448,7 +450,7 @@ strategies:
     historical_days_prior: 5
 ```
 
-The strategy loader is sandboxed: the resolved module path must live under `strategies_directory`. Absolute paths or `../` traversal are rejected, and the YAML config is parsed with `yaml.safe_load` so Python-object tags (`!!python/object/apply:...`) cannot be used to execute arbitrary code. Each strategy gets a unique `sys.modules` key derived from its `name`, so two strategies sharing a filename (e.g. `strategies/a/shared.py` and `strategies/b/shared.py`) don't clobber each other and a reload actually re-imports fresh source.
+Strategy paths must remain beneath `strategies_directory`, and configuration uses `yaml.safe_load`. Strategy construction and callbacks run in a spawned process with bounded work queues and deadlines. This contains callback failures; it is not an OS security sandbox. Strategy code retains the service user's filesystem and network privileges. See the [strategy execution contract](docs/STRATEGY_EXECUTION_CONTRACT.md) for worker, ownership and recovery limits.
 
 ## Risk Management
 
@@ -516,7 +518,7 @@ mmr/
 ├── config_defaults/                       # Bundled defaults
 ├── skills/                        # Claude skills (mmr, mmr-loop, news)
 ├── CLAUDE.md                      # Claude Code context (architecture, commands, workflows)
-├── tests/                         # 1000+ tests (pytest, no IB required)
+├── tests/                         # Unit, property, invariant and integration tests
 ├── docker-compose.yml             # IB Gateway + MMR containers
 ├── Dockerfile                     # Debian bookworm + Python venv
 ├── docker.sh                      # Docker/Podman build helper
@@ -526,14 +528,13 @@ mmr/
 
 ## Testing
 
-All tests are unit tests using temporary DuckDB databases — no IB connection required. The suite runs in ~47s with zero failures:
+The suite includes unit, property, invariant and integration tests. Trading tests use temporary DuckDB/SQLite stores and modeled broker callbacks or local RPC peers; they do not require an IB session. With the test dependencies installed, run:
 
 ```bash
-pytest tests/ --timeout=30 -q --ignore=tests/test_ibrx_async.py
-# → 880 passed
+python -m pytest tests/ --timeout=60 -q --ignore=tests/test_ibrx_async.py
 ```
 
-`test_ibrx_async.py` is excluded because it spins up long-lived asyncio tasks that flake in the full suite; it still runs cleanly on its own.
+`test_ibrx_async.py` has long-lived mocked tasks that are documented as flaky when combined with the full suite. Run it separately with `python -m pytest tests/test_ibrx_async.py --timeout=60 -q`. Test counts, timings, exclusions and source-bound validation results are recorded in the [remediation report](docs/REMEDIATION_2026-09-08.md). Docker and paper-broker replay are separate checks.
 
 Coverage highlights:
 

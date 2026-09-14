@@ -1,0 +1,10 @@
+{
+  "frame_rows": 10000,
+  "samples": 30,
+  "startup_s": 1.487896207952872,
+  "child_rss_mib": 188.734375,
+  "median_roundtrip_ms": 3.0763335525989532,
+  "p95_roundtrip_ms": 4.361458122730255,
+  "first_roundtrip_ms": 7.202917011454701,
+  "scope": "one trivial callback including 10000-row Arrow IPC, parent copy and child process"
+}

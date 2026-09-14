@@ -5,6 +5,7 @@ from trader.data.duckdb_store import DuckDBObjectStore, _default_db_path
 from typing import cast, Dict, List, Optional, Tuple, Union
 
 import csv
+import threading
 
 
 class Universe():
@@ -14,15 +15,7 @@ class Universe():
 
     @staticmethod
     def to_contract(definition: Union[SecurityDefinition, Contract]) -> Contract:
-        if isinstance(definition, SecurityDefinition):
-            contract = Contract(secType=definition.secType, conId=definition.conId, symbol=definition.symbol,
-                                currency=definition.currency, exchange=definition.exchange,
-                                primaryExchange=definition.primaryExchange)
-            return contract
-        elif isinstance(definition, Contract):
-            return definition
-        else:
-            raise ValueError('unable to cast type to Contract')
+        return SecurityDefinition.to_contract(definition)
 
     def find_contract(self, contract: Contract) -> Optional[SecurityDefinition]:
         for definition in self.security_definitions:
@@ -62,8 +55,10 @@ class UniverseAccessor():
         self.sorted_names = ['LSE', 'ASX', 'NYSE', 'NASDAQ']
         self.sorted_types = ['STK', 'OPT', 'FUT', 'EFT']
 
-        # todo: fix this at the source: Universe shouldn't have a list of SecurityDefinitions
-        self._resolver_cache: Dict[int, Tuple[Universe, SecurityDefinition]] = {}
+        # Cache complete query results: neither first_only nor a previous
+        # symbol lookup may hide a conflicting definition of the same conId.
+        self._resolver_cache: Dict[tuple, Tuple[Tuple[Universe, SecurityDefinition], ...]] = {}
+        self._resolver_lock = threading.RLock()
 
     def list_universes(self) -> List[str]:
         result = [k for k in self.library.list_symbols() if not k.startswith('_')]
@@ -118,82 +113,33 @@ class UniverseAccessor():
         sec_type: str = '',
         first_only: bool = False,
     ) -> List[Tuple[Universe, SecurityDefinition]]:
-        def check_exchange(exchange, definition: SecurityDefinition) -> bool:
-            if not exchange:
-                return True
-            if definition.exchange == exchange:
-                return True
-            if definition.primaryExchange == exchange:
-                return True
-            return False
-
-        def check_sec_type(sec_type, definition: SecurityDefinition) -> bool:
-            if not sec_type:
-                return True
-            if definition.secType == sec_type:
-                return True
-            return False
-
-        # support the SYBOL.EXCHANGE format
+        # Keep numeric ticker strings distinct from integer contract IDs.
         if type(symbol) is str and '.' in symbol and not exchange:
             symbol, exchange = symbol.split('.')
-
-        results: List[Tuple[Universe, SecurityDefinition]] = []
-        universes = []
-
-        if type(symbol) is int and int(symbol) in self._resolver_cache:
-            u, definition = self._resolver_cache[int(symbol)]
-            # A cache HIT must honour the exact same filters as a miss —
-            # exchange AND sec_type AND universe. The old condition
-            # (`check_exchange and not universe or universe == u.name`) had a
-            # precedence bug that skipped the exchange check whenever a universe
-            # was given and skipped sec_type entirely, so a cached entry could
-            # be returned for the wrong exchange/type.
-            if (check_exchange(exchange, definition)
-                    and check_sec_type(sec_type, definition)
-                    and (not universe or universe == u.name)):
-                return [(u, definition)]
-
-        if universe:
-            universes.append(self.get(universe))
-        else:
-            universes.extend(self.get_all())
-
-        for u in universes:
-            for definition in u.security_definitions:
-                if (
-                    type(symbol) is int
-                    and int(symbol) == definition.conId
-                    and check_exchange(exchange, definition)
-                    and check_sec_type(sec_type, definition)
-                ):
-                    results.append((u, definition))
-                    self._resolver_cache.update({definition.conId: (u, definition)})
-                    if first_only: return results
-                if (
-                    type(symbol) is str
-                    and symbol.isnumeric()
-                    and int(symbol) == definition.conId
-                    and check_exchange(exchange, definition)
-                    and check_sec_type(sec_type, definition)
-                ):
-                    results.append((u, definition))
-                    self._resolver_cache.update({definition.conId: (u, definition)})
-                    if first_only: return results
-                if (
-                    type(symbol) is str
-                    and symbol == definition.symbol
-                    and check_exchange(exchange, definition)
-                    and check_sec_type(sec_type, definition)
-                ):
-                    results.append((u, definition))
-                    self._resolver_cache.update({definition.conId: (u, definition)})
-                    if first_only: return results
-
-        results.sort(
-            key=lambda x: self.sorted_types.index(x[1].secType) if x[1].secType in self.sorted_types else len(self.sorted_types)
-        )
-        return results
+        key = (type(symbol), symbol, exchange, universe, sec_type)
+        # A concurrent update cannot invalidate then be overwritten by the
+        # result of a query that began against the old local catalogue.
+        with self._resolver_lock:
+            cached = self._resolver_cache.get(key)
+            if cached is None:
+                results = []
+                universes = [self.get(universe)] if universe else self.get_all()
+                for u in universes:
+                    for definition in u.security_definitions:
+                        matches = ((type(symbol) is int and symbol == definition.conId)
+                                   or (type(symbol) is str and symbol == definition.symbol))
+                        if (matches
+                                and (not exchange or exchange in (definition.exchange, definition.primaryExchange))
+                                and (not sec_type or sec_type == definition.secType)):
+                            results.append((u, definition))
+                results.sort(key=lambda row: self.sorted_types.index(row[1].secType)
+                             if row[1].secType in self.sorted_types else len(self.sorted_types))
+                cached = tuple(results)
+                SecurityDefinition.validate_multiplier_consistency([d for _, d in cached])
+                self._resolver_cache[key] = cached
+            # Validate before truncation, on a cache hit as well as a miss.
+            SecurityDefinition.validate_multiplier_consistency([d for _, d in cached])
+            return list(cached[:1] if first_only else cached)
 
     def resolve_universe_name(
         self,
@@ -213,30 +159,34 @@ class UniverseAccessor():
         sec_type: str = '',
         first_only: bool = False,
     ) -> List[SecurityDefinition]:
-        # unique definitions via set comprehension
-        result = {definition for _, definition in self.resolve_universe(symbol, exchange, universe, sec_type, first_only)}
-        return list(result)
+        # Ordered deduplication keeps cold and warm venue preference stable.
+        return list(dict.fromkeys(definition for _, definition in
+                    self.resolve_universe(symbol, exchange, universe, sec_type, first_only)))
 
     def invalidate_resolver_cache(self) -> None:
-        """Drop the conId → (universe, definition) resolver cache.
+        """Forget complete query results after changes made through this accessor.
 
-        Called on any universe mutation so a cached resolution can't outlive a
-        change to the universe it came from (add/remove/re-import a symbol).
+        Other accessors or direct object-store writers must also invalidate
+        their caches (or restart); this is an in-process resolution guarantee.
         """
-        self._resolver_cache.clear()
+        with self._resolver_lock:
+            self._resolver_cache.clear()
 
     def update(self, universe: Universe) -> None:
-        self.library.write(universe.name, universe)
-        self.invalidate_resolver_cache()
+        with self._resolver_lock:
+            self.library.write(universe.name, universe)
+            self.invalidate_resolver_cache()
 
     def insert(self, universe_name: str, security_definition: SecurityDefinition):
-        universe = self.get(universe_name)
-        universe.security_definitions.append(security_definition)
-        self.update(universe)
+        with self._resolver_lock:
+            universe = self.get(universe_name)
+            universe.security_definitions.append(security_definition)
+            self.update(universe)
 
     def delete(self, name: str) -> None:
-        self.library.delete(name)
-        self.invalidate_resolver_cache()
+        with self._resolver_lock:
+            self.library.delete(name)
+            self.invalidate_resolver_cache()
 
     def update_from_csv_str(self, name: str, csv_str: str) -> int:
         reader = csv.DictReader(csv_str.splitlines())

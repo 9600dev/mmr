@@ -330,3 +330,23 @@ class TestUtcStampsRowReading:
         row = pd.Series({'market_open': pd.Timestamp('2026-07-24 13:30:00')})
         assert _utc_stamps(row, row.index, ('market_open',)) == \
             [_utc('2026-07-24 13:30:00')]
+
+
+@pytest.mark.parametrize('when,expected', [
+    ('2026-09-08 11:59:59', True),
+    ('2026-09-08 12:00:00', False),
+    ('2026-09-08 12:59:59', False),
+    ('2026-09-08 13:00:00', True),
+])
+def test_hong_kong_lunch_boundaries(when, expected):
+    assert in_session(pd.Timestamp(when, tz='Asia/Hong_Kong'), 'SEHK') is expected
+
+
+def test_session_lookup_exposes_both_hong_kong_trading_intervals():
+    from trader.data.market_session import session_intervals
+    lookup = session_intervals('HKEX', dt.date(2026, 9, 8))
+    assert lookup.evaluable
+    assert lookup.intervals == (
+        (_utc('2026-09-08 01:30'), _utc('2026-09-08 04:00')),
+        (_utc('2026-09-08 05:00'), _utc('2026-09-08 08:00')),
+    )

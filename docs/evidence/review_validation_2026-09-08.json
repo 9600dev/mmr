@@ -1,0 +1,291 @@
+{
+  "review_date_local": "2026-09-08",
+  "recorded_at_utc": "2026-09-09T03:38:30.300878+00:00",
+  "reviewed_commit": "e6918526d4915c44473996278322146188a8ce6a",
+  "environment": {
+    "python": "3.12.13",
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "packages": {
+      "pytest": "9.0.2",
+      "pandas": "3.0.1",
+      "numpy": "2.4.2",
+      "duckdb": "1.4.4",
+      "pyzmq": "27.1.0",
+      "ib_async": "2.1.0",
+      "mutmut": "3.6.0"
+    }
+  },
+  "initial_baseline": {
+    "command": ".venv/bin/python -m pytest tests/ --timeout=60 -q --ignore=tests/test_ibrx_async.py",
+    "passed": 2708,
+    "failed": 3,
+    "errors": 11,
+    "elapsed_s": 409.11,
+    "explanations": [
+      "Missing mutmut caused 1 failure and 11 setup errors; installed documented dev-only mutmut==3.6.0 in local venv.",
+      "Documented vectorbt/numba ordering failure passed in isolation and final suite.",
+      "Backup-test child-startup race repaired with explicit lock-acquired handshake; backup behavior/assertion unchanged."
+    ]
+  },
+  "final_full_suite": {
+    "command": ".venv/bin/python -m pytest tests/ --timeout=60 -q --ignore=tests/test_ibrx_async.py",
+    "exit_code": 0,
+    "passed": 2728,
+    "xfailed": 44,
+    "warnings": 441,
+    "elapsed_s": 184.39,
+    "excluded": "tests/test_ibrx_async.py, as prescribed by repository test instructions"
+  },
+  "counterexample_verification": {
+    "command": ".venv/bin/python -m pytest tests/review/ --runxfail --tb=short -q --timeout=60",
+    "exit_code": 1,
+    "failed_as_expected": 44,
+    "passed_controls": 6,
+    "errors": 0,
+    "elapsed_s": 25.63,
+    "interpretation": "Expected-safe-behavior assertions fail on the reviewed implementation. Findings remain unresolved; ordinary-suite xfails are not working safety guarantees.",
+    "cases": [
+      {
+        "node_id": "tests/review/test_review_market_data_contract.py::test_history_becomes_visible_after_a_transient_priming_read_failure",
+        "finding_id": "REVIEW-D01",
+        "reason": "REVIEW-D01: cached empty history never retries"
+      },
+      {
+        "node_id": "tests/review/test_review_market_data_contract.py::test_forming_history_does_not_override_completed_live_frame",
+        "finding_id": "REVIEW-D02",
+        "reason": "REVIEW-D02: forming historical bar bypasses completion filtering"
+      },
+      {
+        "node_id": "tests/review/test_review_market_data_contract.py::test_out_of_session_quotes_do_not_enter_later_strategy_windows",
+        "finding_id": "REVIEW-D03",
+        "reason": "REVIEW-D03: session gate filters only the tail, leaving invalid historical rows"
+      },
+      {
+        "node_id": "tests/review/test_review_market_data_contract.py::test_mid_session_subscription_does_not_invent_a_million_share_minute",
+        "finding_id": "REVIEW-D04",
+        "reason": "REVIEW-D04: first observed minute gets the entire session's cumulative volume"
+      },
+      {
+        "node_id": "tests/review/test_review_market_data_contract.py::test_valid_daily_bar_reaches_daily_strategy",
+        "finding_id": "REVIEW-D05",
+        "reason": "REVIEW-D05: minute-session gate rejects date-labelled daily bars"
+      },
+      {
+        "node_id": "tests/review/test_review_market_data_contract.py::test_hong_kong_lunch_break_is_out_of_session",
+        "finding_id": "REVIEW-D06",
+        "reason": "REVIEW-D06: session window spans HKEX's lunch break"
+      },
+      {
+        "node_id": "tests/review/test_review_market_data_contract.py::test_shared_bar_subscription_reuses_one_resample_per_tick",
+        "finding_id": "REVIEW-D07",
+        "reason": "REVIEW-D07: each strategy resamples the full tick history even on the same bar"
+      },
+      {
+        "node_id": "tests/review/test_review_order_contract.py::test_stock_position_does_not_authorize_unheld_option_short",
+        "finding_id": "REVIEW-O01",
+        "reason": "REVIEW-O01: same-symbol position bypasses conId identity"
+      },
+      {
+        "node_id": "tests/review/test_review_order_contract.py::test_amount_sized_open_requires_proposal",
+        "finding_id": "REVIEW-O02",
+        "reason": "REVIEW-O02: proposal gate runs before amount is sized"
+      },
+      {
+        "node_id": "tests/review/test_review_order_contract.py::test_closing_long_does_not_attach_ungated_reopening_buy",
+        "finding_id": "REVIEW-O03",
+        "reason": "REVIEW-O03: exit parent authorizes an exposure-opening child"
+      },
+      {
+        "node_id": "tests/review/test_review_order_contract.py::test_working_exit_orders_cannot_exceed_held_quantity_ungated",
+        "finding_id": "REVIEW-O04",
+        "reason": "REVIEW-O04: pending reductions do not reserve reducible quantity"
+      },
+      {
+        "node_id": "tests/review/test_review_order_contract.py::test_direct_open_fails_closed_when_margin_cannot_be_read",
+        "finding_id": "REVIEW-O05",
+        "reason": "REVIEW-O05: simple execution path omits margin/leverage gate"
+      },
+      {
+        "node_id": "tests/review/test_review_order_contract.py::test_unknown_exit_type_does_not_submit_naked_entry",
+        "finding_id": "REVIEW-O06",
+        "reason": "REVIEW-O06: unknown exit_type silently means unprotected entry"
+      },
+      {
+        "node_id": "tests/review/test_review_order_contract.py::test_nan_margin_inputs_are_unevaluable",
+        "finding_id": "REVIEW-O07",
+        "reason": "REVIEW-O07: NaN margin/account inputs pass both comparisons"
+      },
+      {
+        "node_id": "tests/review/test_review_order_contract.py::test_partial_fill_is_recorded_when_remainder_is_cancelled",
+        "finding_id": "REVIEW-O08",
+        "reason": "REVIEW-O08: partially filled then cancelled order loses its fill"
+      },
+      {
+        "node_id": "tests/review/test_review_order_contract.py::test_adding_to_position_at_concentration_cap_is_refused",
+        "finding_id": "REVIEW-O09",
+        "reason": "REVIEW-O09: proposed aggregate concentration contract; current cap is per order"
+      },
+      {
+        "node_id": "tests/review/test_review_order_contract.py::test_order_placement_disposes_its_temporary_subscription[expressive]",
+        "finding_id": "REVIEW-O10",
+        "reason": "REVIEW-O10: completed placement calls retain hot order subscriptions"
+      },
+      {
+        "node_id": "tests/review/test_review_order_contract.py::test_order_placement_disposes_its_temporary_subscription[simple]",
+        "finding_id": "REVIEW-O10",
+        "reason": "REVIEW-O10: completed placement calls retain hot order subscriptions"
+      },
+      {
+        "node_id": "tests/review/test_review_order_contract.py::test_resize_waits_for_protective_cancel_before_replacement",
+        "finding_id": "REVIEW-O11",
+        "reason": "REVIEW-O11: resize replaces a stop before its cancellation is confirmed"
+      },
+      {
+        "node_id": "tests/review/test_review_order_contract.py::test_resize_keeps_full_protection_until_trim_fills",
+        "finding_id": "REVIEW-O12",
+        "reason": "REVIEW-O12: unfilled resize trim leaves half the actual holding unprotected"
+      },
+      {
+        "node_id": "tests/review/test_review_strategy_contract.py::test_partial_fill_never_closes_manual_shares",
+        "finding_id": "REVIEW-S01",
+        "reason": "REVIEW-S01: open attribution uses requested quantity, so partial fills can liquidate manual holdings"
+      },
+      {
+        "node_id": "tests/review/test_review_strategy_contract.py::test_accepted_but_unfilled_close_retains_managed_position",
+        "finding_id": "REVIEW-S02",
+        "reason": "REVIEW-S02: accepted close is marked CLOSED before any fill"
+      },
+      {
+        "node_id": "tests/review/test_review_strategy_contract.py::test_ambiguous_open_prevents_duplicate_attempt_for_same_bar",
+        "finding_id": "REVIEW-S03",
+        "reason": "REVIEW-S03: ambiguous submission has no durable intent preventing another open"
+      },
+      {
+        "node_id": "tests/review/test_review_strategy_contract.py::test_crash_after_broker_fill_does_not_allow_another_open",
+        "finding_id": "REVIEW-S03",
+        "reason": "REVIEW-S03: broker execution and local attribution are not crash consistent"
+      },
+      {
+        "node_id": "tests/review/test_review_strategy_contract.py::test_unknown_execution_quantity_blocks_reentry",
+        "finding_id": "REVIEW-S03",
+        "reason": "REVIEW-S03: UNKNOWN attribution is treated as flat after restart"
+      },
+      {
+        "node_id": "tests/review/test_review_strategy_contract.py::test_failed_stop_cancel_cannot_leave_live_sell_after_close",
+        "finding_id": "REVIEW-S04",
+        "reason": "REVIEW-S04: failed stop cancellation is discarded before submitting a close"
+      },
+      {
+        "node_id": "tests/review/test_review_strategy_contract.py::test_failed_order_read_does_not_duplicate_protective",
+        "finding_id": "REVIEW-S05",
+        "reason": "REVIEW-S05: failed orders read is treated as proof a tracked stop died"
+      },
+      {
+        "node_id": "tests/review/test_review_strategy_contract.py::test_protective_grows_when_more_of_entry_fills",
+        "finding_id": "REVIEW-S06",
+        "reason": "REVIEW-S06: a live protective is never reconciled to later entry fills"
+      },
+      {
+        "node_id": "tests/review/test_review_strategy_contract.py::test_first_empty_broker_read_preserves_attribution_through_worker",
+        "finding_id": "REVIEW-S07",
+        "reason": "REVIEW-S07: worker continues into close despite inconclusive startup reconciliation"
+      },
+      {
+        "node_id": "tests/review/test_review_strategy_contract.py::test_live_runtime_applies_declared_uppercase_tunables",
+        "finding_id": "REVIEW-S08",
+        "reason": "REVIEW-S08: live runtime does not apply the backtester parameter contract"
+      },
+      {
+        "node_id": "tests/review/test_review_strategy_contract.py::test_runtime_gauntlet_refuses_untested_sibling_class",
+        "finding_id": "REVIEW-S09",
+        "reason": "REVIEW-S09: runtime PASS lookup omits class despite CLI requiring it"
+      },
+      {
+        "node_id": "tests/review/test_review_strategy_contract.py::test_config_disarm_applies_to_existing_runtime_instance",
+        "finding_id": "REVIEW-S10",
+        "reason": "REVIEW-S10: config reconciliation skips changes to already loaded names"
+      },
+      {
+        "node_id": "tests/review/test_review_strategy_contract.py::test_config_removal_revokes_opening_authority",
+        "finding_id": "REVIEW-S10",
+        "reason": "REVIEW-S10: config reconciliation does not disarm removed deployments"
+      },
+      {
+        "node_id": "tests/review/test_review_strategy_contract.py::test_strategy_error_does_not_stop_future_time_exit_checks",
+        "finding_id": "REVIEW-S12",
+        "reason": "REVIEW-S12: strategy ERROR state also stops independent exit/protective management"
+      },
+      {
+        "node_id": "tests/review/test_review_strategy_contract.py::test_live_runtime_rejects_or_dispatches_on_bar_only_strategy",
+        "finding_id": "REVIEW-S13",
+        "reason": "REVIEW-S13: unsupported live dispatch loads without explicit refusal"
+      },
+      {
+        "node_id": "tests/review/test_review_transport_storage.py::test_default_rpc_deadline_also_bounds_sending",
+        "finding_id": "REVIEW-M01",
+        "reason": "REVIEW-M01: default RPC send has no deadline when the service is absent"
+      },
+      {
+        "node_id": "tests/review/test_review_transport_storage.py::test_concurrent_history_merges_preserve_both_updates",
+        "finding_id": "REVIEW-M02",
+        "reason": "REVIEW-M02: separate read/merge/write loses a successful concurrent update"
+      },
+      {
+        "node_id": "tests/review/test_review_transport_storage.py::test_incomplete_bar_cannot_enter_queryable_history[high]",
+        "finding_id": "REVIEW-M03",
+        "reason": "REVIEW-M03: a missing OHLC column bypasses validation and is stored as NULL"
+      },
+      {
+        "node_id": "tests/review/test_review_transport_storage.py::test_incomplete_bar_cannot_enter_queryable_history[volume]",
+        "finding_id": "REVIEW-M03",
+        "reason": "REVIEW-M03: a missing OHLC column bypasses validation and is stored as NULL"
+      },
+      {
+        "node_id": "tests/review/test_review_transport_storage.py::test_terminal_fill_is_retried_after_transient_persistence_failure",
+        "finding_id": "REVIEW-M04",
+        "reason": "REVIEW-M04: terminal dedup is marked before durable append and cannot retry"
+      },
+      {
+        "node_id": "tests/review/test_review_transport_storage.py::test_bar_dedup_matches_the_same_instant_in_different_zones",
+        "finding_id": "REVIEW-M05",
+        "reason": "REVIEW-M05: dedup strips timezone instead of identifying an instant"
+      },
+      {
+        "node_id": "tests/review/test_review_transport_storage.py::test_bar_dedup_distinguishes_both_occurrences_of_dst_hour",
+        "finding_id": "REVIEW-M05",
+        "reason": "REVIEW-M05: DST fallback collapses two distinct bar instants into one key"
+      },
+      {
+        "node_id": "tests/review/test_review_transport_storage.py::test_failed_atomic_callback_preserves_previous_disabled_state",
+        "finding_id": "REVIEW-M06",
+        "reason": "REVIEW-M06: execute_atomic has no transaction, so a failed callback leaves deletes committed"
+      },
+      {
+        "node_id": "tests/review/test_review_transport_storage.py::test_publisher_bind_failure_returns_to_the_caller",
+        "finding_id": "REVIEW-M07",
+        "reason": "REVIEW-M07: publisher bind failure leaves start waiting forever for readiness"
+      }
+    ]
+  },
+  "type_gate": {
+    "command": "uv run --no-sync python scripts/ty_gate.py",
+    "exit_code": 0,
+    "kernel_diagnostics": 0,
+    "advisory_diagnostics": 94,
+    "new_diagnostics": 0
+  },
+  "focused_harness_checks": {
+    "command": ".venv/bin/python -m pytest tests/test_db_backup.py tests/test_mutation_gate.py --timeout=60 -q",
+    "passed": 20,
+    "elapsed_s": 4.02
+  },
+  "scope": {
+    "production_code_changed": false,
+    "human_owned_invariants_changed": false,
+    "broker_orders_placed": false,
+    "services_restarted": false,
+    "paper_broker_validation_performed": false,
+    "kernel_mutation_or_crosshair_rerun": false,
+    "changed_existing_test": "tests/test_db_backup.py: replace fixed sleep with child readiness handshake and bounded cleanup"
+  }
+}

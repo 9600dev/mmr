@@ -406,6 +406,35 @@ class TestDeployPath:
         cfg = _read_deployed(tmp_home)
         assert len([s for s in cfg['strategies'] if s['name'] == 'x']) == 1
 
+    def test_selected_runtime_config_path_is_used(self, tmp_home, gauntlet_db, tmp_path, monkeypatch):
+        from trader.container import Container
+        chosen = tmp_path / 'isolated-strategies.yaml'
+        monkeypatch.setitem(Container.instance().config(), 'strategy_config_file', str(chosen))
+        f = _passed_module(tmp_path, gauntlet_db)
+        _handle_strategy_deploy(_deploy_ns(name='isolated', module=str(f)))
+        assert chosen.exists()
+        assert not (tmp_home / '.config' / 'mmr' / 'strategy_runtime.yaml').exists()
+
+
+def test_deployment_ack_rejects_same_name_with_other_configuration():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from trader.common.reactivex import SuccessFail
+    from trader.mmr_cli import _ack_strategy_config
+    expected = dict(class_name='TestStrat', bar_size='1 min', historical_days_prior=0,
+                    params={'threshold': '7'})
+    deployed = SimpleNamespace(name='probe', deployment_generation='generation',
+        effective_config_hash='hash', class_name='TestStrat', bar_size=BarSize.Mins1,
+        historical_days_prior=0, conids=[], universe=None, auto_execute=False,
+        paper_only=False, requested_params={'threshold': '8'}, source_hash='source')
+    sdk = Mock()
+    sdk.reload_strategies.return_value = SuccessFail.success([deployed])
+    assert not _ack_strategy_config(sdk, 'probe', True, expected, 'source')
+    deployed.requested_params = {'threshold': '7'}
+    assert _ack_strategy_config(sdk, 'probe', True, expected, 'source')
+    deployed.source_hash = 'other'
+    assert not _ack_strategy_config(sdk, 'probe', True, expected, 'source')
+
 
 # ---------------------------------------------------------------------------
 # `mmr strategies` (no subcommand) — regression against the trader-on-

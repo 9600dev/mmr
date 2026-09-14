@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional
 
 import datetime as dt
 import json
+import math
+import sys
 
 
 class EventType(str, Enum):
@@ -72,7 +74,29 @@ class EventStore:
         def _init(conn):
             conn.execute(self._CREATE_TABLE)
             conn.execute(self._CREATE_SEQUENCE)
+            conn.execute('CREATE TABLE IF NOT EXISTS trading_event_receipts '
+                         '(identity VARCHAR PRIMARY KEY)')
         self.db.execute_atomic(_init)
+
+    def append_once(self, event: TradingEvent, identity: str) -> bool:
+        """Commit an event and its durable replay receipt in one transaction.
+
+        The broker outbox may retry after a crash between this commit and its
+        acknowledgement.  An in-memory terminal flag cannot close that gap.
+        """
+        def _append(conn):
+            if conn.execute('SELECT 1 FROM trading_event_receipts WHERE identity=?',
+                            [identity]).fetchone():
+                return False
+            conn.execute(self._INSERT, [
+                event.event_type.value, event.timestamp, event.strategy_name,
+                event.conid, event.symbol, event.action, event.quantity,
+                event.price, event.order_id, event.signal_probability,
+                event.signal_risk, json.dumps(event.metadata),
+            ])
+            conn.execute('INSERT INTO trading_event_receipts VALUES (?)', [identity])
+            return True
+        return self.db.execute_atomic(_append)
 
     def append(self, event: TradingEvent) -> None:
         self.db.execute(self._INSERT, [
@@ -199,10 +223,16 @@ class EventStore:
                 meta = json.loads(r[6]) if r[6] else {}
             except (TypeError, ValueError):
                 meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
             if meta.get('excluded'):
                 excluded += 1
             else:
-                kept.append(r[:6])
+                # Replay can prove filled quantity without a price. Keep that
+                # inventory movement in pairing, but never use a placeholder
+                # or explicitly unproven price as its cost basis.
+                kept.append((*r[:4], fill_price_or_none(
+                    r[4], price_evaluable=meta.get('price_evaluable', True)), r[5]))
         closed, open_lots, unmatched = pair_fills_long_only(kept)
 
         today = dt.date.today()
@@ -212,17 +242,30 @@ class EventStore:
             return strategies.setdefault(name, {
                 'realized_total': 0.0, 'realized_today': 0.0,
                 'closed_trades': 0, 'wins': 0, 'open_lots': [],
+                'unevaluable_trades': 0, 'unevaluable_trades_today': 0,
             })
 
         for trade in closed:
             b = _bucket(trade['strategy'])
-            b['realized_total'] += trade['pnl']
             b['closed_trades'] += 1
-            if trade['pnl'] > 0:
-                b['wins'] += 1
             closed_at = trade['closed_at']
-            if closed_at is not None and getattr(closed_at, 'date', None) and closed_at.date() == today:
-                b['realized_today'] += trade['pnl']
+            closed_today = (closed_at is not None
+                            and getattr(closed_at, 'date', None)
+                            and closed_at.date() == today)
+            if trade['pnl'] is None:
+                b['realized_total'] = None
+                b['wins'] = None
+                b['unevaluable_trades'] += 1
+                if closed_today:
+                    b['realized_today'] = None
+                    b['unevaluable_trades_today'] += 1
+            else:
+                if b['realized_total'] is not None:
+                    b['realized_total'] += trade['pnl']
+                if trade['pnl'] > 0 and b['wins'] is not None:
+                    b['wins'] += 1
+                if closed_today and b['realized_today'] is not None:
+                    b['realized_today'] += trade['pnl']
         for lot in open_lots:
             _bucket(lot['strategy'])['open_lots'].append(
                 {'conid': lot['conid'], 'quantity': lot['quantity'],
@@ -233,6 +276,8 @@ class EventStore:
             'closed_trades': closed,
             'unmatched_sells': unmatched,
             'excluded_fills': excluded,
+            'unevaluable_trades': sum(
+                b['unevaluable_trades'] for b in strategies.values()),
         }
 
     def list_fills(self, strategy: Optional[str] = None,
@@ -290,6 +335,21 @@ class EventStore:
         return updated
 
 
+def fill_price_or_none(price: Any, *, price_evaluable: bool = True) -> Optional[float]:
+    """Return a proven positive fill price, excluding IB's unset sentinel.
+
+    Legacy zero prices and replay fills with no price evidence remain
+    unknown. Their quantities must still be matched by the ledger.
+    """
+    if price_evaluable is not True or isinstance(price, bool):
+        return None
+    try:
+        value = float(price)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) and 0 < value < sys.float_info.max else None
+
+
 def pair_fills_long_only(fills) -> tuple:
     """Pair BUY/SELL fills into round trips under the long-only invariant.
 
@@ -298,6 +358,10 @@ def pair_fills_long_only(fills) -> tuple:
     conid) lot at a volume-weighted entry; a SELL realizes
     ``(exit - entry) x min(sell_qty, lot_qty)``. A SELL with no lot (manual
     interleaving, fills predating attribution) is counted, never guessed at.
+    Missing or invalid prices produce ``None`` basis/PnL, but their known
+    quantities still consume inventory. An unknown weighted-average basis
+    remains unknown until the lot is flat; an unknown exit price does not
+    alter the basis of the remaining shares.
 
     Returns ``(closed_trades, open_lots, unmatched_sells)``. Pure function —
     tests drive it with fabricated rows.
@@ -308,18 +372,20 @@ def pair_fills_long_only(fills) -> tuple:
     for strategy, conid, action, quantity, price, ts in fills:
         try:
             qty = float(quantity or 0.0)
-            px = float(price or 0.0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
-        if qty <= 0:
+        if not math.isfinite(qty) or qty <= 0 or isinstance(quantity, bool):
             continue
+        px = fill_price_or_none(price)
         key = (strategy, conid)
         side = (action or '').upper()
         if side == 'BUY':
             if key in lots:
                 held_qty, held_px = lots[key]
                 new_qty = held_qty + qty
-                lots[key] = [new_qty, (held_qty * held_px + qty * px) / new_qty]
+                basis = (held_qty / new_qty * held_px + qty / new_qty * px
+                         if held_px is not None and px is not None else None)
+                lots[key] = [new_qty, basis]
             else:
                 lots[key] = [qty, px]
         elif side == 'SELL':
@@ -328,10 +394,13 @@ def pair_fills_long_only(fills) -> tuple:
                 continue
             held_qty, held_px = lots[key]
             close_qty = min(qty, held_qty)
+            pnl = (px - held_px) * close_qty if px is not None and held_px is not None else None
+            if pnl is not None and not math.isfinite(pnl):
+                pnl = None
             closed.append({
                 'strategy': strategy, 'conid': conid, 'quantity': close_qty,
                 'entry_price': held_px, 'exit_price': px,
-                'pnl': (px - held_px) * close_qty, 'closed_at': ts,
+                'pnl': pnl, 'closed_at': ts,
             })
             remaining = held_qty - close_qty
             if remaining <= 1e-9:

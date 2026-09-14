@@ -1,0 +1,22 @@
+--- a/tests/invariants/test_gate_properties.py
++++ b/tests/invariants/test_gate_properties.py
+@@ -192,6 +192,8 @@
+         return_value=rx.from_iterable([MagicMock()]))
+     trader.risk_gate = gate
+     trader.order_reduces_exposure = MagicMock(return_value=True)
++    # This fixture has no outstanding physical broker reservations.
++    trader.unobserved_reduction_quantity = AsyncMock(return_value=0.0)
+     # The approver notional tier no-ops for exits (opening_qty 0 → None); this
+     # helper builds exit-class orders, so a faithful stub returns None.
+     trader.enforce_approver_tier = AsyncMock(return_value=None)
+--- a/tests/invariants/test_order_structure.py
++++ b/tests/invariants/test_order_structure.py
+@@ -248,6 +248,8 @@
+     trader.client.subscribe_place_order = AsyncMock(
+         return_value=rx.from_iterable([MagicMock()]))
+     trader.order_reduces_exposure = MagicMock(return_value=True)
++    # This fixture has no outstanding physical broker reservations.
++    trader.unobserved_reduction_quantity = AsyncMock(return_value=0.0)
+     ex = TradeExecutioner()
+     ex.connect(trader)
+     return ex, trader

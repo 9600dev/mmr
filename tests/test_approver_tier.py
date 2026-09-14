@@ -82,6 +82,8 @@ def _tier_trader(threshold, key, *, tick=None, is_exit=False):
 
     t.order_reduces_exposure = MagicMock(return_value=is_exit)
     t.risk_gate = _ApproveAll()
+    t.convert_notional = lambda value, currency, target='BASE': value
+    t.check_order_margin = AsyncMock(return_value={'initMarginAfter': 1000.0, 'equityWithLoanAfter': 2000.0})
     # Benign margin data, NOT a raising stub: check_order_margin failing is no
     # longer a skip — it refuses the open (fail-closed), which would make every
     # test here exercise the margin gate instead of its actual subject.
@@ -105,6 +107,7 @@ def _contract():
     c.exchange = 'NASDAQ'
     c.secType = 'STK'
     c.conId = 4391
+    c.currency = 'USD'
     return c
 
 
@@ -266,6 +269,8 @@ def _direct_trader(threshold, key, *, positions=None):
     t.book = MagicMock()
     t.get_positions = MagicMock(return_value=positions if positions is not None else [])
     t.risk_gate = _ApproveAll()
+    t.convert_notional = lambda value, currency, target='BASE': value
+    t.check_order_margin = AsyncMock(return_value={'initMarginAfter': 1000.0, 'equityWithLoanAfter': 2000.0})
     t.gather_risk_inputs = MagicMock(return_value=RiskInputs(
         open_order_count=0,
         daily_pnl=0.0, daily_pnl_evaluable=True,

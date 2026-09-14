@@ -113,10 +113,10 @@ def rebalance_orders(
           0.0 < enter_pct <= 1.0 and enter_pct <= exit_pct <= 1.0)
 def buffered_membership(
     ranks: Mapping[int, float],
-    held: frozenset,
+    held: frozenset[int],
     enter_pct: float,
     exit_pct: float,
-) -> frozenset:
+) -> frozenset[int]:
     """Which names the book should hold, with a buffer against boundary churn.
 
     A decile book re-sorts its universe every period, and a name sitting near
@@ -138,7 +138,7 @@ def buffered_membership(
     whole mechanism: ``exit_pct >= enter_pct`` is a precondition, because the
     reverse would eject names faster than it admitted them and churn MORE.
     """
-    keep: set = set()
+    keep: set[int] = set()
     for conid, r in ranks.items():
         if r is None or not math.isfinite(r):
             continue

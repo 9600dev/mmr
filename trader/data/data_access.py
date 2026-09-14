@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from dateutil.tz import gettz
 from dateutil.tz.tz import tzfile
 from durations import Duration
@@ -77,6 +78,8 @@ class SecurityDefinition:
     company_name: str = ''
     industry: str = ''
     contractMonth: str = ''
+    # Empty also covers definitions stored before this field existed.
+    multiplier: str = ''
 
     @staticmethod
     def from_contract_details(d: ContractDetails):
@@ -121,14 +124,49 @@ class SecurityDefinition:
             company_name=d.longName,
             industry=d.industry,
             contractMonth=d.contractMonth,
+            multiplier=d.contract.multiplier if d.contract else '',
         )
+
+    @staticmethod
+    def validate_multiplier_consistency(definitions: List['SecurityDefinition']) -> None:
+        """Refuse conflicting metadata before choosing a venue copy of a listing.
+
+        Decimal comparison preserves numerical equivalence without rounding a
+        large value to float. It does not establish that an individual value is
+        usable for sizing; the execution arithmetic still validates that value.
+        """
+        seen = {}
+        for definition in definitions:
+            key = (definition.conId, definition.secType, definition.currency)
+            raw = getattr(definition, 'multiplier', '')
+            if raw is None or raw == '':
+                value = ('missing', '')
+            else:
+                try:
+                    number = Decimal(str(raw))
+                except (InvalidOperation, ValueError):
+                    number = None
+                if number is not None and number.is_finite() and number > 0:
+                    value = ('positive', number)
+                else:
+                    # Keep invalid values distinguishable; missing data and
+                    # malformed nonempty data are not interchangeable.
+                    value = ('invalid', str(raw))
+            previous = seen.get(key)
+            if previous is not None and previous[0] != value:
+                raise ValueError(
+                    f'Conflicting multipliers for conId {definition.conId} '
+                    f'({definition.secType}/{definition.currency}): '
+                    f'{previous[1]!r} versus {raw!r}')
+            seen[key] = (value, raw)
 
     @staticmethod
     def to_contract(definition: Union['SecurityDefinition', Contract]) -> Contract:
         if isinstance(definition, SecurityDefinition):
             contract = Contract(secType=definition.secType, conId=definition.conId, symbol=definition.symbol,
                                 currency=definition.currency, exchange=definition.exchange,
-                                primaryExchange=definition.primaryExchange)
+                                primaryExchange=definition.primaryExchange,
+                                multiplier=definition.multiplier)
             return contract
         elif isinstance(definition, Contract):
             return definition
@@ -409,42 +447,30 @@ class Data():
         the opening range, so it had been reading fiction.
         """
         symbol = self._to_symbol(contract)
-        if data_frame is not None and len(data_frame) > 0:
+        if data_frame is None:
+            raise ValueError('OHLCV frame must not be None')
+        if data_frame.empty:
+            return
+        # Validation is part of committing data, not a best-effort diagnostic.
+        # Missing columns and validator failures must leave the old data intact.
+        missing = [c for c in ('open', 'high', 'low', 'close', 'volume')
+                   if c not in data_frame.columns]
+        if missing:
+            raise ValueError(f'OHLCV frame is missing required columns: {missing}')
+        bad = impossible_mask(data_frame)
+        n_bad = int(bad.sum())
+        if n_bad:
+            rejected = cast(pd.DataFrame, data_frame[bad])
             try:
-                bad = impossible_mask(data_frame)
-                n_bad = int(bad.sum())
-                if n_bad:
-                    rejected = cast(pd.DataFrame, data_frame[bad])
-                    sample = rejected.head(1).to_dict('records')
-                    # QUARANTINED, not discarded. The fact that a source SENT
-                    # us an impossible bar is itself evidence worth keeping —
-                    # it is how vendor quality gets measured over time, and how
-                    # a claim like "130 impossible bars last month" can be
-                    # substantiated rather than asserted. The trading and
-                    # backtesting paths never read that table.
-                    n_kept = 0
-                    try:
-                        n_kept = self.library.quarantine(
-                            symbol, rejected,
-                            reason='structurally impossible bar (bar_quality)')
-                    except Exception as ex:
-                        logging.warning('could not quarantine rejected bars '
-                                        'for %s: %s', symbol, ex)
-                    logging.warning(
-                        'REFUSED %d of %d structurally impossible bar(s) for %s '
-                        '(a bar whose high is below its own open/close, or with '
-                        'partial/negative values, cannot have happened); '
-                        '%d quarantined for the record. First: %s',
-                        n_bad, len(data_frame), symbol, n_kept, sample)
-                    data_frame = cast(pd.DataFrame, data_frame[~bad])
-                if len(data_frame) == 0:
-                    return
-            except Exception as ex:
-                # A validation failure must not become a data-loss event: if the
-                # check itself breaks, persist and let `mmr data audit` catch
-                # what got through.
-                logging.warning('bar validation failed for %s, writing '
-                                'unvalidated: %s', symbol, ex)
+                self.library.quarantine(
+                    symbol, rejected, reason='structurally impossible bar (bar_quality)')
+            except Exception:
+                logging.exception('could not quarantine rejected bars for %s', symbol)
+            logging.warning('REFUSED %d structurally impossible bar(s) for %s; first: %s',
+                            n_bad, symbol, rejected.head(1).to_dict('records'))
+            data_frame = cast(pd.DataFrame, data_frame[~bad])
+            if data_frame.empty:
+                return
         self.library.write(symbol, data_frame)
 
     def delete(self,
@@ -565,40 +591,14 @@ class TickData(Data):
         contract: Union[Contract, SecurityDefinition, int],
         data_frame: pd.DataFrame
     ):
-        # DuckDB store handles upserts natively, so overlapping data
-        # is resolved automatically.  We merge with existing data to
-        # maintain dedup semantics when merging overlapping data.
-
-        # A bar with no close is not a real observation. Never persist it and
-        # never let it overwrite a good bar — this is the defensive backstop for
-        # the "empty IB response persisted as NaN bars" poisoning path.
-        def _drop_empty_bars(df: pd.DataFrame) -> pd.DataFrame:
-            if 'close' in df.columns:
-                return cast(pd.DataFrame, df[df['close'].notna()])
-            return df
-
-        data_frame = _drop_empty_bars(data_frame)
-        existing_data = self.read(contract)
-        if existing_data.empty:
-            self.write(contract, data_frame)
-            return
-        if data_frame.empty:
-            return
-
-        # keep='last' so a freshly downloaded bar CORRECTS a previously stored
-        # one for the same timestamp, instead of the stale existing bar winning
-        # forever (the old keep='first' made re-downloads a no-op).
-        temp_df = pd.concat([existing_data, data_frame])
-        result = cast(pd.DataFrame, temp_df[~temp_df.index.duplicated(keep='last')])
-        result.sort_index(inplace=True)
-
-        # todo this probably shouldn't go here -- there's a bug upstream
-        # somewhere which kicks out a 'Timestamp' object has no attribute 'astype' exception
-        try:
-            result.index = pd.to_datetime(result.index)  # type: ignore
-        except ValueError as ve:
-            logging.debug('pd.to_datetime failed with {}'.format(ve))
-        self.write(contract=contract, data_frame=result)  # type: ignore
+        # The store atomically replaces incoming timestamp/bar-size keys.
+        # Reading all existing history here created lost updates and turned a
+        # ten-bar refresh into a rewrite of years of data.
+        if data_frame is None:
+            raise ValueError('OHLCV frame must not be None')
+        if 'close' in data_frame.columns:
+            data_frame = cast(pd.DataFrame, data_frame[data_frame['close'].notna()])
+        self.write(contract, data_frame)
 
     def read(self,
              contract: Union[Contract, SecurityDefinition, int],

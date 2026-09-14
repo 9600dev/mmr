@@ -14,6 +14,7 @@ from trader.trading.strategy import Strategy, StrategyConfig, StrategyState
 from typing import Dict, List, Optional, Tuple, Union
 
 import trader.strategy.strategy_runtime as runtime
+import asyncio
 
 
 logging = setup_logging(module_name='strategy_service_api')
@@ -24,30 +25,32 @@ class StrategyServiceApi(RPCHandler):
         self.strategy: runtime.StrategyRuntime = strategy_runtime
 
     @rpcmethod
-    def enable_strategy(self, name: str) -> SuccessFail[StrategyState]:
+    async def enable_strategy(self, name: str) -> SuccessFail[StrategyState]:
         try:
             # find the strategy
             strategy = self.strategy.get_strategy(name)
             if strategy:
-                state = self.strategy.enable_strategy(name)
+                state = await asyncio.to_thread(self.strategy.enable_strategy, name)
+                if state not in (StrategyState.RUNNING, StrategyState.WAITING_HISTORICAL_DATA):
+                    return SuccessFail.fail(error='Strategy could not be enabled; inspect runtime validation errors')
                 return SuccessFail.success(state)
             else:
                 return SuccessFail.fail(error='Strategy not found or error')
         except Exception as ex:
-            return SuccessFail.fail(exception=ex)
+            return SuccessFail.fail(error=str(ex) or type(ex).__name__, exception=ex)
 
     @rpcmethod
-    def disable_strategy(self, name: str) -> SuccessFail[StrategyState]:
+    async def disable_strategy(self, name: str) -> SuccessFail[StrategyState]:
         try:
             # find the strategy
             strategy = self.strategy.get_strategy(name)
             if strategy:
-                state = self.strategy.disable_strategy(name)
+                state = await asyncio.to_thread(self.strategy.disable_strategy, name)
                 return SuccessFail.success(obj=state)
             else:
                 return SuccessFail.fail(error='Strategy not found or error')
         except Exception as ex:
-            return SuccessFail.fail(exception=ex)
+            return SuccessFail.fail(error=str(ex) or type(ex).__name__, exception=ex)
 
     @rpcmethod
     def get_strategies(self) -> List[StrategyConfig]:
@@ -62,11 +65,27 @@ class StrategyServiceApi(RPCHandler):
         return self.strategy.runtime_status()
 
     @rpcmethod
+    async def adopt_legacy_holding(self, strategy: str, conid: int,
+                                   avg_cost: Optional[float] = None) -> SuccessFail[dict]:
+        """Operator-attested ownership for a holding attributed before ownership epochs."""
+        executor = getattr(self.strategy, 'auto_executor', None)
+        if executor is None:
+            return SuccessFail.fail(error='auto-executor is not running in this strategy service')
+        try:
+            adopted = await asyncio.to_thread(executor.adopt_legacy_holding, strategy, int(conid), avg_cost)
+            return SuccessFail.success(obj=adopted)
+        except Exception as ex:
+            return SuccessFail.fail(error=str(ex) or type(ex).__name__, exception=ex)
+
+    @rpcmethod
     async def reload_strategies(self) -> SuccessFail[List[StrategyConfig]]:
         try:
+            # Explicit reload is an application acknowledgment, independent
+            # of filesystem timestamp resolution or periodic reconciliation.
+            await asyncio.to_thread(self.strategy.config_loader, self.strategy.strategy_config_file)
             await self.strategy._reconcile()
             return SuccessFail.success(
                 [StrategyConfig.from_strategy(s) for s in self.strategy.get_strategies()]
             )
         except Exception as ex:
-            return SuccessFail.fail(exception=ex)
+            return SuccessFail.fail(error=str(ex) or type(ex).__name__, exception=ex)

@@ -62,10 +62,10 @@ class TestExecutionSpec:
         assert restored.tif == spec.tif
         assert restored.outside_rth == spec.outside_rth
 
-    def test_from_dict_ignores_unknown_keys(self):
+    def test_from_dict_rejects_unknown_keys(self):
         d = {'order_type': 'MARKET', 'unknown_field': 42}
-        spec = ExecutionSpec.from_dict(d)
-        assert spec.order_type == 'MARKET'
+        with pytest.raises(ValueError, match='unknown execution fields'):
+            ExecutionSpec.from_dict(d)
 
     def test_validate_market_no_errors(self):
         spec = ExecutionSpec(order_type='MARKET', exit_type='NONE')

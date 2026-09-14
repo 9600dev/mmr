@@ -1,0 +1,73 @@
+{
+  "auto_executor_module_sha256": "d2129891beb379d1a9af52f8f38ddf49b1d2a86fc8c6f6b9d019377636d2a5b6",
+  "constraints_observed": {
+    "epoch_index": [
+      "ownership_epoch"
+    ],
+    "nullable_cumulative_quote_notional": true,
+    "primary_key": [
+      "sequence"
+    ],
+    "unique_endpoint": [
+      "intent_id",
+      "end_quantity"
+    ]
+  },
+  "cost_schema": {
+    "cost_epoch_index_present": true,
+    "cost_history_created_empty": true,
+    "cost_history_unchanged_after_restart_and_cleanup": true,
+    "cost_no_historical_price_inference": true,
+    "cost_rows_after": 0,
+    "cost_rows_before": 0,
+    "cost_snapshot_sha256": [
+      "398b676e47d03a29016ee92fe378b8b4f1b3e965390c4c64ce78d27f79df74d1",
+      "dc1efdaf095633e27913bfc9366cb44b2924fa260c2f4c3dd5b90c5aac0f967d",
+      "dc1efdaf095633e27913bfc9366cb44b2924fa260c2f4c3dd5b90c5aac0f967d",
+      "dc1efdaf095633e27913bfc9366cb44b2924fa260c2f4c3dd5b90c5aac0f967d"
+    ],
+    "cost_table": "auto_exec_cost_events",
+    "cost_table_already_present_unchanged": false,
+    "cost_table_creation_observed": true,
+    "cost_table_present_after": true,
+    "cost_table_present_before": false,
+    "limits": [
+      "Read-only schema and row preservation; no new execution, pricing or broker activity proof.",
+      "Separate deterministic tests establish owned fill-price attribution and recovery."
+    ]
+  },
+  "kind": "current_source_paper_owned_cost_schema_evidence_v1",
+  "limits": [
+    "The replay retained eight historical fills and did not create new execution or cost evidence.",
+    "The observed cost migration created an empty table; preservation of nonempty cost histories is tested separately.",
+    "The separate activity-log migration had zero legacy rows; the unchanged reservation index had 14 existing claim legs.",
+    "Actual fill-price attribution, reductions and recovery are established by separate deterministic tests.",
+    "Final book flatness was observed before shutdown; detached service exit codes were not collected."
+  ],
+  "production_source_sha256": "9f67944ce78e6d75e82e3d2f9c2ac4e4ba1561d00e2b0e0f9330f44bd32b045b",
+  "proof_sha256": {
+    "cost_observer": "8c5bd456557e516183f699fedb33a4f86bd9e10061ce1dfc479377d793982537",
+    "cost_summary": "8d4025ef4b366a0c213ec500c4f2d73903276de7bdc98d48bbcb9087069654a3",
+    "final_cleanup": "68a1815403f29630eb3a075b9ffb61e90300a29613a203fb1ead746525a86b3a",
+    "matching_full_suite": "c49adff6a528e7acb87da0719b3971a1da97faca728d061808327d2aba45c08f",
+    "snapshot_receipts": [
+      "da5caeeae2be803329fcbc4afcea145deec509d0026c542e960c0711d4e247df",
+      "88130ac803607bedcf5bb32d6055c331038b248b8b88ba935aa6ba46e13edc8b",
+      "1c91b6b67c35022e9c5042b340b14d2034c46bac103c859c2e4901c198775524",
+      "d3f68681508838753bb1d363cee1d93c8eee25b21fde5daf38638c8ea0ca7a63"
+    ],
+    "source_freeze": "edd12e0e68c0e3fdadba8b805a44366a6a7c774f1a5ec85b51433f989f677e4c"
+  },
+  "recorded_at_utc": "2026-09-10T16:29:53.331692+00:00",
+  "replay_evidence": {
+    "artifact": "remediation_replay_2026-09-09.json",
+    "sha256": "01cf732d21ae47fb371540db1086fc97b27a7014bd998d06b164f6c5f7601e7e"
+  },
+  "source_sha256": "6eaadf73c2544a4cc1e789edcee001b3df364093a82a56bd06af3347aae25401",
+  "verification_interval": {
+    "finished_at_utc": "2026-09-10T16:24:04.216508+00:00",
+    "limit": "Concurrent local verification; no idle-host performance or execution-latency claim.",
+    "overlapped_canonical_mutation_run": true,
+    "started_at_utc": "2026-09-10T16:21:26.223377+00:00"
+  }
+}

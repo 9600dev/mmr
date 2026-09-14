@@ -288,8 +288,7 @@ def pbo_cscv(
     # Every block must hold enough rows for a variance. Shrink to the largest
     # even S that does, rather than refusing: a short daily series is the
     # normal case, not an error.
-    while n_splits > 2 and T // n_splits < 2:
-        n_splits -= 2
+    n_splits = min(n_splits, 2 * (T // 4))
     if T // n_splits < 2:
         return None
 

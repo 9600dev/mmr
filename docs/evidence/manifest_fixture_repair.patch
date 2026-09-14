@@ -1,0 +1,54 @@
+diff --git a/tests/invariants/test_manifest.py b/tests/invariants/test_manifest.py
+index d2ed039..c2c9c9c 100644
+--- a/tests/invariants/test_manifest.py
++++ b/tests/invariants/test_manifest.py
+@@ -93,6 +93,7 @@ class _FakeSDK:
+         self.fill_qty = 140.0
+         self.avg_cost = 100.0
+         self.next_protective_id = 900
++        self.execution_rows = []
+ 
+     def resolve(self, symbol, sec_type='STK', exchange='', universe='', currency=''):
+         return [self.secdef] if symbol in (1111, 'WDS') else []
+@@ -112,6 +113,12 @@ class _FakeSDK:
+         action = self.propose_calls[-1]['action']
+         cur = self.broker.get(1111, 0.0)
+         self.broker[1111] = cur + qty if action == 'BUY' else cur - qty
++        self.execution_rows.append({
++            'orderId': pid * 10, 'conId': 1111, 'action': action,
++            'orderRef': p.metadata.get('strategy', ''), 'status': 'Filled',
++            'totalQuantity': qty, 'filled': qty, 'avgFillPrice': self.avg_cost,
++            'clientIntentId': p.metadata.get('client_intent_id', ''),
++        })
+         return _Result(ok=True, obj=[pid * 10])
+ 
+     def positions(self):
+@@ -122,16 +129,24 @@ class _FakeSDK:
+     def place_protective_order(self, **kwargs):
+         oid = self.next_protective_id
+         self.next_protective_id += 1
++        self.execution_rows.append({
++            'orderId': oid, 'conId': kwargs['con_id'], 'action': 'SELL',
++            'orderRef': kwargs['order_ref'], 'orderType': 'STP',
++            'status': 'Submitted', 'totalQuantity': kwargs['quantity'],
++            'filled': 0.0, 'clientIntentId': kwargs.get('client_intent_id', ''),
++        })
+         return _Result(ok=True, obj=SimpleNamespace(order=SimpleNamespace(orderId=oid)))
+ 
+     def cancel(self, order_id):
++        for row in self.execution_rows:
++            if row['orderId'] == order_id and row['status'] != 'Filled':
++                row['status'] = 'Cancelled'
+         return _Result(ok=True)
+ 
+     def trades(self):
+-        rows = [{'orderId': pid * 10,
+-                 'totalQuantity': (self.proposals[pid].quantity or self.fill_qty)}
+-                for pid in self.approve_calls]
+-        return pd.DataFrame(rows)
++        # The fake fills synchronously in approve; expose those executions,
++        # independently from the quantity requested on each order.
++        return pd.DataFrame(self.execution_rows)
+ 
+     def _proposal_store(self):
+         proposals = self.proposals

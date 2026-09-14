@@ -33,16 +33,18 @@ def main(simulation: bool,
         nonlocal is_stopping
         if loop.is_running() and not is_stopping:
             is_stopping = True
-            # Cannot call loop.run_until_complete() here — the loop IS running
-            # (this fires while it's spinning), which raises RuntimeError and
-            # aborts the clean shutdown. Cancel the pending tasks and stop the
-            # loop; their CancelledError is delivered on the next iteration.
             pending_tasks = [
                 task for task in asyncio.all_tasks(loop) if not task.done()
             ]
             for task in pending_tasks:
                 task.cancel()
-            loop.stop()
+            async def finish_shutdown():
+                # Keep the loop alive to run runtime.finally, reap strategy
+                # children, and release sockets before the process exits.
+                if pending_tasks:
+                    await asyncio.wait(pending_tasks, timeout=30)
+                loop.stop()
+            loop.create_task(finish_shutdown())
 
     if simulation:
         raise ValueError('simulation not implemented yet')
@@ -54,12 +56,9 @@ def main(simulation: bool,
             loop.set_debug(enabled=True)
 
         loop.add_signal_handler(signal.SIGINT, stop_loop, loop)
+        loop.add_signal_handler(signal.SIGTERM, stop_loop, loop)
 
         container = Container.create(config)
-        strategy_runtime = container.resolve(StrategyRuntime)
-
-        strategy_runtime.connect()
-
         restart_count = 0
 
         def on_runtime_done(task: asyncio.Task):
@@ -86,7 +85,13 @@ def main(simulation: bool,
             loop.call_later(delay, _start_runtime)
 
         def _start_runtime():
-            task = loop.create_task(strategy_runtime.run())
+            async def run_generation():
+                # A stopped executor/thread pool/socket set is not reusable.
+                # Each supervised restart owns a fresh runtime generation.
+                strategy_runtime = container.resolve(StrategyRuntime)
+                await asyncio.to_thread(strategy_runtime.connect)
+                await strategy_runtime.run()
+            task = loop.create_task(run_generation())
             task.add_done_callback(on_runtime_done)
 
         _start_runtime()

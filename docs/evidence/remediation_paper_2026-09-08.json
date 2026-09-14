@@ -1,0 +1,1425 @@
+{
+  "backup_restore": {
+    "complete_snapshot": true,
+    "engines": [
+      "duckdb",
+      "sqlite"
+    ],
+    "new_exposure_requires_reconciliation": true,
+    "restored_intent_and_cancellation_verified": true,
+    "sha256_verified_on_restore": true
+  },
+  "cleanup": {
+    "broker_book_rechecked_flat": true,
+    "docker_paper_gateway": "left running; existing user application deployment not started or changed",
+    "exit_codes_collected": false,
+    "nonzero_positions": 0,
+    "temporary_services": "SIGINT sent to trader_service and strategy_service; process exits observed; no forced kill",
+    "working_orders": 0,
+    "zero_quantity_position_rows": 1
+  },
+  "deployment": {
+    "applied": [
+      {
+        "effective_config_hash": "f418621eee4d938a3cc5caae7dfa22021011855e74123c29ce932028f422373f",
+        "generation": "c2a90dd6e0784effba27fabad4808dbc",
+        "name": "remediation_probe",
+        "params": {
+          "THRESHOLD": 7
+        },
+        "requested_params": {
+          "THRESHOLD": "7"
+        },
+        "source_hash": "bfefc7381484707475e0c2b9ee582e37b852b8e0db94b25fb471d1a6470d1660",
+        "state": "1"
+      }
+    ],
+    "gauntlet": "PASS for a no-signal probe; lookahead and profitability not evaluated",
+    "lifecycle": [
+      {
+        "effective_config_hash": "f418621eee4d938a3cc5caae7dfa22021011855e74123c29ce932028f422373f",
+        "generation": "42caacf30d9f485c86398f06ca1e7031",
+        "phase": "enable",
+        "state": "3"
+      },
+      {
+        "effective_config_hash": "f418621eee4d938a3cc5caae7dfa22021011855e74123c29ce932028f422373f",
+        "generation": "42caacf30d9f485c86398f06ca1e7031",
+        "phase": "disable",
+        "state": "4"
+      },
+      {
+        "effective_config_hash": "f418621eee4d938a3cc5caae7dfa22021011855e74123c29ce932028f422373f",
+        "generation": "62f06944abdc4ca986ccd2b7806a0a64",
+        "phase": "reenable",
+        "state": "3"
+      }
+    ],
+    "removed_with_runtime_acknowledgment": true
+  },
+  "earlier_code_recoveries": [
+    {
+      "broker_status": "Cancelled",
+      "fill_quantity_known": true,
+      "filled": 0.0,
+      "final_book": {
+        "complete": true,
+        "journal_healthy": true,
+        "positions": 0,
+        "positions_complete": true,
+        "working_orders": []
+      },
+      "journal_healthy": true,
+      "recorded_at_utc": "2026-09-09T07:00:53.031033+00:00",
+      "snapshots_complete": true,
+      "source_sha256": "351b556c4f877bc3f2e2af44aadf986d0659a71fb0bfeff2a24b5f1028780aae",
+      "status": "Cancelled",
+      "temporary_service_cleanup": {
+        "strategy": "stopped cleanly",
+        "trader": "stopped cleanly"
+      }
+    },
+    {
+      "broker_status": "Cancelled",
+      "fill_quantity_known": true,
+      "filled": 0.0,
+      "final_book": {
+        "complete": true,
+        "journal_healthy": true,
+        "positions": 0,
+        "positions_complete": true,
+        "working_orders": []
+      },
+      "identity_ambiguous": false,
+      "journal_healthy": true,
+      "recorded_at_utc": "2026-09-09T08:40:42.301171+00:00",
+      "snapshots_complete": true,
+      "source_fingerprint_recipe": "Python files under trader/, tests/ and scripts/, plus pyproject.toml",
+      "source_sha256": "88a680f0cdc909151489c6b1fa89f3e5b98f776a4d2f0aaa381b34809df39cfd",
+      "status": "Cancelled",
+      "temporary_service_cleanup": {
+        "strategy": "stopped cleanly",
+        "trader": "stopped cleanly"
+      }
+    },
+    {
+      "earlier_rounds_preserved": {
+        "cdac9993a9d942a885000ac9254961f2": {
+          "audit_row_count": 3,
+          "audit_rows_sha256": "a7880621c33474d4e9f8cfe70ed4f5dc9c5a000310fdf5b7950fa13c4a87724d",
+          "audit_rows_unchanged": true,
+          "broker_identities_unchanged": true,
+          "fill_events": 2,
+          "state_and_evidence_unchanged": true
+        }
+      },
+      "production_source_sha256": "93e3c8b4bbffda6c3a4b363d7b6b61ffbd8303d463991c1d12ce374ed96ef1b0",
+      "recorded_at_utc": "2026-09-09T10:14:29.524057+00:00",
+      "restart": {
+        "audit_rows_unchanged": true,
+        "duplicate_fill_events": false,
+        "fill_events_after_restart": 2,
+        "journal_healthy": true,
+        "ledger_scope": "active round exact broker identities",
+        "nonzero_positions": 0,
+        "orders": {
+          "close": {
+            "filled": 1.0,
+            "same_intent": true,
+            "same_logical_identity": true,
+            "same_permanent_identity": true,
+            "status": "Filled"
+          },
+          "open": {
+            "filled": 1.0,
+            "same_intent": true,
+            "same_logical_identity": true,
+            "same_permanent_identity": true,
+            "status": "Filled"
+          },
+          "protection": {
+            "filled": 0.0,
+            "same_intent": true,
+            "same_logical_identity": true,
+            "same_permanent_identity": true,
+            "status": "Cancelled"
+          }
+        },
+        "restarted_current_services": true,
+        "snapshots_complete": true,
+        "working_orders": 0,
+        "zero_quantity_position_rows": 1
+      },
+      "run_id": "557c0f554c9e4d69bc278233cc4dd8f9",
+      "source_fingerprint_recipe": "sha256(json.dumps(source_file_sha256_map, sort_keys=True).encode()); all .py files returned by rg --files trader tests scripts, plus pyproject.toml",
+      "source_sha256": "589573eb7ab9ab9f3d5b1a15a63da405dc19dcbee346aaaf5da4fdfaa36a6cf0",
+      "temporary_service_cleanup": {
+        "strategy": "SIGINT sent; process exit observed; no forced kill",
+        "trader": "SIGINT sent; process exit observed; no forced kill"
+      },
+      "temporary_service_cleanup_proof": {
+        "exit_codes_collected": false,
+        "forced_kill": false,
+        "process_exits_observed": true,
+        "signal": "SIGINT"
+      }
+    },
+    {
+      "earlier_rounds_preserved": {
+        "557c0f554c9e4d69bc278233cc4dd8f9": {
+          "audit_row_count": 3,
+          "audit_rows_sha256": "e0786ab10f5edca8b3dcef4d458953fe94b0c6f3caca04faaeb81125ce3353ec",
+          "audit_rows_unchanged": true,
+          "broker_identities_unchanged": true,
+          "fill_events": 2,
+          "state_and_evidence_unchanged": true
+        },
+        "cdac9993a9d942a885000ac9254961f2": {
+          "audit_row_count": 3,
+          "audit_rows_sha256": "a7880621c33474d4e9f8cfe70ed4f5dc9c5a000310fdf5b7950fa13c4a87724d",
+          "audit_rows_unchanged": true,
+          "broker_identities_unchanged": true,
+          "fill_events": 2,
+          "state_and_evidence_unchanged": true
+        }
+      },
+      "production_source_sha256": "3102d7cbc56e0b311f4b073e15beeeb251fdb6a112e3fb4889d1b7c17d6573a4",
+      "recorded_at_utc": "2026-09-09T12:08:03.091617+00:00",
+      "restart": {
+        "audit_rows_unchanged": true,
+        "duplicate_fill_events": false,
+        "fill_events_after_restart": 2,
+        "journal_healthy": true,
+        "ledger_scope": "active round exact broker identities",
+        "nonzero_positions": 0,
+        "orders": {
+          "close": {
+            "filled": 1.0,
+            "same_intent": true,
+            "same_logical_identity": true,
+            "same_permanent_identity": true,
+            "status": "Filled"
+          },
+          "open": {
+            "filled": 1.0,
+            "same_intent": true,
+            "same_logical_identity": true,
+            "same_permanent_identity": true,
+            "status": "Filled"
+          },
+          "protection": {
+            "filled": 0.0,
+            "same_intent": true,
+            "same_logical_identity": true,
+            "same_permanent_identity": true,
+            "status": "Cancelled"
+          }
+        },
+        "restarted_current_services": true,
+        "snapshots_complete": true,
+        "working_orders": 0,
+        "zero_quantity_position_rows": 1
+      },
+      "run_id": "afb10a70c6564bc78dc1ac3dc2960aad",
+      "source_fingerprint_recipe": "sha256(json.dumps(source_file_sha256_map, sort_keys=True).encode()); all .py files returned by rg --files trader tests scripts, plus pyproject.toml",
+      "source_sha256": "eeb8440d87263bb82497e113c4a842d3caaa0b1f18438d6d257fe4f5f156feaa",
+      "temporary_service_cleanup": {
+        "strategy": "SIGINT sent; process exit observed; no forced kill",
+        "trader": "SIGINT sent; process exit observed; no forced kill"
+      },
+      "temporary_service_cleanup_proof": {
+        "exit_codes_collected": false,
+        "forced_kill": false,
+        "process_exits_observed": true,
+        "signal": "SIGINT"
+      }
+    }
+  ],
+  "earlier_publication_metadata": [
+    {
+      "active_round_id_at_publication": "557c0f554c9e4d69bc278233cc4dd8f9",
+      "metadata": {
+        "cleanup": {
+          "broker_book_rechecked_flat": true,
+          "docker_paper_gateway": "left running; existing user application deployment not started or changed",
+          "exit_codes_collected": false,
+          "nonzero_positions": 0,
+          "temporary_services": "SIGINT sent to trader_service and strategy_service; process exits observed; no forced kill",
+          "working_orders": 0,
+          "zero_quantity_position_rows": 1
+        },
+        "history_note": "Initial deployment/order/backup/setup observations retain their original time and scope; each earlier roundtrip and replaced latest record is preserved verbatim in its history array.",
+        "latest_stack_checks_recorded_at_utc": "2026-09-09T10:14:55.873736+00:00",
+        "serialization_adapter": {
+          "adapter_sha256": "24c4461519f7d33da242d54e1ce6893b483584149eccc010db6a15cb4d2f8d70",
+          "baseline_and_frozen_helper_files_unchanged": true,
+          "conversion_scope": {
+            "contract_format": "Complete dataclass field map plus original Python type marker",
+            "contract_types": [
+              "ib_async.contract.Contract",
+              "ib_async.contract.Stock"
+            ],
+            "datetime_format": "ISO 8601 string",
+            "datetime_types": [
+              "datetime.datetime",
+              "datetime.date"
+            ],
+            "nonfinite_numbers": "rejected",
+            "unknown_objects": "rejected"
+          },
+          "converted_types": {},
+          "guard_and_fingerprint_functions_unchanged": true,
+          "invoked_helper": "stage_paper_evidence.py",
+          "wrapped_function": "verify_roundtrip_recovery.save_unique"
+        },
+        "supplement_provenance": {
+          "assembled_at_utc": "2026-09-09T10:16:47.436601+00:00",
+          "refusal_supplement_sha256": "28e365ce5a98a17c13a4248c5df00e2cd97c95480a9e8424333a5423b0dd9f03",
+          "staged_candidate_sha256": "1ce166b121372008aa17d679659e29f17cbd1f0ce8f27afc32c9e5ffeb1bf810"
+        },
+        "updated_at_utc": "2026-09-09T10:15:40.446204+00:00"
+      },
+      "preservation_checks": {
+        "published_receipt_sha256": {
+          "557c0f554c9e4d69bc278233cc4dd8f9": {
+            "after_restart_verification": "27d4cb254a5801340df98f3e83ae4b1a4f4bccaba5fba796e6ad78f3707d07e3",
+            "before_restart_checkpoint": "5183e9dea84e006416415200ab869b82bd697ef6e3412f0915d1fb8cd491fff0",
+            "cleanup_receipt": "e824417fe567a04a39e8c3d0d72d47e4ad1db7de6978c606341cb1c012424852",
+            "recovery_baseline": "6dff1d921bc36b08f44daed733172fd9dbbc7fe9134acc999397ea5eeaaa904e",
+            "recovery_verifier": "eb69e436199150d0b74d66b272b9b88075258c7c002f65a57f4859c31400b181",
+            "roundtrip_harness": "d031feb2e19ef198ab6fe35b9a6158a3eca9eb2104a4889bc9ae8bed83b58f76",
+            "stack_receipt": "48256b3cd993a71dd9cf6937f500f7a1b132e0cc3e20ee12c731c4f7954a1d59"
+          }
+        },
+        "published_round_ids": [
+          "cdac9993a9d942a885000ac9254961f2",
+          "557c0f554c9e4d69bc278233cc4dd8f9"
+        ],
+        "state_files_and_audit_rows_unchanged": true
+      },
+      "production_source_sha256": "93e3c8b4bbffda6c3a4b363d7b6b61ffbd8303d463991c1d12ce374ed96ef1b0",
+      "public_predecessor_sha256": "8e342509afccdff4cb4d39740d5421d71bf1be17d1b604f6a84abc417d39de9a",
+      "source_sha256": "589573eb7ab9ab9f3d5b1a15a63da405dc19dcbee346aaaf5da4fdfaa36a6cf0"
+    },
+    {
+      "active_round_id_at_publication": "afb10a70c6564bc78dc1ac3dc2960aad",
+      "metadata": {
+        "cleanup": {
+          "broker_book_rechecked_flat": true,
+          "docker_paper_gateway": "left running; existing user application deployment not started or changed",
+          "exit_codes_collected": false,
+          "nonzero_positions": 0,
+          "temporary_services": "SIGINT sent to trader_service and strategy_service; process exits observed; no forced kill",
+          "working_orders": 0,
+          "zero_quantity_position_rows": 1
+        },
+        "history_note": "Initial deployment/order/backup/setup observations retain their original time and scope; each earlier roundtrip and replaced latest record is preserved verbatim in its history array.",
+        "latest_stack_checks_recorded_at_utc": "2026-09-09T12:08:16.446615+00:00",
+        "serialization_adapter": {
+          "adapter_sha256": "24c4461519f7d33da242d54e1ce6893b483584149eccc010db6a15cb4d2f8d70",
+          "baseline_and_frozen_helper_files_unchanged": true,
+          "conversion_scope": {
+            "contract_format": "Complete dataclass field map plus original Python type marker",
+            "contract_types": [
+              "ib_async.contract.Contract",
+              "ib_async.contract.Stock"
+            ],
+            "datetime_format": "ISO 8601 string",
+            "datetime_types": [
+              "datetime.datetime",
+              "datetime.date"
+            ],
+            "nonfinite_numbers": "rejected",
+            "unknown_objects": "rejected"
+          },
+          "converted_types": {},
+          "guard_and_fingerprint_functions_unchanged": true,
+          "invoked_helper": "stage_paper_evidence.py",
+          "wrapped_function": "verify_roundtrip_recovery.save_unique"
+        },
+        "updated_at_utc": "2026-09-09T12:08:33.020010+00:00"
+      },
+      "preservation_checks": {
+        "published_receipt_sha256": {
+          "557c0f554c9e4d69bc278233cc4dd8f9": {
+            "after_restart_verification": "27d4cb254a5801340df98f3e83ae4b1a4f4bccaba5fba796e6ad78f3707d07e3",
+            "before_restart_checkpoint": "5183e9dea84e006416415200ab869b82bd697ef6e3412f0915d1fb8cd491fff0",
+            "cleanup_receipt": "e824417fe567a04a39e8c3d0d72d47e4ad1db7de6978c606341cb1c012424852",
+            "recovery_baseline": "6dff1d921bc36b08f44daed733172fd9dbbc7fe9134acc999397ea5eeaaa904e",
+            "recovery_verifier": "eb69e436199150d0b74d66b272b9b88075258c7c002f65a57f4859c31400b181",
+            "roundtrip_harness": "d031feb2e19ef198ab6fe35b9a6158a3eca9eb2104a4889bc9ae8bed83b58f76",
+            "stack_receipt": "48256b3cd993a71dd9cf6937f500f7a1b132e0cc3e20ee12c731c4f7954a1d59"
+          },
+          "afb10a70c6564bc78dc1ac3dc2960aad": {
+            "after_restart_verification": "a0f284981c613161e950271899b8e433ce3b698a71da036b5067bd9360f46307",
+            "before_restart_checkpoint": "8624fa9c41c5d15aa6d942d9f52b8b55889a9568d6bc72ff2424f7a897980317",
+            "cleanup_receipt": "68e28c84677b35857dfadfe26ecfe0dfde396f5ba580c23894926cfa56ee26f5",
+            "recovery_baseline": "3617880ab00db7860f2615f18d0cdc2f5857e9763f84b2fdd552240965c276d4",
+            "recovery_verifier": "eb69e436199150d0b74d66b272b9b88075258c7c002f65a57f4859c31400b181",
+            "roundtrip_harness": "d031feb2e19ef198ab6fe35b9a6158a3eca9eb2104a4889bc9ae8bed83b58f76",
+            "stack_receipt": "256f7a236df20611de9b95d08d44b17baa900f7b9249544adfa0f38bba917ff6"
+          }
+        },
+        "published_round_ids": [
+          "cdac9993a9d942a885000ac9254961f2",
+          "557c0f554c9e4d69bc278233cc4dd8f9",
+          "afb10a70c6564bc78dc1ac3dc2960aad"
+        ],
+        "state_files_and_audit_rows_unchanged": true
+      },
+      "production_source_sha256": "3102d7cbc56e0b311f4b073e15beeeb251fdb6a112e3fb4889d1b7c17d6573a4",
+      "public_predecessor_sha256": "7c9aa27008b590b12f7370627ba347066deb739c5b08fbd937d0814084ab1805",
+      "source_sha256": "eeb8440d87263bb82497e113c4a842d3caaa0b1f18438d6d257fe4f5f156feaa"
+    }
+  ],
+  "earlier_roundtrips": [
+    {
+      "attributed_remaining": 0.0,
+      "confirmed_owned_remaining": 0.0,
+      "conid": 756733,
+      "currency": "USD",
+      "exit_filled": 1.0,
+      "final_flat": true,
+      "ledger": {
+        "buy_quantity": 1.0,
+        "duplicate_fill_events": false,
+        "fill_events": 2,
+        "positive_finite_fill_prices": true,
+        "sell_quantity": 1.0,
+        "strategy_tag": "remediation_roundtrip"
+      },
+      "limits": [
+        "Only one instrument/one lot and the connected trader-service snapshot scope.",
+        "Quote age is IB ticker receipt time, not an exchange timestamp for each side.",
+        "Protective acceptance does not prove stop triggering or outside-hours protection.",
+        "No OCA behavior is exercised; recovery evidence is retained privately.",
+        "Durable management state is private harness state, not AutoExecutor attribution."
+      ],
+      "listing": "ARCA",
+      "management_required": false,
+      "observed_broker_quantity": 0,
+      "open_filled": 1.0,
+      "order_filled": {
+        "close": 1.0,
+        "open": 1.0,
+        "protection": 0.0,
+        "recovery_protection": null
+      },
+      "order_status": {
+        "close": "Filled",
+        "open": "Filled",
+        "protection": "Cancelled",
+        "recovery_protection": null
+      },
+      "phase": "COMPLETE",
+      "probe_source_fingerprint": "88a680f0cdc909151489c6b1fa89f3e5b98f776a4d2f0aaa381b34809df39cfd",
+      "production_source_fingerprint_recipe": "sha256(json.dumps(map,sort_keys=True).encode()); Python files under trader/",
+      "production_source_sha256": "e7e2200918cbec85ffb8bacd135bfc46dc9807f573a4ce165e5a10391a95de70",
+      "production_source_unchanged_through_verification_tool_repair": true,
+      "proposal_approval_attempted": {
+        "close": true,
+        "open": true
+      },
+      "proposal_approval_reported_success": {
+        "close": true,
+        "open": true
+      },
+      "protective_terminal_observed": true,
+      "protective_working_observed": true,
+      "reason_code": null,
+      "recorded_at_utc": "2026-09-09T08:47:40.000123+00:00",
+      "requested_quantity": 1,
+      "restart": {
+        "duplicate_fill_events": false,
+        "fill_events_after_restart": 2,
+        "journal_healthy": true,
+        "nonzero_positions": 0,
+        "orders": {
+          "close": {
+            "filled": 1.0,
+            "same_intent": true,
+            "same_permanent_identity": true,
+            "status": "Filled"
+          },
+          "open": {
+            "filled": 1.0,
+            "same_intent": true,
+            "same_permanent_identity": true,
+            "status": "Filled"
+          },
+          "protection": {
+            "filled": 0.0,
+            "same_intent": true,
+            "same_permanent_identity": true,
+            "status": "Cancelled"
+          }
+        },
+        "restarted_current_services": true,
+        "snapshots_complete": true,
+        "working_orders": 0,
+        "zero_quantity_position_rows": 1
+      },
+      "run_id": "cdac9993a9d942a885000ac9254961f2",
+      "symbol": "SPY",
+      "temporary_service_cleanup": {
+        "strategy": "stopped cleanly",
+        "trader": "stopped cleanly"
+      },
+      "verified_paper": true
+    },
+    {
+      "attributed_remaining": 0.0,
+      "confirmed_owned_remaining": 0.0,
+      "conid": 756733,
+      "currency": "USD",
+      "earlier_rounds_preserved": {
+        "cdac9993a9d942a885000ac9254961f2": {
+          "audit_row_count": 3,
+          "audit_rows_sha256": "a7880621c33474d4e9f8cfe70ed4f5dc9c5a000310fdf5b7950fa13c4a87724d",
+          "audit_rows_unchanged": true,
+          "broker_identities_unchanged": true,
+          "fill_events": 2,
+          "state_and_evidence_unchanged": true
+        }
+      },
+      "exit_filled": 1.0,
+      "final_flat": true,
+      "ledger": {
+        "buy_quantity": 1.0,
+        "duplicate_fill_events": false,
+        "fill_events": 2,
+        "positive_finite_fill_prices": true,
+        "scope": "active round exact broker identities",
+        "sell_quantity": 1.0,
+        "strategy_tag": "remediation_roundtrip"
+      },
+      "limits": [
+        "Only one instrument/one lot and the connected trader-service snapshot scope.",
+        "Quote age is IB ticker receipt time, not an exchange timestamp for each side.",
+        "Protective acceptance does not prove stop triggering or outside-hours protection.",
+        "No OCA or partial-fill behavior was exercised in this paper round.",
+        "Temporary service shutdown records SIGINT and observed process exits without forced kill; exit codes were not collected.",
+        "Durable management state is private harness state, not AutoExecutor attribution."
+      ],
+      "listing": "ARCA",
+      "management_required": false,
+      "observed_broker_quantity": 0,
+      "open_filled": 1.0,
+      "order_filled": {
+        "close": 1.0,
+        "open": 1.0,
+        "protection": 0.0,
+        "recovery_protection": null
+      },
+      "order_status": {
+        "close": "Filled",
+        "open": "Filled",
+        "protection": "Cancelled",
+        "recovery_protection": null
+      },
+      "phase": "COMPLETE",
+      "probe_source_fingerprint": "589573eb7ab9ab9f3d5b1a15a63da405dc19dcbee346aaaf5da4fdfaa36a6cf0",
+      "production_source_fingerprint_recipe": "sha256(json.dumps(map,sort_keys=True).encode()); Python files under trader/",
+      "production_source_sha256": "93e3c8b4bbffda6c3a4b363d7b6b61ffbd8303d463991c1d12ce374ed96ef1b0",
+      "proof_sha256": {
+        "after_restart_verification": "27d4cb254a5801340df98f3e83ae4b1a4f4bccaba5fba796e6ad78f3707d07e3",
+        "before_restart_checkpoint": "5183e9dea84e006416415200ab869b82bd697ef6e3412f0915d1fb8cd491fff0",
+        "cleanup_receipt": "e824417fe567a04a39e8c3d0d72d47e4ad1db7de6978c606341cb1c012424852",
+        "recovery_baseline": "6dff1d921bc36b08f44daed733172fd9dbbc7fe9134acc999397ea5eeaaa904e",
+        "recovery_verifier": "eb69e436199150d0b74d66b272b9b88075258c7c002f65a57f4859c31400b181",
+        "roundtrip_harness": "d031feb2e19ef198ab6fe35b9a6158a3eca9eb2104a4889bc9ae8bed83b58f76",
+        "stack_receipt": "48256b3cd993a71dd9cf6937f500f7a1b132e0cc3e20ee12c731c4f7954a1d59"
+      },
+      "proposal_approval_attempted": {
+        "close": true,
+        "open": true
+      },
+      "proposal_approval_reported_success": {
+        "close": true,
+        "open": true
+      },
+      "protective_terminal_observed": true,
+      "protective_working_observed": true,
+      "reason_code": null,
+      "recorded_at_utc": "2026-09-09T10:14:29.524057+00:00",
+      "requested_quantity": 1,
+      "restart": {
+        "audit_rows_unchanged": true,
+        "duplicate_fill_events": false,
+        "fill_events_after_restart": 2,
+        "journal_healthy": true,
+        "ledger_scope": "active round exact broker identities",
+        "nonzero_positions": 0,
+        "orders": {
+          "close": {
+            "filled": 1.0,
+            "same_intent": true,
+            "same_logical_identity": true,
+            "same_permanent_identity": true,
+            "status": "Filled"
+          },
+          "open": {
+            "filled": 1.0,
+            "same_intent": true,
+            "same_logical_identity": true,
+            "same_permanent_identity": true,
+            "status": "Filled"
+          },
+          "protection": {
+            "filled": 0.0,
+            "same_intent": true,
+            "same_logical_identity": true,
+            "same_permanent_identity": true,
+            "status": "Cancelled"
+          }
+        },
+        "restarted_current_services": true,
+        "snapshots_complete": true,
+        "working_orders": 0,
+        "zero_quantity_position_rows": 1
+      },
+      "run_id": "557c0f554c9e4d69bc278233cc4dd8f9",
+      "setup": {
+        "exact_integer_conid_preflight_passed": true,
+        "finalization_invoked_no_prepare_seed_or_reset": true,
+        "prior_round_state_and_audit_preserved": true,
+        "private_configuration_and_database_paths_unchanged": true
+      },
+      "source_fingerprint_recipe": "sha256(json.dumps(source_file_sha256_map, sort_keys=True).encode()); all .py files returned by rg --files trader tests scripts, plus pyproject.toml",
+      "started_at_utc": "2026-09-09T10:06:48.929898+00:00",
+      "symbol": "SPY",
+      "temporary_service_cleanup": {
+        "strategy": "SIGINT sent; process exit observed; no forced kill",
+        "trader": "SIGINT sent; process exit observed; no forced kill"
+      },
+      "temporary_service_cleanup_proof": {
+        "exit_codes_collected": false,
+        "forced_kill": false,
+        "process_exits_observed": true,
+        "signal": "SIGINT"
+      },
+      "total_verified_fill_events_all_completed_rounds": 4,
+      "verified_paper": true
+    },
+    {
+      "attributed_remaining": 0.0,
+      "confirmed_owned_remaining": 0.0,
+      "conid": 756733,
+      "currency": "USD",
+      "earlier_rounds_preserved": {
+        "557c0f554c9e4d69bc278233cc4dd8f9": {
+          "audit_row_count": 3,
+          "audit_rows_sha256": "e0786ab10f5edca8b3dcef4d458953fe94b0c6f3caca04faaeb81125ce3353ec",
+          "audit_rows_unchanged": true,
+          "broker_identities_unchanged": true,
+          "fill_events": 2,
+          "state_and_evidence_unchanged": true
+        },
+        "cdac9993a9d942a885000ac9254961f2": {
+          "audit_row_count": 3,
+          "audit_rows_sha256": "a7880621c33474d4e9f8cfe70ed4f5dc9c5a000310fdf5b7950fa13c4a87724d",
+          "audit_rows_unchanged": true,
+          "broker_identities_unchanged": true,
+          "fill_events": 2,
+          "state_and_evidence_unchanged": true
+        }
+      },
+      "exit_filled": 1.0,
+      "final_flat": true,
+      "ledger": {
+        "buy_quantity": 1.0,
+        "duplicate_fill_events": false,
+        "fill_events": 2,
+        "positive_finite_fill_prices": true,
+        "scope": "active round exact broker identities",
+        "sell_quantity": 1.0,
+        "strategy_tag": "remediation_roundtrip"
+      },
+      "limits": [
+        "Only one instrument/one lot and the connected trader-service snapshot scope.",
+        "Quote age is IB ticker receipt time, not an exchange timestamp for each side.",
+        "Protective acceptance does not prove stop triggering or outside-hours protection.",
+        "No OCA or partial-fill behavior was exercised in this paper round.",
+        "Temporary service shutdown records SIGINT and observed process exits without forced kill; exit codes were not collected.",
+        "Durable management state is private harness state, not AutoExecutor attribution."
+      ],
+      "listing": "ARCA",
+      "management_required": false,
+      "observed_broker_quantity": 0,
+      "open_filled": 1.0,
+      "order_filled": {
+        "close": 1.0,
+        "open": 1.0,
+        "protection": 0.0,
+        "recovery_protection": null
+      },
+      "order_status": {
+        "close": "Filled",
+        "open": "Filled",
+        "protection": "Cancelled",
+        "recovery_protection": null
+      },
+      "phase": "COMPLETE",
+      "probe_source_fingerprint": "eeb8440d87263bb82497e113c4a842d3caaa0b1f18438d6d257fe4f5f156feaa",
+      "production_source_fingerprint_recipe": "sha256(json.dumps(map,sort_keys=True).encode()); Python files under trader/",
+      "production_source_sha256": "3102d7cbc56e0b311f4b073e15beeeb251fdb6a112e3fb4889d1b7c17d6573a4",
+      "proof_sha256": {
+        "after_restart_verification": "a0f284981c613161e950271899b8e433ce3b698a71da036b5067bd9360f46307",
+        "before_restart_checkpoint": "8624fa9c41c5d15aa6d942d9f52b8b55889a9568d6bc72ff2424f7a897980317",
+        "cleanup_receipt": "68e28c84677b35857dfadfe26ecfe0dfde396f5ba580c23894926cfa56ee26f5",
+        "recovery_baseline": "3617880ab00db7860f2615f18d0cdc2f5857e9763f84b2fdd552240965c276d4",
+        "recovery_verifier": "eb69e436199150d0b74d66b272b9b88075258c7c002f65a57f4859c31400b181",
+        "roundtrip_harness": "d031feb2e19ef198ab6fe35b9a6158a3eca9eb2104a4889bc9ae8bed83b58f76",
+        "stack_receipt": "256f7a236df20611de9b95d08d44b17baa900f7b9249544adfa0f38bba917ff6"
+      },
+      "proposal_approval_attempted": {
+        "close": true,
+        "open": true
+      },
+      "proposal_approval_reported_success": {
+        "close": true,
+        "open": true
+      },
+      "protective_terminal_observed": true,
+      "protective_working_observed": true,
+      "reason_code": null,
+      "recorded_at_utc": "2026-09-09T12:08:03.091617+00:00",
+      "requested_quantity": 1,
+      "restart": {
+        "audit_rows_unchanged": true,
+        "duplicate_fill_events": false,
+        "fill_events_after_restart": 2,
+        "journal_healthy": true,
+        "ledger_scope": "active round exact broker identities",
+        "nonzero_positions": 0,
+        "orders": {
+          "close": {
+            "filled": 1.0,
+            "same_intent": true,
+            "same_logical_identity": true,
+            "same_permanent_identity": true,
+            "status": "Filled"
+          },
+          "open": {
+            "filled": 1.0,
+            "same_intent": true,
+            "same_logical_identity": true,
+            "same_permanent_identity": true,
+            "status": "Filled"
+          },
+          "protection": {
+            "filled": 0.0,
+            "same_intent": true,
+            "same_logical_identity": true,
+            "same_permanent_identity": true,
+            "status": "Cancelled"
+          }
+        },
+        "restarted_current_services": true,
+        "snapshots_complete": true,
+        "working_orders": 0,
+        "zero_quantity_position_rows": 1
+      },
+      "run_id": "afb10a70c6564bc78dc1ac3dc2960aad",
+      "setup": {
+        "exact_integer_conid_preflight_passed": true,
+        "finalization_invoked_no_prepare_seed_or_reset": true,
+        "prior_round_state_and_audit_preserved": true,
+        "private_configuration_and_database_paths_unchanged": true
+      },
+      "source_fingerprint_recipe": "sha256(json.dumps(source_file_sha256_map, sort_keys=True).encode()); all .py files returned by rg --files trader tests scripts, plus pyproject.toml",
+      "started_at_utc": "2026-09-09T12:06:57.204979+00:00",
+      "symbol": "SPY",
+      "temporary_service_cleanup": {
+        "strategy": "SIGINT sent; process exit observed; no forced kill",
+        "trader": "SIGINT sent; process exit observed; no forced kill"
+      },
+      "temporary_service_cleanup_proof": {
+        "exit_codes_collected": false,
+        "forced_kill": false,
+        "process_exits_observed": true,
+        "signal": "SIGINT"
+      },
+      "total_verified_fill_events_all_completed_rounds": 6,
+      "verified_paper": true
+    }
+  ],
+  "earlier_stack_checks": [
+    [
+      {
+        "check": "trader_service",
+        "detail": "RPC responsive",
+        "status": "PASS"
+      },
+      {
+        "check": "ib_socket",
+        "detail": "live round-trip OK (IB time 2026-09-09 08:39:25+00:00)",
+        "status": "PASS"
+      },
+      {
+        "check": "ib_upstream",
+        "detail": "gateway reports upstream connected",
+        "status": "PASS"
+      },
+      {
+        "check": "strategy_service",
+        "detail": "RPC responsive (0/0 strategies RUNNING, 0 auto-exec positions open)",
+        "status": "PASS"
+      },
+      {
+        "check": "strategy_roster",
+        "detail": "no auto_execute strategies in strategy_runtime.yaml",
+        "status": "SKIP"
+      },
+      {
+        "check": "tick_flow",
+        "detail": "no watched market (NYSE,ASX) is open \u2014 0 ticks expected",
+        "status": "SKIP"
+      },
+      {
+        "check": "pycron",
+        "detail": "port 7425 not responding \u2014 nightly db_backup/data_refresh jobs are not scheduled (expected when running outside the container)",
+        "status": "WARN"
+      }
+    ],
+    [
+      {
+        "check": "trader_service",
+        "detail": "RPC responsive",
+        "status": "PASS"
+      },
+      {
+        "check": "ib_socket",
+        "detail": "IB time round-trip observed",
+        "status": "PASS"
+      },
+      {
+        "check": "ib_upstream",
+        "detail": "Gateway upstream connection checked",
+        "status": "PASS"
+      },
+      {
+        "check": "strategy_service",
+        "detail": "RPC responsive; private runtime checked",
+        "status": "PASS"
+      },
+      {
+        "check": "strategy_roster",
+        "detail": "Private test strategy roster checked",
+        "status": "SKIP"
+      },
+      {
+        "check": "tick_flow",
+        "detail": "Tick-flow expectation checked against market hours",
+        "status": "SKIP"
+      },
+      {
+        "check": "pycron",
+        "detail": "Scheduler availability checked in isolated stack",
+        "status": "WARN"
+      }
+    ],
+    [
+      {
+        "check": "trader_service",
+        "detail": "RPC responsive",
+        "status": "PASS"
+      },
+      {
+        "check": "ib_socket",
+        "detail": "IB time round-trip observed",
+        "status": "PASS"
+      },
+      {
+        "check": "ib_upstream",
+        "detail": "Gateway upstream connection checked",
+        "status": "PASS"
+      },
+      {
+        "check": "strategy_service",
+        "detail": "RPC responsive; private runtime checked",
+        "status": "PASS"
+      },
+      {
+        "check": "strategy_roster",
+        "detail": "Private test strategy roster checked",
+        "status": "SKIP"
+      },
+      {
+        "check": "tick_flow",
+        "detail": "Tick-flow expectation checked against market hours",
+        "status": "SKIP"
+      },
+      {
+        "check": "pycron",
+        "detail": "Scheduler availability checked in isolated stack",
+        "status": "WARN"
+      }
+    ]
+  ],
+  "environment": {
+    "broker": "Docker IB Gateway, verified paper account",
+    "services": "local current-worktree trader_service and strategy_service; private empty test database/config; auto-execution kill switch enabled"
+  },
+  "final_book": {
+    "complete": true,
+    "journal_healthy": true,
+    "positions": 0,
+    "positions_complete": true,
+    "working_orders": []
+  },
+  "history_note": "Initial deployment/order/backup/setup observations retain their original time and scope; each earlier roundtrip and replaced latest record is preserved verbatim in its history array.",
+  "latest_code_recovery": {
+    "earlier_rounds_preserved": {
+      "557c0f554c9e4d69bc278233cc4dd8f9": {
+        "audit_row_count": 3,
+        "audit_rows_sha256": "e0786ab10f5edca8b3dcef4d458953fe94b0c6f3caca04faaeb81125ce3353ec",
+        "audit_rows_unchanged": true,
+        "broker_identities_unchanged": true,
+        "fill_events": 2,
+        "state_and_evidence_unchanged": true
+      },
+      "afb10a70c6564bc78dc1ac3dc2960aad": {
+        "audit_row_count": 3,
+        "audit_rows_sha256": "5bff06ed454465551c81bbabb3b99a4e6788add7640878e6f7df948f3d6b7365",
+        "audit_rows_unchanged": true,
+        "broker_identities_unchanged": true,
+        "fill_events": 2,
+        "state_and_evidence_unchanged": true
+      },
+      "cdac9993a9d942a885000ac9254961f2": {
+        "audit_row_count": 3,
+        "audit_rows_sha256": "a7880621c33474d4e9f8cfe70ed4f5dc9c5a000310fdf5b7950fa13c4a87724d",
+        "audit_rows_unchanged": true,
+        "broker_identities_unchanged": true,
+        "fill_events": 2,
+        "state_and_evidence_unchanged": true
+      }
+    },
+    "production_source_sha256": "834b774ae8b3d963ba979d5f8a01b80c4bcd393057d06dc04d379ee17e21f885",
+    "recorded_at_utc": "2026-09-09T14:48:15.796351+00:00",
+    "restart": {
+      "audit_rows_unchanged": true,
+      "duplicate_fill_events": false,
+      "fill_events_after_restart": 2,
+      "journal_healthy": true,
+      "ledger_scope": "active round exact broker identities",
+      "nonzero_positions": 0,
+      "orders": {
+        "close": {
+          "filled": 1.0,
+          "same_intent": true,
+          "same_logical_identity": true,
+          "same_permanent_identity": true,
+          "status": "Filled"
+        },
+        "open": {
+          "filled": 1.0,
+          "same_intent": true,
+          "same_logical_identity": true,
+          "same_permanent_identity": true,
+          "status": "Filled"
+        },
+        "protection": {
+          "filled": 0.0,
+          "same_intent": true,
+          "same_logical_identity": true,
+          "same_permanent_identity": true,
+          "status": "Cancelled"
+        },
+        "recovery_protection": {
+          "filled": 0.0,
+          "same_intent": true,
+          "same_logical_identity": true,
+          "same_permanent_identity": true,
+          "status": "Cancelled"
+        }
+      },
+      "restarted_current_services": true,
+      "snapshots_complete": true,
+      "working_orders": 0,
+      "zero_quantity_position_rows": 1
+    },
+    "run_id": "741ee30a5e8941cdb5cd5373eecd408d",
+    "source_fingerprint_recipe": "sha256(json.dumps(source_file_sha256_map, sort_keys=True).encode()); all .py files returned by rg --files trader tests scripts, plus pyproject.toml",
+    "source_sha256": "9193fe6f84f9c72ed86983a07f759130fb719f646ed5c0b5493122da89dd5b33",
+    "temporary_service_cleanup": {
+      "strategy": "SIGINT sent; process exit observed; no forced kill",
+      "trader": "SIGINT sent; process exit observed; no forced kill"
+    },
+    "temporary_service_cleanup_proof": {
+      "exit_codes_collected": false,
+      "forced_kill": false,
+      "process_exits_observed": true,
+      "signal": "SIGINT"
+    }
+  },
+  "latest_stack_checks": [
+    {
+      "check": "trader_service",
+      "detail": "RPC responsive",
+      "status": "PASS"
+    },
+    {
+      "check": "ib_socket",
+      "detail": "IB time round-trip observed",
+      "status": "PASS"
+    },
+    {
+      "check": "ib_upstream",
+      "detail": "Gateway upstream connection checked",
+      "status": "PASS"
+    },
+    {
+      "check": "strategy_service",
+      "detail": "RPC responsive; private runtime checked",
+      "status": "PASS"
+    },
+    {
+      "check": "strategy_roster",
+      "detail": "Private test strategy roster checked",
+      "status": "SKIP"
+    },
+    {
+      "check": "tick_flow",
+      "detail": "Tick-flow expectation checked against market hours",
+      "status": "SKIP"
+    },
+    {
+      "check": "pycron",
+      "detail": "Scheduler availability checked in isolated stack",
+      "status": "WARN"
+    }
+  ],
+  "latest_stack_checks_recorded_at_utc": "2026-09-09T14:54:00.265509+00:00",
+  "limits": [
+    "One-share entry/exit fills and protective acceptance/cancellation were observed; stop triggering, partial fills and broker OCA reduction were not exercised by the paper roundtrip.",
+    "Hong Kong quote probing surfaced the real unsubscribed-market-data error; no subscription was purchased.",
+    "Data service and cron were not started in this isolated test stack."
+  ],
+  "order": {
+    "before_restart": {
+      "filled": 0.0,
+      "remaining": 1.0,
+      "status": "PreSubmitted"
+    },
+    "currency": "USD",
+    "duplicate_approval_refused": true,
+    "final_filled_quantity": 0.0,
+    "final_status": "Cancelled",
+    "journal_healthy_after_restart": true,
+    "limit_price": 750,
+    "proposal_pipeline": true,
+    "regular_session_only": true,
+    "requested_quantity": 1,
+    "same_broker_permanent_identity_after_restart": true,
+    "same_intent_after_restart": true
+  },
+  "quote_revalidation_refusals": {
+    "kind": "paper_quote_revalidation_refusals",
+    "limits": [
+      "Successful proposal rejection is the recorded SDK acknowledgment of its atomic PENDING-to-REJECTED transition; no fresh proposal database query was made.",
+      "Quote times are local recorded ticker receipts, not exchange timestamps for each side.",
+      "Neither attempt reached approval; fills, protective orders and restart recovery were not observed in these attempts."
+    ],
+    "recorded_at_utc": "2026-09-09T10:09:00.371681+00:00",
+    "scope": "Read-only review of completed private harness records; no new broker or service observation.",
+    "unobserved_clean_attempts": [
+      {
+        "approval_attempts": 0,
+        "artifact_sha256": {
+          "raw.jsonl": "3a0c5adb1ce979001735237e354089248fc11ed03fca41a5389f97745f7052fc",
+          "state.json": "56c90b890022e9075cc04e455de05e5a08ca9c8804910cfad12ed04b0a0b5ffd",
+          "summary.json": "c34d9374e6a4054d016691fd41761604a1d78387c1dfbbb8028a32868e72ae71"
+        },
+        "completed_observation_at_utc": "2026-09-09T10:04:48.553084+00:00",
+        "currency": "USD",
+        "fills_observed_in_this_attempt": false,
+        "final_flat": true,
+        "final_snapshot_complete": true,
+        "journal_healthy": true,
+        "listing": "ARCA",
+        "management_required": false,
+        "nonzero_positions": 0,
+        "phase": "UNOBSERVED_CLEAN",
+        "proposal_created": true,
+        "proposal_rejection_acknowledged": true,
+        "proposal_rejection_at_utc": "2026-09-09T10:04:48.538648+00:00",
+        "quote_revalidation": {
+          "initial_quote": {
+            "ask": 764.26,
+            "bid": 764.21,
+            "recorded_at_utc": "2026-09-09T10:04:47.924273+00:00"
+          },
+          "proposed_buy_limit": 764.27,
+          "refreshed_ask_above_limit": 0.01,
+          "refreshed_ask_exceeded_initial_limit": true,
+          "refreshed_quote": {
+            "ask": 764.28,
+            "bid": 764.21,
+            "recorded_at_utc": "2026-09-09T10:04:48.509568+00:00"
+          }
+        },
+        "reason_code": "PROPOSAL_PRECONDITIONS_CHANGED",
+        "recorded_proposal_transition": "PENDING -> REJECTED",
+        "requested_quantity": 1,
+        "run_id": "1e86b5e93cd542908223885414f0e08d",
+        "started_at_utc": "2026-09-09T10:04:47.356232+00:00",
+        "symbol": "SPY",
+        "verified_paper": true,
+        "working_orders": 0
+      },
+      {
+        "approval_attempts": 0,
+        "artifact_sha256": {
+          "raw.jsonl": "e24b5417112c5bfe409d8e8c589acdf67c30c073b5f87e264791e6eacd7cbd22",
+          "state.json": "66a60b8da211df17e64f43d56a2b769fed59ef64ef1a3b459342ffb66af941f6",
+          "summary.json": "749b1d2cc9e57ce841b7c44408e30249878f9ded52b8c7b2d95ebdb2fae793fe"
+        },
+        "completed_observation_at_utc": "2026-09-09T10:05:55.902565+00:00",
+        "currency": "USD",
+        "fills_observed_in_this_attempt": false,
+        "final_flat": true,
+        "final_snapshot_complete": true,
+        "journal_healthy": true,
+        "listing": "ARCA",
+        "management_required": false,
+        "nonzero_positions": 0,
+        "phase": "UNOBSERVED_CLEAN",
+        "proposal_created": true,
+        "proposal_rejection_acknowledged": true,
+        "proposal_rejection_at_utc": "2026-09-09T10:05:55.879970+00:00",
+        "quote_revalidation": {
+          "initial_quote": {
+            "ask": 764.29,
+            "bid": 764.21,
+            "recorded_at_utc": "2026-09-09T10:05:55.439381+00:00"
+          },
+          "proposed_buy_limit": 764.3,
+          "refreshed_ask_above_limit": 0.09,
+          "refreshed_ask_exceeded_initial_limit": true,
+          "refreshed_quote": {
+            "ask": 764.39,
+            "bid": 764.33,
+            "recorded_at_utc": "2026-09-09T10:05:55.855930+00:00"
+          }
+        },
+        "reason_code": "PROPOSAL_PRECONDITIONS_CHANGED",
+        "recorded_proposal_transition": "PENDING -> REJECTED",
+        "requested_quantity": 1,
+        "run_id": "18cf43f07ce34a4987bca89fc501a4d0",
+        "started_at_utc": "2026-09-09T10:05:55.040897+00:00",
+        "symbol": "SPY",
+        "verified_paper": true,
+        "working_orders": 0
+      }
+    ]
+  },
+  "quote_revalidation_refusals_publication": {
+    "production_source_sha256": "93e3c8b4bbffda6c3a4b363d7b6b61ffbd8303d463991c1d12ce374ed96ef1b0",
+    "public_predecessor_sha256": "8e342509afccdff4cb4d39740d5421d71bf1be17d1b604f6a84abc417d39de9a",
+    "published_with_round_id": "557c0f554c9e4d69bc278233cc4dd8f9",
+    "scope": "Historical observations; not relabeled as observations on a later source tree.",
+    "source_sha256": "589573eb7ab9ab9f3d5b1a15a63da405dc19dcbee346aaaf5da4fdfaa36a6cf0",
+    "supplement_provenance": {
+      "assembled_at_utc": "2026-09-09T10:16:47.436601+00:00",
+      "refusal_supplement_sha256": "28e365ce5a98a17c13a4248c5df00e2cd97c95480a9e8424333a5423b0dd9f03",
+      "staged_candidate_sha256": "1ce166b121372008aa17d679659e29f17cbd1f0ce8f27afc32c9e5ffeb1bf810"
+    }
+  },
+  "recorded_at_utc": "2026-09-09T06:33:51.340782+00:00",
+  "recovery_proof_extension": {
+    "execution_profile": "one_share_recovered_close_v1",
+    "extension_sha256": "8208fae2d7638ad2939fd0824c422ae8cf651d84d5974b2725222d5406b12932",
+    "invocation": "recovery_proof_extension.py; not the original helper CLI",
+    "kind": "reviewed_recovery_proof_extension_v1",
+    "original_baseline_private_inputs_unchanged": true,
+    "original_baseline_sha256": "9c075edced4f9889accce70dc07cca7501ebcf9bce26fbbe9d76666cff2bdeda",
+    "recovery_helper_sha256": "622bf67947d0faf05183b279b5624b8f49a17e86370748f546423a405c1c5994",
+    "recovery_result_sha256": "a4d3764ebf783c73889fb869ce42115876104070d6d6d2fb966e3a63acec59f6",
+    "rejected_close_history_sha256": "bd40e0519909dd11f68eec2624d362373ce304afffa5468ce06fdfb7ca907f10",
+    "rejected_close_proof_sha256": "4839ac17967945550f4b02ead38de5aec484fea6338308d1dc8a3ec4a61432d0",
+    "run_id": "741ee30a5e8941cdb5cd5373eecd408d",
+    "runtime_dependency_injection": {
+      "emit_validation.py": [
+        "paper_guards"
+      ],
+      "finalize_roundtrip.py": [
+        "proof"
+      ],
+      "restart.py": [
+        "proof",
+        "finalizer.proof"
+      ],
+      "stage_paper_evidence.py": [
+        "proof",
+        "SUMMARY_KEYS",
+        "exporter.paper_guards"
+      ],
+      "verify_roundtrip_recovery.py": [
+        "frozen_inputs",
+        "load_round",
+        "audit_rows",
+        "broker_observations",
+        "save_unique"
+      ]
+    }
+  },
+  "roundtrip": {
+    "attributed_remaining": 0.0,
+    "confirmed_owned_remaining": 0.0,
+    "conid": 756733,
+    "currency": "USD",
+    "earlier_rounds_preserved": {
+      "557c0f554c9e4d69bc278233cc4dd8f9": {
+        "audit_row_count": 3,
+        "audit_rows_sha256": "e0786ab10f5edca8b3dcef4d458953fe94b0c6f3caca04faaeb81125ce3353ec",
+        "audit_rows_unchanged": true,
+        "broker_identities_unchanged": true,
+        "fill_events": 2,
+        "state_and_evidence_unchanged": true
+      },
+      "afb10a70c6564bc78dc1ac3dc2960aad": {
+        "audit_row_count": 3,
+        "audit_rows_sha256": "5bff06ed454465551c81bbabb3b99a4e6788add7640878e6f7df948f3d6b7365",
+        "audit_rows_unchanged": true,
+        "broker_identities_unchanged": true,
+        "fill_events": 2,
+        "state_and_evidence_unchanged": true
+      },
+      "cdac9993a9d942a885000ac9254961f2": {
+        "audit_row_count": 3,
+        "audit_rows_sha256": "a7880621c33474d4e9f8cfe70ed4f5dc9c5a000310fdf5b7950fa13c4a87724d",
+        "audit_rows_unchanged": true,
+        "broker_identities_unchanged": true,
+        "fill_events": 2,
+        "state_and_evidence_unchanged": true
+      }
+    },
+    "execution_profile": "one_share_recovered_close_v1",
+    "exit_filled": 1.0,
+    "final_flat": true,
+    "ledger": {
+      "buy_quantity": 1.0,
+      "duplicate_fill_events": false,
+      "fill_events": 2,
+      "positive_finite_fill_prices": true,
+      "scope": "active round exact broker identities",
+      "sell_quantity": 1.0,
+      "strategy_tag": "remediation_roundtrip"
+    },
+    "limits": [
+      "Only one instrument/one lot and the connected trader-service snapshot scope.",
+      "Quote age is IB ticker receipt time, not an exchange timestamp for each side.",
+      "Protective acceptance does not prove stop triggering or outside-hours protection.",
+      "No OCA or partial-fill behavior was exercised in this paper round.",
+      "Temporary service shutdown records SIGINT and observed process exits without forced kill; exit codes were not collected.",
+      "Durable management state is private harness state, not AutoExecutor attribution."
+    ],
+    "listing": "ARCA",
+    "management_required": false,
+    "observed_broker_quantity": 0,
+    "open_filled": 1.0,
+    "order_filled": {
+      "close": 1.0,
+      "open": 1.0,
+      "protection": 0.0,
+      "recovery_protection": 0.0
+    },
+    "order_status": {
+      "close": "Filled",
+      "open": "Filled",
+      "protection": "Cancelled",
+      "recovery_protection": "Cancelled"
+    },
+    "phase": "COMPLETE",
+    "physical_order_count": 4,
+    "probe_source_fingerprint": "9193fe6f84f9c72ed86983a07f759130fb719f646ed5c0b5493122da89dd5b33",
+    "production_source_fingerprint_recipe": "sha256(json.dumps(map,sort_keys=True).encode()); Python files under trader/",
+    "production_source_sha256": "834b774ae8b3d963ba979d5f8a01b80c4bcd393057d06dc04d379ee17e21f885",
+    "proof_sha256": {
+      "after_restart_verification": "f275f2f8f5e22eaa08f3752f9fd5c1b9f48682e60209dfe82fecc6bcbbcf6c6b",
+      "before_restart_checkpoint": "ca4ed7e921a66b938eaf4c132d6650560dd9a59bdd5e7019244c3976087c4156",
+      "cleanup_receipt": "e4788dde7dcdeedb28d86a596a66cb62cb66364a76f95ebb3c469bc2f8bd7072",
+      "recovery_baseline": "9c075edced4f9889accce70dc07cca7501ebcf9bce26fbbe9d76666cff2bdeda",
+      "recovery_verifier": "eb69e436199150d0b74d66b272b9b88075258c7c002f65a57f4859c31400b181",
+      "roundtrip_harness": "d031feb2e19ef198ab6fe35b9a6158a3eca9eb2104a4889bc9ae8bed83b58f76",
+      "stack_receipt": "97be7f22139280e4e8cb30003ec808116dada6e5d832b0bffab51bb3a3fe2ce2"
+    },
+    "proposal_approval_attempted": {
+      "close": true,
+      "open": true
+    },
+    "proposal_approval_reported_success": {
+      "close": true,
+      "open": true
+    },
+    "proposal_recovery": {
+      "fresh_close_proposal_approved": true,
+      "original_close_approval_attempted": false,
+      "original_close_physical_orders": 0,
+      "original_close_proposal_status": "REJECTED",
+      "recovery_stop_acceptance_observed": true,
+      "recovery_stop_cancelled_without_fill": true
+    },
+    "protective_terminal_observed": true,
+    "protective_working_observed": true,
+    "reason_code": null,
+    "recorded_at_utc": "2026-09-09T14:48:15.796351+00:00",
+    "recovery_proof_extension": {
+      "execution_profile": "one_share_recovered_close_v1",
+      "extension_sha256": "8208fae2d7638ad2939fd0824c422ae8cf651d84d5974b2725222d5406b12932",
+      "invocation": "recovery_proof_extension.py; not the original helper CLI",
+      "kind": "reviewed_recovery_proof_extension_v1",
+      "original_baseline_private_inputs_unchanged": true,
+      "original_baseline_sha256": "9c075edced4f9889accce70dc07cca7501ebcf9bce26fbbe9d76666cff2bdeda",
+      "recovery_helper_sha256": "622bf67947d0faf05183b279b5624b8f49a17e86370748f546423a405c1c5994",
+      "recovery_result_sha256": "a4d3764ebf783c73889fb869ce42115876104070d6d6d2fb966e3a63acec59f6",
+      "rejected_close_history_sha256": "bd40e0519909dd11f68eec2624d362373ce304afffa5468ce06fdfb7ca907f10",
+      "rejected_close_proof_sha256": "4839ac17967945550f4b02ead38de5aec484fea6338308d1dc8a3ec4a61432d0",
+      "run_id": "741ee30a5e8941cdb5cd5373eecd408d",
+      "runtime_dependency_injection": {
+        "emit_validation.py": [
+          "paper_guards"
+        ],
+        "finalize_roundtrip.py": [
+          "proof"
+        ],
+        "restart.py": [
+          "proof",
+          "finalizer.proof"
+        ],
+        "stage_paper_evidence.py": [
+          "proof",
+          "SUMMARY_KEYS",
+          "exporter.paper_guards"
+        ],
+        "verify_roundtrip_recovery.py": [
+          "frozen_inputs",
+          "load_round",
+          "audit_rows",
+          "broker_observations",
+          "save_unique"
+        ]
+      }
+    },
+    "requested_quantity": 1,
+    "restart": {
+      "audit_rows_unchanged": true,
+      "duplicate_fill_events": false,
+      "fill_events_after_restart": 2,
+      "journal_healthy": true,
+      "ledger_scope": "active round exact broker identities",
+      "nonzero_positions": 0,
+      "orders": {
+        "close": {
+          "filled": 1.0,
+          "same_intent": true,
+          "same_logical_identity": true,
+          "same_permanent_identity": true,
+          "status": "Filled"
+        },
+        "open": {
+          "filled": 1.0,
+          "same_intent": true,
+          "same_logical_identity": true,
+          "same_permanent_identity": true,
+          "status": "Filled"
+        },
+        "protection": {
+          "filled": 0.0,
+          "same_intent": true,
+          "same_logical_identity": true,
+          "same_permanent_identity": true,
+          "status": "Cancelled"
+        },
+        "recovery_protection": {
+          "filled": 0.0,
+          "same_intent": true,
+          "same_logical_identity": true,
+          "same_permanent_identity": true,
+          "status": "Cancelled"
+        }
+      },
+      "restarted_current_services": true,
+      "snapshots_complete": true,
+      "working_orders": 0,
+      "zero_quantity_position_rows": 1
+    },
+    "run_id": "741ee30a5e8941cdb5cd5373eecd408d",
+    "setup": {
+      "exact_integer_conid_preflight_passed": true,
+      "finalization_invoked_no_prepare_seed_or_reset": true,
+      "prior_round_state_and_audit_preserved": true,
+      "private_configuration_and_database_paths_unchanged": true
+    },
+    "source_fingerprint_recipe": "sha256(json.dumps(source_file_sha256_map, sort_keys=True).encode()); all .py files returned by rg --files trader tests scripts, plus pyproject.toml",
+    "started_at_utc": "2026-09-09T14:30:55.101896+00:00",
+    "symbol": "SPY",
+    "temporary_service_cleanup": {
+      "strategy": "SIGINT sent; process exit observed; no forced kill",
+      "trader": "SIGINT sent; process exit observed; no forced kill"
+    },
+    "temporary_service_cleanup_proof": {
+      "exit_codes_collected": false,
+      "forced_kill": false,
+      "process_exits_observed": true,
+      "signal": "SIGINT"
+    },
+    "total_verified_fill_events_all_completed_rounds": 8,
+    "verified_paper": true
+  },
+  "roundtrip_setup": {
+    "initial_probe_reason": "Exact integer conId absent from private empty universe",
+    "initial_probe_submitted_orders": false,
+    "repair": "Seeded broker-confirmed exact SPY/ARCA/USD definition in private test universe; integer round-trip then passed"
+  },
+  "serialization_adapter": {
+    "adapter_sha256": "24c4461519f7d33da242d54e1ce6893b483584149eccc010db6a15cb4d2f8d70",
+    "converted_types": {},
+    "extension_sha256": "8208fae2d7638ad2939fd0824c422ae8cf651d84d5974b2725222d5406b12932",
+    "invoked_helper": "recovery_proof_extension.py",
+    "nonfinite_numbers": "rejected",
+    "normalizer": "serialization_adapter.normalize",
+    "original_serializer_file_unchanged": true,
+    "unknown_objects": "rejected"
+  },
+  "stack_checks": [
+    {
+      "check": "trader_service",
+      "detail": "RPC responsive",
+      "status": "PASS"
+    },
+    {
+      "check": "ib_socket",
+      "detail": "live round-trip OK (IB time 2026-09-09 06:30:51+00:00)",
+      "status": "PASS"
+    },
+    {
+      "check": "ib_upstream",
+      "detail": "gateway reports upstream connected",
+      "status": "PASS"
+    },
+    {
+      "check": "strategy_service",
+      "detail": "RPC responsive (0/0 strategies RUNNING, 0 auto-exec positions open)",
+      "status": "PASS"
+    },
+    {
+      "check": "strategy_roster",
+      "detail": "no auto_execute strategies in strategy_runtime.yaml",
+      "status": "SKIP"
+    },
+    {
+      "check": "tick_flow",
+      "detail": "no watched market (NYSE,ASX) is open \u2014 0 ticks expected",
+      "status": "SKIP"
+    },
+    {
+      "check": "pycron",
+      "detail": "port 7425 not responding \u2014 nightly db_backup/data_refresh jobs are not scheduled (expected when running outside the container)",
+      "status": "WARN"
+    }
+  ],
+  "updated_at_utc": "2026-09-09T14:55:24.180280+00:00"
+}

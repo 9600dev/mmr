@@ -119,7 +119,11 @@ def resample_ticks_to_bars(ticks: pd.DataFrame, freq: str,
     cum = ticks['volume'].resample(freq).last().reindex(ohlc.index)
     per_bar = cum.diff()
     if len(per_bar):
-        per_bar.iloc[0] = cum.iloc[0]           # first bar: volume since session start
+        # We joined the feed partway through a session. Only volume observed
+        # after our first tick belongs to this partial bar; the initial counter
+        # includes unknown pre-subscription history.
+        first = ticks['volume'].resample(freq).first().reindex(ohlc.index)
+        per_bar.iloc[0] = cum.iloc[0] - first.iloc[0]
     # A negative diff means the cumulative counter reset (new day) — the bar's
     # own cumulative is the best estimate of its volume in that case.
     per_bar = per_bar.where(per_bar >= 0, cum)

@@ -1,0 +1,72 @@
+{
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "python": "3.12.13",
+  "dependencies": {
+    "pandas": "3.0.1",
+    "numpy": "2.4.2",
+    "ib_async": "2.1.0"
+  },
+  "scope": "Synthetic same-bar tick dispatch; excludes broker, DB, calendars, signal execution and network.",
+  "measurements": [
+    {
+      "seed_ticks": 10000,
+      "retained_ticks": 2048,
+      "strategies_on_same_instrument_and_interval": 1,
+      "seed_frame_bytes": 960000,
+      "retained_frame_bytes": 196608,
+      "samples": 25,
+      "median_ms_per_tick": 0.311,
+      "p95_ms_per_tick": 0.77
+    },
+    {
+      "seed_ticks": 10000,
+      "retained_ticks": 2048,
+      "strategies_on_same_instrument_and_interval": 4,
+      "seed_frame_bytes": 960000,
+      "retained_frame_bytes": 196608,
+      "samples": 25,
+      "median_ms_per_tick": 0.361,
+      "p95_ms_per_tick": 0.467
+    },
+    {
+      "seed_ticks": 50000,
+      "retained_ticks": 2048,
+      "strategies_on_same_instrument_and_interval": 1,
+      "seed_frame_bytes": 4800000,
+      "retained_frame_bytes": 196608,
+      "samples": 25,
+      "median_ms_per_tick": 0.287,
+      "p95_ms_per_tick": 0.358
+    },
+    {
+      "seed_ticks": 50000,
+      "retained_ticks": 2048,
+      "strategies_on_same_instrument_and_interval": 4,
+      "seed_frame_bytes": 4800000,
+      "retained_frame_bytes": 196608,
+      "samples": 25,
+      "median_ms_per_tick": 0.374,
+      "p95_ms_per_tick": 1.221
+    },
+    {
+      "seed_ticks": 200000,
+      "retained_ticks": 2048,
+      "strategies_on_same_instrument_and_interval": 1,
+      "seed_frame_bytes": 19200000,
+      "retained_frame_bytes": 196608,
+      "samples": 25,
+      "median_ms_per_tick": 0.29,
+      "p95_ms_per_tick": 0.565
+    },
+    {
+      "seed_ticks": 200000,
+      "retained_ticks": 2048,
+      "strategies_on_same_instrument_and_interval": 4,
+      "seed_frame_bytes": 19200000,
+      "retained_frame_bytes": 196608,
+      "samples": 25,
+      "median_ms_per_tick": 0.382,
+      "p95_ms_per_tick": 0.811
+    }
+  ]
+}

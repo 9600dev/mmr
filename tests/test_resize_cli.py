@@ -51,52 +51,36 @@ class TestPlanRenderNeverCrashes:
         mmr.execute_resize_plan.assert_not_called()
 
 
-class TestReCreateRoundTrip:
-    """A re-created protective equals the old order except quantity —
-    the round-trip property the live test proved was violated for orderRef."""
+class TestCoordinatedProtection:
+    """The supported server handoff preserves the residual protective tranche.
 
-    def _mmr_with_captured_rpc(self):
-        mmr = MMR.__new__(MMR)
-        captured = []
+    The original re-create regression lost orderRef. The coordinator now
+    retains the existing residual order, so every protective field survives.
+    """
 
-        class _Rpc:
-            def rpc(self, return_type=None):
-                svc = MagicMock()
-                def place_standalone_order(**kw):
-                    captured.append(kw)
-                    ok = MagicMock(); ok.is_success.return_value = True
-                    return iter([ok])
-                svc.place_standalone_order = place_standalone_order
-                return svc
-
-        # _rpc is a read-only property returning self._client (after an
-        # is_setup check) — give it a client-shaped stub.
-        stub = _Rpc()
-        stub.is_setup = True
-        mmr._client = stub
-        mmr._contract_map = {'GOOGL': SimpleNamespace(conId=208813719)}
-        mmr.cancel = MagicMock(return_value=SimpleNamespace(is_success=lambda: True))
-        # the delta leg: pretend the trim filled
-        ok = SimpleNamespace(is_success=lambda: True, error=None)
-        mmr._place_order = MagicMock(return_value=ok)
-        mmr.sell = MagicMock(return_value=ok)
-        mmr.buy = MagicMock(return_value=ok)
-        return mmr, captured
-
-    def test_re_created_stop_preserves_ref_price_type_tif(self):
-        mmr, captured = self._mmr_with_captured_rpc()
+    def test_remaining_stop_preserves_ref_price_type_tif(self):
+        from test_seams import SeamBroker, _resize_mmr
+        broker = SeamBroker()
+        conid = 208813719
+        broker.positions[conid] = 3.0
+        broker.add_order(orderRef='orb_googl', conId=conid,
+                         auxPrice=296.56, quantity=2.0)
+        survivor = broker.add_order(orderRef='orb_googl', conId=conid,
+                                    auxPrice=296.56, quantity=1.0)
+        mmr = _resize_mmr(broker, conid=conid, symbol='GOOGL')
         results = mmr.execute_resize_plan(_plan())
         assert results['failures'] == []
-        assert len(captured) == 1, f'expected one re-create, got {captured}'
-        re = captured[0]
+        assert broker.positions[conid] == 1.0
+        (remaining,) = broker.live_orders()
+        assert remaining['orderId'] == survivor
         old = _plan()['adjustments'][0]['associated_orders'][0]
-        assert re['order_ref'] == 'orb_googl', (
+        assert remaining['orderRef'] == 'orb_googl', (
             'orderRef dropped — the exact live bug: fills become unattributed '
             'and the executor can no longer recognize its own order')
-        assert re['order_type'] == old['orderType']
-        assert re['aux_price'] == old['auxPrice']
-        assert re['tif'] == old['tif']
-        assert re['quantity'] == 1.0            # the one INTENDED change
+        assert remaining['orderType'] == old['orderType']
+        assert remaining['auxPrice'] == old['auxPrice']
+        assert remaining['tif'] == old['tif']
+        assert remaining['quantity'] == 1.0
 
 
 class TestJsonOutputIsValidJson:

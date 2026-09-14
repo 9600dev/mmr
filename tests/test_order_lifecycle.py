@@ -240,7 +240,10 @@ class TestOnTradeGuards:
     def test_latest_status_tracks_progression(self):
         t = self._tracker()
         for st in ('PendingSubmit', 'PreSubmitted', 'Submitted', 'Filled'):
-            t.on_trade(self._trade(6, st))
+            trade = self._trade(6, st)
+            if st == 'Filled':
+                trade.orderStatus.filled = 1.0
+            t.on_trade(trade)
         assert t.latest_status(6) == 'Filled'
 
 
@@ -313,10 +316,10 @@ class TestApiCancelledAndDegenerateFill:
         events = list(es.query_since(since=dt.datetime(2000, 1, 1)))
         assert events[0].event_type == EventType.ORDER_CANCELLED
 
-    def test_fill_with_zero_filled_records_zero_not_a_fabricated_quantity(self, tmp_path):
-        """Degenerate but pinned: a Filled status carrying filled=0 must record
-        0, never a fabricated default — a wrong nonzero here would enter the
-        PnL pairing as a phantom lot."""
+    def test_filled_with_missing_quantity_is_unknown_without_a_phantom_fill(self, tmp_path):
+        """IB initializes completedOrder filled=0 even when quantity is absent.
+        Neither the requested quantity nor default zero is a fill receipt.
+        """
         import datetime as dt
         from types import SimpleNamespace
         from trader.data.event_store import EventStore
@@ -330,4 +333,7 @@ class TestApiCancelledAndDegenerateFill:
                                         avgFillPrice=0.0),
             contract=SimpleNamespace(conId=1, symbol='X')))
         events = list(es.query_since(since=dt.datetime(2000, 1, 1)))
-        assert events[0].quantity == 0.0
+        assert events == []
+        assert t.latest_status(21) == 'Unknown'
+        assert t.snapshot([21])[0]['fillQuantityKnown'] is False
+        t.close()

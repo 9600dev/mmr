@@ -1,3 +1,4 @@
+from trader.common.logging_helper import setup_logging
 from trader.data.duckdb_store import DuckDBConnection
 from trader.data.proposal_transitions import (
     _ALLOWED_TRANSITIONS,
@@ -10,6 +11,8 @@ from typing import List, Optional
 
 import datetime as dt
 import json
+
+logging = setup_logging(module_name='proposal_store')
 
 
 # The proposal state machine (transition table + pure validity predicates) lives
@@ -319,13 +322,20 @@ class ProposalStore:
             currency = metadata_dict.pop('_currency', '')
             group = metadata_dict.pop('_group', '')
 
+            unknown_fields = set(execution_dict) - set(ExecutionSpec.__dataclass_fields__)
+            if unknown_fields:
+                # Written by a newer build; this one cannot honour those fields
+                # but must still be able to list, reject and expire the row.
+                logging.warning('proposal #%s: ignoring execution fields unknown to this build: %s',
+                                row[0], sorted(unknown_fields))
+
             proposals.append(TradeProposal(
                 id=row[0],
                 symbol=row[1],
                 action=row[2],
                 quantity=row[3],
                 amount=row[4],
-                execution=ExecutionSpec.from_dict(execution_dict),
+                execution=ExecutionSpec.from_dict(execution_dict, ignore_unknown=True),
                 reasoning=row[6],
                 confidence=row[7],
                 thesis=row[8],

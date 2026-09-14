@@ -44,8 +44,10 @@ class TestResample:
 
     def test_per_bar_volume_from_cumulative(self):
         bars = resample_ticks_to_bars(_ticks(BARS), '1min')
-        # first bar: volume since session start = its cumulative (1800)
-        assert bars.iloc[0]['volume'] == 1800
+        # The feed starts ten seconds into this minute at cumulative 1,000.
+        # Only the subsequent 800 shares were observed in the initial bar;
+        # assigning the earlier session volume to it was review finding D04.
+        assert bars.iloc[0]['volume'] == 800
         # second bar: 2600 - 1800 = 800 (NOT the raw cumulative 2600)
         assert bars.iloc[1]['volume'] == 800
 

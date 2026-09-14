@@ -161,3 +161,60 @@ class TestRealBaselineIsPresentAndSane:
             assert expected in modules, f'{expected} missing from the mutation baseline'
         for name, entry in modules.items():
             assert 0.0 <= entry['score'] <= 1.0, f'{name} has a nonsense score'
+
+
+class TestCompleteRunRequired:
+    """A passing score on the checked subset cannot certify the full run."""
+
+    @pytest.mark.parametrize('status', ['not checked', 'suspicious'])
+    @pytest.mark.parametrize('offender', ['kernel.py', 'new_module.py'])
+    def test_check_rejects_unfinished_or_unreliable_results(
+            self, gate, tmp_path, monkeypatch, capsys, status, offender):
+        _write_baseline(tmp_path, {'kernel.py': {'killed': 90, 'survived': 10, 'score': 0.9}})
+        before = gate.BASELINE.read_bytes()
+        counts = {'kernel.py': {'killed': 9, 'survived': 1}}
+        counts.setdefault(offender, {'killed': 9, 'survived': 1})[status] = 990
+        monkeypatch.setattr(gate, 'collect', lambda: (counts, {}))
+        monkeypatch.setattr('sys.argv', ['mutation_score.py', '--check'])
+
+        assert gate.main() == 1
+        output = capsys.readouterr()
+        assert offender in output.err and status in output.err
+        assert 'mutation gate OK' not in output.out
+        assert gate.BASELINE.read_bytes() == before
+
+    @pytest.mark.parametrize('status', ['not checked', 'suspicious'])
+    @pytest.mark.parametrize('existing_baseline', [True, False])
+    def test_incomplete_update_cannot_record_or_replace_baseline(
+            self, gate, tmp_path, monkeypatch, capsys, status, existing_baseline):
+        if existing_baseline:
+            _write_baseline(tmp_path, {'kernel.py': {'killed': 90, 'survived': 10, 'score': 0.9}})
+        before = gate.BASELINE.read_bytes() if existing_baseline else None
+        counts = {'kernel.py': {'killed': 9, 'survived': 1, status: 990}}
+        monkeypatch.setattr(gate, 'collect', lambda: (counts, {}))
+        monkeypatch.setattr('sys.argv', ['mutation_score.py', '--update'])
+
+        assert gate.main() == 1
+        output = capsys.readouterr()
+        assert 'kernel.py' in output.err and status in output.err
+        assert 'baseline updated' not in output.out
+        if existing_baseline:
+            assert gate.BASELINE.read_bytes() == before
+        else:
+            assert not gate.BASELINE.exists()
+
+    @pytest.mark.parametrize('mode', ['--check', '--update'])
+    def test_complete_results_keep_timeout_and_no_tests_policy(
+            self, gate, tmp_path, monkeypatch, mode):
+        _write_baseline(tmp_path, {'kernel.py': {'killed': 90, 'survived': 10, 'score': 0.9}})
+        before = gate.BASELINE.read_bytes()
+        counts = {'kernel.py': {'killed': 89, 'survived': 10, 'timeout': 1,
+                                'no tests': 7, 'not checked': 0, 'suspicious': 0}}
+        monkeypatch.setattr(gate, 'collect', lambda: (counts, {}))
+        monkeypatch.setattr('sys.argv', ['mutation_score.py', mode])
+
+        assert gate.main() == 0
+        if mode == '--check':
+            assert gate.BASELINE.read_bytes() == before
+        else:
+            assert json.loads(gate.BASELINE.read_text())['modules']['kernel.py']['score'] == 0.9

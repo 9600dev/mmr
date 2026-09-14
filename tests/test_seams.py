@@ -12,6 +12,7 @@ auto-executor reads it through its SDK. No test injects the post-resize
 state by hand — the resize produces it, which is the entire point.
 """
 import datetime as dt
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -19,8 +20,10 @@ import pandas as pd
 import pytest
 
 from trader.objects import Action
+from trader.common.reactivex import SuccessFail
 from trader.sdk import MMR
 from trader.strategy.auto_executor import AutoExecutor, BarWork
+from trader.strategy.execution_intents import timestamp_text
 from trader.trading.strategy import Signal
 
 # A fixed bar timestamp, kept deterministic on purpose. These tests drive the
@@ -69,7 +72,8 @@ class SeamBroker:
         self.orders.append({'orderId': oid, 'status': 'PreSubmitted',
                             'action': 'SELL', 'orderType': 'STP', 'tif': 'GTC',
                             'orderRef': '', 'auxPrice': 0.0, 'quantity': 0.0,
-                            'conId': 0, **kw})
+                            'conId': 0, 'filled': 0.0, 'clientIntentId': '',
+                            'totalQuantity': kw.get('quantity', 0.0), **kw})
         return oid
 
     def cancel(self, oid):
@@ -100,7 +104,9 @@ class ExecutorSDK:
     def positions(self):
         rows = [{'conId': c, 'position': q, 'avgCost': self.avg_cost}
                 for c, q in self.b.positions.items() if q != 0]
-        return pd.DataFrame(rows)
+        frame = pd.DataFrame(rows, columns=['conId', 'position', 'avgCost'])
+        frame.attrs['complete'] = True  # The shared fake is an authoritative snapshot, even when flat.
+        return frame
 
     def trades(self):
         return pd.DataFrame(self.b.orders)
@@ -109,7 +115,8 @@ class ExecutorSDK:
         oid = self.b.add_order(orderRef=kw.get('order_ref', ''),
                                conId=kw.get('con_id', self.conid),
                                auxPrice=kw.get('aux_price', 0.0),
-                               quantity=kw.get('quantity', 0.0))
+                               quantity=kw.get('quantity', 0.0),
+                               clientIntentId=kw.get('client_intent_id', ''))
         return SimpleNamespace(is_success=lambda: True, error=None,
                                obj=SimpleNamespace(order=SimpleNamespace(orderId=oid)))
 
@@ -132,7 +139,14 @@ class ExecutorSDK:
         action = self.propose_calls[-1]['action']
         cur = self.b.positions.get(self.conid, 0.0)
         self.b.positions[self.conid] = cur + qty if action == 'BUY' else cur - qty
-        return SimpleNamespace(is_success=lambda: True, error=None, obj=[pid * 10])
+        # A broker position mutation is a fill, not a submitted quantity. Give
+        # both components the same execution evidence and durable identity.
+        oid = self.b.add_order(action=action, conId=self.conid, orderType='MKT',
+                              quantity=qty, filled=qty, remaining=0.0,
+                              status='Filled', avgFillPrice=self.avg_cost,
+                              orderRef=p.metadata.get('strategy', 'proposal'),
+                              clientIntentId=p.metadata.get('client_intent_id', ''))
+        return SimpleNamespace(is_success=lambda: True, error=None, obj=[oid])
 
     def _proposal_store(self):
         store = MagicMock()
@@ -151,26 +165,36 @@ def _resize_mmr(broker: SeamBroker, conid=578031277, symbol='QBTS'):
         def rpc(self, return_type=None):
             svc = MagicMock()
 
-            def place_standalone_order(**kw):
-                oid = broker.add_order(orderRef=kw.get('order_ref', ''),
-                                       conId=conid,
-                                       auxPrice=kw.get('aux_price', 0.0),
-                                       quantity=kw.get('quantity', 0.0))
-                captured.append(kw)
-                ok = MagicMock(); ok.is_success.return_value = True
-                return ok        # consume() passes non-generators through
+            def resize_position(contract, target_quantity, client_intent_id):
+                """Model the server's supported matching-tranche handoff.
 
-            def place_order_simple(**kw):
-                # the delta leg — apply it to the shared broker for real
-                qty = float(kw.get('quantity') or 0)
-                cur = broker.positions.get(conid, 0.0)
-                broker.positions[conid] = (cur + qty if kw.get('action') == 'BUY'
-                                           else cur - qty)
-                ok = MagicMock(); ok.is_success.return_value = True
-                return ok
+                The fake broker fills the trim before returning its receipt.
+                OCA type 2 consumes the paired stop; the residual tranche is
+                untouched. Arbitrary single-stop splits remain unsupported.
+                The client plan's protective metadata is never authoritative.
+                """
+                assert contract.conId == conid
+                cur = broker.positions[conid]
+                trim = cur - target_quantity
+                if target_quantity < 0 or trim < 0:
+                    return SuccessFail.fail(error='DEFERRED: unsupported grow/flip')
+                protective = [o for o in broker.live_orders() if o['conId'] == conid]
+                paired = next((o for o in protective if o['quantity'] == trim), None)
+                if protective and (paired is None or sum(o['quantity'] for o in protective) != cur):
+                    return SuccessFail.fail(error='DEFERRED: no supported protective tranche')
+                if paired:
+                    paired['ocaGroup'] = client_intent_id
+                    paired['ocaType'] = 2
+                    captured.append(dict(paired))
+                    paired.update(status='Cancelled', quantity=0.0, remaining=0.0)
+                broker.positions[conid] = target_quantity
+                oid = broker.add_order(action='SELL', conId=conid, orderType='MKT',
+                                       quantity=trim, filled=trim, remaining=0.0,
+                                       status='Filled', avgFillPrice=19.0,
+                                       clientIntentId=client_intent_id, orderRef='resize')
+                return SuccessFail.success(obj={'status': 'SUBMITTED', 'order_ids': [oid]})
 
-            svc.place_standalone_order = place_standalone_order
-            svc.place_order_simple = place_order_simple
+            svc.resize_position = resize_position
             return svc
 
     mmr._client = _Client()
@@ -225,9 +249,26 @@ class TestResizeThenExecutor:
 
     def _open_with_stop(self, broker, ex):
         broker.positions[CONID] = 20.0
-        ex.state.record_open('probe', CONID, 20.0, TS, None, None, None)
+        # Price the holding from its own matched fill before exercising the
+        # resize handoff; account-level average cost is not strategy evidence.
+        entry = ex.intents.create('probe', CONID, 'OPEN',
+                                  dict(bar_ts=timestamp_text(TS), quantity=20.0),
+                                  status='WORKING')
+        entry_id = broker.add_order(action='BUY', conId=CONID, orderType='MKT',
+                                    quantity=20.0, filled=20.0, remaining=0.0,
+                                    status='Filled', avgFillPrice=19.0,
+                                    orderRef='probe', clientIntentId=entry['intent_id'])
+        ex.intents.update(entry, order_ids=[entry_id])
+        ex._reconcile_intents('probe', CONID)
+        # These are fresh server-claimed stops. Preserve their original
+        # identity/time through resize and later reads, as native snapshots do.
         oid = broker.add_order(orderRef='probe', conId=CONID,
-                               auxPrice=17.5, quantity=20.0)
+                               auxPrice=17.5, quantity=10.0,
+                               clientIntentId=f'protective:seam-{broker.next_id}',
+                               brokerIntentCreatedAt=time.time())
+        broker.add_order(orderRef='probe', conId=CONID, auxPrice=17.5, quantity=10.0,
+                         clientIntentId=f'protective:seam-{broker.next_id}',
+                         brokerIntentCreatedAt=time.time())
         ex.state.set_protective('probe', CONID, oid)
         return oid
 
@@ -255,33 +296,35 @@ class TestResizeThenExecutor:
             strategy_name='probe', conid=CONID, action=Action.SELL,
             bar_ts=TS + pd.Timedelta(minutes=2), bar_size_seconds=60.0, auto_execute=True,
             state_running=True))
+        # Resize is external to strategy fill attribution. Independent
+        # management reconciles the residual attribution against confirmed
+        # flat broker state after the strategy's actual close fill.
+        ex.manage_positions()
         assert ex.state.open_position('probe', CONID) is None
         assert [o for o in broker.live_orders() if o['conId'] == CONID] == [], (
             'an orphaned GTC stop survived the close — fires into a short later')
 
-    def test_prefix_behaviour_would_have_orphaned_the_stop(self, seam):
-        """The COUNTERFACTUAL, run through the same seam: strip the ref the
-        way the pre-fix resize did, and the replacement is invisible to the
-        executor by design (never touch an order that is not provably ours).
-        This pins the seam's honest boundary: attribution is the ONLY thing
-        that makes external re-placements survivable."""
+    def test_stale_plan_cannot_strip_broker_protective_attribution(self, seam):
+        """The coordinator reads broker ownership instead of copying a stale
+        client's protective metadata, preventing the original lost-ref bug."""
         broker, sdk, ex = seam
         self._open_with_stop(broker, ex)
         mmr = _resize_mmr(broker)
         plan = _plan_for(broker, CONID, 'QBTS', 10)
         plan['adjustments'][0]['associated_orders'][0]['orderRef'] = ''   # the old bug
-        mmr.execute_resize_plan(plan)
+        results = mmr.execute_resize_plan(plan)
+        assert results['failures'] == []
         (new_stop,) = [o for o in broker.live_orders() if o['conId'] == CONID]
-        assert new_stop['orderRef'] == ''
+        assert new_stop['orderRef'] == 'probe'
 
         from trader.strategy.auto_executor import SignalWork
         ex._process_signal(SignalWork(
             strategy_name='probe', conid=CONID, action=Action.SELL,
             bar_ts=TS + pd.Timedelta(minutes=2), bar_size_seconds=60.0, auto_execute=True,
             state_running=True))
-        # The unattributed stop SURVIVES the close — the documented hazard the
-        # orderRef fix exists to prevent, reproduced through the real seam.
-        assert [o for o in broker.live_orders() if o['conId'] == CONID] != []
+        ex.manage_positions()
+        assert ex.state.open_position('probe', CONID) is None
+        assert [o for o in broker.live_orders() if o['conId'] == CONID] == []
 
 
 class TestResizeThenReconcile:
@@ -306,7 +349,9 @@ class TestResizeThenReconcile:
                                       # reconciliation instead of testing it
         ex.state.record_open('probe', CONID, 10.0, TS, None, None, None)
         oid = broker.add_order(orderRef='probe', conId=CONID,
-                               auxPrice=17.5, quantity=10.0)
+                               auxPrice=17.5, quantity=10.0,
+                               clientIntentId=f'protective:seam-{broker.next_id}',
+                               brokerIntentCreatedAt=time.time())
         ex.state.set_protective('probe', CONID, oid)
         mmr = _resize_mmr(broker)
         plan = _plan_for(broker, CONID, 'QBTS', 0)

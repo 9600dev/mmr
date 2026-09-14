@@ -112,10 +112,22 @@ def _floor_shares_for_notional(amount: float, price: float, multiplier: float = 
             f'share-count computation — inputs are degenerate'
         )
     shares = math.floor(ratio)
-    # Float division can round up across an integer boundary (e.g. 8.28 / 2.76
-    # -> 3.0000000000000004); step down until the postcondition holds.
-    while shares >= 1 and shares * price * multiplier > amount:
-        shares -= 1
+    # Correct a rounded-up quotient using the same product as the contract.
+    # At large quantities many neighboring ints convert to the same float:
+    # decrementing one share at a time can require trillions of iterations.
+    # Preserve the normal affordable floor; otherwise search below that bound.
+    if shares * price * multiplier > amount:
+        affordable, over_budget = 0, shares
+        # Positive floating-point multiplication is monotone, even across
+        # plateaus or intermediate overflow. Keep a safe low and unsafe high;
+        # a finite binary64 ratio permits at most 1024 midpoint steps.
+        while over_budget - affordable > 1:
+            candidate = (affordable + over_budget) // 2
+            if candidate * price * multiplier <= amount:
+                affordable = candidate
+            else:
+                over_budget = candidate
+        shares = affordable
     if shares < 1:
         raise ValueError(
             f'amount {amount} does not cover one whole share at price {price}'

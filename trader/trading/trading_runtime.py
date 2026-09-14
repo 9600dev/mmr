@@ -1,7 +1,8 @@
 from ib_async.contract import Contract
-from ib_async.objects import PnLSingle, PortfolioItem, Position
+from ib_async.objects import PnL, PnLSingle, PortfolioItem, Position
 from ib_async.order import LimitOrder, MarketOrder, Order, StopLimitOrder, StopOrder, Trade
 from ib_async.ticker import Ticker
+from ib_async.util import UNSET_DOUBLE
 from reactivex import pipe
 from reactivex.abc import DisposableBase, ObserverBase
 from reactivex.disposable import Disposable
@@ -23,22 +24,30 @@ from trader.data.universe import Universe, UniverseAccessor
 from trader.trading.approved_order import ExitReason, mint_approved_order
 from trader.trading.exit_class import reduces_exposure
 from trader.trading.order_math import order_notional
+from trader.trading.order_reference import split_order_reference
 from trader.trading.order_split import SplitPlan, split_order
 from trader.trading.order_structure import rejection_for_order
-from trader.trading.risk_gate import RiskGate, RiskInputs, RiskLimits
+from trader.trading.risk_gate import RiskGate, RiskGateResult, RiskInputs, RiskLimits
 from trader.listeners.ibreactive import IBAIORx, IBAIORxError
 from trader.messaging.clientserver import MessageBusServer, MultithreadedTopicPubSub, RPCClient, RPCServer
 from trader.objects import Action, ContractOrderPair, ExecutorCondition
 from trader.trading.book import BookSubject
-from trader.trading.executioner import TradeExecutioner
+from trader.trading.executioner import TradeExecutioner, _working_reduction_quantity
 from trader.trading.portfolio import Portfolio
 from trader.trading.strategy import Strategy, StrategyConfig, StrategyState
-from typing import Any, cast, Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, Callable, cast, Dict, List, NamedTuple, Optional, Tuple, Union
 
 import asyncio
+import copy
+from contextlib import asynccontextmanager
 import backoff
 import datetime as dt
 import hmac
+import hashlib
+import inspect
+import json
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 import math
 import os
 import reactivex as rx
@@ -59,6 +68,8 @@ logging = setup_logging(module_name='trading_runtime')
 # when it changes. Found live 2026-07-27: restarting trader_service alone left
 # every strategy blind for 30 minutes with both services reporting healthy.
 _BOOT_ID = uuid.uuid4().hex
+_CURRENT_INTENT: ContextVar[Optional[str]] = ContextVar('mmr_order_intent', default=None)
+_CURRENT_JOURNAL: ContextVar[Any] = ContextVar('mmr_order_journal', default=None)
 
 # notes
 # https://groups.io/g/insync/topic/using_reqallopenorders/27261173?p=,,,20,0,0,0::recentpostdate%2Fsticky,,,20,2,0,27261173
@@ -73,6 +84,19 @@ class AccountNotPinnedError(Exception):
     mode — any of which could let orders route to the wrong account on a
     multi-account login. A hard, fatal refusal (not retried).
     """
+
+
+@dataclass
+class _AccountPnLSubscription:
+    """One IB request and the value actually received for that request."""
+
+    ib: Any
+    account: str
+    pnl: Optional[PnL] = None
+    callback: Optional[Callable[[PnL], None]] = None
+    value: Optional[float] = None
+    request_started: bool = False
+    pending: list[tuple[PnL, Optional[float]]] = field(default_factory=list)
 
 
 class Trader():
@@ -104,6 +128,9 @@ class Trader():
         self.duckdb_path = duckdb_path
         self.history_duckdb_path = history_duckdb_path or duckdb_path
         self.universe_library = universe_library
+        self._submitted_trades: list[Trade] = []
+        self._order_lock: Optional[asyncio.Lock] = None
+        self._order_lock_owner: Any = None
         self.simulation: bool = simulation
         self.paper_trading = paper_trading
         # When True, `place_order_simple` (the direct buy/sell RPC path) is
@@ -164,6 +191,10 @@ class Trader():
         self.pnl: DataClassCache = DataClassCache[PnLSingle](lambda pnl: str((pnl.account, pnl.conId)))
         self.pnl_subscriptions: Dict[Tuple[str, int], bool] = {}
         self._pnl_subscriptions_lock: threading.Lock = threading.Lock()
+        # PnLSingle remains a display feed. Risk needs the exact account total,
+        # including positions closed by other clients before this process ran.
+        self._account_pnl_lock = threading.RLock()
+        self._account_pnl_subscription: Optional[_AccountPnLSubscription] = None
         # The main event loop, captured on connect(). Used when IB callbacks
         # fire on threads other than the loop thread.
         self._main_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -194,6 +225,8 @@ class Trader():
         # connect() and it's attached to orderStatusEvent in setup_subscriptions.
         from trader.trading.order_lifecycle import OrderLifecycleTracker
         self.order_tracker = OrderLifecycleTracker(None)
+        self._execution_history_ready = False
+        self._execution_replay_lock = asyncio.Lock()
 
         self.zmq_strategy_client: RPCClient[strategy_bus.StrategyServiceApi]
         self.zmq_messagebus: MessageBusServer
@@ -208,6 +241,7 @@ class Trader():
         # These error codes indicate Gateway is connected locally but lost upstream IBKR connection
         self._ib_upstream_connected: bool = True
         self._ib_upstream_error: str = ''
+        self._ib_upstream_ib: Any = None
 
         self.disposables: List[DisposableBase] = []
 
@@ -391,6 +425,7 @@ class Trader():
 
     @log_method
     async def shutdown(self):
+        self._invalidate_account_pnl()
         self.client.ib.connectedEvent -= self.connected_event
         self.client.ib.disconnectedEvent -= self.disconnected_event
         self.client.ib.disconnect()
@@ -407,11 +442,22 @@ class Trader():
             disposable.dispose()
 
         self.book.dispose()
+        for name, method in (('zmq_pubsub_server', 'stop'), ('zmq_messagebus', 'stop'),
+                             ('zmq_strategy_client', 'close')):
+            resource = getattr(self, name, None)
+            close = getattr(resource, method, None)
+            if callable(close):
+                await asyncio.to_thread(close)
+        # ROUTER socket/task ownership belongs to this asyncio thread.
+        self.zmq_rpc_server.close()
+        if getattr(self, 'order_tracker', None) is not None:
+            await asyncio.to_thread(self.order_tracker.close)
         await self.client.shutdown()
 
     @log_method
     def reconnect(self):
         # this will force a reconnect through the disconnected event
+        self._invalidate_account_pnl()
         self.client.ib.disconnect()
 
     def __update_positions(self, positions: Union[List[Position], Position]):
@@ -454,6 +500,9 @@ class Trader():
     async def setup_subscriptions(self):
         if not self.is_ib_connected():
             raise ConnectionError('not connected to interactive brokers')
+        # Start this independently of portfolio events: a flat account can
+        # still have a daily loss. reqPnL sends without waiting for a callback.
+        self._ensure_account_pnl_subscription()
 
         def handle_subscription_exception(ex):
             exception = trader_exception(self, TraderException, message='setup_subscriptions()', inner=ex)
@@ -486,6 +535,15 @@ class Trader():
                 pass
             _ev.connect(self.order_tracker.on_trade, keep_ref=True)
             logging.info('order-lifecycle tracker attached to orderStatusEvent')
+            exec_event = self.client.ib.execDetailsEvent
+            try:
+                exec_event.disconnect(self.order_tracker.on_execution)
+            except Exception:
+                pass
+            exec_event.connect(self.order_tracker.on_execution, keep_ref=True)
+            self._execution_history_ready = False
+            await self._replay_broker_executions()
+
 
         positions_observer = Observer(
             on_next=self.__update_positions,
@@ -593,7 +651,7 @@ class Trader():
 
         IB distinguishes two severities we care about:
 
-        1. **1100 / 1102**: full gateway↔IBKR connectivity. 1100 means
+        1. **1100 / 1101 / 1102**: full gateway↔IBKR connectivity. 1100 means
            trading is actually disabled. This is the ONLY signal that
            should flip ``ib_upstream_connected`` to False.
 
@@ -613,14 +671,20 @@ class Trader():
         msg = error.errorString
 
         if code == 1100:
-            # Real disconnect — trading disabled until 1102 arrives.
+            # Real disconnect — account inputs are invalid until a new receipt
+            # after 1101 (data lost) or 1102 (data maintained) restores service.
             self._ib_upstream_connected = False
             self._ib_upstream_error = msg
+            self._ib_upstream_ib = getattr(getattr(self, 'client', None), 'ib', None)
+            self._invalidate_account_pnl()
             logging.warning('IB upstream connection lost (code 1100): %s', msg)
-        elif code == 1102:
+        elif code in (1101, 1102):
+            self._invalidate_account_pnl()
+            self._ib_upstream_ib = getattr(getattr(self, 'client', None), 'ib', None)
             self._ib_upstream_connected = True
             self._ib_upstream_error = ''
-            logging.info('IB upstream connection restored (code 1102): %s', msg)
+            self._ensure_account_pnl_subscription()
+            logging.info('IB upstream connection restored (code %d): %s', code, msg)
         elif code in (2103, 2105, 2157):
             # Informational farm hiccup. Track so callers can query
             # ``_ib_farms_down`` if they really want farm-level detail,
@@ -637,6 +701,18 @@ class Trader():
 
     @log_method
     async def connected_event(self):
+        ib = self.client.ib
+        if ib.isConnected() is True and getattr(self, '_ib_upstream_ib', None) is not ib:
+            # An old IB object's loss flag is not a status report for this
+            # connection. A 1100 already received from THIS instance remains
+            # authoritative. Account risk still needs its new PnL callback.
+            self._invalidate_account_pnl()
+            self._ib_upstream_ib = ib
+            self._ib_upstream_connected = True
+            self._ib_upstream_error = ''
+        # Replacement IB objects can arrive while a prior setup is unwinding.
+        # Bind the account feed before coalescing or awaiting other setup work.
+        self._ensure_account_pnl_subscription()
         # Coalesce the reconnect double-fire: connect_async() emits the IB
         # connectedEvent (→ this handler) AND the reconnect loop calls this
         # explicitly. Running both would dispose/rebuild subscriptions twice and
@@ -718,6 +794,7 @@ class Trader():
 
     @log_method
     async def disconnected_event(self):
+        self._invalidate_account_pnl()
         # Guard against multiple concurrent reconnection attempts
         if hasattr(self, '_reconnecting') and self._reconnecting:
             logging.debug('reconnection already in progress, skipping')
@@ -768,35 +845,53 @@ class Trader():
     @log_method
     async def enable_strategy(self, name: str) -> SuccessFail[StrategyState]:
         try:
-            return self.zmq_strategy_client.rpc().enable_strategy(name)
+            # Initialization may use the strategy worker's 60-second budget.
+            # Keep broker callbacks responsive while strategy reconciliation
+            # makes its own nested RPC calls back into this service.
+            return await asyncio.to_thread(self.zmq_strategy_client.rpc(timeout=120).enable_strategy, name)
         except Exception as ex:
             logging.error('enable_strategy: {}'.format(ex))
-            return SuccessFail.fail(exception=ex)
+            return SuccessFail.fail(error=str(ex) or type(ex).__name__, exception=ex)
 
     @log_method
     async def disable_strategy(self, name: str) -> SuccessFail[StrategyState]:
         try:
-            return self.zmq_strategy_client.rpc().disable_strategy(name)
+            return await asyncio.to_thread(self.zmq_strategy_client.rpc(timeout=20).disable_strategy, name)
         except Exception as ex:
             logging.error('disable_strategy: {}'.format(ex))
-            return SuccessFail.fail(exception=ex)
+            return SuccessFail.fail(error=str(ex) or type(ex).__name__, exception=ex)
 
     @log_method
     async def get_strategies(self) -> SuccessFail[List[StrategyConfig]]:
         try:
-            rpc_call = self.zmq_strategy_client.rpc().get_strategies()
-            # rpc_call = SuccessFail.success(await (await self.zmq_strategy_client.awaitable_rpc()).get_strategies())
+            rpc_call = await asyncio.to_thread(self.zmq_strategy_client.rpc().get_strategies)
             return SuccessFail.success(rpc_call)
         except Exception as ex:
-            return SuccessFail.fail(exception=ex)
+            return SuccessFail.fail(error=str(ex) or type(ex).__name__, exception=ex)
 
     @log_method
     async def reload_strategies(self) -> SuccessFail[List[StrategyConfig]]:
         try:
-            return self.zmq_strategy_client.rpc().reload_strategies()
+            return await asyncio.to_thread(self.zmq_strategy_client.rpc(timeout=120).reload_strategies)
         except Exception as ex:
             logging.error('reload_strategies: {}'.format(ex))
-            return SuccessFail.fail(exception=ex)
+            return SuccessFail.fail(error=str(ex) or type(ex).__name__, exception=ex)
+
+    @log_method
+    async def adopt_legacy_holding(self, strategy: str, conid: int,
+                                   avg_cost: Optional[float] = None) -> SuccessFail[dict]:
+        """Forward an operator's ownership attestation to the strategy service.
+
+        The executor corroborates the attributed quantity against a fresh
+        broker position read (which calls back into this service), so this
+        stays off the broker callback thread like the other strategy controls.
+        """
+        try:
+            return await asyncio.to_thread(
+                self.zmq_strategy_client.rpc(timeout=60).adopt_legacy_holding, strategy, int(conid), avg_cost)
+        except Exception as ex:
+            logging.error('adopt_legacy_holding: {}'.format(ex))
+            return SuccessFail.fail(error=str(ex) or type(ex).__name__, exception=ex)
 
     @log_method
     def clear_portfolio_universe(self):
@@ -831,6 +926,7 @@ class Trader():
                 symbol=symbol,
                 exchange=exchange,
                 universe=universe,
+                sec_type=sec_type,
                 first_only=first_only
             )
 
@@ -1064,6 +1160,173 @@ class Trader():
             'warningText': order_state.warningText,
         }
 
+    @asynccontextmanager
+    async def serialized_orders(self):
+        """Serialize exposure decisions through submission, reentrant for split legs."""
+        task = asyncio.current_task()
+        if getattr(self, '_order_lock_owner', None) is task:
+            yield
+            return
+        if getattr(self, '_order_lock', None) is None:
+            self._order_lock = asyncio.Lock()
+        assert self._order_lock is not None
+        async with self._order_lock:
+            self._order_lock_owner = task
+            try:
+                yield
+            finally:
+                self._order_lock_owner = None
+
+    def _journal_recovered(self) -> None:
+        """A durable journal operation succeeded; clear the outage flag.
+
+        ``_journal_degraded`` is set wherever a journal call fails, including
+        read-only lookups, and used to be cleared nowhere, so one transient
+        ``database is locked`` disabled new exposure until the process was
+        restarted. Every open still fails closed at the actual reservation and
+        submission-audit writes, so clearing on a successful transaction cannot
+        admit an open that the journal would refuse.
+        """
+        previous = getattr(self, '_journal_degraded', '')
+        if previous:
+            logging.info('execution journal recovered after: %s', previous)
+        self._journal_degraded = ''
+
+    async def _probe_journal_if_degraded(self) -> None:
+        """Re-test a flagged journal with a real transaction before refusing an open."""
+        if not getattr(self, '_journal_degraded', ''):
+            return
+        try:
+            journal = await asyncio.to_thread(self.server_order_journal)
+            await asyncio.to_thread(journal.reservations, self.ib_account)
+        except Exception as ex:
+            self._journal_degraded = str(ex)
+            return
+        self._journal_recovered()
+
+    async def margin_checks(self, contract: Contract, order: Order) -> RiskGateResult:
+        """Shared opening-order margin policy for every execution path."""
+        restored = self.opening_restore_error()
+        if restored:
+            return RiskGateResult(False, reason=restored,
+                                  checks={'broker_reconciliation': 'unevaluable:restored-state'})
+        tracker = getattr(self, 'order_tracker', None)
+        await self._probe_journal_if_degraded()
+        if getattr(self, '_journal_degraded', '') or (tracker is not None and not tracker.health['healthy']):
+            return RiskGateResult(False, reason='execution journal degraded; new exposure is disabled',
+                                  checks={'execution_journal': 'unevaluable:durable-storage'})
+        if (contract.secType or '').upper() == 'CASH':
+            return RiskGateResult(True, checks={
+                'leverage': 'skipped:forex-cash', 'margin_cushion': 'skipped:forex-cash'})
+        impact = await self._margin_impact_or_refusal(contract, order)
+        if isinstance(impact, SuccessFail):
+            return RiskGateResult(False, reason=impact.error or 'margin unavailable',
+                                  checks={'leverage': 'unevaluable:margin-data'})
+        inputs = self.gather_risk_inputs()
+        if self.risk_gate is None:
+            return RiskGateResult(False, reason='risk gate unavailable')
+        return self.risk_gate.check_leverage(
+            impact, inputs.portfolio_value if inputs.portfolio_value_evaluable else 0.0)
+
+    def opening_restore_error(self) -> Optional[str]:
+        """A restored journal cannot authorize exposure until explicitly reconciled."""
+        database_path = getattr(self, 'duckdb_path', None)
+        if not isinstance(database_path, (str, os.PathLike)):
+            return None
+        marker = os.path.join(os.path.dirname(os.fspath(database_path)),
+                              'BROKER_RECONCILIATION_REQUIRED.json')
+        try:
+            os.stat(marker)
+        except FileNotFoundError:
+            return None
+        except OSError as ex:
+            return f'broker reconciliation marker cannot be read: {ex}'
+        return 'broker reconciliation is required after database restore; new exposure is disabled'
+
+    def fx_rates_to_base(self) -> dict[str, float]:
+        """Finite, account-scoped conversion rates, with an explicit base row.
+
+        reqAccountUpdates delivers per-currency FX as ``$LEDGER-ExchangeRate``
+        rows (ib_async's rendering of IB's ``$LEDGER:ALL`` summary); only some
+        account types expose the plain ``ExchangeRate`` tag. Both are read and
+        the ledger form wins, exactly as ``get_account_cash_by_currency`` does.
+        Matching the plain tag alone returned ``{base: 1.0}`` on a live ledger
+        account, which made every non-base position value non-evaluable and
+        refused every non-base open fail-closed.
+        """
+        ledger: dict[str, float] = {}
+        plain: dict[str, float] = {}
+        base_currency = None
+        for value in self.client.ib.accountValues():
+            if value.account != self.ib_account or not value.currency or value.currency == 'BASE':
+                continue
+            if value.tag == 'NetLiquidation':
+                # The account's own NetLiquidation row is denominated in the
+                # base currency; its rate is 1.0 by definition.
+                base_currency = value.currency
+                continue
+            if value.tag not in ('$LEDGER-ExchangeRate', 'ExchangeRate'):
+                continue
+            try:
+                rate = float(value.value)
+            except (ValueError, TypeError):
+                continue
+            if math.isfinite(rate) and rate > 0:
+                (ledger if value.tag.startswith('$LEDGER-') else plain)[value.currency] = rate
+        rates = {**plain, **ledger}
+        if base_currency:
+            rates[base_currency] = 1.0
+        return rates
+
+    def convert_notional(self, value: float, currency: str, target: str = 'BASE') -> Optional[float]:
+        """Convert financial units explicitly; missing FX never means rate one."""
+        if not currency or not math.isfinite(value) or value < 0:
+            return None
+        if currency == target:
+            return value
+        try:
+            rates = self.fx_rates_to_base()
+            source_rate = rates[currency]
+            target_rate = 1.0 if target == 'BASE' else rates[target]
+            converted = value * source_rate / target_rate
+            return converted if math.isfinite(converted) else None
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return None
+
+    def aggregate_position_value(self, contract: Contract, action: str,
+                                 quantity: float, order_value: float) -> float:
+        """Post-order exposure including same-direction working openings."""
+        held = self._signed_position(int(contract.conId or 0))
+        if held is None or not math.isfinite(held) or quantity <= 0:
+            return float('nan')
+        sign = 1 if str(action).upper() == 'BUY' else -1
+        pending = 0.0
+        for trade in self.working_trades(contract):
+            order = trade.order
+            if str(order.action).upper() == str(action).upper():
+                pending += float(trade.orderStatus.remaining or 0.0)
+        return abs(held + sign * (quantity + pending)) * (order_value / quantity)
+
+    def working_trades(self, contract: Contract) -> list:
+        """Broker-known working orders plus locally submitted orders awaiting updates."""
+        self._submitted_trades = [t for t in getattr(self, '_submitted_trades', [])
+                                  if t.orderStatus.status not in {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}]
+        candidates = list(self._submitted_trades)
+        try:
+            candidates.extend(self.client.ib.openTrades())
+        except (AttributeError, TypeError):
+            pass
+        unique = {}
+        for trade in candidates:
+            order = trade.order
+            if (getattr(trade.contract, 'conId', None) != contract.conId
+                    or getattr(order, 'account', '') != self.ib_account
+                    or trade.orderStatus.status in {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}):
+                continue
+            key = (getattr(order, 'clientId', 0), order.orderId)
+            unique[key] = trade
+        return list(unique.values())
+
     def _signed_position(self, conid: int) -> Optional[float]:
         """Live broker position (signed) for ``conid`` in the pinned account.
 
@@ -1080,25 +1343,8 @@ class Trader():
         total = 0.0
         for p in positions or []:
             c = getattr(p, 'contract', None)
+            # get_positions owns account filtering at the broker/cache boundary.
             if c is not None and int(getattr(c, 'conId', 0) or 0) == conid:
-                total += float(getattr(p, 'position', 0.0) or 0.0)
-        return total
-
-    def _signed_position_by_symbol(self, symbol: str) -> Optional[float]:
-        """Live broker position (signed) summed across every row whose
-        contract symbol matches ``symbol``. Fallback for the exit-class
-        predicate when the order's conId doesn't resolve to a position row
-        (missing conId, cache lag, conId change). None on a failed read.
-        """
-        try:
-            positions = self.get_positions()
-        except Exception as ex:
-            logging.warning('could not read broker positions for symbol exit-class check: %s', ex)
-            return None
-        total = 0.0
-        for p in positions or []:
-            c = getattr(p, 'contract', None)
-            if c is not None and (getattr(c, 'symbol', '') or '') == symbol:
                 total += float(getattr(p, 'position', 0.0) or 0.0)
         return total
 
@@ -1114,11 +1360,8 @@ class Trader():
 
         Only a SELL with no long (opening a short) or a BUY with no short is a
         true open. No matching position or an unreadable portfolio returns
-        False (gated like an open, fail-closed). When the order's conId is
-        missing or its position row hasn't landed yet (cache lag right after a
-        fill, or a conId change), a same-symbol position is used as a fallback
-        — exit-class detection only (gate exemption), never contract
-        resolution.
+        False (gated like an open, fail-closed). A symbol never substitutes for
+        an exact conId: stocks, options and futures can share the same ticker.
         """
         try:
             conid = int(getattr(contract, 'conId', 0) or 0)
@@ -1131,12 +1374,6 @@ class Trader():
         if act not in ('BUY', 'SELL'):
             return False
         held = self._signed_position(conid) if conid > 0 else None
-        if held is None or held == 0.0:
-            symbol = (getattr(contract, 'symbol', '') or '').strip()
-            if symbol:
-                by_symbol = self._signed_position_by_symbol(symbol)
-                if by_symbol is not None and by_symbol != 0.0:
-                    held = by_symbol
         if held is None:
             return False
         # The DECISION itself lives in the pure, deal-contracted, mutation- and
@@ -1159,13 +1396,12 @@ class Trader():
         (the unsplit exit-class boolean) and exempted the whole order before
         the splitter downstream ever saw it. Found live 2026-07-27.
 
-        Position resolution mirrors ``order_reduces_exposure`` exactly: conId
-        first, then a same-symbol fallback for cache lag right after a fill or
-        a conId change.
+        Position resolution mirrors ``order_reduces_exposure`` exactly: the
+        exact conId in the pinned broker account.
 
         FAIL-CLOSED — the WHOLE quantity is opening, so it faces every gate —
-        when the position is unreadable, when a blank conId has no same-symbol
-        fallback, or when the action is not BUY/SELL. The arithmetic itself
+        when the position is unreadable, when the conId is blank, or when the
+        action is not BUY/SELL. The arithmetic itself
         lives in the pure, contracted, mutation- and CrossHair-checked kernel
         (``trader.trading.order_split``); this method only resolves ``held``.
         """
@@ -1183,12 +1419,6 @@ class Trader():
         if act not in ('BUY', 'SELL'):
             return SplitPlan(0.0, qty)  # fail-closed: unknown action → opening
         held = self._signed_position(conid) if conid > 0 else None
-        if held is None or held == 0.0:
-            symbol = (getattr(contract, 'symbol', '') or '').strip()
-            if symbol:
-                by_symbol = self._signed_position_by_symbol(symbol)
-                if by_symbol is not None and by_symbol != 0.0:
-                    held = by_symbol
         if held is None:
             return SplitPlan(0.0, qty)  # fail-closed: unreadable → opening
         return split_order(act, held, qty)
@@ -1206,7 +1436,8 @@ class Trader():
 
     async def _tier_notional(
         self, contract: Contract, action: str, quantity: float,
-        order_type: str, limit_price: Optional[float],
+        order_type: str, limit_price: Optional[float], target_currency: str = 'USD',
+        anchor: str = 'marketable', limit_pushes_up: bool = True,
     ) -> Tuple[float, bool]:
         """The NON-FORGEABLE notional for the approver tier and whether it is
         evaluable, as ``(notional, evaluable)``.
@@ -1220,21 +1451,23 @@ class Trader():
         and — critically — when there is NO snapshot the notional is NOT
         evaluable (``(0.0, False)``): a bare client limit is never trusted
         downward for the tier.
+
+        ``anchor='last'`` values at the last trade first (then the marketable
+        side, then close) and ``limit_pushes_up=False`` ignores the client
+        limit. That is the anchor ``sdk.approve`` sizes an amount-budgeted
+        proposal with, so the budget match re-derives the same figure instead
+        of a systematically higher marketable one.
         """
-        try:
-            multiplier = float(contract.multiplier) if contract.multiplier else 1.0
-        except (TypeError, ValueError):
-            multiplier = 1.0
+        multiplier = TradeExecutioner._multiplier(contract)
 
         act = str(action).strip().upper()
         snapshot_price: Optional[float] = None
         try:
             tick = await self.client.get_snapshot(contract)
-            for candidate in (
-                tick.ask if act == 'BUY' else tick.bid,
-                getattr(tick, 'last', None),
-                getattr(tick, 'close', None),
-            ):
+            marketable = tick.ask if act == 'BUY' else tick.bid
+            last = getattr(tick, 'last', None)
+            candidates = ((last, marketable) if anchor == 'last' else (marketable, last))
+            for candidate in (*candidates, getattr(tick, 'close', None)):
                 try:
                     # candidate may be None (ask/bid/last/close unset); the
                     # TypeError from float(None) is caught below — ty can't see
@@ -1250,7 +1483,7 @@ class Trader():
                 'approver tier: no snapshot price to value order: %s', ex)
 
         limit_val: Optional[float] = None
-        if str(order_type).strip().upper() != 'MARKET':
+        if limit_pushes_up and str(order_type).strip().upper() != 'MARKET':
             try:
                 # limit_price is Optional; float(None) → TypeError, caught below.
                 lp = float(limit_price)  # ty: ignore[invalid-argument-type]
@@ -1269,7 +1502,9 @@ class Trader():
         # has the opposite failure preference: best-effort valuation, and record
         # that it could not value rather than refuse to place.
         price = max(snapshot_price, limit_val) if limit_val is not None else snapshot_price
-        return order_notional((price,), quantity, multiplier)
+        notional, evaluable = order_notional((price,), quantity, multiplier)
+        converted = self.convert_notional(notional, contract.currency, target_currency) if evaluable else None
+        return (converted, True) if converted is not None else (0.0, False)
 
     async def enforce_approver_tier(
         self, contract: Contract, action: str, quantity: float,
@@ -1333,27 +1568,137 @@ class Trader():
                     'supplied. No order placed.')
         return None
 
-    def _has_today_trading_activity(self) -> bool:
-        """True if the account holds any position OR booked any fill today.
+    def _account_pnl_is_current(self, subscription: _AccountPnLSubscription,
+                                *, pending: bool = False) -> bool:
+        """Called under the account lock; all reads are local IB cache reads."""
+        try:
+            if (getattr(self, '_account_pnl_subscription', None) is not subscription
+                    or self.client.ib is not subscription.ib
+                    or self.ib_account != subscription.account
+                    or not getattr(self, '_ib_upstream_connected', False)
+                    or subscription.ib.isConnected() is not True):
+                return False
+            pnl = subscription.pnl
+            if pnl is None:
+                return pending
+            return (pnl.account == subscription.account and pnl.modelCode == ''
+                    and any(item is pnl for item in subscription.ib.pnl(
+                        subscription.account, '')))
+        except Exception:
+            return False
 
-        Used to disambiguate an empty PnL cache: with activity present, an
-        empty cache means the feed hasn't warmed (fail-closed on opens); with
-        genuinely no activity, an empty cache is a real flat 0.0. An
-        unreadable state returns True (assume activity → fail-closed).
+    def _invalidate_account_pnl(self) -> None:
+        """Revoke readiness before any disconnect/reconnect wait or cleanup."""
+        lock = getattr(self, '_account_pnl_lock', None)
+        if lock is None:
+            return
+        with lock:
+            subscription = self._account_pnl_subscription
+            self._account_pnl_subscription = None
+            if subscription is None:
+                return
+            subscription.value = None
+            subscription.pending.clear()
+            # IBAIORx preserves event handlers when replacing its IB object.
+            # Remove our saved callback from both, never a freshly bound method.
+            current_ib = getattr(getattr(self, 'client', None), 'ib', None)
+            sources = [subscription.ib]
+            if current_ib is not None and current_ib is not subscription.ib:
+                sources.append(current_ib)
+            for ib in sources:
+                try:
+                    ib.pnlEvent.disconnect(subscription.callback)
+                except Exception as ex:
+                    logging.warning('account PnL callback cleanup failed: %s', ex)
+            if subscription.request_started:
+                try:
+                    # reqPnL registers the request BEFORE sending it. A send
+                    # failure can therefore need cancellation even when no PnL
+                    # object was returned; otherwise every retry asserts.
+                    subscription.ib.cancelPnL(subscription.account, '')
+                except Exception as ex:
+                    logging.warning('account PnL request cleanup failed: %s', ex)
+
+    def _ensure_account_pnl_subscription(self) -> None:
+        """On the IB loop, request exactly the pinned account's full PnL.
+
+        A finite object returned by reqPnL is not a receipt. Only pnlEvent for
+        that exact request can warm risk inputs, including after reconnect.
         """
-        try:
-            if self.get_positions():
-                return True
-        except Exception as ex:
-            logging.warning('risk inputs: could not read positions for activity check: %s', ex)
-            return True
-        try:
-            midnight = dt.datetime.combine(dt.date.today(), dt.time.min)
-            return self.event_store.count_since(
-                since=midnight, event_type=EventType.ORDER_FILLED) > 0
-        except Exception as ex:
-            logging.warning('risk inputs: could not read fills for activity check: %s', ex)
-            return True
+        if not hasattr(self, '_account_pnl_lock'):
+            self._account_pnl_lock = threading.RLock()
+            self._account_pnl_subscription = None
+        with self._account_pnl_lock:
+            subscription = self._account_pnl_subscription
+            if subscription is not None and self._account_pnl_is_current(
+                    subscription, pending=True):
+                return
+            self._invalidate_account_pnl()
+            ib = getattr(getattr(self, 'client', None), 'ib', None)
+            account = getattr(self, 'ib_account', None)
+            if (ib is None or not isinstance(account, str) or not account.strip()
+                    or account != account.strip()
+                    or not getattr(self, '_ib_upstream_connected', False)):
+                return
+            try:
+                if ib.isConnected() is not True:
+                    return
+            except Exception:
+                return
+
+            subscription = _AccountPnLSubscription(ib=ib, account=account)
+            self._account_pnl_subscription = subscription
+
+            def observe(pnl: PnL) -> None:
+                with self._account_pnl_lock:
+                    if not self._account_pnl_is_current(subscription, pending=True):
+                        return
+                    if (getattr(pnl, 'account', None) != account
+                            or getattr(pnl, 'modelCode', None) != ''):
+                        return
+                    raw = getattr(pnl, 'dailyPnL', None)
+                    value = None
+                    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                        try:
+                            numeric = float(raw)
+                            if math.isfinite(numeric) and abs(numeric) < UNSET_DOUBLE:
+                                value = numeric
+                        except (OverflowError, ValueError):
+                            pass
+                    if subscription.pnl is None:
+                        # A synchronous callback during reqPnL is allowed, but
+                        # it still must match the object that request returns.
+                        subscription.pending.append((pnl, value))
+                    elif pnl is subscription.pnl:
+                        subscription.value = value
+
+            subscription.callback = observe
+            try:
+                ib.pnlEvent.connect(observe, keep_ref=True)
+                subscription.request_started = True
+                subscription.pnl = ib.reqPnL(account, '')
+                if not self._account_pnl_is_current(subscription):
+                    raise ValueError('account PnL request did not return its registered account object')
+                for pnl, value in subscription.pending:
+                    if pnl is subscription.pnl:
+                        subscription.value = value
+                subscription.pending.clear()
+            except Exception as ex:
+                if self._account_pnl_subscription is subscription:
+                    self._invalidate_account_pnl()
+                logging.warning('account PnL subscription unavailable: %s', ex)
+
+    def _read_account_daily_pnl(self) -> tuple[float, bool]:
+        """Read one coherent callback checkpoint, without requesting data."""
+        lock = getattr(self, '_account_pnl_lock', None)
+        if lock is None:
+            return 0.0, False
+        with lock:
+            subscription = self._account_pnl_subscription
+            if (subscription is None or subscription.value is None
+                    or not self._account_pnl_is_current(subscription)):
+                return 0.0, False
+            return subscription.value, True
 
     def gather_risk_inputs(self) -> RiskInputs:
         """Read the account state the risk gate needs, marking per-field
@@ -1364,35 +1709,7 @@ class Trader():
         """
         open_order_count = self.book.get_open_order_count() if hasattr(self, 'book') else 0
 
-        daily_pnl = 0.0
-        daily_pnl_evaluable = True
-        try:
-            pnl_items = list(self.get_pnl() or [])
-        except Exception as ex:
-            logging.warning('risk inputs: could not read daily PnL: %s', ex)
-            pnl_items = []
-            daily_pnl_evaluable = False
-
-        if daily_pnl_evaluable and not pnl_items:
-            # An empty PnLSingle cache is ambiguous: genuinely flat-with-no-
-            # activity (0.0 is the truth) vs the feed simply hasn't warmed yet
-            # after a mid-day restart (0.0 is a LIE — realized losses booked
-            # earlier are invisible). If the account holds positions or booked
-            # any fill today, the feed hasn't populated: treat daily_pnl as
-            # NOT-evaluable so the gate fails closed on opens until it warms,
-            # rather than approving blind to today's loss. Exits are unaffected.
-            if self._has_today_trading_activity():
-                daily_pnl_evaluable = False
-        elif daily_pnl_evaluable:
-            for p in pnl_items:
-                value = float(getattr(p, 'dailyPnL', 0.0) or 0.0)
-                if not math.isfinite(value):
-                    # IB hasn't delivered this position's PnL yet — the sum
-                    # would be a lie, not a zero.
-                    daily_pnl_evaluable = False
-                    daily_pnl = 0.0
-                    break
-                daily_pnl += value
+        daily_pnl, daily_pnl_evaluable = self._read_account_daily_pnl()
 
         portfolio_value = 0.0
         portfolio_value_evaluable = False
@@ -1427,6 +1744,7 @@ class Trader():
         execution_spec: dict,
         algo_name: str,
         approver_key: str,
+        allow_open: bool = True,
     ) -> SuccessFail:
         """Place a position-crossing order as its two real halves.
 
@@ -1460,24 +1778,607 @@ class Trader():
                       f'({reduce_result.error}); the opening remainder of '
                       f'{plan.open_qty:g} was NOT attempted')
 
-        open_result = await self.place_expressive_order(
-            contract, action, plan.open_qty, execution_spec,
-            algo_name=algo_name, approver_key=approver_key, force_open=True)
+        if allow_open:
+            open_result = await self.place_expressive_order(
+                contract, action, plan.open_qty, execution_spec,
+                algo_name=algo_name, approver_key=approver_key, force_open=True)
+        else:
+            open_result = SuccessFail.fail(error='opening exposure requires an approved proposal matching this exact order')
 
+        reduction = {'status': 'SUBMITTED',
+                     'quantity': sum(float(t.order.totalQuantity) for t in reduce_result.obj or []),
+                     'order_ids': [t.order.orderId for t in reduce_result.obj or []]}
         if not open_result.is_success():
             logging.warning(
                 'flip split: reduction of %s placed; opening remainder of %s '
-                'REFUSED by the gates (%s) — caller is flat, not flipped',
+                'REFUSED by the gates (%s); reduction execution remains pending',
                 plan.reduce_qty, plan.open_qty, open_result.error)
-            return SuccessFail.fail(
-                error=f'flip split: reduced {plan.reduce_qty:g} (placed), but the '
+            result = SuccessFail.fail(
+                error=f'PARTIAL: flip split: reduction {plan.reduce_qty:g} submitted, but the '
                       f'opening remainder of {plan.open_qty:g} was refused: '
                       f'{open_result.error}')
+            result.obj = {'reduction': reduction,
+                          'opening': {'status': 'UNKNOWN' if 'UNKNOWN' in str(open_result.error) else 'REJECTED',
+                                      'quantity': plan.open_qty, 'error': open_result.error}}
+            return result
 
         trades = list(reduce_result.obj or []) + list(open_result.obj or [])
-        return SuccessFail.success(obj=trades)
+        result = SuccessFail.success(obj=trades)
+        result.execution_outcome = {'reduction': reduction,
+                                    'opening': {'status': 'SUBMITTED', 'quantity': plan.open_qty,
+                                                'order_ids': [t.order.orderId for t in open_result.obj or []]}}
+        return result
 
     async def place_expressive_order(
+        self, contract: Contract, action: str, quantity: float, execution_spec: dict,
+        algo_name: str = 'proposal', approver_key: str = '', force_open: bool = False,
+        allow_open: bool = True, client_intent_id: str = '',
+    ) -> SuccessFail:
+        args = (contract, action, quantity, execution_spec)
+        kwargs = dict(algo_name=algo_name, approver_key=approver_key,
+                      force_open=force_open, allow_open=allow_open)
+        return await self._run_order_intent('expressive', client_intent_id,
+                                           self._place_expressive_order, args, kwargs)
+
+    async def _run_order_intent(self, operation: str, intent_id: str, call,
+                                args: tuple, kwargs: dict) -> SuccessFail:
+        async with self.serialized_orders():
+            if not intent_id:
+                if _CURRENT_INTENT.get():
+                    # Split and protective legs are part of their parent's
+                    # claim, so one recovery identity retains every broker ID.
+                    return await call(*args, **kwargs)
+                if isinstance(getattr(self, 'duckdb_path', None), str):
+                    intent_id = f'{operation}:{uuid.uuid4().hex}'
+                else:
+                    return await call(*args, **kwargs)
+            if not isinstance(intent_id, str) or len(intent_id.encode()) > 160 or '|mmr:' in intent_id:
+                return SuccessFail.fail(error='client_intent_id must be a string of at most 160 bytes without the reserved delimiter')
+            # Capture the complete normalized wire intent, including exact identity.
+            bound = inspect.signature(call).bind(*args, **kwargs)
+            bound.apply_defaults()
+            # Positional/keyword spelling and mapping insertion order are not
+            # part of an intent. The complete semantic payload is.
+            payload = {'operation': operation, 'arguments': bound.arguments}
+            def encode(value):
+                if isinstance(value, Contract):
+                    from dataclasses import asdict
+                    return asdict(value)
+                if isinstance(value, Action):
+                    return str(value)
+                return repr(value)
+            fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True, default=encode).encode()).hexdigest()
+            try:
+                emergency = getattr(self, '_emergency_order_journal', None)
+                journal = (emergency if emergency is not None and emergency.get(intent_id)
+                           else await asyncio.to_thread(self.server_order_journal))
+                if not await asyncio.to_thread(journal.claim, intent_id, fingerprint, self.ib_account):
+                    prior = await asyncio.to_thread(journal.get, intent_id)
+                    if prior and prior['status'] == 'REJECTED':
+                        return SuccessFail.fail(error=prior['error'])
+                    return SuccessFail.fail(error=f'UNKNOWN: intent {intent_id} already claimed; '
+                                            f'reconcile reserved broker orders {prior}')
+            except ValueError as ex:
+                return SuccessFail.fail(error=str(ex))
+            except Exception as ex:
+                self._journal_degraded = str(ex)
+                contract = bound.arguments.get('contract')
+                action = str(bound.arguments.get('action', ''))
+                quantity = bound.arguments.get('quantity', 0)
+                if (operation not in {'expressive', 'protective', 'simple'} or contract is None
+                        or not self.order_reduces_exposure(contract, action, quantity)):
+                    return SuccessFail.fail(error=f'Cannot durably claim intent {intent_id}: {ex}')
+                from trader.data.server_order_journal import EmergencyOrderJournal
+                journal = getattr(self, '_emergency_order_journal', None)
+                if journal is None:
+                    journal = EmergencyOrderJournal()
+                    self._emergency_order_journal = journal
+                if not journal.claim(intent_id, fingerprint, self.ib_account):
+                    return SuccessFail.fail(error=f'UNKNOWN: emergency intent {intent_id} already claimed; reconcile broker orders')
+                if operation in {'expressive', 'simple'}:
+                    kwargs['allow_open'] = False
+                logging.error('DURABILITY DEGRADED: submitting only the reduction for intent %s: %s', intent_id, ex)
+            token = _CURRENT_INTENT.set(intent_id)
+            journal_token = _CURRENT_JOURNAL.set(journal)
+            try:
+                result = await call(*args, **kwargs)
+                if isinstance(result, Observable):
+                    observable = result
+                    result = SuccessFail.success(obj=await observable.pipe(ops.take(1)))
+                    outcome = getattr(observable, 'execution_outcome', None)
+                    if outcome is not None:
+                        result.execution_outcome = outcome
+                journal = _CURRENT_JOURNAL.get()
+                reserved = await asyncio.to_thread(journal.get, intent_id)
+                outcome = (result.obj if isinstance(result.obj, dict)
+                           else getattr(result, 'execution_outcome', None))
+                partial = bool(outcome and outcome.get('reduction', {}).get('status') == 'SUBMITTED'
+                               and outcome.get('opening', {}).get('status') == 'REJECTED')
+                unknown_opening = bool(outcome and outcome.get('opening', {}).get('status') == 'UNKNOWN')
+                status = ('UNKNOWN' if unknown_opening else 'PARTIAL' if partial else
+                          'SUBMITTED' if result.is_success() else
+                          'UNKNOWN' if reserved and reserved['orders'] else
+                          'RETRYABLE' if 'UNKNOWN:' in str(result.error) else 'REJECTED')
+                await asyncio.to_thread(journal.finish, intent_id, status, str(result.error or ''), outcome)
+                result.client_intent_id = intent_id
+                if status == 'UNKNOWN':
+                    result.error = f'UNKNOWN: intent {intent_id}: {result.error}'
+                return result
+            except Exception as ex:
+                try:
+                    reserved = await asyncio.to_thread(journal.get, intent_id)
+                    status = ('UNKNOWN' if reserved and reserved['orders'] else
+                              'RETRYABLE' if 'UNKNOWN:' in str(ex) else 'REJECTED')
+                    await asyncio.to_thread(journal.finish, intent_id, status, str(ex))
+                except Exception as storage_error:
+                    self._journal_degraded = str(storage_error)
+                    status = 'UNKNOWN'
+                return SuccessFail.fail(error=f'{status}: intent {intent_id}: {ex}')
+            finally:
+                _CURRENT_INTENT.reset(token)
+                _CURRENT_JOURNAL.reset(journal_token)
+
+    def server_order_journal(self):
+        from trader.data.server_order_journal import ServerOrderJournal
+        journal = getattr(self, '_server_order_journal', None)
+        if journal is None:
+            journal = ServerOrderJournal(self.duckdb_path)
+            self._server_order_journal = journal
+        return journal
+
+    async def unobserved_reduction_quantity(self, contract: Contract, action: str) -> float:
+        """Capacity of attempted orders absent from the live Trade collection.
+
+        A complete open-order read cannot prove that an older unknown send
+        never executed. Only exact broker final-quantity evidence retires a
+        claim. Reads/writes of the indexed active claims stay off the IB loop.
+        """
+        account = self.ib_account
+        journal = None
+        try:
+            journal = await asyncio.to_thread(self.server_order_journal)
+            rows = await asyncio.to_thread(journal.reservations, account)
+            self._server_reservation_cache = (account, rows)
+            self._reservation_cache_error = ''
+            self._journal_recovered()
+        except Exception as ex:
+            self._reservation_cache_error = str(ex)
+            cached = getattr(self, '_server_reservation_cache', None)
+            if cached is None or cached[0] != account:
+                raise RuntimeError('UNKNOWN: durable competing reduction capacity is unreadable') from ex
+            # This is valid only under the documented one-authoritative-
+            # Trader-per-account contract: all this process's later reserves
+            # update the cache. A new process starts without this proof.
+            rows = cached[1]
+            logging.warning('durable capacity read failed; using complete process cache: %s', ex)
+        emergency = getattr(self, '_emergency_order_journal', None)
+        merged = {(r['intent_id'], r['client_id'], r['order_id']): r for r in rows}
+        for row in emergency.reservations(account) if emergency is not None else []:
+            key = (row['intent_id'], row['client_id'], row['order_id'])
+            previous = merged.get(key)
+            if previous is not None and any(previous.get(field) != row.get(field)
+                                            for field in ('conid', 'action', 'quantity', 'broker_reference')):
+                raise RuntimeError('UNKNOWN: conflicting durable and emergency order reservations')
+            if previous is not None:
+                counts = (previous['leg_count'], row['leg_count'])
+                row = dict(row, leg_count=max(counts) if all(counts) else 0)
+            merged[key] = row
+        tracker = getattr(self, 'order_tracker', None)
+        by_reference: dict[str, list[dict]] = {}
+        by_identity: dict[tuple, list[dict]] = {}
+        for observation in tracker.snapshot() if tracker is not None else []:
+            if observation.get('account') != account:
+                continue
+            by_identity.setdefault((observation.get('clientId', 0), observation.get('orderId')), []).append(observation)
+            if observation.get('clientIntentId'):
+                by_reference.setdefault(observation['clientIntentId'], []).append(observation)
+        # A migrated legacy claim records only a physical (clientId, orderId)
+        # identity, never its instrument. Once this process has replayed the
+        # broker's open orders and available execution history, every working
+        # order placed under ITS OWN client id has been observed with that id:
+        # a legacy identity of this client that is absent from the view is not
+        # working and holds no future executable capacity, whatever it once
+        # was. Before that replay completes the absence proves nothing. Another
+        # client id's working orders are reported with orderId 0 and can never
+        # be matched by identity, so those claims keep deferring.
+        broker_view_complete = bool(
+            getattr(self, '_execution_history_ready', False) and tracker is not None
+            and not tracker.health['replay_required'] and self.client.ib.isConnected())
+        own_client_id = getattr(self, 'trading_runtime_ib_client_id', None)
+        visible = {(split_order_reference(trade.order.orderRef)[1], trade.order.clientId, trade.order.orderId):
+                   _working_reduction_quantity(trade)
+                   for trade in self.working_trades(contract) if trade.order.action == action}
+        topology: dict[str, set[tuple]] = {}
+        topology_counts: dict[str, list[int]] = {}
+        for reservation in merged.values():
+            reference = reservation.get('broker_reference') or reservation['intent_id']
+            topology.setdefault(reference, set()).add((reservation['client_id'], reservation['order_id']))
+            topology_counts.setdefault(reference, []).append(reservation['leg_count'])
+        settled = []
+        missing: dict[tuple, float] = {}
+        for key, reservation in merged.items():
+            _parent, client_id, order_id = key
+            reference = reservation.get('broker_reference') or reservation['intent_id']
+            physical_key = (reference, client_id, order_id)
+            candidates = by_reference.get(reference, [])
+            matching = [row for row in candidates if row.get('clientId') == client_id
+                        and row.get('orderId') == order_id]
+            if (not matching and len(topology[reference]) == 1
+                    and all(count == 1 for count in topology_counts[reference]) and len(candidates) == 1):
+                row = candidates[0]
+                if (row.get('orderId') == 0 and row.get('permId', 0) > 0
+                        and row.get('clientId') in (0, client_id)):
+                    matching = [row]
+            observation = matching[0] if len(matching) == 1 and not matching[0].get('identityAmbiguous', False) else None
+            conid, side, quantity = (reservation.get('conid'), reservation.get('action'), reservation.get('quantity'))
+            if observation is None and conid is None:
+                # Legacy claim: the only evidence is its physical identity, and
+                # legacy orderRefs need not carry the intent reference, so
+                # look the identity up directly rather than by reference.
+                identity_rows = by_identity.get((client_id, order_id), [])
+                if len(identity_rows) == 1 and not identity_rows[0].get('identityAmbiguous', False):
+                    observation = identity_rows[0]
+                elif not identity_rows and broker_view_complete and client_id == own_client_id:
+                    settled.append(key)
+                    continue
+            if observation is not None and (conid is not None and observation.get('conId') != conid
+                                             or side is not None and observation.get('action') != side):
+                observation = None  # a contradictory row cannot release this physical claim
+            if (observation is not None and observation.get('fillQuantityKnown') is True
+                    and observation.get('status') in {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}):
+                settled.append(key)
+                continue
+            # For a legacy reservation, only the exact broker row can supply
+            # scope/quantity. The migration itself supplies none of these.
+            if conid is None and observation is not None:
+                conid, side, quantity = (observation.get('conId'), observation.get('action'), observation.get('totalQuantity'))
+            if (not isinstance(conid, int) or isinstance(conid, bool) or conid <= 0
+                    or side not in {'BUY', 'SELL'}):
+                raise RuntimeError(
+                    'UNKNOWN: legacy competing order has no proven instrument or direction '
+                    f'(intent {reservation["intent_id"]}, client {client_id}, order {order_id}); '
+                    'deferring until the broker open-order and execution replay completes')
+            if conid != contract.conId or side != action:
+                continue
+            if (not isinstance(quantity, (int, float)) or isinstance(quantity, bool)
+                    or not math.isfinite(quantity) or not 0 < quantity < UNSET_DOUBLE):
+                raise RuntimeError('UNKNOWN: competing order quantity is unavailable')
+            reserve = float(quantity)
+            if observation is not None and observation.get('status') != 'Unknown':
+                filled = observation.get('filled')
+                if (not isinstance(filled, (int, float)) or isinstance(filled, bool)
+                        or not math.isfinite(filled) or filled < 0 or filled >= UNSET_DOUBLE):
+                    raise RuntimeError('UNKNOWN: competing cumulative fill quantity is unreadable')
+                reserve = max(0.0, reserve - filled - visible.get(physical_key, 0.0))
+            # A verified in-place modification preserves the original broker
+            # reference and physical ID. Parent claims are not extra orders.
+            missing[physical_key] = max(missing.get(physical_key, 0.0), reserve)
+        if settled:
+            # Keep the source claim/audit intact. This index records only the
+            # authoritative retirement of its executable capacity.
+            if journal is not None:
+                try:
+                    await asyncio.to_thread(journal.settle_reservations, settled)
+                except Exception as ex:
+                    logging.warning('could not persist terminal reduction capacity: %s', ex)
+            if emergency is not None:
+                emergency.settle_reservations(settled)
+            keys = set(settled)
+            self._server_reservation_cache = (account, [row for row in rows
+                if (row['intent_id'], row['client_id'], row['order_id']) not in keys])
+        total = sum(missing.values())
+        if not math.isfinite(total):
+            raise RuntimeError('UNKNOWN: competing reduction capacity overflow')
+        return total
+
+    def _cache_broker_reservation(self, intent_id: str, order: Order, contract: Optional[Contract],
+                                   is_exit: bool, broker_reference: str) -> None:
+        cached = getattr(self, '_server_reservation_cache', None)
+        if cached is None or cached[0] != self.ib_account:
+            return  # a partial process view cannot certify all pre-restart claims
+        rows = cached[1]
+        key = (intent_id, self.trading_runtime_ib_client_id, order.orderId)
+        if any((row['intent_id'], row['client_id'], row['order_id']) == key for row in rows):
+            return  # a just-completed full read already includes this leg
+        rows.append(dict(intent_id=intent_id, client_id=key[1], order_id=key[2],
+                         account=self.ib_account, conid=contract.conId if contract is not None else None,
+                         action=order.action if contract is not None else None,
+                         quantity=float(order.totalQuantity) if contract is not None else None,
+                         is_exit=int(is_exit) if contract is not None else None,
+                         broker_reference=broker_reference if contract is not None else None,
+                         settled=0, leg_count=0))
+        # Until the next complete journal read, a new physical leg makes this
+        # cached topology unsuitable for single-leg orderId=0 association.
+        legs = [row for row in rows if row['intent_id'] == intent_id]
+        for row in legs:
+            row['leg_count'] = 0
+
+    async def reserve_broker_order(self, order: Order, is_exit: bool = False,
+                                   contract: Optional[Contract] = None) -> None:
+        intent_id = _CURRENT_INTENT.get()
+        if not intent_id:
+            return
+        broker_reference = split_order_reference(order.orderRef)[1] or intent_id
+        if broker_reference != intent_id:
+            # Resize changes OCA metadata on a proved existing order without
+            # replacing its broker identity. A caller-supplied foreign ref on
+            # a new order cannot manufacture this alias.
+            if contract is None:
+                raise ValueError('physical modification requires an exact contract')
+            matches = [trade for trade in self.working_trades(contract)
+                       if order.orderId > 0 and trade.order.orderId == order.orderId
+                       and trade.order.clientId == order.clientId == self.trading_runtime_ib_client_id
+                       and split_order_reference(trade.order.orderRef)[1] == broker_reference
+                       and trade.order.action == order.action
+                       and trade.order.totalQuantity == order.totalQuantity]
+            if len(matches) != 1:
+                raise ValueError('foreign broker reference is not a verified same-quantity modification')
+        if not order.orderId:
+            allocated_id = self.client.ib.client.getReqId()
+            # IB.placeOrder treats zero as unallocated, so never reserve it.
+            if type(allocated_id) is int and allocated_id == 0:
+                allocated_id = self.client.ib.client.getReqId()
+            if (not isinstance(allocated_id, int) or isinstance(allocated_id, bool)
+                    or allocated_id <= 0):
+                raise ValueError('broker order ID allocation requires a positive integer')
+            order.orderId = allocated_id
+        journal = _CURRENT_JOURNAL.get() or await asyncio.to_thread(self.server_order_journal)
+        metadata = (dict(conid=contract.conId, action=order.action,
+                         quantity=float(order.totalQuantity), is_exit=is_exit,
+                         broker_reference=broker_reference) if contract is not None else {})
+        try:
+            await asyncio.to_thread(journal.reserve_order, intent_id, order.orderId, self.trading_runtime_ib_client_id, **metadata)
+        except ValueError:
+            raise  # contradictory immutable identity is not a storage outage
+        except Exception as ex:
+            self._journal_degraded = str(ex)
+            if not is_exit:
+                raise
+            from trader.data.server_order_journal import EmergencyOrderJournal
+            emergency = getattr(self, '_emergency_order_journal', None)
+            if emergency is None:
+                emergency = EmergencyOrderJournal()
+                self._emergency_order_journal = emergency
+            emergency.claim(intent_id, 'durable-reservation-failed', self.ib_account)
+            emergency.reserve_order(intent_id, order.orderId, self.trading_runtime_ib_client_id, **metadata)
+            _CURRENT_JOURNAL.set(emergency)
+            logging.error('DURABILITY DEGRADED: reserved emergency exit %s/%s in memory: %s', intent_id, order.orderId, ex)
+        cached = getattr(self, '_server_reservation_cache', None)
+        from trader.data.server_order_journal import ServerOrderJournal
+        if ((cached is None or cached[0] != self.ib_account)
+                and isinstance(journal, ServerOrderJournal) and _CURRENT_JOURNAL.get() is journal):
+            try:
+                # A successful first OPEN also establishes the process's
+                # full prior-claim view before the wire call. Emergency-only
+                # rows can never establish absence of older durable claims.
+                rows = await asyncio.to_thread(journal.reservations, self.ib_account)
+                self._server_reservation_cache = (self.ib_account, rows)
+                self._reservation_cache_error = ''
+            except Exception as ex:
+                self._reservation_cache_error = str(ex)
+                logging.warning('could not warm complete reduction capacity cache: %s', ex)
+        self._cache_broker_reservation(intent_id, order, contract, is_exit, broker_reference)
+        # Preserve the strategy prefix for the ledger; keep the complete ID for
+        # broker-side recovery even when the sidecar is unavailable.
+        if '|mmr:' not in order.orderRef:
+            suffix = f'|mmr:{intent_id}'
+            if len(suffix.encode()) > 200:
+                raise ValueError('client_intent_id is too long for broker recovery identity')
+            prefix = order.orderRef.encode()[:max(0, 255 - len(suffix.encode()))].decode(errors='ignore')
+            order.orderRef = prefix + suffix
+
+    async def unreserve_broker_order(self, order: Order) -> None:
+        """Release a preallocated ID only before any call that can send it."""
+        intent_id = _CURRENT_INTENT.get()
+        journal = _CURRENT_JOURNAL.get()
+        if intent_id and journal is not None:
+            await asyncio.to_thread(journal.discard_order, intent_id,
+                                    order.orderId, self.trading_runtime_ib_client_id)
+            cached = getattr(self, '_server_reservation_cache', None)
+            if cached is not None and cached[0] == self.ib_account:
+                cached[1][:] = [row for row in cached[1] if (row['intent_id'], row['client_id'], row['order_id'])
+                                != (intent_id, self.trading_runtime_ib_client_id, order.orderId)]
+
+    async def _replay_broker_executions(self) -> bool:
+        from trader.trading.execution_replay import replay_execution_history
+        tracker = getattr(self, 'order_tracker', None)
+        if tracker is None:
+            return False
+        if not hasattr(self, '_execution_replay_lock'):
+            self._execution_replay_lock = asyncio.Lock()
+        async with self._execution_replay_lock:
+            if getattr(self, '_execution_history_ready', False) and not tracker.health['replay_required']:
+                return True
+            self._execution_replay_started_at = dt.datetime.now(dt.timezone.utc).isoformat()
+            self._execution_replay_completed_at = None
+            try:
+                await replay_execution_history(self.client.ib, tracker)
+                self._execution_history_ready = True
+                self._execution_replay_completed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+                # Broker completeness and journal durability are distinct.
+                # An unavailable journal must not hide fresh broker evidence
+                # from an already-owned emergency reduction.
+                await asyncio.to_thread(tracker.flush, 1.0)
+                tracker.mark_replay_complete()
+                return True
+            except Exception as ex:
+                self._execution_history_ready = False
+                logging.warning('broker execution replay incomplete: %s', ex)
+                return False
+
+    async def execution_snapshot(self, intent_id: str = '', order_ids: Optional[list[int]] = None) -> dict:
+        """Fresh positions/orders plus IB's bounded execution-history replay.
+
+        Completeness is observation, not proof an absent older intent never
+        executed. Journal health is separate so confirmed reductions can
+        continue during a local storage outage.
+        """
+        ids = list(order_ids or [])
+        prior = None
+        if intent_id:
+            # A split parent may have made its first leg visible while it is
+            # still preparing a second. Wait for that account-order operation
+            # to finish extending the journal topology. Broker snapshot I/O
+            # below runs after releasing this barrier.
+            async with self.serialized_orders():
+                emergency = getattr(self, '_emergency_order_journal', None)
+                prior = emergency.get(intent_id) if emergency is not None else None
+                if prior is None:
+                    try:
+                        journal = await asyncio.to_thread(self.server_order_journal)
+                        prior = await asyncio.to_thread(journal.get, intent_id)
+                        self._journal_recovered()
+                    except Exception as ex:
+                        self._journal_degraded = str(ex)
+            if prior:
+                if prior['account'] != self.ib_account:
+                    raise ValueError('execution intent belongs to a different broker account')
+                ids.extend(item['orderId'] for item in prior['orders'])
+        expected = {(item['clientId'], item['orderId']) for item in prior['orders']} if prior else set()
+        journal_ids = {oid for _client, oid in expected}
+        expected.update((self.trading_runtime_ib_client_id, oid) for oid in ids if oid not in journal_ids)
+        orders_complete = False
+        positions_complete = False
+        account_confirmed = False
+        positions = []
+        tracker = getattr(self, 'order_tracker', None)
+        if (not getattr(self, '_execution_history_ready', False)
+                or tracker is not None and tracker.health['replay_required']):
+            await self._replay_broker_executions()
+        try:
+            fresh_trades = await asyncio.wait_for(self.client.ib.reqOpenOrdersAsync(), 5.0)
+            if tracker is not None:
+                for trade in fresh_trades:
+                    tracker.on_trade(trade)
+            orders_complete = self.client.ib.isConnected()
+        except Exception as ex:
+            logging.warning('open orders snapshot incomplete: %s', ex)
+        try:
+            positions = [p for p in await asyncio.wait_for(self.client.ib.reqPositionsAsync(), 5.0)
+                         if p.account == self.ib_account]
+            account_confirmed = self.ib_account in self.client.ib.managedAccounts()
+            positions_complete = self.client.ib.isConnected() and account_confirmed
+        except Exception as ex:
+            logging.warning('position snapshot incomplete: %s', ex)
+        orders = []
+        provenance_rows: dict[str, list[dict]] = {}
+        reference_observations: dict[str, int] = {}
+        expected_ids = {oid for _client, oid in expected}
+        # Read reference/permId-only completed observations too. Filtering by
+        # numeric ID first would hide exactly the recovery evidence needed
+        # when IB completedOrder reports an orderId of zero.
+        for row in tracker.snapshot() if tracker is not None else []:
+            if row.get('account') != self.ib_account:
+                continue
+            row = dict(row)
+            row.pop('brokerIntentCreatedAt', None)
+            observed_reference = row.get('clientIntentId')
+            if isinstance(observed_reference, str) and observed_reference:
+                reference_observations[observed_reference] = reference_observations.get(observed_reference, 0) + 1
+            key = (row.get('clientId', 0), row['orderId'])
+            reference = row.get('clientIntentId') or ''
+            if intent_id:
+                if reference:
+                    if reference != intent_id:
+                        continue
+                    if row['orderId'] in expected_ids and key not in expected:
+                        continue  # same numeric ID from another broker client
+                elif key not in expected:
+                    continue
+                if key in expected:
+                    row['clientIntentId'] = intent_id
+            elif ids and key not in expected:
+                continue
+            orders.append(row)
+            if isinstance(observed_reference, str) and observed_reference:
+                # An identity inferred solely from requested numeric IDs is
+                # not original broker-reference provenance across restarts.
+                provenance_rows.setdefault(observed_reference, []).append(row)
+        known = {(row.get('clientId', 0), row['orderId']) for row in orders if row['orderId'] > 0}
+        if prior and len(prior['orders']) == 1 and len(expected) == 1 and len(orders) == 1:
+            row = orders[0]
+            if row['orderId'] == 0 and row.get('permId', 0) > 0 and row.get('clientIntentId') == intent_id:
+                # Exactly one durable physical leg and one permanent broker
+                # identity under its reference have one possible association.
+                # Multiple legs or a provisional scoped alias require more
+                # replay evidence. Preserve orderId=0, never mint a cancel ID.
+                known.update(expected)
+        history_ready = bool(getattr(self, '_execution_history_ready', False))
+        complete = (orders_complete and history_ready and account_confirmed and expected <= known
+                    and not any(row.get('identityAmbiguous', False) for row in orders))
+        if provenance_rows:
+            try:
+                provenance_journal = await asyncio.to_thread(self.server_order_journal)
+                claims = await asyncio.to_thread(provenance_journal.get_many, list(provenance_rows))
+            except Exception as ex:
+                logging.warning('broker intent creation provenance unavailable: %s', ex)
+                claims = {}
+            for reference, candidates in provenance_rows.items():
+                claim = claims.get(reference)
+                if claim is None or claim.get('account') != self.ib_account:
+                    continue
+                created = claim.get('created_at')
+                if (not isinstance(created, (int, float)) or isinstance(created, bool)
+                        or not math.isfinite(created) or created <= 0):
+                    continue
+                legs = claim.get('orders')
+                if not isinstance(legs, list) or not legs or any(
+                    not isinstance(leg, dict)
+                    or any(not isinstance(leg.get(field), int) or isinstance(leg.get(field), bool)
+                           for field in ('clientId', 'orderId'))
+                    or leg['orderId'] <= 0 for leg in legs
+                ):
+                    continue
+                reserved = {(leg['clientId'], leg['orderId']) for leg in legs}
+                for row in candidates:
+                    if row.get('identityAmbiguous', False):
+                        continue
+                    client_id, order_id = row.get('clientId', 0), row['orderId']
+                    if any(not isinstance(value, int) or isinstance(value, bool)
+                           for value in (client_id, order_id)):
+                        continue
+                    matches = (client_id, order_id) in reserved
+                    if order_id == 0:
+                        perm_id = row.get('permId', 0)
+                        # The same singleton recovery used for completeness,
+                        # applied per intent for an unscoped snapshot. A
+                        # contradictory nonzero client cannot be omitted data.
+                        matches = (len(legs) == 1 and reference_observations[reference] == 1
+                                   and len(candidates) == 1
+                                   and isinstance(perm_id, int) and not isinstance(perm_id, bool) and perm_id > 0
+                                   and client_id in (0, legs[0]['clientId'])
+                                   and (not intent_id or len(expected) == 1 and len(orders) == 1))
+                    if matches:
+                        row['brokerIntentCreatedAt'] = float(created)
+        receipts = []
+        receipts_available = False
+        try:
+            if tracker is not None:
+                receipts = await asyncio.to_thread(tracker.execution_receipts, ids or None)
+                receipts_available = True
+        except Exception as ex:
+            self._journal_degraded = str(ex)
+        journal_healthy = (not bool(getattr(self, '_journal_degraded', ''))
+                           and tracker is not None and tracker.health['healthy'])
+        return {'complete': complete, 'positions_complete': positions_complete,
+                'account': self.ib_account, 'account_confirmed': account_confirmed,
+                'client_id': getattr(self, 'trading_runtime_ib_client_id', None),
+                'orders_complete': orders_complete, 'executions_complete': history_ready,
+                'execution_replay': {
+                    'scope': 'broker_available_recent_history',
+                    'history_start': None,  # IB supplies no completeness boundary for older history
+                    'requested_at': getattr(self, '_execution_replay_started_at', None),
+                    'completed_at': getattr(self, '_execution_replay_completed_at', None)},
+                'observed_at': dt.datetime.now(dt.timezone.utc).isoformat(),
+                'orders': orders,
+                'retry_safe': bool(prior and prior['status'] == 'RETRYABLE' and not prior['orders']),
+                'intent_outcome': prior.get('outcome') if prior else None,
+                'journal_healthy': journal_healthy, 'execution_receipts_available': receipts_available,
+                'positions': [{'conId': p.contract.conId, 'position': p.position, 'avgCost': p.avgCost,
+                               'account': p.account, 'contract': p.contract} for p in positions],
+                'executions': receipts}
+
+    async def _place_expressive_order(
         self,
         contract: Contract,
         action: str,
@@ -1486,6 +2387,7 @@ class Trader():
         algo_name: str = 'proposal',
         approver_key: str = '',
         force_open: bool = False,
+        allow_open: bool = True,
     ) -> SuccessFail:
         """Place an order with full execution specification (brackets, trailing stops, etc.).
 
@@ -1496,7 +2398,10 @@ class Trader():
         wave it through. It is never set by an external caller.
         """
         from trader.trading.proposal import ExecutionSpec
-        spec = ExecutionSpec.from_dict(execution_spec)
+        try:
+            spec = ExecutionSpec.from_dict(execution_spec)
+        except (TypeError, ValueError) as ex:
+            return SuccessFail.fail(error=f'Invalid execution spec: {ex}')
 
         # Validate execution spec before placing any orders
         validation_errors = spec.validate()
@@ -1573,16 +2478,21 @@ class Trader():
             if plan.is_flip:
                 return await self._place_flip_split(
                     contract, action, plan, execution_spec, algo_name,
-                    approver_key)
+                    approver_key, allow_open=allow_open)
 
         is_exit = False if force_open else self.order_reduces_exposure(
             contract, action, quantity)
+        if not is_exit and not allow_open:
+            return SuccessFail.fail(error='Opening exposure requires an approved proposal matching this exact order')
 
         # Tri-state gate record carried into the entry leg's minted token
         # (empty for exit-class entries and for protective children).
         entry_checks: dict = {}
 
         if is_exit:
+            # The opposite child of a closing entry opens a new position.
+            # Protection belongs only to an exposure-opening parent.
+            spec.exit_type = 'NONE'
             if self.risk_gate is not None:
                 # Observability only — never refuse an exit.
                 try:
@@ -1614,72 +2524,10 @@ class Trader():
             # Build a temporary entry order for margin simulation
             probe_order = _build_entry(**common)
 
-            # 2. whatIfOrder margin check
-            # Tri-state record for the margin/leverage dimension, merged into the
-            # gate's checks below. Without this a whatIfOrder failure produced a
-            # clean-looking approval with NOTHING recording that the leverage
-            # limit was never applied — the audit trail could not distinguish
-            # "checked and fine" from "never checked".
-            # FAIL CLOSED (2026-07-26): a whatIfOrder failure or an empty
-            # margin dict REFUSES the open. This was the last gate input that
-            # still failed open — the recorded 'skipped:' states existed so the
-            # audit trail could distinguish "checked and fine" from "never
-            # checked", and the flip makes "never checked" refuse like every
-            # other unreadable critical input. Exits never reach this branch.
-            leverage_checks: Dict[str, str] = {}
-            if (contract.secType or '').upper() == 'CASH':
-                # A forex order is a currency conversion, not leveraged stock
-                # exposure — the same reasoning that exempts CASH from the
-                # concentration check. This is also a practical necessity, not
-                # just taste: IB's whatIfOrder returns NO order state for
-                # CASH/IDEALPRO (observed live 2026-07-27), so without this
-                # carve-out the fail-closed margin gate makes forex opens
-                # permanently impossible. Recorded, never silent.
-                leverage_checks = {
-                    'leverage': 'skipped:forex-cash',
-                    'margin_cushion': 'skipped:forex-cash',
-                }
-                margin_impact = None
-            else:
-                margin_impact = await self._margin_impact_or_refusal(contract, probe_order)
-                if isinstance(margin_impact, SuccessFail):
-                    return margin_impact
-
-            # 3. Leverage limit check
-            if margin_impact:
-                # Scope NetLiquidation to the configured account. With a
-                # multi-account login, accountValues() returns rows for every
-                # managed account; picking the first NetLiquidation row blind
-                # could size the leverage check against the wrong (e.g. master
-                # aggregate) account. Pin to self.ib_account.
-                active_account = self.ib_account
-                if not active_account:
-                    managed = self.client.ib.managedAccounts() or []
-                    active_account = managed[0] if managed else None
-                net_liq = 0.0
-                for v in self.client.ib.accountValues():
-                    if v.tag != 'NetLiquidation' or v.currency == 'BASE':
-                        continue
-                    if active_account and v.account and v.account != active_account:
-                        continue
-                    net_liq = float(v.value)
-                    break
-
-                leverage_result = self.risk_gate.check_leverage(margin_impact, net_liq)
-                leverage_checks = dict(leverage_result.checks or {})
-                if not leverage_result.approved:
-                    return SuccessFail.fail(error=leverage_result.reason)
-            elif not leverage_checks:
-                # margin_impact was falsy but no exception fired (e.g. {}).
-                # UNEVALUABLE, not skipped: the check applies to this order and
-                # its input could not be read. The chokepoint treats that like a
-                # failure for an opening order, which is the documented policy
-                # (unreadable margin data refuses an open) now expressed in the
-                # gate record rather than only in prose.
-                leverage_checks = {
-                    'leverage': 'unevaluable:margin-data',
-                    'margin_cushion': 'unevaluable:margin-data',
-                }
+            margin_result = await self.margin_checks(contract, probe_order)
+            if not margin_result.approved:
+                return SuccessFail.fail(error=margin_result.reason)
+            leverage_checks = dict(margin_result.checks)
 
             # 4. Risk gate checks (open orders, daily loss, concentration)
             from trader.trading.strategy import Signal
@@ -1696,10 +2544,7 @@ class Trader():
 
             inputs = self.gather_risk_inputs()
 
-            try:
-                multiplier = float(contract.multiplier) if contract.multiplier else 1.0
-            except (TypeError, ValueError):
-                multiplier = 1.0
+            multiplier = TradeExecutioner._multiplier(contract)
 
             # Concentration needs a notional. LIMIT orders carry their own
             # price; MARKET orders are valued off a snapshot so the check is
@@ -1734,6 +2579,9 @@ class Trader():
                     logging.warning(
                         'risk gate: no snapshot price to value market order: %s', ex)
 
+            converted = self.convert_notional(position_value, contract.currency)
+            position_value_evaluable = position_value_evaluable and converted is not None
+            position_value = converted if converted is not None else 0.0
             gate_result = self.risk_gate.evaluate(
                 signal=signal,
                 open_order_count=inputs.open_order_count,
@@ -1744,6 +2592,8 @@ class Trader():
                 portfolio_value_evaluable=inputs.portfolio_value_evaluable,
                 position_value_evaluable=position_value_evaluable,
                 sec_type=contract.secType or '',
+                aggregate_position_value=self.aggregate_position_value(
+                    contract, action, quantity, position_value),
             )
             if not gate_result.approved:
                 return SuccessFail.fail(error=f'Risk gate: {gate_result.reason}')
@@ -1776,9 +2626,14 @@ class Trader():
             Trade object or None on failure (observer emitted on_error)."""
             event = asyncio.Event()
             result: Dict[str, Optional[Trade]] = {'trade': None}
+            errors: list[Exception] = []
 
             def _on_next(trade: Trade):
                 result['trade'] = trade
+                event.set()
+
+            def _on_error(error):
+                errors.append(error)
                 event.set()
 
             # leg_reason defaults to PROTECTIVE_CHILD because the TP/SL legs are
@@ -1790,12 +2645,19 @@ class Trader():
                 c, o, is_exit=leg_is_exit, checks=leg_checks or {},
                 exit_reason=leg_reason)
             obs = await self.executioner.subscribe_place_order_direct(approved)
-            obs.subscribe(Observer(
+            disposable = obs.pipe(ops.take(1)).subscribe(Observer(
                 on_next=_on_next,
-                on_error=lambda e: event.set(),
-                on_completed=lambda: None,
+                on_error=_on_error,
+                on_completed=event.set,
             ))
-            await event.wait()
+            try:
+                await asyncio.wait_for(event.wait(), timeout=8.0)
+            except TimeoutError as ex:
+                raise RuntimeError('UNKNOWN: broker submission did not return a receipt') from ex
+            finally:
+                disposable.dispose()
+            if errors and ('UNKNOWN:' in str(errors[0]) or leg_reason is ExitReason.POSITION_CLASSIFIED):
+                raise RuntimeError(str(errors[0]))
             return result['trade']
 
         def _cancel_trade_safely(trade: Optional[Trade]) -> None:
@@ -1875,19 +2737,9 @@ class Trader():
                 entry = _build_entry(**common)
                 entry.transmit = False
 
-                task = asyncio.Event()
-                entry_trade = None
-
-                def on_entry_ts(trade: Trade):
-                    nonlocal entry_trade
-                    entry_trade = trade
-                    task.set()
-
-                observable = await self.executioner.subscribe_place_order_direct(
-                    mint_approved_order(contract, entry, is_exit=is_exit, checks=entry_checks,
-                                            exit_reason=ExitReason.POSITION_CLASSIFIED))
-                observable.subscribe(Observer(on_next=on_entry_ts, on_error=lambda e: task.set(), on_completed=lambda: None))
-                await task.wait()
+                entry_trade = await _place_and_wait(
+                    contract, entry, leg_is_exit=is_exit, leg_checks=entry_checks,
+                    leg_reason=ExitReason.POSITION_CLASSIFIED)
 
                 if entry_trade is None:
                     return SuccessFail.fail(error='Failed to place entry order')
@@ -1910,19 +2762,7 @@ class Trader():
                 elif spec.trailing_stop_amount:
                     trail.auxPrice = spec.trailing_stop_amount
 
-                trail_task = asyncio.Event()
-                trail_trade: Optional[Trade] = None
-
-                def on_trail(trade: Trade):
-                    nonlocal trail_trade
-                    trail_trade = trade
-                    trail_task.set()
-
-                trail_obs = await self.executioner.subscribe_place_order_direct(
-                    mint_approved_order(contract, trail, is_exit=True,
-                                            exit_reason=ExitReason.PROTECTIVE_CHILD))
-                trail_obs.subscribe(Observer(on_next=on_trail, on_error=lambda e: trail_task.set(), on_completed=lambda: None))
-                await trail_task.wait()
+                trail_trade = await _place_and_wait(contract, trail, leg_is_exit=True)
                 if trail_trade is None:
                     # All-or-nothing: the trailing stop is what transmits the
                     # staged (transmit=False) entry. If it failed, roll back the
@@ -1938,19 +2778,9 @@ class Trader():
                 entry = _build_entry(**common)
                 entry.transmit = False
 
-                task = asyncio.Event()
-                entry_trade = None
-
-                def on_entry_sl(trade: Trade):
-                    nonlocal entry_trade
-                    entry_trade = trade
-                    task.set()
-
-                observable = await self.executioner.subscribe_place_order_direct(
-                    mint_approved_order(contract, entry, is_exit=is_exit, checks=entry_checks,
-                                            exit_reason=ExitReason.POSITION_CLASSIFIED))
-                observable.subscribe(Observer(on_next=on_entry_sl, on_error=lambda e: task.set(), on_completed=lambda: None))
-                await task.wait()
+                entry_trade = await _place_and_wait(
+                    contract, entry, leg_is_exit=is_exit, leg_checks=entry_checks,
+                    leg_reason=ExitReason.POSITION_CLASSIFIED)
 
                 if entry_trade is None:
                     return SuccessFail.fail(error='Failed to place entry order')
@@ -1970,19 +2800,7 @@ class Trader():
                     outsideRth=spec.outside_rth,
                 )
 
-                sl_task = asyncio.Event()
-                sl_trade: Optional[Trade] = None
-
-                def on_sl_only(trade: Trade):
-                    nonlocal sl_trade
-                    sl_trade = trade
-                    sl_task.set()
-
-                sl_obs = await self.executioner.subscribe_place_order_direct(
-                    mint_approved_order(contract, sl, is_exit=True,
-                                         exit_reason=ExitReason.PROTECTIVE_CHILD))
-                sl_obs.subscribe(Observer(on_next=on_sl_only, on_error=lambda e: sl_task.set(), on_completed=lambda: None))
-                await sl_task.wait()
+                sl_trade = await _place_and_wait(contract, sl, leg_is_exit=True)
                 if sl_trade is None:
                     # All-or-nothing: the stop-loss transmits the staged
                     # (transmit=False) entry. If it failed, roll back the entry
@@ -1998,19 +2816,9 @@ class Trader():
                 entry = _build_entry(**common)
                 entry.transmit = True
 
-                task = asyncio.Event()
-                entry_trade = None
-
-                def on_entry_simple(trade: Trade):
-                    nonlocal entry_trade
-                    entry_trade = trade
-                    task.set()
-
-                observable = await self.executioner.subscribe_place_order_direct(
-                    mint_approved_order(contract, entry, is_exit=is_exit, checks=entry_checks,
-                                            exit_reason=ExitReason.POSITION_CLASSIFIED))
-                observable.subscribe(Observer(on_next=on_entry_simple, on_error=lambda e: task.set(), on_completed=lambda: None))
-                await task.wait()
+                entry_trade = await _place_and_wait(
+                    contract, entry, leg_is_exit=is_exit, leg_checks=entry_checks,
+                    leg_reason=ExitReason.POSITION_CLASSIFIED)
                 if entry_trade is None:
                     return SuccessFail.fail(error='Failed to place entry order')
                 trades.append(entry_trade)
@@ -2024,11 +2832,11 @@ class Trader():
             if tracker is not None and trades:
                 entry_id = int(getattr(trades[0].order, 'orderId', 0) or 0)
                 if entry_id:
-                    verdict = await tracker.wait_decisive(entry_id, timeout=8.0)
+                    verdict = await tracker.wait_decisive(entry_id, timeout=8.0, trade=trades[0])
                     if verdict == 'rejected':
                         for t in trades:
                             _cancel_trade_safely(t)
-                        reason = tracker.latest_status(entry_id) or 'rejected'
+                        reason = tracker.latest_status(entry_id, trade=trades[0]) or 'rejected'
                         return SuccessFail.fail(
                             error=f'Order rejected by IB (entry status={reason})')
 
@@ -2036,9 +2844,116 @@ class Trader():
 
         except Exception as ex:
             logging.error(f'place_expressive_order error: {ex}')
-            return SuccessFail.fail(exception=ex)
+            return SuccessFail.fail(error=str(ex), exception=ex)
 
     async def place_standalone_order(
+        self, contract: Contract, action: str, quantity: float, order_type: str,
+        aux_price: float = 0, limit_price: float = 0, trailing_percent: float = 0,
+        tif: str = 'GTC', outside_rth: bool = True, order_ref: str = '',
+        client_intent_id: str = '',
+    ) -> SuccessFail:
+        args = (contract, action, quantity, order_type)
+        kwargs = dict(aux_price=aux_price, limit_price=limit_price,
+                      trailing_percent=trailing_percent, tif=tif,
+                      outside_rth=outside_rth, order_ref=order_ref)
+        return await self._run_order_intent('protective', client_intent_id,
+                                           self._place_standalone_order, args, kwargs)
+
+    async def resize_position(self, contract: Contract, target_quantity: float,
+                              client_intent_id: str = '') -> SuccessFail:
+        """Submit a coordinated trim, preserving the protection of pending shares.
+
+        An existing protective tranche equal to the requested trim can share
+        IB's reduce-with-block OCA group with the trim. A single larger stop
+        cannot be atomically split into two orders with this API, so that shape
+        is deferred *before* any order modification. Success means submitted;
+        callers reconcile executions before treating the target as achieved.
+        """
+        return await self._run_order_intent(
+            'resize', client_intent_id, self._resize_position,
+            (contract, target_quantity), {})
+
+    async def _resize_position(self, contract: Contract, target_quantity: float) -> SuccessFail:
+        if not math.isfinite(target_quantity) or int(contract.conId or 0) <= 0:
+            return SuccessFail.fail(error='resize requires finite target and exact conId')
+        try:
+            snapshot = await self.client.ib.reqOpenOrdersAsync()
+            positions = await self.client.ib.reqPositionsAsync()
+        except Exception as ex:
+            return SuccessFail.fail(error=f'DEFERRED: complete broker state unavailable: {ex}')
+        held = sum(float(p.position) for p in positions
+                   if p.account == self.ib_account and p.contract.conId == contract.conId)
+        if not math.isfinite(held):
+            return SuccessFail.fail(error='DEFERRED: broker position is not finite')
+        if target_quantity == held:
+            return SuccessFail.success(obj={'status': 'UNCHANGED', 'order_ids': []})
+        if held * target_quantity < 0 or abs(target_quantity) > abs(held):
+            return SuccessFail.fail(error='DEFERRED: coordinated resize supports reductions; use a reviewed proposal to grow')
+        action = 'SELL' if held > 0 else 'BUY'
+        trim_qty = abs(held - target_quantity)
+        working = [t for t in snapshot
+                   if t.contract.conId == contract.conId and t.order.account == self.ib_account
+                   and t.order.action == action
+                   and t.orderStatus.status not in {'Cancelled', 'ApiCancelled', 'Filled', 'Inactive'}]
+        protective = None
+        if working:
+            # Only independent protective tranches with exact quantities have a
+            # proved handoff here. Arbitrary bracket/OCA webs need a separately
+            # specified coordinator; guessing their ownership is unsafe.
+            if any(t.order.orderType not in {'STP', 'TRAIL'} or t.order.ocaGroup
+                   or t.order.parentId or t.orderStatus.status not in {'Submitted', 'PreSubmitted'}
+                   for t in working):
+                return SuccessFail.fail(error='DEFERRED: unsupported protective order topology')
+            quantities = [float(t.orderStatus.remaining) for t in working]
+            if (not all(math.isfinite(q) and q > 0 for q in quantities)
+                    or abs(sum(quantities) - abs(held)) > 1e-8):
+                return SuccessFail.fail(error='DEFERRED: protective coverage does not exactly match broker inventory')
+            protective = next((t for t in working
+                               if abs(float(t.orderStatus.remaining) - trim_qty) < 1e-8), None)
+            if protective is None:
+                return SuccessFail.fail(error='DEFERRED: partial trim requires an existing matching protective tranche; no orders changed')
+
+        oca_group = ''
+        if protective is not None:
+            oca_group = f'mmr-resize-{uuid.uuid4().hex}'
+            edit = copy.copy(protective.order)
+            edit.ocaGroup, edit.ocaType = oca_group, 2
+            edit.transmit = True
+            modified = await self.executioner.subscribe_place_order_direct(
+                mint_approved_order(contract, edit, is_exit=True,
+                                    exit_reason=ExitReason.VALIDATED_STANDALONE))
+            try:
+                await asyncio.wait_for(modified.pipe(ops.take(1)), timeout=8.0)
+                confirmed = await self.client.ib.reqOpenOrdersAsync()
+                positions = await self.client.ib.reqPositionsAsync()
+            except Exception as ex:
+                return SuccessFail.fail(error=f'UNKNOWN: protective OCA modification requires reconciliation: {ex}')
+            match = next((t for t in confirmed if t.order.orderId == edit.orderId
+                          and t.order.clientId == edit.clientId
+                          and t.order.account == self.ib_account
+                          and t.contract.conId == contract.conId), None)
+            new_held = sum(float(p.position) for p in positions
+                           if p.account == self.ib_account and p.contract.conId == contract.conId)
+            if (match is None or match.order.ocaGroup != oca_group or match.order.ocaType != 2
+                    or match.orderStatus.status not in {'Submitted', 'PreSubmitted'}
+                    or float(match.orderStatus.remaining) != trim_qty or new_held != held):
+                return SuccessFail.fail(error='UNKNOWN: broker has not confirmed the matching protected tranche; trim not submitted')
+
+        order = MarketOrder(action, trim_qty, account=self.ib_account, transmit=True,
+                            ocaGroup=oca_group, ocaType=2 if oca_group else 0)
+        observable = await self.executioner.subscribe_place_order_direct(
+            mint_approved_order(contract, order, is_exit=True,
+                                exit_reason=ExitReason.POSITION_CLASSIFIED))
+        try:
+            trade = await asyncio.wait_for(observable.pipe(ops.take(1)), timeout=8.0)
+        except Exception as ex:
+            return SuccessFail.fail(error=f'UNKNOWN: resize submission requires reconciliation: {ex}')
+        return SuccessFail.success(obj={
+            'status': 'SUBMITTED', 'order_ids': [trade.order.orderId],
+            'target_quantity': target_quantity,
+            'protection': 'OCA_REDUCE_WITH_BLOCK' if protective else 'NO_EXISTING_PROTECTION'})
+
+    async def _place_standalone_order(
         self,
         contract: Contract,
         action: str,
@@ -2135,10 +3050,15 @@ class Trader():
 
             task = asyncio.Event()
             result_trade: Optional[Trade] = None
+            errors: list[Exception] = []
 
             def on_next(trade: Trade):
                 nonlocal result_trade
                 result_trade = trade
+                task.set()
+
+            def on_error(error):
+                errors.append(error)
                 task.set()
 
             # Standalone orders are exit-class ONLY (validated above): mint a
@@ -2146,13 +3066,13 @@ class Trader():
             observable = await self.executioner.subscribe_place_order_direct(
                 mint_approved_order(contract, order, is_exit=True,
                         exit_reason=ExitReason.VALIDATED_STANDALONE))
-            observable.subscribe(Observer(on_next=on_next, on_error=lambda e: task.set(), on_completed=lambda: None))
+            observable.pipe(ops.take(1)).subscribe(Observer(on_next=on_next, on_error=on_error, on_completed=lambda: None))
             await task.wait()
 
             if result_trade:
                 return SuccessFail.success(obj=result_trade)
             else:
-                return SuccessFail.fail(error='Failed to place standalone order')
+                return SuccessFail.fail(error=str(errors[0]) if errors else 'Failed to place standalone order')
 
         except Exception as ex:
             logging.error(f'place_standalone_order error: {ex}')
@@ -2160,6 +3080,34 @@ class Trader():
 
     @log_method
     async def place_order_simple(
+        self, contract: Contract, action: Action, equity_amount: Optional[float],
+        quantity: Optional[float], limit_price: Optional[float], market_order: bool,
+        stop_loss_percentage: float, algo_name: str = 'global', debug: bool = False,
+        skip_risk_gate: bool = False, approver_key: str = '', allow_open: bool = True,
+        client_intent_id: str = '',
+    ) -> Observable[Trade]:
+        args = (contract, action, equity_amount, quantity, limit_price,
+                market_order, stop_loss_percentage)
+        kwargs = dict(algo_name=algo_name, debug=debug, skip_risk_gate=skip_risk_gate,
+                      approver_key=approver_key, allow_open=allow_open)
+        async with self.serialized_orders():
+            intent_id = client_intent_id
+            if not intent_id and not isinstance(getattr(self, 'duckdb_path', None), str):
+                return await self._place_order_simple(
+                    contract, action, equity_amount, quantity, limit_price,
+                    market_order, stop_loss_percentage, algo_name, debug,
+                    skip_risk_gate, approver_key, allow_open)
+            result = await self._run_order_intent('simple', intent_id,
+                                                 self._place_order_simple, args, kwargs)
+            if not result.is_success():
+                return rx.throw(RuntimeError(result.error))
+            observable = rx.of(cast(Trade, result.obj))
+            if hasattr(result, 'execution_outcome'):
+                setattr(observable, 'execution_outcome', result.execution_outcome)
+            setattr(observable, 'client_intent_id', getattr(result, 'client_intent_id', intent_id))
+            return observable
+
+    async def _place_order_simple(
         self,
         contract: Contract,
         action: Action,
@@ -2181,6 +3129,12 @@ class Trader():
         through propose → approve like any other."""
         latest_tick: Ticker = await self.client.get_snapshot(contract)
 
+        if quantity is None and equity_amount is not None:
+            base_per_local = self.convert_notional(1.0, contract.currency)
+            if base_per_local is None or base_per_local <= 0:
+                return rx.throw(ValueError('Cannot size base-currency amount: FX rate unavailable'))
+            equity_amount = equity_amount / base_per_local
+
         contract_order = self.executioner.helper_create_order(
             contract,
             action,
@@ -2199,10 +3153,7 @@ class Trader():
         # fetched — ask for a BUY, bid for a SELL). None = no usable price,
         # which the gate treats as not-evaluable and refuses opens on.
         position_value_hint: Optional[float] = None
-        try:
-            multiplier = float(contract.multiplier) if contract.multiplier else 1.0
-        except (TypeError, ValueError):
-            multiplier = 1.0
+        multiplier = TradeExecutioner._multiplier(contract)
         for candidate in (
             limit_price,
             latest_tick.ask if action == Action.BUY else latest_tick.bid,
@@ -2240,26 +3191,38 @@ class Trader():
                 position_value_hint=position_value_hint,
                 approver_key=approver_key,
             )
-            if not allow_open:
-                # require_proposal_approval is on. The reduction still goes
-                # through — a close is never blocked behind a proposal — but
-                # the opening half is a NEW trade and needs the reviewed path.
-                # Leaving the caller flat is the safe direction.
-                return reduce_obs
-            open_order = self.executioner.helper_create_order(
-                contract, action, latest_tick, None, plan.open_qty,
-                limit_price, market_order, stop_loss_percentage, algo_name, debug)
-            # The remainder may be refused; that leaves the caller flat,
-            # which is the safe direction. Its observable carries the
-            # refusal to the caller exactly as any gated order would.
-            await self.executioner.place_order(
-                contract_order=open_order,
-                condition=ExecutorCondition.SANITY_CHECK,
-                position_value_hint=position_value_hint,
-                approver_key=approver_key,
-                force_open=True,
-            )
-            return reduce_obs
+            try:
+                reduction = await reduce_obs.pipe(ops.take(1))
+            except Exception as ex:
+                return rx.throw(ex)
+            outcome = {
+                'reduction': {'status': 'SUBMITTED', 'quantity': float(reduction.order.totalQuantity),
+                              'order_ids': [reduction.order.orderId]},
+                'opening': {'status': 'REJECTED', 'quantity': plan.open_qty,
+                            'error': 'opening exposure requires an approved proposal'},
+            }
+            if allow_open:
+                try:
+                    open_order = self.executioner.helper_create_order(
+                        contract, action, latest_tick, None, plan.open_qty,
+                        limit_price, market_order, stop_loss_percentage, algo_name, debug)
+                    open_value = position_value_hint * plan.open_qty / final_qty if position_value_hint is not None else None
+                    open_obs = await self.executioner.place_order(
+                        contract_order=open_order,
+                        condition=ExecutorCondition.SANITY_CHECK,
+                        position_value_hint=open_value,
+                        approver_key=approver_key,
+                        force_open=True,
+                    )
+                    opening = await open_obs.pipe(ops.take(1))
+                    outcome['opening'] = {'status': 'SUBMITTED', 'quantity': float(opening.order.totalQuantity),
+                                          'order_ids': [opening.order.orderId]}
+                except Exception as ex:
+                    outcome['opening'] = {'status': 'UNKNOWN' if 'UNKNOWN' in str(ex) else 'REJECTED',
+                                          'quantity': plan.open_qty, 'error': str(ex)}
+            result_obs = rx.of(reduction)
+            setattr(result_obs, 'execution_outcome', outcome)
+            return result_obs
 
         return await self.executioner.place_order(
             contract_order=contract_order,
@@ -2449,6 +3412,29 @@ class Trader():
             ))
         return summary
 
+    @staticmethod
+    def routable_contract(contract: Contract) -> Contract:
+        """An order-routable copy of a broker position record.
+
+        ``ib.positions()`` reports contracts with ``exchange=''``; IB rejects
+        ``placeOrder`` on that shape with error 321 ("Please enter exchange").
+        Every client-originated path normalises through ``sdk._to_contract``;
+        the server-side emergency reduction placed the raw record and failed
+        at the broker on every retry. The conId is kept exactly; only the
+        routing venue is supplied, and only when the record has none.
+        """
+        routed = copy.copy(contract)
+        if (routed.exchange or '').strip():
+            return routed
+        sec_type = (routed.secType or '').upper()
+        if sec_type == 'CASH':
+            routed.exchange = 'IDEALPRO'
+        elif sec_type in {'STK', 'ETF', 'OPT', 'WAR', 'CFD', 'BOND', 'FUND', ''}:
+            routed.exchange = 'SMART'
+        elif (routed.primaryExchange or '').strip():
+            routed.exchange = routed.primaryExchange
+        return routed
+
     def get_positions(self) -> List[Position]:
         # See _get_portfolio_summary_sync for rationale — hit ib_async
         # directly rather than relying on the event-driven local cache.
@@ -2457,10 +3443,10 @@ class Trader():
                 account=self.ib_account
             ) if self.ib_account else self.client.ib.positions()
             if positions:
-                return list(positions)
+                return [p for p in positions if p.account == self.ib_account]
         except Exception as ex:
             logging.warning('ib.positions() failed, using cache: %s', ex)
-        return self.portfolio.get_positions()
+        return [p for p in self.portfolio.get_positions() if p.account == self.ib_account]
 
     async def reconcile_with_broker(self) -> dict:
         """Cross-check recent proposals + positions against live IB truth.

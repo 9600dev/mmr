@@ -3,21 +3,30 @@
 Regression for the precedence bug where a cache hit skipped the exchange check
 when a universe was given and skipped sec_type entirely.
 """
-import types
-
 from trader.data.universe import UniverseAccessor
 
 
 def _accessor_with_cached_asx_stk():
-    acc = object.__new__(UniverseAccessor)
-    sd = types.SimpleNamespace(conId=1, exchange='ASX', primaryExchange='ASX',
-                               secType='STK', symbol='BHP')
-    u = types.SimpleNamespace(name='mine', security_definitions=[sd])
-    acc._resolver_cache = {1: (u, sd)}
-    # A miss falls through to iteration; keep it empty so we can tell a hit from
-    # a fall-through (fall-through returns []).
-    acc.get_all = lambda: []
-    acc.get = lambda name: types.SimpleNamespace(name=name, security_definitions=[])
+    # Prime through the public resolver; the cache's private representation is
+    # allowed to change while all existing request/filter assertions remain.
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+    from ib_async import Contract, ContractDetails
+    from trader.data.data_access import SecurityDefinition
+    from trader.data.universe import Universe
+
+    temporary = TemporaryDirectory(prefix='mmr-resolver-test-')
+    acc = UniverseAccessor(str(Path(temporary.name)/'catalogue.duckdb'), 'mine')
+    acc._test_temporary = temporary
+    sd = SecurityDefinition.from_contract_details(ContractDetails(contract=Contract(
+        conId=1, exchange='ASX', primaryExchange='ASX', secType='STK',
+        symbol='BHP', currency='AUD')))
+    u = Universe('mine', [sd])
+    # Stable object identity preserves these original unit assertions; the
+    # integration cases in test_sdk exercise actual persisted catalogue reads.
+    acc.get_all = lambda: [u]
+    acc.get = lambda name: u if name == 'mine' else Universe(name, [])
+    acc.resolve_universe(1)
     return acc, u, sd
 
 

@@ -1,0 +1,173 @@
+{
+  "current_source_replay": {
+    "auto_exec_bar_log": {
+      "after_columns": 8,
+      "after_snapshot_sha256": "a79d2882ebcb36b9e618b3b2cd0432af8c1a91ba38809ef13dec1f124a066f87",
+      "before_columns": 8,
+      "before_snapshot_sha256": "a79d2882ebcb36b9e618b3b2cd0432af8c1a91ba38809ef13dec1f124a066f87",
+      "legacy_intent_ids_invented": false,
+      "legacy_rows_before": 0,
+      "migrated_null_intent_id_rows": 0,
+      "migration_scope": "Only the nullable intent_id VARCHAR column is added; original rows are not attributed to invented identities.",
+      "original_values_and_row_multiplicity_unchanged": true,
+      "rows_after": 0,
+      "schema_migration_observed": false,
+      "table": "auto_exec_bar_log",
+      "table_creation_observed": false,
+      "transition": "already_eight_columns_unchanged",
+      "unchanged_across_restart_and_cleanup": true
+    },
+    "both_services_restarted": true,
+    "complete_account_scoped_snapshots": true,
+    "exit_codes_collected": false,
+    "final_flat_no_working_orders": true,
+    "historical_audit_rows_unchanged": true,
+    "historical_rounds": 4,
+    "new_harness_fill_events": 0,
+    "new_server_claims_or_reservations": 0,
+    "original_server_claims_and_order_id_lists_unchanged": true,
+    "paper_gateway_left_running": true,
+    "physical_identities": 13,
+    "priced_fills_preserved": 8,
+    "reservation_capacity_index": {
+      "capacity_index_rows": 14,
+      "index_matches_allowed_baseline_or_migration": true,
+      "index_present": true,
+      "migration_scope": "Only NULL-scope, unsettled metadata rows for existing physical claim legs.",
+      "original_claim_legs": 14,
+      "schema_migration_observed": false,
+      "snapshot_sha256": "9c7870e8e27020f50109e8fd6b4f8b3446cf9bf2bde0058c88c22637bdf06657",
+      "unchanged_across_restart_and_cleanup": true
+    },
+    "temporary_services_sigint_and_exits_observed": true
+  },
+  "historical_execution": {
+    "artifact": "remediation_paper_2026-09-08.json",
+    "consistency_checks": {
+      "current_source_execution_claimed": false,
+      "exactly_two_priced_fill_events_before_and_after_restart": true,
+      "final_flat_no_working_orders": true,
+      "fresh_distinct_close_approved": true,
+      "initial_and_recovery_stops_cancelled_without_fill": true,
+      "matches_recorded_historical_production_source": true,
+      "one_share_entry_and_exit": true,
+      "original_close_rejected_before_approval": true,
+      "physical_order_count": 4,
+      "prior_completed_rounds_preserved": 3,
+      "prior_fill_events_preserved": 6,
+      "recovery_proof_extension": {
+        "execution_profile": "one_share_recovered_close_v1",
+        "extension_sha256": "8208fae2d7638ad2939fd0824c422ae8cf651d84d5974b2725222d5406b12932",
+        "invocation": "recovery_proof_extension.py; not the original helper CLI",
+        "kind": "reviewed_recovery_proof_extension_v1",
+        "original_baseline_private_inputs_unchanged": true,
+        "original_baseline_sha256": "9c075edced4f9889accce70dc07cca7501ebcf9bce26fbbe9d76666cff2bdeda",
+        "recovery_helper_sha256": "622bf67947d0faf05183b279b5624b8f49a17e86370748f546423a405c1c5994",
+        "recovery_result_sha256": "a4d3764ebf783c73889fb869ce42115876104070d6d6d2fb966e3a63acec59f6",
+        "rejected_close_history_sha256": "bd40e0519909dd11f68eec2624d362373ce304afffa5468ce06fdfb7ca907f10",
+        "rejected_close_proof_sha256": "4839ac17967945550f4b02ead38de5aec484fea6338308d1dc8a3ec4a61432d0",
+        "run_id": "741ee30a5e8941cdb5cd5373eecd408d",
+        "runtime_dependency_injection": {
+          "emit_validation.py": [
+            "paper_guards"
+          ],
+          "finalize_roundtrip.py": [
+            "proof"
+          ],
+          "restart.py": [
+            "proof",
+            "finalizer.proof"
+          ],
+          "stage_paper_evidence.py": [
+            "proof",
+            "SUMMARY_KEYS",
+            "exporter.paper_guards"
+          ],
+          "verify_roundtrip_recovery.py": [
+            "frozen_inputs",
+            "load_round",
+            "audit_rows",
+            "broker_observations",
+            "save_unique"
+          ]
+        }
+      },
+      "restart_preserved_four_identities": true,
+      "scope": "Active recovered paper round: four physical identities and two priced fills; three earlier rounds/six fills retain historical scope. No new broker observation.",
+      "temporary_service_exit_codes_collected": false,
+      "temporary_services_sigint_and_exits_observed": true,
+      "total_verified_fill_events": 8,
+      "verified_paper": true
+    },
+    "sha256": "d5195fd3c1c9058b82e2e9189a88e55efe502904b3fc8d819d6086b3e418f4a9"
+  },
+  "kind": "current_source_paper_replay_evidence_v2",
+  "limits": [
+    "The eight fills occurred on their recorded historical source trees; current code only replayed their durable history.",
+    "No current-source order placement, triggered stop, partial fill, or real broker cancellation race is claimed.",
+    "AutoExecutor ownership and cancellation races are covered by separate deterministic native-producer regressions.",
+    "Flatness is the complete connected trader-service snapshot immediately before stopping it; no broker read follows shutdown.",
+    "SIGINT delivery and process absence/zombie are observed; detached process exit codes are not collected.",
+    "Zero new activity refers to private server claims/reservations and the verified strategy-tag fill ledger, not a census of all external account activity.",
+    "Partial service recovery requires a responsive private trader for fresh complete flat-book reads; otherwise remaining services are retained for investigation.",
+    "Original claim rows and broker order-ID lists are compared unchanged; capacity-index migration is separately counted and is not a new broker submission.",
+    "Read-only snapshots do not exercise capacity retirement; the reservation index must remain stable after migration, and retirement behavior is covered by deterministic tests.",
+    "auto_exec_bar_log migration is measured separately from the server reservation index; neither is a new order or fill.",
+    "The bar-log proof preserves all existing values and duplicate rows, leaves migrated intent IDs NULL, and verifies stability after the first checkpoint. Turnover union behavior remains covered by deterministic tests."
+  ],
+  "production_source_fingerprint_recipe": "sha256(json.dumps(map,sort_keys=True).encode()); Python files under trader/",
+  "production_source_sha256": "ab1646f395959becd3d74f0aa4d7a557c85384a3ea2b0a846ba7bedc44689fb2",
+  "proof_sha256": {
+    "after_restart": "8821af6715aa05e1ed52486a505e73f668216c7c7a018691deaaebbb9cfb03be",
+    "baseline": "dd19ad85dbb0405afd68c5348abab99b222004c21f82e6d15d4d2cd79d355745",
+    "before_restart": "a38e93cdd09dc00389c4894fc650b8dccc5d082038c157c7d8d370465075a944",
+    "cleanup": "570c9026d5cc101624a1214152d248eef016b00460dbe8952d770ecbb5a63f2d",
+    "driver": "587245bd133feff7522c3c153205669f983909e3bb5676cc0cd5eae5aa54779b",
+    "evidence_exporter": "f68a384b6a5aca485ee7770a2e8ce33cc66af3722b7c02201f44e58db4bd424b",
+    "first_start": "6f77c8c6acb590cdfe4d9f6b25ec5781f03c7cccc9616f00b2348d2cdaa8e355",
+    "historical_after_restart": "f275f2f8f5e22eaa08f3752f9fd5c1b9f48682e60209dfe82fecc6bcbbcf6c6b",
+    "second_start": "ad371d231c4ea1b6dba86c86d5403ab90a50226cba6330b1b59f233771c4a516",
+    "stack": "144eb3be1ffa53b07ddf32e7448893164b5dd22885699ffb0f2bc274c5e43815"
+  },
+  "recorded_at_utc": "2026-09-11T03:49:35.654254+00:00",
+  "replay_stamp": {
+    "driver_sha256": "587245bd133feff7522c3c153205669f983909e3bb5676cc0cd5eae5aa54779b",
+    "historical_four_order_checker_sha256": "8208fae2d7638ad2939fd0824c422ae8cf651d84d5974b2725222d5406b12932",
+    "historical_public_evidence_sha256": "d5195fd3c1c9058b82e2e9189a88e55efe502904b3fc8d819d6086b3e418f4a9",
+    "historical_verification_sha256": "f275f2f8f5e22eaa08f3752f9fd5c1b9f48682e60209dfe82fecc6bcbbcf6c6b",
+    "kind": "current_source_read_only_paper_replay_bar_log_v2",
+    "scope": "Current-source replay only; no new order submission or historical source relabeling."
+  },
+  "source_fingerprint_recipe": "sha256(json.dumps(source_file_sha256_map, sort_keys=True).encode()); all .py files returned by rg --files trader tests scripts, plus pyproject.toml",
+  "source_sha256": "1fd8240d18afb6d22bbeadba21f30a4993b9ff96fdde050ee69b279233268ad2",
+  "stack_checks": [
+    {
+      "check": "trader_service",
+      "status": "PASS"
+    },
+    {
+      "check": "ib_socket",
+      "status": "PASS"
+    },
+    {
+      "check": "ib_upstream",
+      "status": "PASS"
+    },
+    {
+      "check": "strategy_service",
+      "status": "PASS"
+    },
+    {
+      "check": "strategy_roster",
+      "status": "SKIP"
+    },
+    {
+      "check": "tick_flow",
+      "status": "SKIP"
+    },
+    {
+      "check": "pycron",
+      "status": "WARN"
+    }
+  ]
+}

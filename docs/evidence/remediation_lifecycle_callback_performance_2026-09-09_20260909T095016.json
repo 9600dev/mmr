@@ -1,0 +1,101 @@
+{
+  "earlier_measurements_preserved": "docs/evidence/remediation_storage_performance_2026-09-08.json",
+  "environment": {
+    "cpu_count": 16,
+    "implementation": "CPython",
+    "machine": "arm64",
+    "packages": {
+      "crosshair-tool": "0.0.109",
+      "deal": "4.24.6",
+      "dill": "0.4.1",
+      "duckdb": "1.4.4",
+      "hypothesis": "6.161.1",
+      "ib_async": "2.1.0",
+      "msgpack": "1.1.2",
+      "mutmut": "3.6.0",
+      "numpy": "2.4.2",
+      "pandas": "3.0.1",
+      "pyarrow": "23.0.1",
+      "pytest": "9.0.2",
+      "pytest-timeout": "2.4.0",
+      "pyzmq": "27.1.0",
+      "reactivex": "4.1.0",
+      "z3-solver": "5.0.0.0"
+    },
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "python": "3.12.13",
+    "scope_limit": "Observed subset: uv.lock file hash and installed distribution-version metadata from the repository .venv interpreter before and after the command. This does not fingerprint all installed package files, the entire environment, or the dependencies inside a Docker image.",
+    "uv_lock_sha256": "707e99c2266d3b877ad9cf8d8e827ad50c9f5f0968cef8deaa2199a03b0eda8b"
+  },
+  "finished_at_utc": "2026-09-09T09:50:21.954309+00:00",
+  "full_suite_prerequisite": {
+    "context_sha256": "f9e944f03760603fc992812c279d12c96e7a46395ccab96ce593b5a7716625e2",
+    "exit_code": 0,
+    "finished_at_utc": "2026-09-09T09:49:19.979059+00:00",
+    "log_sha256": "51f1be06d87ce22244b1ce9aafe3114772d197f2acd1cf9abcd777b6ef4ef7e2",
+    "source_and_selected_environment_match": true,
+    "summary": "3147 passed, 1 skipped, 17 warnings in 163.68s (0:02:43)"
+  },
+  "isolation": {
+    "broker_or_service_connections": false,
+    "separate_temporary_database_per_sample": true,
+    "temporary_config": true,
+    "temporary_directory_removed": true,
+    "temporary_logs": true
+  },
+  "limitations": "Three descriptive samples, not a latency bound, percentile estimate, broker/network benchmark, startup replay benchmark, or performance gate. No unrelated history, select, or dispatch workloads ran.",
+  "measurement": "scripts/review_storage_benchmark.py::_measure_broker_loop_contention",
+  "module_sha256": {
+    "config_defaults/logging.yaml": "905b7583fa6968e7f555727962eaec11ed9f491ee170a06b77aa17ab44e5d37a",
+    "scripts/review_storage_benchmark.py": "3dc9bd0bbe225067ca55e3c21817b2575c9d4bc6dc7ce2b10b6a4943b35bde00",
+    "trader/common/logging_helper.py": "058bcaddb2eda8e6963712fec0fde938400abfcbc5bd3c200e94d0f55837b962",
+    "trader/data/duckdb_store.py": "336dd4a89eebb1b18047f4e6f29cf7cedddd8b913678538fd2d4622c563da4a4",
+    "trader/data/event_store.py": "5b49c703a37e6c4ef938d1c7dc5ef1a9aed7d7a8cc68d56e1ce7c62537f33052",
+    "trader/data/execution_journal.py": "ae000a5b2c21204495fafa71c6793b1698221c17e4224323b1e5ddaafa969b7e",
+    "trader/trading/order_lifecycle.py": "3153d2d7df7fa3116542adf39f701900cc9d251fff177ea93af297bde2048696"
+  },
+  "module_sha256_unchanged": true,
+  "raw_private_sha256": "06accb30034fbb06849419c676563d9b8d1d89fde7c70b11d06cf5d20e5002cf",
+  "samples": [
+    {
+      "heartbeat_requested_interval_s": 0.01,
+      "max_event_loop_heartbeat_gap_s": 0.010403250000308617,
+      "on_trade_elapsed_s": 0.00016033300016715657,
+      "other_process_holds_connection_s": 1.0,
+      "sample": 1
+    },
+    {
+      "heartbeat_requested_interval_s": 0.01,
+      "max_event_loop_heartbeat_gap_s": 0.012212166999233887,
+      "on_trade_elapsed_s": 0.00017854200086730998,
+      "other_process_holds_connection_s": 1.0,
+      "sample": 2
+    },
+    {
+      "heartbeat_requested_interval_s": 0.01,
+      "max_event_loop_heartbeat_gap_s": 0.012123958000302082,
+      "on_trade_elapsed_s": 0.0001293340010306565,
+      "other_process_holds_connection_s": 1.0,
+      "sample": 3
+    }
+  ],
+  "scope": "One synthetic on_trade callback while another local process holds its temporary DuckDB connection for one second; requested heartbeat interval is ten milliseconds.",
+  "selected_environment_unchanged": true,
+  "source_fingerprint": "589573eb7ab9ab9f3d5b1a15a63da405dc19dcbee346aaaf5da4fdfaa36a6cf0",
+  "source_recipe": "SHA-256 of sorted JSON map of all .py files under trader/tests/scripts plus pyproject.toml",
+  "source_unchanged": true,
+  "started_at_utc": "2026-09-09T09:50:16.927385+00:00",
+  "summary": {
+    "max_event_loop_heartbeat_gap_ms": {
+      "maximum": 12.212166999233887,
+      "median": 12.123958000302082,
+      "minimum": 10.403250000308617
+    },
+    "on_trade_elapsed_ms": {
+      "maximum": 0.17854200086730998,
+      "median": 0.16033300016715657,
+      "minimum": 0.1293340010306565
+    },
+    "samples": 3
+  }
+}

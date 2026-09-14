@@ -1,0 +1,206 @@
+{
+  "final_source_paper": {
+    "cleanup": {
+      "book_rechecked_flat": true,
+      "detached_exit_codes_collected": false,
+      "paper_gateway_left_running": true,
+      "temporary_services": "SIGINT sent; process exits observed; no forced kill"
+    },
+    "conid": 756733,
+    "exit_filled": 1.0,
+    "final_flat": true,
+    "limit": "Observed paper execution uses private harness attribution; it does not establish live-money, stop-trigger, partial-fill, OCA or full AutoExecutor behavior.",
+    "management_required": false,
+    "open_filled": 1.0,
+    "order_filled": {
+      "close": 1.0,
+      "open": 1.0,
+      "protection": 0.0,
+      "recovery_protection": 0.0
+    },
+    "order_status": {
+      "close": "Filled",
+      "open": "Filled",
+      "protection": "Cancelled",
+      "recovery_protection": "Cancelled"
+    },
+    "original_close_proposal": "Rejected after quote movement, before approval; archived and not reused.",
+    "physical_order_count": 4,
+    "private_evidence_sha256": {
+      "cleanup": "e4788dde7dcdeedb28d86a596a66cb62cb66364a76f95ebb3c469bc2f8bd7072",
+      "final_state": "28adad6fad1b1c11f4581232a98b5b88dcc4aaa0f025ed8c33a7f760e8c49657",
+      "final_summary": "f249ba445073e464e4794ba11fe102f72fca8f630da075ebe51a507817a95480",
+      "original_manifest": "bd40e0519909dd11f68eec2624d362373ce304afffa5468ce06fdfb7ca907f10",
+      "raw_observations": "97d2e26cd0604cc413811bfa6357baeb84506bde254e115c90d8afb0af80537c",
+      "recovery_helper": "622bf67947d0faf05183b279b5624b8f49a17e86370748f546423a405c1c5994",
+      "recovery_proof_extension": "8208fae2d7638ad2939fd0824c422ae8cf651d84d5974b2725222d5406b12932",
+      "rejected_close_proof": "4839ac17967945550f4b02ead38de5aec484fea6338308d1dc8a3ec4a61432d0",
+      "restart_verification": "f275f2f8f5e22eaa08f3752f9fd5c1b9f48682e60209dfe82fecc6bcbbcf6c6b",
+      "reviewed_exit_result": "a4d3764ebf783c73889fb869ce42115876104070d6d6d2fb966e3a63acec59f6",
+      "stack": "97be7f22139280e4e8cb30003ec808116dada6e5d832b0bffab51bb3a3fe2ce2"
+    },
+    "production_source_sha256": "834b774ae8b3d963ba979d5f8a01b80c4bcd393057d06dc04d379ee17e21f885",
+    "proposal_approval_reported_success": {
+      "close": true,
+      "open": true
+    },
+    "requested_quantity": 1,
+    "restart": {
+      "active_priced_fills": 2,
+      "duplicate_fills": false,
+      "nonzero_positions": 0,
+      "prior_completed_rounds": 3,
+      "prior_priced_fills": 6,
+      "same_four_identities": true,
+      "total_priced_fills": 8,
+      "working_orders": 0
+    },
+    "reviewed_close": "A new exit-only proposal was approved once after terminal stop cancellation and fresh inventory/price checks.",
+    "run_id": "741ee30a5e8941cdb5cd5373eecd408d",
+    "source_sha256": "9193fe6f84f9c72ed86983a07f759130fb719f646ed5c0b5493122da89dd5b33",
+    "status": "COMPLETE_FLAT_RESTART_VERIFIED_AND_CLEANED_UP",
+    "symbol": "SPY",
+    "verified_paper": true
+  },
+  "final_source_quote_precondition_observations": [
+    {
+      "approval_attempted": false,
+      "final_flat": true,
+      "management_required": false,
+      "private_evidence_sha256": {
+        "raw.jsonl": "54a23f0dcd4bb6574b53f06e80a78548904a40026db435922da46ba6ccaf884b",
+        "state.json": "68e81e70c4831665b0aaca1b03d6e4ccd0b8f4f449227c7bbf2755f6b09220fd",
+        "summary.json": "499f4afdc832330da99dd233056c211be18bc09e32990818f0bf0fb292ec7c6e"
+      },
+      "production_source_sha256": "834b774ae8b3d963ba979d5f8a01b80c4bcd393057d06dc04d379ee17e21f885",
+      "proposal_rejected_before_approval": true,
+      "reason": "PROPOSAL_PRECONDITIONS_CHANGED",
+      "recorded_at_utc": "2026-09-09T14:30:03.928149+00:00",
+      "run_id": "5912088ac12841caba414dcff7c21c5e",
+      "source_sha256": "9193fe6f84f9c72ed86983a07f759130fb719f646ed5c0b5493122da89dd5b33",
+      "status": "UNOBSERVED_CLEAN_NO_APPROVAL_ATTEMPT"
+    },
+    {
+      "approval_attempted": false,
+      "final_flat": true,
+      "management_required": false,
+      "private_evidence_sha256": {
+        "raw.jsonl": "f517079744cdf3e8916bc288455aa42d61bdf25d05d4b908b7890c05e621699c",
+        "state.json": "8a2d9cd48286f4fde4a68459a631c0a58f81861ffdb2c773bcdd45a4eccf563b",
+        "summary.json": "1ff3fd3ba1b8317d547c913da36e97bce5d04edb9bc8ef5e16d7059b565ce6e5"
+      },
+      "production_source_sha256": "834b774ae8b3d963ba979d5f8a01b80c4bcd393057d06dc04d379ee17e21f885",
+      "proposal_rejected_before_approval": true,
+      "reason": "PROPOSAL_PRECONDITIONS_CHANGED",
+      "recorded_at_utc": "2026-09-09T14:30:53.185897+00:00",
+      "run_id": "bc49d183bd0b4bc5a713671b6fd19b17",
+      "source_sha256": "9193fe6f84f9c72ed86983a07f759130fb719f646ed5c0b5493122da89dd5b33",
+      "status": "UNOBSERVED_CLEAN_NO_APPROVAL_ATTEMPT"
+    }
+  ],
+  "limits": [
+    "Session/callback identity is checked; no maximum callback-age guarantee was added.",
+    "The daily period and money units follow broker account-PnL conventions.",
+    "Closed-loss and reconnect counterexamples use controlled regression tests; the earlier read-only paper probe did not exercise these scenarios."
+  ],
+  "pre_repair_diagnostic": {
+    "account_feed_probe": {
+      "account_pinned": true,
+      "elapsed_seconds": 1.5073121250024997,
+      "finite_daily_pnl": true,
+      "model_code": "",
+      "observed_callback": true,
+      "orders_submitted": false,
+      "read_only_connection": true,
+      "recorded_at_utc": "2026-09-09T13:59:05.993761+00:00",
+      "subscription_cancelled_and_client_disconnected": true,
+      "verified_paper": true
+    },
+    "cleanup": {
+      "book_rechecked_flat_before_each_stop": true,
+      "detached_exit_codes_collected": false,
+      "docker_paper_gateway_left_running": true,
+      "prior_completed_rounds_preserved": 3,
+      "prior_fill_events_preserved": 6,
+      "temporary_services": "SIGINT sent; process exits observed; no forced kill"
+    },
+    "limits": [
+      "Account-level PnL receipt availability was observed on one paper account while flat.",
+      "The probe did not test a realized-loss scenario, disconnect recovery, or live money.",
+      "No fill/protective/restart proof is claimed for the unobserved run."
+    ],
+    "paper_observations": {
+      "approval_result": "REFUSED: daily PnL unevaluable",
+      "broker_order_status": "NotSubmitted",
+      "durable_intent_status": "REJECTED",
+      "final_flat": true,
+      "initial_open_approval_attempted": true,
+      "interpretation": "The observed startup refusal recovered. It does not demonstrate permanent inability to warm the position feed or an incorrect trading decision.",
+      "later_position_pnl_observation": {
+        "finite_daily_pnl_items": 1,
+        "nonzero_positions": 0,
+        "observed_at_utc": "2026-09-09T13:54:16.182464+00:00",
+        "pnl_items": 1,
+        "snapshot_complete": true,
+        "working_orders": 0
+      },
+      "new_fills": 0,
+      "physical_topology_empty": true,
+      "run_id": "3e4ccee0a65f46f8b4f6c883931d9e4c",
+      "verified_paper": true
+    },
+    "private_evidence_sha256": {
+      "account_feed_probe": "7f3dcf66a5ae79b0ba95b62557f4fecb2e28e1783a6e7e46213b42c84ee55208",
+      "cleanup_receipt": "5a1ad5aaffe2a044bd1e471265d9e4ec133316146d9733b902baab7a30a37611",
+      "corrected_source_review": "d3b004f91a246f86441cd7ff9c1808b0c2e6c8fc5d6ef19f0aafe9db801e1389",
+      "later_position_pnl": "af3b1f2c0b46d65be6558a9892aa436bce2a442f74ec34c14a8f69248eeb09d1",
+      "raw_observations": "c776c981db265673f4dd7e214a990e963b6ef048f24f3ce62719c2075cbbe092",
+      "run_state": "b3aacb519430146ee3370ead615df5615ab99182388e01d7df79f41ab7b6257a",
+      "run_summary": "e25813d14d24ef98528a9ad3821ddca0f00e4e3e4e948895d3b64154b566daaa"
+    },
+    "production_source_sha256": "0cc4a0305ec1f15020b15f58445dfecb5344cf52f0ac55141f233889c496d2be",
+    "recorded_at_utc": "2026-09-09T14:04:46.451128+00:00",
+    "source_finding_scope": "Independently confirmed source contract gaps, separate from the observed transient refusal; ordinary counterexample tests precede repair.",
+    "source_findings": [
+      "A finite PnLSingle cache is used as account daily PnL without proving complete account/day coverage; a current-position subset may omit closed-position losses.",
+      "The PnLSingle cache is not invalidated with the replaced IB session, so a finite old value may remain evaluable after reconnect."
+    ],
+    "source_sha256": "820fe2354b1f27f19cd4e6e6ad3bfbf32a5e84da506e8cc925d7a5cc56033aeb",
+    "status": "PRE_REPAIR_DIAGNOSTIC; final repair verification pending"
+  },
+  "pre_repair_diagnostic_sha256": "217bb7aad6519d042878572f12b5bf97e9a83de63439f8c48b229671fd4bfd42",
+  "pre_repair_observation_clarification": "The position feed later became finite. The refused approval was not retried, so no later approval success was observed in that run.",
+  "recorded_at_utc": "2026-09-09T14:56:54.716966+00:00",
+  "repair": {
+    "behavior": [
+      "Risk reads account-level PnL for the exact pinned account and empty model code.",
+      "Only a callback for the exact current IB request object establishes an evaluable value.",
+      "Disconnect and upstream-loss boundaries revoke readiness; a replacement cannot inherit the prior connection value or loss latch.",
+      "The current connection own upstream-loss report remains authoritative.",
+      "Finite zero from a fresh account callback is usable; a flat book or empty local fill history does not establish zero.",
+      "Invalid and sentinel values refuse exposure-increasing orders; reduction policy is unchanged."
+    ],
+    "focused_tests": {
+      "new_account_contract_cases": 45,
+      "passed": 472,
+      "pytest_seconds": 15.8
+    },
+    "independent_review": "No remaining blocker within reviewed account-PnL lifecycle and risk-input scope.",
+    "private_evidence_sha256": {
+      "account-pnl-aggregate": "51806261b45d8718d8f40138a250ac137f80c00745107e918b507fc6e696d8e1",
+      "account-pnl-freeze": "a2f8fa66b8384f0812c126057e2031b67611ebb9f0b5abf5ca3177d959fbfe74",
+      "account-pnl-independent-review": "eb56e561d824dc878eb111acd7195cf34d595722b7202b6badc4be8c5a7a195e",
+      "account-pnl-instance-red": "151dc7dc1b68540fe0fc9930765ca8265d1b2aac910ef6c389134b163c6290e3",
+      "account-pnl-red": "72aa714398a9f6a9ba16c2f442b1dfdc56c43543ff37950d703bce2078d7e6eb",
+      "account-pnl-type": "9b0da918f889f8cd76836c9ca77848d40c7e333110873202411ef6f14fcc9aa5"
+    },
+    "production_source_sha256": "834b774ae8b3d963ba979d5f8a01b80c4bcd393057d06dc04d379ee17e21f885",
+    "red_reproductions": {
+      "obsolete_connection_loss_latch": 1,
+      "partial_or_stale_account_inputs": 4,
+      "same_or_current_connection_loss_controls_passed": 2
+    },
+    "source_sha256": "9193fe6f84f9c72ed86983a07f759130fb719f646ed5c0b5493122da89dd5b33"
+  },
+  "status": "ACCOUNT_PNL_REPAIR_FOCUSED_AND_PAPER_CHECKS_PASS; complete canonical mutation and aggregate report pending"
+}

@@ -58,6 +58,11 @@ class _Service(RPCHandler):
         return payload
 
     @rpcmethod
+    async def slow_echo(self, payload, seconds):
+        await asyncio.sleep(seconds)
+        return payload
+
+    @rpcmethod
     def rows(self):
         return [_Row(conid=101, price=1.5), _Row(conid=202, price=2.5)]
 
@@ -314,6 +319,10 @@ def test_rpc_round_trip_preserves_error_types():
     try:
         assert client.rpc().add(2, 3) == 5
         assert client.rpc().echo({'k': 'v'}) == {'k': 'v'}
+        with pytest.raises(TimeoutError):
+            client.rpc(timeout=.05).slow_echo('late', .15)
+        assert client.timeout == 3, 'a control timeout must not mutate shared client defaults'
+        assert client.rpc(timeout=1).slow_echo('within control budget', .15) == 'within control budget'
 
         # NamedTuples flatten to plain lists on the wire...
         raw = client.rpc().rows()
@@ -342,7 +351,7 @@ def test_rpc_round_trip_preserves_error_types():
             # (ctx.term) block forever — the interpreter hangs at exit.
             server = server_obj.get('server')
             if server:
-                loop.call_soon_threadsafe(server.close)
+                asyncio.run_coroutine_threadsafe(server.aclose(), loop).result(timeout=3)
             loop.call_soon_threadsafe(loop.stop)
         t.join(timeout=3.0)
 
@@ -429,7 +438,7 @@ def test_server_replies_error_on_undeserializable_request():
         if loop:
             server = server_obj.get('server')
             if server:
-                loop.call_soon_threadsafe(server.close)
+                asyncio.run_coroutine_threadsafe(server.aclose(), loop).result(timeout=3)
             loop.call_soon_threadsafe(loop.stop)
         t.join(timeout=3.0)
 

@@ -1,0 +1,32 @@
+{
+  "recorded_at_utc": "2026-09-09T03:28:22.643092+00:00",
+  "environment": {
+    "python": "3.12.13",
+    "duckdb": "1.4.4",
+    "platform": "macOS-26.6.2-arm64-arm-64bit"
+  },
+  "broker_event_loop_contention": {
+    "other_process_holds_connection_s": 1.0,
+    "heartbeat_requested_interval_s": 0.01,
+    "on_trade_elapsed_s": 1.2184692919254303,
+    "max_event_loop_heartbeat_gap_s": 1.2295233339536935
+  },
+  "select_open_close": {
+    "samples": 50,
+    "median_ms": 4.1892086155712605,
+    "p95_ms": 4.567417083308101,
+    "description": "One SELECT 1 with connection open and close per call"
+  },
+  "history_merge": {
+    "existing_bars": 100000,
+    "incoming_bars": 10,
+    "samples_s": [
+      3.234039458911866,
+      3.1545531661249697,
+      3.134080624906346
+    ],
+    "median_s": 3.1545531661249697,
+    "description": "Overwrite the final 10 of 100000 valid one-minute bars"
+  },
+  "reviewed_commit": "e6918526d4915c44473996278322146188a8ce6a"
+}

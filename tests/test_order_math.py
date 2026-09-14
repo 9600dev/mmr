@@ -140,3 +140,36 @@ class TestProperties:
         except ValueError:
             return
         assert (shares + 1) * price > amount or math.isclose((shares + 1) * price, amount)
+
+
+class TestLargeFiniteQuantities:
+    @pytest.mark.timeout(2)
+    @pytest.mark.parametrize(('amount', 'price', 'multiplier'), [
+        (1e30, 0.1, 100.0),
+        (sys.float_info.max, 0.1, 100.0),
+        (1e308, 1e308, 1e-308),
+    ])
+    def test_extreme_sizing_finishes_without_overspending(self, amount, price, multiplier):
+        # The old one-share correction could need trillions of iterations
+        # while many neighboring Python ints converted to the same float.
+        # The final case also covers an overflowing intermediate product.
+        quantity = whole_shares_for_notional(amount, price, multiplier)
+        assert isinstance(quantity, int)
+        assert quantity >= 1
+        assert quantity * price * multiplier <= amount
+        assert (quantity + 1) * price * multiplier > amount
+
+    @pytest.mark.timeout(2)
+    def test_large_affordable_floor_keeps_the_existing_fast_path_result(self):
+        amount = 1e300
+        quantity = whole_shares_for_notional(amount, 1.0)
+        assert quantity == math.floor(amount)
+        assert quantity * 1.0 <= amount
+
+
+@pytest.mark.parametrize('price', [10**18, 1e18], ids=['integer-price', 'float-price'])
+def test_exact_integer_budget_cannot_round_up_to_one_share(price):
+    with pytest.raises(ValueError, match='does not cover one whole share'):
+        whole_shares_for_notional(10**18 - 1, price)
+
+    assert whole_shares_for_notional(10**18, price) == 1

@@ -72,8 +72,9 @@ class DuckDBConnection:
     DuckDB only allows one write connection per database file across all
     processes.  To support multiple services (trader_service, strategy_service)
     accessing the same database, we use short-lived connections: connect,
-    execute, close.  DuckDB connect/disconnect is very fast (~1ms) so this
-    is not a performance concern.
+    execute, close. Connection and transaction overhead is paid on every call;
+    batch related work in execute_atomic and keep contention off broker/event
+    loop threads.
     """
 
     _instances: dict[str, 'DuckDBConnection'] = {}
@@ -84,7 +85,7 @@ class DuckDBConnection:
         # DuckDB create a stub file on open — the earliest point at which a
         # wrong-database read can still be turned into a loud failure.
         _assert_not_shadowed(db_path)
-        self.db_path = db_path
+        self.db_path = os.path.realpath(os.path.expanduser(db_path))
         self._lock = threading.Lock()
         # Ensure directory exists
         db_dir = os.path.dirname(self.db_path)
@@ -93,6 +94,7 @@ class DuckDBConnection:
 
     @classmethod
     def get_instance(cls, db_path: str) -> 'DuckDBConnection':
+        db_path = os.path.realpath(os.path.expanduser(db_path))
         with cls._class_lock:
             if db_path not in cls._instances:
                 cls._instances[db_path] = DuckDBConnection(db_path)
@@ -130,8 +132,9 @@ class DuckDBConnection:
         """Execute a function with an exclusive connection.
 
         The function receives a DuckDBPyConnection and can perform
-        multiple operations atomically.  The connection is closed
-        after the function returns.
+        multiple operations in one transaction. Success commits; any exception
+        rolls the complete callback back. Callbacks must not manage transactions
+        themselves. The connection is closed after the callback finishes.
 
         **Multi-process contention**: DuckDB uses file-level locking — a
         second process trying to open the same DB while another has a
@@ -148,8 +151,8 @@ class DuckDBConnection:
         with self._lock:
             delay = 0.05
             last_err: Optional[Exception] = None
-            # 32 attempts × growing-then-capped backoff gives ~45s of total
-            # wait before giving up. Sized so 15+ concurrent backtest
+            # 32 attempts × growing-then-capped backoff gives 55–110s of
+            # sleep before giving up (including jitter). Sized so 15+ concurrent backtest
             # subprocesses all land their final-row writes without a
             # single one getting starved out. The 8-attempt prior budget
             # (~6s) silently dropped most writes under sweeps with
@@ -175,7 +178,13 @@ class DuckDBConnection:
                 # dropping the write.
                 raise last_err  # type: ignore[misc]
             try:
-                return fn(conn)
+                conn.execute('BEGIN TRANSACTION')
+                result = fn(conn)
+                conn.execute('COMMIT')
+                return result
+            except BaseException:
+                conn.execute('ROLLBACK')
+                raise
             finally:
                 conn.close()
 
@@ -243,15 +252,10 @@ class DuckDBDataStore(DataStore):
                 what_to_show INTEGER
             )
         """)
-        # Create composite index if it does not exist.  DuckDB does not
-        # support IF NOT EXISTS on CREATE INDEX, so we catch the error.
-        try:
-            conn.execute(f"""
-                CREATE INDEX idx_{self.TABLE_NAME}_symbol_date
-                ON {self.TABLE_NAME} (symbol, date)
-            """)
-        except duckdb.CatalogException:
-            pass
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{self.TABLE_NAME}_symbol_date
+            ON {self.TABLE_NAME} (symbol, date)
+        """)
 
     # --------------------------------------------------------------------- #
     # DataStore interface
@@ -393,49 +397,21 @@ class DuckDBDataStore(DataStore):
                 'a close where one side was a placeholder)',
                 n_before - len(write_df), symbol)
 
-        # Upsert: delete existing rows for this symbol in the date range, then insert.
-        # CRITICAL: filter the DELETE by bar_size too — otherwise writing a
-        # 1-min window for AAPL clobbers any daily rows for AAPL in that same
-        # date range. With write_resolve_overlap() merging in pre-existing rows,
-        # the date span can grow to span years of history, deleting everything.
-        # Observed: 10/20 NASDAQ daily downloads silently disappeared because
-        # they were wiped by the subsequent 1-min write for the same conid.
-        min_date = write_df['date'].min()
-        max_date = write_df['date'].max()
-        bar_sizes_being_written = list(write_df['bar_size'].dropna().unique())
-
+        # Replace only the incoming keys. A range DELETE also removes bars
+        # written by another downloader between this frame's observations.
+        # execute_atomic owns the transaction, including registration/cleanup.
         def _write(conn):
-            # Wrap the DELETE + INSERT in a single transaction. Without this the
-            # DELETE autocommits, so a crash (or an INSERT failure) between the
-            # two leaves the old rows gone and the new rows never written —
-            # permanent, silent data loss for that symbol/range.
-            conn.execute("BEGIN TRANSACTION")
+            conn.register('__write_df', write_df)
             try:
-                if bar_sizes_being_written:
-                    for bs in bar_sizes_being_written:
-                        conn.execute(
-                            f"DELETE FROM {self.TABLE_NAME} "
-                            f"WHERE symbol = ? AND date >= ? AND date <= ? AND bar_size = ?",
-                            [symbol, min_date, max_date, bs],
-                        )
-                else:
-                    # Caller didn't set bar_size on any row — fall back to the old
-                    # behavior (delete all bar_sizes in range). Should never happen
-                    # for proper TickData writes; preserved for safety.
-                    conn.execute(
-                        f"DELETE FROM {self.TABLE_NAME} "
-                        f"WHERE symbol = ? AND date >= ? AND date <= ?",
-                        [symbol, min_date, max_date],
-                    )
-                conn.register('__write_df', write_df)
-                try:
-                    conn.execute(f"INSERT INTO {self.TABLE_NAME} SELECT * FROM __write_df")
-                finally:
-                    conn.unregister('__write_df')
-                conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
+                conn.execute(f"""
+                    DELETE FROM {self.TABLE_NAME} AS stored USING __write_df AS incoming
+                    WHERE stored.symbol = incoming.symbol
+                      AND stored.date = incoming.date
+                      AND stored.bar_size IS NOT DISTINCT FROM incoming.bar_size
+                """)
+                conn.execute(f"INSERT INTO {self.TABLE_NAME} SELECT * FROM __write_df")
+            finally:
+                conn.unregister('__write_df')
 
         self._db.execute_atomic(_write)
 

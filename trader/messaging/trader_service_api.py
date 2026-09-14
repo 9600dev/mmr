@@ -16,11 +16,22 @@ from trader.trading.strategy import StrategyConfig, StrategyState
 from typing import List, Optional, Tuple, Union
 
 import asyncio
+import math
+import reactivex.operators as ops
 import time
 import trader.trading.trading_runtime as runtime
 
 
 logging = setup_logging(module_name='trader_service_api')
+
+# Slack for the amount-budget match on an approved proposal. sdk.approve sizes
+# whole shares of ``amount`` at its own last-trade snapshot; the server values
+# the same quantity at ITS snapshot seconds later. The two differ by intra-
+# spread movement, never by a whole share for any budget worth approving, so
+# one percent admits that drift while a quantity inflated past what the budget
+# buys still fails the match. The approver notional tier is unaffected: it
+# keeps its marketable, zero-tolerance valuation.
+_BUDGET_MATCH_TOLERANCE = 0.01
 
 
 class TraderServiceApi(RPCHandler):
@@ -74,10 +85,11 @@ class TraderServiceApi(RPCHandler):
         debug: bool = False,
         skip_risk_gate: bool = False,
         approver_key: str = '',
+        client_intent_id: str = '',
     ) -> SuccessFail[Trade]:
         # todo: we'll have to make the cli async so we can subscribe to the trade
         # changes as orders get hit etc
-        logging.warn('place_order_simple() is not complete, your mileage may vary')
+        logging.debug('place_order_simple returns a submission receipt; executions require reconciliation')
         from trader.trading.trading_runtime import Action
         # Strict: any string not literally BUY/SELL must be refused, not silently
         # coerced. The old `'BUY' in action else SELL` turned a typo like 'BYU'
@@ -118,6 +130,19 @@ class TraderServiceApi(RPCHandler):
         # split itself was written. One resolver now answers for both.
         allow_open = True
         if getattr(self.trader, 'require_proposal_approval', False):
+            if quantity is None:
+                try:
+                    tick = await self.trader.client.get_snapshot(contract)
+                    rate = self.trader.convert_notional(1.0, contract.currency)
+                    if rate is None or rate <= 0 or equity_amount is None:
+                        return SuccessFail.fail(error='Cannot size base-currency amount: FX rate unavailable')
+                    sized = self.trader.executioner.helper_create_order(
+                        contract, act, tick, equity_amount / rate, None, limit_price,
+                        market_order, stop_loss_percentage, algo_name, debug)
+                    quantity = float(sized.order.totalQuantity)
+                    equity_amount = None
+                except Exception as ex:
+                    return SuccessFail.fail(error=f'Cannot resolve order quantity: {ex}')
             try:
                 plan = self.trader.split_for_order(contract, _a, quantity)
             except Exception as ex:
@@ -158,7 +183,7 @@ class TraderServiceApi(RPCHandler):
 
         def on_error(ex):
             nonlocal result
-            result = SuccessFail.fail(exception=ex)
+            result = SuccessFail.fail(error=str(ex), exception=ex)
             task.set()
 
         def on_completed():
@@ -179,8 +204,9 @@ class TraderServiceApi(RPCHandler):
             skip_risk_gate=skip_risk_gate,
             approver_key=approver_key,
             allow_open=allow_open,
+            client_intent_id=client_intent_id,
         )
-        observable.subscribe(observer)
+        disposable = observable.pipe(ops.take(1)).subscribe(observer)
 
         try:
             await asyncio.wait_for(task.wait(), timeout=10.0)
@@ -188,6 +214,13 @@ class TraderServiceApi(RPCHandler):
             if result is None:
                 result = SuccessFail.fail(error='order placement timed out waiting for confirmation')
         disposable.dispose()
+        if result is not None:
+            result.client_intent_id = getattr(observable, 'client_intent_id', client_intent_id)
+            outcome = getattr(observable, 'execution_outcome', None)
+            if outcome is not None:
+                result.execution_outcome = outcome
+                if outcome['opening']['status'] != 'SUBMITTED':
+                    result.error = f"PARTIAL: reduction SUBMITTED; opening {outcome['opening']['status']}: {outcome['opening'].get('error', '')}"
         return result if result else SuccessFail.fail()
 
     @rpcmethod
@@ -273,6 +306,13 @@ class TraderServiceApi(RPCHandler):
         return await self.trader.reload_strategies()
 
     @rpcmethod
+    async def adopt_legacy_holding(self, strategy: str, conid: int,
+                                   avg_cost: Optional[float] = None) -> SuccessFail[dict]:
+        """Operator-attested ownership for a holding attributed before ownership
+        epochs; forwarded to strategy_service like enable/disable/reload."""
+        return await self.trader.adopt_legacy_holding(strategy, int(conid), avg_cost)
+
+    @rpcmethod
     def get_status(self) -> dict:
         return self.trader.status()
 
@@ -344,8 +384,62 @@ class TraderServiceApi(RPCHandler):
         execution_spec: dict,
         algo_name: str = 'proposal',
         approver_key: str = '',
+        client_intent_id: str = '',
+        proposal_id: Optional[int] = None,
     ) -> SuccessFail[list[Trade]]:
         """Place an order with full execution specification (brackets, trailing stops, etc.)."""
+        allow_open = True
+        if getattr(self.trader, 'require_proposal_approval', False):
+            # Passing an execution-spec dict is not evidence of review. The
+            # server reads the approved row and compares the exact wire intent.
+            allow_open = False
+            reason = 'an approved proposal ID is required'
+            if proposal_id is not None:
+                try:
+                    from trader.data.proposal_store import ProposalStore
+                    store = ProposalStore(self.trader.duckdb_path)
+                    proposal = await asyncio.to_thread(store.get, proposal_id)
+                    expected_intent = str(proposal.metadata.get('client_intent_id') or f'proposal:{proposal_id}') if proposal else ''
+                    matches = bool(proposal and proposal.status == 'APPROVED'
+                                   and proposal.action == action
+                                   and proposal.symbol == contract.symbol
+                                   and proposal.sec_type == contract.secType
+                                   and proposal.metadata.get('con_id', proposal.metadata.get('conId')) == contract.conId
+                                   and proposal.execution.to_dict() == execution_spec
+                                   and (not proposal.currency or proposal.currency == contract.currency)
+                                   and (not proposal.exchange or proposal.exchange in {contract.exchange, contract.primaryExchange})
+                                   and str(proposal.metadata.get('strategy') or 'proposal') == algo_name
+                                   and client_intent_id == expected_intent
+                                   and math.isfinite(quantity) and quantity > 0)
+                    if matches and proposal is not None:
+                        if proposal.quantity is not None:
+                            matches = float(proposal.quantity) == quantity
+                        elif proposal.amount is not None:
+                            # Amount is an account-base budget. sdk.approve sized
+                            # the quantity as whole shares of amount at ITS last-
+                            # trade snapshot; re-derive that figure at the same
+                            # anchor (last first, no client limit pushing it up)
+                            # and allow for the price moving between the two
+                            # independent snapshots. Valuing at the marketable
+                            # side with zero tolerance refused every amount-sized
+                            # open on any positive spread and failed the proposal.
+                            base, evaluable = await self.trader._tier_notional(
+                                contract, action, quantity, proposal.execution.order_type,
+                                proposal.execution.limit_price, target_currency='BASE',
+                                anchor='last', limit_pushes_up=False)
+                            matches = (evaluable and math.isfinite(proposal.amount)
+                                       and base <= proposal.amount * (1.0 + _BUDGET_MATCH_TOLERANCE))
+                        else:
+                            matches = False
+                    allow_open = matches
+                    reason = 'proposal is not APPROVED or does not match the exact submitted contract, quantity and execution'
+                except Exception as ex:
+                    reason = f'approved proposal could not be verified: {ex}'
+            if not allow_open:
+                logging.warning('proposal authorization refused opening remainder: %s', reason)
+                plan = self.trader.split_for_order(contract, action, quantity)
+                if plan.reduce_qty <= 0:
+                    return SuccessFail.fail(error=f'Opening authorization refused: {reason}')
         result = await self.trader.place_expressive_order(
             contract=contract,
             action=action,
@@ -353,8 +447,38 @@ class TraderServiceApi(RPCHandler):
             execution_spec=execution_spec,
             algo_name=algo_name,
             approver_key=approver_key,
+            client_intent_id=client_intent_id,
+            allow_open=allow_open,
         )
         return result
+
+    @rpcmethod
+    async def execution_snapshot(self, intent_id: str = '', order_ids: Optional[list[int]] = None) -> dict:
+        return await self.trader.execution_snapshot(intent_id, order_ids)
+
+    @rpcmethod
+    async def resize_position(self, contract: Contract, target_quantity: float,
+                              client_intent_id: str = '') -> SuccessFail:
+        return await self.trader.resize_position(contract, target_quantity, client_intent_id)
+
+    @rpcmethod
+    async def emergency_close_position(self, con_id: int, quantity: float,
+                                       strategy_name: str, client_intent_id: str) -> SuccessFail:
+        """Reduction-only recovery path independent of proposal storage."""
+        if type(con_id) is not int or con_id <= 0 or not math.isfinite(quantity) or quantity <= 0:
+            return SuccessFail.fail(error='emergency close requires exact conId and finite positive quantity')
+        positions = self.trader.get_positions()
+        matching = [p for p in positions if p.contract.conId == con_id and p.account == self.trader.ib_account]
+        held = sum(float(p.position) for p in matching)
+        if not matching or not math.isfinite(held) or held == 0:
+            return SuccessFail.fail(error='emergency close has no confirmed broker inventory')
+        # A position record carries exchange=''; IB rejects an order on it
+        # (error 321) and the executor would retry the same shape forever.
+        contract = self.trader.routable_contract(matching[0].contract)
+        return await self.trader.place_expressive_order(
+            contract, 'SELL' if held > 0 else 'BUY', min(quantity, abs(held)),
+            {'order_type': 'MARKET'}, algo_name=strategy_name, allow_open=False,
+            client_intent_id=client_intent_id)
 
     @rpcmethod
     async def place_standalone_order(
@@ -369,6 +493,7 @@ class TraderServiceApi(RPCHandler):
         tif: str = 'GTC',
         outside_rth: bool = True,
         order_ref: str = '',
+        client_intent_id: str = '',
     ) -> SuccessFail[Trade]:
         """Place a standalone protective order (stop, trailing stop, limit)."""
         return await self.trader.place_standalone_order(
@@ -382,6 +507,7 @@ class TraderServiceApi(RPCHandler):
             tif=tif,
             outside_rth=outside_rth,
             order_ref=order_ref,
+            client_intent_id=client_intent_id,
         )
 
     @rpcmethod
@@ -440,14 +566,7 @@ class TraderServiceApi(RPCHandler):
         like NetLiquidation — otherwise a USD position in a CAD account is
         mis-weighted by the ~1.4x FX factor.
         """
-        rates: dict = {}
-        for v in self.trader.client.ib.accountValues():
-            if v.tag == 'ExchangeRate' and v.currency and v.currency != 'BASE':
-                try:
-                    rates[v.currency] = float(v.value)
-                except (TypeError, ValueError):
-                    continue
-        return rates
+        return self.trader.fx_rates_to_base()
 
     @rpcmethod
     def get_account_values(self) -> dict:

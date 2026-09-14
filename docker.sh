@@ -739,8 +739,18 @@ down() {
     $RUNTIME network rm mmr_default 2>/dev/null || true
 }
 
+_snapshot_tool() {
+    # Run the current snapshot implementation without starting any service or
+    # gateway. The app image supplies DuckDB; the mounted module also supports
+    # recovery before the rebuilt image has been deployed.
+    $COMPOSE -f "$BUILDDIR/docker-compose.yml" run --rm --no-deps \
+        --entrypoint python \
+        -v "$BUILDDIR/trader/data/db_backup.py":/tmp/mmr_snapshot.py:ro \
+        mmr /tmp/mmr_snapshot.py "$@"
+}
+
 backup() {
-    # Snapshot the DuckDB files to the host-visible backups/ dir.
+    # Snapshot DuckDBs AND the operational SQLite journal into the host directory.
     local name="$BACKUP_NAME"
 
     # Preferred path: if mmr-mmr-1 is running, take a CLEAN in-DB snapshot via the
@@ -758,19 +768,17 @@ backup() {
         return
     fi
 
-    # Fallback: container down — the DB isn't being written, so a plain sidecar
-    # copy is safe and needs no host duckdb tooling.
-    if [[ -z "$name" ]]; then
-        name="$(date +%Y-%m-%d_%H-%M-%S)"
+    # An unclean stop can leave committed SQLite data in -wal. The online
+    # backup API replays it even when no service is running; plain cp does not.
+    echo "Container not running — snapshot databases and execution journal..."
+    if [[ -n "$name" ]]; then
+        _snapshot_tool backup /home/trader/.local/share/mmr/data \
+            /home/trader/.local/share/mmr/backups --name "$name"
+    else
+        _snapshot_tool backup /home/trader/.local/share/mmr/data \
+            /home/trader/.local/share/mmr/backups --keep 30
     fi
-    local dest_host="$HOME/.local/share/mmr/backups/$name"
-    mkdir -p "$dest_host"
-    echo "Container not running — plain-copy snapshot to $dest_host/"
-    $RUNTIME run --rm \
-        -v "$MMR_DB_VOLUME":/src:ro \
-        -v "$dest_host":/dst \
-        alpine sh -c 'cp -v /src/*.duckdb /dst/ 2>&1; ls -lh /dst/'
-    echo "Backup complete: $dest_host/"
+    echo "Backup complete → $HOME/.local/share/mmr/backups/"
 }
 
 # Seed an EMPTY named volume from the newest host backup (backups/latest) before
@@ -783,19 +791,17 @@ seed_db_if_empty() {
     local latest
     latest=$(cd -P "$latest_link" 2>/dev/null && pwd) || return 0
     [[ -n "$latest" && -d "$latest" ]] || return 0
-    ls "$latest"/*.duckdb >/dev/null 2>&1 || return 0
-
     local has_db
     has_db=$($RUNTIME run --rm -v "$vol":/v alpine sh -c \
-        'ls /v/*.duckdb >/dev/null 2>&1 && echo yes || echo no' 2>/dev/null || echo no)
+        'for f in /v/*.duckdb /v/*.sqlite3; do [ ! -e "$f" ] || { echo yes; exit; }; done; echo no')
     if [[ "$has_db" == "yes" ]]; then
         return 0   # volume already populated — NEVER overwrite live data
     fi
 
     echo "Named volume '$vol' is empty — seeding from newest backup $latest ..."
-    $RUNTIME run --rm -v "$vol":/v -v "$latest":/seed:ro \
-        alpine sh -c 'cp -v /seed/*.duckdb /v/ 2>&1; ls -lh /v/'
-    echo "Seed complete."
+    _snapshot_tool restore /home/trader/.local/share/mmr/backups/latest \
+        /home/trader/.local/share/mmr/data
+    echo "Seed complete. Opening trades remain blocked until broker reconciliation is acknowledged."
 }
 
 clean() {

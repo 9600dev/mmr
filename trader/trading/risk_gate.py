@@ -147,6 +147,7 @@ class RiskGate:
         portfolio_value_evaluable: bool = True,
         position_value_evaluable: bool = True,
         sec_type: str = '',
+        aggregate_position_value: Optional[float] = None,
     ) -> RiskGateResult:
         """Evaluate risk limits for an exposure-increasing order.
 
@@ -170,7 +171,7 @@ class RiskGate:
         checks['max_open_orders'] = 'pass'
 
         # Daily loss check — an unreadable daily PnL is NOT a pass.
-        if not daily_pnl_evaluable:
+        if not daily_pnl_evaluable or not math.isfinite(daily_pnl):
             checks['daily_loss'] = 'unevaluable:daily-pnl'
             return RiskGateResult(
                 approved=False,
@@ -193,7 +194,7 @@ class RiskGate:
         # CASH entirely; everything else keeps the concentration cap.
         if str(sec_type).upper() == 'CASH':
             checks['concentration'] = 'skipped:forex-cash'
-        elif not portfolio_value_evaluable:
+        elif not portfolio_value_evaluable or not math.isfinite(portfolio_value):
             checks['concentration'] = 'unevaluable:portfolio-value'
             return RiskGateResult(
                 approved=False,
@@ -201,7 +202,7 @@ class RiskGate:
                        'open new exposure without the concentration check (fail-closed)',
                 checks=checks,
             )
-        elif not position_value_evaluable:
+        elif not position_value_evaluable or not math.isfinite(position_value):
             checks['concentration'] = 'unevaluable:position-value'
             return RiskGateResult(
                 approved=False,
@@ -218,7 +219,12 @@ class RiskGate:
                            f'against portfolio value {portfolio_value:.2f}',
                     checks=checks,
                 )
-            concentration = position_value / portfolio_value
+            concentration_value = (position_value if aggregate_position_value is None
+                                   else aggregate_position_value)
+            if not math.isfinite(concentration_value) or concentration_value < 0:
+                checks['concentration'] = 'unevaluable:aggregate-position'
+                return RiskGateResult(False, 'aggregate position could not be valued', checks)
+            concentration = concentration_value / portfolio_value
             if concentration > self.limits.max_position_size_pct:
                 checks['concentration'] = 'fail'
                 return RiskGateResult(
@@ -482,7 +488,7 @@ class RiskGate:
         init_margin_after = margin_impact.get('initMarginAfter', 0)
         equity_after = margin_impact.get('equityWithLoanAfter', 0)
 
-        if net_liquidation <= 0:
+        if not math.isfinite(net_liquidation) or net_liquidation <= 0:
             checks['leverage'] = 'unevaluable:net-liq'
             checks['margin_cushion'] = 'unevaluable:net-liq'
             return RiskGateResult(
@@ -493,7 +499,7 @@ class RiskGate:
                 checks=checks,
             )
 
-        if not init_margin_after:
+        if not math.isfinite(init_margin_after) or init_margin_after <= 0:
             checks['leverage'] = 'unevaluable:margin-data'
             checks['margin_cushion'] = 'unevaluable:margin-data'
             return RiskGateResult(
@@ -514,7 +520,7 @@ class RiskGate:
             )
         checks['leverage'] = 'pass'
 
-        if not equity_after:
+        if not math.isfinite(equity_after) or equity_after <= 0:
             checks['margin_cushion'] = 'unevaluable:equity-data'
             return RiskGateResult(
                 approved=False,

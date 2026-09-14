@@ -525,23 +525,13 @@ class IBAIORx():
         contract: Contract,
         order: Order,
     ) -> Observable[Trade]:
-        # the order object gets filled with the order details (clientId, orderId etc)
-        # the trade object returned from 'placeOrder' gets filled later, but we don't return it
-        # as we want the subscription stream to contain all relevant trade details
-        def filter_trade(trade: Trade):
-            return self._filter_contract(contract, trade)
-
-        xs = self.trades_subject.pipe(
-            ops.filter(filter_trade)
-        )
-
+        # This API returns a submission receipt. Lifecycle updates are consumed
+        # once by OrderLifecycleTracker, rather than leaving a symbol-filtered
+        # hot subscription behind for every order ever placed.
         trade_result = self.trades_subject.call_event_subscriber_sync(lambda: self.ib.placeOrder(contract, order))
 
         if trade_result:
-            deferred = rx.defer(lambda _: rx.of(cast(Trade, trade_result)))
-            return deferred.pipe(
-                ops.concat(xs)
-            )
+            return rx.of(cast(Trade, trade_result))
         else:
             logging.error('subscribe_place_order, trade_result was None')
             return rx.throw(Exception('subscribe_place_order, trade_result was None'))

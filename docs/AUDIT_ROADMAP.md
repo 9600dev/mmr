@@ -1,5 +1,14 @@
 # MMR Audit — Remaining-Work Roadmap
 
+The [September 2026 remediation report](REMEDIATION_2026-09-08.md) maps all 39
+findings from the [2026-09-08 architecture review](ARCHITECTURE_REVIEW_2026-09-08.md)
+to implementations, [pinned regressions](../tests/review/README.md), performance
+evidence and final verification status. The current
+[strategy execution contract](STRATEGY_EXECUTION_CONTRACT.md) states the
+supported behavior and limits. Completion labels below describe the earlier
+remediation scope; consult the September report for the later work on those
+same boundaries.
+
 Scoping for the architectural-tier items left after the confirmed-bug remediation
 (passes 1–4, all merged to `master`). These are **design changes**, not bug fixes:
 each links IB/broker truth to internal state, or hardens a subsystem. Ordered by

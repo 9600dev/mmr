@@ -192,6 +192,8 @@ def _exit_executioner(gate, inputs):
         return_value=rx.from_iterable([MagicMock()]))
     trader.risk_gate = gate
     trader.order_reduces_exposure = MagicMock(return_value=True)
+    # This fixture has no outstanding physical broker reservations.
+    trader.unobserved_reduction_quantity = AsyncMock(return_value=0.0)
     # The approver notional tier no-ops for exits (opening_qty 0 → None); this
     # helper builds exit-class orders, so a faithful stub returns None.
     trader.enforce_approver_tier = AsyncMock(return_value=None)

@@ -79,6 +79,19 @@ def _module_report(per_module: dict[str, dict[str, int]]) -> dict[str, dict]:
     }
 
 
+def _refuse_incomplete_results(per_module: dict[str, dict[str, int]], prefix: str) -> bool:
+    """A score on a checked subset cannot certify or baseline the whole run."""
+    refused = False
+    for module, counts in sorted(per_module.items()):
+        unchecked = counts.get("not checked", 0)
+        suspicious = counts.get("suspicious", 0)
+        if unchecked or suspicious:
+            print(f"{prefix} [{module}] — {unchecked} not checked, {suspicious} suspicious; "
+                  "complete a reliable `scripts/run_mutation.sh all` run first.", file=sys.stderr)
+            refused = True
+    return refused
+
+
 def check_against_baseline(per_module: dict[str, dict[str, int]]) -> int:
     """Fail if any baselined module's score dropped, or wasn't exercised.
 
@@ -98,12 +111,14 @@ def check_against_baseline(per_module: dict[str, dict[str, int]]) -> int:
     number you have not seen twice.
 
     FAILS CLOSED, the lesson from the ty gate: a missing baseline, absent
-    mutation data, or a module that was generated but never exercised is a
+    mutation data, unchecked mutants, or suspicious execution results are a
     FAILED check, never a silent pass.
     """
     if not BASELINE.exists():
         print(f"mutation gate FAILED — no baseline at {BASELINE}. "
               f"Record one with: scripts/run_mutation.sh baseline", file=sys.stderr)
+        return 1
+    if _refuse_incomplete_results(per_module, "mutation gate FAILED"):
         return 1
     baseline = json.loads(BASELINE.read_text())
     current = _module_report(per_module)
@@ -152,6 +167,8 @@ def main() -> int:
         return 1
 
     if args.update:
+        if _refuse_incomplete_results(per_module, "mutation baseline REFUSED"):
+            return 1
         # --update on a PARTIAL run used to overwrite every unexercised module
         # with a 0/0 record, silently erasing its floor. `--check` fails closed
         # on a partial run; `--update` did not, so the safe path and the

@@ -214,8 +214,12 @@ class TestStaleBarGate:
         d = _decide(_work(Action.SELL), bar_age=10_000.0, held=5.0)
         assert d.kind == 'close'
 
-    def test_unknown_bar_size_disables_gate(self):
-        assert _decide(_work(Action.BUY, bar_size_seconds=0.0), bar_age=10_000.0).kind == 'open'
+    def test_unknown_bar_size_refuses_the_open(self):
+        # Correct the obsolete permissive oracle: an unknown interval cannot
+        # establish freshness. This is an ordinary test, not an invariant edit.
+        decision = _decide(_work(Action.BUY, bar_size_seconds=0.0), bar_age=10_000.0)
+        assert decision.kind == 'skip'
+        assert 'interval' in decision.reason and 'fail-closed' in decision.reason
 
     def test_unknown_age_refuses_the_open(self):
         """CHANGED 2026-07-28. This used to assert the opposite: an undatable
@@ -330,3 +334,69 @@ class TestPreflightSummary:
         assert not ok
         assert line.startswith('PREFLIGHT FAIL')
         assert 'ib_socket: round-trip failed' in line
+
+
+# The decision consumes primitive floating-point inputs. Missing/nonfinite
+# evidence must refuse an opening; an exit keeps its independent authority.
+_INVALID_FRESHNESS = [
+    pytest.param(float('nan'), 60.0, 3.0, id='age-nan'),
+    pytest.param(float('inf'), 60.0, 3.0, id='age-infinity'),
+    pytest.param(float('-inf'), 60.0, 3.0, id='age-negative-infinity'),
+    pytest.param(10.0, -60.0, 3.0, id='interval-negative'),
+    pytest.param(10.0, float('nan'), 3.0, id='interval-nan'),
+    pytest.param(10.0, float('inf'), 3.0, id='interval-infinity'),
+    pytest.param(10.0, 60.0, 0.0, id='multiplier-zero'),
+    pytest.param(10.0, 60.0, -3.0, id='multiplier-negative'),
+    pytest.param(10.0, 60.0, float('nan'), id='multiplier-nan'),
+    pytest.param(10.0, 60.0, float('inf'), id='multiplier-infinity'),
+    pytest.param(10.0, 60.0, 1e308, id='threshold-overflow'),
+]
+
+
+@pytest.mark.parametrize('age, interval, multiple', _INVALID_FRESHNESS)
+def test_invalid_numeric_freshness_refuses_an_open(age, interval, multiple):
+    decision = _decide(_work(Action.BUY, bar_size_seconds=interval),
+                       bar_age=age, multiple=multiple)
+    assert decision.kind == 'skip'
+    assert decision.quantity is None
+    assert 'stale_bar' in decision.reason and 'fail-closed' in decision.reason
+
+
+@pytest.mark.parametrize('age, expected', [
+    pytest.param(-120.0, 'open', id='finite-future-label'),
+    pytest.param(1.5, 'open', id='positive-subsecond-exact-boundary'),
+    pytest.param(1.6, 'skip', id='positive-subsecond-stale'),
+])
+def test_finite_future_labels_and_subsecond_intervals_keep_their_policy(age, expected):
+    assert _decide(_work(Action.BUY, bar_size_seconds=0.5),
+                   bar_age=age, multiple=3.0).kind == expected
+
+
+@pytest.mark.parametrize('age, interval, multiple', _INVALID_FRESHNESS + [
+    pytest.param(10.0, 0.0, 3.0, id='interval-zero'),
+])
+def test_invalid_freshness_cannot_remove_an_attributed_exit(age, interval, multiple):
+    decision = _decide(_work(Action.SELL, bar_size_seconds=interval),
+                       bar_age=age, multiple=multiple, held=5.0)
+    assert decision.kind == 'close'
+    assert decision.quantity == 5.0
+
+
+def test_native_nat_timestamp_has_unknown_age():
+    assert bar_age_seconds(pd.NaT, TestBarAgeSeconds.NOW) is None
+
+
+@pytest.mark.parametrize('value', ['nan', 'inf', '-inf', '0', '-2', '1e999', '-1e999'])
+def test_invalid_stale_multiplier_environment_uses_the_documented_default(monkeypatch, value):
+    from trader.strategy.auto_executor import AutoExecutor
+    monkeypatch.setenv('MMR_STALE_BAR_MULTIPLE', value)
+    # Only the native env-backed property is used; constructing storage is
+    # irrelevant to this configuration contract.
+    assert AutoExecutor.__new__(AutoExecutor).stale_bar_multiple == 3.0
+
+
+@pytest.mark.parametrize('value, expected', [('', 3.0), ('invalid', 3.0), ('0.5', 0.5)])
+def test_stale_multiplier_fallback_and_positive_fraction_remain_supported(monkeypatch, value, expected):
+    from trader.strategy.auto_executor import AutoExecutor
+    monkeypatch.setenv('MMR_STALE_BAR_MULTIPLE', value)
+    assert AutoExecutor.__new__(AutoExecutor).stale_bar_multiple == expected

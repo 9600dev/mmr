@@ -110,13 +110,19 @@ def protective_stop_plan(
     # FLOOR, not round: stepping toward entry is the one direction that can
     # destroy the stop's meaning, and rounding does exactly that at low prices.
     cents = math.floor(target * 100.0)
-    # ...and then step down if the float boundary put the floor ABOVE target
-    # anyway. `target * 100.0` can round up onto an exact integer — at an entry
-    # of 99999.99999999999 and 1.00001% it lands on 9899999.0, one cent nearer
-    # entry than asked for. Same step-down idiom as
-    # order_math._floor_shares_for_notional, and for the same reason.
-    while cents > 0 and cents / 100.0 > target:
-        cents -= 1
+    # Scaling and division can round the integer floor ABOVE target. At
+    # large finite prices, decrementing one cent at a time can take billions
+    # of iterations before the represented price changes. Preserve the fast
+    # path and otherwise find the last safe cent count with a bounded search.
+    if cents > 0 and cents / 100.0 > target:
+        safe, over_target = 0, cents
+        while over_target - safe > 1:
+            midpoint = (safe + over_target) // 2
+            if midpoint / 100.0 > target:
+                over_target = midpoint
+            else:
+                safe = midpoint
+        cents = safe
     stop_price = cents / 100.0
     if not (0.0 < stop_price < cost):
         return None                      # no representable stop below entry

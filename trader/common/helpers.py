@@ -413,11 +413,22 @@ def dateify(
 
 
 def get_network_ip() -> str:
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.connect(("8.8.8.8", 80))
-    ip = s.getsockname()[0]
-    s.close()
-    return ip
+    """Best-effort address for the startup banner, never a service dependency.
+
+    UDP connect chooses a local route without sending a packet, but hosts may
+    still prohibit it. A reported loopback address is appropriate for local
+    access when no routed interface can be determined; binding uses separate
+    service configuration and is unaffected.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(('8.8.8.8', 80))
+            return probe.getsockname()[0]
+    except OSError as exc:
+        logging.getLogger(__name__).warning(
+            'Could not determine routed interface for startup banner; '
+            'reporting loopback 127.0.0.1: %s', exc)
+        return '127.0.0.1'
 
 # todo change this to use exchange calendar
 def daily_open(data_frame: pd.DataFrame) -> pd.DataFrame:
@@ -678,4 +689,3 @@ def best_fit_distribution(data, bins=200, ax=None):
 def get_truncated_normal(mean=0.0, sd=1.0, low=0.0, upp=10.0):
     return truncnorm(
         (low - mean) / sd, (upp - mean) / sd, loc=mean, scale=sd)
-

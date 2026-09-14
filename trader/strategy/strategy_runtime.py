@@ -31,9 +31,16 @@ import exchange_calendars
 import importlib
 import importlib.util
 import inspect
+import hashlib
+import json
 import os
 import pandas as pd
 import sys
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from functools import wraps
 import trader.messaging.strategy_service_api as bus
 import yaml
 
@@ -45,6 +52,16 @@ error_table = {
     'trader.common.exceptions.TraderException': TraderException,
     'trader.common.exceptions.TraderConnectionException': TraderConnectionException
 }
+
+
+def _serialized_deployment(method):
+    @wraps(method)
+    def serialized(self, *args, **kwargs):
+        if not hasattr(self, '_config_lock'):
+            self._config_lock = threading.RLock()
+        with self._config_lock:
+            return method(self, *args, **kwargs)
+    return serialized
 
 
 # The auto-executor is long-only by construction (decide_signal has no
@@ -425,6 +442,20 @@ class StrategyRuntime():
         self._oos_last: Dict[int, Any] = {}
         # Keep at most this many days of raw ticks per conid (bounds compute).
         self._tick_retention_days: int = 2
+        self._deployment_lock = threading.RLock()
+        self._config_lock = threading.RLock()
+        self._deployment_generations: Dict[str, str] = {}
+        self._retired_strategies: List[Strategy] = []
+        self._contracts: Dict[int, Contract] = {}
+        self._live_bar_buffers: Dict[tuple, Any] = {}
+        self._frame_cache: Dict[tuple, Any] = {}
+        self._isolate_callbacks = True
+        self._callback_workers: Dict[str, Any] = {}
+        self._history_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='strategy-history')
+        self._history_jobs: Dict[tuple, Any] = {}
+        self._history_retry_at: Dict[tuple, float] = {}
+        self._history_versions: Dict[tuple, int] = {}
+        self._managed_contexts: Dict[tuple, Strategy] = {}
 
         self.historical_data_client: IBHistoryWorker
 
@@ -468,6 +499,7 @@ class StrategyRuntime():
                 duckdb_path=self.duckdb_path,
                 paper_trading=(self.trading_mode == 'paper'),
                 event_store=self.event_store,
+                authority_check=self._opening_authorized,
             )
             self.trader_client = RPCClient[TraderServiceApi](
                 zmq_server_address=self.zmq_rpc_server_address,
@@ -532,6 +564,48 @@ class StrategyRuntime():
             logging.warning('could not read enabled-state for %s: %s', name, ex)
             return None
 
+    def _deployment_state(self) -> None:
+        # Also supports runtimes constructed without the network setup.
+        if not hasattr(self, '_deployment_lock'):
+            self._deployment_lock = threading.RLock()
+            self._deployment_generations = {}
+            self._retired_strategies = []
+
+    def _opening_authorized(self, name: str, generation: str) -> bool:
+        self._deployment_state()
+        with self._deployment_lock:
+            strategy = self.get_strategy(name)
+            return bool(generation and self._deployment_generations.get(name) == generation
+                        and strategy is not None and strategy.state == StrategyState.RUNNING
+                        and strategy.ctx.auto_execute)
+
+    def _revoke_opening(self, strategy: Strategy) -> None:
+        self._deployment_state()
+        with self._deployment_lock:
+            generation = getattr(strategy._context, 'deployment_generation', '')
+            if self._deployment_generations.get(strategy.name) == generation:
+                self._deployment_generations.pop(strategy.name, None)
+
+    def _grant_generation(self, strategy: Strategy) -> None:
+        self._deployment_state()
+        with self._deployment_lock:
+            generation = uuid.uuid4().hex
+            strategy.ctx.deployment_generation = generation
+            self._deployment_generations[strategy.ctx.name] = generation
+
+    def _retire_strategy(self, strategy: Strategy) -> None:
+        """Revoke openings immediately; retain its exit policy until flat."""
+        self._revoke_opening(strategy)
+        self._stop_callback_worker(strategy)
+        strategy.ctx.auto_execute = False
+        strategy.disable()
+        self._retired_strategies.append(strategy)
+        self.strategy_implementations.remove(strategy)
+        for subscribers in self.strategies.values():
+            if strategy in subscribers:
+                subscribers.remove(strategy)
+
+    @_serialized_deployment
     def enable_strategy(self, name: str, paper_only: bool = False) -> StrategyState:
         """Enable a strategy.
 
@@ -542,15 +616,34 @@ class StrategyRuntime():
         """
         for implementation in self.strategy_implementations:
             if name == implementation.name:
+                if implementation.ctx.auto_execute:
+                    filepath = getattr(implementation, '_source_path', '')
+                    if not filepath or not self._gauntlet_allows_arming(
+                            name, filepath, implementation.ctx.class_name or ''):
+                        self._revoke_opening(implementation)
+                        return StrategyState.ERROR
                 state = implementation.enable()
+                self._grant_generation(implementation)
+                if getattr(self, '_isolate_callbacks', False):
+                    try:
+                        self._start_callback_worker(implementation)
+                        state = implementation.state
+                    except Exception:
+                        implementation.state = StrategyState.ERROR
+                        self._revoke_opening(implementation)
+                        logging.exception('strategy worker failed to enable %s', name)
+                        return StrategyState.ERROR
                 self._persist_enabled(name, True)
                 return state
         return StrategyState.ERROR
 
     @log_method
+    @_serialized_deployment
     def disable_strategy(self, name: str) -> StrategyState:
         for implementation in self.strategy_implementations:
             if name == implementation.name:
+                self._revoke_opening(implementation)
+                self._stop_callback_worker(implementation)
                 state = implementation.disable()
                 self._persist_enabled(name, False)
                 return state
@@ -577,7 +670,7 @@ class StrategyRuntime():
         """Health snapshot for the pulse line, `mmr verify`, and healthchecks."""
         executor = getattr(self, 'auto_executor', None)
         auto_open = executor.open_count() if executor is not None else 0
-        return build_runtime_status(
+        status = build_runtime_status(
             now_utc=pd.Timestamp.now(tz='UTC'),
             strategies=self.strategy_implementations,
             streams=self.streams,
@@ -585,6 +678,24 @@ class StrategyRuntime():
             oos_bars=self._oos_bars,
             auto_exec_open=auto_open,
         )
+        if executor is not None and hasattr(executor, 'status_metrics'):
+            status['execution'] = executor.status_metrics()
+        status['deployments'] = {
+            strategy.name: {
+                'generation': strategy.ctx.deployment_generation,
+                'effective_config_hash': strategy.ctx.effective_config_hash,
+                'source_hash': strategy._source_hash,
+            } for strategy in self.strategy_implementations
+        }
+        status['callback_workers'] = {
+            name: {'pid': worker.pid, 'failed': worker.failed}
+            # Snapshot: enable/disable mutate this dict from a worker thread.
+            for name, worker in list(getattr(self, '_callback_workers', {}).items())
+        }
+        status['event_loop_lag_seconds'] = getattr(self, '_event_loop_lag_seconds', 0.0)
+        status['signal_audit_pending'] = len(getattr(self, '_signal_audit_tasks', ()))
+        status['signal_audit_overflow'] = getattr(self, '_signal_audit_overflow', 0)
+        return status
 
     def _log_pulse(self) -> None:
         """Periodic heartbeat. A healthy pipeline is otherwise SILENT at INFO
@@ -607,76 +718,155 @@ class StrategyRuntime():
             cutoff = df.index[-1] - pd.Timedelta(days=self._tick_retention_days)
             if df.index[0] < cutoff:
                 self.streams[conId] = df.loc[df.index >= cutoff]
+            # Completed bars live in incremental buffers. Raw ticks are only
+            # the recent health/sample view, not an ever-growing replay log.
+            if any(key[0] == conId for key in getattr(self, '_live_bar_buffers', {})):
+                self.streams[conId] = self.streams[conId].iloc[-2048:]
         except Exception:
             pass
 
+    def _invalidate_history(self, conId: int, bar_size: BarSize) -> None:
+        if hasattr(self, '_history_versions'):
+            key = (conId, bar_size)
+            self._history_versions[key] = self._history_versions.get(key, 0) + 1
+            self._history_retry_at.pop(key, None)
+        self._hist_bars.pop((conId, bar_size), None)
+        getattr(self, '_frame_cache', {}).pop((conId, bar_size), None)
+
     def _prime_hist_bars(self, conId: int, bar_size: BarSize) -> None:
-        """One-time load of recent historical OHLCV bars for (conId, bar_size)
-        from the DB into the priming cache, normalized to the live schema so it
-        concatenates cleanly with resampled ticks. Marks the key as primed even
-        on no-data so we don't re-read the DB on every tick."""
+        """Only successful reads populate the cache; failed reads are retryable."""
         from trader.data.duckdb_store import DuckDBDataStore
         from trader.data.market_data import normalize_historical
         key = (conId, bar_size)
-        self._hist_bars[key] = pd.DataFrame()   # mark primed (default empty)
+        version = getattr(self, '_history_versions', {}).get(key, 0)
         try:
             ds = DuckDBDataStore(self.history_duckdb_path)
             end = dt.datetime.now(dt.timezone.utc)
-            start = end - dt.timedelta(days=max(self._tick_retention_days, 5) + 5)
+            candidates = list(self.strategies.get(conId, [])) + [
+                s for (name, cid), s in getattr(self, '_managed_contexts', {}).items() if cid == conId]
+            requested_days = max((getattr(s, 'historical_days_prior', 0) or 0
+                                  for s in candidates
+                                  if s.bar_size == bar_size), default=0)
+            start = end - dt.timedelta(days=max(requested_days, self._tick_retention_days, 5) + 5)
             df = ds.read(str(conId), start=start, end=end, bar_size=str(bar_size))
+            norm = pd.DataFrame()
             if df is not None and not df.empty:
-                norm = normalize_historical(df)
-                # Drop NaN-close rows, exactly as Backtester.run does
-                # (backtester.py: `normalized.dropna(subset=['close'])`). The
-                # provider returns null OHLCV placeholders for future dates and
-                # holidays, and until 2026-07-26 only the BACKTEST dropped them:
-                # the live frame carried bars the validated series never had.
-                # Measured in the live DB at the time: 34 such rows for CAT, 79
-                # for GLD, 7 PLTR, 6 GOOGL — and several land ON a session
-                # boundary (GOOGL at 08:00 UTC = the pre-market open, CAT at
-                # 13:30 UTC = the RTH open), which is exactly where ORB reads its
-                # opening range. Same DB, same normalize_historical, two
-                # different series is the divergence class that invalidated the
-                # 2026-07 roster validation once already.
-                norm = norm.dropna(subset=['close'])
-                idx = norm.index
-                norm.index = idx.tz_localize('UTC') if idx.tz is None else idx.tz_convert('UTC')
+                norm = normalize_historical(df).dropna(subset=['close'])
+                norm.index = self._utc_index(norm.index)
+            if version == getattr(self, '_history_versions', {}).get(key, 0):
                 self._hist_bars[key] = norm
         except Exception as ex:
-            logging.warning('could not prime hist bars for conId %s %s: %s', conId, bar_size, ex)
+            if hasattr(self, '_history_retry_at'):
+                self._history_retry_at[key] = time.monotonic() + 5
+            logging.warning('could not prime hist bars for conId %s %s (will retry): %s', conId, bar_size, ex)
+
+    @staticmethod
+    def _utc_index(index):
+        index = pd.DatetimeIndex(index)
+        return index.tz_localize('UTC') if index.tz is None else index.tz_convert('UTC')
+
+    def _filter_session_frame(self, conId, bar_size, frame, observed):
+        """Filter EVERY row, retaining valid extended-hours and daily labels."""
+        contract = getattr(self, '_contracts', {}).get(conId)
+        if contract is None or frame.empty:
+            return frame
+        from trader.data.market_session import calendar_name_for, session_intervals
+        name = calendar_name_for(contract.exchange, contract.primaryExchange)
+        duration = pd.Timedelta(BarSize.to_pandas_freq(bar_size))
+        if name is None or contract.secType in ('CASH', 'CRYPTO'):
+            return frame.loc[frame.index + duration <= observed] if duration >= pd.Timedelta(days=1) else frame
+        index = frame.index
+        keep = pd.Series(False, index=index)
+        if duration >= pd.Timedelta(days=1):
+            # Daily bars carry session labels, not minute timestamps. UTC
+            # midnight labels are already dates; local-midnight labels retain
+            # their venue date after conversion.
+            import pandas_market_calendars as mcal
+            timezone = mcal.get_calendar(name).tz
+            for stamp in index:
+                day = (stamp.date() if stamp == stamp.normalize()
+                       else stamp.tz_convert(timezone).date())
+                lookup = session_intervals(name, day)
+                keep.loc[stamp] = (not lookup.evaluable or
+                                  (lookup.window is not None and lookup.window[1] <= observed))
+        else:
+            # Include adjacent calendar dates for overnight/Asian sessions;
+            # vector comparisons keep this O(bars + sessions), not per tick.
+            days = set(index.date)
+            days |= {day + dt.timedelta(days=offset) for day in list(days) for offset in (-1, 1)}
+            for day in sorted(days):
+                lookup = session_intervals(name, day)
+                if not lookup.evaluable:
+                    keep |= index.date == day
+                elif lookup.window:
+                    intervals = lookup.intervals or (lookup.window,)
+                    for start, end in intervals:
+                        mask = (index >= start) & (index <= end)
+                        if end != lookup.window[1]:
+                            mask &= index < end
+                        keep |= mask
+        refused = frame.index[~keep.to_numpy()]
+        if len(refused):
+            self._note_out_of_session(conId, refused[-1])
+        return frame.loc[keep.to_numpy()]
 
     def _strategy_frame(self, conId: int, bar_size: BarSize) -> Optional[pd.DataFrame]:
-        """The OHLCV frame a bar-based strategy should see: historical priming
-        bars + the live tick stream resampled to `bar_size` (completed bars only).
-        This is what makes bar strategies work live — previously they were handed
-        the raw per-tick, cumulative-volume stream and couldn't compute bars."""
-        from trader.data.market_data import resample_ticks_to_bars
+        """Shared completed bars, with one incremental buffer per subscription."""
+        from trader.strategy.live_bars import LiveBarBuffer, DailySessionBuckets
         key = (conId, bar_size)
+        if not hasattr(self, '_live_bar_buffers'):
+            self._live_bar_buffers = {}
+            self._frame_cache = {}
         if key not in self._hist_bars:
-            self._prime_hist_bars(conId, bar_size)
-        try:
-            freq = BarSize.to_pandas_freq(bar_size)
-        except Exception:
-            return self.streams.get(conId)   # unknown freq: legacy raw stream
-
-        def _utc(df):
-            if df is None or df.empty:
-                return None
-            idx = df.index
-            if idx.tz is None:
-                df = df.copy(); df.index = idx.tz_localize('UTC')
-            return df
-
-        hist = self._hist_bars.get(key)
+            if hasattr(self, '_history_pool'):
+                job = self._history_jobs.get(key)
+                if (job is None or job.done()) and time.monotonic() >= self._history_retry_at.get(key, 0):
+                    self._history_jobs[key] = self._history_pool.submit(self._prime_hist_bars, conId, bar_size)
+            else:
+                self._prime_hist_bars(conId, bar_size)
+        freq = BarSize.to_pandas_freq(bar_size)
+        daily = pd.Timedelta(freq) >= pd.Timedelta(days=1)
         ticks = self.streams.get(conId)
-        live = resample_ticks_to_bars(ticks, freq) if ticks is not None and not ticks.empty else None
-        frames = [f for f in (_utc(hist), _utc(live)) if f is not None and not f.empty]
+        if key not in self._live_bar_buffers:
+            daily_sessions = None
+            contract = getattr(self, '_contracts', {}).get(conId)
+            if daily and contract is not None and contract.secType not in ('CASH', 'CRYPTO'):
+                from trader.data.market_session import calendar_name_for
+                name = calendar_name_for(contract.exchange, contract.primaryExchange)
+                if name:
+                    daily_sessions = DailySessionBuckets(name)
+            if ticks is not None and not ticks.empty:
+                ticks = ticks.copy()
+                ticks.index = self._utc_index(ticks.index)
+            self._live_bar_buffers[key] = LiveBarBuffer(
+                ticks, freq, self._tick_retention_days, daily_sessions=daily_sessions)
+        buffer = self._live_bar_buffers[key]
+        observed = buffer.last_tick if buffer.last_tick is not None else pd.Timestamp.now(tz='UTC')
+        forming = observed.floor(freq)
+        hist = self._hist_bars.get(key)
+        revision = (id(hist), buffer.revision, observed.floor('min') if daily else forming)
+        cached = self._frame_cache.get(key)
+        if cached is not None and cached[0] == revision:
+            return cached[1]
+        live = buffer.completed
+        if daily and buffer.current is not None:
+            candidate = pd.DataFrame([buffer.current], index=pd.DatetimeIndex([buffer.bucket], name='date'))
+            live = candidate if live.empty else pd.concat([live, candidate])
+        frames = [frame for frame in (hist, live) if frame is not None and not frame.empty]
         if not frames:
             return None
-        if len(frames) == 1:
-            return frames[0].sort_index()
-        combined = pd.concat(frames)
-        return combined[~combined.index.duplicated(keep='last')].sort_index()
+        combined = pd.concat(frames) if len(frames) > 1 else frames[0].copy()
+        combined.index = self._utc_index(combined.index)
+        if buffer.daily_sessions is not None:
+            combined.index = buffer.daily_sessions.historical_labels(combined.index)
+        combined = combined[~combined.index.duplicated(keep='last')].sort_index()
+        if not daily:
+            combined = combined.loc[combined.index < forming]
+        elif getattr(self, '_contracts', {}).get(conId) is None:
+            combined = combined.loc[combined.index + pd.Timedelta(freq) <= observed]
+        combined = self._filter_session_frame(conId, bar_size, combined, observed)
+        self._frame_cache[key] = (revision, combined)
+        return combined
 
     def _bar_in_session(self, contract, bar_ts) -> bool:
         """Session gate for a dispatched bar. Never raises and never blocks on
@@ -725,14 +915,39 @@ class StrategyRuntime():
         if not ticker.contract:
             return
         conId = ticker.contract.conId
+        if not hasattr(self, '_contracts'):
+            self._contracts = {}
+        self._contracts[conId] = ticker.contract
 
         # populate the raw tick buffer, then bound it so resampling stays cheap
         normalized = normalize_ticker(ticker)
+        previous_ticks = self.streams.get(conId)
+        if previous_ticks is not None and not previous_ticks.empty:
+            if normalized.index[-1] < previous_ticks.index[-1]:
+                logging.warning('ignoring out-of-order ticker for conId %s at %s', conId, normalized.index[-1])
+                return
+        for key, buffer in getattr(self, '_live_bar_buffers', {}).items():
+            if key[0] == conId:
+                buffer.append(normalized)
         if conId not in self.streams:
             self.streams[conId] = normalized
         else:
-            self.streams[conId] = pd.concat([self.streams[conId], normalized], axis=0, copy=False)
+            self.streams[conId] = pd.concat([self.streams[conId], normalized], axis=0)
         self._cap_tick_stream(conId)
+
+        # Persisted position policies survive replacement/removal and even a
+        # service restart with no strategy left in the deployment YAML.
+        managed_names = set()
+        for (name, cid), context in list(getattr(self, '_managed_contexts', {}).items()):
+            if cid != conId:
+                continue
+            managed_names.add(name)
+            try:
+                frame = self._strategy_frame(conId, context.bar_size)
+                if frame is not None and not frame.empty:
+                    self._dispatch_management_bar(context, conId, frame)
+            except Exception:
+                logging.exception('persisted exit-policy dispatch failed for %s conId %s', name, conId)
 
         # Execute the strategies attached to the conId. CRITICAL: each strategy
         # is isolated in its own try/except. Without this, one strategy raising
@@ -741,7 +956,10 @@ class StrategyRuntime():
         # DETACHES this observer from the ticker subject — every subsequent tick
         # for ALL strategies is then silently dropped and open positions go
         # unmanaged. A single misbehaving strategy must not take down the feed.
-        for strategy in self.__get_enabled_strategies(conId):
+        strategies = list(self.strategies.get(conId, []))
+        strategies += [s for s in getattr(self, '_retired_strategies', [])
+                       if conId in (s.conids or []) and s.name not in {x.name for x in strategies}]
+        for strategy in strategies:
             try:
                 # Hand the strategy proper OHLCV bars (historical priming +
                 # resampled live ticks), and only when a NEW completed bar has
@@ -752,8 +970,18 @@ class StrategyRuntime():
                 if frame is None or frame.empty:
                     continue
                 last_bar = frame.index[-1]
+                # Position management remains live through DISABLED/ERROR and
+                # deployment removal. It has a separate dispatch watermark.
+                if strategy.name not in managed_names:
+                    self._dispatch_management_bar(strategy, conId, frame)
+                if strategy.state not in (StrategyState.RUNNING, StrategyState.WAITING_HISTORICAL_DATA):
+                    continue
+                if (hasattr(self, '_history_pool') and (getattr(strategy, 'historical_days_prior', 0) or 0) > 0
+                        and (conId, strategy.bar_size) not in self._hist_bars):
+                    continue
                 dkey = (conId, strategy.name)
-                if self._last_dispatched_bar.get(dkey) == last_bar:
+                previous = self._last_dispatched_bar.get(dkey)
+                if previous is not None and last_bar <= previous:
                     continue
                 # Out-of-session bars are NOT market data (AUDIT_ROADMAP G8).
                 # normalize_ticker falls back to the bid/ask midpoint, so an
@@ -762,14 +990,30 @@ class StrategyRuntime():
                 # hours ARE in-session — this is not an RTH filter; see
                 # trader/data/market_session.py. Deliberately does NOT update
                 # _last_dispatched_bar, so bar_age_s keeps telling the truth.
-                if not self._bar_in_session(ticker.contract, last_bar):
+                if (pd.Timedelta(BarSize.to_pandas_freq(strategy.bar_size)) < pd.Timedelta(days=1)
+                        and not self._bar_in_session(ticker.contract, last_bar)):
                     self._note_out_of_session(conId, last_bar)
+                    continue
+                worker = getattr(self, '_callback_workers', {}).get(strategy.name)
+                if worker is None and getattr(self, '_isolate_callbacks', False):
+                    # enable/redeploy registers the worker from a thread after
+                    # the strategy is already RUNNING. A bar in that window is
+                    # retried on the next tick (the watermark is not advanced).
+                    # Failing the strategy here set ERROR and revoked its
+                    # opening authority while the enable RPC reported success.
+                    self._note_worker_pending(strategy.name or '?', conId)
                     continue
                 self._last_dispatched_bar[dkey] = last_bar
                 # G6: evaluate time-based exits once per new bar, whether or
                 # not the strategy emits a signal (mirrors the backtester's
                 # per-bar exit_conditions check).
-                self._check_time_exit(strategy, conId, frame, last_bar)
+                if worker is not None:
+                    getattr(self, '_worker_pending_logged', set()).discard(strategy.name)
+                    generation = strategy.ctx.deployment_generation
+                    worker.submit(conId, frame, last_bar, generation,
+                                  lambda result, s=strategy: self._post_callback(self._callback_result, s, result),
+                                  lambda error, s=strategy: self._post_callback(self._callback_error, s, error))
+                    continue
                 signal = strategy.on_prices(frame)
             except Exception as ex:
                 logging.exception(
@@ -777,49 +1021,140 @@ class StrategyRuntime():
                     'continuing the tick feed', getattr(strategy, 'name', '?'), conId)
                 try:
                     strategy.state = StrategyState.ERROR
+                    self._revoke_opening(strategy)
                 except Exception:
                     pass
                 continue
 
-            if not signal:
-                continue
-            try:
-                if signal.action == Action.BUY:
-                    logging.info('BUY signal from %s', strategy.name)
-                elif signal.action == Action.SELL:
-                    logging.info('SELL signal from %s', strategy.name)
+            self._handle_signal(strategy, conId, signal, last_bar)
 
-                # Persist signal to event store
-                event = TradingEvent(
-                    event_type=EventType.SIGNAL,
-                    timestamp=dt.datetime.now(),
-                    strategy_name=signal.source_name,
-                    conid=conId,
-                    action=str(signal.action),
-                    signal_probability=signal.probability,
-                    signal_risk=signal.risk,
-                )
+    def _note_worker_pending(self, name: str, conId: int) -> None:
+        logged = getattr(self, '_worker_pending_logged', None)
+        if logged is None:
+            logged = self._worker_pending_logged = set()
+        if name in logged:
+            return
+        logged.add(name)
+        logging.warning('strategy %s is RUNNING but its callback worker is not registered yet; '
+                        'deferring bars (first: conId %s) until it is', name, conId)
+
+    def _handle_signal(self, strategy, conId, signal, last_bar):
+        if not signal:
+            return
+        signal.source_name = strategy.name
+        signal.conid = conId
+        try:
+            if signal.action == Action.BUY:
+                logging.info('BUY signal from %s', strategy.name)
+            elif signal.action == Action.SELL:
+                logging.info('SELL signal from %s', strategy.name)
+
+            # Persist signal to event store
+            event = TradingEvent(
+                event_type=EventType.SIGNAL,
+                timestamp=dt.datetime.now(),
+                strategy_name=signal.source_name,
+                conid=conId,
+                action=str(signal.action),
+                signal_probability=signal.probability,
+                signal_risk=signal.risk,
+            )
+            if hasattr(self, '_loop'):
+                self._queue_signal_audit(event)
+            else:
                 self.event_store.append(event)
 
-                # Publish signal via MessageBus for cross-strategy use and subscribers
-                self.zmq_messagebus_client.write('signal', signal)
-            except Exception:
-                # A failure persisting/publishing one signal must not kill the
-                # feed or the other strategies either.
-                logging.exception(
-                    'failed to record/publish signal from %s for conId %s',
-                    getattr(strategy, 'name', '?'), conId)
+            # Publish signal via MessageBus for cross-strategy use and subscribers
+            self.zmq_messagebus_client.write('signal', signal)
+        except Exception:
+            # A failure persisting/publishing one signal must not kill the
+            # feed or the other strategies either.
+            logging.exception(
+                'failed to record/publish signal from %s for conId %s',
+                getattr(strategy, 'name', '?'), conId)
 
-            # G6: hand the signal to the auto-executor (guards + long-only
-            # decision + proposal-pipeline execution happen on its worker
-            # thread). Isolated from the persist/publish block above so a
-            # failure there can't swallow execution, and vice versa.
+        try:
+            self._submit_auto_execution(strategy, conId, signal, last_bar)
+        except Exception:
+            logging.exception('auto-execute submission failed for %s conId %s',
+                              getattr(strategy, 'name', '?'), conId)
+
+    def _queue_signal_audit(self, event):
+        """A busy analytics store cannot stall bars or independent exits.
+
+        Executed intents have their own durable journal. This bounded queue is
+        the best-effort signal audit stream, including nonexecuted signals.
+        Overflow is visible in health and logs, never an unbounded memory queue.
+        """
+        if not hasattr(self, '_signal_audit_tasks'):
+            self._signal_audit_tasks = set()
+        if len(self._signal_audit_tasks) >= 256:
+            self._signal_audit_overflow = getattr(self, '_signal_audit_overflow', 0) + 1
+            logging.error('signal audit backlog full for %s conId %s', event.strategy_name, event.conid)
+            return
+        async def record():
             try:
-                self._submit_auto_execution(strategy, conId, signal, last_bar)
+                await asyncio.to_thread(self.event_store.append, event)
             except Exception:
-                logging.exception(
-                    'auto-execute submission failed for %s conId %s',
-                    getattr(strategy, 'name', '?'), conId)
+                logging.exception('signal audit persistence failed for %s conId %s', event.strategy_name, event.conid)
+        task = self._loop.create_task(record())
+        self._signal_audit_tasks.add(task)
+        task.add_done_callback(self._signal_audit_tasks.discard)
+
+
+    def _start_callback_worker(self, strategy, deployment_config=None):
+        from trader.strategy.callback_worker import StrategyCallbackWorker
+        self._stop_callback_worker(strategy)
+        if not hasattr(self, '_callback_workers'):
+            self._callback_workers = {}
+        conids = set(strategy.conids or [])
+        if strategy.universe:
+            universe = self.universe_accessor.get(strategy.universe)
+            conids.update(sd.conId for sd in universe.security_definitions)
+        worker = StrategyCallbackWorker(
+            source_path=strategy._source_path, source_hash=strategy._source_hash,
+            class_name=strategy.ctx.class_name, context=strategy.ctx,
+            initial_state=strategy.state,
+            max_pending=max(1, min(256, len(conids))),
+            deployment_config=deployment_config,
+        )
+        try:
+            worker.start()
+            metadata = worker.wait_ready()
+        except Exception:
+            worker.stop()
+            raise
+        strategy.ctx.params = metadata['effective_params']
+        strategy.ctx.effective_config_hash = metadata['effective_config_hash']
+        # Register before the state becomes dispatchable: the tick loop reads
+        # both without a lock, and a RUNNING strategy with no worker is the
+        # shape the dispatcher must otherwise defer around.
+        self._callback_workers[strategy.name] = worker
+        strategy.state = StrategyState(metadata['state'])
+
+    def _stop_callback_worker(self, strategy):
+        worker = getattr(self, '_callback_workers', {}).pop(strategy.name, None)
+        if worker is not None:
+            worker.stop()
+
+    def _post_callback(self, callback, strategy, value):
+        self._loop.call_soon_threadsafe(callback, strategy, value)
+
+    def _callback_result(self, strategy, result):
+        if result.signal is not None and result.signal.action == Action.BUY:
+            if (self._deployment_generations.get(strategy.name) != result.generation
+                    or strategy.state != StrategyState.RUNNING):
+                return
+        self._handle_signal(strategy, result.conid, result.signal, result.bar_ts)
+
+    def _callback_error(self, strategy, error):
+        if (self.get_strategy(strategy.name) is not strategy
+                or self._deployment_generations.get(strategy.name) != error.generation):
+            return
+        strategy.state = StrategyState.ERROR
+        self._revoke_opening(strategy)
+        logging.error('strategy worker %s failed: %s: %s', strategy.name,
+                      error.error_type, error.message)
 
     def _submit_auto_execution(self, strategy: Strategy, conId: int, signal, last_bar) -> None:
         """Flatten the signal + strategy config to primitives and enqueue for
@@ -827,8 +1162,8 @@ class StrategyRuntime():
         skip decision lands in the persistent decision log."""
         ctx = strategy._context
         # Bar interval in seconds for the executor's stale-bar gate. Unknown/
-        # unparseable bar sizes leave it at 0, which disables the gate for
-        # this strategy rather than blocking its trades.
+        # unparseable intervals remain 0 so the executor refuses an open whose
+        # freshness cannot be established.
         bar_size_seconds = 0.0
         try:
             bar_size_seconds = float(
@@ -839,7 +1174,7 @@ class StrategyRuntime():
             strategy_name=strategy.name or 'unknown',
             conid=conId,
             action=signal.action,
-            bar_ts=last_bar,
+            bar_ts=_session_bar_ts(last_bar, ctx.params if ctx else None),
             probability=float(getattr(signal, 'probability', 0.0) or 0.0),
             risk=float(getattr(signal, 'risk', 0.0) or 0.0),
             quantity=float(getattr(signal, 'quantity', 0.0) or 0.0),
@@ -865,31 +1200,99 @@ class StrategyRuntime():
                 getattr(ctx, 'manifest_max_opens_per_day', None) if ctx else None),
             manifest_max_opens_per_hour=(
                 getattr(ctx, 'manifest_max_opens_per_hour', None) if ctx else None),
+            deployment_generation=getattr(ctx, 'deployment_generation', '') if ctx else '',
         )
         self.auto_executor.submit_signal(work)
 
-    def _check_time_exit(self, strategy: Strategy, conId: int, frame, last_bar) -> None:
+    def _dispatch_management_bar(self, strategy, conId, frame):
+        if not hasattr(self, '_last_managed_bar'):
+            self._last_managed_bar = {}
+        key = (conId, strategy.name)
+        last_bar = frame.index[-1]
+        previous = self._last_managed_bar.get(key)
+        if previous is None or last_bar > previous:
+            if self._check_time_exit(strategy, conId, frame, last_bar):
+                self._last_managed_bar[key] = last_bar
+
+    def _refresh_management_contexts(self):
+        records = self.auto_executor.managed_positions()
+        contexts = {}
+        for record in records:
+            name, conid = record['strategy_name'], record['conid']
+            seconds = record.get('bar_size_seconds')
+            session_tz = record.get('session_tz')
+            if seconds is None or session_tz is None:
+                # The holding predates recorded exit policy. Its rule can only
+                # run with the deployed strategy's real interval and session:
+                # a default (one minute, UTC) executes a REAL reduction at the
+                # wrong time. Use the loaded strategy's context, else defer.
+                loaded = self.get_strategy(name)
+                if loaded is None:
+                    self._note_policy_unknown(name, conid)
+                    continue
+                if seconds is None:
+                    seconds = pd.Timedelta(BarSize.to_pandas_freq(loaded.bar_size)).total_seconds()
+                if session_tz is None:
+                    session_tz = (loaded.ctx.params or {}).get('SESSION_TZ') or 'America/New_York'
+            bar_size = next((size for size in BarSize if size <= BarSize.Days1
+                             and pd.Timedelta(BarSize.to_pandas_freq(size)).total_seconds() == seconds), None)
+            if bar_size is None:
+                logging.error('cannot recover exit policy for %s conId %s: invalid interval %r', name, conid, seconds)
+                continue
+            entry = pd.Timestamp(record['entry_bar_ts'])
+            entry = entry.tz_localize('UTC') if entry.tz is None else entry.tz_convert('UTC')
+            days = int(max(1, (pd.Timestamp.now(tz='UTC') - entry).days + 2))
+            context = Strategy()
+            context.install(StrategyContext(
+                name=name, bar_size=bar_size, conids=[conid], universe=None,
+                historical_days_prior=days, paper_only=False,
+                storage=self.storage, universe_accessor=self.universe_accessor, logger=logging,
+                params={'SESSION_TZ': session_tz},
+            ))
+            context.disable()
+            contexts[(name, conid)] = context
+            if (name, conid) not in getattr(self, '_managed_contexts', {}):
+                self._invalidate_history(conid, bar_size)
+        self._managed_contexts = contexts
+
+    def _note_policy_unknown(self, name: str, conid: int) -> None:
+        logged = getattr(self, '_policy_unknown_logged', None)
+        if logged is None:
+            logged = self._policy_unknown_logged = set()
+        if (name, conid) in logged:
+            return
+        logged.add((name, conid))
+        logging.error('exit policy for %s conId %s has no recorded interval/session and the strategy is not '
+                      'loaded; time exits are deferred (redeploy the strategy or close the holding manually)',
+                      name, conid)
+
+    def _check_time_exit(self, strategy: Strategy, conId: int, frame, last_bar) -> bool:
         """If this (strategy, conid) has an open auto position, report the new
         bar so the executor can evaluate close_by_time / max_hold_bars.
-        bars_held counts frame bars after the entry bar — the same bar
-        arithmetic the backtester uses."""
+        The worker durably accumulates completed bars after this entry epoch;
+        the retained frame is only an observation window, not a lifetime count.
+        Return False when admission fails so the same bar can be retried."""
         try:
             name = strategy.name or 'unknown'
             entry_ts = self.auto_executor.open_entry_bar(name, conId)
             if entry_ts is None:
-                return
+                return True
             idx = frame.index
-            # Entry timestamps are stored tz-naive (DuckDB TIMESTAMP); strip
-            # the frame's tz for comparison — same feed, same wall time.
-            if getattr(idx, 'tz', None) is not None:
-                idx = idx.tz_localize(None)
-            bars_held = int((idx > pd.Timestamp(entry_ts)).sum())
+            # Persisted naive entry timestamps represent UTC instants.
+            idx = self._utc_index(idx)
+            entry = pd.Timestamp(entry_ts)
+            entry = entry.tz_localize('UTC') if entry.tz is None else entry.tz_convert('UTC')
+            observed = tuple(idx[idx > entry].unique().sort_values().to_pydatetime())
             ctx = getattr(strategy, '_context', None)
             exit_bar = _session_bar_ts(last_bar, getattr(ctx, 'params', None) if ctx else None)
-            self.auto_executor.submit_bar(name, conId, exit_bar, bars_held)
+            return self.auto_executor.submit_bar(
+                name, conId, exit_bar, len(observed),
+                entry_bar_ts=entry, observed_bar_timestamps=observed,
+            ) is not False
         except Exception:
             logging.exception('time-exit check failed for %s conId %s',
                               getattr(strategy, 'name', '?'), conId)
+            return False
 
     def on_ticker_error(self, ex: Exception):
         logging.error('StrategyRuntime ticker stream error: %s', ex, exc_info=True)
@@ -1015,7 +1418,7 @@ class StrategyRuntime():
             else:
                 try:
                     store = GauntletStore(duckdb_path)
-                    if store.has_pass(code_hash):
+                    if store.has_pass(code_hash, class_name):
                         return True
                     latest = store.latest_pass_for_class(class_name)
                     last_pass_hash = latest.code_hash if latest else None
@@ -1036,6 +1439,7 @@ class StrategyRuntime():
             'anyway (MMR_GAUNTLET_ENFORCE unset); %s', name, problem, hash_pair, hint)
         return True
 
+    @_serialized_deployment
     def load_strategy(
         self,
         name: str,
@@ -1054,11 +1458,6 @@ class StrategyRuntime():
         manifest: Optional[Dict] = None,
     ) -> None:
 
-        # Skip if strategy with this name already loaded
-        if any(s.name == name for s in self.strategy_implementations):
-            logging.debug('strategy {} already loaded, skipping'.format(name))
-            return
-
         if not name or not class_name or not module or not bar_size_str:
             raise ValueError('invalid config. need name, bar_size, class_name and module specified')
 
@@ -1067,13 +1466,16 @@ class StrategyRuntime():
         # (one trader_service → one IB account), so this is the only place it
         # makes sense to enforce the flag.
         if paper_only and not self.paper_trading:
+            existing = self.get_strategy(name)
+            if existing is not None:
+                self._retire_strategy(existing)
             logging.error(
                 'refusing to load strategy %s: paper_only=True but trader_service '
                 'is running in LIVE mode', name,
             )
             return
 
-        strategies_dir = os.path.abspath(os.path.expanduser(self.strategies_directory))
+        strategies_dir = os.path.realpath(os.path.expanduser(self.strategies_directory))
 
         def resolve_module_path(filename) -> str:
             # Reject absolute paths and path traversal. Strategy modules must
@@ -1089,6 +1491,7 @@ class StrategyRuntime():
                 if not os.path.exists(filepath):
                     filepath = os.path.abspath(requested)
 
+            filepath = os.path.realpath(filepath)
             if not filepath.startswith(strategies_dir + os.sep) and filepath != strategies_dir:
                 raise ValueError(
                     f'strategy module {filename!r} resolves outside strategies '
@@ -1113,7 +1516,10 @@ class StrategyRuntime():
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
             try:
-                spec.loader.exec_module(module)
+                # Read current bytes directly. A same-second edit with an
+                # unchanged length must not resurrect stale .pyc code.
+                with open(filepath, 'rb') as source:
+                    exec(compile(source.read(), filepath, 'exec'), module.__dict__)
             except Exception:
                 sys.modules.pop(module_name, None)
                 raise
@@ -1121,6 +1527,28 @@ class StrategyRuntime():
 
         try:
             filepath = resolve_module_path(module)
+            parsed_bar_size = BarSize.parse_str(bar_size_str)
+            if parsed_bar_size in (BarSize.Weeks1, BarSize.Months1):
+                raise ValueError('unsupported live bar interval: weekly/monthly bars are backtest-only')
+            with open(filepath, 'rb') as source:
+                source_hash = hashlib.sha256(source.read()).hexdigest()
+            requested_config = dict(
+                name=name, bar_size=bar_size_str, conids=conids or [], universe=universe,
+                historical_days_prior=historical_days_prior, module=filepath,
+                class_name=class_name, description=description, paper_only=paper_only,
+                auto_execute=auto_execute, params=params or {},
+                pyramid_max_adds=pyramid_max_adds, trade_amount=trade_amount,
+                manifest=manifest, source_hash=source_hash)
+            fingerprint = hashlib.sha256(json.dumps(
+                requested_config, sort_keys=True, allow_nan=False).encode()).hexdigest()
+            existing = self.get_strategy(name)
+            previous_state = existing.state if existing is not None else None
+            if existing is not None:
+                if getattr(existing, '_requested_fingerprint', None) == fingerprint:
+                    return
+                # Do this BEFORE imports/validation. Failed replacement cannot
+                # leave the superseded opening authority alive.
+                self._retire_strategy(existing)
             # Gauntlet arm gate ("no hash, no live"): auto_execute needs a
             # PASS gauntlet record for the exact current source hash. The
             # CLI enforces this at deploy/enable, but the YAML can be
@@ -1163,12 +1591,17 @@ class StrategyRuntime():
                     'manifest_max_opens_per_hour': None,
                 }
 
-            class_object = load_class_from_file(filepath, class_name)
+            isolated = getattr(self, '_isolate_callbacks', False)
+            class_object = Strategy if isolated else load_class_from_file(filepath, class_name)
             if not class_object:
                 return
 
-            if inspect.isclass(class_object) and issubclass(class_object, Strategy) and class_object is not Strategy:
+            if isolated or (inspect.isclass(class_object) and issubclass(class_object, Strategy) and class_object is not Strategy):
                 logging.debug('found implementation of Strategy {}'.format(class_object))
+                if not isolated and class_object.on_prices is Strategy.on_prices:
+                    raise ValueError(
+                        'unsupported live dispatch capability: implement on_prices; '
+                        'on_bar/on_panel are backtest-only APIs')
 
                 instance = class_object()
                 context = StrategyContext(
@@ -1191,9 +1624,18 @@ class StrategyRuntime():
                     manifest_direction=manifest_fields['manifest_direction'],
                     manifest_max_opens_per_day=manifest_fields['manifest_max_opens_per_day'],
                     manifest_max_opens_per_hour=manifest_fields['manifest_max_opens_per_hour'],
-                    params=params if params else {},
+                    params={},
                 )
                 instance.install(context)
+                from trader.strategy.parameters import apply_param_overrides
+                if isolated:
+                    context.params = dict(params or {})
+                else:
+                    apply_param_overrides(instance, params)
+                instance._source_path = filepath
+                instance._source_hash = source_hash
+                instance._requested_fingerprint = fingerprint
+                instance._requested_params = dict(params or {})
                 # Give the strategy a reference to the runtime for subscriptions
                 instance.strategy_runtime = self
 
@@ -1205,15 +1647,35 @@ class StrategyRuntime():
                     instance.enable()
                 elif persisted is False:
                     instance.disable()
+                elif previous_state == StrategyState.RUNNING:
+                    instance.enable()
+
+                self._grant_generation(instance)
+                if isolated:
+                    self._start_callback_worker(instance, requested_config)
+                else:
+                    context.effective_config_hash = hashlib.sha256(json.dumps(
+                        {**requested_config, 'params': context.params, 'auto_execute': auto_execute},
+                        sort_keys=True, allow_nan=False).encode()).hexdigest()
 
                 self.strategy_implementations.append(cast(Strategy, instance))
+                for conid in conids or []:
+                    if hasattr(self, '_hist_bars'):
+                        self._invalidate_history(conid, context.bar_size)
 
         except Exception as ex:
+            worker = getattr(self, '_callback_workers', {}).pop(name, None)
+            if worker is not None:
+                worker.stop()
+            existing = self.get_strategy(name)
+            if existing is not None:
+                self._retire_strategy(existing)
             # Load failures used to be swallowed at DEBUG; a config typo could
             # silently disable a strategy. Log at ERROR with the cause so the
             # operator sees it.
             logging.error('failed to load strategy %s (%s): %s', name, class_name, ex)
 
+    @_serialized_deployment
     def config_loader(self, config_file: str):
         config_file = os.path.expanduser(config_file)
         logging.debug('loading config file {}'.format(config_file))
@@ -1223,8 +1685,19 @@ class StrategyRuntime():
         if not config or 'strategies' not in config:
             logging.warning('strategy config %s has no strategies section', config_file)
             return
-
-        for strategy_config in config['strategies']:
+        entries = config['strategies']
+        if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
+            raise ValueError('strategies must be a list of mappings')
+        names = [e.get('name') for e in entries]
+        if any(not isinstance(n, str) or not n for n in names) or len(set(names)) != len(names):
+            raise ValueError('strategy names must be nonempty and unique')
+        for entry in entries:
+            if not entry.get('bar_size'):
+                raise ValueError(f"strategy {entry['name']} requires bar_size")
+        for strategy in list(self.strategy_implementations):
+            if strategy.name not in names:
+                self._retire_strategy(strategy)
+        for strategy_config in entries:
             self.load_strategy(
                 name=strategy_config['name'],
                 bar_size_str=strategy_config['bar_size'],
@@ -1265,7 +1738,16 @@ class StrategyRuntime():
         except OSError:
             current_mtime = self._config_mtime
 
-        if current_mtime != self._config_mtime:
+        source_changed = False
+        for strategy in self.strategy_implementations:
+            path = getattr(strategy, '_source_path', None)
+            if path:
+                try:
+                    with open(path, 'rb') as source:
+                        source_changed |= hashlib.sha256(source.read()).hexdigest() != getattr(strategy, '_source_hash', None)
+                except OSError:
+                    source_changed = True
+        if current_mtime != self._config_mtime or source_changed:
             logging.info('strategy config changed, reloading')
             try:
                 self.config_loader(self.strategy_config_file)
@@ -1299,6 +1781,18 @@ class StrategyRuntime():
                     self.subscribe_universe(strategy, strategy.universe)
         except (TimeoutError, ConnectionError) as ex:
             logging.debug('reconciliation RPC failed (trader_service may be restarting): %s', ex)
+        for (name, conid), context in list(getattr(self, '_managed_contexts', {}).items()):
+            if conid not in self._published_conids:
+                try:
+                    definitions = self.trader_client.rpc().resolve_symbol(conid)
+                    exact = [sd for sd in definitions or [] if sd.conId == conid]
+                    if not exact:
+                        raise ValueError(f'no exact contract for managed conId {conid}')
+                    contract = SecurityDefinition.to_contract(exact[0])
+                    self.trader_client.rpc().publish_contract(contract=contract, delayed=False)
+                    self._published_conids.add(conid)
+                except Exception:
+                    logging.exception('could not restore exit feed for %s conId %s', name, conid)
 
     async def _reconnect_historical_client(self):
         """Disconnect and reconnect the IB historical data client."""
@@ -1415,7 +1909,8 @@ class StrategyRuntime():
 
             if df is not None and len(df) > 0:
                 try:
-                    tick_data.write(security, df)
+                    await asyncio.to_thread(tick_data.write, security, df)
+                    self._invalidate_history(security.conId, bar_size)
                     logging.debug(
                         'wrote %d bars for %s (%s) strategy %s',
                         len(df), security.symbol, security.conId, strategy_name,
@@ -1463,9 +1958,68 @@ class StrategyRuntime():
                         raise
         logging.debug('finished get_historical_data()')
 
+    async def _management_loop(self):
+        """Broker reconciliation/protection must not depend on signal code."""
+        expected = asyncio.get_running_loop().time()
+        while True:
+            now = asyncio.get_running_loop().time()
+            self._event_loop_lag_seconds = max(0.0, now - expected)
+            try:
+                self.auto_executor.submit_management()
+                self._refresh_management_contexts()
+            except Exception:
+                logging.exception('independent position management submission failed')
+            expected = asyncio.get_running_loop().time() + 1.0
+            await asyncio.sleep(1)
+
     async def run(self):
+        try:
+            await self._run_services()
+        finally:
+            task = getattr(self, '_management_task', None)
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            audit_tasks = list(getattr(self, '_signal_audit_tasks', ()))
+            if audit_tasks:
+                _, pending = await asyncio.wait(audit_tasks, timeout=2)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+            workers = list(getattr(self, '_callback_workers', {}).values())
+            self._callback_workers = {}
+            for worker in workers:
+                await asyncio.to_thread(worker.stop)
+            executor = getattr(self, 'auto_executor', None)
+            if executor is not None:
+                await asyncio.to_thread(executor.stop)
+            pool = getattr(self, '_history_pool', None)
+            if pool is not None:
+                pool.shutdown(wait=False, cancel_futures=True)
+            subscription = getattr(self, 'subscription', None)
+            if subscription is not None:
+                subscription.dispose()
+            subscriber = getattr(self, 'zmq_subscriber', None)
+            if subscriber is not None:
+                subscriber.subscriber_close()
+            server = getattr(self, 'zmq_strategy_rpc_server', None)
+            if server is not None:
+                await server.aclose()
+            client = getattr(self, 'trader_client', None)
+            if client is not None:
+                await asyncio.to_thread(client.close)
+            bus_client = getattr(self, 'zmq_messagebus_client', None)
+            if bus_client is not None:
+                await bus_client.disconnect()
+            history = getattr(self, 'historical_data_client', None)
+            if history is not None:
+                history.shutdown()
+
+    async def _run_services(self):
         logging.info('starting strategy_runtime')
         logging.debug('StrategyRuntime.run()')
+        self._loop = asyncio.get_running_loop()
+        self._management_task = asyncio.create_task(self._management_loop())
 
         # Async setup that used to happen inside connect() via asyncio.run():
         # we now do it here so the tasks land on the real service loop and
@@ -1490,7 +2044,7 @@ class StrategyRuntime():
         self.subscription = observable.subscribe(self.observer)
 
         logging.debug('loading {} config file'.format(self.strategy_config_file))
-        self.config_loader(self.strategy_config_file)
+        await asyncio.to_thread(self.config_loader, self.strategy_config_file)
 
         logging.debug('subscribing to streams for all conids')
 
@@ -1566,4 +2120,3 @@ class StrategyRuntime():
             except Exception as ex:
                 logging.error('reconciliation error: {}'.format(ex))
             self._log_pulse()
-

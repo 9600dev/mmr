@@ -1,0 +1,128 @@
+{
+  "earlier_measurements_preserved": "docs/evidence/remediation_storage_performance_2026-09-08.json",
+  "environment": {
+    "cpu_count": 16,
+    "implementation": "CPython",
+    "machine": "arm64",
+    "packages": {
+      "crosshair-tool": "0.0.109",
+      "deal": "4.24.6",
+      "dill": "0.4.1",
+      "duckdb": "1.4.4",
+      "hypothesis": "6.161.1",
+      "ib_async": "2.1.0",
+      "msgpack": "1.1.2",
+      "mutmut": "3.6.0",
+      "numpy": "2.4.2",
+      "pandas": "3.0.1",
+      "pyarrow": "23.0.1",
+      "pytest": "9.0.2",
+      "pytest-timeout": "2.4.0",
+      "pyzmq": "27.1.0",
+      "reactivex": "4.1.0",
+      "z3-solver": "5.0.0.0"
+    },
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "python": "3.12.13",
+    "scope_limit": "Observed subset: uv.lock file hash and installed distribution-version metadata from the repository .venv interpreter before and after the command. This does not fingerprint all installed package files, the entire environment, or the dependencies inside a Docker image.",
+    "uv_lock_sha256": "707e99c2266d3b877ad9cf8d8e827ad50c9f5f0968cef8deaa2199a03b0eda8b"
+  },
+  "finished_at_utc": "2026-09-10T01:29:07.874518+00:00",
+  "full_suite_prerequisite": {
+    "context_sha256": "258b92f419c12634f3339660a44e45561a16d4cbc1e5bc88c552708f8839d775",
+    "exit_code": 0,
+    "finished_at_utc": "2026-09-10T01:28:07.850836+00:00",
+    "log_sha256": "23a4e3b0a4848a6478991483a0ac4cba285bcbfa0bdcfca82408c43086450ca3",
+    "source_and_selected_environment_match": true,
+    "summary": "4179 passed, 1 skipped, 17 warnings in 231.36s (0:03:51)"
+  },
+  "isolation": {
+    "broker_or_service_connections": false,
+    "separate_temporary_database_per_sample": true,
+    "temporary_config": true,
+    "temporary_directory_removed": true,
+    "temporary_logs": true
+  },
+  "limitations": "Three descriptive current-source absolute samples, not a latency bound, percentile estimate, broker/network benchmark, startup replay benchmark, or performance gate. This native waiter fixture differs from earlier minimal-adapter measurements; no before/after comparison is claimed. No unrelated history, select, or dispatch workloads ran.",
+  "measurement": "measure_native_lifecycle_callback.py::_measure_native_callback",
+  "module_sha256": {
+    "config_defaults/logging.yaml": "905b7583fa6968e7f555727962eaec11ed9f491ee170a06b77aa17ab44e5d37a",
+    "trader/common/logging_helper.py": "058bcaddb2eda8e6963712fec0fde938400abfcbc5bd3c200e94d0f55837b962",
+    "trader/data/duckdb_store.py": "336dd4a89eebb1b18047f4e6f29cf7cedddd8b913678538fd2d4622c563da4a4",
+    "trader/data/event_store.py": "5b49c703a37e6c4ef938d1c7dc5ef1a9aed7d7a8cc68d56e1ce7c62537f33052",
+    "trader/data/execution_journal.py": "ae000a5b2c21204495fafa71c6793b1698221c17e4224323b1e5ddaafa969b7e",
+    "trader/trading/order_lifecycle.py": "4e0ecd7fc0080cad061c7434fb632f32f2285cebf0d4b0c28c7a2fb7b6bde0e2"
+  },
+  "module_sha256_unchanged": true,
+  "native_type_module": "ib_async.order",
+  "native_type_module_sha256": "cd9e7dfb562bb048394c70085fe01600df811b8e88b23254f1b235ccfdec3885",
+  "raw_private_sha256": "697f1e661bdf97bd115c5784ad7831066447ee6d20bf8b85e0d5b1696236bb2f",
+  "samples": [
+    {
+      "database_held_until_explicit_post_measurement_release": true,
+      "database_holder_autonomous_deadline_s": 5.0,
+      "exact_trade_waiter_completion_elapsed_s": 0.0002270419936394319,
+      "exact_trade_waiter_registered_before_callback": true,
+      "heartbeat_requested_interval_s": 0.01,
+      "journal_drained_after_release": true,
+      "max_event_loop_heartbeat_gap_s": 0.012045334005961195,
+      "native_trade_weakref_supported": true,
+      "on_trade_elapsed_s": 0.00013262500579003245,
+      "provisional_waiter_matched_promoted_same_trade": true,
+      "sample": 1,
+      "waiter_outcome": "filled"
+    },
+    {
+      "database_held_until_explicit_post_measurement_release": true,
+      "database_holder_autonomous_deadline_s": 5.0,
+      "exact_trade_waiter_completion_elapsed_s": 0.00022658299712929875,
+      "exact_trade_waiter_registered_before_callback": true,
+      "heartbeat_requested_interval_s": 0.01,
+      "journal_drained_after_release": true,
+      "max_event_loop_heartbeat_gap_s": 0.012054542006808333,
+      "native_trade_weakref_supported": true,
+      "on_trade_elapsed_s": 0.00012862500443588942,
+      "provisional_waiter_matched_promoted_same_trade": true,
+      "sample": 2,
+      "waiter_outcome": "filled"
+    },
+    {
+      "database_held_until_explicit_post_measurement_release": true,
+      "database_holder_autonomous_deadline_s": 5.0,
+      "exact_trade_waiter_completion_elapsed_s": 0.00015537500439677387,
+      "exact_trade_waiter_registered_before_callback": true,
+      "heartbeat_requested_interval_s": 0.01,
+      "journal_drained_after_release": true,
+      "max_event_loop_heartbeat_gap_s": 0.012033292005071416,
+      "native_trade_weakref_supported": true,
+      "on_trade_elapsed_s": 9.033300739247352e-05,
+      "provisional_waiter_matched_promoted_same_trade": true,
+      "sample": 3,
+      "waiter_outcome": "filled"
+    }
+  ],
+  "scope": "One native ib_async Trade callback with a previously registered exact-Trade waiter. The callback promotes its provisional permanent ID and reports Filled. Another local process holds the temporary DuckDB connection until explicit release after measurement; requested heartbeat interval is ten milliseconds.",
+  "selected_environment_unchanged": true,
+  "source_fingerprint": "b3b0200c33f699ceab93190827b601a19ecba783f6eb80013ec03dadecb03e96",
+  "source_recipe": "SHA-256 of sorted JSON map of all .py files under trader/tests/scripts plus pyproject.toml",
+  "source_unchanged": true,
+  "started_at_utc": "2026-09-10T01:29:06.553867+00:00",
+  "summary": {
+    "exact_trade_waiter_completion_elapsed_ms": {
+      "maximum": 0.2270419936394319,
+      "median": 0.22658299712929875,
+      "minimum": 0.15537500439677387
+    },
+    "max_event_loop_heartbeat_gap_ms": {
+      "maximum": 12.054542006808333,
+      "median": 12.045334005961195,
+      "minimum": 12.033292005071416
+    },
+    "on_trade_elapsed_ms": {
+      "maximum": 0.13262500579003245,
+      "median": 0.12862500443588942,
+      "minimum": 0.09033300739247352
+    },
+    "samples": 3
+  }
+}

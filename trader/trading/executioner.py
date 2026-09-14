@@ -22,15 +22,20 @@ from trader.objects import Action, Basket, ContractOrderPair, ExecutorCondition
 from trader.trading.approved_order import ApprovedOrder, ExitReason, mint_approved_order
 from trader.trading.order_math import order_notional, whole_shares_for_notional
 from trader.trading.order_structure import rejection_for_order
+from trader.trading.order_reference import split_order_reference
 from trader.trading.order_validator import OrderValidator
 from trader.trading.risk_gate import RiskGate, RiskGateResult
 from typing import cast, List, Optional, TYPE_CHECKING
 
 import datetime as dt
+import asyncio
+import inspect
+import time
 import math
 import reactivex as rx
 import reactivex.operators as ops
 import sys
+import uuid
 
 
 logging = setup_logging(module_name='trading_runtime')
@@ -57,6 +62,20 @@ def _price_or_none(value):
     return price
 
 
+def _working_reduction_quantity(trade: Trade) -> float:
+    try:
+        total, filled, remaining = (float(trade.order.totalQuantity),
+                                    float(trade.orderStatus.filled),
+                                    float(trade.orderStatus.remaining))
+    except (ValueError, TypeError) as ex:
+        raise RuntimeError('UNKNOWN: competing reduction quantity is unreadable') from ex
+    if any(not math.isfinite(value) or value < 0 or value >= sys.float_info.max
+           for value in (total, filled, remaining)):
+        raise RuntimeError('UNKNOWN: competing reduction quantity is unreadable')
+    # Native PendingSubmit initially reports remaining=0 despite its send.
+    return max(0.0, total - filled, remaining)
+
+
 class TradeExecutioner():
     def __init__(
         self,
@@ -69,7 +88,7 @@ class TradeExecutioner():
         self.trader = trader
         self.connected = True
 
-    def _log_event(self, event_type: EventType, contract: Contract, order: Order,
+    async def _log_event(self, event_type: EventType, contract: Contract, order: Order,
                    strategy_name: Optional[str] = None, is_exit: bool = False) -> None:
         if hasattr(self.trader, 'event_store'):
             # Stamp the real originator: the order's orderRef (approve derives
@@ -78,7 +97,7 @@ class TradeExecutioner():
             # signal names, so the open-rate check counts the right bucket
             # instead of a dead 'manual'/'proposal' constant.
             if strategy_name is None:
-                strategy_name = (getattr(order, 'orderRef', '') or '').strip() or 'manual'
+                strategy_name = (getattr(order, 'orderRef', '') or '').split('|mmr:', 1)[0].strip() or 'manual'
             # Exit-class submissions (closes, protective stops, bracket legs)
             # are stamped so the rate limit — which counts only exposure-
             # increasing opens — can exclude them.
@@ -108,8 +127,20 @@ class TradeExecutioner():
                 float(order.totalQuantity or 0),
                 self._multiplier(contract),
             )
+            converted = self.trader.convert_notional(notional, getattr(contract, 'currency', '')) if notional_evaluable else None
+            notional_evaluable = converted is not None
+            notional = converted if converted is not None else 0.0
+            metadata['account'] = self.trader.ib_account
+            metadata['notional_currency'] = 'BASE'
             metadata['notional'] = notional
             metadata['notional_evaluable'] = notional_evaluable
+            if event_type == EventType.ORDER_SUBMITTED:
+                _, intent_id = split_order_reference(getattr(order, 'orderRef', ''))
+                metadata['submission_identity'] = ':'.join([
+                    'submission', self.trader.ib_account,
+                    str(getattr(self.trader, 'trading_runtime_ib_client_id', 0)),
+                    intent_id or uuid.uuid4().hex, str(order.orderId)])
+                metadata['submission_phase'] = 'BEFORE_BROKER_SEND'
             if not notional_evaluable:
                 logging.warning(
                     'could not value %s %s %s for the audit trail (no limit, stop '
@@ -127,13 +158,24 @@ class TradeExecutioner():
                 order_id=order.orderId or 0,
                 metadata=metadata,
             )
-            self.trader.event_store.append(event)
+            # Capture broker fields on their owner loop, then await the durable
+            # write off-loop. The account order lock remains held, so the next
+            # order cannot race ahead of the rate/turnover accounting.
+            tracker = getattr(self.trader, 'order_tracker', None)
+            record = getattr(tracker, 'record_submission', None)
+            if event_type == EventType.ORDER_SUBMITTED and callable(record):
+                await asyncio.to_thread(record, event, getattr(self, '_audit_timeout', 5.0))
+            else:
+                await asyncio.to_thread(self.trader.event_store.append, event)
 
-    def _multiplier(self, contract: Contract) -> float:
+    @staticmethod
+    def _multiplier(contract: Contract) -> float:
         try:
-            return float(contract.multiplier) if contract.multiplier else 1.0
+            if not contract.multiplier:
+                return float('nan') if getattr(contract, 'secType', '') in {'OPT', 'FUT', 'FOP'} else 1.0
+            return float(contract.multiplier)
         except (TypeError, ValueError):
-            return 1.0
+            return float('nan')
 
     def _cached_prices(self, contract: Contract) -> tuple:
         """Live prices for ``contract`` from ib_async's ticker cache, best
@@ -152,6 +194,97 @@ class TradeExecutioner():
         except Exception as ex:
             logging.debug('no cached price for %s: %s', getattr(contract, 'symbol', '?'), ex)
         return ()
+
+    async def _coordinate_reduction(self, contract: Contract, order: Order,
+                                   protective: bool = False) -> None:
+        """Replace conflicting reductions only after cancellation is terminal.
+
+        PendingCancel still owns its executable capacity. An uncertain cancel
+        leaves the new reduction pending/unknown; it never submits a second
+        independently executable close. Confirmed fills force a fresh clamp.
+        """
+        unobserved = await self.trader.unobserved_reduction_quantity(contract, order.action)
+        working = [t for t in self.trader.working_trades(contract)
+                   if t.order.action == order.action and t.order.orderId != order.orderId]
+        if not working and not unobserved:
+            return
+        held = self.trader._signed_position(int(contract.conId or 0))
+        if held is None or not math.isfinite(held):
+            raise RuntimeError('UNKNOWN: cannot coordinate reductions without broker inventory')
+        def capacity(trades):
+            # Blocking OCA alternatives reserve their maximum, not their sum.
+            # Type 3 lacks overfill protection and must remain additive.
+            groups = {}
+            independent = 0.0
+            for trade in trades:
+                qty = _working_reduction_quantity(trade)
+                if trade.order.ocaGroup and trade.order.ocaType in (1, 2):
+                    key = trade.order.ocaGroup
+                    groups[key] = max(groups.get(key, 0.0), qty)
+                else:
+                    independent += qty
+            return independent + sum(groups.values())
+
+        reserved = capacity(working) + unobserved
+        if order.ocaGroup and order.ocaType in (1, 2):
+            matching = [t for t in working if t.order.ocaGroup == order.ocaGroup
+                        and t.order.ocaType == order.ocaType]
+            if matching:
+                reserved -= min(float(order.totalQuantity), capacity(matching))
+        if reserved + float(order.totalQuantity) <= abs(held):
+            return
+        # Only the caller's own working reductions may be displaced, whatever
+        # the exit reason. Cancelling another owner's order (typically a
+        # strategy's disaster stop under a manual close) and then refusing
+        # this exit — cancel unconfirmed, inventory unreadable, an unconfirmed
+        # earlier send still reserving capacity — left the position naked.
+        # Nothing has been sent at this point, so a shortfall against orders
+        # owned elsewhere is a clean DEFERRED refusal, never an UNKNOWN.
+        owner = self._owner_class(order.orderRef)
+        own = [t for t in working if self._owner_class(t.order.orderRef) == owner]
+        foreign = [t for t in working if self._owner_class(t.order.orderRef) != owner]
+        untouchable = capacity(foreign) + unobserved
+        if abs(held) - untouchable <= 0:
+            competing = ', '.join(
+                f'{t.order.orderId} (owner {split_order_reference(t.order.orderRef)[0] or "operator"})'
+                for t in foreign)
+            claims = f' and {unobserved:g} by unconfirmed earlier sends' if unobserved else ''
+            raise RuntimeError(
+                f'DEFERRED: {order.action} {float(order.totalQuantity):g} not placed: all {abs(held):g} held '
+                f'are reserved by working reductions owned elsewhere [{competing}]{claims}; '
+                'that owner must retire them (or cancel them explicitly) before this close')
+        for trade in own:
+            self.trader.client.ib.cancelOrder(trade.order)
+            deadline = time.monotonic() + getattr(self, '_cancel_wait_timeout', 8.0)
+            while trade.orderStatus.status not in {'Cancelled', 'ApiCancelled', 'Filled', 'Inactive'}:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('UNKNOWN: competing reduction cancellation not confirmed')
+                await asyncio.sleep(0.05)
+        unobserved = await self.trader.unobserved_reduction_quantity(contract, order.action)
+        held = self.trader._signed_position(int(contract.conId or 0))
+        if held is None or not math.isfinite(held):
+            raise RuntimeError('UNKNOWN: broker inventory unreadable after cancellation')
+        remaining = unobserved + capacity([t for t in self.trader.working_trades(contract)
+                                          if t.order.action == order.action])
+        available = max(0.0, abs(held) - remaining)
+        correct_direction = (order.action == 'SELL' and held > 0) or (order.action == 'BUY' and held < 0)
+        if not correct_direction or available <= 0:
+            raise RuntimeError('UNKNOWN: reduction already filled or reserved; reconcile intent')
+        if available < float(order.totalQuantity):
+            logging.warning(
+                'reduction %s %g clamped to %g: %g reserved by other working reductions or unconfirmed sends',
+                order.action, float(order.totalQuantity), available, remaining)
+        order.totalQuantity = min(float(order.totalQuantity), available)
+
+    # Manual paths stamp different algo names (``global`` for mmr buy/sell,
+    # ``proposal`` for approve); they are all the operator and may displace
+    # one another's working orders. A strategy name is its own class.
+    _OPERATOR_OWNERS = frozenset({'', 'global', 'proposal', 'manual'})
+
+    @classmethod
+    def _owner_class(cls, order_ref) -> str:
+        owner = split_order_reference(order_ref)[0]
+        return 'operator' if owner in cls._OPERATOR_OWNERS else owner
 
     async def subscribe_place_order_direct(
         self,
@@ -204,11 +337,10 @@ class TradeExecutioner():
         # construction and their position does not exist yet — but the
         # POSITION_CLASSIFIED category is checkable, so it is checked.
         #
-        # OBSERVABILITY ONLY, deliberately: a mismatch means the position moved
-        # between classification and placement, and refusing an exit is worse
-        # than acting on a stale classification. This logs and records; it never
-        # blocks. (Refusing here would also re-introduce exactly the read-race
-        # that enforce_approver_tier documents as its reason not to re-check.)
+        # This corroboration is observability-only: a mismatch or failed
+        # re-read does not decide placement here. Non-child exits still pass
+        # the independent reduction-capacity checks below before reservation;
+        # those checks can defer the send.
         if is_exit:
             reason = approved.exit_reason
             if reason is None:
@@ -225,12 +357,19 @@ class TradeExecutioner():
                     if not still_exit:
                         logging.error(
                             'STALE exit claim: %r was minted POSITION_CLASSIFIED but the '
-                            'live position no longer makes it a reduction — placing anyway '
-                            '(an exit is never refused). Position likely moved between '
+                            'live position no longer makes it a reduction — continuing to '
+                            'reduction-capacity checks. Position likely moved between '
                             'classification and placement.', approved)
-                        self._log_event(EventType.RISK_GATE_REJECTED, contract, order)
+                        try:
+                            await self._log_event(EventType.RISK_GATE_REJECTED, contract, order)
+                        except Exception as ex:
+                            self.trader._journal_degraded = str(ex)
+                            logging.error('exit observability write failed; reduction remains available: %s', ex)
 
         if not is_exit:
+            restored = self.trader.opening_restore_error()
+            if isinstance(restored, str) and restored:
+                return rx.throw(ValueError(restored))
             recorded = approved.checks or {}
             # 'fail' is a check that ran and refused. 'unevaluable:' is a check
             # whose INPUT could not be read, which is equally disqualifying for
@@ -276,23 +415,48 @@ class TradeExecutioner():
                 f'Refusing to place order: order.account {order.account!r} '
                 f'!= configured ib_account {configured!r}'))
 
+        submission_started = False
         try:
+            if is_exit and approved.exit_reason != ExitReason.PROTECTIVE_CHILD:
+                await self._coordinate_reduction(
+                    contract, order,
+                    protective=approved.exit_reason == ExitReason.VALIDATED_STANDALONE)
+            reservation = self.trader.reserve_broker_order(order, is_exit=is_exit, contract=contract)
+            if inspect.isawaitable(reservation):
+                await reservation
+            try:
+                # Charge the attempted submission durably before the first
+                # possible broker side effect. An unconfirmed attempt may
+                # consume budget, but a crash cannot give that budget back.
+                await self._log_event(EventType.ORDER_SUBMITTED, contract, order, is_exit=is_exit)
+            except Exception as ex:
+                self.trader._journal_degraded = str(ex)
+                if not is_exit:
+                    released = self.trader.unreserve_broker_order(order)
+                    if inspect.isawaitable(released):
+                        await released
+                    return rx.throw(ValueError(f'submission audit unavailable; order was not sent: {ex}'))
+                logging.error('DURABILITY DEGRADED: exit audit unavailable; reduction remains available: %s', ex)
+            submission_started = True
             observable = await self.trader.client.subscribe_place_order(contract, order)
+            # Capture the placement receipt while the account decision lock is
+            # still held. Returning an unsubscribed cold stream used to leave a
+            # window in which a second close saw no reserved broker quantity.
+            trade = await asyncio.wait_for(observable.pipe(ops.take(1)), timeout=8.0)
+            if not hasattr(self.trader, '_submitted_trades'):
+                self.trader._submitted_trades = []
+            self.trader._submitted_trades.append(trade)
         except Exception as ex:
+            if 'UNKNOWN:' in str(ex) or 'DEFERRED:' in str(ex):
+                # Coordination verdicts carry their own actionable text (what
+                # reserves the shares, who owns it); wrapping them in the
+                # generic placement exception hid it from the caller.
+                return rx.throw(ex)
+            if submission_started:
+                return rx.throw(RuntimeError(f'UNKNOWN: broker submission did not return a receipt: {ex}'))
             return trader_exception_helper(ex)
 
-        # The order is now LIVE at IB. Event-store logging must NEVER be able to
-        # turn a successful placement into a reported failure — a caller that
-        # sees failure may retry and place a duplicate order. Isolate it.
-        try:
-            self._log_event(EventType.ORDER_SUBMITTED, contract, order, is_exit=is_exit)
-        except Exception as ex:
-            logging.error(
-                'order placed but ORDER_SUBMITTED event-store append failed '
-                '(order IS live, not retrying): %s', ex)
-        return observable.pipe(
-            ops.catch(lambda ex, src: trader_exception_helper(ex))
-        )
+        return rx.of(trade)
 
     async def place_order(
         self,
@@ -370,7 +534,7 @@ class TradeExecutioner():
                 sec_type=contract.secType or '',
             )
             if not instrument_result.approved:
-                self._log_event(EventType.RISK_GATE_REJECTED, contract, order)
+                await self._log_event(EventType.RISK_GATE_REJECTED, contract, order)
                 logging.warning(f'trading filter rejected order: {instrument_result.reason}')
                 return rx.throw(
                     trader_exception(
@@ -379,6 +543,13 @@ class TradeExecutioner():
                         message=f'trading filter rejected: {instrument_result.reason}'
                     )
                 )
+
+            structural_reason = rejection_for_order(order)
+            if structural_reason is not None:
+                return rx.throw(ValueError(structural_reason))
+            margin_result = await self.trader.margin_checks(contract, order)
+            if not margin_result.approved:
+                return rx.throw(ValueError(margin_result.reason))
 
             from trader.trading.strategy import Signal
             # Create a pseudo-signal for risk evaluation. Its source_name must
@@ -395,13 +566,16 @@ class TradeExecutioner():
             if position_value_hint is None:
                 try:
                     lmt = float(order.lmtPrice or 0)
-                    multiplier = float(contract.multiplier) if contract.multiplier else 1.0
+                    multiplier = self._multiplier(contract)
                     if lmt > 0:
                         position_value_hint = abs(float(order.totalQuantity or 0)) * lmt * multiplier
                 except (TypeError, ValueError):
                     pass
 
             inputs = self.trader.gather_risk_inputs()
+            if position_value_hint is not None:
+                position_value_hint = self.trader.convert_notional(
+                    position_value_hint, getattr(contract, 'currency', ''))
             result = gate.evaluate(
                 signal=signal,
                 open_order_count=inputs.open_order_count,
@@ -412,9 +586,12 @@ class TradeExecutioner():
                 portfolio_value_evaluable=inputs.portfolio_value_evaluable,
                 position_value_evaluable=position_value_hint is not None,
                 sec_type=contract.secType or '',
+                aggregate_position_value=self.trader.aggregate_position_value(
+                    contract, str(order.action), float(order.totalQuantity),
+                    position_value_hint or 0.0),
             )
             if not result.approved:
-                self._log_event(EventType.RISK_GATE_REJECTED, contract, order)
+                await self._log_event(EventType.RISK_GATE_REJECTED, contract, order)
                 logging.warning(f'risk gate rejected order: {result.reason}')
                 return rx.throw(
                     trader_exception(
@@ -423,7 +600,7 @@ class TradeExecutioner():
                         message=f'risk gate rejected: {result.reason}'
                     )
                 )
-            gate_checks = result.checks
+            gate_checks = {**result.checks, **margin_result.checks}
 
         if condition == condition.SANITY_CHECK:
             logging.debug('sanity_check_order for {}'.format(contract_order))
@@ -453,7 +630,7 @@ class TradeExecutioner():
             getattr(order, 'lmtPrice', 0.0), approver_key,
             force_open=force_open)
         if tier_error:
-            self._log_event(EventType.RISK_GATE_REJECTED, contract, order)
+            await self._log_event(EventType.RISK_GATE_REJECTED, contract, order)
             logging.warning('approver tier rejected order: %s', tier_error)
             return rx.throw(
                 trader_exception(
@@ -523,7 +700,7 @@ class TradeExecutioner():
             # receive (bid). Floors and refuses (ValueError) when the amount
             # doesn't cover one whole share — never bumps to 1, which turned
             # a small sized notional into an oversized full share.
-            multiplier = float(contract.multiplier) if contract.multiplier else 1.0
+            multiplier = self._multiplier(contract)
             ref_price = latest_tick.ask if action == Action.BUY else latest_tick.bid
             quantity = float(whole_shares_for_notional(equity_amount, ref_price, multiplier))
             assert quantity * ref_price * multiplier <= equity_amount * 1.05, (

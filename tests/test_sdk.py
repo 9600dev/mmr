@@ -778,8 +778,8 @@ class TestResolveContractExchangeCurrency:
 
         assert contract.conId == 3333
 
-    def test_no_hint_prefers_usd(self):
-        """Without hints, the existing US/USD preference is preserved."""
+    def test_no_hint_refuses_distinct_listings(self):
+        """An unqualified ambiguous ticker cannot silently choose a listing."""
         mock_client = _make_mock_rpc()
         asx_def = FakeSecurityDefinition(
             symbol='BHP', conId=5678, exchange='ASX',
@@ -789,14 +789,12 @@ class TestResolveContractExchangeCurrency:
             symbol='BHP', conId=1234, exchange='SMART',
             primaryExchange='NYSE', currency='USD',
         )
-        # ASX listed first, but USD should still win
+        # Neither list order nor USD status grants execution authority.
         mock_client.rpc.return_value.resolve_symbol.return_value = [asx_def, us_def]
 
         mmr = _make_mmr_with_mock(mock_client)
-        contract = mmr._resolve_contract('BHP')
-
-        assert contract.conId == 1234
-        assert contract.currency == 'USD'
+        with pytest.raises(ValueError, match='Ambiguous contract'):
+            mmr._resolve_contract('BHP')
 
     def test_matches_primary_exchange(self):
         """exchange hint should match against primaryExchange too."""
@@ -1185,7 +1183,7 @@ class TestApproveAmountConversion:
         ticker = FakeTicker()
         ticker.last = last_price
         mock_client.rpc.return_value.get_snapshot.return_value = ticker
-        mock_client.rpc.return_value.get_fx_rates.return_value = {}
+        mock_client.rpc.return_value.get_fx_rates.return_value = {'USD': 1.0}
 
     def test_amount_below_price_fails_proposal_never_bumps_to_one(self, tmp_duckdb_path):
         """BRK.A-class regression: a $5000 amount on a $700k stock must FAIL
@@ -1239,7 +1237,7 @@ class TestApproveAmountConversion:
         ticker = FakeTicker()
         ticker.last = premium
         mock_client.rpc.return_value.get_snapshot.return_value = ticker
-        mock_client.rpc.return_value.get_fx_rates.return_value = {}
+        mock_client.rpc.return_value.get_fx_rates.return_value = {'USD': 1.0}
 
     def test_option_multiplier_prevents_100x_oversize(self, tmp_duckdb_path):
         """An OPT at $5 premium with multiplier 100 costs $500/contract. A $300
@@ -1294,12 +1292,11 @@ class TestApproveAmountConversion:
 
 
 class TestExecuteResizeGrowProtection:
-    """execute_resize_plan must never leave a GROWN position naked. A grow
-    (--min-bound) BUY delta resolves on submission, not fill; re-creating the
-    protective at the grown quantity before the fill lands is refused by
-    place_standalone_order's exit-class check (qty must not exceed the held
-    position). If the old stop were cancelled first, the position would be
-    naked. So an unconfirmed grow must LEAVE the old protective in place."""
+    """Resize delegates protection coordination to the server.
+
+    Cached positions and an accepted delta are never authority for cancelling
+    protection on the client. Unsupported grows are explicitly deferred.
+    """
 
     def _grow_plan(self):
         return {'adjustments': [{
@@ -1331,6 +1328,8 @@ class TestExecuteResizeGrowProtection:
             return SuccessFail.success(obj=None)
         mock_client.rpc.return_value.place_standalone_order.side_effect = _standalone
         mock_client.rpc.return_value.cancel_order.return_value = SuccessFail.success()
+        mock_client.rpc.return_value.resize_position.return_value = SuccessFail.fail(
+            error='DEFERRED: coordinated resize supports reductions; use a reviewed proposal to grow')
 
     def test_grow_unfilled_leaves_old_protective_uncancelled(self):
         """Broker still shows the OLD (100) qty at re-create time — the delta
@@ -1350,13 +1349,16 @@ class TestExecuteResizeGrowProtection:
         # Old protective retained: cancel never called, no re-create attempted.
         mmr.cancel.assert_not_called()
         mock_client.rpc.return_value.place_standalone_order.assert_not_called()
-        assert any('LEFT IN' in w and 'PLACE' in w for w in results['warnings'])
+        assert not results['successes']
+        assert any('DEFERRED' in failure for failure in results['failures'])
+        mock_client.rpc.return_value.place_order_simple.assert_not_called()
 
-    def test_grow_confirmed_recreates_at_new_qty(self):
-        """Once the fill lands (position reflects 150), the normal cancel →
-        re-create at the grown quantity proceeds."""
+    def test_already_achieved_target_preserves_existing_protection(self):
+        """A server-confirmed unchanged target does not rewrite protection."""
         mock_client = _make_mock_rpc()
         self._wire(mock_client, held_qty=150)  # fill landed
+        mock_client.rpc.return_value.resize_position.return_value = SuccessFail.success(
+            obj={'status': 'UNCHANGED', 'order_ids': []})
 
         mmr = _make_mmr_with_mock(mock_client)
         mmr._contract_map['AMD'] = FakeContract(conId=4391, symbol='AMD')
@@ -1365,29 +1367,35 @@ class TestExecuteResizeGrowProtection:
 
         results = mmr.execute_resize_plan(self._grow_plan())
 
-        mmr.cancel.assert_called_once_with(7)
-        placed = mock_client.rpc.return_value.place_standalone_order.call_args
-        assert placed.kwargs['quantity'] == 150
-        assert any('re-created' in s for s in results['successes'])
+        mmr.cancel.assert_not_called()
+        mock_client.rpc.return_value.place_standalone_order.assert_not_called()
+        assert any('UNCHANGED' in s for s in results['successes'])
+        assert not results['failures']
 
-    def test_trim_path_unchanged_no_grow_poll(self):
-        """A trim shrinks the position; it must not poll for a grow and must
-        cancel + re-create at the smaller quantity exactly as before."""
+    def test_trim_submission_retains_identity_without_client_side_handoff(self):
+        """An accepted coordinated trim remains execution-pending."""
         mock_client = _make_mock_rpc()
         self._wire(mock_client, held_qty=100)
+        mock_client.rpc.return_value.resize_position.return_value = SuccessFail.success(
+            obj={'status': 'SUBMITTED', 'order_ids': [42]})
 
         mmr = _make_mmr_with_mock(mock_client)
         mmr._contract_map['AMD'] = FakeContract(conId=4391, symbol='AMD')
         mmr._await_grown_position = MagicMock()
         mmr.cancel = MagicMock(return_value=SuccessFail.success())
 
-        results = mmr.execute_resize_plan(self._trim_plan())
+        plan = self._trim_plan()
+        results = mmr.execute_resize_plan(plan)
 
         mmr._await_grown_position.assert_not_called()
-        mmr.cancel.assert_called_once_with(7)
-        placed = mock_client.rpc.return_value.place_standalone_order.call_args
-        assert placed.kwargs['quantity'] == 60
-        assert any('re-created' in s for s in results['successes'])
+        mmr.cancel.assert_not_called()
+        mock_client.rpc.return_value.place_standalone_order.assert_not_called()
+        placed = mock_client.rpc.return_value.resize_position.call_args
+        assert placed.kwargs['target_quantity'] == 60
+        assert placed.kwargs['client_intent_id'] == plan['adjustments'][0]['client_intent_id']
+        assert plan['adjustments'][0]['order_ids'] == [42]
+        assert any('SUBMITTED' in s for s in results['successes'])
+        assert any('execution pending' in s for s in results['warnings'])
 
 
 class TestResolveContractForexRouting:
@@ -1421,8 +1429,388 @@ class TestResolveContractForexRouting:
         mmr = MMR.__new__(MMR)
         sec = SimpleNamespace(conId=4036812, symbol='BHP', secType='STK',
                               exchange='ASX', primaryExchange='ASX',
-                              currency='AUD', multiplier='')
+                              currency='AUD', multiplier='', validExchanges='ASX,SMART')
         mmr.resolve = MagicMock(return_value=[sec])
         c = mmr._resolve_contract('BHP', sec_type='STK', exchange='ASX', currency='AUD')
         assert c.exchange == 'SMART'
         assert c.primaryExchange == 'ASX'
+
+
+@pytest.fixture
+def native_definition_multiplier_sdk(tmp_path, monkeypatch):
+    """Native catalogue, proposal/approval and server checks with offline quotes."""
+    from types import SimpleNamespace
+    from ib_async import Contract, ContractDetails, Ticker
+    from review.test_review_order_contract import _coordinated_trader
+    from trader.data.data_access import SecurityDefinition
+    from trader.data.proposal_store import ProposalStore
+    from trader.data.universe import Universe, UniverseAccessor
+    from trader.messaging.trader_service_api import TraderServiceApi
+    from trader.trading.risk_gate import RiskGate, RiskLimits
+
+    server = _coordinated_trader(tmp_path, held=0)
+    server.risk_gate = RiskGate(RiskLimits(), server.event_store)
+    server.require_proposal_approval = True
+    api = TraderServiceApi(server)
+    proposals = ProposalStore(server.duckdb_path)
+    catalogue_path = str(tmp_path / 'native_multiplier_catalogue.duckdb')
+    ctx = SimpleNamespace(server=server, proposals=proposals, price=10.0, calls=[])
+
+    def install(sec_type, multiplier, price, *, legacy=False):
+        contract = Contract(conId=200, symbol='MULTIPLIER_NATIVE', secType=sec_type,
+                            exchange='CME' if sec_type == 'FUT' else 'SMART',
+                            currency='USD', multiplier=multiplier)
+        definition = SecurityDefinition.from_contract_details(ContractDetails(contract=contract))
+        if legacy:
+            # Explicit dated storage shape: objects persisted before this field
+            # existed have no multiplier in their instance state. Do not invent
+            # one from the current broker definition when reopening that record.
+            vars(definition).pop('multiplier', None)
+        writer = UniverseAccessor(catalogue_path, 'native_multiplier')
+        writer.update(Universe('native_multiplier', [definition]))
+        # Real DuckDB/dill reload, followed by the real local resolver cache.
+        reader = UniverseAccessor(catalogue_path, 'native_multiplier')
+        restored, = reader.get('native_multiplier').security_definitions
+        monkeypatch.setattr(server, 'universe_accessor', reader, raising=False)
+        ctx.contract, ctx.definition, ctx.restored = contract, definition, restored
+        ctx.price = price
+        return restored
+
+    def quote(contract):
+        ticker = Ticker(contract=contract)
+        # Native __post_init__ clears constructor prices before quotes arrive.
+        ticker.last = ticker.bid = ticker.ask = ctx.price
+        return ticker
+
+    def resolve_symbol(symbol, exchange='', universe='', sec_type=''):
+        return asyncio.run(api.resolve_symbol(symbol, exchange, universe, sec_type))
+
+    def place_expressive_order(**kwargs):
+        ctx.calls.append(dict(kwargs))
+        return asyncio.run(api.place_expressive_order(**kwargs))
+
+    rpc = SimpleNamespace(
+        resolve_symbol=resolve_symbol,
+        resolve_contract=lambda contract: [],
+        get_snapshot=lambda contract, delayed: quote(contract),
+        get_fx_rates=lambda: {'USD': 1.0},
+        get_account_values=lambda: {},
+        place_expressive_order=place_expressive_order,
+    )
+    sdk = MMR.__new__(MMR)
+    sdk._prop_store = proposals
+    sdk._client = SimpleNamespace(is_setup=True, rpc=lambda **kwargs: rpc)
+    monkeypatch.setattr(server.client.get_snapshot, 'side_effect', lambda contract: quote(contract))
+    monkeypatch.setattr(server.client.ib, 'tickers', lambda: [quote(ctx.contract)])
+    ctx.sdk, ctx.install = sdk, install
+    try:
+        yield ctx
+    finally:
+        server.order_tracker.close(timeout=1)
+        if server.order_tracker._journal is not None:
+            server.order_tracker._journal.close()
+        journal = getattr(server, '_server_order_journal', None)
+        if journal is not None:
+            journal.journal.close()
+        if server.order_tracker._temporary is not None:
+            server.order_tracker._temporary.cleanup()
+
+
+@pytest.mark.parametrize('sec_type,multiplier,price,amount,expected_quantity', [
+    pytest.param('OPT', '100', 5.0, 500.0, 1.0, id='option'),
+    pytest.param('FUT', '50', 10.0, 1000.0, 2.0, id='future'),
+    pytest.param('STK', '', 10.0, 100.0, 10.0, id='stock'),
+])
+def test_native_factory_multiplier_survives_catalogue_and_amount_approval(
+        native_definition_multiplier_sdk, sec_type, multiplier, price, amount, expected_quantity):
+    from trader.data.data_access import SecurityDefinition
+    from trader.data.universe import Universe
+
+    ctx = native_definition_multiplier_sdk
+    restored = ctx.install(sec_type, multiplier, price)
+    proposal_id, _, _ = ctx.sdk.propose(
+        ctx.contract.symbol, 'BUY', amount=amount, sec_type=sec_type,
+        exchange=ctx.contract.exchange, currency='USD', metadata={'con_id': 200})
+    result = ctx.sdk.approve(proposal_id)
+
+    assert result.is_success(), result.error
+    assert getattr(restored, 'multiplier', '') == multiplier
+    resolved = ctx.sdk._resolve_contract(200, sec_type=sec_type,
+                                         exchange=ctx.contract.exchange, currency='USD')
+    assert resolved.multiplier == multiplier and resolved.secType == sec_type
+    for convert in (SecurityDefinition.to_contract, Universe.to_contract):
+        converted = convert(restored)
+        assert (converted.conId, converted.secType, converted.multiplier) == (200, sec_type, multiplier)
+        assert convert(ctx.contract) is ctx.contract
+    assert len(ctx.calls) == len(ctx.server.placed) == 1
+    placed, = ctx.server.placed
+    assert placed.contract.conId == 200 and placed.contract.multiplier == multiplier
+    assert placed.order.totalQuantity == expected_quantity
+    assert ctx.calls[0]['quantity'] == expected_quantity
+    assert expected_quantity * price * float(multiplier or 1) <= amount
+    stored = ctx.proposals.get(proposal_id)
+    assert stored.status == 'EXECUTED'
+    assert stored.metadata['submission_quantity'] == expected_quantity
+    assert stored.order_ids == [placed.order.orderId]
+
+
+@pytest.mark.parametrize('sec_type,multiplier', [
+    pytest.param('OPT', '', id='missing'),
+    pytest.param('FUT', 'not-a-number', id='nonnumeric'),
+    pytest.param('OPT', '0', id='zero'),
+    pytest.param('FUT', 'nan', id='nan'),
+    pytest.param('OPT', 'inf', id='infinite'),
+])
+def test_native_invalid_derivative_multiplier_still_refuses_amount(
+        native_definition_multiplier_sdk, sec_type, multiplier):
+    ctx = native_definition_multiplier_sdk
+    ctx.install(sec_type, multiplier, 5.0)
+    proposal_id, _, _ = ctx.sdk.propose(
+        ctx.contract.symbol, 'BUY', amount=500.0, sec_type=sec_type,
+        exchange=ctx.contract.exchange, currency='USD', metadata={'con_id': 200})
+    result = ctx.sdk.approve(proposal_id)
+
+    assert not result.is_success()
+    assert isinstance(result.exception, ValueError)
+    assert 'multiplier' in str(result.error)
+    assert ctx.proposals.get(proposal_id).status == 'FAILED'
+    assert 'submission_quantity' not in ctx.proposals.get(proposal_id).metadata
+    assert ctx.calls == [] and ctx.server.placed == []
+
+
+@pytest.mark.parametrize('sec_type', ['OPT', 'STK'])
+def test_legacy_definition_without_multiplier_reopens_without_inventing_one(
+        native_definition_multiplier_sdk, sec_type):
+    from dataclasses import replace
+    from ib_async import ContractDetails
+    from trader.data.data_access import SecurityDefinition
+    from trader.data.universe import Universe
+
+    ctx = native_definition_multiplier_sdk
+    restored = ctx.install(sec_type, '100' if sec_type == 'OPT' else '', 5.0, legacy=True)
+    assert 'multiplier' not in vars(restored)
+    assert getattr(restored, 'multiplier', '') == ''
+    fresh_blank = SecurityDefinition.from_contract_details(
+        ContractDetails(contract=replace(ctx.contract, multiplier='')))
+    assert restored == fresh_blank and len({restored, fresh_blank}) == 1
+    resolved = ctx.sdk._resolve_contract(200, sec_type=sec_type,
+                                         exchange=ctx.contract.exchange, currency='USD')
+    assert resolved.multiplier == ''
+    assert SecurityDefinition.to_contract(restored).multiplier == ''
+    assert Universe.to_contract(restored).multiplier == ''
+    proposal_id, _, _ = ctx.sdk.propose(
+        ctx.contract.symbol, 'BUY', amount=500.0, sec_type=sec_type,
+        exchange=ctx.contract.exchange, currency='USD', metadata={'con_id': 200})
+    result = ctx.sdk.approve(proposal_id)
+
+    if sec_type == 'OPT':
+        assert not result.is_success() and 'multiplier' in str(result.error)
+        assert ctx.proposals.get(proposal_id).status == 'FAILED'
+        assert ctx.calls == [] and ctx.server.placed == []
+    else:
+        assert result.is_success(), result.error
+        assert len(ctx.server.placed) == 1
+        assert ctx.server.placed[0].order.totalQuantity == 100
+        assert ctx.proposals.get(proposal_id).status == 'EXECUTED'
+
+
+def _assert_native_catalogue_conflict(resolve):
+    error = None
+    try:
+        resolve()
+    except ValueError as caught:
+        error = caught
+    assert error is not None, 'Conflicting catalogue multipliers were accepted'
+    assert 'Conflicting multipliers' in str(error)
+    assert 'conId 200' in str(error)
+
+
+def _install_native_catalogue_copies(ctx, multipliers, *, sec_type='OPT'):
+    """Persist actual ContractDetails with two venues for one exact listing."""
+    from ib_async import Contract, ContractDetails
+    from trader.data.data_access import SecurityDefinition
+    from trader.data.universe import Universe
+
+    ctx.install(sec_type, multipliers[0], 5.0)
+    definitions = [SecurityDefinition.from_contract_details(ContractDetails(
+        contract=Contract(conId=200, symbol=ctx.contract.symbol, secType=sec_type,
+                          currency='USD', exchange=venue, primaryExchange='NASDAQ',
+                          multiplier=multiplier)))
+        for venue, multiplier in zip(('SMART', 'NASDAQ'), multipliers)]
+    accessor = ctx.server.universe_accessor
+    accessor.update(Universe('native_multiplier', definitions))
+    return accessor, definitions
+
+
+@pytest.mark.parametrize('multipliers', [
+    pytest.param(('100', '50'), id='known-conflict'),
+    pytest.param(('50', '100'), id='known-reversed'),
+    pytest.param(('', '100'), id='missing-known'),
+    pytest.param(('100', ''), id='known-missing'),
+])
+def test_native_catalogue_conflict_precedes_first_only(
+        native_definition_multiplier_sdk, multipliers):
+    ctx = native_definition_multiplier_sdk
+    accessor, _ = _install_native_catalogue_copies(ctx, multipliers)
+    calls = [
+        lambda: ctx.sdk.resolve(200, sec_type='OPT'),
+        lambda: ctx.sdk.resolve(ctx.contract.symbol, sec_type='OPT'),
+        lambda: accessor.resolve_symbol(200, sec_type='OPT', first_only=True),
+    ]
+    for resolve in calls:
+        accessor.invalidate_resolver_cache()
+        _assert_native_catalogue_conflict(resolve)
+    assert ctx.calls == [] and ctx.server.placed == []
+
+
+@pytest.mark.parametrize('multipliers', [
+    pytest.param(('100', '50'), id='known-conflict'),
+    pytest.param(('50', '100'), id='known-reversed'),
+    pytest.param(('', '100'), id='missing-known'),
+    pytest.param(('100', ''), id='known-missing'),
+])
+def test_native_catalogue_filtered_warmup_cannot_hide_conflict(
+        native_definition_multiplier_sdk, multipliers):
+    ctx = native_definition_multiplier_sdk
+    _install_native_catalogue_copies(ctx, multipliers)
+    # A scoped symbol lookup is legitimate, but cannot seed a singleton for
+    # a subsequent unfiltered exact-ID request that has two matching records.
+    selected = ctx.sdk.resolve(ctx.contract.symbol, sec_type='OPT', exchange='SMART')
+    assert len(selected) == 1 and selected[0].exchange == 'SMART'
+    _assert_native_catalogue_conflict(lambda: ctx.sdk.resolve(200, sec_type='OPT'))
+    assert ctx.calls == [] and ctx.server.placed == []
+
+
+@pytest.mark.parametrize('sec_type,multipliers,expected_quantity', [
+    pytest.param('OPT', ('100', '100'), 1.0, id='identical-option'),
+    pytest.param('OPT', ('100', '100.0'), 1.0, id='numeric-equivalent'),
+    pytest.param('OPT', ('', ''), None, id='missing-option'),
+    pytest.param('STK', ('', ''), 100.0, id='default-stock'),
+])
+def test_native_catalogue_consistent_copies_keep_amount_contract(
+        native_definition_multiplier_sdk, sec_type, multipliers, expected_quantity):
+    ctx = native_definition_multiplier_sdk
+    _install_native_catalogue_copies(ctx, multipliers, sec_type=sec_type)
+    proposal_id, _, _ = ctx.sdk.propose(
+        ctx.contract.symbol, 'BUY', amount=500.0, sec_type=sec_type,
+        currency='USD', metadata={'con_id': 200})
+    result = ctx.sdk.approve(proposal_id)
+    if expected_quantity is None:
+        assert not result.is_success()
+        assert isinstance(result.exception, ValueError) and 'multiplier' in str(result.error)
+        assert ctx.calls == [] and ctx.server.placed == []
+        assert ctx.proposals.get(proposal_id).status == 'FAILED'
+    else:
+        assert result.is_success(), result.error
+        assert len(ctx.calls) == len(ctx.server.placed) == 1
+        placed, = ctx.server.placed
+        assert placed.order.totalQuantity == expected_quantity
+        assert placed.contract.conId == 200 and placed.contract.secType == sec_type
+        assert float(placed.contract.multiplier or 1) == float(multipliers[0] or 1)
+        assert ctx.proposals.get(proposal_id).metadata['submission_quantity'] == expected_quantity
+
+
+def test_native_catalogue_first_only_does_not_truncate_cached_candidates(
+        native_definition_multiplier_sdk):
+    ctx = native_definition_multiplier_sdk
+    accessor, _ = _install_native_catalogue_copies(ctx, ('', ''), sec_type='STK')
+    first = accessor.resolve_symbol(200, sec_type='STK', first_only=True)
+    assert len(first) == 1 and first[0].exchange == 'SMART'
+    complete = accessor.resolve_symbol(200, sec_type='STK')
+    assert [row.exchange for row in complete] == ['SMART', 'NASDAQ']
+    complete.clear()
+    assert [row.exchange for row in accessor.resolve_symbol(200, sec_type='STK')] == ['SMART', 'NASDAQ']
+    named = accessor.resolve_universe_name(200, sec_type='STK')
+    assert [(name, row.exchange) for name, row in named] == [
+        ('native_multiplier', 'SMART'), ('native_multiplier', 'NASDAQ')]
+
+
+def test_native_catalogue_service_preserves_type_and_universe_filters(
+        native_definition_multiplier_sdk):
+    from ib_async import Contract, ContractDetails
+    from trader.data.data_access import SecurityDefinition
+    from trader.data.universe import Universe
+
+    ctx = native_definition_multiplier_sdk
+    ctx.install('STK', '', 5.0)
+    accessor = ctx.server.universe_accessor
+    option = SecurityDefinition.from_contract_details(ContractDetails(contract=Contract(
+        conId=200, symbol=ctx.contract.symbol, secType='OPT', currency='USD',
+        exchange='CBOE', multiplier='100')))
+    accessor.update(Universe('option_only', [option]))
+    # This warms the existing stock query before requesting another type.
+    stock = ctx.sdk.resolve(200, sec_type='STK', universe='native_multiplier')
+    assert len(stock) == 1 and stock[0].secType == 'STK'
+    option_rows = ctx.sdk.resolve(200, sec_type='OPT')
+    assert len(option_rows) == 1 and option_rows[0].secType == 'OPT'
+    assert ctx.sdk.resolve(200, sec_type='STK', universe='option_only') == []
+    assert ctx.sdk.resolve(200, sec_type='OPT', exchange='SMART') == []
+    selected = ctx.sdk.resolve(200, sec_type='OPT', exchange='CBOE', universe='option_only')
+    assert len(selected) == 1 and selected[0].conId == 200
+    assert ctx.calls == [] and ctx.server.placed == []
+
+
+def test_native_catalogue_numeric_ticker_is_distinct_from_integer_id(
+        native_definition_multiplier_sdk):
+    from ib_async import Contract, ContractDetails
+    from trader.data.data_access import SecurityDefinition
+    from trader.data.universe import Universe
+
+    ctx = native_definition_multiplier_sdk
+    ctx.install('STK', '', 5.0)
+    accessor = ctx.server.universe_accessor
+    numeric_ticker = SecurityDefinition.from_contract_details(ContractDetails(contract=Contract(
+        conId=700, symbol='200', secType='STK', currency='HKD', exchange='SEHK')))
+    accessor.update(Universe('numeric_tickers', [numeric_ticker]))
+    for _ in range(2):
+        assert [row.conId for row in ctx.sdk.resolve('200', sec_type='STK')] == [700]
+        assert [row.conId for row in ctx.sdk.resolve(200, sec_type='STK')] == [200]
+    assert ctx.calls == [] and ctx.server.placed == []
+
+
+def test_native_catalogue_update_invalidates_complete_query_result(
+        native_definition_multiplier_sdk):
+    from dataclasses import replace
+    from trader.data.universe import Universe
+
+    ctx = native_definition_multiplier_sdk
+    accessor, definitions = _install_native_catalogue_copies(ctx, ('', ''), sec_type='STK')
+    before = ctx.sdk.resolve(200, sec_type='STK')
+    assert len(before) == 1 and before[0].exchange == 'SMART'
+    accessor.update(Universe('native_multiplier', [replace(definitions[0], exchange='NYSE')]))
+    after = ctx.sdk.resolve(200, sec_type='STK')
+    assert len(after) == 1 and after[0].exchange == 'NYSE'
+    assert ctx.sdk.resolve(200, sec_type='STK', exchange='SMART') == []
+    accessor.delete('native_multiplier')
+    assert ctx.sdk.resolve(200, sec_type='STK') == []
+
+
+@pytest.mark.parametrize('multipliers', [
+    pytest.param(('100', '50'), id='known-conflict'),
+    pytest.param(('', '100'), id='missing-known'),
+])
+def test_native_discovery_refuses_multiplier_conflict_before_venue_dedup(
+        native_definition_multiplier_sdk, monkeypatch, multipliers):
+    from ib_async import Contract, ContractDetails
+    from trader.messaging.trader_service_api import TraderServiceApi
+
+    ctx = native_definition_multiplier_sdk
+    ctx.install('OPT', '100', 5.0)
+    ctx.server.universe_accessor.delete('native_multiplier')
+    details = [ContractDetails(contract=Contract(
+        conId=200, symbol=ctx.contract.symbol, secType='OPT', currency='USD',
+        exchange=venue, primaryExchange='NASDAQ', multiplier=multiplier))
+        for venue, multiplier in zip(('SMART', 'NASDAQ'), multipliers)]
+    requests = []
+
+    async def discover(contract):
+        requests.append(contract)
+        return details
+
+    monkeypatch.setattr(ctx.server.client.ib, 'reqContractDetailsAsync', discover, raising=False)
+    api = TraderServiceApi(ctx.server)
+    rpc = ctx.sdk._client.rpc()
+    rpc.resolve_contract = lambda contract: asyncio.run(api.resolve_contract(contract))
+    _assert_native_catalogue_conflict(lambda: ctx.sdk.resolve(ctx.contract.symbol, sec_type='OPT'))
+    assert len(requests) == 1 and requests[0].secType == 'OPT'
+    assert ctx.calls == [] and ctx.server.placed == []

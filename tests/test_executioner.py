@@ -48,6 +48,10 @@ def _make_executioner_with_trader(risk_gate=None, book_orders=None, ib_account='
     predicate + risk-inputs reads are stubbed since they hit IB state.
     """
     trader = MagicMock()
+    trader.opening_restore_error.return_value = None
+    trader.reserve_broker_order = AsyncMock()
+    trader.unobserved_reduction_quantity = AsyncMock(return_value=0.0)
+    trader.order_tracker = None
     trader.ib_account = ib_account
     trader.book = MagicMock()
     trader.book.get_orders.return_value = book_orders or []
@@ -61,6 +65,10 @@ def _make_executioner_with_trader(risk_gate=None, book_orders=None, ib_account='
     # these executioner tests are not about the tier, so it no-ops here (the
     # real method returns None for exits and when the feature is off).
     trader.enforce_approver_tier = AsyncMock(return_value=None)
+    trader.margin_checks = AsyncMock(return_value=RiskGateResult(True, checks={
+        'leverage': 'pass', 'margin_cushion': 'pass'}))
+    trader.aggregate_position_value = MagicMock(side_effect=lambda contract, action, quantity, value: value)
+    trader.convert_notional = MagicMock(side_effect=lambda value, currency, target='BASE': value)
     trader.gather_risk_inputs = MagicMock(return_value=inputs or _inputs())
     ex = TradeExecutioner()
     ex.connect(trader)
@@ -458,7 +466,8 @@ async def test_place_order_mints_token_carrying_gate_checks():
     tok = captured['token']
     assert isinstance(tok, ApprovedOrder)
     assert tok.is_exit is False
-    assert tok.checks == {'daily_loss': 'pass', 'concentration': 'unevaluable:position-value'}
+    assert tok.checks == {'daily_loss': 'pass', 'concentration': 'unevaluable:position-value',
+                          'leverage': 'pass', 'margin_cushion': 'pass'}
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,8 @@ import functools
 import inspect
 import io
 import msgpack
+import math
+import queue
 import pandas as pd
 import pyarrow as pa
 import reactivex as rx
@@ -623,58 +625,54 @@ class _SyncMethodCall:
         }
         method_str = '.'.join(self._names)
 
-        # The DEALER socket is shared across all calls on this client and the
-        # lock serializes them. Two failure modes are guarded here:
-        #   1. On timeout we DROP AND RECREATE the socket (new ZMQ identity)
-        #      so the in-flight request cannot be redelivered later when the
-        #      server reconnects, and so any late reply is routed to the dead
-        #      identity and discarded by ZMQ. Without this a "failed" order can
-        #      silently fire when trader_service comes back.
-        #   2. We match every received reply's req_id against the one we sent,
-        #      discarding stale frames left over from a prior timed-out call.
-        #      Without this one timeout desyncs the request/reply stream forever
-        #      (each call returns the *previous* call's result).
-        with self._client._lock:
+        # One monotonic budget includes waiting for this client's turn,
+        # connection readiness, sending, and receiving. A disconnected DEALER
+        # with IMMEDIATE=1 must never wait indefinitely inside send().
+        timeout = self._timeout if self._timeout is not None else 10.0
+        deadline = time_.monotonic() + timeout
+        if not self._client._lock.acquire(timeout=max(0.0, deadline - time_.monotonic())):
+            raise ConnectionError(f'RPC {method_str}: deadline expired before sending (client busy)')
+        response = None
+        sent = False
+        try:
             socket = self._client._require_socket()
-            try:
-                socket.send(pack(request))
-            except zmq.Again:
-                # IMMEDIATE=1 means an un-connected DEALER refuses to queue —
-                # surface "server unreachable" loudly instead of buffering an order.
+            payload = pack(request)
+            remaining = deadline - time_.monotonic()
+            if remaining <= 0 or not socket.poll(max(1, math.ceil(remaining * 1000)), zmq.POLLOUT):
                 self._client._reset_socket()
-                raise ConnectionError(
-                    f'RPC call to {method_str} could not be sent: no route to server')
+                raise ConnectionError(f'RPC {method_str}: no route before send deadline')
+            try:
+                socket.send(payload, flags=zmq.NOBLOCK)
+                sent = True
+            except zmq.Again:
+                self._client._reset_socket()
+                raise ConnectionError(f'RPC {method_str}: request could not be sent')
 
-            poller = zmq.Poller()
-            poller.register(socket, zmq.POLLIN)
-            timeout_ms = (self._timeout or 10) * 1000
-            deadline = timeout_ms
-            elapsed = 0
-            poll_interval = 250  # ms
-            response = None
-            while elapsed < deadline:
-                ready = poller.poll(poll_interval)
-                if not ready:
-                    elapsed += poll_interval
-                    continue
+            while True:
+                remaining = deadline - time_.monotonic()
+                if remaining <= 0 or not socket.poll(max(1, math.ceil(remaining * 1000)), zmq.POLLIN):
+                    break
                 frames = socket.recv_multipart(zmq.NOBLOCK)
                 candidate = unpack(frames[-1])
-                if candidate.get('req_id') != req_id:
-                    # Stale reply from an earlier timed-out call. Discard and
-                    # keep waiting for OUR reply within the remaining budget.
-                    logging.warning(
-                        f'RPC {method_str}: discarding stale reply '
-                        f'{candidate.get("req_id")!r} (awaiting {req_id!r})')
-                    elapsed += poll_interval
+                if not isinstance(candidate, dict) or candidate.get('req_id') != req_id:
+                    logging.warning('RPC %s: discarding reply for another request', method_str)
                     continue
-                response = candidate
+                if time_.monotonic() <= deadline:
+                    response = candidate
                 break
             if response is None:
-                # Drop the poisoned pipe: prevents late redelivery of this
-                # request and clears any buffered mismatched replies.
+                # This discards queued messages and late replies; it CANNOT
+                # cancel a handler already executing on the server. The caller
+                # must reconcile an ambiguous mutation rather than retry it.
                 self._client._reset_socket()
-                raise TimeoutError(
-                    f'RPC call to {method_str} timed out after {timeout_ms}ms')
+                raise TimeoutError(f'RPC {method_str} timed out after {timeout}s; outcome UNKNOWN')
+        except Exception as ex:
+            if sent and not isinstance(ex, TimeoutError):
+                self._client._reset_socket()
+                raise TimeoutError(f'RPC {method_str}: reply unavailable after submission; outcome UNKNOWN') from ex
+            raise
+        finally:
+            self._client._lock.release()
 
         if response.get('error'):
             exc_type = response.get('exc_type', 'Exception')
@@ -707,8 +705,22 @@ class RPCServer(Generic[T]):
         self.ctx = zmq.asyncio.Context()
         self.socket: Optional[zmq.asyncio.Socket] = None
         self._serve_task: Optional[asyncio.Task] = None
+        self._requests: set[asyncio.Task] = set()
+        self._request_slots = asyncio.Semaphore(64)
 
     async def serve(self):
+        if self.socket is not None:
+            raise RuntimeError('RPC server is already serving')
+        # A supervised service may restart this same object after close().
+        # Finish cancellation before replacing its request-slot semaphore.
+        old_tasks = [task for task in (self._serve_task, *self._requests)
+                     if task is not None]
+        if old_tasks:
+            await asyncio.gather(*old_tasks, return_exceptions=True)
+        self._requests.clear()
+        self._request_slots = asyncio.Semaphore(64)
+        if self.ctx.closed:
+            self.ctx = zmq.asyncio.Context()
         self.socket = self.ctx.socket(zmq.ROUTER)
         self.socket.setsockopt(zmq.LINGER, 0)
         # Retry the bind with backoff. After a crash-restart the previous
@@ -726,38 +738,46 @@ class RPCServer(Generic[T]):
                                 self.address, attempt + 1, ex)
                 await asyncio.sleep(min(2 ** attempt, 8) * 0.25)  # ~0.25s → 2s
         else:
+            self.socket.close(linger=0)
+            self.socket = None
+            self.ctx.term()
             raise last_err  # type: ignore[misc]
         self._serve_task = asyncio.create_task(self._serve_loop())
 
     async def _serve_loop(self):
         while True:
+            acquired = False
             try:
+                await self._request_slots.acquire()
+                acquired = True
                 frames = await self.socket.recv_multipart()
-                # frames: [client_id, empty, request_data]
-                client_id = frames[0]
-                # msgpack.unpackb + the dill fallback on ExtType=OBJECT can
-                # take tens of ms for payloads carrying DataFrames or
-                # pickled args. Offload to a thread so the serve loop
-                # immediately goes back to recv_multipart — other inbound
-                # requests aren't blocked behind one slow deserialization.
-                try:
-                    request = await asyncio.to_thread(unpack, frames[-1])
-                except Exception as ex:
-                    # A rejected/undeserializable request must produce an
-                    # error REPLY — dropping it silently leaves the client
-                    # hanging to TimeoutError with no clue why.
-                    logging.error(f'RPCServer: refusing request payload: {ex}')
-                    asyncio.create_task(self._reject_request(client_id, frames[-1], ex))
-                    continue
-                # request = {'method': 'dotted.name', 'args': [...], 'kwargs': {...}, 'req_id': uuid}
-                asyncio.create_task(self._handle_request(client_id, request))
-            except zmq.ZMQError as e:
-                logging.debug(f"RPCServer ZMQ error in serve loop: {e}")
+                task = asyncio.create_task(self._dispatch(frames))
+                self._requests.add(task)
+                task.add_done_callback(self._requests.discard)
+                acquired = False  # _dispatch now owns/relinquishes the slot
+            except (zmq.ZMQError, asyncio.CancelledError):
                 break
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logging.exception(f"RPCServer unexpected error: {e}")
+            except Exception:
+                logging.exception('RPCServer receive error')
+            finally:
+                if acquired:
+                    self._request_slots.release()
+
+    async def _dispatch(self, frames):
+        try:
+            client_id = frames[0]
+            try:
+                request = await asyncio.to_thread(unpack, frames[-1])
+            except Exception as ex:
+                await self._reject_request(client_id, frames[-1], ex)
+                return
+            await self._handle_request(client_id, request)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception('RPCServer dispatch failed')
+        finally:
+            self._request_slots.release()
 
     async def _reject_request(self, client_id: bytes, raw: bytes, exc: Exception):
         # The payload didn't deserialize, so the req_id has to be recovered
@@ -786,7 +806,8 @@ class RPCServer(Generic[T]):
             logging.exception(f"RPCServer failed to send rejection response: {ex}")
 
     async def _handle_request(self, client_id: bytes, request: dict):
-        method_name = request['method']
+        request = request if isinstance(request, dict) else {}
+        method_name = request.get('method', '')
         args = request.get('args', ())
         kwargs = request.get('kwargs', {})
         req_id = request.get('req_id', '')
@@ -801,7 +822,7 @@ class RPCServer(Generic[T]):
             # trader.client.ib.reqGlobalCancel) is refused — otherwise any local
             # client could walk the whole object graph and place live orders,
             # bypassing the proposal-approval gate that lives on the API wrapper.
-            if '.' in method_name or method_name.startswith('_'):
+            if not isinstance(method_name, str) or not method_name or '.' in method_name or method_name.startswith('_'):
                 raise AttributeError(f'RPC method {method_name!r} is not permitted')
             method = getattr(self.instance, method_name, None)
             if method is None or not getattr(method, '_is_rpc_method', False):
@@ -842,8 +863,22 @@ class RPCServer(Generic[T]):
     def close(self):
         if self._serve_task:
             self._serve_task.cancel()
-        if self.socket:
-            self.socket.close()
+        for task in tuple(self._requests):
+            task.cancel()
+        if self.socket is not None:
+            self.socket.close(linger=0)
+            self.socket = None
+        self.ctx.term()
+
+    async def aclose(self):
+        """Close and drain canceled handlers before the owning loop stops."""
+        tasks = [task for task in (self._serve_task, *self._requests)
+                 if task is not None]
+        self.close()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._serve_task = None
+        self._requests.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -902,7 +937,9 @@ class RPCClient(Generic[T]):
         self.address = f"{zmq_server_address}:{zmq_server_port}"
         self.ctx = zmq.Context()  # sync context for sync calls
         self.socket: Optional[zmq.Socket] = None
-        self.timeout: Optional[int] = timeout
+        if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError('RPC timeout must be finite and positive')
+        self.timeout = timeout if timeout is not None else 10.0
         self.is_setup: bool = False
         self._lock = threading.Lock()
         self.error_table = error_table
@@ -914,17 +951,25 @@ class RPCClient(Generic[T]):
         #   an order to a down trader_service fails loudly rather than firing later.
         socket.setsockopt(zmq.LINGER, 0)
         socket.setsockopt(zmq.IMMEDIATE, 1)
-        if self.timeout:
-            socket.setsockopt(zmq.RCVTIMEO, self.timeout * 1000)
-            socket.setsockopt(zmq.SNDTIMEO, self.timeout * 1000)
+        socket.setsockopt(zmq.RCVTIMEO, math.ceil(self.timeout * 1000))
+        socket.setsockopt(zmq.SNDTIMEO, math.ceil(self.timeout * 1000))
 
     async def connect(self, loop=None):
         logging.debug('trying RPCClient.connect()')
         _refuse_live_ports_under_pytest(self.zmq_server_address, self.zmq_server_port)
-        self.socket = self.ctx.socket(zmq.DEALER)
-        self._configure_socket(self.socket)
-        self.socket.connect(self.address)
-        self.is_setup = True
+        if not self._lock.acquire(timeout=self.timeout):
+            raise TimeoutError('RPC connection is busy')
+        try:
+            if self.socket is not None:
+                self.socket.close(linger=0)
+            if self.ctx.closed:
+                self.ctx = zmq.Context()
+            self.socket = self.ctx.socket(zmq.DEALER)
+            self._configure_socket(self.socket)
+            self.socket.connect(self.address)
+            self.is_setup = True
+        finally:
+            self._lock.release()
 
     def _require_socket(self):
         if not (self.socket and self.is_setup):
@@ -953,10 +998,12 @@ class RPCClient(Generic[T]):
             self.is_setup = False
             raise
 
-    def rpc(self, return_type: Optional[Type] = None) -> T:
+    def rpc(self, return_type: Optional[Type] = None, *, timeout: Optional[float] = None) -> T:
+        if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError('RPC timeout must be finite and positive')
         if self.socket and self.is_setup:
             return _SyncMethodCall(
-                self, self.timeout,
+                self, self.timeout if timeout is None else timeout,
                 return_type=return_type,
                 error_table=self.error_table,
             )  # type: ignore
@@ -980,8 +1027,12 @@ class RPCClient(Generic[T]):
             return future
 
     def close(self):
-        if self.socket:
-            self.socket.close()
+        with self._lock:
+            if self.socket is not None:
+                self.socket.close(linger=0)
+                self.socket = None
+            self.is_setup = False
+            self.ctx.term()
 
 
 # ---------------------------------------------------------------------------
@@ -989,30 +1040,25 @@ class RPCClient(Generic[T]):
 # ---------------------------------------------------------------------------
 
 class MessageBusServer:
-    def __init__(
-        self,
-        zmq_address: str,
-        zmq_port: int,
-        **kwargs,
-    ):
-        self.zmq_address = zmq_address
-        self.zmq_port = zmq_port
-        self.lock = threading.Lock()
+    """Best-effort topic router with bounded work and explicit worker lifetime."""
 
-        self._sentinel = ('stop', 'stop', 'stop')
-        self.sentinel_flag: bool = True
-        self.clients: Dict[Tuple[str, str], bool] = {}
-        self.server: Optional[zmq.asyncio.Socket] = None
-        self.read_task: Optional[asyncio.Task] = None
-        self.read_loop = None
-
-        self.read_thread: Optional[threading.Thread] = None
-        self.message_thread: Optional[threading.Thread] = None
-        self.ctx = zmq.asyncio.Context()
+    def __init__(self, zmq_address: str, zmq_port: int, queue_size: int = 1024, **kwargs):
+        if queue_size <= 0:
+            raise ValueError('message bus queue_size must be positive')
+        self.zmq_address, self.zmq_port = zmq_address, zmq_port
+        self.clients = {}
+        self.server = None
+        self.ctx = None
+        self.read_thread = None
+        self.sentinel_flag = True
+        self.wait_handle = threading.Event()
+        self._stop_event = threading.Event()
+        self._queue = queue.Queue(maxsize=queue_size)
+        self._startup_error = None
 
     @staticmethod
     def message_subscribe(topic):
-        return [topic.encode() if type(topic) is str else topic, b'subscribe']
+        return [topic.encode() if isinstance(topic, str) else topic, b'subscribe']
 
     @staticmethod
     def message_disconnect():
@@ -1020,113 +1066,103 @@ class MessageBusServer:
 
     @staticmethod
     def message(topic, val: Any):
-        return [topic.encode() if type(topic) is str else topic, pack(val)]
+        return [topic.encode() if isinstance(topic, str) else topic, pack(val)]
 
     def put(self, topic_item):
-        self.wait_handle.loop.call_soon_threadsafe(self.wait_handle.queue.put_nowait, topic_item)  # type: ignore
+        if self.read_thread is None or not self.read_thread.is_alive() or self._stop_event.is_set():
+            raise RuntimeError('message bus is not running')
+        self._queue.put_nowait(topic_item)
 
     def write(self, topic: str, val: Any):
-        self.put((topic, val))
+        topic_bytes, payload = self.message(topic, val)
+        self.put((b'', topic_bytes, payload))
 
-    async def __message(self, client_id: bytes, topic: bytes, val: bytes):
-        if not self.server:
-            raise ValueError('server is not initialized')
-
-        subscribe_marker = b'subscribe'
-        disconnect_marker = b'disconnect'
-
-        if val == subscribe_marker and (client_id, topic) not in self.clients:
+    def _route(self, client_id, topic, val):
+        if val == b'subscribe':
             self.clients[(client_id, topic)] = True
             return
-
-        if val == disconnect_marker:
-            # remove all subscriptions for this client
-            for (subscribed_client_id, subscribed_topic) in list(self.clients.keys()):
-                if client_id == subscribed_client_id:
-                    self.clients.pop((subscribed_client_id, subscribed_topic))
+        if val == b'disconnect':
+            for key in list(self.clients):
+                if key[0] == client_id:
+                    self.clients.pop(key)
             return
+        for cid, subscribed in list(self.clients):
+            if cid != client_id and subscribed == topic:
+                try:
+                    self.server.send_multipart([cid, topic, val], flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    logging.error('message bus subscriber queue full; message rejected')
 
-        client_ids = [cid for (cid, t), _ in self.clients.items() if cid != client_id and t == topic]
-        for cid in client_ids:
-            await self.server.send_multipart([cid, topic, val])
-
-    def __combined_loop(self, wait_handle: threading.Event):
-        async def main():
-            ctx = zmq.asyncio.Context()
-            self.server = ctx.socket(zmq.ROUTER)
+    def _run(self):
+        try:
+            self.ctx = zmq.Context()
+            self.server = self.ctx.socket(zmq.ROUTER)
+            self.server.setsockopt(zmq.LINGER, 0)
             self.server.bind(f'{self.zmq_address}:{self.zmq_port}')
-
-            wait_handle.loop = asyncio.get_running_loop()  # type: ignore
-            wait_handle.queue = asyncio.Queue()  # type: ignore
-            wait_handle.set()
-
-            async def read_messages():
-                while not self.sentinel_flag:
+            self.wait_handle.set()
+            while not self._stop_event.is_set():
+                if self.server.poll(50, zmq.POLLIN):
+                    frames = self.server.recv_multipart()
+                    if len(frames) >= 3:
+                        self._route(frames[0], frames[1], frames[2])
+                for _ in range(128):
                     try:
-                        frames = await self.server.recv_multipart()
-                        if len(frames) >= 3:
-                            await self.__message(frames[0], frames[1], frames[2])
-                        elif len(frames) == 2:
-                            await self.__message(frames[0], frames[1], b'')
-                    except zmq.ZMQError:
+                        item = self._queue.get_nowait()
+                    except queue.Empty:
                         break
-                    except Exception as ex:
-                        logging.exception(f"MessageBusServer read error: {ex}")
-                        break
+                    try:
+                        self._route(*item)
+                    finally:
+                        self._queue.task_done()
+        except BaseException as ex:
+            self._startup_error = ex
+            logging.exception('message bus worker failed')
+        finally:
+            if self.server is not None:
+                self.server.close(linger=0)
+                self.server = None
+            if self.ctx is not None:
+                self.ctx.term()
+                self.ctx = None
+            self.sentinel_flag = True
+            self.wait_handle.set()
 
-            async def process_writes():
-                queue = wait_handle.queue
-                while True:
-                    item = await queue.get()
-                    if item == self._sentinel:
-                        queue.task_done()
-                        self.sentinel_flag = True
-                        break
-                    client_id = item[0]
-                    topic = item[1]
-                    val = item[2]
-                    await self.__message(client_id, topic, val)
-                    queue.task_done()
-
-            await asyncio.gather(read_messages(), process_writes())
-
-        self.read_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.read_loop)
-        self.read_loop.run_until_complete(main())
-
-    async def start(self):
-        logging.debug('starting MessageBus server work queue')
-
-        if self.server and self.sentinel_flag is False:
-            raise ValueError('server already started')
-
-        self.wait_handle = threading.Event()
-
+    def _start(self, timeout):
+        if self.read_thread is not None and self.read_thread.is_alive():
+            raise RuntimeError('message bus already started')
+        self.wait_handle.clear()
+        self._stop_event.clear()
+        self.clients.clear()
+        self._startup_error = None
         self.sentinel_flag = False
-        self.read_thread = threading.Thread(target=self.__combined_loop, args=(self.wait_handle,))
+        self.read_thread = threading.Thread(target=self._run, daemon=True, name='mmr-messagebus')
         self.read_thread.start()
+        if not self.wait_handle.wait(timeout):
+            self._stop_event.set()
+            raise TimeoutError('message bus startup timed out')
+        if self._startup_error is not None:
+            self.read_thread.join(timeout)
+            raise RuntimeError('message bus could not start') from self._startup_error
 
-        self.wait_handle.wait()
+    async def start(self, timeout: float = 5.0):
+        await asyncio.to_thread(self._start, timeout)
 
-    def stop(self):
-        if self.server is None or self.read_loop is None:
-            raise ValueError('server not initialized')
-
-        self.sentinel_flag = True
-        self.put(self._sentinel)  # type: ignore
-
-        if self.server:
-            self.server.close()
-
-        loop = self.read_loop
-        if loop.is_running():
-            loop.call_soon_threadsafe(loop.stop)
-
-        asyncio.run(asyncio.sleep(0.1))
+    def stop(self, timeout: float = 5.0):
+        self._stop_event.set()
+        if self.read_thread is not None and self.read_thread is not threading.current_thread():
+            self.read_thread.join(timeout)
+            if self.read_thread.is_alive():
+                raise TimeoutError('message bus shutdown timed out')
+        while True:
+            try:
+                self._queue.get_nowait()
+                self._queue.task_done()
+            except queue.Empty:
+                break
 
     async def wait(self):
         while not self.sentinel_flag:
-            await asyncio.sleep(1)
+            await asyncio.sleep(.1)
 
 
 # ---------------------------------------------------------------------------
@@ -1146,7 +1182,12 @@ class MessageBusClient(Generic[T]):
 
     async def connect(self) -> None:
         _refuse_live_ports_under_pytest(self.zmq_address, self.zmq_port)
+        if self.client is not None:
+            self.client.close(linger=0)
+        if self.ctx.closed:
+            self.ctx = zmq.asyncio.Context()
         self.client = self.ctx.socket(zmq.DEALER)
+        self.client.setsockopt(zmq.LINGER, 0)
         self.client.connect(f'{self.zmq_address}:{self.zmq_port}')
 
     async def __iterable_read(self):
@@ -1191,13 +1232,20 @@ class MessageBusClient(Generic[T]):
         self.client.send_multipart(MessageBusServer.message(topic, val))
 
     async def disconnect(self) -> None:
-        if not self.client:
-            raise ValueError('client is not initialized')
-
-        self.client.send_multipart(MessageBusServer.message_disconnect())
-        # pump the loop
-        await asyncio.sleep(1.0)
-        self.client.close()
+        client, self.client = self.client, None
+        try:
+            if client is not None:
+                # Best-effort subscription cleanup, with a bounded flush. The
+                # local socket/context must close even if its peer has gone.
+                await asyncio.wait_for(
+                    client.send_multipart(MessageBusServer.message_disconnect()), .25)
+                await asyncio.sleep(.05)
+        except (TimeoutError, zmq.ZMQError):
+            logging.warning('message bus disconnect notification could not be sent')
+        finally:
+            if client is not None:
+                client.close(linger=0)
+            self.ctx.term()
 
     async def read(self) -> T:
         if not self.client:
@@ -1280,9 +1328,18 @@ class TopicPubSub(Generic[T]):
     def subscriber_close(self):
         if self._sub_task:
             self._sub_task.cancel()
+            self._sub_task = None
         if self.zmq_subscriber:
             logging.debug('subscriber_close()')
-            self.zmq_subscriber.close()
+            self.zmq_subscriber.close(linger=0)
+            self.zmq_subscriber = None
+        if self._sub_ctx is not None:
+            self._sub_ctx.term()
+            self._sub_ctx = None
+        # Closing this transport has historically been cancellation, not a
+        # stream-completion event. Keep that contract while allowing a fresh
+        # subject/socket on an explicit subsequent subscription.
+        self.handler = None
 
     async def publisher(
         self,
@@ -1311,7 +1368,11 @@ class TopicPubSub(Generic[T]):
     async def publisher_close(self):
         if self.zmq_publisher:
             logging.debug('publisher_close()')
-            self.zmq_publisher.close()
+            self.zmq_publisher.close(linger=0)
+            self.zmq_publisher = None
+        if self._pub_ctx is not None:
+            self._pub_ctx.term()
+            self._pub_ctx = None
 
 
 # ---------------------------------------------------------------------------
@@ -1319,66 +1380,91 @@ class TopicPubSub(Generic[T]):
 # ---------------------------------------------------------------------------
 
 class MultithreadedTopicPubSub(Generic[T], TopicPubSub[T]):
-    def __init__(
-        self,
-        zmq_pubsub_server_address: str,
-        zmq_pubsub_server_port: int,
-        **kwargs,
-    ):
-        super().__init__(
-            zmq_pubsub_server_address,
-            zmq_pubsub_server_port,
-        )
+    """A bounded publisher queue whose socket is owned by its worker thread."""
+
+    def __init__(self, zmq_pubsub_server_address: str,
+                 zmq_pubsub_server_port: int, queue_size: int = 1024, **kwargs):
+        super().__init__(zmq_pubsub_server_address, zmq_pubsub_server_port)
+        if queue_size <= 0:
+            raise ValueError('publisher queue_size must be positive')
         self.wait_handle = threading.Event()
-        self._sentinel = ('stop', 'stop')
+        self._queue = queue.Queue(maxsize=queue_size)
+        self._stop_event = threading.Event()
+        self._thread = None
+        self._startup_error = None
+        self.rejected_messages = 0
 
     def put(self, topic_item: Tuple[str, T]):
-        self.wait_handle.loop.call_soon_threadsafe(self.wait_handle.queue.put_nowait, topic_item)  # type: ignore
-
-    def _publisher_loop(self, wait_handle: threading.Event):
+        if self._thread is None or not self._thread.is_alive() or self._stop_event.is_set():
+            raise RuntimeError('publisher is not running')
         try:
-            if not self.zmq_publisher:
-                with self.aquire_timeout(self.lock, 5) as acquired:
-                    # double check lock
-                    if acquired and not self.zmq_publisher:
-                        logging.debug(
-                            f'clientserver.publisher() self.zmq_server_address: {self.zmq_server_address}, '
-                            f'self.zmq_server_port: {self.zmq_server_port}'
-                        )
-                        self._pub_ctx = zmq.Context()
-                        self.zmq_publisher = self._pub_ctx.socket(zmq.PUB)
-                        self.zmq_publisher.bind(f'{self.zmq_server_address}:{self.zmq_server_port}')
-        except Exception as e:
-            logging.exception(e)
-            raise e
+            self._queue.put_nowait(topic_item)
+        except queue.Full:
+            self.rejected_messages += 1
+            logging.error('publisher queue full: rejecting message (%s rejected)', self.rejected_messages)
+            raise
 
-        async def main():
-            wait_handle.loop = asyncio.get_running_loop()  # type: ignore
-            wait_handle.queue = task_queue = asyncio.Queue()  # type: ignore
-            wait_handle.set()
+    async def publisher_close(self):
+        # The inherited API must also respect the worker's socket ownership.
+        await asyncio.to_thread(self.stop)
 
-            while True:
-                item = await task_queue.get()
-                if item == self._sentinel:
-                    task_queue.task_done()
-                    break
-                topic = item[0]
-                val = item[1]
+    def _publisher_loop(self):
+        try:
+            self._pub_ctx = zmq.Context()
+            self.zmq_publisher = self._pub_ctx.socket(zmq.PUB)
+            self.zmq_publisher.setsockopt(zmq.LINGER, 0)
+            self.zmq_publisher.bind(f'{self.zmq_server_address}:{self.zmq_server_port}')
+            self.wait_handle.set()
+            while not self._stop_event.is_set():
+                try:
+                    topic, value = self._queue.get(timeout=.1)
+                except queue.Empty:
+                    continue
+                try:
+                    topic_bytes = topic.encode() if isinstance(topic, str) else topic
+                    self.zmq_publisher.send_multipart([topic_bytes, pack(value)])
+                except Exception:
+                    logging.exception('publisher could not deliver message')
+                finally:
+                    self._queue.task_done()
+        except BaseException as ex:
+            self._startup_error = ex
+            logging.exception('publisher worker failed')
+        finally:
+            if self.zmq_publisher is not None:
+                self.zmq_publisher.close(linger=0)
+                self.zmq_publisher = None
+            if self._pub_ctx is not None:
+                self._pub_ctx.term()
+                self._pub_ctx = None
+            self.wait_handle.set()
 
-                task = asyncio.create_task(self.publisher(val, topic))
-                task.add_done_callback(lambda _: task_queue.task_done())
-            await task_queue.join()
+    def start(self, timeout: float = 5.0):
+        if self._thread is not None and self._thread.is_alive():
+            raise RuntimeError('publisher already started')
+        self.wait_handle.clear()
+        self._stop_event.clear()
+        self._startup_error = None
+        self._thread = threading.Thread(target=self._publisher_loop, daemon=True,
+                                        name='mmr-publisher')
+        self._thread.start()
+        if not self.wait_handle.wait(timeout):
+            self._stop_event.set()
+            raise TimeoutError('publisher startup timed out')
+        if self._startup_error is not None:
+            self._thread.join(timeout)
+            raise RuntimeError('publisher could not start') from self._startup_error
 
-        asyncio.run(main())
-
-    def start(self):
-        logging.debug('starting _publisher_loop')
-        self.wait_handle = threading.Event()
-
-        th = threading.Thread(target=self._publisher_loop, args=(self.wait_handle,))
-        th.start()
-        self.wait_handle.wait()
-        logging.debug('started _publisher_loop')
-
-    def stop(self):
-        self.put(self._sentinel)  # type: ignore
+    def stop(self, timeout: float = 5.0):
+        self._stop_event.set()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout)
+            if self._thread.is_alive():
+                raise TimeoutError('publisher shutdown timed out')
+        # Never replay stale ticks when the same publisher is restarted.
+        while True:
+            try:
+                self._queue.get_nowait()
+                self._queue.task_done()
+            except queue.Empty:
+                break

@@ -103,11 +103,12 @@ class SessionLookup(NamedTuple):
     """
     window: Optional[Window]
     evaluable: bool
+    intervals: Tuple[Window, ...] = ()
 
 
 _lock = threading.Lock()
 _calendar_cache: Dict[str, object] = {}
-_schedule_cache: Dict[Tuple[str, dt.date], Optional[Window]] = {}
+_schedule_cache: Dict[Tuple[str, dt.date], SessionLookup] = {}
 _warned_unknown: set = set()
 
 
@@ -166,8 +167,9 @@ def session_window(calendar_name: str, day: dt.date) -> SessionLookup:
     key = (calendar_name, day)
     with _lock:
         if key in _schedule_cache:
-            return SessionLookup(_schedule_cache[key], True)
+            return _schedule_cache[key]
     window: Optional[Window] = None
+    intervals: Tuple[Window, ...] = ()
     try:
         cal = _calendar(calendar_name)
         stamp = day.isoformat()
@@ -187,14 +189,32 @@ def session_window(calendar_name: str, day: dt.date) -> SessionLookup:
                     list(sched.columns))
                 return SessionLookup(None, False)
             window = (min(starts), max(ends))
+            intervals = (window,)
+            break_starts = _utc_stamps(row, sched.columns, ('break_start',))
+            break_ends = _utc_stamps(row, sched.columns, ('break_end',))
+            if break_starts and break_ends:
+                pause_start, pause_end = break_starts[0], break_ends[0]
+                if window[0] <= pause_start < pause_end <= window[1]:
+                    intervals = ((window[0], pause_start), (pause_end, window[1]))
     except Exception as ex:
         logging.warning(
             'market_session: could not read %s schedule for %s (%s) — treating '
             'as open, NOT caching', calendar_name, day, ex)
         return SessionLookup(None, False)
+    lookup = SessionLookup(window, True, intervals)
     with _lock:
-        _schedule_cache[key] = window
-    return SessionLookup(window, True)
+        _schedule_cache[key] = lookup
+    return lookup
+
+
+def session_intervals(calendar_name: str, day: dt.date) -> SessionLookup:
+    """Session envelope and tradable intervals; lunch breaks are excluded.
+
+    Internal interval ends are exclusive; the final session close is inclusive
+    to preserve exchange closing-auction prints. ``window`` remains the outer
+    envelope for consumers that only need the session date/open/close.
+    """
+    return session_window(calendar_name, day)
 
 
 def in_session(
@@ -255,8 +275,10 @@ def in_session(
         if not lookup.evaluable:
             unevaluable = True
             continue
-        if lookup.window and lookup.window[0] <= stamp <= lookup.window[1]:
-            return True
+        intervals = lookup.intervals or ((lookup.window,) if lookup.window else ())
+        for start, end in intervals:
+            if start <= stamp < end or (lookup.window and stamp == end == lookup.window[1]):
+                return True
     if unevaluable:
         # Every relevant day answered "unknown" — fail OPEN. Returning False
         # here is what the two-state version did, and it would have suppressed
