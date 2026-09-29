@@ -710,3 +710,5 @@ membership-filtered loader, so both sides carried frozen leavers and implicit
 leverage. The *spread* may survive (both books were affected), the absolute
 levels quoted there (Sharpe 1.26 vs 1.04, CAGR 31 % vs 20 %) should not be
 believed until re-run through the harness. Not re-run here.
+
+**2026-09-29 (C01, D06 labelling).** Every `Backtester.run_panel` figure in this log dated before 2026-09-29 — including the 2026-08-17 size-tilt / sales-to-price books and their covered-EW benchmark (Sharpe 1.26 vs 1.04) and the 12-1 momentum panel runs — is **pre-D06**: produced before the panel executor's cash guard (BUY fills scaled to available cash) and before stopped names were exited at their last stored print (D07), so those books could run on implicit leverage and stale marks. Read them as pre-fix until re-run through `trader.research.lowfreq`.
