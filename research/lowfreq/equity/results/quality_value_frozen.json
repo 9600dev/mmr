@@ -58,18 +58,32 @@
   "eq_ew_covered"
  ],
  "dsr": {
-  "n_trials": 6,
+  "n_trials": 20,
   "trial_sharpes": {
    "52ac0c1b7d9362d2c079491369ae6df02f7bab47bd7a51a7d5c0182501844dde": 0.5475584322088927,
    "6110358a0ff54777a8bf12581820ee3ab106a68d3d695ba641b6f66ba1c26226": 0.8298688610171476,
    "6cea0d0fdb84915f3cb6f0c32d32d62f0cd38820f25f3b194474a3923841690e": 0.5489415721964034,
+   "6f5e879be9489fae949ea3fe5987b7af88f6ab365ada13e468ac440d40f138a0": 0.7654937044086801,
+   "74413f7d78fa494458a74391ec2bfadfccf5a74742949a97f09e0fbc71cbe989": 0.611180744440217,
+   "744eadae318b9ed93d14ca3e58657a16cac8e4a0298dc65d1364c957c79b64a8": 0.5644080954778259,
+   "7a84885f218a7ef6aaddaaddce46d43b44fd647b41a56438c639629ff58c4e55": 0.4443339047618607,
+   "8efc193b085883e9d851ce0967c86eabb796807a3eea43634212432f8ff44d75": 0.6271464519870612,
+   "9a337694fb5a6f2c8f2ac4b9c9f35bf7b56ead16dc921206029b8636de549e6e": -0.08210112081439319,
+   "9b9a2a03b7c410f9686ac7a0069e6d83531b9afc0aaff08b49077a76cab31af8": -0.046997658546724504,
    "9d339f2025571ac61af65bc59f00ad665fcf49ec43eb6c1470c5b572bef696d2": 0.6110076758510676,
+   "c6896d86596089de11ca0afddb27ff8a4fb7f6bf9485c9235cd253b05707ec39": 0.07407304184970118,
+   "c8c6c832f630d25640181634592d834707fadd2f45d90d26c1c275110d7f87ab": 0.48535536680904456,
+   "c961be6ef43f2b295da1953f86e5ce820a52ab5f758713cd5418fee217ddff39": 0.02516429689754552,
+   "d0459a72c138943c3826df8d7b40f0c7c7306bd7ceafa9da9d9125cdf39014a3": -0.048658037859680224,
    "da4a171e83d76612e867296a067c2114968bdfcbf308ba8d3a923d9b2bef2289": 0.5226391569720702,
+   "e530dfb612f48a02eae43cdc748559af0ad2a44192780659dbcb05ac1496b1f0": -0.46863511403297403,
+   "eef3d079bfd47e3fa22f5822f2f38317afab3cc91ef908756a6db7408dc17b55": 0.17576977788865414,
+   "f11909195359304008fc665d24bfb508a6fcfa74d9746df0d34f25c48fc836f7": 0.32959154230562904,
    "f26522f826099257e9a31a5ac196e3f812667fa0d62486775983c8c1bbf8289b": 0.8538257162721573
   },
-  "value": 0.7625083490854925
+  "value": 0.3659691613004581
  },
- "elapsed_s": 202.0,
+ "elapsed_s": 196.1,
  "entry": {
   "benchmarks": [
    "eq_ew_covered"
@@ -325,7 +339,7 @@
  "gate_inputs": {
   "active_ann_return": 0.09571985778695555,
   "active_ann_return_stressed": 0.09256697667393968,
-  "active_dsr": 0.7625083490854925,
+  "active_dsr": 0.3659691613004581,
   "active_t_nw": 1.2414664714258123,
   "benchmark_max_drawdown": -0.31875711128715967,
   "benchmark_oos_sharpe_max": 0.5708006485178792,
@@ -355,7 +369,7 @@
  "ledger_metrics": {
   "active_ann_return": 0.09571985778695555,
   "active_ann_return_3x": 0.09256697667393968,
-  "active_dsr": 0.7625083490854925,
+  "active_dsr": 0.3659691613004581,
   "active_t_nw": 1.2414664714258123,
   "benchmark_oos_sharpe_max": 0.5708006485178792,
   "full_min_cash_fraction": 0.00039691703645072996,
@@ -370,20 +384,20 @@
   "selection_stability": 1.0
  },
  "ledger_row": {
-  "elapsed_s": 202.0,
+  "elapsed_s": 196.1,
   "end": "2024-06-28",
   "entry_sha256": "da4a171e83d76612e867296a067c2114968bdfcbf308ba8d3a923d9b2bef2289",
   "error": null,
   "family": "equity",
   "fixed_params": null,
-  "git_sha": "92653bfba4d8425e02d39c1e392b9f05635ed720",
+  "git_sha": "a75a485ee0d64644f0bcdf8edb7b84e790c16a38",
   "grid": {},
   "harness_version": 2,
   "id": "quality_value_frozen",
   "metrics": {
    "active_ann_return": 0.09571985778695555,
    "active_ann_return_3x": 0.09256697667393968,
-   "active_dsr": 0.7625083490854925,
+   "active_dsr": 0.3659691613004581,
    "active_t_nw": 1.2414664714258123,
    "benchmark_oos_sharpe_max": 0.5708006485178792,
    "full_min_cash_fraction": 0.00039691703645072996,
@@ -398,13 +412,13 @@
    "selection_stability": 1.0
   },
   "mode": "walk_forward",
-  "n_trials": 6,
+  "n_trials": 20,
   "results_path": "/Users/joelpob/.local/share/llmvm_lite/scratch_directory/llmvm_scratch_jsx5vvxn/hillclimb-meta/20260928-185549/worktrees/C03/research/lowfreq/equity/results/quality_value_frozen.json",
   "role": "candidate",
   "start": "2016-08-01",
   "status": "ok",
   "strategy_sha256": "cf6068e532501d70103b21034224dba945fe98376cc1511748935c5aeb8c3e85",
-  "timestamp": "2026-09-29T08:32:32+00:00",
+  "timestamp": "2026-09-29T09:15:03+00:00",
   "verdict": "PROMISING"
  },
  "lookahead": {

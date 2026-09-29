@@ -230,3 +230,41 @@ quality_value_frozen, gross_profitability, gross_profit_raw;
   has a final JSON at the common N, every ok row has an artifact, the
   champion equals `make_report.choose_champion`, the report's verdict equals
   the champion JSON's, the report is under 3000 words.
+
+---
+
+## Addendum R4 — 2026-09-29, written AFTER pass 1 (13 + 7 rows) and BEFORE pass 2
+
+State when written: the ledger holds 20 pass-1 rows (the 13 entries of
+`f41bc9a` at N = 1..6, the seven R3 controls at N = 14); every candidate's
+OOS metrics have been seen once; no pass-2 row exists; REPORT.md does not
+exist. This addendum answers the round-3 review. It changes no hypothesis,
+no rule text above, and no code that computes a metric.
+
+1. **Champion-selection rule = the round-1 rule, verbatim.** The only
+   selection rule with a git proof of predating the first ledger row is
+   rules 1–4 above as committed in `92653bf`. The family champion is chosen
+   by THAT rule alone (`make_report.choose_champion`): eligible = the eight
+   non-control entries registered at `92653bf` (rule 1, read literally —
+   `size_smallcap` is an eligible candidate-role entry in its own right as
+   well as H1's stand-in), rule 2's three guards, rule 3's ranking, rule 4's
+   verdict. The R2 item-3 guards and every R3 guard are demoted to a
+   POST-HOC SENSITIVITY ANALYSIS (`make_report.sensitivity_champion`):
+   REPORT.md states whether the champion would change under them and reports
+   their decomposition evidence, but they do not select. Reason: R2 was
+   written before the first `evaluate` call, but its first commit
+   (`f41bc9a`) postdates the pass-1 rows, so that cannot be shown; R3 was
+   written after pass-1 results by its own statement. A rule that cannot be
+   shown to predate results is not a pre-registered rule.
+2. **Row budget.** Rows after pass 2: 13 + 7 + 20 = 40 candidate-role rows
+   holding 20 distinct entry hashes (D02's trial count). An error re-run
+   would make 41 rows; none is planned and any would be reported as a
+   breach, not hidden.
+3. **Provenance chain.** `PROVENANCE.json` becomes a list of records; this
+   addendum's sha256 is recorded as the second record (ledger rows at
+   record = 20) before the first pass-2 run, and `provenance.py` verifies
+   every record's row count and last timestamp against the append-only
+   ledger, so the instant each version of this file existed is pinned to a
+   ledger state.
+4. `check_artifacts.py` additionally compares every archived per-row
+   artifact's embedded ledger row and metrics with its `trials.jsonl` row.
