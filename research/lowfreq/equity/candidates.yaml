@@ -1,0 +1,89 @@
+# Equity family (C03, decision D05). Hypotheses and the champion rule are
+# pre-registered in PREREG.md; every candidate is a single cell (no grid).
+family: equity
+universe: equity
+dev_period: {start: 2016-08-01, end: 2024-06-28}
+walk_forward: {train_days: 1095, test_days: 365}     # D05: train 3y, test 1y, rolling
+warmup_days: 400                                     # 12-1 momentum / 126d vol need ~273 sessions
+top_n: 500
+candidates:
+  - id: eq_ew_covered
+    role: benchmark
+    hypothesis: Equal weight of the covered point-in-time universe, rebalanced monthly, is the return of owning the names an equity signal could choose from.
+    rationale: D05 decisive benchmark - the one that killed long-only momentum; it owns exactly the coverage each candidate publishes.
+    strategy: {module: trader.research.lowfreq.reference_strategies, class: EqEwCovered}
+    params: {}
+    benchmarks: []
+    registered_at: 2026-09-29
+  - id: s2p_top_quintile
+    role: candidate
+    hypothesis: The top sales-to-price quintile of the covered PIT universe beats owning the covered universe (PREREG H1).
+    rationale: Value on the least manipulable fundamental; the program's one survivor (2026-08-17, pre-D06/D07) re-measured honestly.
+    strategy: {module: strategies.lowfreq_equity_s2p, class: SalesToPriceQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: size_smallcap
+    role: candidate
+    hypothesis: The smallest-market-cap quintile of the covered PIT universe beats owning it (PREREG D1, denominator of H1).
+    rationale: Size effect inside a liquid universe; 1/marketcap alone scored IC 0.0443 t(NW) 3.34 on the honest universe.
+    strategy: {module: strategies.lowfreq_equity_size, class: SmallCapQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: s2p_frozen_revenue
+    role: candidate
+    hypothesis: Sales-to-price with revenue frozen per name performs like H1 (PREREG D2, numerator control; never a champion).
+    rationale: Same knowledge mask, revenue information removed - if it matches H1 the numerator added nothing.
+    strategy: {module: strategies.lowfreq_equity_s2p_frozen, class: SalesToPriceFrozenRevenue}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: pead_earnings
+    role: candidate
+    hypothesis: Names whose latest as-of TTM net income rose most vs the TTM it replaced (Q_t - Q_t-4, scaled by assets) drift up (PREREG H2).
+    rationale: Post-earnings-announcement drift measured from the EDGAR acceptance instant against a seasonal random walk.
+    strategy: {module: strategies.lowfreq_equity_pead_earnings, class: EarningsSurpriseQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: pead_revenue
+    role: candidate
+    hypothesis: Names whose latest as-of TTM revenue rose most relative to the TTM it replaced drift up (PREREG H3).
+    rationale: Revenue-surprise drift (Jegadeesh & Livnat 2006), less managed than earnings, from the acceptance instant.
+    strategy: {module: strategies.lowfreq_equity_pead_revenue, class: RevenueSurpriseQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: quality_value_blend
+    role: candidate
+    hypothesis: The top quintile on the mean rank of gross profitability and sales-to-price beats the covered universe and plain value (PREREG H4).
+    rationale: Novy-Marx - profitability is the other side of value; the blend drops cheap-because-failing names.
+    strategy: {module: strategies.lowfreq_equity_quality_value, class: QualityValueBlend}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: value_momentum_filter
+    role: candidate
+    hypothesis: The momentum-better half of the cheapest 40 percent by sales-to-price beats the covered universe and plain value (PREREG H5).
+    rationale: Value says what is cheap, 12-1 momentum says when the market has started to agree; momentum filters, it does not select.
+    strategy: {module: strategies.lowfreq_equity_value_momentum, class: ValueMomentumFilter}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: low_volatility
+    role: candidate
+    hypothesis: The lowest-126-day-volatility quintile of the covered universe beats owning it, mainly through drawdown (PREREG H6).
+    rationale: Low-volatility anomaly - leverage-constrained investors overpay for volatile names.
+    strategy: {module: strategies.lowfreq_equity_lowvol, class: LowVolatilityQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: low_accruals
+    role: candidate
+    hypothesis: The quintile with the most cash-backed earnings (lowest accruals / assets) beats the covered universe (PREREG H7).
+    rationale: Sloan 1996 - earnings not backed by cash reverse; asset-scaled so it is not a size proxy.
+    strategy: {module: strategies.lowfreq_equity_accruals, class: LowAccrualsQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
