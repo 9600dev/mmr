@@ -1,0 +1,24 @@
+{
+ "records": [
+  {
+   "recorded_at_utc": "2026-09-29T08:51:10.278671+00:00",
+   "sha256": {
+    "PREREG.md": "f128b5d53d149b53c563e88e86582db30d00bd018ebae48b46bb71ff9918440b",
+    "candidates.yaml": "fc7f44262970995bb9d4555a781c7aea29ab44bb9e117b2dc8aea307f437123b"
+   },
+   "ledger_rows_at_record": 13,
+   "last_ledger_timestamp_at_record": "2026-09-29T08:32:32+00:00",
+   "note": "sha256 of the pre-registration files at the instant before the R3 evaluations (PREREG addendum R3)"
+  },
+  {
+   "recorded_at_utc": "2026-09-29T09:08:43.325442+00:00",
+   "sha256": {
+    "PREREG.md": "db0ecc69018fc9fc836a40db758eafcb832e17337b5ee72cce18db0b2eefb1d8",
+    "candidates.yaml": "fc7f44262970995bb9d4555a781c7aea29ab44bb9e117b2dc8aea307f437123b"
+   },
+   "ledger_rows_at_record": 20,
+   "last_ledger_timestamp_at_record": "2026-09-29T09:05:40+00:00",
+   "note": "PREREG.md with addendum R4 (champion rule fixed at 92653bf); recorded after the 7 R3 pass-1 rows, before the first pass-2 run"
+  }
+ ]
+}

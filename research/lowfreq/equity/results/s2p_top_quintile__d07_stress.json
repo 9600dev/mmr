@@ -1,0 +1,1017 @@
+{
+ "active": {
+  "i_candidate_stressed_only": {
+   "ann_mean": 0.11406330251699087,
+   "days": 1005,
+   "max_drawdown": -0.1526309928001195,
+   "nw_lags": 6,
+   "sharpe": 0.7924514767086014,
+   "t_nw": 1.8215313919862612
+  },
+  "ii_both_stressed": {
+   "ann_mean": 0.1377186126520558,
+   "days": 1005,
+   "max_drawdown": -0.14996648396192624,
+   "nw_lags": 6,
+   "sharpe": 0.9646016574621646,
+   "t_nw": 2.2473869766198304
+  },
+  "unstressed": {
+   "ann_mean": 0.11994569564468313,
+   "days": 1005,
+   "max_drawdown": -0.14105702319870805,
+   "nw_lags": 6,
+   "sharpe": 0.8538257162721573,
+   "t_nw": 2.0110840217103183
+  }
+ },
+ "believed_if": "active.ii_both_stressed.ann_mean > 0 (PREREG addendum R2 item 5)",
+ "benchmark": {
+  "stressed": {
+   "ann_mean": 0.10099245256619549,
+   "days": 1005,
+   "max_drawdown": -0.3449554609566927,
+   "nw_lags": 6,
+   "sharpe": 0.4333386296288883,
+   "t_nw": 0.9142444058631589
+  },
+  "unstressed": {
+   "ann_mean": 0.12464776270126039,
+   "days": 1005,
+   "max_drawdown": -0.3271218852459683,
+   "nw_lags": 6,
+   "sharpe": 0.5644033953389246,
+   "t_nw": 1.1950679782263565
+  }
+ },
+ "candidate": {
+  "stressed": {
+   "ann_mean": 0.23871106521825128,
+   "days": 1005,
+   "max_drawdown": -0.38319935695418006,
+   "nw_lags": 6,
+   "sharpe": 0.8309521842476413,
+   "t_nw": 1.7503093141093287
+  },
+  "unstressed": {
+   "ann_mean": 0.2445934583459435,
+   "days": 1005,
+   "max_drawdown": -0.3684134229203033,
+   "nw_lags": 6,
+   "sharpe": 0.8780654437220264,
+   "t_nw": 1.8587532250895018
+  }
+ },
+ "command": "uv run python research/lowfreq/equity/stress_d07.py s2p_top_quintile",
+ "decisive_benchmark": "eq_ew_covered",
+ "events": [
+  {
+   "book": "candidate",
+   "date": "2018-10-15",
+   "fold": 0,
+   "last_print_close": 32.46,
+   "price": 32.44377,
+   "proceeds": 16576.21147,
+   "quantity": 511.0,
+   "ticker": "SVU"
+  },
+  {
+   "book": "candidate",
+   "date": "2018-12-20",
+   "fold": 0,
+   "last_print_close": 92.33,
+   "price": 92.283835,
+   "proceeds": 14395.498259999998,
+   "quantity": 156.0,
+   "ticker": "ESRX"
+  },
+  {
+   "book": "candidate",
+   "date": "2020-01-23",
+   "fold": 0,
+   "last_print_close": 349.92,
+   "price": 349.74504,
+   "proceeds": 12240.9014,
+   "quantity": 35.0,
+   "ticker": "WCG"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2018-10-15",
+   "fold": 0,
+   "last_print_close": 32.46,
+   "price": 32.44377,
+   "proceeds": 3276.31577,
+   "quantity": 101.0,
+   "ticker": "SVU"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2018-10-30",
+   "fold": 0,
+   "last_print_close": 164.5,
+   "price": 164.41775,
+   "proceeds": 3123.8422500000006,
+   "quantity": 19.0,
+   "ticker": "PX"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2018-11-02",
+   "fold": 0,
+   "last_print_close": 44.44,
+   "price": 44.41778,
+   "proceeds": 2709.17958,
+   "quantity": 61.0,
+   "ticker": "CA"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2018-12-20",
+   "fold": 0,
+   "last_print_close": 92.33,
+   "price": 92.283835,
+   "proceeds": 2860.6438849999995,
+   "quantity": 31.0,
+   "ticker": "ESRX"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2019-01-04",
+   "fold": 0,
+   "last_print_close": 179.2,
+   "price": 179.1104,
+   "proceeds": 3223.8972,
+   "quantity": 18.0,
+   "ticker": "SHPG"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2019-03-29",
+   "fold": 0,
+   "last_print_close": 48.99,
+   "price": 48.96550500000001,
+   "proceeds": 3084.5118150000003,
+   "quantity": 63.0,
+   "ticker": "IDTI"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2019-07-08",
+   "fold": 0,
+   "last_print_close": 187.71,
+   "price": 187.61614500000002,
+   "proceeds": 3189.389465,
+   "quantity": 17.0,
+   "ticker": "RHT"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2019-07-26",
+   "fold": 0,
+   "last_print_close": 31.69,
+   "price": 31.674155000000003,
+   "proceeds": 3325.2612750000003,
+   "quantity": 105.0,
+   "ticker": "FDC"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2019-07-31",
+   "fold": 0,
+   "last_print_close": 169.53,
+   "price": 169.445235,
+   "proceeds": 2880.483995,
+   "quantity": 17.0,
+   "ticker": "DATA"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2019-08-08",
+   "fold": 0,
+   "last_print_close": 72.77,
+   "price": 72.733615,
+   "proceeds": 3272.787675,
+   "quantity": 45.0,
+   "ticker": "APC"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2019-10-04",
+   "fold": 0,
+   "last_print_close": 52.99,
+   "price": 52.963505000000005,
+   "proceeds": 2436.09123,
+   "quantity": 46.0,
+   "ticker": "VSM"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2019-11-20",
+   "fold": 0,
+   "last_print_close": 108.24,
+   "price": 108.18588,
+   "proceeds": 3461.78816,
+   "quantity": 32.0,
+   "ticker": "CELG"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2019-12-06",
+   "fold": 0,
+   "last_print_close": 54.24,
+   "price": 54.212880000000006,
+   "proceeds": 3577.7200800000005,
+   "quantity": 66.0,
+   "ticker": "BBT"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2020-01-03",
+   "fold": 0,
+   "last_print_close": 84.9,
+   "price": 84.85755,
+   "proceeds": 3733.5122000000006,
+   "quantity": 44.0,
+   "ticker": "MDCO"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2020-01-23",
+   "fold": 0,
+   "last_print_close": 349.92,
+   "price": 349.74504,
+   "proceeds": 2448.1802800000005,
+   "quantity": 7.0,
+   "ticker": "WCG"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2020-03-06",
+   "fold": 0,
+   "last_print_close": 34.99,
+   "price": 34.972505000000005,
+   "proceeds": 4930.418205000001,
+   "quantity": 141.0,
+   "ticker": "ZAYO"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2020-05-28",
+   "fold": 0,
+   "last_print_close": 136.46,
+   "price": 136.39177,
+   "proceeds": 3409.6692500000004,
+   "quantity": 25.0,
+   "ticker": "WBC"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2020-06-29",
+   "fold": 0,
+   "last_print_close": 144.9,
+   "price": 144.82755,
+   "proceeds": 5358.4343499999995,
+   "quantity": 37.0,
+   "ticker": "TECD"
+  },
+  {
+   "book": "candidate",
+   "date": "2020-01-23",
+   "fold": 1,
+   "last_print_close": 349.92,
+   "price": 349.74504,
+   "proceeds": 12940.381480000002,
+   "quantity": 37.0,
+   "ticker": "WCG"
+  },
+  {
+   "book": "candidate",
+   "date": "2021-02-03",
+   "fold": 1,
+   "last_print_close": 61.005,
+   "price": 60.974497500000005,
+   "proceeds": 24021.982015,
+   "quantity": 394.0,
+   "ticker": "FIZZ"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2019-07-08",
+   "fold": 1,
+   "last_print_close": 187.71,
+   "price": 187.61614500000002,
+   "proceeds": 3189.389465,
+   "quantity": 17.0,
+   "ticker": "RHT"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2019-07-26",
+   "fold": 1,
+   "last_print_close": 31.69,
+   "price": 31.674155000000003,
+   "proceeds": 3736.96029,
+   "quantity": 118.0,
+   "ticker": "FDC"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2019-07-31",
+   "fold": 1,
+   "last_print_close": 169.53,
+   "price": 169.445235,
+   "proceeds": 3219.364465,
+   "quantity": 19.0,
+   "ticker": "DATA"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2019-08-08",
+   "fold": 1,
+   "last_print_close": 72.77,
+   "price": 72.733615,
+   "proceeds": 3127.330445,
+   "quantity": 43.0,
+   "ticker": "APC"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2019-10-04",
+   "fold": 1,
+   "last_print_close": 52.99,
+   "price": 52.963505000000005,
+   "proceeds": 2859.7592700000005,
+   "quantity": 54.0,
+   "ticker": "VSM"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2019-11-20",
+   "fold": 1,
+   "last_print_close": 108.24,
+   "price": 108.18588,
+   "proceeds": 3353.6072799999997,
+   "quantity": 31.0,
+   "ticker": "CELG"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2019-12-06",
+   "fold": 1,
+   "last_print_close": 54.24,
+   "price": 54.212880000000006,
+   "proceeds": 3469.30432,
+   "quantity": 64.0,
+   "ticker": "BBT"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2020-01-03",
+   "fold": 1,
+   "last_print_close": 84.9,
+   "price": 84.85755,
+   "proceeds": 3563.8071,
+   "quantity": 42.0,
+   "ticker": "MDCO"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2020-01-23",
+   "fold": 1,
+   "last_print_close": 349.92,
+   "price": 349.74504,
+   "proceeds": 2797.92032,
+   "quantity": 8.0,
+   "ticker": "WCG"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2020-03-06",
+   "fold": 1,
+   "last_print_close": 34.99,
+   "price": 34.972505000000005,
+   "proceeds": 4965.3857100000005,
+   "quantity": 142.0,
+   "ticker": "ZAYO"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2020-05-28",
+   "fold": 1,
+   "last_print_close": 136.46,
+   "price": 136.39177,
+   "proceeds": 3273.2824800000003,
+   "quantity": 24.0,
+   "ticker": "WBC"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2020-06-29",
+   "fold": 1,
+   "last_print_close": 144.9,
+   "price": 144.82755,
+   "proceeds": 5358.4343499999995,
+   "quantity": 37.0,
+   "ticker": "TECD"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2020-12-22",
+   "fold": 1,
+   "last_print_close": 6.87,
+   "price": 6.8665650000000005,
+   "proceeds": 3080.8426850000005,
+   "quantity": 449.0,
+   "ticker": "FIT"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2020-12-23",
+   "fold": 1,
+   "last_print_close": 55.99,
+   "price": 55.962005000000005,
+   "proceeds": 4532.5174050000005,
+   "quantity": 81.0,
+   "ticker": "HDS"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-01-06",
+   "fold": 1,
+   "last_print_close": 131.46,
+   "price": 131.39427,
+   "proceeds": 4730.01372,
+   "quantity": 36.0,
+   "ticker": "TIF"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-02-03",
+   "fold": 1,
+   "last_print_close": 61.005,
+   "price": 60.974497500000005,
+   "proceeds": 3536.2308550000002,
+   "quantity": 58.0,
+   "ticker": "FIZZ"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-04-12",
+   "fold": 1,
+   "last_print_close": 177.12,
+   "price": 177.03144,
+   "proceeds": 4956.74032,
+   "quantity": 28.0,
+   "ticker": "VAR"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-07-20",
+   "fold": 1,
+   "last_print_close": 182.5,
+   "price": 182.40875,
+   "proceeds": 5289.70875,
+   "quantity": 29.0,
+   "ticker": "ALXN"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-07-20",
+   "fold": 1,
+   "last_print_close": 45.2,
+   "price": 45.177400000000006,
+   "proceeds": 4517.240000000001,
+   "quantity": 100.0,
+   "ticker": "WORK"
+  },
+  {
+   "book": "candidate",
+   "date": "2021-02-03",
+   "fold": 2,
+   "last_print_close": 61.005,
+   "price": 60.974497500000005,
+   "proceeds": 23229.378547500004,
+   "quantity": 381.0,
+   "ticker": "FIZZ"
+  },
+  {
+   "book": "candidate",
+   "date": "2021-09-14",
+   "fold": 2,
+   "last_print_close": 11.8,
+   "price": 11.794100000000002,
+   "proceeds": 11529.739800000003,
+   "quantity": 978.0,
+   "ticker": "SPRT"
+  },
+  {
+   "book": "candidate",
+   "date": "2021-11-26",
+   "fold": 2,
+   "last_print_close": 8.32,
+   "price": 8.315840000000001,
+   "proceeds": 22954.540080000002,
+   "quantity": 2762.0,
+   "ticker": "AHPI"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2020-12-23",
+   "fold": 2,
+   "last_print_close": 55.99,
+   "price": 55.962005000000005,
+   "proceeds": 3581.24832,
+   "quantity": 64.0,
+   "ticker": "HDS"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-01-06",
+   "fold": 2,
+   "last_print_close": 131.46,
+   "price": 131.39427,
+   "proceeds": 4467.23518,
+   "quantity": 34.0,
+   "ticker": "TIF"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-02-03",
+   "fold": 2,
+   "last_print_close": 61.005,
+   "price": 60.974497500000005,
+   "proceeds": 3719.1393475000004,
+   "quantity": 61.0,
+   "ticker": "FIZZ"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-04-12",
+   "fold": 2,
+   "last_print_close": 177.12,
+   "price": 177.03144,
+   "proceeds": 5133.7667599999995,
+   "quantity": 29.0,
+   "ticker": "VAR"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-07-20",
+   "fold": 2,
+   "last_print_close": 182.5,
+   "price": 182.40875,
+   "proceeds": 4924.90125,
+   "quantity": 27.0,
+   "ticker": "ALXN"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-07-20",
+   "fold": 2,
+   "last_print_close": 45.2,
+   "price": 45.177400000000006,
+   "proceeds": 4607.5848000000005,
+   "quantity": 102.0,
+   "ticker": "WORK"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-09-03",
+   "fold": 2,
+   "last_print_close": 138.2,
+   "price": 138.1309,
+   "proceeds": 3038.7697999999996,
+   "quantity": 22.0,
+   "ticker": "LGND"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-09-14",
+   "fold": 2,
+   "last_print_close": 11.8,
+   "price": 11.794100000000002,
+   "proceeds": 1780.1541000000002,
+   "quantity": 151.0,
+   "ticker": "SPRT"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-10-07",
+   "fold": 2,
+   "last_print_close": 15.99,
+   "price": 15.982005000000001,
+   "proceeds": 4633.331450000001,
+   "quantity": 290.0,
+   "ticker": "CLDR"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-11-26",
+   "fold": 2,
+   "last_print_close": 8.32,
+   "price": 8.315840000000001,
+   "proceeds": 4047.3790800000006,
+   "quantity": 487.0,
+   "ticker": "AHPI"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-12-13",
+   "fold": 2,
+   "last_print_close": 293.59,
+   "price": 293.443205,
+   "proceeds": 3814.6966649999995,
+   "quantity": 13.0,
+   "ticker": "KSU"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-02-11",
+   "fold": 2,
+   "last_print_close": 194.92,
+   "price": 194.82254,
+   "proceeds": 4675.62096,
+   "quantity": 24.0,
+   "ticker": "XLNX"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-02-22",
+   "fold": 2,
+   "last_print_close": 4.23,
+   "price": 4.227885000000001,
+   "proceeds": 1469.5639800000001,
+   "quantity": 348.0,
+   "ticker": "OCGN"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-03-03",
+   "fold": 2,
+   "last_print_close": 55.99,
+   "price": 55.962005000000005,
+   "proceeds": 6994.625625000001,
+   "quantity": 125.0,
+   "ticker": "NUAN"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-04-18",
+   "fold": 2,
+   "last_print_close": 52.5,
+   "price": 52.47375,
+   "proceeds": 1101.84375,
+   "quantity": 21.0,
+   "ticker": "CEI"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-06-07",
+   "fold": 2,
+   "last_print_close": 94.92,
+   "price": 94.87254,
+   "proceeds": 3604.96652,
+   "quantity": 38.0,
+   "ticker": "CERN"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-06-10",
+   "fold": 2,
+   "last_print_close": 61.5,
+   "price": 61.46925,
+   "proceeds": 6638.139,
+   "quantity": 108.0,
+   "ticker": "REGI"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-07-05",
+   "fold": 2,
+   "last_print_close": 173.69,
+   "price": 173.60315500000002,
+   "proceeds": 2603.9723250000006,
+   "quantity": 15.0,
+   "ticker": "CCMP"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-07-08",
+   "fold": 2,
+   "last_print_close": 2.77,
+   "price": 2.768615,
+   "proceeds": 6911.801115,
+   "quantity": 2501.0,
+   "ticker": "CLVS"
+  },
+  {
+   "book": "candidate",
+   "date": "2021-09-14",
+   "fold": 3,
+   "last_print_close": 11.8,
+   "price": 11.794100000000002,
+   "proceeds": 6130.332,
+   "quantity": 520.0,
+   "ticker": "SPRT"
+  },
+  {
+   "book": "candidate",
+   "date": "2021-11-26",
+   "fold": 3,
+   "last_print_close": 8.32,
+   "price": 8.315840000000001,
+   "proceeds": 13239.168120000002,
+   "quantity": 1593.0,
+   "ticker": "AHPI"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-07-20",
+   "fold": 3,
+   "last_print_close": 182.5,
+   "price": 182.40875,
+   "proceeds": 3283.2675,
+   "quantity": 18.0,
+   "ticker": "ALXN"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-07-20",
+   "fold": 3,
+   "last_print_close": 45.2,
+   "price": 45.177400000000006,
+   "proceeds": 3478.2748,
+   "quantity": 77.0,
+   "ticker": "WORK"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-09-14",
+   "fold": 3,
+   "last_print_close": 11.8,
+   "price": 11.794100000000002,
+   "proceeds": 1379.3247000000001,
+   "quantity": 117.0,
+   "ticker": "SPRT"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-10-07",
+   "fold": 3,
+   "last_print_close": 15.99,
+   "price": 15.982005000000001,
+   "proceeds": 3467.0100850000003,
+   "quantity": 217.0,
+   "ticker": "CLDR"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-11-26",
+   "fold": 3,
+   "last_print_close": 8.32,
+   "price": 8.315840000000001,
+   "proceeds": 2867.2398000000007,
+   "quantity": 345.0,
+   "ticker": "AHPI"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2021-12-13",
+   "fold": 3,
+   "last_print_close": 293.59,
+   "price": 293.443205,
+   "proceeds": 2934.3820499999997,
+   "quantity": 10.0,
+   "ticker": "KSU"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-02-11",
+   "fold": 3,
+   "last_print_close": 194.92,
+   "price": 194.82254,
+   "proceeds": 2922.2631,
+   "quantity": 15.0,
+   "ticker": "XLNX"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-02-22",
+   "fold": 3,
+   "last_print_close": 4.23,
+   "price": 4.227885000000001,
+   "proceeds": 983.9322050000002,
+   "quantity": 233.0,
+   "ticker": "OCGN"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-03-03",
+   "fold": 3,
+   "last_print_close": 55.99,
+   "price": 55.962005000000005,
+   "proceeds": 4756.345425,
+   "quantity": 85.0,
+   "ticker": "NUAN"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-04-18",
+   "fold": 3,
+   "last_print_close": 52.5,
+   "price": 52.47375,
+   "proceeds": 891.96875,
+   "quantity": 17.0,
+   "ticker": "CEI"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-06-07",
+   "fold": 3,
+   "last_print_close": 94.92,
+   "price": 94.87254,
+   "proceeds": 2466.55604,
+   "quantity": 26.0,
+   "ticker": "CERN"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-06-10",
+   "fold": 3,
+   "last_print_close": 61.5,
+   "price": 61.46925,
+   "proceeds": 4609.81875,
+   "quantity": 75.0,
+   "ticker": "REGI"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-07-05",
+   "fold": 3,
+   "last_print_close": 173.69,
+   "price": 173.60315500000002,
+   "proceeds": 1735.9815500000002,
+   "quantity": 10.0,
+   "ticker": "CCMP"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-07-08",
+   "fold": 3,
+   "last_print_close": 2.77,
+   "price": 2.768615,
+   "proceeds": 4919.234700000001,
+   "quantity": 1780.0,
+   "ticker": "CLVS"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-09-07",
+   "fold": 3,
+   "last_print_close": 30.9,
+   "price": 30.88455,
+   "proceeds": 3057.0754500000003,
+   "quantity": 99.0,
+   "ticker": "GSAT"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-09-29",
+   "fold": 3,
+   "last_print_close": 103.9,
+   "price": 103.84805000000001,
+   "proceeds": 4776.780300000001,
+   "quantity": 46.0,
+   "ticker": "CTXS"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-10-18",
+   "fold": 3,
+   "last_print_close": 93.48,
+   "price": 93.43326,
+   "proceeds": 2429.13476,
+   "quantity": 26.0,
+   "ticker": "AVLR"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-10-27",
+   "fold": 3,
+   "last_print_close": 53.7,
+   "price": 53.67315000000001,
+   "proceeds": 3220.0890000000004,
+   "quantity": 60.0,
+   "ticker": "TWTR"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2022-11-22",
+   "fold": 3,
+   "last_print_close": 74.27,
+   "price": 74.232865,
+   "proceeds": 2375.2916800000003,
+   "quantity": 32.0,
+   "ticker": "CLR"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2023-05-01",
+   "fold": 3,
+   "last_print_close": 39.0,
+   "price": 38.9805,
+   "proceeds": 4638.0845,
+   "quantity": 119.0,
+   "ticker": "OSH"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2023-06-06",
+   "fold": 3,
+   "last_print_close": 114.23,
+   "price": 114.17288500000001,
+   "proceeds": 2511.69347,
+   "quantity": 22.0,
+   "ticker": "FISV"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2023-06-15",
+   "fold": 3,
+   "last_print_close": 199.92,
+   "price": 199.82004,
+   "proceeds": 2997.2256,
+   "quantity": 15.0,
+   "ticker": "RXDX"
+  },
+  {
+   "book": "eq_ew_covered",
+   "date": "2023-07-20",
+   "fold": 3,
+   "last_print_close": 12.7,
+   "price": 12.69365,
+   "proceeds": 799.3849499999999,
+   "quantity": 63.0,
+   "ticker": "VIR"
+  }
+ ],
+ "events_reconciled_with_backtester_diagnostics": true,
+ "id": "s2p_top_quintile",
+ "passes_stress": true,
+ "per_fold": [
+  {
+   "benchmark_forced_exits": 18,
+   "benchmark_forced_proceeds": 60302.126665,
+   "candidate_forced_exits": 3,
+   "candidate_forced_proceeds": 43212.61113,
+   "fold": 0,
+   "reconciled_with_backtester_diagnostics": true,
+   "test_end": "2020-07-31",
+   "test_start": "2019-08-01"
+  },
+  {
+   "benchmark_forced_exits": 19,
+   "benchmark_forced_proceeds": 73557.83923,
+   "candidate_forced_exits": 2,
+   "candidate_forced_proceeds": 36962.363495000005,
+   "fold": 1,
+   "reconciled_with_backtester_diagnostics": true,
+   "test_end": "2021-07-31",
+   "test_start": "2020-07-31"
+  },
+  {
+   "benchmark_forced_exits": 19,
+   "benchmark_forced_proceeds": 77748.7400275,
+   "candidate_forced_exits": 3,
+   "candidate_forced_proceeds": 57713.658427500006,
+   "fold": 2,
+   "reconciled_with_backtester_diagnostics": true,
+   "test_end": "2022-07-31",
+   "test_start": "2021-07-31"
+  },
+  {
+   "benchmark_forced_exits": 23,
+   "benchmark_forced_proceeds": 67500.359165,
+   "candidate_forced_exits": 2,
+   "candidate_forced_proceeds": 19369.500120000004,
+   "fold": 3,
+   "reconciled_with_backtester_diagnostics": true,
+   "test_end": "2023-07-31",
+   "test_start": "2022-07-31"
+  }
+ ],
+ "reproduction_check": {
+  "active_ann_return_from_results_json": 0.11994569564468313,
+  "active_ann_return_recomputed_unstressed": 0.11994569564468313,
+  "oos_sharpe_from_results_json": 0.8780654437220264,
+  "oos_sharpe_recomputed_unstressed": 0.8780654437220264
+ },
+ "rule": "D07 stress: proceeds of every SELL fill dated at a name's terminal print are removed from equity from that day on (the name marked to zero); (i) candidate only, (ii) candidate and benchmark alike",
+ "source_results": "/Users/joelpob/.local/share/llmvm_lite/scratch_directory/llmvm_scratch_jsx5vvxn/hillclimb-meta/20260928-185549/worktrees/C03/research/lowfreq/equity/results/s2p_top_quintile.json",
+ "source_verdict": "PROMISING",
+ "total_benchmark_forced_exits": 79,
+ "total_benchmark_forced_proceeds": 279109.0650875,
+ "total_candidate_forced_exits": 10,
+ "total_candidate_forced_proceeds": 157258.1331725
+}

@@ -1,0 +1,179 @@
+# Equity family (C03, decision D05). Hypotheses and the champion rule are
+# pre-registered in PREREG.md; every candidate is a single cell (no grid).
+family: equity
+universe: equity
+dev_period: {start: 2016-08-01, end: 2024-06-28}
+walk_forward: {train_days: 1095, test_days: 365}     # D05: train 3y, test 1y, rolling
+warmup_days: 400                                     # 12-1 momentum / 126d vol need ~273 sessions
+top_n: 500
+candidates:
+  - id: eq_ew_covered
+    role: benchmark
+    hypothesis: Equal weight of the covered point-in-time universe, rebalanced monthly, is the return of owning the names an equity signal could choose from.
+    rationale: D05 decisive benchmark - the one that killed long-only momentum; it owns exactly the coverage each candidate publishes.
+    strategy: {module: trader.research.lowfreq.reference_strategies, class: EqEwCovered}
+    params: {}
+    benchmarks: []
+    registered_at: 2026-09-29
+  - id: s2p_top_quintile
+    role: candidate
+    hypothesis: The top sales-to-price quintile of the covered PIT universe beats owning the covered universe (PREREG H1).
+    rationale: Value on the least manipulable fundamental; the program's one survivor (2026-08-17, pre-D06/D07) re-measured honestly.
+    strategy: {module: strategies.lowfreq_equity_s2p, class: SalesToPriceQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: size_smallcap
+    role: candidate
+    hypothesis: The smallest-market-cap quintile of the covered PIT universe beats owning it (PREREG D1, denominator of H1).
+    rationale: Size effect inside a liquid universe; 1/marketcap alone scored IC 0.0443 t(NW) 3.34 on the honest universe.
+    strategy: {module: strategies.lowfreq_equity_size, class: SmallCapQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: s2p_frozen_revenue
+    role: candidate
+    hypothesis: Sales-to-price with revenue frozen per name performs like H1 (PREREG D2, numerator control; never a champion).
+    rationale: Same knowledge mask, revenue information removed - if it matches H1 the numerator added nothing.
+    strategy: {module: strategies.lowfreq_equity_s2p_frozen, class: SalesToPriceFrozenRevenue}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: pead_earnings
+    role: candidate
+    hypothesis: Names whose latest as-of TTM net income rose most vs the TTM it replaced (Q_t - Q_t-4, scaled by assets) drift up (PREREG H2).
+    rationale: Post-earnings-announcement drift measured from the EDGAR acceptance instant against a seasonal random walk.
+    strategy: {module: strategies.lowfreq_equity_pead_earnings, class: EarningsSurpriseQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: pead_revenue
+    role: candidate
+    hypothesis: Names whose latest as-of TTM revenue rose most relative to the TTM it replaced drift up (PREREG H3).
+    rationale: Revenue-surprise drift (Jegadeesh & Livnat 2006), less managed than earnings, from the acceptance instant.
+    strategy: {module: strategies.lowfreq_equity_pead_revenue, class: RevenueSurpriseQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: quality_value_blend
+    role: candidate
+    hypothesis: The top quintile on the mean rank of gross profitability and sales-to-price beats the covered universe and plain value (PREREG H4).
+    rationale: Novy-Marx - profitability is the other side of value; the blend drops cheap-because-failing names.
+    strategy: {module: strategies.lowfreq_equity_quality_value, class: QualityValueBlend}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: value_momentum_filter
+    role: candidate
+    hypothesis: The momentum-better half of the cheapest 40 percent by sales-to-price beats the covered universe and plain value (PREREG H5).
+    rationale: Value says what is cheap, 12-1 momentum says when the market has started to agree; momentum filters, it does not select.
+    strategy: {module: strategies.lowfreq_equity_value_momentum, class: ValueMomentumFilter}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: low_volatility
+    role: candidate
+    hypothesis: The lowest-126-day-volatility quintile of the covered universe beats owning it, mainly through drawdown (PREREG H6).
+    rationale: Low-volatility anomaly - leverage-constrained investors overpay for volatile names.
+    strategy: {module: strategies.lowfreq_equity_lowvol, class: LowVolatilityQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: low_accruals
+    role: candidate
+    hypothesis: The quintile with the most cash-backed earnings (lowest accruals / assets) beats the covered universe (PREREG H7).
+    rationale: Sloan 1996 - earnings not backed by cash reverse; asset-scaled so it is not a size proxy.
+    strategy: {module: strategies.lowfreq_equity_accruals, class: LowAccrualsQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  # ---- PREREG.md addendum R2 (2026-09-29, before the first evaluate call): decomposition controls
+  - id: size_small_assets
+    role: candidate
+    hypothesis: The smallest-total-assets quintile of the covered universe beats owning it (PREREG addendum R2 D3, denominator control for asset-scaled ratios; never a champion).
+    rationale: pead_earnings, quality_value_blend and low_accruals divide by as-of total assets; a candidate that cannot beat its own denominator measured asset size.
+    strategy: {module: strategies.lowfreq_equity_size_assets, class: SmallAssetsQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: size_small_revenue
+    role: candidate
+    hypothesis: The smallest-TTM-revenue quintile of the covered universe beats owning it (PREREG addendum R2 D4, denominator control for pead_revenue; never a champion).
+    rationale: pead_revenue divides the revenue change by prior TTM revenue; a candidate that cannot beat its own denominator measured revenue size.
+    strategy: {module: strategies.lowfreq_equity_size_revenue, class: SmallRevenueQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: quality_value_frozen
+    role: candidate
+    hypothesis: The quality/value blend with both numerators frozen per name performs like quality_value_blend (PREREG addendum R2 D5, numerator control; never a champion).
+    rationale: Same knowledge mask, fundamental information removed - if it matches the blend, the blend is its denominators.
+    strategy: {module: strategies.lowfreq_equity_quality_value_frozen, class: QualityValueFrozen}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: accruals_frozen
+    role: candidate
+    hypothesis: Low accruals with the numerator frozen per name performs like low_accruals (PREREG addendum R2 D6, numerator control; never a champion).
+    rationale: Same knowledge mask, accrual information removed - if it matches low_accruals, that book is an asset-size tilt.
+    strategy: {module: strategies.lowfreq_equity_accruals_frozen, class: LowAccrualsFrozen}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  # ---- PREREG.md addendum R3 (2026-09-29, after pass-1 results were seen; controls only, never champions)
+  - id: pead_earnings_raw
+    role: candidate
+    hypothesis: The top quintile by raw dollar change in as-of TTM net income behaves like a large-cap tilt and does not reach pead_earnings (PREREG addendum R3 D7, numerator control; never a champion).
+    rationale: Standing rule - test each component of a ratio alone; the unscaled surprise is the numerator of pead_earnings.
+    strategy: {module: strategies.lowfreq_equity_pead_earnings_raw, class: EarningsSurpriseRaw}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: pead_revenue_raw
+    role: candidate
+    hypothesis: The top quintile by raw dollar change in as-of TTM revenue behaves like a large-cap tilt and does not reach pead_revenue (PREREG addendum R3 D8, numerator control; never a champion).
+    rationale: Standing rule - test each component alone; the unscaled surprise is the numerator of pead_revenue.
+    strategy: {module: strategies.lowfreq_equity_pead_revenue_raw, class: RevenueSurpriseRaw}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: accruals_raw
+    role: candidate
+    hypothesis: The top quintile by minus raw dollar accruals does not reach low_accruals (PREREG addendum R3 D9, numerator control; never a champion).
+    rationale: Standing rule - test each component alone; the unscaled accrual is the numerator of low_accruals.
+    strategy: {module: strategies.lowfreq_equity_accruals_raw, class: LowAccrualsRaw}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: gross_profitability
+    role: candidate
+    hypothesis: The top gross-profitability quintile (TTM gross profit / assets) beats the covered universe but not the quality/value blend (PREREG addendum R3 D10, component control; never a champion).
+    rationale: Novy-Marx 2013 profitability alone - the blend must beat each of its components alone to have added anything.
+    strategy: {module: strategies.lowfreq_equity_gross_profitability, class: GrossProfitabilityQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: gross_profit_raw
+    role: candidate
+    hypothesis: The top quintile by raw dollar TTM gross profit is a large-cap tilt and does not reach gross_profitability (PREREG addendum R3 D11, numerator control; never a champion).
+    rationale: Standing rule - test each component alone; raw gross profit is the numerator of gross profitability.
+    strategy: {module: strategies.lowfreq_equity_gross_profit_raw, class: GrossProfitRaw}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: momentum_12_1
+    role: candidate
+    hypothesis: The top 12-1 momentum quintile of the covered set does not beat owning it, and value_momentum_filter must exceed it (PREREG addendum R3 D12, component control; never a champion).
+    rationale: Long-only 12-1 momentum lost to equal weight of its universe on 2026-07-30; the filter must beat momentum alone as well as value alone.
+    strategy: {module: strategies.lowfreq_equity_momentum, class: Momentum121Quintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: revenue_raw
+    role: candidate
+    hypothesis: The top quintile by raw dollar TTM revenue is a large-cap tilt and does not reach s2p_top_quintile (PREREG addendum R3 D13, numerator control; never a champion).
+    rationale: Standing rule - test each component alone; raw revenue is the numerator of sales-to-price.
+    strategy: {module: strategies.lowfreq_equity_revenue_raw, class: RevenueRaw}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
