@@ -312,7 +312,8 @@ DDL = [
         accession VARCHAR PRIMARY KEY, quarter VARCHAR, filing_date DATE, period_of_report DATE,
         date_of_orig_sub DATE, document_type VARCHAR, base_form VARCHAR, is_amendment BOOLEAN,
         issuer_cik BIGINT, issuer_name VARCHAR, symbol_as_filed VARCHAR, ticker VARCHAR,
-        ticker_source VARCHAR, usable_from DATE, superseded_by VARCHAR)""",
+        ticker_source VARCHAR, usable_from DATE, superseded_by VARCHAR,
+        amends_accession VARCHAR, link_tier SMALLINT)""",
     """CREATE TABLE IF NOT EXISTS form345_owners(
         accession VARCHAR, owner_cik BIGINT, owner_name VARCHAR, relationship VARCHAR,
         is_director BOOLEAN, is_officer BOOLEAN, is_ten_pct BOOLEAN, is_other BOOLEAN,
@@ -356,6 +357,10 @@ _TABLE_COLUMNS = {
 def ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
     for stmt in DDL:
         con.execute(stmt)
+    # Databases built before the link outcome was persisted (2026-09-29) gain the columns in
+    # place; apply_supersession fills them on every finalize, so no re-ingest is needed.
+    con.execute('ALTER TABLE form345_submissions ADD COLUMN IF NOT EXISTS amends_accession VARCHAR')
+    con.execute('ALTER TABLE form345_submissions ADD COLUMN IF NOT EXISTS link_tier SMALLINT')
 
 
 def _insert(con: duckdb.DuckDBPyConnection, table: str, df: pd.DataFrame) -> int:
@@ -709,13 +714,23 @@ FROM ranked r JOIN ranked e ON e.root_acc = r.root_acc AND e.rn = 1;
 
 
 def apply_supersession(con: duckdb.DuckDBPyConnection) -> Dict[str, int]:
-    """Recompute ``superseded_by`` from scratch (D10). Returns diagnostics."""
-    con.execute('UPDATE form345_submissions SET superseded_by = NULL')
+    """Recompute ``superseded_by`` from scratch (D10/D14). Returns diagnostics.
+
+    Every amendment also records its link outcome: ``amends_accession`` (the
+    filing it was paired with; for an ambiguous top-score tie, the lowest
+    accession among them) and ``link_tier`` (1-6). Both stay NULL for an
+    amendment no tier could pair - kept, counted and reported per D14 - so the
+    residual in DATA.md is reproducible from the database with one query."""
+    con.execute('UPDATE form345_submissions SET superseded_by = NULL, amends_accession = NULL, link_tier = NULL')
     con.execute(SUPERSESSION_SQL)
     con.execute(GROUP_SQL)
     con.execute("""
         UPDATE form345_submissions s SET superseded_by = g.effective_acc
         FROM _groups g WHERE s.accession = g.accession AND g.effective_acc <> s.accession""")
+    con.execute("""
+        UPDATE form345_submissions s SET amends_accession = l.target_acc, link_tier = l.tier
+        FROM (SELECT amend_acc, min(target_acc) AS target_acc, min(tier) AS tier FROM _links GROUP BY 1) l
+        WHERE s.accession = l.amend_acc""")
     n_amend = int(con.execute('SELECT count(*) FROM form345_submissions WHERE is_amendment').fetchone()[0])
     n_linked = int(con.execute('SELECT count(DISTINCT amend_acc) FROM _links').fetchone()[0])
     n_ambiguous = int(con.execute('SELECT count(DISTINCT amend_acc) FROM _links WHERE n_targets > 1').fetchone()[0])
@@ -1008,6 +1023,37 @@ def report(db_path: Path, history_db: Optional[Path], start: str = '2016-09-01',
         for r in p:
             matched = len([x for x in (r[4] or []) if x in pit_tickers]) if pit_tickers else 0
             lines.append(f'| {int(r[0])} | {r[1]:,} | {r[2]:,} | {r[3]:,} | {matched:,} |')
+        lines.append('')
+        # D14: amendments no tier could pair with an original are kept and counted; report their
+        # weight in the P-code purchases a strategy would read (all tickers, and PIT tickers only).
+        lines.append('### Unmatched amendments (D14: kept, counted)')
+        lines.append('')
+        n_unm, n_unm_eff = con.execute("""
+            SELECT count(*), count(*) FILTER (WHERE superseded_by IS NULL)
+            FROM form345_submissions WHERE is_amendment AND link_tier IS NULL""").fetchone()
+        lines.append(f'- amendments no tier could pair with an original: {n_unm:,} ({n_unm_eff:,} effective)')
+        for label, tick_filter, params in (('all tickers', '', []),
+                                           ('PIT tickers', 'AND s.ticker IN (SELECT unnest(?::VARCHAR[]))', [sorted(pit_tickers)])):
+            if label == 'PIT tickers' and not pit_tickers:
+                continue
+            # Value sums exclude data-entry errors where the price field carries a dollar total
+            # (DNP 0000899243-16-025693: 47,000,000 shares "at" $47,000,000): a row above $10 B or
+            # $100,000 per share is not a purchase anyone made. The excluded count is reported.
+            r = con.execute(f"""
+                WITH eff_p AS (
+                    SELECT (s.is_amendment AND s.link_tier IS NULL) AS unmatched, t.shares, t.price,
+                           (t.price > 0 AND t.price <= 1e5 AND isfinite(t.price) AND isfinite(t.shares)
+                            AND t.shares * t.price <= 1e10) AS valued
+                    FROM form345_nonderiv_trans t JOIN form345_submissions s ON s.accession = t.accession
+                    WHERE t.trans_code = 'P' AND s.base_form = '4' AND s.superseded_by IS NULL {tick_filter})
+                SELECT count(*) FILTER (WHERE unmatched), count(*),
+                       coalesce(sum(shares * price) FILTER (WHERE unmatched AND valued), 0),
+                       coalesce(sum(shares * price) FILTER (WHERE valued), 0),
+                       count(*) FILTER (WHERE NOT valued AND price > 0)
+                FROM eff_p""", params).fetchone()
+            lines.append(f'- {label}: their P transactions {r[0]:,} of {r[1]:,} effective Form 4 P transactions '
+                         f'({100.0 * r[0] / max(r[1], 1):.2f}%), purchase value ${r[2]:,.0f} of ${r[3]:,.0f} '
+                         f'({100.0 * r[2] / max(r[3], 1):.2f}%; {r[4]:,} rows above $10 B or $100,000/share excluded)')
         lines.append('')
         if history_db is not None and history_db.exists():
             mm = _pit_member_months(history_db)

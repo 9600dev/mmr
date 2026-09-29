@@ -24,24 +24,16 @@ default, superseded filings excluded, one row per transaction x reporting owner 
   to the amendment's `DATE_OF_ORIG_SUB` (chains are walked to their root); (2) CONTENT: shared
   owner, identical non-derivative transaction list within the prior 45 days; (3) PERIOD: shared
   owner, a UNIQUE original with the same period of report within 45 days; (4) OWNER-FREE: the
-  amendment corrects the reporting owner's identity (CYAN `0001010549-14-000096`, a gift moved
-  from an individual's CIK to a foundation's): same named date and period, IDENTICAL transaction
+  amendment corrects the reporting owner's identity (CYAN `0001010549-14-000096`): same named date and period, IDENTICAL transaction
   list including shares owned after, UNIQUE; (5) OWNER-FREE, CORE CONTENT: an owner correction
-  that also corrects the holdings (BATL `0001209191-21-056275`, "inadvertently reported under
-  Grant Evans", shares after 9,551 -> 11,601): same named date and period, identical
+  that also corrects the holdings (BATL `0001209191-21-056275`, shares after 9,551 -> 11,601): same named date and period, identical
   date/code/shares/price/A-D, UNIQUE, same submitter prefix on both accessions, and the amending
-  owner has no earlier filing of their own for that period - of the 10 unique core matches on the
-  full history, footnotes confirm six owner corrections (BATL, CLRO, RTEC, SFST, FMCB, WCUI);
-  ABCB (two self-filers with identical grants) and LSCC/OKE (officers re-filing their own
-  months-old reports beside a colleague's identical withholding) are refused; (6) OWNER + PERIOD,
+  owner has no earlier filing of their own for that period - footnotes confirm the six full-history matches (BATL, CLRO, RTEC, SFST, FMCB, WCUI); ABCB (two self-filers with identical grants) is refused; (6) OWNER + PERIOD,
   NO WINDOW: tier 3 beyond 45 days - a UNIQUE same-owner original with the same period, any age
-  (LSCC `0000855658-22-000265` re-files its 157-day-old original to attach a power of attorney;
-  OKE `0001741956-22-000014` corrects a withholding reported 308 days earlier; 14 sampled pairs
-  were all confirmed by their footnotes). Within a tier the top-ranked candidates (same period
+  (LSCC `0000855658-22-000265`, 157 days; OKE `0001741956-22-000014`, 308 days; 14 sampled pairs confirmed by footnotes). Within a tier the top-ranked candidates (same period
   +2, original +1) are linked; a group's effective member is its latest-filed (then higher
-  accession). Every case named here is pinned on the real database plus sixteen fixture patterns.
-  Full history: 54,268 amendments (46,060 `4/A`); 51,676 linked (tier 1: 49,729; 2: 377; 3: 844; 4: 50; 5: 6; 6: 670), 627 ambiguous (all superseded), 23 tier-3, 3 tier-4, 13 tier-5 and 9 tier-6 candidates refused, 2,592 unlinked (original before 2014 or no match) and effective; 52,225 filings superseded. Residual check (effective same-issuer Form 4 pairs within 10
-  days, identical transaction lists): 77 same-owner pairs involve an amendment (348 before tiers 2-6). Ignoring the owner, 1,387 such pairs remain: a sample of ten was all different directors' identical grants, hence the named-date requirement in tiers 4-5. Supersession is recomputed inside the dev
+  accession). Every named case is pinned on the real database plus sixteen fixture patterns.
+  Full history: 54,268 amendments (46,060 `4/A`); 51,676 linked (tier 1: 49,729; 2: 377; 3: 844; 4: 50; 5: 6; 6: 670), 627 ambiguous (all superseded), 23 tier-3, 3 tier-4, 13 tier-5 and 9 tier-6 candidates refused, 2,592 unlinked (original before 2014 or no match) and effective; 52,225 filings superseded. Residual duplicate check (same-issuer effective Form 4 pairs within 10 days with identical transaction lists): 77 same-owner pairs involve an amendment (348 before tiers 2-6); 1,387 owner-free pairs are different directors' identical grants (sample of ten). Supersession is recomputed inside the dev
   copy on its own rows, so a post-cutoff amendment cannot erase what was the best information
   before it (`test_dev_copy_recomputes_supersession_on_its_own_rows`).
 - **Re-runs are idempotent**: each quarter is keyed by its zip SHA-256; unchanged quarters are
@@ -124,6 +116,10 @@ transactions; per-quarter 4/A and superseded counts: `fetch_insider_form345.py r
 - Joint filings produce one row per reporting owner; sum shares per `accession, trans_sk` or weight by `1/n_owners`.
 - Derivative transactions (table II) are stored in `form345_deriv_trans`, not returned by
   `load_insider_events`.
-- 2,592 amendments stand alone as effective: a `4/A` naming a wrong original date whose owner has
-  no same-period original (or several) still double-counts.
+- **Unmatched amendments (D14)**: 2,592 amendments no tier could pair with an original (2,556
+  effective) are kept and counted, not special-cased; BIF `0001247997-20-000001` (a trust re-filing an
+  affiliate's self-filed purchase under its own CIK) has the ABCB look-alike shape. They carry 553 of 381,474 effective Form 4 P transactions (0.14%) and $2.71 B of $1.48 T
+  purchase value (0.18%); within PIT tickers 105 of 152,676 (0.07%) and $155 M of $278 B (0.06%).
+  Value sums exclude 430 rows above $10 B or $100,000/share (mis-keyed prices).
+  `link_tier` (NULL = unmatched) and `amends_accession` are persisted per amendment.
 - `www.sec.gov/Archives` 403s a parenthesised User-Agent; `MMR Research joelpob@gmail.com` works.

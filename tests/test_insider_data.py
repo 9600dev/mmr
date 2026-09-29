@@ -295,7 +295,8 @@ def test_build_loads_all_tables_with_required_fields(built):
     assert _q(db, 'SELECT count(*) FROM form345_owners')[0][0] == 9
     assert _q(db, 'SELECT count(*) FROM form345_nonderiv_trans')[0][0] == 7
     cols = {r[0] for r in _q(db, "SELECT column_name FROM information_schema.columns WHERE table_name = 'form345_submissions'")}
-    assert {'filing_date', 'accession', 'issuer_cik', 'ticker', 'symbol_as_filed', 'usable_from', 'superseded_by'} <= cols
+    assert {'filing_date', 'accession', 'issuer_cik', 'ticker', 'symbol_as_filed', 'usable_from', 'superseded_by',
+            'amends_accession', 'link_tier'} <= cols
     cols = {r[0] for r in _q(db, "SELECT column_name FROM information_schema.columns WHERE table_name = 'form345_owners'")}
     assert {'owner_cik', 'is_director', 'is_officer', 'officer_title', 'is_ten_pct'} <= cols
     cols = {r[0] for r in _q(db, "SELECT column_name FROM information_schema.columns WHERE table_name = 'form345_nonderiv_trans'")}
@@ -804,6 +805,55 @@ def test_owner_period_fallback_links_months_old_original_without_window(chain_db
     assert sorted(ev['shares']) == [100.0, 150.0, 200.0]
 
 
+def test_link_outcome_is_persisted_per_amendment(chain_db):
+    """D14: every amendment records which filing it was paired with and by which tier; NULL means no
+    tier could pair it (kept, counted), so the residual reported in DATA.md is one query on the DB."""
+    db, diag = chain_db
+    link = {r[0]: (r[1], r[2]) for r in
+            _q(db, 'SELECT accession, amends_accession, link_tier FROM form345_submissions WHERE is_amendment')}
+    assert link['0003-24-000010'] == ('0003-24-000011', 1)      # S: date tier
+    assert link['0008-24-000061'] == ('0008-24-000060', 2)      # C2: content tier
+    assert link['0009-24-000071'] == ('0009-24-000070', 3)      # P3: period tier
+    assert link['0011-24-000091'] == ('0011-24-000090', 4)      # O: owner-free, extended content
+    assert link['0014-24-000121'] == ('0014-24-000120', 5)      # B: owner-free, core content
+    assert link['0018-24-000151'] == ('0018-24-000150', 6)      # N: owner + period, no window
+    assert link['0007-24-000052'][1] == 1 and link['0007-24-000052'][0] in ('0007-24-000050', '0007-24-000051')   # X: ambiguous
+    for acc in ('0010-24-000082', '0012-24-000102', '0152-24-000001', '0017-24-000142', '0019-24-000162'):
+        assert link[acc] == (None, None), acc                    # refused/unmatched: kept and counted
+    assert sum(1 for v in link.values() if v[1] is None) == diag['amendments_unlinked'] == 6
+    assert _q(db, """SELECT count(*) FROM form345_submissions
+                     WHERE NOT is_amendment AND (link_tier IS NOT NULL OR amends_accession IS NOT NULL)""")[0][0] == 0
+
+
+def test_schema_migration_adds_link_columns_to_an_older_database(chain_db, tmp_path):
+    """A database built before the link columns existed gains them on the next build and they are
+    filled by apply_supersession without re-ingesting any quarter."""
+    import shutil
+    db, _ = chain_db
+    copy = tmp_path / 'old.duckdb'
+    shutil.copy(db, copy)
+    con = duckdb.connect(str(copy))
+    try:
+        con.execute('ALTER TABLE form345_submissions DROP COLUMN amends_accession')
+        con.execute('ALTER TABLE form345_submissions DROP COLUMN link_tier')
+        F.ensure_schema(con)
+        diag = F.apply_supersession(con)
+        got = con.execute("SELECT amends_accession, link_tier FROM form345_submissions WHERE accession = '0014-24-000121'").fetchone()
+    finally:
+        con.close()
+    assert got == ('0014-24-000120', 5) and diag['linked_tier5_owner_free_core'] == 1
+
+
+def test_report_counts_unmatched_amendments_and_their_p_value(chain_db):
+    """D14: DATA.md reports the unmatched amendments and their share of P-code purchase value."""
+    db, _ = chain_db
+    text = F.report(db, None)
+    assert '### Unmatched amendments (D14: kept, counted)' in text
+    assert '- amendments no tier could pair with an original: 6 (6 effective)' in text
+    # the six unmatched amendments carry S/A/F transactions (KAPA, MUU, NUU, OMI, RHO, TAU), no P
+    assert '- all tickers: their P transactions 0 of ' in text and '(0.00%; 0 rows above $10 B' in text
+
+
 _FULL_DB = Path(os.path.expanduser('~/.local/share/mmr/research_full/insider.duckdb'))
 
 
@@ -820,9 +870,22 @@ def test_real_full_database_supersedes_the_observed_cases():
              '0001090009-15-000020', '0001090009-16-000028',
              '0001239875-16-000012', '0001356555-16-000004', '0000855658-22-000264', '0000855658-22-000265',
              '0001741956-22-000011', '0001741956-22-000014',
-             '0000855658-22-000137', '0000855658-22-000131', '0001741956-22-000002')""").fetchall())
+             '0000855658-22-000137', '0000855658-22-000131', '0001741956-22-000002',
+             '0001247997-20-000001', '0001307493-20-000001')""").fetchall())
+        tier = dict(con.execute("""SELECT accession, link_tier FROM form345_submissions WHERE accession IN
+            ('0001062993-22-012373', '0001207097-22-000001', '0001010549-14-000096', '0001209191-21-056275',
+             '0000855658-22-000265', '0001741956-22-000014', '0001247997-20-000001')""").fetchall())
     finally:
         con.close()
+    # the tier each pinned case was paired by is persisted (D14 residual = link_tier IS NULL)
+    assert tier['0001062993-22-012373'] == 1 and tier['0001207097-22-000001'] == 1
+    assert tier['0001010549-14-000096'] == 4 and tier['0001209191-21-056275'] == 5
+    assert tier['0000855658-22-000265'] == 6 and tier['0001741956-22-000014'] == 6
+    # BIF: the trust's 4/A re-files an affiliate's self-filed original under its own CIK; two different
+    # self-filers is exactly the ABCB look-alike shape, so no rule pairs it. Per D14 it is kept, counted
+    # (link_tier NULL) and reported in DATA.md, and both filings stay effective.
+    assert tier['0001247997-20-000001'] is None
+    assert sup['0001247997-20-000001'] is None and sup['0001307493-20-000001'] is None
     # tier 6: the same owner's months-old original is replaced whatever its age (no 45-day window)
     assert sup['0000855658-22-000137'] == '0000855658-22-000265' and sup['0000855658-22-000265'] is None   # LSCC Luther, 157 days
     assert sup['0000855658-22-000131'] == '0000855658-22-000264' and sup['0000855658-22-000264'] is None   # LSCC Elashmawi
