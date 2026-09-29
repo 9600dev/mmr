@@ -51,7 +51,8 @@ def _key() -> str:
     return str(cfg.get('sec_api_key', '') or '').strip()
 
 
-def sec_filing_index(client, ticker: str, key: str, forms=('10-Q', '10-K')):
+def sec_filing_index(client, ticker: str, key: str, forms=('10-Q', '10-K'),
+                     filed_after=None):
     """Every 10-Q/10-K for a ticker, with its acceptance instant.
 
     Returns {period_end_iso: (accepted_at, form_type, accession_no)}. Later
@@ -68,8 +69,14 @@ def sec_filing_index(client, ticker: str, key: str, forms=('10-Q', '10-K')):
     """
     out = {}
     form_clause = ' OR '.join(f'formType:"{f}"' for f in forms)
+    query = f'ticker:{ticker} AND ({form_clause})'
+    if filed_after is not None:
+        # Incremental mode (hillclimb C02): only filings accepted strictly
+        # after the latest instant already stored for this name. Lucene range
+        # on the same field the row is keyed by, so nothing older can come back.
+        query += f' AND filedAt:{{{_iso_instant(filed_after)} TO *]}}'
     for start in (0, 50):
-        body = {'query': f'ticker:{ticker} AND ({form_clause})',
+        body = {'query': query,
                 'from': str(start), 'size': '50',
                 'sort': [{'filedAt': {'order': 'desc'}}]}
         try:
@@ -133,6 +140,131 @@ def pit_membership_todo(db, hist_db, min_months: int):
     return todo
 
 
+def _iso_instant(t) -> str:
+    """A tz-aware instant as sec-api's ``filedAt`` literal (UTC, seconds)."""
+    import pandas as pd
+    ts = pd.Timestamp(t)
+    ts = ts.tz_localize('UTC') if ts.tzinfo is None else ts.tz_convert('UTC')
+    return ts.strftime('%Y-%m-%dT%H:%M:%S')
+
+
+FUNDAMENTALS_DDL = """CREATE TABLE IF NOT EXISTS fundamentals (
+        conid VARCHAR, ticker VARCHAR, period_end DATE,
+        accepted_at TIMESTAMPTZ,          -- when it became public. THE key.
+        form_type VARCHAR, accession_no VARCHAR,
+        revenue DOUBLE, net_income DOUBLE, gross_profit DOUBLE,
+        operating_income DOUBLE, total_assets DOUBLE, total_liabilities DOUBLE,
+        stockholders_equity DOUBLE, cash_from_operations DOUBLE,
+        shares_diluted DOUBLE, fetched_at TIMESTAMPTZ,
+        PRIMARY KEY (conid, period_end, accession_no))"""
+
+
+def last_accepted(db, ticker: str):
+    """Latest stored acceptance instant for ``ticker`` (None when unseen) -
+    the incremental resume point."""
+    r = db.execute('SELECT max(accepted_at) FROM fundamentals WHERE ticker = ?',
+                   [ticker], fetch='one')
+    return r[0] if r and r[0] is not None else None
+
+
+def ingest_ticker(db, poly, index: dict, conid: str, ticker: str,
+                  append_only: bool = False) -> dict:
+    """Join Polygon's quarterly statements for ``ticker`` to the acceptance
+    index and write them. ``append_only`` (incremental mode) uses
+    ``INSERT OR IGNORE``: a row whose (conid, period_end, accession_no) is
+    already stored is left exactly as it was - older rows are never rewritten,
+    a restatement arrives as a NEW accession number and is simply added."""
+    from trader.data.fundamentals import extract_polygon
+    written = no_timestamp = 0
+    try:
+        fins = list(poly.vx.list_stock_financials(
+            ticker=ticker, limit=60, timeframe='quarterly'))
+    except Exception:
+        return {'written': 0, 'no_timestamp': 0, 'no_values': 1}
+    verb = 'INSERT OR IGNORE' if append_only else 'INSERT OR REPLACE'
+    for f in fins:
+        period = getattr(f, 'end_date', None)
+        if not period:
+            no_timestamp += 1
+            continue
+        hit = index.get(period)
+        if not hit:
+            # No filing carries this period end. It cannot be placed
+            # in time, so it is dropped rather than dated by guesswork.
+            no_timestamp += 1
+            continue
+        filed_at, form, acc = hit
+        st = getattr(f, 'financials', None)
+        vals = extract_polygon(st) if st else {}
+        db.execute(
+            f'{verb} INTO fundamentals VALUES '
+            '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, now())',
+            [conid, ticker, period, filed_at, form, acc,
+             vals.get('revenue'), vals.get('net_income'),
+             vals.get('gross_profit'), vals.get('operating_income'),
+             vals.get('total_assets'), vals.get('total_liabilities'),
+             vals.get('stockholders_equity'),
+             vals.get('cash_from_operations'),
+             vals.get('shares_diluted')], fetch='none')
+        written += 1
+    return {'written': written, 'no_timestamp': no_timestamp, 'no_values': 0}
+
+
+def incremental_todo(hist_db, months: int = 3) -> list:
+    """(conid='', ticker) for every name in the point-in-time top 500 at any
+    of the last ``months`` month-ends - the names a live sleeve can hold.
+    Unlike ``pit_membership_todo`` it does NOT skip covered names: incremental
+    mode asks each for filings after its last stored acceptance."""
+    import pandas as pd
+    from trader.data.bar_quality import EXCHANGE_TEST_TICKERS
+    df = hist_db.execute(
+        'SELECT day, ticker, dv_rank FROM pit_daily_bars', fetch='df')
+    if df is None or len(df) == 0:
+        return []
+    df = df[~df['ticker'].isin(EXCHANGE_TEST_TICKERS)]
+    df['day'] = pd.to_datetime(df['day'])
+    df['month'] = df['day'].dt.to_period('M')
+    recent = sorted(df['month'].unique())[-months:]
+    month_end = (df[df['month'].isin(recent)].sort_values('day')
+                 .groupby(['month', 'ticker']).agg(rank=('dv_rank', 'last')).reset_index())
+    names = sorted(month_end[month_end['rank'] <= 500]['ticker'].unique())
+    return [('', t) for t in names]
+
+
+def run_incremental(db, hist_db, client, poly, key: str, months: int = 3,
+                    limit: int = 0, sleep: float = 0.0, log=print) -> dict:
+    """Incremental refresh (hillclimb C02, acceptance criterion 1): for each
+    current PIT member ask sec-api only for filings accepted after the latest
+    instant stored for that name, and append the dated statements. Idempotent:
+    a re-run with nothing new fetches nothing new and writes nothing."""
+    db.execute(FUNDAMENTALS_DDL, fetch='none')
+    todo = incremental_todo(hist_db, months)
+    if limit:
+        todo = todo[:limit]
+    log(f'incremental: {len(todo)} current point-in-time members')
+    written = failed = no_new = 0
+    for i, (conid, ticker) in enumerate(todo):
+        since = last_accepted(db, ticker)
+        try:
+            index = sec_filing_index(client, ticker, key, filed_after=since)
+        except Exception:
+            index = None
+        if index is None:
+            failed += 1
+            continue
+        if not index:
+            no_new += 1
+            continue
+        res = ingest_ticker(db, poly, index, conid, ticker, append_only=True)
+        written += res['written']
+        if (i + 1) % 25 == 0:
+            log(f'  {i+1}/{len(todo)} rows={written} nonew={no_new} failed={failed}')
+        if sleep:
+            time.sleep(sleep)
+    log(f'done: {written} new rows, {no_new} names with nothing new, {failed} failed')
+    return {'written': written, 'no_new': no_new, 'failed': failed, 'names': len(todo)}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--limit', type=int, default=0, help='cap tickers (0 = all)')
@@ -143,6 +275,12 @@ def main() -> int:
                          'many member-months (rank<=500 at a month-end) that '
                          'has no fundamentals yet. 0 = off (legacy universe '
                          'mode).')
+    ap.add_argument('--incremental', action='store_true',
+                    help='append-only refresh: for every current PIT member '
+                         '(top 500 at any of the last --months month-ends) '
+                         'fetch only filings accepted after its latest stored '
+                         'acceptance instant; stored rows are never rewritten')
+    ap.add_argument('--months', type=int, default=3)
     args = ap.parse_args()
 
     import logging as _logging
@@ -169,15 +307,15 @@ def main() -> int:
     poly = RESTClient(os.environ.get('MASSIVE_API_KEY')
                       or ycfg.get('massive_api_key'))
     db = DuckDBConnection(cfg.get('duckdb_path', ''))
-    db.execute("""CREATE TABLE IF NOT EXISTS fundamentals (
-        conid VARCHAR, ticker VARCHAR, period_end DATE,
-        accepted_at TIMESTAMPTZ,          -- when it became public. THE key.
-        form_type VARCHAR, accession_no VARCHAR,
-        revenue DOUBLE, net_income DOUBLE, gross_profit DOUBLE,
-        operating_income DOUBLE, total_assets DOUBLE, total_liabilities DOUBLE,
-        stockholders_equity DOUBLE, cash_from_operations DOUBLE,
-        shares_diluted DOUBLE, fetched_at TIMESTAMPTZ,
-        PRIMARY KEY (conid, period_end, accession_no))""", fetch='none')
+    db.execute(FUNDAMENTALS_DDL, fetch='none')
+
+    if args.incremental:
+        hist_db = DuckDBConnection(cfg.get('history_duckdb_path', ''))
+        with httpx.Client() as client:
+            run_incremental(db, hist_db, client, poly, key, months=args.months,
+                            limit=args.limit, sleep=args.sleep,
+                            log=lambda m: print(m, flush=True))
+        return 0
 
     if args.pit_min_months > 0:
         hist_db = DuckDBConnection(cfg.get('history_duckdb_path', ''))
