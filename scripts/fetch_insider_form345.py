@@ -441,12 +441,33 @@ SUPERSESSION_SQL = """
 --           with the same PERIOD_OF_REPORT filed within the 45 days up to the
 --           amendment - linked only when it is UNIQUE (an ambiguous tier-3
 --           match is left unlinked and counted).
+--   tier 4  OWNER-FREE: none of the above matched because the amendment
+--           corrects the reporting owner's identity (observed: CYAN
+--           0001010549-14-000096 moves a gift from an individual's CIK to a
+--           foundation's; issuers' own CIKs filed as the owner and later fixed
+--           are the common shape). Same issuer/base form, FILING_DATE = the
+--           named DATE_OF_ORIG_SUB, same period, and an IDENTICAL extended
+--           transaction list (date, code, shares, price, A/D, shares owned
+--           after; NOT direct/indirect, which the CYAN correction flips from
+--           "I, by the foundation" to "D") - linked only when UNIQUE. Different
+--           people with identical grants filed the same day are refused
+--           (ambiguous, counted); different content is never linked without a
+--           shared owner - the "same period, different content" candidates
+--           are other officers' filings.
 CREATE OR REPLACE TEMP TABLE _sig AS
 SELECT accession,
        string_agg(coalesce(trans_date::VARCHAR, '') || '|' || coalesce(trans_code, '') || '|' ||
                   coalesce(shares::VARCHAR, '') || '|' || coalesce(price::VARCHAR, '') || '|' ||
                   coalesce(acquired_disposed, ''), ';'
                   ORDER BY trans_date, trans_code, shares, price, acquired_disposed) AS signature
+FROM form345_nonderiv_trans GROUP BY accession;
+
+CREATE OR REPLACE TEMP TABLE _sigx AS
+SELECT accession,
+       string_agg(coalesce(trans_date::VARCHAR, '') || '|' || coalesce(trans_code, '') || '|' ||
+                  coalesce(shares::VARCHAR, '') || '|' || coalesce(price::VARCHAR, '') || '|' ||
+                  coalesce(acquired_disposed, '') || '|' || coalesce(shares_after::VARCHAR, ''), ';'
+                  ORDER BY trans_date, trans_code, shares, price, acquired_disposed, shares_after) AS signature
 FROM form345_nonderiv_trans GROUP BY accession;
 
 CREATE OR REPLACE TEMP TABLE _links AS
@@ -492,8 +513,25 @@ WITH am AS (
       AND EXISTS (SELECT 1 FROM form345_owners x JOIN form345_owners y ON y.owner_cik = x.owner_cik
                   WHERE x.accession = a.accession AND y.accession = o.accession)
     QUALIFY count(*) OVER (PARTITION BY a.accession) = 1
+), t4 AS (
+    SELECT a.accession AS amend_acc, o.accession AS target_acc, o.is_amendment AS target_is_amend,
+           TRUE AS same_period, 4 AS tier
+    FROM am a
+    JOIN _sigx sa ON sa.accession = a.accession
+    JOIN form345_submissions o
+      ON o.issuer_cik = a.issuer_cik AND o.base_form = a.base_form AND o.accession <> a.accession
+     AND o.filing_date = a.date_of_orig_sub
+     AND o.period_of_report IS NOT DISTINCT FROM a.period_of_report
+     AND (o.filing_date < a.filing_date
+          OR (o.filing_date = a.filing_date AND (NOT o.is_amendment OR o.accession < a.accession)))
+    JOIN _sigx so ON so.accession = o.accession AND so.signature = sa.signature
+    WHERE a.date_of_orig_sub IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM t1 WHERE t1.amend_acc = a.accession)
+      AND NOT EXISTS (SELECT 1 FROM t2 WHERE t2.amend_acc = a.accession)
+      AND NOT EXISTS (SELECT 1 FROM t3 WHERE t3.amend_acc = a.accession)
+    QUALIFY count(*) OVER (PARTITION BY a.accession) = 1
 ), cand AS (
-    SELECT * FROM t1 UNION ALL SELECT * FROM t2 UNION ALL SELECT * FROM t3
+    SELECT * FROM t1 UNION ALL SELECT * FROM t2 UNION ALL SELECT * FROM t3 UNION ALL SELECT * FROM t4
 ), scored AS (
     SELECT *, (CASE WHEN same_period THEN 2 ELSE 0 END) + (CASE WHEN target_is_amend THEN 0 ELSE 1 END) AS score
     FROM cand
@@ -516,6 +554,19 @@ JOIN form345_submissions o
 WHERE NOT EXISTS (SELECT 1 FROM _links l WHERE l.amend_acc = a.accession)
   AND EXISTS (SELECT 1 FROM form345_owners x JOIN form345_owners y ON y.owner_cik = x.owner_cik
               WHERE x.accession = a.accession AND y.accession = o.accession)
+GROUP BY 1 HAVING count(*) > 1;
+
+-- tier-4 candidates that were NOT unique (identical filings by several owners), for the diagnostics
+CREATE OR REPLACE TEMP TABLE _tier4_ambiguous AS
+WITH am AS (SELECT accession, issuer_cik, base_form, date_of_orig_sub, period_of_report, filing_date FROM form345_submissions WHERE is_amendment)
+SELECT a.accession AS amend_acc, count(*) AS n
+FROM am a
+JOIN _sigx sa ON sa.accession = a.accession
+JOIN form345_submissions o
+  ON o.issuer_cik = a.issuer_cik AND o.base_form = a.base_form AND o.accession <> a.accession
+ AND o.filing_date = a.date_of_orig_sub AND o.period_of_report IS NOT DISTINCT FROM a.period_of_report
+JOIN _sigx so ON so.accession = o.accession AND so.signature = sa.signature
+WHERE NOT EXISTS (SELECT 1 FROM _links l WHERE l.amend_acc = a.accession)
 GROUP BY 1 HAVING count(*) > 1;
 """
 
@@ -567,6 +618,7 @@ def apply_supersession(con: duckdb.DuckDBPyConnection) -> Dict[str, int]:
     n_ambiguous = int(con.execute('SELECT count(DISTINCT amend_acc) FROM _links WHERE n_targets > 1').fetchone()[0])
     tiers = dict(con.execute('SELECT tier, count(DISTINCT amend_acc) FROM _links GROUP BY 1').fetchall())
     n_t3_amb = int(con.execute('SELECT count(*) FROM _tier3_ambiguous').fetchone()[0])
+    n_t4_amb = int(con.execute('SELECT count(*) FROM _tier4_ambiguous').fetchone()[0])
     n_superseded = int(con.execute('SELECT count(*) FROM form345_submissions WHERE superseded_by IS NOT NULL').fetchone()[0])
     n_unlinked_amend = int(con.execute("""
         SELECT count(*) FROM form345_submissions s WHERE is_amendment
@@ -574,6 +626,7 @@ def apply_supersession(con: duckdb.DuckDBPyConnection) -> Dict[str, int]:
     return {'amendments': n_amend, 'amendments_linked': n_linked, 'amendments_ambiguous': n_ambiguous,
             'linked_tier1_date': int(tiers.get(1, 0)), 'linked_tier2_content': int(tiers.get(2, 0)),
             'linked_tier3_period': int(tiers.get(3, 0)), 'tier3_ambiguous_unlinked': n_t3_amb,
+            'linked_tier4_owner_free': int(tiers.get(4, 0)), 'tier4_ambiguous_unlinked': n_t4_amb,
             'amendments_unlinked': n_unlinked_amend, 'filings_superseded': n_superseded}
 
 
@@ -603,11 +656,37 @@ FROM sig a JOIN sig b
  AND b.accession < a.accession AND abs(a.filing_date - b.filing_date) <= 10
 """
 
+RESIDUAL_DUPLICATES_OWNER_FREE_SQL = """
+-- Same as above but ignoring the owner and using the extended signature (with
+-- shares owned after): the shape an unmatched
+-- owner-identity correction leaves behind (CYAN 0001010549-14-000096 was one).
+WITH eff AS (
+    SELECT accession, issuer_cik, filing_date, is_amendment, period_of_report
+    FROM form345_submissions WHERE superseded_by IS NULL AND base_form = '4'
+), sig AS (
+    SELECT e.accession, e.issuer_cik, e.filing_date, e.is_amendment, e.period_of_report,
+           string_agg(coalesce(t.trans_date::VARCHAR, '') || '|' || coalesce(t.trans_code, '') || '|' ||
+                      coalesce(t.shares::VARCHAR, '') || '|' || coalesce(t.price::VARCHAR, '') || '|' ||
+                      coalesce(t.acquired_disposed, '') || '|' || coalesce(t.shares_after::VARCHAR, ''), ';'
+                      ORDER BY t.trans_date, t.trans_code, t.shares, t.price, t.acquired_disposed, t.shares_after) AS signature
+    FROM eff e JOIN form345_nonderiv_trans t USING (accession)
+    GROUP BY 1, 2, 3, 4, 5
+)
+SELECT count(*) AS dup_pairs_amend_owner_free
+FROM sig a JOIN sig b
+  ON b.issuer_cik = a.issuer_cik AND b.signature = a.signature
+ AND b.period_of_report IS NOT DISTINCT FROM a.period_of_report
+ AND b.accession < a.accession AND abs(a.filing_date - b.filing_date) <= 10
+WHERE a.is_amendment OR b.is_amendment
+"""
+
 
 def residual_duplicates(con: duckdb.DuckDBPyConnection) -> Dict[str, int]:
     """How many identical effective filing pairs supersession left behind (see SQL)."""
     row = con.execute(RESIDUAL_DUPLICATES_SQL).fetchone()
-    return {'dup_pairs_amend': int(row[0] or 0), 'dup_pairs_any': int(row[1] or 0)}
+    row2 = con.execute(RESIDUAL_DUPLICATES_OWNER_FREE_SQL).fetchone()
+    return {'dup_pairs_amend': int(row[0] or 0), 'dup_pairs_any': int(row[1] or 0),
+            'dup_pairs_amend_owner_free': int(row2[0] or 0)}
 
 
 def fill_tickers(con: duckdb.DuckDBPyConnection) -> Dict[str, int]:

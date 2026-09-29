@@ -517,6 +517,17 @@ CHAIN_SUBS = [
     _sub('0010-24-000080', '14-JUN-2024', '13-JUN-2024', '4', '1000', 'KAPPA LTD', 'KAPA'),
     _sub('0010-24-000081', '17-JUN-2024', '13-JUN-2024', '4', '1000', 'KAPPA LTD', 'KAPA'),
     _sub('0010-24-000082', '19-JUN-2024', '13-JUN-2024', '4/A', '1000', 'KAPPA LTD', 'KAPA', orig='13-JUN-2024'),
+    # O (owner-free tier 4, CYAN pattern): the 4/A corrects the reporting owner; no shared owner CIK,
+    # same named date, same period, identical extended content, unique -> replaced
+    _sub('0011-24-000090', '24-JUN-2024', '21-JUN-2024', '4', '1100', 'LAMBDA CORP', 'LMDA'),
+    _sub('0011-24-000091', '26-JUN-2024', '21-JUN-2024', '4/A', '1100', 'LAMBDA CORP', 'LMDA', orig='24-JUN-2024'),
+    # O-amb: two directors with identical grants filed 06-24, a third owner's 4/A names 06-24 -> refused
+    _sub('0012-24-000100', '24-JUN-2024', '21-JUN-2024', '4', '1200', 'MU INC', 'MUU'),
+    _sub('0012-24-000101', '24-JUN-2024', '21-JUN-2024', '4', '1200', 'MU INC', 'MUU'),
+    _sub('0012-24-000102', '26-JUN-2024', '21-JUN-2024', '4/A', '1200', 'MU INC', 'MUU', orig='24-JUN-2024'),
+    # O-diff: new owner, named date holds one same-period filing with DIFFERENT content -> never linked
+    _sub('0013-24-000110', '24-JUN-2024', '21-JUN-2024', '4', '1300', 'NU PLC', 'NUU'),
+    _sub('0013-24-000111', '26-JUN-2024', '21-JUN-2024', '4/A', '1300', 'NU PLC', 'NUU', orig='24-JUN-2024'),
 ]
 CHAIN_OWNS = [_own(acc, cik, name, 'Director') for acc, cik, name in [
     ('0003-24-000011', '31', 'Gamma Dir'), ('0003-24-000010', '31', 'Gamma Dir'),
@@ -528,6 +539,9 @@ CHAIN_OWNS = [_own(acc, cik, name, 'Director') for acc, cik, name in [
     ('0008-24-000060', '81', 'Theta Dir'), ('0008-24-000061', '81', 'Theta Dir'),
     ('0009-24-000070', '91', 'Iota Dir'), ('0009-24-000071', '91', 'Iota Dir'),
     ('0010-24-000080', '101', 'Kappa Dir'), ('0010-24-000081', '101', 'Kappa Dir'), ('0010-24-000082', '101', 'Kappa Dir'),
+    ('0011-24-000090', '111', 'Lambda Corp (misfiled as owner)'), ('0011-24-000091', '112', 'Lambda Dir'),
+    ('0012-24-000100', '121', 'Mu Dir One'), ('0012-24-000101', '122', 'Mu Dir Two'), ('0012-24-000102', '123', 'Mu Dir Three'),
+    ('0013-24-000110', '131', 'Nu Dir One'), ('0013-24-000111', '132', 'Nu Dir Two'),
 ]]
 CHAIN_NDTS = [
     _ndt('0003-24-000011', '111', '20-JUN-2024', 'P', '1000.0', '27.15', 'A', '7000.0'),
@@ -552,6 +566,13 @@ CHAIN_NDTS = [
     _ndt('0010-24-000080', '180', '13-JUN-2024', 'S', '10.0', '8.0', 'D', '90.0'),
     _ndt('0010-24-000081', '181', '13-JUN-2024', 'S', '20.0', '8.0', 'D', '70.0'),
     _ndt('0010-24-000082', '182', '13-JUN-2024', 'S', '25.0', '8.0', 'D', '65.0'),
+    _ndt('0011-24-000090', '190', '21-JUN-2024', 'G', '30769.0', '5.1', 'A', '767133.0', di='I'),   # D/I flips in the fix
+    _ndt('0011-24-000091', '191', '21-JUN-2024', 'G', '30769.0', '5.1', 'A', '767133.0'),
+    _ndt('0012-24-000100', '200', '21-JUN-2024', 'A', '9000.0', '0', 'A', '9000.0'),
+    _ndt('0012-24-000101', '201', '21-JUN-2024', 'A', '9000.0', '0', 'A', '9000.0'),
+    _ndt('0012-24-000102', '202', '21-JUN-2024', 'A', '9000.0', '0', 'A', '9000.0'),
+    _ndt('0013-24-000110', '210', '21-JUN-2024', 'F', '653.0', '33.69', 'D', '5000.0'),
+    _ndt('0013-24-000111', '211', '21-JUN-2024', 'F', '485.0', '33.69', 'D', '4000.0'),
 ]
 
 
@@ -613,12 +634,14 @@ def test_ambiguous_amendment_supersedes_all_candidates_and_is_counted(chain_db):
     sup = _superseded(db)
     assert sup['0007-24-000050'] == '0007-24-000052' and sup['0007-24-000051'] == '0007-24-000052'
     assert sup['0007-24-000052'] is None
-    assert diag['amendments'] == 10 and diag['amendments_linked'] == 9 and diag['amendments_unlinked'] == 1
+    assert diag['amendments'] == 13 and diag['amendments_linked'] == 10 and diag['amendments_unlinked'] == 3
     assert diag['amendments_ambiguous'] == 1
     assert diag['linked_tier1_date'] == 7 and diag['linked_tier2_content'] == 1 and diag['linked_tier3_period'] == 1
-    assert diag['tier3_ambiguous_unlinked'] == 1
-    assert diag['filings_superseded'] == 10           # S 1 + T 2 + Y 1 + D 2 + X 2 + C2 1 + P3 1
+    assert diag['linked_tier4_owner_free'] == 1
+    assert diag['tier3_ambiguous_unlinked'] == 1 and diag['tier4_ambiguous_unlinked'] == 1
+    assert diag['filings_superseded'] == 11           # S 1 + T 2 + Y 1 + D 2 + X 2 + C2 1 + P3 1 + O 1
     assert diag['dup_pairs_amend'] == 0          # no identical amendment/original pair left effective
+    assert diag['dup_pairs_amend_owner_free'] == 2   # the refused O-amb triple: amendment x two identical originals
 
 
 def test_residual_duplicate_metric_detects_a_missed_link(chain_db, tmp_path):
@@ -663,6 +686,29 @@ def test_period_tier_links_unique_same_period_original_only(chain_db):
     assert sorted(ev['shares']) == [10.0, 20.0, 25.0]
 
 
+def test_owner_free_tier_links_owner_identity_correction(chain_db):
+    """Tier 4 (CYAN pattern): no shared owner CIK, but the named date holds exactly one same-period
+    filing with an identical extended transaction list -> replaced. Direct/indirect ownership is
+    deliberately NOT part of the comparison: the CYAN original said "I, by the foundation" and the
+    amendment under the foundation's own CIK says "D"."""
+    db, _ = chain_db
+    sup = _superseded(db)
+    assert sup['0011-24-000090'] == '0011-24-000091' and sup['0011-24-000091'] is None
+    ev = load_insider_events('2024-06-01', '2024-06-30', tickers=['LMDA'], db_path=db)
+    assert list(ev['accession']) == ['0011-24-000091'] and list(ev['owner_cik']) == [112]
+
+
+def test_owner_free_tier_refuses_ambiguous_and_different_content(chain_db):
+    """Identical grants by two other directors on the named day -> ambiguous, refused; a lone
+    same-period filing with different content -> never linked without a shared owner."""
+    db, _ = chain_db
+    sup = _superseded(db)
+    assert sup['0012-24-000100'] is None and sup['0012-24-000101'] is None and sup['0012-24-000102'] is None
+    assert sup['0013-24-000110'] is None and sup['0013-24-000111'] is None
+    ev = load_insider_events('2024-06-01', '2024-06-30', tickers=['MUU', 'NUU'], db_path=db)
+    assert len(ev) == 5
+
+
 _FULL_DB = Path(os.path.expanduser('~/.local/share/mmr/research_full/insider.duckdb'))
 
 
@@ -673,14 +719,18 @@ def test_real_full_database_supersedes_the_observed_cases():
         sup = dict(con.execute("""SELECT accession, superseded_by FROM form345_submissions WHERE accession IN
             ('0001062993-22-012378', '0001062993-22-012373', '0001207097-21-000451', '0001207097-21-000455',
              '0001207097-22-000001', '0001207097-21-000456', '0001207097-21-000457',
-             '0001207097-22-000067', '0001207097-22-000069')""").fetchall())
+             '0001207097-22-000067', '0001207097-22-000069',
+             '0001010549-14-000083', '0001010549-14-000096')""").fetchall())
     finally:
         con.close()
+    assert sup['0001010549-14-000083'] == '0001010549-14-000096' and sup['0001010549-14-000096'] is None   # CYAN owner fix
     assert sup['0001062993-22-012378'] == '0001062993-22-012373' and sup['0001062993-22-012373'] is None   # SWM
     assert sup['0001207097-21-000451'] == '0001207097-22-000001'                                          # TPL chain root
     assert sup['0001207097-21-000455'] == '0001207097-22-000001' and sup['0001207097-22-000001'] is None
     assert sup['0001207097-21-000456'] is None and sup['0001207097-21-000457'] is None                    # decoys
     assert sup['0001207097-22-000067'] == '0001207097-22-000069'                                          # period typo
+    cyan = load_insider_events('2014-02-01', '2014-03-31', forms=('4',), tickers=['CYAN'], db_path=_FULL_DB)
+    assert '0001010549-14-000083' not in set(cyan['accession']) and '0001010549-14-000096' in set(cyan['accession'])
     tpl = load_insider_events('2021-12-01', '2022-01-31', codes=['P'], tickers=['TPL'], db_path=_FULL_DB)
     assert (tpl['accession'] != '0001207097-21-000455').all()
     assert (tpl['accession'] == '0001207097-22-000001').sum() == 14      # 7 transactions x 2 reporting owners

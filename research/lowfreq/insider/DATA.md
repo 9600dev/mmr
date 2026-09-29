@@ -2,8 +2,8 @@
 
 Built 2026-09-29 by `scripts/fetch_insider_form345.py build` from the SEC's
 quarterly Insider Transactions Data Sets, 2014q1 to 2026q1 (latest published;
-2026q2 answers 404). Two DuckDB files, one per
-research directory, next to each history DB (D03):
+2026q2 answers 404). One DuckDB file per research
+directory, next to its history DB (D03):
 
 | file | filings | non-derivative transactions | max filing date |
 |---|---:|---:|---|
@@ -12,38 +12,34 @@ research directory, next to each history DB (D03):
 
 `fetch_insider_form345.py check` and `tests/test_insider_data.py::test_real_dev_database_has_no_row_after_cutoff`
 prove the dev copy has no row filed after 2024-06-30 in any of its four tables.
-Loader: `trader.data.insider.load_insider_events(start, end, codes=None)` (read-only,
-Form 4 by default, superseded filings excluded, one row per transaction x reporting owner
-with `n_owners` for joint filings). The loader asserts `usable_from > filing_date` on every row.
+Loader: `trader.data.insider.load_insider_events(start, end, codes=None)`: read-only, Form 4 by
+default, superseded filings excluded, one row per transaction x reporting owner (`n_owners`),
+`usable_from > filing_date` asserted on every row.
 
 ## What was applied (D10)
 
-- **usable_from** = first XNYS session strictly after `FILING_DATE`. The data set has no
-  time and filings are often accepted after 16:00 ET (two of the three spot checks below), so
-  the next session is the earliest honest one.
-- **Amendments replace originals**, matched in three tiers, each tried only when the previous
+- **usable_from** = first XNYS session strictly after `FILING_DATE`: the data set has no time
+  and filings are often accepted after 16:00 ET (two of the three spot checks below).
+- **Amendments replace originals**, matched in four tiers, each tried only when the previous
   found nothing: (1) DATE: same issuer, base form and a shared reporting owner, `FILING_DATE` equal
-  to the amendment's `DATE_OF_ORIG_SUB`; filers put either the original's or the PREVIOUS
-  amendment's filing date there, so earlier amendments are valid targets and chains are walked to
-  their root; (2) CONTENT: an identical non-derivative transaction list within the prior 45 days
-  (`DATE_OF_ORIG_SUB` is often the transaction date - replacing an identical filing only removes
-  a double count); (3) PERIOD: a UNIQUE original with the same period of report within 45 days.
-  Within a tier candidates are ranked jointly (same period +2, original +1) and the top-scored
-  linked; a root's group is effective in its latest-filed member (an amendment beats a same-day
-  original whatever the accession order; two same-day amendments: higher accession). Round 1's
-  independent filters and accession ordering missed SWM `0001062993-22-012373` (same day, lower accession than its original) and TPL
-  `0001207097-22-000001` (same-period earlier amendment beside two different-period same-day
-  originals), double-counting both; both are pinned on the real database
-  (`test_real_full_database_supersedes_the_observed_cases`) plus seven fixture patterns.
-  Full history: 54,268 amendments (46,060 `4/A`); 50,950 linked (tier 1: 49,729, tier 2: 377,
-  tier 3: 844), 627 ambiguous (all top candidates superseded), 23 tier-3 ambiguous refused,
-  3,318 unlinked (original before 2014 or no match) and effective on their own; 51,499 filings
-  superseded. Residual check - effective same-issuer/owner Form 4 pairs within 10 days with
-  identical transaction lists: 78 involve an amendment (was 348 before tiers 2-3), 3,982 of any
-  kind (two originals: re-filings or two identical trades, counted only). Supersession is
-  recomputed inside the dev copy on its own rows, so an amendment filed after the cutoff cannot
-  erase an original that was the best information before it
-  (`test_dev_copy_recomputes_supersession_on_its_own_rows`).
+  to the amendment's `DATE_OF_ORIG_SUB`; filers name either the original's or the PREVIOUS
+  amendment's filing date, so chains are walked to their root; (2) CONTENT: shared owner, identical non-derivative transaction list within the prior
+  45 days (`DATE_OF_ORIG_SUB` is often the transaction date); (3) PERIOD: shared owner, a UNIQUE original with the same period of
+  report within 45 days; (4) OWNER-FREE: the amendment corrects the reporting owner's identity
+  (CYAN `0001010549-14-000096` moves a gift from an individual's CIK to a foundation's; issuers'
+  own CIKs misfiled as the owner are the common shape): same named date, same period and an
+  IDENTICAL transaction list including shares owned after, linked only when UNIQUE; different
+  content without a shared owner is never linked. Within a tier candidates are ranked jointly (same
+  period +2, original +1) and the top-scored linked; a root's group is effective in its
+  latest-filed member (an amendment beats a same-day original whatever the accession order; two
+  same-day amendments: higher accession). Earlier rounds missed SWM `0001062993-22-012373`
+  (same day, lower accession than its original), TPL `0001207097-22-000001` (same-period earlier
+  amendment beside two different-period same-day originals) and CYAN (no shared owner); all three
+  are pinned on the real database plus ten fixture patterns.
+  Full history: 54,268 amendments (46,060 `4/A`); 51,000 linked (tier 1: 49,729, tier 2: 377, tier 3: 844, tier 4: 50), 627 ambiguous (all superseded), 23 tier-3 and 3 tier-4 ambiguous refused, 3,268 unlinked (original before 2014 or no match) and effective; 51,549 filings superseded. Residual check - effective same-issuer Form 4 pairs within 10
+  days with identical transaction lists: 78 same-owner pairs involve an amendment (348 before tiers 2-4). Ignoring the owner, 1,388 identical-list pairs involve an amendment, but a sample of ten was all different directors' identical grants (WAT, IIIN, MCS, BYD), which is why tier 4 also demands the named filing date. Supersession is recomputed inside the dev
+  copy on its own rows, so an amendment filed after the cutoff cannot erase an original that was
+  the best information before it (`test_dev_copy_recomputes_supersession_on_its_own_rows`).
 - **Re-runs are idempotent**: each quarter is keyed by its zip SHA-256; unchanged quarters are
   skipped, changed/forced ones are deleted and re-inserted in one transaction, and every derived
   column is rebuilt from scratch (`test_rerun_is_idempotent`, `test_changed_zip_replaces_only_its_quarter`).
@@ -51,9 +47,8 @@ with `n_owners` for joint filings). The loader asserts `usable_from > filing_dat
 ## Ticker / CIK matching
 
 The stable identity is the issuer CIK (`cik`). The as-filed `ISSUERTRADINGSYMBOL` is
-normalised to the PIT universe's Polygon spelling: upper-case, exchange prefixes stripped
-(`NYSE: KRC` -> `KRC`), OTC suffixes stripped, list -> first entry, class separators -> dot
-(`BRK-B` -> `BRK.B`), and `NONE`/`N/A`/prose -> null. Null symbols inherit the same CIK's most
+normalised to the PIT universe's Polygon spelling (upper-case, `NYSE: KRC` -> `KRC`, OTC suffix
+stripped, list -> first entry, `BRK-B` -> `BRK.B`, `NONE`/`N/A`/prose -> null). Null symbols inherit the same CIK's most
 recent earlier symbol (else earliest later): 2,487,375 filings carry the filed symbol, 12,687
 were filled from the issuer, 22,799 (0.9%) have none. Matching to the PIT panel is by normalised
 ticker at the event's `usable_from`, so a reused ticker matches whoever held it at filing time. No current-ticker table is used, so delisted names keep their
@@ -62,45 +57,44 @@ historical symbols.
 **Coverage, PIT top-500 member-months 2016-09 .. 2024-06** (membership rule of
 `scripts/pit_panel.py`): 56,756 member-months; 29,248 (51.5%) have at least one effective
 Form 4 non-derivative filing usable that month, 2,738 (4.8%) an open-market purchase (P).
-The unmatched residue is 13,401 member-months (23.6%) over 1,134 tickers, and it is almost
-entirely instruments with no Section 16 insiders: 12,966 member-months over 1,111 tickers have
+The unmatched residue, 13,401 member-months (23.6%) over 1,134 tickers, is almost entirely
+instruments with no Section 16 insiders: 12,966 member-months over 1,111 tickers have
 no 10-K/10-Q fundamentals either (ETFs such as XLE/XLK/TLT/GLD/IWM, ADRs, trusts). Among
 operating companies (ticker present in the `fundamentals` table) coverage is 27,128 of 38,001
 member-months (71.4%) and the residue is 435 member-months (1.1%) over 23 tickers, itself
 mostly grantor trusts and foreign private issuers that file no Form 4 (GLD, SLV, IAU, SHOP,
-SHPG, CBOE, BF.B, GBTC, IBIT ...). Monthly coverage is bounded by insider
-activity, not matching.
+SHPG, CBOE, BF.B, GBTC, IBIT ...).
 
 ### Open-market purchases (code P, Form 4, effective filings) per filing year
 
 | year | P transactions | P filings | issuers (CIK) | matched PIT tickers |
 |---|---:|---:|---:|---:|
 | 2014 | 32,319 | 17,515 | 3,065 | 1,303 |
-| 2015 | 39,458 | 20,441 | 3,229 | 1,537 |
+| 2015 | 39,457 | 20,440 | 3,229 | 1,537 |
 | 2016 | 33,997 | 17,557 | 2,957 | 1,473 |
-| 2017 | 27,525 | 15,028 | 2,683 | 1,402 |
+| 2017 | 27,522 | 15,026 | 2,683 | 1,402 |
 | 2018 | 44,097 | 18,943 | 2,872 | 1,611 |
 | 2019 | 38,609 | 17,249 | 2,739 | 1,531 |
 | 2020 | 30,587 | 18,416 | 3,047 | 1,797 |
-| 2021 | 25,562 | 14,426 | 2,785 | 1,582 |
+| 2021 | 25,559 | 14,424 | 2,785 | 1,582 |
 | 2022 | 33,064 | 16,934 | 2,934 | 1,748 |
-| 2023 | 27,982 | 15,308 | 2,638 | 1,474 |
-| 2024 | 21,865 | 12,108 | 2,419 | 1,302 |
-| 2025 | 21,639 | 12,228 | 2,512 | 1,372 |
+| 2023 | 27,981 | 15,307 | 2,638 | 1,474 |
+| 2024 | 21,863 | 12,106 | 2,419 | 1,302 |
+| 2025 | 21,638 | 12,227 | 2,512 | 1,372 |
 | 2026 | 4,851 | 2,969 | 1,110 | 555 |
 
-`matched PIT tickers` = P-purchase tickers that year that ever appear in `pit_daily_bars`.
+`matched PIT tickers` = P-purchase tickers ever present in `pit_daily_bars`.
 
 ## Spot checks against EDGAR (fetched 2026-09-29 from `www.sec.gov/Archives`)
 
 | # | accession | DB row | EDGAR primary document | acceptance |
 |---|---|---|---|---|
 | 1 | 0001127602-20-010727 (WFC, CIK 72971; Charles Scharf, CEO & President) | 2020-03-13 P 173,000 @ 28.69 A, 176,916 after; filed 2020-03-16, usable 2020-03-17 | 2020-03-13 P 173000 @ 28.69 A, 176916 | 2020-03-16 13:13 ET |
-| 2 | 0001179110-20-005097 (ABBV, CIK 1551152) — a `4/A` superseding 0001179110-20-004036 (filed 2020-03-20: P 2,200 @ 68.18; 800 @ 67.50; 750 @ 69.00) | 2020-03-20 P 1,550 @ 69.00 A, 17,644 after; filed 2020-04-24, usable 2020-04-27 (Mon) | one transaction: 2020-03-20 P 1550 @ 69 A, 17644 | 2020-04-24 17:07 ET |
+| 2 | 0001179110-20-005097 (ABBV, CIK 1551152), a `4/A` superseding 0001179110-20-004036 (three P rows: 2,200 @ 68.18; 800 @ 67.50; 750 @ 69.00) | 2020-03-20 P 1,550 @ 69.00 A, 17,644 after; filed 2020-04-24, usable 2020-04-27 | 2020-03-20 P 1550 @ 69 A, 17644 (one row) | 2020-04-24 17:07 ET |
 | 3 | 0001104659-23-074791 (LCID, CIK 1811210; 10% owner, joint filing, 2 reporting owners) | 2023-06-22 P 265,693,703 @ 6.83 A, 1,366,658,905 after; filed 2023-06-26, usable 2023-06-27 | 2023-06-22 P 265693703 @ 6.83 A, 1366658905 | 2023-06-26 17:09 ET |
 
-All three agree field for field. Check 2 shows why D10 replaces rather than appends. Checks 2
-and 3 were accepted after the close, where the next-session rule is exact, not conservative.
+All three agree field for field; checks 2 and 3 were accepted after the close, where the
+next-session rule is exact.
 
 ## Rows per quarter (filings / non-derivative transactions, as loaded)
 
@@ -120,16 +114,15 @@ and 3 were accepted after the close, where the next-session rule is exact, not c
 | 2025 | 63,284 / 103,029 | 50,861 / 66,915 | 35,457 / 55,125 | 36,421 / 59,678 |
 | 2026 | 69,259 / 103,733 | - | - | - |
 
-Totals: 49 quarters, 2,522,861 filings, 3,756,762 non-derivative and 1,492,816 derivative transactions;
-54,268 are 3/A, 4/A or 5/A amendments (4/A: 46,060); per-quarter 4/A and superseded counts are in `fetch_insider_form345.py report`.
+Totals: 49 quarters, 2,522,861 filings, 3,756,762 non-derivative and 1,492,816 derivative
+transactions; per-quarter 4/A and superseded counts are in `fetch_insider_form345.py report`.
 ## Caveats
 
 - Joint filings produce one row per reporting owner for the same transaction; sum shares
   per `accession, trans_sk` or weight by `1/n_owners`.
 - Derivative transactions (table II) are stored in `form345_deriv_trans` but not returned by
   `load_insider_events`.
-- 3,318 amendments stand alone as effective; a `4/A` that changes the numbers and names a wrong
-  original date outside tiers 2-3 still double-counts.
-- On 2026-09-29 `www.sec.gov/Archives` answered 403 "Undeclared Automated Tool" to a
-  parenthesised User-Agent and 200 to `MMR Research joelpob@gmail.com`; the data-set zips
-  accepted both.
+- 3,268 amendments stand alone as effective; a `4/A` that changes the numbers and names a
+  wrong original date outside tiers 2-4 still double-counts.
+- `www.sec.gov/Archives` answered 403 "Undeclared Automated Tool" to a parenthesised User-Agent
+  and 200 to `MMR Research joelpob@gmail.com`; the data-set zips accepted both.
