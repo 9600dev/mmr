@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from rebalance_fakes import AS_OF, FakeGateway, executed, execution, held, make_doc, write_targets
+from rebalance_fakes import AS_OF, FakeGateway, evidence, executed, filled_order, held, make_doc, observed, write_targets
 from trader.rebalance.__main__ import load_limits, main
 from trader.rebalance.plan import PositionLimits
 
@@ -101,13 +101,18 @@ def test_every_refusal_exits_nonzero_and_creates_nothing(tmp_path, capsys, doc_o
     assert gw.propose_calls == [] and not gw.groups and gw.recorded == []
 
 
-def test_gross_exposure_refusal_exits_nonzero_and_creates_nothing(tmp_path, capsys):
+def test_gross_exposure_refusal_is_the_default_for_plan_and_propose(tmp_path, capsys):
     path = write_targets(tmp_path, make_doc(weights={'AAPL': 0.5, 'MSFT': 0.5}))
     gw = FakeGateway(prices=PRICES, fills=held(AAPL=27), positions={'AAPL': 27})
-    code, _ = _run(['propose', str(path), *TODAY, '--band-pct', '5', '--strict'], gw)
-    assert code == 1 and 'GROSS_EXPOSURE_EXCEEDS_CAPITAL' in capsys.readouterr().err and gw.propose_calls == []
-    code, out = _run(['plan', str(path), *TODAY, '--band-pct', '5'], gw)          # default mode repairs it
-    assert code == 0 and 'BUY trimmed by 1' in out
+    code, out = _run(['propose', str(path), *TODAY, '--band-pct', '5'], gw)
+    err = capsys.readouterr().err
+    assert code == 1 and 'GROSS_EXPOSURE_EXCEEDS_CAPITAL' in err and 'lower --band-pct' in err
+    assert gw.propose_calls == [] and not gw.groups and out == ''
+    code, out = _run(['plan', str(path), *TODAY, '--band-pct', '5'], gw)          # plan is refused too: no repair
+    assert code == 1 and 'GROSS_EXPOSURE_EXCEEDS_CAPITAL' in capsys.readouterr().err and out == ''
+    code, out = _run(['plan', str(path), *TODAY, '--band-pct', '0'], gw)          # the documented remedy
+    assert code == 0 and 'SELL' in out and 'BUY' in out and 'expected cash after execution $200.00' in out
+    assert 'post-execution gross exposure $9,800.00 of capital $10,000.00' in out
 
 
 def test_propose_creates_pending_proposals_and_prints_ids(tmp_path):
@@ -187,23 +192,32 @@ def test_status_refuses_a_targets_file_for_another_sleeve(tmp_path, capsys):
     assert code == 1 and 'WRONG_SLEEVE' in capsys.readouterr().err
 
 
-def test_reconcile_journals_executions_and_prints_them():
+def test_reconcile_journals_receipts_and_prints_them():
+    obs, rc = filled_order(901, 'AAPL', 'BUY', 25, 200.0, exec_id='x1')
+    ev = evidence([obs, observed(902, 'MSFT', 'BUY', 'Submitted', filled=0)], [rc])
     gw = FakeGateway(proposals=[executed(1, 'AAPL', 'BUY', 25, order_ids=[901]), executed(2, 'MSFT', 'BUY', 7, order_ids=[902])],
-                     executions=[execution('x1', 901, 'AAPL', 'BUY', 25, 200.0)], positions={'AAPL': 25})
+                     evidence=ev, positions={'AAPL': 25})
     code, out = _run(['reconcile', '--sleeve', 's2p', '--dry-run'], gw)
     assert code == 0 and 'DRY RUN' in out and 'exec x1' in out and gw.recorded == []
     code, out = _run(['reconcile', '--sleeve', 's2p'], gw)
-    assert code == 0 and 'journaled now 1' in out and 'no execution yet for EXECUTED proposals: #2' in out
+    assert code == 0 and 'journaled now 1' in out
+    assert 'no execution yet for EXECUTED proposals: #2 (order 902, broker status Submitted)' in out
+    assert 'broker evidence observed 2026-09-29T14:35:00+00:00' in out
     assert len(gw.recorded) == 1 and gw.recorded[0].exec_id == 'x1'
     code, out = _run(['reconcile', '--sleeve', 's2p', '--json'], gw)
     doc = json.loads(out)
     assert code == 0 and doc['inserted'] == 0 and doc['holdings'] == {'AAPL': 25.0} and doc['unfilled_proposals'] == [2]
+    assert doc['unfilled'] == [{'proposal_id': 2, 'order_id': 902, 'broker_status': 'Submitted'}]
 
 
-def test_reconcile_refuses_when_executions_cannot_be_read(capsys):
-    gw = FakeGateway(fail_executions=True)
+def test_reconcile_refuses_when_executions_cannot_be_read_or_are_incomplete(capsys):
+    gw = FakeGateway(proposals=[executed(1, 'AAPL', 'BUY', 25, order_ids=[901])], fail_evidence=True)
     code, _ = _run(['reconcile', '--sleeve', 's2p'], gw)
     assert code == 1 and 'EXECUTIONS_UNREADABLE' in capsys.readouterr().err and gw.recorded == []
+    gw = FakeGateway(proposals=[executed(1, 'AAPL', 'BUY', 25, order_ids=[901])], positions={'AAPL': 25},
+                     evidence=evidence([observed(901, 'AAPL', 'BUY', 'Filled', filled=25)], []))
+    code, _ = _run(['reconcile', '--sleeve', 's2p'], gw)
+    assert code == 1 and 'EXECUTIONS_INCOMPLETE' in capsys.readouterr().err and gw.recorded == []
 
 
 def test_module_is_runnable_as_python_dash_m(tmp_path):

@@ -1,18 +1,21 @@
-"""Sleeve holdings, order sizing and the D12 refusals.
+"""Sleeve holdings, order sizing and the D15 refusals.
 
 Pure where it can be: :func:`reconcile_holdings` and :func:`size_orders` take
 plain data and return plain data; :func:`make_plan` is the only function here
 that talks to the ports, and it does so read-only.
 
-D12/D13 rules implemented here:
+D15/D13 rules implemented here:
   * holdings = per-ticker sums of the ``sleeve_fills`` journal (D13), clamped to
     IB — a sleeve never owns shares IB does not show;
-  * whole shares, ``floor(weight * capital / price)``;
-  * SELLs before BUYs; changes inside the no-trade band are skipped;
+  * whole shares, ``floor(weight * capital / price)`` — exactly, never adjusted;
+  * SELLs before BUYs; changes inside the no-trade band are skipped — exactly,
+    never un-skipped;
   * refusals: stale targets (> 5 trading sessions old), weights > 1.0 (already
     refused by the loader), an unpriceable ticker, POST-EXECUTION gross exposure
-    above the sleeve's capital (turnover within a batch is not capped);
-    expected cash after execution is never negative.
+    above the sleeve's capital (turnover within a batch is not capped). Expected
+    cash after execution is capital minus that exposure, so it is never negative
+    on a plan that is not refused. There is no repair mode: a plan is the
+    targets' sizing or it is refused.
 """
 from __future__ import annotations
 
@@ -25,14 +28,14 @@ from trader.rebalance.ports import Gateway, Pricer, ProposalRecord
 from trader.rebalance.targets import Targets
 from trader.trading.order_math import whole_shares_for_notional
 
-MAX_TARGET_AGE_SESSIONS = 5          # D12: targets older than 5 trading days are refused
+MAX_TARGET_AGE_SESSIONS = 5          # D15: targets older than 5 trading days are refused
 DEFAULT_BAND_PCT = 0.25              # no-trade band as % of sleeve capital, per name
 OPEN_STATUSES = frozenset({'PENDING', 'APPROVED'})   # in flight: not yet inventory, not yet dead
 _CENTS = 0.005                       # float slack when comparing dollar sums
 
 
 class Refusal(Exception):
-    """A D12 refusal: the CLI exits non-zero and nothing is created."""
+    """A D15 refusal: the CLI exits non-zero and nothing is created."""
 
     def __init__(self, code: str, message: str):
         super().__init__(f'{code}: {message}')
@@ -109,10 +112,9 @@ class Plan:
     skipped: Sequence[Skipped]
     cash_before: float
     cash_after: float
-    turnover_notional: float                    # sum of |order notional| (informational; D12 does not cap it)
-    gross_exposure_after: float                 # sum of resulting position values at plan prices (D12 cap)
+    turnover_notional: float                    # sum of |order notional| (informational; D15 does not cap it)
+    gross_exposure_after: float                 # sum of resulting position values at plan prices (D15 cap)
     warnings: Sequence[str] = field(default_factory=tuple)
-    notes: Sequence[str] = field(default_factory=tuple)
     open_proposals: Sequence[ProposalRecord] = field(default_factory=tuple)
 
     @property
@@ -144,7 +146,7 @@ class SleeveState:
 
 
 # ---------------------------------------------------------------------------
-# Freshness (D12: targets older than 5 trading days are refused)
+# Freshness (D15: targets older than 5 trading days are refused)
 # ---------------------------------------------------------------------------
 
 def sessions_after(as_of: dt.date, today: dt.date, calendar: str = 'XNYS') -> int:
@@ -171,7 +173,7 @@ def check_freshness(targets: Targets, today: dt.date) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Holdings (D13 journal sums, D12 reconciliation with IB)
+# Holdings (D13 journal sums, D15 reconciliation with IB)
 # ---------------------------------------------------------------------------
 
 def reconcile_holdings(journal: Mapping[str, float],
@@ -224,16 +226,17 @@ def size_orders(targets: Targets, holdings: Mapping[str, int], prices: Mapping[s
                 band_pct: float = DEFAULT_BAND_PCT, limits: PositionLimits | None = None,
                 sells_only: bool = False, warnings: Sequence[str] = (),
                 open_proposals: Sequence[ProposalRecord] = (),
-                ib_positions: Mapping[str, float] | None = None, strict: bool = False) -> Plan:
-    """Turn targets + reconciled holdings + prices into a :class:`Plan` (D12 sizing).
+                ib_positions: Mapping[str, float] | None = None) -> Plan:
+    """Turn targets + reconciled holdings + prices into a :class:`Plan` (D15 sizing).
 
-    Raises ``Refusal`` for an unpriceable ticker, a post-execution gross exposure
-    above capital, or a plan that cannot keep expected cash non-negative.
-    ``ib_positions`` (the account's total per symbol) lets the position-limit
-    flag value the whole resulting position, outside shares included, the way
-    the live gate does. ``strict`` disables the automatic repair of a plan whose
-    banded names overhang capital: the plan is then exactly the targets, or it
-    is refused (``GROSS_EXPOSURE_EXCEEDS_CAPITAL``).
+    Every order is exactly ``floor(weight * capital / price) - held``; nothing
+    is trimmed, rounded up, or un-skipped to make a plan fit. Raises ``Refusal``
+    for an unpriceable ticker and for a post-execution gross exposure above
+    capital (``GROSS_EXPOSURE_EXCEEDS_CAPITAL``) — the only way a compliant plan
+    can overhang capital is through names left inside the no-trade band, so the
+    remedy is a smaller ``band_pct`` or targets that leave cash. ``ib_positions``
+    (the account's total per symbol) lets the position-limit flag value the whole
+    resulting position, outside shares included, the way the live gate does.
     """
     if not (math.isfinite(band_pct) and band_pct >= 0):
         raise Refusal('BAD_BAND', f'no-trade band must be a finite percentage >= 0, got {band_pct!r}')
@@ -248,7 +251,6 @@ def size_orders(targets: Targets, holdings: Mapping[str, int], prices: Mapping[s
 
     wanted = {t: target_shares(targets.weights.get(t, 0.0), capital, px[t]) for t in universe}
     band_usd = band_pct / 100.0 * capital
-    notes: list[str] = []
     deltas: dict[str, int] = {}
     skipped: list[Skipped] = []
     for t in universe:
@@ -264,36 +266,6 @@ def size_orders(targets: Targets, holdings: Mapping[str, int], prices: Mapping[s
             skipped.append(Skipped(t, delta, notional, 'sells-only run'))
             continue
         deltas[t] = delta
-
-    def _cash_after() -> float:
-        book = sum((holdings.get(t, 0) + deltas.get(t, 0)) * px[t] for t in universe)
-        return capital - book
-
-    # Expected cash after execution must never be negative (D12). Floor sizing
-    # and weights <= 1 make this hold whenever every name is traded to target;
-    # names left inside the band can hold slightly more than target, so trim
-    # buys first, then un-skip the largest banded sells, then give up loudly.
-    if _cash_after() < -_CENTS and not strict:
-        for t in sorted((s for s, d in deltas.items() if d > 0), key=lambda s: -deltas[s] * px[s]):
-            shortfall = -_cash_after()
-            if shortfall <= _CENTS:
-                break
-            cut = min(deltas[t], int(math.ceil(shortfall / px[t])))
-            deltas[t] -= cut
-            notes.append(f'{t}: BUY trimmed by {cut} shares to keep expected cash >= 0')
-            if deltas[t] == 0:
-                del deltas[t]
-        if _cash_after() < -_CENTS:
-            for sk in sorted((s for s in skipped if s.delta < 0), key=lambda s: -s.notional):
-                if _cash_after() >= -_CENTS:
-                    break
-                deltas[sk.symbol] = sk.delta
-                skipped.remove(sk)
-                notes.append(f'{sk.symbol}: banded SELL of {-sk.delta} restored to keep expected cash >= 0')
-        if _cash_after() < -_CENTS:
-            raise Refusal('CASH_NEGATIVE',
-                          f'expected cash after execution would be ${_cash_after():,.2f}; '
-                          f'holdings are valued above the sleeve capital ${capital:,.2f}')
 
     ib = {str(k).upper(): float(v) for k, v in (ib_positions or {}).items()}
     orders: list[Order] = []
@@ -313,15 +285,18 @@ def size_orders(targets: Targets, holdings: Mapping[str, int], prices: Mapping[s
     turnover = sum(o.notional for o in ordered)
     value_before = sum(holdings.get(t, 0) * px[t] for t in universe)
     exposure_after = sum((holdings.get(t, 0) + deltas.get(t, 0)) * px[t] for t in universe)
-    # D12: the cap is on the sleeve's resulting gross exposure, not on turnover.
+    # D15: the cap is on the sleeve's resulting gross exposure, not on turnover. No repair:
+    # the plan is the targets' sizing or it is refused, and the message names the remedy.
     if exposure_after > capital + _CENTS:
+        banded = [s.symbol for s in skipped if s.delta < 0]
         raise Refusal('GROSS_EXPOSURE_EXCEEDS_CAPITAL',
                       f'post-execution gross exposure ${exposure_after:,.2f} exceeds sleeve capital '
-                      f'${capital:,.2f} (D12)' + ('; drop --strict to let the planner trim BUYs / restore '
-                                                  'banded SELLs' if strict else ''))
+                      f'${capital:,.2f} (D15); nothing sized. '
+                      + (f'Names inside the no-trade band hold more than target: {", ".join(banded)} — '
+                         f'lower --band-pct (currently {band_pct:g}%) so they trade to target, '
+                         if banded else '')
+                      + 'or regenerate targets that leave cash')
     cash_after = capital - exposure_after
-    if cash_after < -_CENTS:  # unreachable given the loop above; fail closed regardless
-        raise Refusal('CASH_NEGATIVE', f'expected cash after execution ${cash_after:,.2f} < 0')
     all_warnings = list(warnings)
     unevaluable = limits.unevaluable_reason()
     if unevaluable and buys:
@@ -329,9 +304,9 @@ def size_orders(targets: Targets, holdings: Mapping[str, int], prices: Mapping[s
     return Plan(
         sleeve=targets.sleeve, as_of=targets.as_of, capital_usd=capital,
         holdings=dict(holdings), prices=px, orders=tuple(ordered), skipped=tuple(skipped),
-        cash_before=capital - value_before, cash_after=max(cash_after, 0.0),
+        cash_before=capital - value_before, cash_after=cash_after,
         turnover_notional=turnover, gross_exposure_after=exposure_after,
-        warnings=tuple(all_warnings), notes=tuple(notes), open_proposals=tuple(open_proposals),
+        warnings=tuple(all_warnings), open_proposals=tuple(open_proposals),
     )
 
 
@@ -379,14 +354,14 @@ def sleeve_state(sleeve: str, gateway: Gateway) -> SleeveState:
 
 def make_plan(targets: Targets, gateway: Gateway, *, today: dt.date | None = None,
               band_pct: float = DEFAULT_BAND_PCT, limits: PositionLimits | None = None,
-              sells_only: bool = False, strict: bool = False) -> Plan:
+              sells_only: bool = False) -> Plan:
     """The dry run: freshness, holdings, prices, sizing. Read-only against the ports."""
     check_freshness(targets, today or dt.date.today())
     state = sleeve_state(targets.sleeve, gateway)
     prices = fetch_prices(gateway, set(targets.weights) | set(state.holdings))
     return size_orders(targets, state.holdings, prices, band_pct=band_pct, limits=limits,
                        sells_only=sells_only, warnings=state.warnings, open_proposals=state.open_proposals,
-                       ib_positions=state.ib_positions, strict=strict)
+                       ib_positions=state.ib_positions)
 
 
 def _log():

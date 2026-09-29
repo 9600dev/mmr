@@ -1,4 +1,4 @@
-"""D09 propose: one PENDING proposal per order via the SDK propose call, and nothing else — ever."""
+"""D15 propose: one PENDING proposal per order via the SDK propose call, and nothing else — ever."""
 from __future__ import annotations
 
 import pytest
@@ -37,7 +37,7 @@ def test_propose_makes_exact_calls_and_never_touches_approve_or_orders():
         rb = c['metadata']['rebalance']
         assert rb['sleeve'] == 's2p' and rb['as_of'] == AS_OF and rb['targets_file'] == PATH
         assert rb['strategy']['source_sha256'] == SHA and rb['capital_usd'] == 10_000.0
-    assert gw.groups == {'sleeve_s2p': 'rebalancer sleeve s2p (D09 holdings ledger)'}
+    assert gw.groups == {'sleeve_s2p': 'rebalancer sleeve s2p (D15 holdings ledger)'}
     # The only gateway methods ever invoked are reads plus propose/ensure_group.
     assert gw.method_names <= {'proposals_in_group', 'stock_positions', 'sleeve_holdings', 'price',
                                'ensure_group', 'propose'}

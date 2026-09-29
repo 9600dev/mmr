@@ -1,8 +1,10 @@
 """CLI: ``python -m trader.rebalance {plan,propose,status,reconcile}``.
 
-Exit codes: 0 success; 1 a D12 refusal (nothing created) or an incomplete
+Exit codes: 0 success; 1 a D15 refusal (nothing created) or an incomplete
 propose; 2 usage / targets validation error. ``propose`` writes only PENDING
-proposals and ``reconcile`` writes only the D13 ``sleeve_fills`` journal.
+proposals and ``reconcile`` (without ``--dry-run``) writes only the D13
+``sleeve_fills`` journal; ``plan``, ``status`` and ``reconcile --dry-run``
+write nothing at all.
 """
 from __future__ import annotations
 
@@ -36,7 +38,7 @@ def _parse_date(text: str) -> dt.date:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog='python -m trader.rebalance',
                                 description='Target-weights rebalancer: targets file -> order plan -> '
-                                            'PENDING proposals. Never approves or trades (D12).')
+                                            'PENDING proposals. Never approves or trades (D15).')
     sub = p.add_subparsers(dest='cmd', required=True)
 
     def common(sp: argparse.ArgumentParser) -> None:
@@ -47,8 +49,6 @@ def build_parser() -> argparse.ArgumentParser:
                         help='override the session date used for the staleness check (tests)')
         sp.add_argument('--sells-only', action='store_true',
                         help='plan only the SELL side (fund the BUYs in a later batch)')
-        sp.add_argument('--strict', action='store_true',
-                        help='never trim BUYs or restore banded SELLs to fit capital: refuse instead')
         sp.add_argument('--json', action='store_true', help='machine-readable output')
         sp.add_argument('--config', default='', help='trader.yaml path (default: ~/.config/mmr/trader.yaml)')
 
@@ -103,7 +103,7 @@ def main(argv: Optional[list[str]] = None, *, gateway_factory: Optional[GatewayF
             gateway = factory()
             plan = make_plan(targets, gateway, today=args.today, band_pct=args.band_pct,
                              limits=limits if limits is not None else load_limits(gateway, args.config),
-                             sells_only=args.sells_only, strict=args.strict)
+                             sells_only=args.sells_only)
             if args.cmd == 'plan':
                 print(json.dumps(plan_to_dict(plan, targets), indent=2, default=str) if args.json
                       else render_plan(plan, targets), file=out)

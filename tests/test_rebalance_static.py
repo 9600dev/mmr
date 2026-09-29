@@ -1,4 +1,4 @@
-"""Static proof (D09): the rebalancer package cannot approve, place, cancel or close anything.
+"""Static proof (D15): the rebalancer package cannot approve, place, cancel or close anything.
 
 Walks the AST of every module under trader/rebalance/: no import, attribute,
 name, string-keyed getattr or raw RPC chain may reach a trading action.
@@ -22,7 +22,9 @@ FORBIDDEN_NAMES = {
     'subprocess', 'os.system', 'system',
 }
 FORBIDDEN_MODULES = {'trader.trading.trading_runtime', 'trader.trading.executioner',
-                     'trader.messaging.clientserver', 'subprocess', 'ib_async'}
+                     'trader.messaging.clientserver', 'subprocess', 'ib_async',
+                     # local ORDER_FILLED events are tracker-derived fill deltas, not IB execution receipts (D13)
+                     'trader.data.event_store'}
 
 
 def _modules() -> list[Path]:
@@ -85,5 +87,5 @@ def test_ports_cannot_express_a_trading_action():
     for proto in (ports.FillsJournal,):
         methods |= {m for m in vars(proto) if not m.startswith('_')}
     # Reads, one PENDING-proposal write, one write to the journal the package owns (D13). No trade.
-    assert methods == {'proposals_in_group', 'stock_positions', 'account_net_liquidation', 'executions',
+    assert methods == {'proposals_in_group', 'stock_positions', 'account_net_liquidation', 'execution_evidence',
                        'price', 'sleeve_holdings', 'record_fills', 'ensure_group', 'propose'}

@@ -1,4 +1,4 @@
-"""D12/D13 planner: journal holdings clamped to IB, floor sizing, band, ordering, refusals, limit flags."""
+"""D15/D13 planner: journal holdings clamped to IB, floor sizing, band, ordering, refusals, limit flags."""
 from __future__ import annotations
 
 import datetime as dt
@@ -13,6 +13,7 @@ from trader.rebalance.plan import (
     reconcile_holdings, sessions_after, size_orders, target_shares,
 )
 from trader.rebalance.targets import validate_targets
+from trader.trading.order_math import whole_shares_for_notional
 
 PRICES = {'AAPL': 200.0, 'MSFT': 400.0, 'TSLA': 250.0}
 
@@ -131,7 +132,7 @@ def test_sells_only_plans_the_sell_side_and_reports_deferred_buys():
 
 
 def test_full_turnover_is_allowed_when_post_execution_exposure_fits_capital():
-    # D12: turnover within a batch is not capped — sell $10k of AAPL and buy $10k of MSFT in one plan.
+    # D15: turnover within a batch is not capped — sell $10k of AAPL and buy $10k of MSFT in one plan.
     plan = size_orders(_targets(weights={'MSFT': 1.0}), {'AAPL': 50}, PRICES)
     assert [(o.action, o.symbol, o.quantity) for o in plan.orders] == [('SELL', 'AAPL', 50), ('BUY', 'MSFT', 25)]
     assert plan.turnover_notional == pytest.approx(20_000) and plan.gross_exposure_after == pytest.approx(10_000)
@@ -184,16 +185,32 @@ def test_unpriceable_ticker_refuses_the_whole_plan():
     assert 'TSLA' in exc.value.message
 
 
-def test_strict_mode_refuses_instead_of_trimming_when_exposure_would_exceed_capital():
-    # Same overhang as the trim test below: AAPL 27 held (target 25) inside a 5% band, MSFT bought to 12.
-    # Default mode repairs the plan; --strict refuses it with the D12 code and creates nothing.
+def test_banded_overhang_is_refused_by_default_and_never_repaired():
+    """AAPL holds 27 (target 25): -2 shares = $400 sits inside a 5% ($500) band, so it is skipped and its $5,400
+    stays on the book; buying MSFT to its 12-share target would put the book at $10,200 > capital. D15 fixes the
+    sizing and the band, so the plan is refused — the BUY is never cut to 11 and the banded SELL never un-skipped."""
     t = _targets(weights={'AAPL': 0.5, 'MSFT': 0.5})
     prices = {'AAPL': 200.0, 'MSFT': 400.0}
     with pytest.raises(Refusal) as exc:
-        size_orders(t, {'AAPL': 27}, prices, band_pct=5.0, strict=True)
+        size_orders(t, {'AAPL': 27}, prices, band_pct=5.0)
     assert exc.value.code == 'GROSS_EXPOSURE_EXCEEDS_CAPITAL'
-    assert '$10,200.00 exceeds sleeve capital $10,000.00' in exc.value.message and '--strict' in exc.value.message
-    assert size_orders(t, {'AAPL': 27}, prices, band_pct=5.0).gross_exposure_after <= 10_000
+    assert '$10,200.00 exceeds sleeve capital $10,000.00' in exc.value.message
+    assert 'AAPL' in exc.value.message and 'lower --band-pct (currently 5%)' in exc.value.message
+    with pytest.raises(Refusal) as exc:                          # nothing to cut: still a refusal, not an un-skipped sell
+        size_orders(t, {'AAPL': 27, 'MSFT': 12}, prices, band_pct=5.0)
+    assert exc.value.code == 'GROSS_EXPOSURE_EXCEEDS_CAPITAL'
+
+
+def test_the_remedy_is_a_smaller_band_which_trades_every_name_exactly_to_target():
+    t = _targets(weights={'AAPL': 0.5, 'MSFT': 0.5})
+    prices = {'AAPL': 200.0, 'MSFT': 400.0}
+    plan = size_orders(t, {'AAPL': 27}, prices, band_pct=0.0)
+    assert [(o.action, o.symbol, o.quantity) for o in plan.orders] == [('SELL', 'AAPL', 2), ('BUY', 'MSFT', 12)]
+    assert plan.gross_exposure_after == pytest.approx(9_800.0) and plan.cash_after == pytest.approx(200.0)   # 12 x $400 + 25 x $200
+    assert plan.skipped == () and not hasattr(plan, 'notes')
+    for o in plan.orders:
+        assert o.target_shares == whole_shares_for_notional(o.target_weight * t.capital_usd, o.price)
+        assert o.quantity == abs(o.target_shares - o.held_before)
 
 
 def test_unreadable_ib_book_refuses_instead_of_assuming_flat():
@@ -223,28 +240,6 @@ def test_bad_band_is_refused():
         size_orders(_targets(), {}, PRICES, band_pct=-1)
 
 
-def test_cash_never_negative_trims_buys_when_a_banded_overweight_overhangs_capital():
-    # AAPL holds 27 (target 25): -2 shares = $400, inside a 5% ($500) band, so it is skipped and its
-    # $5,400 stays on the book. Buying MSFT to its 12-share target would put the book at $10,200 > capital,
-    # so the planner trims the BUY by ceil($200 / $400) = 1 share and says so.
-    t = _targets(weights={'AAPL': 0.5, 'MSFT': 0.5})
-    prices = {'AAPL': 200.0, 'MSFT': 400.0}
-    plan = size_orders(t, {'AAPL': 27}, prices, band_pct=5.0)
-    assert [(o.action, o.symbol, o.quantity) for o in plan.orders] == [('BUY', 'MSFT', 11)]
-    assert plan.cash_after == pytest.approx(200.0) and plan.gross_exposure_after <= t.capital_usd
-    assert plan.notes and 'MSFT: BUY trimmed by 1' in plan.notes[0]
-    assert [(s.symbol, s.delta) for s in plan.skipped] == [('AAPL', -2)]
-
-
-def test_cash_never_negative_restores_a_banded_sell_when_there_is_nothing_to_trim():
-    t = _targets(weights={'AAPL': 0.5, 'MSFT': 0.5})
-    prices = {'AAPL': 200.0, 'MSFT': 400.0}
-    plan = size_orders(t, {'AAPL': 27, 'MSFT': 12}, prices, band_pct=5.0)
-    assert [(o.action, o.symbol, o.quantity) for o in plan.orders] == [('SELL', 'AAPL', 2)]
-    assert plan.cash_after == pytest.approx(200.0) and plan.skipped == ()
-    assert any('banded SELL of 2 restored' in n for n in plan.notes)
-
-
 @settings(max_examples=150, deadline=None)
 @given(
     weights=st.lists(st.floats(0.01, 0.6, allow_nan=False), min_size=1, max_size=5),
@@ -264,9 +259,17 @@ def test_property_plan_is_whole_share_long_only_and_never_overdraws(weights, hel
     try:
         plan = size_orders(t, holdings, pmap, band_pct=band)
     except Refusal as exc:
-        assert exc.code in ('GROSS_EXPOSURE_EXCEEDS_CAPITAL', 'CASH_NEGATIVE')
+        assert exc.code == 'GROSS_EXPOSURE_EXCEEDS_CAPITAL'          # the only refusal sizing itself can raise
         return
     assert plan.cash_after >= 0.0
+    band_usd = band / 100.0 * capital
+    for o in plan.orders:                                            # D15 sizing, exactly, never adjusted to fit
+        expected = whole_shares_for_notional(o.target_weight * capital, o.price) if o.target_weight * capital >= o.price else 0
+        assert o.target_shares == expected
+        assert o.quantity == abs(o.target_shares - o.held_before)
+        assert o.notional >= band_usd or o.target_weight == 0.0      # inside the band only a full exit trades
+    for sk in plan.skipped:
+        assert sk.notional < band_usd
     assert plan.gross_exposure_after <= capital + 0.005
     after = plan.holdings_after()
     assert all(q > 0 for q in after.values())                          # long-only, never short

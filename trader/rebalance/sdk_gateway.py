@@ -1,24 +1,31 @@
-"""Production adapter: the four ports implemented over :class:`trader.sdk.MMR`.
+"""Production adapter: the ports implemented over :class:`trader.sdk.MMR`.
 
 This is the ONLY module in the package that touches the SDK, and it uses just
 these members: ``connect``/``close``, ``positions`` (IB book, read-only),
 ``snapshot`` (prices, read-only), ``_get_portfolio_state`` (NetLiquidation,
+read-only), ``execution_snapshot`` (IB execution receipts + order observations,
 read-only), ``propose`` (creates a PENDING proposal) and the proposal/group
-stores for reads plus group creation. Broker executions come from the event
-store's ORDER_FILLED journal and sleeve fills from the D13 ``sleeve_fills``
-table, both in the main DuckDB. Nothing here can approve, place, cancel or
-close — see ``tests/test_rebalance_static.py``.
+stores for reads plus group creation. Sleeve fills live in the D13
+``sleeve_fills`` table in the main DuckDB. Nothing here can approve, place,
+cancel or close — see ``tests/test_rebalance_static.py``.
+
+Broker executions are deliberately NOT read from the local event store: its
+``ORDER_FILLED`` rows are cumulative fill deltas the order tracker derives from
+``orderStatus`` messages (possibly without an execution id, stamped with the
+observation time), not IB's execution receipts.
 """
 from __future__ import annotations
 
+import datetime as dt
 import math
-from typing import Any, Mapping, Optional, Sequence
+import sys
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from trader.rebalance.ports import Execution, Fill, ProposalRecord
+from trader.rebalance.ports import Execution, ExecutionEvidence, Fill, OrderObservation, ProposalRecord
 
 
 class SdkGateway:
-    """Read IB + the proposal store through the SDK; write only via ``propose``."""
+    """Read IB + the proposal store through the SDK; write only via ``propose`` and the journal."""
 
     def __init__(self, mmr: Any, *, connected: bool = False):
         self._mmr = mmr
@@ -79,23 +86,17 @@ class SdkGateway:
         value = float(state.net_liquidation)
         return value if math.isfinite(value) and value > 0 else None
 
-    def executions(self) -> Sequence[Execution]:
-        """ORDER_FILLED events: trader_service's durable journal of broker executions."""
-        from trader.data.event_store import EventStore
-        store = EventStore(self._duckdb_path())
-        out: list[Execution] = []
-        for ev in store.list_fills(limit=1_000_000):
-            meta = dict(ev.metadata or {})
-            if meta.get('excluded_from_ledger'):
-                continue
-            exec_id = str(meta.get('execId') or '') or f'event:{ev.id}'
-            price: Optional[float] = float(ev.price) if ev.price and math.isfinite(float(ev.price)) else None
-            if meta.get('price_evaluable') is False:
-                price = None
-            out.append(Execution(exec_id=exec_id, order_id=int(ev.order_id), symbol=str(ev.symbol).upper(),
-                                 action=str(ev.action).upper(), quantity=float(ev.quantity), price=price,
-                                 time=ev.timestamp, commission=None, event_id=ev.id))
-        return out
+    def execution_evidence(self, order_ids: Sequence[int]) -> ExecutionEvidence:
+        """trader_service's read-only ``execution_snapshot`` scoped to the sleeve's broker order ids."""
+        ids = sorted({int(o) for o in order_ids})
+        if not ids:
+            return ExecutionEvidence(account='', account_confirmed=True, receipts_available=True,
+                                     history_complete=True, orders_complete=True, observed_at='',
+                                     orders=(), executions=(), replay_scope='nothing requested')
+        snap = self._mmr.execution_snapshot(order_ids=ids)
+        if not isinstance(snap, Mapping):
+            raise ConnectionError(f'execution_snapshot returned {type(snap).__name__}, not a snapshot')
+        return evidence_from_snapshot(snap, ids)
 
     # -- FillsJournal -------------------------------------------------------
     def sleeve_holdings(self, sleeve: str) -> Mapping[str, float]:
@@ -124,6 +125,83 @@ class SdkGateway:
             reasoning=reasoning, source=source, group=group, metadata=dict(metadata),
         )
         return int(proposal_id)
+
+
+def _num(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
+
+
+def _price(value: Any) -> Optional[float]:
+    number = _num(value)
+    # ib_async's UNSET_DOUBLE (sys.float_info.max) is finite and positive: not a price.
+    return number if 0 < number < sys.float_info.max else None
+
+
+def _time(value: Any) -> Optional[dt.datetime]:
+    """An IB execution time from its receipt. Naive values are UTC (ib_async's convention)."""
+    if isinstance(value, dt.datetime):
+        parsed = value
+    elif isinstance(value, str) and value:
+        try:
+            parsed = dt.datetime.fromisoformat(value[:-1] + '+00:00' if value.endswith('Z') else value)
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=dt.timezone.utc)
+
+
+def evidence_from_snapshot(snap: Mapping[str, Any], order_ids: Iterable[int]) -> ExecutionEvidence:
+    """Map the ``execution_snapshot`` RPC reply onto :class:`ExecutionEvidence`, scoped to ``order_ids``.
+
+    Completeness flags are copied, never inferred: a missing key reads as False.
+    Receipts and observations for other order ids or another account are dropped.
+    """
+    wanted = {int(o) for o in order_ids}
+    account = str(snap.get('account') or '')
+    replay = snap.get('execution_replay') or {}
+    orders: list[OrderObservation] = []
+    for row in snap.get('orders') or []:
+        if not isinstance(row, Mapping):
+            continue
+        oid = int(row.get('orderId') or 0)
+        if oid not in wanted:
+            continue
+        row_account = str(row.get('account') or '')
+        if account and row_account and row_account != account:
+            continue
+        orders.append(OrderObservation(
+            order_id=oid, symbol=str(row.get('symbol') or '').upper(), action=str(row.get('action') or '').upper(),
+            status=str(row.get('status') or ''), filled=_num(row.get('filled')),
+            fill_quantity_known=bool(row.get('fillQuantityKnown', False)), con_id=int(row.get('conId') or 0),
+            identity_ambiguous=bool(row.get('identityAmbiguous', False))))
+    executions: list[Execution] = []
+    for rec in snap.get('executions') or []:
+        if not isinstance(rec, Mapping):
+            continue
+        oid = int(rec.get('orderId') or 0)
+        exec_id = str(rec.get('execId') or '')
+        if oid not in wanted or not exec_id:
+            continue
+        rec_account = str(rec.get('account') or '')
+        if account and rec_account and rec_account != account:
+            continue
+        executions.append(Execution(
+            exec_id=exec_id, order_id=oid, shares=_num(rec.get('shares')), cum_qty=_num(rec.get('cumQty')),
+            price=_price(rec.get('price')), time=_time(rec.get('time')), account=rec_account,
+            perm_id=int(rec.get('permId') or 0)))
+    return ExecutionEvidence(
+        account=account, account_confirmed=bool(snap.get('account_confirmed', False)),
+        receipts_available=bool(snap.get('execution_receipts_available', False)),
+        history_complete=bool(snap.get('executions_complete', False)),
+        orders_complete=bool(snap.get('orders_complete', False)),
+        observed_at=str(snap.get('observed_at') or ''),
+        orders=tuple(orders), executions=tuple(sorted(executions, key=lambda e: (e.order_id, e.cum_qty, e.exec_id))),
+        replay_scope=str(replay.get('scope') or '') if isinstance(replay, Mapping) else '')
 
 
 def price_from_snapshot(snap: Mapping[str, Any] | None) -> Optional[float]:

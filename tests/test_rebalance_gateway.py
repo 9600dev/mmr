@@ -2,19 +2,21 @@
 from __future__ import annotations
 
 import datetime as dt
+import sys
 from types import SimpleNamespace
 
+import duckdb
 import pandas as pd
 import pytest
 
-from trader.data.event_store import EventStore, EventType, TradingEvent
-from trader.rebalance.fills import SleeveFillsStore
+from trader.rebalance.fills import SleeveFillsStore, reconcile_sleeve
 from trader.rebalance.plan import Refusal
 from trader.rebalance.ports import Fill
-from trader.rebalance.sdk_gateway import SdkGateway, price_from_snapshot
+from trader.rebalance.sdk_gateway import SdkGateway, evidence_from_snapshot, price_from_snapshot
 from trader.trading.proposal import ExecutionSpec, TradeProposal
 
 UTC = dt.timezone.utc
+ACCOUNT = 'DUM422056'
 
 
 class _Store:
@@ -41,13 +43,14 @@ class _Groups:
 class FakeMMR:
     """Shape of trader.sdk.MMR as the gateway sees it; trading methods explode."""
 
-    def __init__(self, rows, positions_df, snapshots, duckdb_path='', net_liq=(True, 40_000.0)):
+    def __init__(self, rows, positions_df, snapshots, duckdb_path='', net_liq=(True, 40_000.0), exec_snapshot=None):
         self.store = _Store(rows)
         self.groups = _Groups()
         self._positions_df = positions_df
         self._snapshots = snapshots
         self._container = SimpleNamespace(config=lambda: {'duckdb_path': duckdb_path})
         self._net_liq = net_liq
+        self._exec_snapshot = exec_snapshot if exec_snapshot is not None else snapshot_reply()
         self.calls = []
         self.closed = False
 
@@ -68,6 +71,10 @@ class FakeMMR:
     def snapshot(self, symbol, **kw):
         self.calls.append('snapshot'); return self._snapshots[symbol]
 
+    def execution_snapshot(self, intent_id='', order_ids=None, client_intent_id=''):
+        self.calls.append(('execution_snapshot', intent_id, list(order_ids or [])))
+        return self._exec_snapshot
+
     def propose(self, **kw):
         self.calls.append('propose'); self.last_propose = kw; return (77, None, None)
 
@@ -79,6 +86,33 @@ class FakeMMR:
                     'place_protective_order', 'emergency_close_position', '_rpc'):
             raise AssertionError(f'gateway touched MMR.{name}')
         raise AttributeError(name)
+
+
+def snapshot_reply(orders=(), executions=(), **over):
+    """The dict trading_runtime.execution_snapshot returns (keys as the runtime writes them)."""
+    reply = {'complete': True, 'positions_complete': True, 'account': ACCOUNT, 'account_confirmed': True,
+             'client_id': 10, 'orders_complete': True, 'executions_complete': True,
+             'execution_replay': {'scope': 'broker_available_recent_history', 'history_start': None,
+                                  'requested_at': '2026-09-29T13:00:00+00:00', 'completed_at': '2026-09-29T13:00:02+00:00'},
+             'observed_at': '2026-09-29T14:35:00+00:00', 'orders': list(orders), 'retry_safe': False,
+             'intent_outcome': None, 'journal_healthy': True, 'execution_receipts_available': True,
+             'positions': [], 'executions': list(executions)}
+    reply.update(over)
+    return reply
+
+
+def order_row(order_id, symbol, action, status='Filled', filled=0.0, known=True, account=ACCOUNT, **over):
+    row = {'orderId': order_id, 'status': status, 'brokerStatus': status, 'filled': filled, 'fillQuantityKnown': known,
+           'remaining': 0.0, 'totalQuantity': filled, 'avgFillPrice': 0.0, 'orderRef': 'proposal', 'clientIntentId': '',
+           'action': action, 'orderType': 'MKT', 'conId': 1, 'symbol': symbol, 'account': account, 'clientId': 10,
+           'permId': order_id * 10, 'observed_at': '2026-09-29T14:34:00+00:00'}
+    row.update(over)
+    return row
+
+
+def receipt_row(exec_id, order_id, shares, price, cum_qty=None, time='2026-09-29T14:31:05+00:00', account=ACCOUNT):
+    return {'execId': exec_id, 'orderId': order_id, 'shares': shares, 'cumQty': shares if cum_qty is None else cum_qty,
+            'price': price, 'account': account, 'permId': order_id * 10, 'time': time}
 
 
 def _row(pid, symbol, action, qty, status, group='sleeve_s2p', source='rebalance:s2p:2026-08-31', meta=None, order_ids=()):
@@ -102,6 +136,14 @@ def _mmr(duckdb_path='', **kw):
              'NVDA': {'last': float('nan'), 'bid': float('nan'), 'ask': float('nan'), 'close': 120.0},
              'DEAD': {'last': float('nan'), 'bid': float('nan'), 'ask': float('nan'), 'close': float('nan')}}
     return FakeMMR(rows, positions, snaps, duckdb_path=duckdb_path, **kw)
+
+
+def tables(path: str) -> set[str]:
+    con = duckdb.connect(path, read_only=True)
+    try:
+        return {r[0] for r in con.execute('SELECT table_name FROM duckdb_tables()').fetchall()}
+    finally:
+        con.close()
 
 
 def test_proposals_in_group_filters_by_group_and_carries_order_ids():
@@ -140,25 +182,74 @@ def test_price_prefers_last_then_mid_then_close_and_refuses_otherwise():
     assert price_from_snapshot({'bid': 10.0, 'ask': 9.0}) is None      # crossed quote is not a price
 
 
-def test_executions_come_from_the_event_store_order_filled_journal(tmp_duckdb_path):
-    events = EventStore(tmp_duckdb_path)
-    t0 = dt.datetime(2026, 9, 1, 14, 30, tzinfo=UTC)
-    events.append(TradingEvent(event_type=EventType.ORDER_FILLED, timestamp=t0, strategy_name='proposal', conid=1,
-                               symbol='AAPL', action='BUY', quantity=20.0, price=199.5, order_id=901,
-                               metadata={'execId': '0001.abc', 'price_evaluable': True}))
-    events.append(TradingEvent(event_type=EventType.ORDER_FILLED, timestamp=t0, strategy_name='proposal', conid=1,
-                               symbol='AAPL', action='BUY', quantity=5.0, price=0.0, order_id=901,
-                               metadata={'price_evaluable': False}))                       # no execId, no price
-    events.append(TradingEvent(event_type=EventType.ORDER_SUBMITTED, timestamp=t0, strategy_name='proposal', conid=1,
-                               symbol='AAPL', action='BUY', quantity=25.0, price=0.0, order_id=901))
-    events.append(TradingEvent(event_type=EventType.ORDER_FILLED, timestamp=t0, strategy_name='proposal', conid=2,
-                               symbol='MSFT', action='BUY', quantity=7.0, price=400.0, order_id=902,
-                               metadata={'execId': '0002.def', 'excluded_from_ledger': True}))
-    execs = sorted(SdkGateway(_mmr(tmp_duckdb_path)).executions(), key=lambda e: e.exec_id)
-    assert [(e.exec_id[:5], e.order_id, e.symbol, e.action, e.quantity, e.price) for e in execs] == [
-        ('0001.', 901, 'AAPL', 'BUY', 20.0, 199.5), ('event', 901, 'AAPL', 'BUY', 5.0, None)]
-    from trader.rebalance.fills import trade_date_of
-    assert all(trade_date_of(e.time) == dt.date(2026, 9, 1) for e in execs)   # 14:30Z is 10:30 ET on Sep 1
+def test_execution_evidence_is_the_read_only_snapshot_scoped_to_the_sleeve_orders():
+    reply = snapshot_reply(
+        orders=[order_row(901, 'AAPL', 'BUY', 'Filled', filled=25.0),
+                order_row(902, 'MSFT', 'BUY', 'Submitted', filled=0.0, known=False),
+                order_row(904, 'TSLA', 'BUY', 'Filled', filled=9.0),                       # not requested
+                order_row(901, 'AAPL', 'BUY', 'Filled', filled=25.0, account='U0000001'),   # another account
+                order_row(902, 'MSFT', 'BUY', 'Filled', filled=7.0, identityAmbiguous=True)],
+        executions=[receipt_row('0000e.901.01', 901, 20.0, 199.5, cum_qty=20.0, time='2026-09-28T19:59:30+00:00'),
+                    receipt_row('0000e.901.02', 901, 5.0, 200.5, cum_qty=25.0),
+                    receipt_row('0000e.901.03', 901, 1.0, sys.float_info.max, cum_qty=26.0),  # UNSET_DOUBLE: no price
+                    receipt_row('', 901, 1.0, 1.0),                                          # no execId: not a receipt
+                    receipt_row('0000e.904.01', 904, 9.0, 250.0),                            # not requested
+                    receipt_row('0000e.901.09', 901, 5.0, 200.0, account='U0000001')])       # another account
+    m = _mmr(exec_snapshot=reply)
+    ev = SdkGateway(m).execution_evidence([902, 901])
+    assert m.calls[-1] == ('execution_snapshot', '', [901, 902])
+    assert ev.account == ACCOUNT and ev.account_confirmed and ev.receipts_available and ev.history_complete
+    assert ev.orders_complete and ev.observed_at == '2026-09-29T14:35:00+00:00'
+    assert ev.replay_scope == 'broker_available_recent_history'
+    assert [(o.order_id, o.symbol, o.action, o.status, o.filled, o.fill_quantity_known, o.identity_ambiguous)
+            for o in ev.orders] == [(901, 'AAPL', 'BUY', 'Filled', 25.0, True, False),
+                                    (902, 'MSFT', 'BUY', 'Submitted', 0.0, False, False),
+                                    (902, 'MSFT', 'BUY', 'Filled', 7.0, True, True)]
+    assert [(e.exec_id, e.order_id, e.shares, e.cum_qty, e.price, e.time) for e in ev.executions] == [
+        ('0000e.901.01', 901, 20.0, 20.0, 199.5, dt.datetime(2026, 9, 28, 19, 59, 30, tzinfo=UTC)),
+        ('0000e.901.02', 901, 5.0, 25.0, 200.5, dt.datetime(2026, 9, 29, 14, 31, 5, tzinfo=UTC)),
+        ('0000e.901.03', 901, 1.0, 26.0, None, dt.datetime(2026, 9, 29, 14, 31, 5, tzinfo=UTC))]
+
+
+def test_execution_evidence_copies_completeness_flags_and_never_infers_them():
+    degraded = snapshot_reply(execution_receipts_available=False, executions_complete=False, account_confirmed=False)
+    ev = SdkGateway(_mmr(exec_snapshot=degraded)).execution_evidence([901])
+    assert not ev.receipts_available and not ev.history_complete and not ev.account_confirmed
+    missing_keys = {'account': ACCOUNT, 'orders': [], 'executions': []}     # an old server: absent flags read False
+    ev = evidence_from_snapshot(missing_keys, [901])
+    assert not ev.receipts_available and not ev.history_complete and not ev.account_confirmed
+    m = _mmr()
+    assert SdkGateway(m).execution_evidence([]).receipts_available            # nothing requested: no RPC at all
+    assert not any(isinstance(c, tuple) and c[0] == 'execution_snapshot' for c in m.calls)
+    with pytest.raises(ConnectionError):
+        SdkGateway(_mmr(exec_snapshot=None)).execution_evidence([901]) if False else \
+            SdkGateway(FakeMMR([], pd.DataFrame(), {}, exec_snapshot=[])).execution_evidence([901])
+
+
+def test_reads_over_a_real_duckdb_never_create_the_journal_table(tmp_duckdb_path):
+    """plan, status and reconcile --dry-run must leave a database without sleeve_fills untouched."""
+    from rebalance_fakes import TODAY, make_doc
+    from trader.rebalance.plan import make_plan
+    from trader.rebalance.status import sleeve_status
+    from trader.rebalance.targets import validate_targets
+    reply = snapshot_reply(orders=[order_row(901, 'AAPL', 'BUY', filled=25.0), order_row(902, 'MSFT', 'BUY', filled=7.0)],
+                           executions=[receipt_row('0000e.901.01', 901, 25.0, 200.0), receipt_row('0000e.902.01', 902, 7.0, 400.0)])
+    gw = SdkGateway(_mmr(tmp_duckdb_path, exec_snapshot=reply))
+    assert gw.sleeve_holdings('s2p') == {}
+    t = validate_targets(make_doc(weights={'AAPL': 0.5, 'MSFT': 0.3}))
+    plan = make_plan(t, gw, today=TODAY)
+    assert plan.holdings == {} and [(o.action, o.symbol, o.quantity) for o in plan.orders] == [('BUY', 'AAPL', 25), ('BUY', 'MSFT', 7)]
+    assert sleeve_status('s2p', gw, targets_dir=str(tmp_duckdb_path) + '.nodir').market_value == 0.0
+    dry = reconcile_sleeve('s2p', gw, dry_run=True)
+    assert dry.matched_by_symbol == {'AAPL': 25.0, 'MSFT': 7.0} and dry.inserted == 0
+    assert 'sleeve_fills' not in tables(tmp_duckdb_path)                     # three dry paths, no DDL
+    with pytest.raises(Refusal, match='UNPRICEABLE'):
+        make_plan(validate_targets(make_doc(weights={'DEAD': 0.1})), gw, today=TODAY)
+    assert 'sleeve_fills' not in tables(tmp_duckdb_path)                     # a refusal creates nothing either
+    wet = reconcile_sleeve('s2p', gw)
+    assert wet.inserted == 2 and 'sleeve_fills' in tables(tmp_duckdb_path)   # only the write path creates it
+    assert gw.sleeve_holdings('s2p') == {'AAPL': 25.0, 'MSFT': 7.0}
+    assert make_plan(t, gw, today=TODAY).orders == ()
 
 
 def test_journal_round_trips_through_the_real_store(tmp_duckdb_path):
@@ -190,19 +281,3 @@ def test_close_only_disconnects_when_the_gateway_connected():
     assert not m.closed
     SdkGateway(m, connected=True).close()
     assert m.closed
-
-
-def test_end_to_end_plan_over_the_sdk_shaped_fake(tmp_duckdb_path):
-    from rebalance_fakes import TODAY, make_doc
-    from trader.rebalance.plan import make_plan
-    from trader.rebalance.targets import validate_targets
-    gw = SdkGateway(_mmr(tmp_duckdb_path))
-    now = dt.datetime.now(UTC)
-    gw.record_fills([Fill('s2p', 'AAPL', dt.date(2026, 9, 1), 25.0, 200.0, None, 'e1', '901', 1, now),
-                     Fill('s2p', 'MSFT', dt.date(2026, 9, 1), 7.0, 400.0, None, 'e2', '902', 2, now)])
-    t = validate_targets(make_doc(weights={'AAPL': 0.5, 'MSFT': 0.3}))
-    plan = make_plan(t, gw, today=TODAY)
-    assert plan.holdings == {'AAPL': 25, 'MSFT': 7} and plan.orders == ()
-    assert [r.id for r in plan.open_proposals] == [3]
-    with pytest.raises(Refusal, match='UNPRICEABLE'):
-        make_plan(validate_targets(make_doc(weights={'DEAD': 0.1})), gw, today=TODAY)

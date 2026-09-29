@@ -1,4 +1,4 @@
-"""``propose``: one PENDING proposal per planned order, nothing else (D09)."""
+"""``propose``: one PENDING proposal per planned order, nothing else (D15)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -29,7 +29,7 @@ def duplicate_batch(records: Sequence[ProposalRecord], source: str) -> list[Prop
 
 
 def check_no_open_batch(targets: Targets, reader: ProposalReader) -> None:
-    """D12: refuse a second batch for the same sleeve/as_of while one is in flight,
+    """D15: refuse a second batch for the same sleeve/as_of while one is in flight,
     and (``SLEEVE_BUSY``) any new batch while an earlier batch of the sleeve still
     has PENDING or APPROVED-unexecuted proposals: holdings would change under the
     new batch when they are approved. Approve or reject the earlier ones first.
@@ -65,14 +65,14 @@ def propose_plan(targets: Targets, plan: Plan, proposer: Proposer, reader: Propo
     creation stops and the ids already created are returned with
     ``complete == False`` and ``error`` set; they are real PENDING rows for the
     operator to review or reject — the rebalancer never rejects, approves or
-    cancels (D12).
+    cancels (D15).
     """
     from trader.trading.proposal import ExecutionSpec
 
     if not plan.orders:
         raise Refusal('NOTHING_TO_DO', 'the plan has no orders; nothing proposed')
     check_no_open_batch(targets, reader)
-    proposer.ensure_group(targets.group, f'rebalancer sleeve {targets.sleeve} (D09 holdings ledger)')
+    proposer.ensure_group(targets.group, f'rebalancer sleeve {targets.sleeve} (D15 holdings ledger)')
     spec = ExecutionSpec(order_type='MARKET', tif='DAY', outside_rth=False)
     ids: list[int] = []
     for order in plan.orders:

@@ -32,7 +32,7 @@ def plan_to_dict(plan: Plan, targets: Targets) -> dict[str, Any]:
         'cash_before': plan.cash_before, 'cash_after': plan.cash_after,
         'turnover_notional': plan.turnover_notional, 'gross_exposure_after': plan.gross_exposure_after,
         'limit_flags': [o.symbol for o in plan.limit_flags],
-        'warnings': list(plan.warnings), 'notes': list(plan.notes),
+        'warnings': list(plan.warnings),
         'open_proposals': [{'id': r.id, 'symbol': r.symbol, 'action': r.action,
                             'quantity': r.quantity, 'status': r.status, 'source': r.source}
                            for r in plan.open_proposals],
@@ -78,8 +78,6 @@ def render_plan(plan: Plan, targets: Targets) -> str:
         lines.append('  skipped:')
         for s in plan.skipped:
             lines.append(f'    {s.symbol}: delta {s.delta:+d} ({_money(s.notional)}) — {s.reason}')
-    for n in plan.notes:
-        lines.append(f'  note: {n}')
     return '\n'.join(lines)
 
 
@@ -151,7 +149,9 @@ def reconcile_to_dict(report: ReconcileReport) -> dict[str, Any]:
         'matched': [dataclasses.asdict(f) for f in report.matched],
         'matched_by_symbol': report.matched_by_symbol,
         'unfilled_proposals': list(report.unfilled_proposals),
+        'unfilled': [dataclasses.asdict(u) for u in report.unfilled],
         'proposals_without_order_ids': list(report.proposals_without_order_ids),
+        'evidence_observed_at': report.evidence_observed_at, 'replay_scope': report.replay_scope,
         'holdings': dict(report.holdings), 'ib_positions': dict(report.ib_positions),
         'warnings': list(report.warnings),
     }
@@ -165,9 +165,13 @@ def render_reconcile(report: ReconcileReport) -> str:
         px = 'n/a' if f.price is None else f'{f.price:.4f}'
         lines.append(f'  {f.trade_date} {f.ticker:<8} {f.quantity:+9.0f} @ {px:>10}  exec {f.exec_id}  '
                      f'order {f.order_id}  proposal #{f.proposal_id}')
-    if report.unfilled_proposals:
-        lines.append(f'  no execution yet for EXECUTED proposals: '
-                     f'{", ".join(f"#{i}" for i in report.unfilled_proposals)}')
+    if report.unfilled:
+        lines.append('  no execution yet for EXECUTED proposals: '
+                     + ', '.join(f'#{u.proposal_id} (order {u.order_id}, broker status {u.broker_status})'
+                                 for u in report.unfilled))
+    if report.evidence_observed_at:
+        lines.append(f'  broker evidence observed {report.evidence_observed_at}'
+                     + (f'  replay scope {report.replay_scope}' if report.replay_scope else ''))
     lines.append('  journal holdings vs IB:')
     for sym in sorted(set(report.holdings) | set(report.ib_positions)):
         j = report.holdings.get(sym)

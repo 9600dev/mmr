@@ -7,11 +7,13 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
-from trader.rebalance.ports import Execution, Fill, ProposalRecord
+from trader.rebalance.ports import Execution, ExecutionEvidence, Fill, OrderObservation, ProposalRecord
 
 SHA = 'a' * 64
 TODAY = dt.date(2026, 9, 29)          # a Tuesday; 2026-09-28 was the previous session
 AS_OF = '2026-09-28'
+ACCOUNT = 'DUM422056'
+T0 = dt.datetime(2026, 9, 1, 14, 30, tzinfo=dt.timezone.utc)      # 10:30 ET on Sep 1
 
 
 def make_doc(**over: Any) -> dict:
@@ -52,10 +54,37 @@ def executed(pid: int, symbol: str, action: str, qty: float, group: str = 'sleev
                           metadata={'submission_quantity': float(qty), 'con_id': 1}, order_ids=tuple(order_ids))
 
 
-def execution(exec_id: str, order_id: int, symbol: str, action: str, qty: float, price: float | None = 100.0,
-              when: dt.datetime | None = None) -> Execution:
-    return Execution(exec_id=exec_id, order_id=order_id, symbol=symbol, action=action, quantity=qty,
-                     price=price, time=when or dt.datetime(2026, 9, 1, 14, 30, tzinfo=dt.timezone.utc))
+def receipt(exec_id: str, order_id: int, shares: float, price: float | None = 100.0,
+            cum_qty: float | None = None, when: dt.datetime | None = None, account: str = ACCOUNT) -> Execution:
+    """One IB execution receipt; cum_qty defaults to shares (a single-execution order)."""
+    return Execution(exec_id=exec_id, order_id=order_id, shares=shares,
+                     cum_qty=shares if cum_qty is None else cum_qty, price=price,
+                     time=when or T0, account=account, perm_id=order_id * 10)
+
+
+def observed(order_id: int, symbol: str, action: str, status: str = 'Filled', filled: float = 0.0,
+             known: bool = True, ambiguous: bool = False) -> OrderObservation:
+    return OrderObservation(order_id=order_id, symbol=symbol, action=action, status=status, filled=filled,
+                            fill_quantity_known=known, con_id=1, identity_ambiguous=ambiguous)
+
+
+def evidence(orders: Sequence[OrderObservation] = (), executions: Sequence[Execution] = (), *,
+             receipts_available: bool = True, history_complete: bool = True, account_confirmed: bool = True,
+             orders_complete: bool = True, account: str = ACCOUNT,
+             observed_at: str = '2026-09-29T14:35:00+00:00',
+             replay_scope: str = 'broker_available_recent_history') -> ExecutionEvidence:
+    return ExecutionEvidence(account=account, account_confirmed=account_confirmed,
+                             receipts_available=receipts_available, history_complete=history_complete,
+                             orders_complete=orders_complete, observed_at=observed_at,
+                             orders=tuple(orders), executions=tuple(executions), replay_scope=replay_scope)
+
+
+def filled_order(order_id: int, symbol: str, action: str, shares: float, price: float = 100.0,
+                 exec_id: str | None = None, when: dt.datetime | None = None
+                 ) -> tuple[OrderObservation, Execution]:
+    """The common consistent case: a Filled observation and the single receipt that covers it."""
+    return (observed(order_id, symbol, action, 'Filled', filled=shares),
+            receipt(exec_id or f'x{order_id}', order_id, shares, price, when=when))
 
 
 class FakeGateway:
@@ -63,6 +92,8 @@ class FakeGateway:
 
     ``fills`` seeds the sleeve_fills journal (sleeve -> ticker -> signed sum);
     ``record_fills`` appends to it exactly like the real store (exec_id idempotent).
+    ``evidence`` is what ``execution_evidence`` returns (default: nothing observed,
+    everything complete); ``fail_evidence`` makes it raise like a dead RPC.
     """
 
     FORBIDDEN = ('approve', 'buy', 'sell', 'cancel', 'cancel_all', 'close_position', 'reject',
@@ -72,16 +103,16 @@ class FakeGateway:
     def __init__(self, proposals: Sequence[ProposalRecord] = (), positions: Optional[Mapping[str, float]] = None,
                  prices: Optional[Mapping[str, Optional[float]]] = None, fail_positions: bool = False,
                  fills: Optional[Mapping[str, Mapping[str, float]]] = None,
-                 executions: Sequence[Execution] = (), fail_executions: bool = False,
+                 evidence: ExecutionEvidence | None = None, fail_evidence: bool = False,
                  net_liquidation: Optional[float] = None):
         self.proposals = list(proposals)
         self.positions = dict(positions or {})
         self.prices = dict(prices or {})
         self.fail_positions = fail_positions
-        self.fail_executions = fail_executions
+        self.fail_evidence = fail_evidence
         self.journal: dict[str, dict[str, float]] = {s: dict(t) for s, t in (fills or {}).items()}
         self.recorded: list[Fill] = []
-        self.executions_ = list(executions)
+        self.evidence_ = evidence if evidence is not None else globals()['evidence']()
         self.net_liquidation = net_liquidation
         self.calls: list[tuple[str, dict]] = []
         self.groups: dict[str, str] = {}
@@ -107,11 +138,11 @@ class FakeGateway:
         self.calls.append(('account_net_liquidation', {}))
         return self.net_liquidation
 
-    def executions(self) -> Sequence[Execution]:
-        self.calls.append(('executions', {}))
-        if self.fail_executions:
-            raise ConnectionError('event store unreadable')
-        return list(self.executions_)
+    def execution_evidence(self, order_ids: Sequence[int]) -> ExecutionEvidence:
+        self.calls.append(('execution_evidence', {'order_ids': list(order_ids)}))
+        if self.fail_evidence:
+            raise ConnectionError('trader_service RPC timed out')
+        return self.evidence_
 
     def price(self, ticker: str) -> Optional[float]:
         self.calls.append(('price', {'ticker': ticker}))

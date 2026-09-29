@@ -62,7 +62,7 @@ class Targets:
 
     @property
     def group(self) -> str:
-        """The position group that owns this sleeve's holdings (D09)."""
+        """The position group that owns this sleeve's holdings (D15)."""
         return sleeve_group(self.sleeve)
 
     @property

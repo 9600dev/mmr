@@ -1,10 +1,11 @@
-"""End to end through the REAL SDK propose path, a real DuckDB proposal store, event store and fills journal.
+"""End to end through the REAL SDK propose path, a real DuckDB proposal store and fills journal.
 
-IB and prices are faked at the gateway's port boundary; the stores and
-``MMR.propose`` are the production code. Proves that ``propose`` lands PENDING
-rows with the sleeve group, batch source and explicit quantity — that
-``reconcile`` turns ORDER_FILLED events into journal rows exactly once — and
-that the next plan reads holdings back from the journal.
+IB, prices and the broker's ``execution_snapshot`` are faked at the gateway's
+port boundary; the stores and ``MMR.propose`` are the production code. Proves
+that ``propose`` lands PENDING rows with the sleeve group, batch source and
+explicit quantity — that ``reconcile`` turns IB execution receipts into journal
+rows exactly once while dry paths create no table — and that the next plan
+reads holdings back from the journal.
 """
 from __future__ import annotations
 
@@ -13,10 +14,11 @@ import io
 from typing import Mapping, Optional
 from unittest.mock import MagicMock
 
+import duckdb
 import pytest
 
 from rebalance_fakes import AS_OF, TODAY, make_doc, write_targets
-from trader.data.event_store import EventStore, EventType, TradingEvent
+from test_rebalance_gateway import order_row, receipt_row, snapshot_reply
 from trader.data.position_groups import PositionGroupStore
 from trader.data.proposal_store import ProposalStore
 from trader.rebalance.__main__ import main
@@ -31,9 +33,15 @@ PRICES = {'AAPL': 200.0, 'MSFT': 400.0}
 UTC = dt.timezone.utc
 
 
-def _shell_mmr(duckdb_path: str) -> MMR:
-    """A real MMR wired to real stores; RPC absent so the snapshot enrichment degrades."""
-    mmr = MMR.__new__(MMR)
+class ShellMMR(MMR):
+    """A real MMR wired to real stores; the broker snapshot is scripted, RPC absent."""
+
+    def execution_snapshot(self, intent_id='', order_ids=None, client_intent_id=''):
+        return snapshot_reply(orders=list(self.broker_orders), executions=list(self.broker_receipts))
+
+
+def _shell_mmr(duckdb_path: str) -> ShellMMR:
+    mmr = ShellMMR.__new__(ShellMMR)
     mmr._client = None
     mmr._data_client = None
     mmr._massive_rest_client = None
@@ -44,6 +52,8 @@ def _shell_mmr(duckdb_path: str) -> MMR:
     container = MagicMock()
     container.config.return_value = {'duckdb_path': duckdb_path}
     mmr._container = container
+    mmr.broker_orders = []
+    mmr.broker_receipts = []
     return mmr
 
 
@@ -70,9 +80,17 @@ def gateway(tmp_duckdb_path):
     return GatewayWithFakedIB(_shell_mmr(tmp_duckdb_path), positions={}, prices=PRICES)
 
 
-def _fill_everything(store: ProposalStore, events: EventStore, when: dt.datetime) -> None:
+def tables(path: str) -> set[str]:
+    con = duckdb.connect(path, read_only=True)
+    try:
+        return {r[0] for r in con.execute('SELECT table_name FROM duckdb_tables()').fetchall()}
+    finally:
+        con.close()
+
+
+def _fill_everything(store: ProposalStore, mmr: ShellMMR, when: dt.datetime) -> None:
     """The operator approves by hand and the orders fill: drive the state machine as the SDK's approve
-    does, and journal the broker executions as trader_service's order lifecycle does."""
+    does, and let the broker report one execution receipt per order, as trader_service replays them."""
     for p in store.query(limit=100):
         if p.status != 'PENDING':
             continue
@@ -81,10 +99,9 @@ def _fill_everything(store: ProposalStore, events: EventStore, when: dt.datetime
         store.update_metadata(p.id, {'submission_quantity': float(p.quantity or 0)})
         assert store.try_transition(p.id, 'PENDING', 'APPROVED')
         assert store.try_transition(p.id, 'APPROVED', 'EXECUTED', order_ids=[order_id])
-        events.append(TradingEvent(event_type=EventType.ORDER_FILLED, timestamp=when, strategy_name='proposal',
-                                   conid=1, symbol=p.symbol, action=p.action, quantity=float(p.quantity or 0),
-                                   price=PRICES[p.symbol], order_id=order_id,
-                                   metadata={'execId': f'0000e.{order_id}', 'price_evaluable': True}))
+        mmr.broker_orders.append(order_row(order_id, p.symbol, p.action, 'Filled', filled=float(p.quantity or 0)))
+        mmr.broker_receipts.append(receipt_row(f'0000e.{order_id}.01', order_id, float(p.quantity or 0),
+                                               PRICES[p.symbol], time=when.isoformat()))
 
 
 def test_propose_lands_pending_rows_in_the_real_store(tmp_duckdb_path, gateway):
@@ -107,6 +124,7 @@ def test_propose_lands_pending_rows_in_the_real_store(tmp_duckdb_path, gateway):
     groups = PositionGroupStore(tmp_duckdb_path)
     assert groups.get_group('sleeve_s2p') is not None
     assert set(groups.get_members('sleeve_s2p')) == {'AAPL', 'MSFT'}
+    assert 'sleeve_fills' not in tables(tmp_duckdb_path)             # planning and proposing never touch the journal
 
     # The very next run reads the PENDING batch back from the real store and refuses.
     with pytest.raises(Refusal) as exc:
@@ -115,22 +133,26 @@ def test_propose_lands_pending_rows_in_the_real_store(tmp_duckdb_path, gateway):
     assert len(store.query(limit=100)) == 2                          # nothing new was created
 
 
-def test_reconcile_journals_real_fill_events_and_the_next_plan_reads_the_journal(tmp_duckdb_path, gateway):
+def test_reconcile_journals_broker_receipts_and_the_next_plan_reads_the_journal(tmp_duckdb_path, gateway):
     t0 = validate_targets(make_doc(), path='/targets/s2p/2026-09-28.json')
     propose_plan(t0, make_plan(t0, gateway, today=TODAY), gateway, gateway)
-    store, events = ProposalStore(tmp_duckdb_path), EventStore(tmp_duckdb_path)
-    _fill_everything(store, events, dt.datetime(2026, 9, 28, 14, 31, tzinfo=UTC))
+    store, mmr = ProposalStore(tmp_duckdb_path), gateway._mmr
+    _fill_everything(store, mmr, dt.datetime(2026, 9, 28, 19, 59, 30, tzinfo=UTC))    # 15:59:30 ET on the 28th
     gateway._positions = {'AAPL': 25.0, 'MSFT': 7.0, 'TSLA': 3.0}   # IB shows the fills (+ an outside name)
 
-    # Before reconcile: EXECUTED proposals are submissions, not inventory — the sleeve is still flat (D13).
+    # Before reconcile: EXECUTED proposals are submissions, not inventory — the sleeve is still flat (D13),
+    # and neither the plan nor a dry-run reconcile creates the journal table.
     assert make_plan(t0, gateway, today=TODAY).holdings == {}
+    assert reconcile_sleeve('s2p', gateway, dry_run=True).matched_by_symbol == {'AAPL': 25.0, 'MSFT': 7.0}
+    assert 'sleeve_fills' not in tables(tmp_duckdb_path)
 
     report = reconcile_sleeve('s2p', gateway)
     assert report.inserted == 2 and report.matched_by_symbol == {'AAPL': 25.0, 'MSFT': 7.0}
     assert report.holdings == {'AAPL': 25.0, 'MSFT': 7.0} and report.unfilled_proposals == () and report.warnings == ()
     journal = SleeveFillsStore(tmp_duckdb_path).list_fills('s2p')
-    assert [(f.ticker, f.quantity, f.price, f.trade_date, f.order_id) for f in journal] == [
-        ('AAPL', 25.0, 200.0, dt.date(2026, 9, 28), '901'), ('MSFT', 7.0, 400.0, dt.date(2026, 9, 28), '902')]
+    assert [(f.ticker, f.quantity, f.price, f.trade_date, f.order_id, f.exec_id) for f in journal] == [
+        ('AAPL', 25.0, 200.0, dt.date(2026, 9, 28), '901', '0000e.901.01'),
+        ('MSFT', 7.0, 400.0, dt.date(2026, 9, 28), '902', '0000e.902.01')]     # dated by IB's execution time
     assert reconcile_sleeve('s2p', gateway).inserted == 0                # idempotent
 
     t1 = validate_targets(make_doc(as_of='2026-09-29', prices_as_of='2026-09-29', weights={'AAPL': 0.3}))
@@ -144,10 +166,26 @@ def test_reconcile_journals_real_fill_events_and_the_next_plan_reads_the_journal
     assert all(p.source == 'rebalance:s2p:2026-09-29' for p in pending)
 
     # The sells fill; reconcile subtracts them and the sleeve is where the targets say.
-    _fill_everything(store, events, dt.datetime(2026, 9, 29, 14, 31, tzinfo=UTC))
+    _fill_everything(store, mmr, dt.datetime(2026, 9, 29, 14, 31, tzinfo=UTC))
     gateway._positions = {'AAPL': 15.0, 'TSLA': 3.0}
     assert reconcile_sleeve('s2p', gateway).holdings == {'AAPL': 15.0, 'MSFT': 0.0}
     assert make_plan(t1, gateway, today=TODAY).orders == ()
+
+
+def test_status_before_exec_details_journals_nothing_until_the_receipt_arrives(tmp_duckdb_path, gateway):
+    t0 = validate_targets(make_doc(weights={'AAPL': 0.5}), path='/targets/s2p/2026-09-28.json')
+    propose_plan(t0, make_plan(t0, gateway, today=TODAY), gateway, gateway)
+    store, mmr = ProposalStore(tmp_duckdb_path), gateway._mmr
+    (p,) = store.query(limit=10)
+    assert store.try_transition(p.id, 'PENDING', 'APPROVED') and store.try_transition(p.id, 'APPROVED', 'EXECUTED', order_ids=[901])
+    mmr.broker_orders.append(order_row(901, 'AAPL', 'BUY', 'Filled', filled=25.0))       # orderStatus arrived first
+    gateway._positions = {'AAPL': 25.0}
+    with pytest.raises(Refusal) as exc:
+        reconcile_sleeve('s2p', gateway)
+    assert exc.value.code == 'EXECUTIONS_INCOMPLETE' and 'sleeve_fills' not in tables(tmp_duckdb_path)
+    mmr.broker_receipts.append(receipt_row('0000e.901.01', 901, 25.0, 200.0))            # then execDetails
+    assert reconcile_sleeve('s2p', gateway).inserted == 1
+    assert SleeveFillsStore(tmp_duckdb_path).holdings('s2p') == {'AAPL': 25.0}
 
 
 def test_cli_propose_and_reconcile_end_to_end_over_the_real_store(tmp_path, tmp_duckdb_path, gateway):
@@ -162,8 +200,11 @@ def test_cli_propose_and_reconcile_end_to_end_over_the_real_store(tmp_path, tmp_
     assert code == 1
     assert len(ProposalStore(tmp_duckdb_path).query(limit=10)) == 2
 
-    _fill_everything(ProposalStore(tmp_duckdb_path), EventStore(tmp_duckdb_path), dt.datetime(2026, 9, 29, 14, 31, tzinfo=UTC))
+    _fill_everything(ProposalStore(tmp_duckdb_path), gateway._mmr, dt.datetime(2026, 9, 29, 14, 31, tzinfo=UTC))
     gateway._positions = {'AAPL': 25.0, 'MSFT': 7.0}
+    out = io.StringIO()
+    assert main(['reconcile', '--sleeve', 's2p', '--dry-run'], gateway_factory=lambda: gateway, out=out) == 0
+    assert 'DRY RUN' in out.getvalue() and 'sleeve_fills' not in tables(tmp_duckdb_path)
     out = io.StringIO()
     assert main(['reconcile', '--sleeve', 's2p'], gateway_factory=lambda: gateway, out=out) == 0
     assert 'journaled now 2' in out.getvalue()

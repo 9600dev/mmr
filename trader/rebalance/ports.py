@@ -6,7 +6,7 @@ whole package with fakes and the production adapter
 (:mod:`trader.rebalance.sdk_gateway`) is the only module that touches
 :class:`trader.sdk.MMR`.
 
-By design (D12) there is NO protocol method that approves, places, cancels or
+By design (D15) there is NO protocol method that approves, places, cancels or
 closes anything: the rebalancer cannot express those actions. The only writes
 it can express are ``propose`` (a PENDING proposal) and ``record_fills`` (the
 D13 ``sleeve_fills`` journal it owns).
@@ -36,17 +36,57 @@ class ProposalRecord:
 
 @dataclass(frozen=True)
 class Execution:
-    """One broker execution as journaled by trader_service (an ORDER_FILLED event)."""
+    """One IB execution receipt (``execDetails``), as replayed by trader_service.
+
+    This is the broker's own record of one execution — never a cumulative fill
+    delta the local order tracker derived from an ``orderStatus`` message.
+    ``time`` is IB's execution time (not the time trader_service observed it).
+    """
 
     exec_id: str
     order_id: int
+    shares: float                  # unsigned shares of THIS execution
+    cum_qty: float                 # cumulative shares of the order after it (0 = not reported)
+    price: Optional[float]         # this execution's price; None when the receipt carried none
+    time: Optional[dt.datetime]    # aware; None when the receipt carried no time
+    account: str = ''
+    perm_id: int = 0
+
+
+@dataclass(frozen=True)
+class OrderObservation:
+    """The order tracker's view of one broker order (its status and cumulative fill)."""
+
+    order_id: int
     symbol: str
-    action: str            # 'BUY' | 'SELL'
-    quantity: float        # unsigned shares filled by this execution
-    price: Optional[float] # None when the broker gave quantity without a usable price
-    time: dt.datetime
-    commission: Optional[float] = None
-    event_id: Optional[int] = None
+    action: str                    # 'BUY' | 'SELL' | '' when the broker never said
+    status: str                    # IB order status ('Filled', 'Cancelled', 'Submitted', 'Unknown', ...)
+    filled: float                  # cumulative filled quantity the broker reported
+    fill_quantity_known: bool      # False when the tracker could not establish the fill quantity
+    con_id: int = 0
+    identity_ambiguous: bool = False   # the same numeric id was seen from another broker client
+
+
+@dataclass(frozen=True)
+class ExecutionEvidence:
+    """What trader_service's read-only ``execution_snapshot`` says about a set of orders.
+
+    ``receipts_available`` is False when the durable receipt journal could not
+    be read; ``history_complete`` is False when IB's execution-history replay
+    has not completed. Either one means the executions cannot be read and
+    ``reconcile`` must refuse (D13). ``replay_scope`` names IB's bounded window:
+    absence of a receipt is evidence only inside it.
+    """
+
+    account: str
+    account_confirmed: bool
+    receipts_available: bool
+    history_complete: bool
+    orders_complete: bool
+    observed_at: str
+    orders: Sequence[OrderObservation]
+    executions: Sequence[Execution]
+    replay_scope: str = ''
 
 
 @dataclass(frozen=True)
@@ -84,8 +124,12 @@ class Broker(Protocol):
         """The account's NetLiquidation, or None when it cannot be read (never a guess)."""
         ...
 
-    def executions(self) -> Sequence[Execution]:
-        """Every journaled broker execution. Must raise when they cannot be read."""
+    def execution_evidence(self, order_ids: Sequence[int]) -> ExecutionEvidence:
+        """IB execution receipts + order observations for ``order_ids`` (read-only).
+
+        Must raise when the snapshot cannot be taken at all; completeness of
+        what came back is reported on the evidence, not assumed.
+        """
         ...
 
 
@@ -97,7 +141,11 @@ class Pricer(Protocol):
 
 class FillsJournal(Protocol):
     def sleeve_holdings(self, sleeve: str) -> Mapping[str, float]:
-        """Per-ticker signed quantity sums of ``sleeve_fills`` for the sleeve (D13)."""
+        """Per-ticker signed quantity sums of ``sleeve_fills`` for the sleeve (D13).
+
+        A journal that does not exist yet is an empty journal; reading it must
+        not create it.
+        """
         ...
 
     def record_fills(self, fills: Sequence[Fill]) -> int:
