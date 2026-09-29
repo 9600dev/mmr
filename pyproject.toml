@@ -87,6 +87,7 @@ test = [
     "pytest-mock>=3.12",
     "pytest-timeout>=2.3",
     "hypothesis>=6.100",
+    "mutmut==3.6.0",
 ]
 
 [project.scripts]
@@ -134,7 +135,9 @@ root = ["."]
 # NOTE: mutmut 3.x runs pytest IN-PROCESS, so it must be invoked with the
 # canonical env interpreter (~/miniforge3/envs/mmr/bin/python3 -m mutmut) — the
 # tests then run under exactly that interpreter. mutmut is not a runtime dep;
-# install it into the test env only (pip install mutmut==3.6.0).
+# it is pinned in the `test` extra (uv run --extra test ...) so the mutation
+# tooling's own tests (tests/test_mutation_gate.py, test_mutation_temp_cleanup.py)
+# run in the uv env instead of failing on a missing import.
 [tool.mutmut]
 source_paths = ["trader"]
 # Copied into mutants/ and loaded via -p below: a Hypothesis harness shim that
