@@ -82,15 +82,55 @@ def test_strategy_sha_must_be_sha256_hex():
         validate_targets(make_doc(strategy={**make_doc()['strategy'], 'source_sha256': 'abc'}))
 
 
-def test_weight_sum_exactly_one_is_accepted_and_tiny_float_noise_tolerated():
+def test_weight_sum_exactly_one_is_accepted():
     t = validate_targets(make_doc(weights={'AAPL': 0.1, 'MSFT': 0.2, 'GOOGL': 0.7}))
-    assert t.weight_sum <= 1.0 + 1e-9
+    assert t.weight_sum == 1.0
     validate_targets(make_doc(weights={'AAPL': 0.5, 'MSFT': 0.5}))
+    validate_targets(make_doc(weights={'AAPL': 1.0}))
 
 
-def test_weight_sum_just_above_one_is_refused():
+@pytest.mark.parametrize('weights', [
+    {'AAPL': 0.5, 'MSFT': 0.5001},
+    {'AAPL': 1.0000000001},                      # the round-1 critic's reproduction: no tolerance (D08)
+    {'AAPL': 0.5, 'MSFT': 0.5000000001},
+    {'AAPL': 0.5, 'MSFT': 0.5 + 2 ** -52},        # one ulp above 1.0 in float
+])
+def test_any_weight_sum_above_one_is_refused_strictly(weights):
+    with pytest.raises(TargetsError, match='sum|> 1.0'):
+        validate_targets(make_doc(weights=weights))
+
+
+def test_file_path_judges_the_sum_on_the_decimals_as_written(tmp_path):
+    # 0.1 + 0.2 + 0.7 is exactly 1.0 in decimal and must load; 1.0000000001 must not.
+    ok = tmp_path / 'ok.json'
+    ok.write_text(json.dumps(make_doc()).replace('{"AAPL": 0.5, "MSFT": 0.3}',
+                                                 '{"AAPL": 0.1, "MSFT": 0.2, "GOOGL": 0.7}'))
+    assert load_targets(ok).weight_sum == 1.0
+    bad = tmp_path / 'bad.json'
+    bad.write_text(json.dumps(make_doc()).replace('{"AAPL": 0.5, "MSFT": 0.3}', '{"AAPL": 1.0000000001}'))
+    with pytest.raises(TargetsError, match='1.0000000001 > 1.0'):
+        load_targets(bad)
+    two = tmp_path / 'two.json'
+    two.write_text(json.dumps(make_doc()).replace('{"AAPL": 0.5, "MSFT": 0.3}', '{"AAPL": 0.5, "MSFT": 0.5000000001}'))
+    with pytest.raises(TargetsError, match='sum to 1.0000000001 > 1.0'):
+        load_targets(two)
+    tiny = tmp_path / 'tiny.json'
+    tiny.write_text(json.dumps(make_doc()).replace('{"AAPL": 0.5, "MSFT": 0.3}',
+                                                   '{"AAPL": 0.5, "MSFT": 0.5000000000000000000001}'))
     with pytest.raises(TargetsError, match='sum'):
-        validate_targets(make_doc(weights={'AAPL': 0.5, 'MSFT': 0.5001}))
+        load_targets(tiny)
+
+
+def test_file_path_numbers_come_back_json_native(tmp_path):
+    # Regression: parse_float=Decimal leaked Decimals into strategy.params, and the proposal store's
+    # json.dumps of the metadata then failed every propose ("Object of type Decimal is not JSON serializable").
+    doc = make_doc()
+    doc['strategy']['params'] = {'quantile': 0.2, 'lookback': 12, 'nested': {'x': [1.5, 2]}}
+    t = load_targets(write_targets(tmp_path, doc))
+    assert type(t.capital_usd) is float and all(type(w) is float for w in t.weights.values())
+    assert t.strategy.params == {'quantile': 0.2, 'lookback': 12, 'nested': {'x': [1.5, 2]}}
+    assert type(t.strategy.params['quantile']) is float and type(t.strategy.params['lookback']) is int
+    json.dumps(t.strategy.params); json.dumps(t.raw)
 
 
 def test_dotted_and_hyphenated_us_symbols_are_accepted():

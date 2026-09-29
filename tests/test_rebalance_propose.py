@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from rebalance_fakes import AS_OF, SHA, TODAY, FakeGateway, executed, make_doc
+from rebalance_fakes import AS_OF, SHA, TODAY, FakeGateway, executed, held, make_doc
 from trader.rebalance.plan import Refusal, make_plan
 from trader.rebalance.propose import check_no_open_batch, duplicate_batch, propose_plan
 from trader.rebalance.targets import validate_targets
@@ -39,7 +39,8 @@ def test_propose_makes_exact_calls_and_never_touches_approve_or_orders():
         assert rb['strategy']['source_sha256'] == SHA and rb['capital_usd'] == 10_000.0
     assert gw.groups == {'sleeve_s2p': 'rebalancer sleeve s2p (D09 holdings ledger)'}
     # The only gateway methods ever invoked are reads plus propose/ensure_group.
-    assert gw.method_names <= {'proposals_in_group', 'stock_positions', 'price', 'ensure_group', 'propose'}
+    assert gw.method_names <= {'proposals_in_group', 'stock_positions', 'sleeve_holdings', 'price',
+                               'ensure_group', 'propose'}
     assert not (gw.method_names & set(FakeGateway.FORBIDDEN))
 
 
@@ -78,7 +79,7 @@ def test_terminal_proposals_do_not_block_a_new_batch():
     recs = [executed(1, 'AAPL', 'BUY', 25, source=f'rebalance:s2p:{AS_OF}', status='EXECUTED'),
             executed(2, 'MSFT', 'BUY', 7, source=f'rebalance:s2p:{AS_OF}', status='REJECTED'),
             executed(3, 'MSFT', 'BUY', 7, source=f'rebalance:s2p:{AS_OF}', status='FAILED')]
-    gw = FakeGateway(proposals=recs, positions={'AAPL': 25}, prices=PRICES)
+    gw = FakeGateway(proposals=recs, fills=held(AAPL=25), positions={'AAPL': 25}, prices=PRICES)
     t = _targets()
     plan = make_plan(t, gw, today=TODAY)
     check_no_open_batch(t, gw)
@@ -88,8 +89,7 @@ def test_terminal_proposals_do_not_block_a_new_batch():
 
 
 def test_empty_plan_is_refused_not_silently_proposed():
-    gw = FakeGateway(proposals=[executed(1, 'AAPL', 'BUY', 25), executed(2, 'MSFT', 'BUY', 7)],
-                     positions={'AAPL': 25, 'MSFT': 7}, prices=PRICES)
+    gw = FakeGateway(fills=held(AAPL=25, MSFT=7), positions={'AAPL': 25, 'MSFT': 7}, prices=PRICES)
     t = _targets()
     plan = make_plan(t, gw, today=TODAY)
     assert plan.orders == ()
@@ -98,7 +98,7 @@ def test_empty_plan_is_refused_not_silently_proposed():
     assert gw.propose_calls == []
 
 
-def test_midway_failure_reports_partial_ids_and_stops():
+def test_midway_failure_returns_the_partial_ids_and_stops():
     class Flaky(FakeGateway):
         def propose(self, **kw):
             if kw['symbol'] == 'MSFT':
@@ -108,6 +108,7 @@ def test_midway_failure_reports_partial_ids_and_stops():
     gw = Flaky(prices=PRICES)
     t = _targets()
     plan = make_plan(t, gw, today=TODAY)
-    with pytest.raises(ConnectionError):
-        propose_plan(t, plan, gw, gw)
+    result = propose_plan(t, plan, gw, gw)
+    assert not result.complete and list(result.proposal_ids) == [101] and result.orders_total == 2
+    assert 'BUY 7 MSFT' in result.error and 'ConnectionError' in result.error
     assert [c['symbol'] for c in gw.propose_calls] == ['AAPL']       # stopped at the failure, no retries

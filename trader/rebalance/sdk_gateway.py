@@ -1,17 +1,20 @@
 """Production adapter: the four ports implemented over :class:`trader.sdk.MMR`.
 
 This is the ONLY module in the package that touches the SDK, and it uses just
-five of its members: ``connect``/``close``, ``positions`` (IB book, read-only),
-``snapshot`` (prices, read-only), ``propose`` (creates a PENDING proposal) and
-the proposal/group stores for reads plus group creation. Nothing here can
-approve, place, cancel or close — see ``tests/test_rebalance_static.py``.
+these members: ``connect``/``close``, ``positions`` (IB book, read-only),
+``snapshot`` (prices, read-only), ``_get_portfolio_state`` (NetLiquidation,
+read-only), ``propose`` (creates a PENDING proposal) and the proposal/group
+stores for reads plus group creation. Broker executions come from the event
+store's ORDER_FILLED journal and sleeve fills from the D13 ``sleeve_fills``
+table, both in the main DuckDB. Nothing here can approve, place, cancel or
+close — see ``tests/test_rebalance_static.py``.
 """
 from __future__ import annotations
 
 import math
 from typing import Any, Mapping, Optional, Sequence
 
-from trader.rebalance.ports import ProposalRecord
+from trader.rebalance.ports import Execution, Fill, ProposalRecord
 
 
 class SdkGateway:
@@ -33,6 +36,12 @@ class SdkGateway:
             self._mmr.close()
             self._connected = False
 
+    def _duckdb_path(self) -> str:
+        path = str(self._mmr._container.config().get('duckdb_path', '') or '')
+        if not path:
+            raise ValueError('duckdb_path not configured')
+        return path
+
     # -- ProposalReader ----------------------------------------------------
     def proposals_in_group(self, group: str) -> Sequence[ProposalRecord]:
         store = self._mmr._proposal_store()
@@ -44,6 +53,7 @@ class SdkGateway:
                 id=int(p.id or 0), symbol=str(p.symbol).upper(), action=str(p.action).upper(),
                 quantity=p.quantity, status=str(p.status), source=str(p.source or ''),
                 group=str(p.group or ''), created_at=p.created_at, metadata=dict(p.metadata or {}),
+                order_ids=tuple(int(o) for o in (p.order_ids or [])),
             ))
         return out
 
@@ -61,6 +71,40 @@ class SdkGateway:
             sym = str(row['symbol']).upper()
             out[sym] = out.get(sym, 0.0) + float(row['position'])
         return out
+
+    def account_net_liquidation(self) -> Optional[float]:
+        state = self._mmr._get_portfolio_state()
+        if not state.net_liquidation_evaluable:
+            return None
+        value = float(state.net_liquidation)
+        return value if math.isfinite(value) and value > 0 else None
+
+    def executions(self) -> Sequence[Execution]:
+        """ORDER_FILLED events: trader_service's durable journal of broker executions."""
+        from trader.data.event_store import EventStore
+        store = EventStore(self._duckdb_path())
+        out: list[Execution] = []
+        for ev in store.list_fills(limit=1_000_000):
+            meta = dict(ev.metadata or {})
+            if meta.get('excluded_from_ledger'):
+                continue
+            exec_id = str(meta.get('execId') or '') or f'event:{ev.id}'
+            price: Optional[float] = float(ev.price) if ev.price and math.isfinite(float(ev.price)) else None
+            if meta.get('price_evaluable') is False:
+                price = None
+            out.append(Execution(exec_id=exec_id, order_id=int(ev.order_id), symbol=str(ev.symbol).upper(),
+                                 action=str(ev.action).upper(), quantity=float(ev.quantity), price=price,
+                                 time=ev.timestamp, commission=None, event_id=ev.id))
+        return out
+
+    # -- FillsJournal -------------------------------------------------------
+    def sleeve_holdings(self, sleeve: str) -> Mapping[str, float]:
+        from trader.rebalance.fills import SleeveFillsStore
+        return SleeveFillsStore(self._duckdb_path()).holdings(sleeve)
+
+    def record_fills(self, fills: Sequence[Fill]) -> int:
+        from trader.rebalance.fills import SleeveFillsStore
+        return SleeveFillsStore(self._duckdb_path()).record(fills)
 
     # -- Pricer ------------------------------------------------------------
     def price(self, ticker: str) -> Optional[float]:

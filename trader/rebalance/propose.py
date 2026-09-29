@@ -15,10 +15,11 @@ class ProposeResult:
     group: str
     proposal_ids: Sequence[int]
     orders_total: int
+    error: str = ''                 # set when creation stopped midway; the ids above ARE real PENDING rows
 
     @property
     def complete(self) -> bool:
-        return len(self.proposal_ids) == self.orders_total
+        return not self.error and len(self.proposal_ids) == self.orders_total
 
 
 def duplicate_batch(records: Sequence[ProposalRecord], source: str) -> list[ProposalRecord]:
@@ -28,11 +29,10 @@ def duplicate_batch(records: Sequence[ProposalRecord], source: str) -> list[Prop
 
 
 def check_no_open_batch(targets: Targets, reader: ProposalReader) -> None:
-    """D09: refuse a second batch for the same sleeve/as_of while one is in flight.
-
-    Any other in-flight proposal in the sleeve is refused too: holdings would
-    change under the new batch when it is approved. Approve or reject the
-    earlier ones first.
+    """D12: refuse a second batch for the same sleeve/as_of while one is in flight,
+    and (``SLEEVE_BUSY``) any new batch while an earlier batch of the sleeve still
+    has PENDING or APPROVED-unexecuted proposals: holdings would change under the
+    new batch when they are approved. Approve or reject the earlier ones first.
     """
     records = list(reader.proposals_in_group(targets.group))
     dup = duplicate_batch(records, targets.source)
@@ -61,10 +61,11 @@ def reasoning_for(targets: Targets, order) -> str:
 def propose_plan(targets: Targets, plan: Plan, proposer: Proposer, reader: ProposalReader) -> ProposeResult:
     """Create the PENDING proposals for ``plan``. Refuses before creating anything.
 
-    Orders go out in plan order (SELLs first). If a create call fails midway the
-    ids already created are returned with ``complete == False``; they are real
-    PENDING rows for the operator to review or reject — the rebalancer never
-    rejects, approves or cancels (D09).
+    Orders go out in plan order (SELLs first). If a create call fails midway,
+    creation stops and the ids already created are returned with
+    ``complete == False`` and ``error`` set; they are real PENDING rows for the
+    operator to review or reject — the rebalancer never rejects, approves or
+    cancels (D12).
     """
     from trader.trading.proposal import ExecutionSpec
 
@@ -86,11 +87,16 @@ def propose_plan(targets: Targets, plan: Plan, proposer: Proposer, reader: Propo
         }
         metadata['rebalance']['strategy'] = dict(metadata['rebalance']['strategy'])
         metadata['rebalance']['strategy']['params'] = dict(targets.strategy.params)
-        pid = proposer.propose(
-            symbol=order.symbol, action=order.action, quantity=float(order.quantity),
-            execution=spec, reasoning=reasoning_for(targets, order), source=targets.source,
-            group=targets.group, metadata=metadata,
-        )
+        try:
+            pid = proposer.propose(
+                symbol=order.symbol, action=order.action, quantity=float(order.quantity),
+                execution=spec, reasoning=reasoning_for(targets, order), source=targets.source,
+                group=targets.group, metadata=metadata,
+            )
+        except Exception as exc:  # noqa: BLE001 - stop here; report what was created, never retry
+            return ProposeResult(source=targets.source, group=targets.group, proposal_ids=tuple(ids),
+                                 orders_total=len(plan.orders),
+                                 error=f'{order.action} {order.quantity} {order.symbol}: {type(exc).__name__}: {exc}')
         ids.append(int(pid))
     return ProposeResult(source=targets.source, group=targets.group,
                          proposal_ids=tuple(ids), orders_total=len(plan.orders))

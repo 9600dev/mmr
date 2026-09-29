@@ -4,6 +4,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
+from trader.rebalance.fills import ReconcileReport
 from trader.rebalance.plan import Plan
 from trader.rebalance.propose import ProposeResult
 from trader.rebalance.status import SleeveStatus
@@ -29,7 +30,7 @@ def plan_to_dict(plan: Plan, targets: Targets) -> dict[str, Any]:
         } for o in plan.orders],
         'skipped': [dataclasses.asdict(s) for s in plan.skipped],
         'cash_before': plan.cash_before, 'cash_after': plan.cash_after,
-        'gross_notional': plan.gross_notional, 'book_value_after': plan.book_value_after,
+        'turnover_notional': plan.turnover_notional, 'gross_exposure_after': plan.gross_exposure_after,
         'limit_flags': [o.symbol for o in plan.limit_flags],
         'warnings': list(plan.warnings), 'notes': list(plan.notes),
         'open_proposals': [{'id': r.id, 'symbol': r.symbol, 'action': r.action,
@@ -48,7 +49,7 @@ def render_plan(plan: Plan, targets: Targets) -> str:
         f'  cash before {_money(plan.cash_before)}',
     ]
     for w in plan.warnings:
-        lines.append(f'  WARN reconcile: {w}')
+        lines.append(f'  WARN: {w}')
     for r in plan.open_proposals:
         lines.append(f'  WARN in flight: proposal #{r.id} {r.action} {r.quantity:g} {r.symbol} '
                      f'[{r.status}] {r.source}')
@@ -61,13 +62,14 @@ def render_plan(plan: Plan, targets: Targets) -> str:
         for i, o in enumerate(plan.orders, 1):
             lines.append(f'  {i:>2} {o.action:<6} {o.quantity:>7d} {o.symbol:<8} {o.price:>10.2f} '
                          f'{o.notional:>12,.2f} {o.held_before:>6d} {o.target_shares:>7d} '
-                         f'{o.target_weight:>7.4f}  {o.limit_flag or ""}')
+                         f'{o.target_weight:>7.4f}  {"LIMIT" if o.limit_flag else ""}')
     lines.append('')
     lines.append(f'  sells {len(plan.sells)} ({_money(sum(o.notional for o in plan.sells))})  '
                  f'buys {len(plan.buys)} ({_money(sum(o.notional for o in plan.buys))})  '
-                 f'gross {_money(plan.gross_notional)} of capital {_money(plan.capital_usd)}')
+                 f'turnover {_money(plan.turnover_notional)}')
     lines.append(f'  expected cash after execution {_money(plan.cash_after)}  '
-                 f'book after {_money(plan.book_value_after)}')
+                 f'post-execution gross exposure {_money(plan.gross_exposure_after)} '
+                 f'of capital {_money(plan.capital_usd)}')
     if plan.limit_flags:
         lines.append('  POSITION LIMIT would refuse at approval time:')
         for o in plan.limit_flags:
@@ -84,10 +86,13 @@ def render_plan(plan: Plan, targets: Targets) -> str:
 def render_propose(result: ProposeResult) -> str:
     ids = ', '.join(f'#{i}' for i in result.proposal_ids) or '(none)'
     state = 'complete' if result.complete else f'INCOMPLETE ({len(result.proposal_ids)}/{result.orders_total})'
-    return (f'PROPOSED {len(result.proposal_ids)} PENDING proposal(s) {state}\n'
+    text = (f'PROPOSED {len(result.proposal_ids)} PENDING proposal(s) {state}\n'
             f'  source={result.source}  group={result.group}\n'
-            f'  ids: {ids}\n'
-            f'  review with `mmr proposals show <id>`; approve by hand with `mmr approve <id>`')
+            f'  ids: {ids}\n')
+    if result.error:
+        text += (f'  STOPPED: {result.error}\n'
+                 f'  the ids above are real PENDING proposals — review or reject them by hand before re-running\n')
+    return text + '  review with `mmr proposals show <id>`; approve by hand with `mmr approve <id>`'
 
 
 def status_to_dict(status: SleeveStatus) -> dict[str, Any]:
@@ -120,7 +125,7 @@ def render_status(status: SleeveStatus) -> str:
         lines.append('  latest targets: none found')
     lines.append(f'  market value {_money(status.market_value)}')
     for w in status.warnings:
-        lines.append(f'  WARN reconcile: {w}')
+        lines.append(f'  WARN: {w}')
     lines.append('')
     lines.append(f'  {"SYMBOL":<8} {"SHARES":>7} {"PRICE":>10} {"VALUE":>12} {"TGT W":>7} {"TGT SH":>7} {"DRIFT":>6}')
     for h in status.holdings:
@@ -137,4 +142,39 @@ def render_status(status: SleeveStatus) -> str:
             lines.append(f'    #{r.id} {r.action} {r.quantity:g} {r.symbol} [{r.status}] {r.source}')
     else:
         lines.append('  open proposals: none')
+    return '\n'.join(lines)
+
+
+def reconcile_to_dict(report: ReconcileReport) -> dict[str, Any]:
+    return {
+        'sleeve': report.sleeve, 'dry_run': report.dry_run, 'inserted': report.inserted,
+        'matched': [dataclasses.asdict(f) for f in report.matched],
+        'matched_by_symbol': report.matched_by_symbol,
+        'unfilled_proposals': list(report.unfilled_proposals),
+        'proposals_without_order_ids': list(report.proposals_without_order_ids),
+        'holdings': dict(report.holdings), 'ib_positions': dict(report.ib_positions),
+        'warnings': list(report.warnings),
+    }
+
+
+def render_reconcile(report: ReconcileReport) -> str:
+    mode = 'DRY RUN' if report.dry_run else 'RECONCILE'
+    lines = [f'{mode}  sleeve={report.sleeve}  executions matched {len(report.matched)}  '
+             f'journaled now {report.inserted}']
+    for f in report.matched:
+        px = 'n/a' if f.price is None else f'{f.price:.4f}'
+        lines.append(f'  {f.trade_date} {f.ticker:<8} {f.quantity:+9.0f} @ {px:>10}  exec {f.exec_id}  '
+                     f'order {f.order_id}  proposal #{f.proposal_id}')
+    if report.unfilled_proposals:
+        lines.append(f'  no execution yet for EXECUTED proposals: '
+                     f'{", ".join(f"#{i}" for i in report.unfilled_proposals)}')
+    lines.append('  journal holdings vs IB:')
+    for sym in sorted(set(report.holdings) | set(report.ib_positions)):
+        j = report.holdings.get(sym)
+        ib = report.ib_positions.get(sym)
+        if j is None:
+            continue  # outside the sleeve
+        lines.append(f'    {sym:<8} journal {j:>9g}  IB {"n/a" if ib is None else f"{ib:g}":>9}')
+    for w in report.warnings:
+        lines.append(f'  WARN: {w}')
     return '\n'.join(lines)

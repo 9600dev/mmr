@@ -14,6 +14,7 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -24,8 +25,10 @@ _SLEEVE_RE = re.compile(r'^[a-z][a-z0-9_]*$')
 # D08: US common-stock symbols as traded today (BRK.B, BF-B style suffixes allowed).
 _TICKER_RE = re.compile(r'^[A-Z][A-Z0-9]{0,5}([.\-][A-Z0-9]{1,3})?$')
 _SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
-# Floating-point slack on the weight sum: 1.0000000001 is "1.0", 1.0001 is not.
-WEIGHT_SUM_TOLERANCE = 1e-9
+# Numbers a JSON document can carry: ints, floats, and Decimals when the file
+# was parsed exactly (load_targets uses parse_float=Decimal so "0.1"+"0.2"+"0.7"
+# is exactly 1.0 and "1.0000000001" is exactly above it — no tolerance, D08).
+_NUMBER = (int, float, Decimal)
 
 
 class TargetsError(ValueError):
@@ -69,7 +72,7 @@ class Targets:
 
     @property
     def weight_sum(self) -> float:
-        return float(sum(self.weights.values()))
+        return math.fsum(self.weights.values())
 
 
 def sleeve_group(sleeve: str) -> str:
@@ -120,13 +123,48 @@ def _parse_generated_at(value: Any, where: str) -> dt.datetime:
     return parsed.astimezone(dt.timezone.utc)
 
 
+def _is_number(value: Any) -> bool:
+    return isinstance(value, _NUMBER) and not isinstance(value, bool)
+
+
+def _finite(value: Any) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError, InvalidOperation):
+        return False
+
+
 def _finite_positive(value: Any, key: str, where: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not _is_number(value):
         raise TargetsError(f'{where}: field {key!r} must be a number, got {type(value).__name__}')
-    number = float(value)
-    if not math.isfinite(number) or number <= 0:
+    if not _finite(value) or value <= 0:
         raise TargetsError(f'{where}: field {key!r} must be a finite number > 0, got {value!r}')
-    return number
+    return float(value)
+
+
+def _jsonable(value: Any) -> Any:
+    """Decimals (from the exact file parse) back to JSON-native numbers, recursively.
+
+    The strategy params travel into proposal metadata, which is json.dumps'ed by
+    the proposal store — a Decimal there fails the whole propose. Integral
+    decimals become ints, the rest floats.
+    """
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() and 'E' not in str(value) and '.' not in str(value) else float(value)
+    if isinstance(value, Mapping):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return value
+
+
+def exact_weight_sum(weights: Mapping[str, Any]) -> Decimal | float:
+    """The sum of the weights as written: exact when every value is a Decimal
+    (the file path), otherwise the correctly rounded float sum (``math.fsum``)."""
+    values = list(weights.values())
+    if values and all(isinstance(v, Decimal) for v in values):
+        return sum(values, Decimal(0))
+    return math.fsum(float(v) for v in values)
 
 
 def validate_targets(doc: Any, *, path: str = '') -> Targets:
@@ -168,37 +206,39 @@ def validate_targets(doc: Any, *, path: str = '') -> Targets:
         id=_require(strat, 'id', str, swhere),
         module=_require(strat, 'module', str, swhere),
         class_name=_require(strat, 'class', str, swhere),
-        params=dict(params),
+        params=_jsonable(dict(params)),
         source_sha256=sha,
     )
     for key in ('family', 'id', 'module', 'class'):
         if not strat[key].strip():
             raise TargetsError(f'{swhere}: field {key!r} must not be empty')
 
-    capital = _finite_positive(_require(doc, 'capital_usd', (int, float), where), 'capital_usd', where)
+    capital = _finite_positive(_require(doc, 'capital_usd', _NUMBER, where), 'capital_usd', where)
 
     weights_raw = _require(doc, 'weights', Mapping, where)
     if not weights_raw:
         raise TargetsError(f'{where}: weights must name at least one ticker')
     weights: dict[str, float] = {}
+    exact: dict[str, Any] = {}
     for ticker, weight in weights_raw.items():
         if not isinstance(ticker, str) or not _TICKER_RE.match(ticker):
             raise TargetsError(f'{where}: weights key {ticker!r} is not a US common-stock symbol '
                                f'(expected e.g. AAPL, BRK.B)')
-        if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+        if not _is_number(weight):
             raise TargetsError(f'{where}: weight for {ticker} must be a number, got {type(weight).__name__}')
-        w = float(weight)
-        if not math.isfinite(w):
+        if not _finite(weight):
             raise TargetsError(f'{where}: weight for {ticker} must be finite, got {weight!r}')
-        if w <= 0:
-            raise TargetsError(f'{where}: weight for {ticker} is {w!r} — targets are long-only, '
+        if weight <= 0:
+            raise TargetsError(f'{where}: weight for {ticker} is {weight} — targets are long-only, '
                                f'every weight must be in (0, 1]')
-        if w > 1.0:
-            raise TargetsError(f'{where}: weight for {ticker} is {w!r} > 1.0')
-        weights[ticker] = w
-    total = sum(weights.values())
-    if total > 1.0 + WEIGHT_SUM_TOLERANCE:
-        raise TargetsError(f'{where}: weights sum to {total:.6f} > 1.0 (no leverage; the '
+        if weight > 1:
+            raise TargetsError(f'{where}: weight for {ticker} is {weight} > 1.0')
+        exact[ticker] = weight
+        weights[ticker] = float(weight)
+    # D08: the sum may not exceed 1.0 — strictly. No tolerance: 1.0000000001 is leverage.
+    total = exact_weight_sum(exact)
+    if total > 1:
+        raise TargetsError(f'{where}: weights sum to {total} > 1.0 (no leverage; the '
                            f'remainder of 1.0 is cash)')
 
     notes = doc.get('notes', '')
@@ -208,7 +248,7 @@ def validate_targets(doc: Any, *, path: str = '') -> Targets:
     return Targets(
         sleeve=sleeve, as_of=as_of, generated_at=generated_at, strategy=strategy,
         capital_usd=capital, prices_as_of=prices_as_of, weights=weights, notes=notes,
-        path=path, raw=dict(doc),
+        path=path, raw=_jsonable(dict(doc)),
     )
 
 
@@ -222,7 +262,8 @@ def load_targets(path: str | Path) -> Targets:
     except OSError as exc:
         raise TargetsError(f'{p}: cannot read targets file: {exc}') from exc
     try:
-        doc = json.loads(text)
+        # Exact decimals: the weight-sum bound is judged on the numbers as written.
+        doc = json.loads(text, parse_float=Decimal)
     except json.JSONDecodeError as exc:
         raise TargetsError(f'{p}: not valid JSON: {exc}') from exc
     return validate_targets(doc, path=str(p))

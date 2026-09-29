@@ -17,7 +17,7 @@ FORBIDDEN_NAMES = {
     'place_order', 'place_order_simple', 'place_expressive_order', 'place_standalone_order',
     'place_protective_order', 'emergency_close_position', 'buy_option', 'sell_option',
     'convert_to_market', 'resize_positions', 'execute_resize_plan', 'approve_all',
-    'update_status', 'try_transition', 'delete',            # the proposal state machine is not ours to drive
+    'update_status', 'try_transition', 'delete', 'append_once',   # the proposal state machine / event log are not ours to drive
     'rpc', '_rpc', '_client', 'RPCClient', 'consume',        # no raw RPC chain: it could name any method
     'subprocess', 'os.system', 'system',
 }
@@ -82,4 +82,8 @@ def test_ports_cannot_express_a_trading_action():
     methods = set()
     for proto in (ports.ProposalReader, ports.Broker, ports.Pricer, ports.Proposer, ports.Gateway):
         methods |= {m for m in vars(proto) if not m.startswith('_')}
-    assert methods == {'proposals_in_group', 'stock_positions', 'price', 'ensure_group', 'propose'}
+    for proto in (ports.FillsJournal,):
+        methods |= {m for m in vars(proto) if not m.startswith('_')}
+    # Reads, one PENDING-proposal write, one write to the journal the package owns (D13). No trade.
+    assert methods == {'proposals_in_group', 'stock_positions', 'account_net_liquidation', 'executions',
+                       'price', 'sleeve_holdings', 'record_fills', 'ensure_group', 'propose'}

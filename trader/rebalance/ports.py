@@ -1,12 +1,15 @@
 """The rebalancer's seams to the outside world.
 
-Everything the rebalancer needs from IB, the proposal store and the price feed
-comes through these four narrow protocols, so tests drive the whole package with
-fakes and the production adapter (:mod:`trader.rebalance.sdk_gateway`) is the
-only module that touches :class:`trader.sdk.MMR`.
+Everything the rebalancer needs from IB, the proposal store, the price feed and
+the fills journal comes through these narrow protocols, so tests drive the
+whole package with fakes and the production adapter
+(:mod:`trader.rebalance.sdk_gateway`) is the only module that touches
+:class:`trader.sdk.MMR`.
 
-By design (D09) there is NO protocol method that approves, places, cancels or
-closes anything: the rebalancer cannot express those actions.
+By design (D12) there is NO protocol method that approves, places, cancels or
+closes anything: the rebalancer cannot express those actions. The only writes
+it can express are ``propose`` (a PENDING proposal) and ``record_fills`` (the
+D13 ``sleeve_fills`` journal it owns).
 """
 from __future__ import annotations
 
@@ -28,23 +31,38 @@ class ProposalRecord:
     group: str
     created_at: Optional[dt.datetime] = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    order_ids: Sequence[int] = field(default_factory=tuple)
 
-    @property
-    def executed_quantity(self) -> float:
-        """Whole quantity submitted for an EXECUTED proposal, signed by action.
 
-        ``submission_quantity`` is the exact payload the SDK persisted before
-        transport (an amount-sized proposal has no ``quantity`` of its own).
-        Broker acceptance is not inventory: the caller still reconciles this
-        against IB (D09).
-        """
-        if self.status != 'EXECUTED':
-            return 0.0
-        qty = self.metadata.get('submission_quantity', self.quantity)
-        if qty is None:
-            return 0.0
-        signed = float(qty)
-        return signed if self.action.upper() == 'BUY' else -signed
+@dataclass(frozen=True)
+class Execution:
+    """One broker execution as journaled by trader_service (an ORDER_FILLED event)."""
+
+    exec_id: str
+    order_id: int
+    symbol: str
+    action: str            # 'BUY' | 'SELL'
+    quantity: float        # unsigned shares filled by this execution
+    price: Optional[float] # None when the broker gave quantity without a usable price
+    time: dt.datetime
+    commission: Optional[float] = None
+    event_id: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class Fill:
+    """One row of the D13 ``sleeve_fills`` journal."""
+
+    sleeve: str
+    ticker: str
+    trade_date: dt.date
+    quantity: float        # signed: + buy, - sell
+    price: Optional[float]
+    commission: Optional[float]
+    exec_id: str           # primary key: idempotency
+    order_id: str
+    proposal_id: int
+    recorded_at: dt.datetime
 
 
 class ProposalReader(Protocol):
@@ -62,10 +80,28 @@ class Broker(Protocol):
         """
         ...
 
+    def account_net_liquidation(self) -> Optional[float]:
+        """The account's NetLiquidation, or None when it cannot be read (never a guess)."""
+        ...
+
+    def executions(self) -> Sequence[Execution]:
+        """Every journaled broker execution. Must raise when they cannot be read."""
+        ...
+
 
 class Pricer(Protocol):
     def price(self, ticker: str) -> Optional[float]:
         """A finite positive price for ``ticker`` or None when it cannot be priced."""
+        ...
+
+
+class FillsJournal(Protocol):
+    def sleeve_holdings(self, sleeve: str) -> Mapping[str, float]:
+        """Per-ticker signed quantity sums of ``sleeve_fills`` for the sleeve (D13)."""
+        ...
+
+    def record_fills(self, fills: Sequence[Fill]) -> int:
+        """Insert fills not yet journaled (by exec_id); return how many were new."""
         ...
 
 
@@ -80,5 +116,5 @@ class Proposer(Protocol):
         ...
 
 
-class Gateway(ProposalReader, Broker, Pricer, Proposer, Protocol):
+class Gateway(ProposalReader, Broker, Pricer, FillsJournal, Proposer, Protocol):
     """Everything at once — what the CLI is handed."""

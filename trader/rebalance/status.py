@@ -54,7 +54,8 @@ class SleeveStatus:
 def sleeve_status(sleeve: str, gateway: Gateway, *, targets_dir: str | None = None,
                   targets_file: str | None = None) -> SleeveStatus:
     group = sleeve_group(sleeve)
-    holdings, warnings, in_flight, _ = sleeve_state(group, gateway, gateway)
+    state = sleeve_state(sleeve, gateway)
+    holdings, warnings, in_flight = state.holdings, list(state.warnings), list(state.open_proposals)
 
     targets: Optional[Targets] = None
     path: Optional[str] = targets_file

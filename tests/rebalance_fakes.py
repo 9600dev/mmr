@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
-from trader.rebalance.ports import ProposalRecord
+from trader.rebalance.ports import Execution, Fill, ProposalRecord
 
 SHA = 'a' * 64
 TODAY = dt.date(2026, 9, 29)          # a Tuesday; 2026-09-28 was the previous session
@@ -42,25 +42,47 @@ def write_targets(tmp_path: Path, doc: Mapping[str, Any] | None = None, name: st
 
 
 def executed(pid: int, symbol: str, action: str, qty: float, group: str = 'sleeve_s2p',
-             source: str = 'rebalance:s2p:2026-08-31', status: str = 'EXECUTED') -> ProposalRecord:
+             source: str = 'rebalance:s2p:2026-08-31', status: str = 'EXECUTED',
+             order_ids: Sequence[int] | None = None) -> ProposalRecord:
+    """A proposal record; EXECUTED ones carry a broker order id (900 + pid) unless told otherwise."""
+    if order_ids is None:
+        order_ids = (900 + pid,) if status == 'EXECUTED' else ()
     return ProposalRecord(id=pid, symbol=symbol, action=action, quantity=qty, status=status,
                           source=source, group=group, created_at=dt.datetime(2026, 9, 1, 10, 0),
-                          metadata={'submission_quantity': float(qty), 'con_id': 1})
+                          metadata={'submission_quantity': float(qty), 'con_id': 1}, order_ids=tuple(order_ids))
+
+
+def execution(exec_id: str, order_id: int, symbol: str, action: str, qty: float, price: float | None = 100.0,
+              when: dt.datetime | None = None) -> Execution:
+    return Execution(exec_id=exec_id, order_id=order_id, symbol=symbol, action=action, quantity=qty,
+                     price=price, time=when or dt.datetime(2026, 9, 1, 14, 30, tzinfo=dt.timezone.utc))
 
 
 class FakeGateway:
-    """Implements the four ports over in-memory state and records every call."""
+    """Implements the ports over in-memory state and records every call.
+
+    ``fills`` seeds the sleeve_fills journal (sleeve -> ticker -> signed sum);
+    ``record_fills`` appends to it exactly like the real store (exec_id idempotent).
+    """
 
     FORBIDDEN = ('approve', 'buy', 'sell', 'cancel', 'cancel_all', 'close_position', 'reject',
                  'place_order', 'place_expressive_order', 'place_standalone_order',
                  'place_protective_order', 'emergency_close_position')
 
     def __init__(self, proposals: Sequence[ProposalRecord] = (), positions: Optional[Mapping[str, float]] = None,
-                 prices: Optional[Mapping[str, Optional[float]]] = None, fail_positions: bool = False):
+                 prices: Optional[Mapping[str, Optional[float]]] = None, fail_positions: bool = False,
+                 fills: Optional[Mapping[str, Mapping[str, float]]] = None,
+                 executions: Sequence[Execution] = (), fail_executions: bool = False,
+                 net_liquidation: Optional[float] = None):
         self.proposals = list(proposals)
         self.positions = dict(positions or {})
         self.prices = dict(prices or {})
         self.fail_positions = fail_positions
+        self.fail_executions = fail_executions
+        self.journal: dict[str, dict[str, float]] = {s: dict(t) for s, t in (fills or {}).items()}
+        self.recorded: list[Fill] = []
+        self.executions_ = list(executions)
+        self.net_liquidation = net_liquidation
         self.calls: list[tuple[str, dict]] = []
         self.groups: dict[str, str] = {}
         self.closed = False
@@ -81,9 +103,37 @@ class FakeGateway:
             raise ConnectionError('trader_service unreachable')
         return dict(self.positions)
 
+    def account_net_liquidation(self) -> Optional[float]:
+        self.calls.append(('account_net_liquidation', {}))
+        return self.net_liquidation
+
+    def executions(self) -> Sequence[Execution]:
+        self.calls.append(('executions', {}))
+        if self.fail_executions:
+            raise ConnectionError('event store unreadable')
+        return list(self.executions_)
+
     def price(self, ticker: str) -> Optional[float]:
         self.calls.append(('price', {'ticker': ticker}))
         return self.prices.get(ticker)
+
+    def sleeve_holdings(self, sleeve: str) -> Mapping[str, float]:
+        self.calls.append(('sleeve_holdings', {'sleeve': sleeve}))
+        return {t: q for t, q in self.journal.get(sleeve, {}).items() if q != 0}
+
+    def record_fills(self, fills: Sequence[Fill]) -> int:
+        self.calls.append(('record_fills', {'n': len(fills)}))
+        seen = {f.exec_id for f in self.recorded}
+        inserted = 0
+        for f in fills:
+            if f.exec_id in seen:
+                continue
+            seen.add(f.exec_id)
+            self.recorded.append(f)
+            book = self.journal.setdefault(f.sleeve, {})
+            book[f.ticker] = book.get(f.ticker, 0.0) + f.quantity
+            inserted += 1
+        return inserted
 
     def ensure_group(self, group: str, description: str) -> None:
         self.calls.append(('ensure_group', {'group': group, 'description': description}))
@@ -107,3 +157,8 @@ class FakeGateway:
     @property
     def method_names(self) -> set[str]:
         return {name for name, _ in self.calls}
+
+
+def held(sleeve: str = 's2p', **tickers: float) -> dict[str, dict[str, float]]:
+    """Journal seed helper: held(AAPL=30, MSFT=5) -> {'s2p': {'AAPL': 30.0, 'MSFT': 5.0}}."""
+    return {sleeve: {t: float(q) for t, q in tickers.items()}}
