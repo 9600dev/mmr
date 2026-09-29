@@ -17,21 +17,24 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 HERE = Path(__file__).resolve().parent
-CONTROLS = ('s2p_frozen_revenue', 'quality_value_frozen', 'accruals_frozen')
+CONTROLS = ('s2p_frozen_revenue', 'quality_value_frozen', 'accruals_frozen', 'pead_earnings_raw', 'pead_revenue_raw',
+            'accruals_raw', 'gross_profitability', 'gross_profit_raw', 'momentum_12_1', 'revenue_raw')
 SIZE_TILTS = ('size_smallcap', 'size_small_assets', 'size_small_revenue')
-GUARDS = {                                   # PREREG rule 2 + addendum R2 item 3
-    's2p_top_quintile': ['size_smallcap', 's2p_frozen_revenue'],
-    'pead_earnings': ['size_small_assets'],
-    'pead_revenue': ['size_small_revenue'],
-    'quality_value_blend': ['s2p_top_quintile', 'size_smallcap', 'size_small_assets', 'quality_value_frozen'],
-    'low_accruals': ['size_small_assets', 'accruals_frozen'],
-    'value_momentum_filter': ['s2p_top_quintile', 'size_smallcap'],
+GUARDS = {                                   # PREREG rule 2 + addendum R2 item 3 + addendum R3
+    's2p_top_quintile': ['size_smallcap', 's2p_frozen_revenue', 'revenue_raw'],
+    'pead_earnings': ['size_small_assets', 'pead_earnings_raw'],
+    'pead_revenue': ['size_small_revenue', 'pead_revenue_raw'],
+    'quality_value_blend': ['s2p_top_quintile', 'size_smallcap', 'size_small_assets', 'quality_value_frozen',
+                            'gross_profitability', 'gross_profit_raw'],
+    'low_accruals': ['size_small_assets', 'accruals_frozen', 'accruals_raw'],
+    'value_momentum_filter': ['s2p_top_quintile', 'size_smallcap', 'momentum_12_1'],
     'low_volatility': [],
 }
 HYP = {'s2p_top_quintile': 'H1', 'size_smallcap': 'D1', 's2p_frozen_revenue': 'D2', 'pead_earnings': 'H2',
        'pead_revenue': 'H3', 'quality_value_blend': 'H4', 'value_momentum_filter': 'H5', 'low_volatility': 'H6',
        'low_accruals': 'H7', 'size_small_assets': 'D3', 'size_small_revenue': 'D4', 'quality_value_frozen': 'D5',
-       'accruals_frozen': 'D6'}
+       'accruals_frozen': 'D6', 'pead_earnings_raw': 'D7', 'pead_revenue_raw': 'D8', 'accruals_raw': 'D9',
+       'gross_profitability': 'D10', 'gross_profit_raw': 'D11', 'momentum_12_1': 'D12', 'revenue_raw': 'D13'}
 TIER = {'PASS': 2, 'PROMISING': 1, 'FAIL': 0}
 
 
@@ -108,14 +111,21 @@ def choose_champion(ids: List[str], results: Dict[str, Any]):
     return max(eligible, key=key), table
 
 
+def artifact_name(row: Dict[str, Any]) -> str:
+    ts = str(row['timestamp']).replace('-', '').replace(':', '').replace('+0000', '').replace('+00:00', '')
+    return f"{row['id']}__{ts}.json"
+
+
 def ledger_table(rows: List[Dict[str, Any]]) -> List[str]:
-    out = ['| # | timestamp (UTC) | id | status | N at run | OOS Sharpe | active ann | t(NW) | DSR | verdict | git sha |',
-           '|---|---|---|---|---|---|---|---|---|---|---|']
+    out = ['| # | timestamp (UTC) | id | status | N at run | OOS Sharpe | active ann | t(NW) | DSR | verdict | git sha | artifact (`results/trials/`) |',
+           '|---|---|---|---|---|---|---|---|---|---|---|---|']
     for n, r in enumerate(rows, 1):
         m = r.get('metrics') or {}
+        art = HERE / 'results' / 'trials' / artifact_name(r)
         out.append(f"| {n} | {str(r.get('timestamp', ''))[:19]} | {r.get('id')} | {r.get('status')} | {r.get('n_trials')} | "
                    f"{f(m.get('oos_sharpe'))} | {pct(m.get('active_ann_return'))} | {f(m.get('active_t_nw'), '{:.2f}')} | "
-                   f"{f(m.get('active_dsr'), '{:.2f}')} | {r.get('verdict') or '-'} | {str(r.get('git_sha', ''))[:7]} |")
+                   f"{f(m.get('active_dsr'), '{:.2f}')} | {r.get('verdict') or '-'} | {str(r.get('git_sha', ''))[:7]} | "
+                   f"{art.name if art.exists() else 'MISSING'} |")
     return out
 
 
@@ -141,11 +151,13 @@ def candidate_table(ids, results) -> List[str]:
 
 
 def decomposition_tables(results) -> List[str]:
-    groups = [('H1 sales-to-price vs its parts', ['s2p_top_quintile', 'size_smallcap', 's2p_frozen_revenue']),
-              ('H2/H3 surprise ratios vs their denominators', ['pead_earnings', 'size_small_assets', 'pead_revenue', 'size_small_revenue']),
-              ('H4 quality/value blend vs its parts', ['quality_value_blend', 'quality_value_frozen', 's2p_top_quintile', 'size_smallcap', 'size_small_assets']),
-              ('H7 low accruals vs its parts', ['low_accruals', 'accruals_frozen', 'size_small_assets']),
-              ('H5 value+momentum vs plain value and size', ['value_momentum_filter', 's2p_top_quintile', 'size_smallcap'])]
+    groups = [('H1 sales-to-price vs its parts', ['s2p_top_quintile', 'size_smallcap', 's2p_frozen_revenue', 'revenue_raw']),
+              ('H2/H3 surprise ratios vs numerator alone and denominator alone',
+               ['pead_earnings', 'pead_earnings_raw', 'size_small_assets', 'pead_revenue', 'pead_revenue_raw', 'size_small_revenue']),
+              ('H4 quality/value blend vs its parts', ['quality_value_blend', 'quality_value_frozen', 'gross_profitability', 'gross_profit_raw',
+                                                      's2p_top_quintile', 'size_smallcap', 'size_small_assets']),
+              ('H7 low accruals vs its parts', ['low_accruals', 'accruals_frozen', 'accruals_raw', 'size_small_assets']),
+              ('H5 value+momentum vs value alone, momentum alone and size', ['value_momentum_filter', 's2p_top_quintile', 'momentum_12_1', 'size_smallcap'])]
     out = []
     for title, members in groups:
         out += [f'**{title}**', '', '| id | role | OOS Sharpe | active ann | t(NW) | full-period Sharpe | verdict |', '|---|---|---|---|---|---|---|']
@@ -217,7 +229,12 @@ def main() -> int:
           'equal-weighted, ≥ 30 names. Decisive benchmark `eq_ew_covered` owns each candidate\'s published coverage. '
           f"Every candidate is a single pre-registered cell (no grid; gate (g) n/a; nothing selected on train windows). "
           f"Distinct candidate hashes in the ledger: {n_cand_hashes} (budget 40). Two passes (addendum R2 item 4): pass 1 fills the ledger, "
-          'pass 2 re-evaluates every candidate so each final results file deflates by the same trial count.', '']
+          'pass 2 re-evaluates every candidate so each final results file deflates by the same trial count.', '',
+          'Provenance (PREREG addendum R3): ledger rows record the checkpoint SHA their working tree was based on, not a commit holding the '
+          'exact files that ran (pass-1 rows: `92653bf` + the then-uncommitted R2 changes, committed unchanged in `f41bc9a`; pass-2 rows: '
+          '`f41bc9a` for the 13 entries it contains; the seven R3 controls ran before their commit). What is machine-checkable: '
+          '`uv run python research/lowfreq/equity/provenance.py` recomputes every row\'s `entry_sha256` and `strategy_sha256` from the committed '
+          'registry and sources and fails on any mismatch, and checks `PROVENANCE.json` (sha256 of PREREG.md / candidates.yaml recorded before the R3 runs).', '']
     L += ['## Every trial (ledger, in order)', ''] + ledger_table(rows) + ['']
     L += ['## Candidates — final results (`results/<id>.json`)', ''] + candidate_table(ids, results) + ['',
           'maxDD = OOS max drawdown of the stitched OOS equity (candidate / decisive benchmark); pos-years = fraction of counted OOS '

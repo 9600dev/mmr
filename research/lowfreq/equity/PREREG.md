@@ -149,3 +149,84 @@ descend from that checkpoint.
    one carries. Rare for TTM sums; documented, tested, not varied.
 7. Shared files (`docs/RESEARCH_LOG.md`, `research/lowfreq/SUMMARY.md`) are
    not edited by this component; findings live in `REPORT.md`.
+
+---
+
+## Addendum R3 — 2026-09-29, written AFTER pass-1 results were seen, BEFORE any R3 run
+
+State when written: checkpoint `f41bc9a` holds the 13 registered entries, the
+R2 addendum, the 13 pass-1 ledger rows (N = 1..6, partial by construction)
+and their results files. Pass 2 has not run. This addendum answers the
+round-2 review. Nothing here can raise a candidate's chance of PASS: it adds
+controls (raising N), adds guards, and preserves artifacts.
+
+### Provenance (honest statement of a structural limit)
+
+Every ledger row records the git SHA of the checkpoint the working tree was
+based on, not of a commit containing the exact files that ran: pass-1 rows
+say `92653bf`, but ran from `92653bf` + the then-uncommitted R2 changes,
+which were committed unchanged in `f41bc9a`. Pass-2 rows carry `f41bc9a`,
+which contains the exact entries and sources of the 13 entries. The R3
+controls below run before their commit (the round-3 checkpoint). What IS
+immutable and machine-checkable: every row carries `entry_sha256` (canonical
+JSON of its registry entry) and `strategy_sha256` (its module source), so
+`uv run python research/lowfreq/equity/provenance.py` recomputes both from
+the committed files for every row and fails on any mismatch — the committed
+registry and sources are provably the ones that ran. `PROVENANCE.json`
+records sha256 of `PREREG.md` and `candidates.yaml` at the instant before the
+first R3 run, checked by the same script. The claim "PREREG existed before
+the first candidate row" rests on `92653bf` for the nine original hypotheses
+and the champion rule; the R2/R3 additions rest on this hash chain.
+
+### Expected sign and rationale for the R2 controls (D3–D6)
+
+| id | expected active sign | rationale |
+|---|---|---|
+| `size_small_assets` | + (a size effect inside the liquid universe, as D1; weaker than D1 since assets ≠ price) | pure denominator of every asset-scaled ratio here |
+| `size_small_revenue` | + or ~0 (small-revenue names are small caps and growth names alike) | pure denominator of the revenue-surprise ratio |
+| `quality_value_frozen` | ≈ `quality_value_blend` (the blend's fundamentals update slowly) | the blend with its information updates removed |
+| `accruals_frozen` | ≈ `low_accruals` if the accrual information is inert; below it if accruals matter | the accrual level with its updates removed |
+
+### R3 controls — each remaining ratio component ALONE (standing rule)
+
+| id | control for | signal | expected active sign |
+|---|---|---|---|
+| `pead_earnings_raw` (D7) | `pead_earnings` numerator | raw $ change in TTM net income | ~0 / − : a large-cap tilt inside the universe |
+| `pead_revenue_raw` (D8) | `pead_revenue` numerator | raw $ change in TTM revenue | ~0 / − (large-cap tilt) |
+| `accruals_raw` (D9) | `low_accruals` numerator | −raw $ (NI − CFO) | ~0 (large negative-accrual $ are large firms) |
+| `gross_profitability` (D10) | `quality_value_blend` component | GP / assets | + (Novy-Marx), below the blend if value adds |
+| `gross_profit_raw` (D11) | `gross_profitability` numerator | raw $ gross profit | ~0 / − (large-cap tilt) |
+| `momentum_12_1` (D12) | `value_momentum_filter` component | 12-1 price momentum | ≤ 0 vs covered-EW (2026-07-30) |
+| `revenue_raw` (D13) | `s2p_top_quintile` numerator | raw $ TTM revenue | ~0 / − (large-cap tilt) |
+
+All seven are `role: candidate` (they count in N), single-cell, never
+champions. Guards (rule 2 + R2 item 3) now read: a candidate is eligible only
+if its OOS active return exceeds EVERY listed control —
+`s2p_top_quintile`: size_smallcap, s2p_frozen_revenue, revenue_raw;
+`pead_earnings`: size_small_assets, pead_earnings_raw;
+`pead_revenue`: size_small_revenue, pead_revenue_raw;
+`low_accruals`: size_small_assets, accruals_frozen, accruals_raw;
+`quality_value_blend`: s2p_top_quintile, size_smallcap, size_small_assets,
+quality_value_frozen, gross_profitability, gross_profit_raw;
+`value_momentum_filter`: s2p_top_quintile, size_smallcap, momentum_12_1;
+`low_volatility`: none (price-only, not a ratio).
+
+### Protocol additions
+
+* Pass 1 for the seven R3 controls, then **pass 2 for all 20** against the
+  complete ledger (R2 item 4), so every final `results/<id>.json` carries
+  N = 20 and the same trial-Sharpe set. Total candidate-role rows after
+  pass 2: 13 + 7 + 20 = 40 (budget 40; any error re-run would exceed it and
+  is reported as such).
+* Every `ok` ledger row keeps an immutable artifact
+  `results/trials/<id>__<timestamp>.json` (`archive_trials.py`, run before
+  and after pass 2); REPORT.md cites the artifact for every row.
+* `stress_d07.py` identifies a forced exit as a SELL dated at the name's
+  terminal print AND filled at that print's close (regular fills are at the
+  open); it refuses to write unless its event count and value reconcile
+  exactly with `Backtester`'s own `panel_forced_exits` /
+  `panel_forced_exit_value` diagnostics for every window.
+* `check_artifacts.py` asserts before REPORT.md is believed: every candidate
+  has a final JSON at the common N, every ok row has an artifact, the
+  champion equals `make_report.choose_champion`, the report's verdict equals
+  the champion JSON's, the report is under 3000 words.

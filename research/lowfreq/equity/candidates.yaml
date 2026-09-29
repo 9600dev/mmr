@@ -120,3 +120,60 @@ candidates:
     params: {}
     benchmarks: [eq_ew_covered]
     registered_at: 2026-09-29
+  # ---- PREREG.md addendum R3 (2026-09-29, after pass-1 results were seen; controls only, never champions)
+  - id: pead_earnings_raw
+    role: candidate
+    hypothesis: The top quintile by raw dollar change in as-of TTM net income behaves like a large-cap tilt and does not reach pead_earnings (PREREG addendum R3 D7, numerator control; never a champion).
+    rationale: Standing rule - test each component of a ratio alone; the unscaled surprise is the numerator of pead_earnings.
+    strategy: {module: strategies.lowfreq_equity_pead_earnings_raw, class: EarningsSurpriseRaw}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: pead_revenue_raw
+    role: candidate
+    hypothesis: The top quintile by raw dollar change in as-of TTM revenue behaves like a large-cap tilt and does not reach pead_revenue (PREREG addendum R3 D8, numerator control; never a champion).
+    rationale: Standing rule - test each component alone; the unscaled surprise is the numerator of pead_revenue.
+    strategy: {module: strategies.lowfreq_equity_pead_revenue_raw, class: RevenueSurpriseRaw}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: accruals_raw
+    role: candidate
+    hypothesis: The top quintile by minus raw dollar accruals does not reach low_accruals (PREREG addendum R3 D9, numerator control; never a champion).
+    rationale: Standing rule - test each component alone; the unscaled accrual is the numerator of low_accruals.
+    strategy: {module: strategies.lowfreq_equity_accruals_raw, class: LowAccrualsRaw}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: gross_profitability
+    role: candidate
+    hypothesis: The top gross-profitability quintile (TTM gross profit / assets) beats the covered universe but not the quality/value blend (PREREG addendum R3 D10, component control; never a champion).
+    rationale: Novy-Marx 2013 profitability alone - the blend must beat each of its components alone to have added anything.
+    strategy: {module: strategies.lowfreq_equity_gross_profitability, class: GrossProfitabilityQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: gross_profit_raw
+    role: candidate
+    hypothesis: The top quintile by raw dollar TTM gross profit is a large-cap tilt and does not reach gross_profitability (PREREG addendum R3 D11, numerator control; never a champion).
+    rationale: Standing rule - test each component alone; raw gross profit is the numerator of gross profitability.
+    strategy: {module: strategies.lowfreq_equity_gross_profit_raw, class: GrossProfitRaw}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: momentum_12_1
+    role: candidate
+    hypothesis: The top 12-1 momentum quintile of the covered set does not beat owning it, and value_momentum_filter must exceed it (PREREG addendum R3 D12, component control; never a champion).
+    rationale: Long-only 12-1 momentum lost to equal weight of its universe on 2026-07-30; the filter must beat momentum alone as well as value alone.
+    strategy: {module: strategies.lowfreq_equity_momentum, class: Momentum121Quintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: revenue_raw
+    role: candidate
+    hypothesis: The top quintile by raw dollar TTM revenue is a large-cap tilt and does not reach s2p_top_quintile (PREREG addendum R3 D13, numerator control; never a champion).
+    rationale: Standing rule - test each component alone; raw revenue is the numerator of sales-to-price.
+    strategy: {module: strategies.lowfreq_equity_revenue_raw, class: RevenueRaw}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29

@@ -47,16 +47,37 @@ def _run(entry, cell, panel, data_start, end_excl, costs, terminal, coverage=Non
     own_cov = engine.candidate_coverage(engine.make_strategy(entry, cell, window, coverage=cov_in).precompute_panel(wide))
     bt = Backtester(cast(Any, engine._NoStorage()), engine._config(to_date(data_start), to_date(end_excl), costs, terminal))
     res = bt.run_panel(strat, cast(Any, list(frames.keys())), frames=frames)
-    return res, own_cov
+    return res, own_cov, window
 
 
-def _forced(res, terminal) -> List[Dict[str, Any]]:
+def _forced(res, terminal, window, slip: float) -> List[Dict[str, Any]]:
+    """Forced exits (D07) reconstructed from the fill log and RECONCILED with
+    the backtester's own diagnostics. A forced exit is a SELL dated at the
+    name's terminal print AND filled at that print's CLOSE x (1 - slippage);
+    a regular rebalance sell on the same date fills at the OPEN, so the price
+    tells them apart. Refuses (raises) unless count and gross value equal
+    ``panel_forced_exits`` / ``panel_forced_exit_value`` exactly."""
+    diag = getattr(res, 'diagnostics', None) or {}
+    close = window.close
     out = []
     for t in res.trades:
         ts = pd.Timestamp(t.timestamp)
-        if str(t.action).endswith('SELL') and terminal.get(t.conid) == ts:
-            out.append({'date': str(ts.date()), 'ticker': str(t.conid), 'quantity': float(t.quantity),
-                        'price': float(t.price), 'proceeds': float(t.quantity * t.price - t.commission)})
+        if not str(t.action).endswith('SELL') or terminal.get(t.conid) != ts:
+            continue
+        if t.conid not in close.columns or ts not in close.index:
+            continue
+        px = float(close.at[ts, t.conid])
+        if not (px > 0) or abs(t.price - px * (1 - slip)) > 1e-9 * max(1.0, px):
+            continue                                   # a regular open fill on the terminal date
+        out.append({'date': str(ts.date()), 'ticker': str(t.conid), 'quantity': float(t.quantity),
+                    'price': float(t.price), 'last_print_close': px,
+                    'proceeds': float(t.quantity * t.price - t.commission)})
+    n_diag = int(diag.get('panel_forced_exits') or 0)
+    v_diag = float(diag.get('panel_forced_exit_value') or 0.0)
+    v_here = sum(e['quantity'] * e['last_print_close'] for e in out)
+    if len(out) != n_diag or abs(v_here - v_diag) > 1e-6 * max(1.0, v_diag):
+        raise RuntimeError(f'forced-exit reconciliation failed: extracted {len(out)} events worth {v_here:,.2f}, '
+                           f'backtester reports {n_diag} worth {v_diag:,.2f}')
     return out
 
 
@@ -97,10 +118,10 @@ def main(cid: str) -> int:
     for f in r['folds']:
         test_start, test_end = to_date(f['test_start']), to_date(f['test_end'])
         data_start = test_start - warm
-        res_c, cov = _run(entry, f['chosen'], panel, data_start, test_end, costs, terminal)
-        ev_c = _forced(res_c, terminal)
-        res_b, _ = _run(bench, default_cell(bench), panel, data_start, test_end, costs, terminal, coverage=cov)
-        ev_b = _forced(res_b, terminal)
+        res_c, cov, win = _run(entry, f['chosen'], panel, data_start, test_end, costs, terminal)
+        ev_c = _forced(res_c, terminal, win, costs.slippage_bps / 10_000.0)
+        res_b, _, _ = _run(bench, default_cell(bench), panel, data_start, test_end, costs, terminal, coverage=cov)
+        ev_b = _forced(res_b, terminal, win, costs.slippage_bps / 10_000.0)
         c_raw, c_s = _stressed_returns(res_c, ev_c, test_start)
         b_raw, b_s = _stressed_returns(res_b, ev_b, test_start)
         cand_raw.append(c_raw); cand_s.append(c_s); ben_raw.append(b_raw); ben_s.append(b_s)
@@ -110,13 +131,15 @@ def main(cid: str) -> int:
             events.append(dict(e, fold=f['fold'], book=bench_id))
         per_fold.append({'fold': f['fold'], 'test_start': f['test_start'], 'test_end': f['test_end'],
                          'candidate_forced_exits': len(ev_c), 'candidate_forced_proceeds': sum(e['proceeds'] for e in ev_c),
-                         'benchmark_forced_exits': len(ev_b), 'benchmark_forced_proceeds': sum(e['proceeds'] for e in ev_b)})
+                         'benchmark_forced_exits': len(ev_b), 'benchmark_forced_proceeds': sum(e['proceeds'] for e in ev_b),
+                         'reconciled_with_backtester_diagnostics': True})
     cat = lambda parts: pd.concat(parts).sort_index()   # noqa: E731
     c_raw, c_s, b_raw, b_s = cat(cand_raw), cat(cand_s), cat(ben_raw), cat(ben_s)
     b_raw = b_raw.reindex(c_raw.index).fillna(0.0)
     b_s = b_s.reindex(c_s.index).fillna(0.0)
     out = {
         'id': cid, 'decisive_benchmark': bench_id, 'source_results': str(results_path), 'source_verdict': r['verdict'],
+        'events_reconciled_with_backtester_diagnostics': True,
         'rule': 'D07 stress: proceeds of every SELL fill dated at a name\'s terminal print are removed from equity '
                 'from that day on (the name marked to zero); (i) candidate only, (ii) candidate and benchmark alike',
         'command': f'uv run python research/lowfreq/equity/stress_d07.py {cid}',
