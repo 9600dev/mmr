@@ -1,4 +1,4 @@
-"""``python -m trader.lowfreq_live`` - targets / track / report / fills.
+"""``python -m trader.lowfreq_live`` - targets / track / rebuild / report / fills.
 
 Exit codes: 0 ok, 2 refused (nothing written), 1 unexpected error.
 """
@@ -79,23 +79,26 @@ def _ib_positions() -> Dict[str, float]:
     return out
 
 
-def cmd_track(a: argparse.Namespace) -> int:
-    from trader.lowfreq_live.ledger import ReconciliationError, track
-    store, bars = _store_and_bars(a)
-    broker: Optional[Dict[str, float]] = None
-    if not a.no_reconcile:
-        try:
-            broker = _ib_positions()
-        except Exception as exc:                        # noqa: BLE001 - fail closed
-            print(f'REFUSED: cannot read IB positions for reconciliation ({exc}); '
-                  f'pass --no-reconcile to record without it', file=sys.stderr)
-            return 2
-    else:
-        print('WARNING: --no-reconcile - journaled holdings were not checked against IB', file=sys.stderr)
+def _broker_or_refuse() -> Optional[Dict[str, float]]:
+    """IB positions, or None after printing the refusal (D13: no bypass)."""
     try:
-        res = track(a.sleeve, store, bars, targets_dir=a.targets_dir, through=_date(a.through),
-                    benchmark_id=a.benchmark, broker_positions=broker)
-    except ReconciliationError as exc:
+        return _ib_positions()
+    except Exception as exc:                            # noqa: BLE001 - fail closed
+        print(f'REFUSED: cannot read IB positions for reconciliation ({exc}); track/rebuild require it (D13)',
+              file=sys.stderr)
+        return None
+
+
+def cmd_track(a: argparse.Namespace) -> int:
+    from trader.lowfreq_live.ledger import LedgerDisagreement, ReconciliationError, track
+    store, bars = _store_and_bars(a)
+    broker = _broker_or_refuse()
+    if broker is None:
+        return 2
+    try:
+        res = track(a.sleeve, store, bars, broker, targets_dir=a.targets_dir, through=_date(a.through),
+                    benchmark_id=a.benchmark)
+    except (ReconciliationError, LedgerDisagreement) as exc:
         print(f'REFUSED: {exc}', file=sys.stderr)
         return 2
     if a.json:
@@ -103,10 +106,34 @@ def cmd_track(a: argparse.Namespace) -> int:
     else:
         print(f"{a.sleeve}: appended {res['appended']} session(s) through {res['through']} "
               f"(benchmark {res['benchmark_id']}, inception {res['inception']}, capital {res['capital_usd']:,.2f}, "
-              f"reconciled={res['reconciled']})")
-        for d in res['disagreements']:
-            print(f"  DISAGREEMENT {d['session']} {d['column']}: stored {d['stored']:.2f} replayed {d['replayed']:.2f}")
-    return 0 if not res['disagreements'] else 2
+              f"reconciled against IB)")
+    return 0
+
+
+def cmd_rebuild(a: argparse.Namespace) -> int:
+    from trader.lowfreq_live.ledger import ReconciliationError, rebuild
+    if not a.attest:
+        print('REFUSED: rebuild rewrites the ledger history; pass --attest with --reason', file=sys.stderr)
+        return 2
+    if not (a.reason or '').strip():
+        print('REFUSED: --reason is required', file=sys.stderr)
+        return 2
+    store, bars = _store_and_bars(a)
+    broker = _broker_or_refuse()
+    if broker is None:
+        return 2
+    try:
+        res = rebuild(a.sleeve, store, bars, broker, a.reason, targets_dir=a.targets_dir,
+                      through=_date(a.through), benchmark_id=a.benchmark)
+    except ReconciliationError as exc:
+        print(f'REFUSED: {exc}', file=sys.stderr)
+        return 2
+    if a.json:
+        print(json.dumps(res, indent=2, default=str))
+    else:
+        print(f"{a.sleeve}: rebuilt - dropped {res['rows_dropped']} row(s), wrote {res['rows_written']} through "
+              f"{res['through']}; {len(res['disagreements_resolved'])} disagreement(s) resolved; reason: {res['reason']}")
+    return 0
 
 
 def cmd_report(a: argparse.Namespace) -> int:
@@ -158,19 +185,22 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument('--overwrite', action='store_true')
     t.set_defaults(func=cmd_targets)
 
-    for name, fn, help_ in (('track', cmd_track, 'append ledger rows through the last stored session'),
+    for name, fn, help_ in (('track', cmd_track, 'append ledger rows through the last stored session '
+                                                 '(reconciles against IB first; refuses on any disagreement)'),
+                            ('rebuild', cmd_rebuild, 'attested operator act: drop the ledger and replay from inception'),
                             ('report', cmd_report, 'since-inception sleeve vs benchmark'),
-                            ('fills', cmd_fills, 'list the recorded fills of a sleeve')):
+                            ('fills', cmd_fills, 'list the sleeve_fills rows of a sleeve (read-only)')):
         p = sub.add_parser(name, help=help_)
         p.add_argument('--sleeve', required=True)
         p.add_argument('--ledger-db', default=None, help='DuckDB file for the ledger (default: trader.yaml duckdb_path)')
         p.add_argument('--bars-db', default=None, help='DuckDB with pit_daily_bars (default: history_duckdb_path)')
         p.add_argument('--targets-dir', default=None)
-        if name == 'track':
+        if name in ('track', 'rebuild'):
             p.add_argument('--through', default=None, help='last session to record (default: last stored)')
             p.add_argument('--benchmark', default=None, help='benchmark id when the sidecar carries several')
-            p.add_argument('--no-reconcile', action='store_true',
-                           help='skip the IB positions check (D13); default reads trader_service and refuses on a discrepancy')
+        if name == 'rebuild':
+            p.add_argument('--reason', default=None, help='why history is being rewritten (recorded)')
+            p.add_argument('--attest', action='store_true', help='confirm the operator reviewed the disagreements')
         p.set_defaults(func=fn)
 
     return ap

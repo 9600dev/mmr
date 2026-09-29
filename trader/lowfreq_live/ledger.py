@@ -55,18 +55,36 @@ LEDGER_DDL = """CREATE TABLE IF NOT EXISTS lowfreq_paper_ledger (
     benchmark_n_holdings INTEGER, benchmark_n_unpriced INTEGER,
     capital_usd DOUBLE, recorded_at TIMESTAMP NOT NULL,
     PRIMARY KEY (sleeve, session))"""
-# A name is treated as STOPPED (D07 exit at its last print) only once it has
-# been silent this many sessions: at the live data edge "no print yet today"
-# and "delisted" look identical for a while.
-TERMINAL_SILENCE_SESSIONS = 5
-# A replayed value that differs from a stored row by more than this fraction
-# of capital is a disagreement (a late fill, a data correction); commission
-# -sized effects of a newly recognised terminal exit are below it.
-DISAGREEMENT_TOLERANCE = 1e-4
+# D07 at the live data edge. The harness exits a stopped name at its LAST
+# print, which it can only know with hindsight. Live, "no print yet today" and
+# "delisted" look identical, so the ledger's rule is PREFIX-STABLE instead: a
+# held name that has been silent for this many consecutive sessions is exited
+# ON THE SESSION THE SILENCE IS RECOGNISED, at its last print's price (the
+# carried mark, exactly what the harness would have sold it for). Rows already
+# stored are never replayed differently; the exit appears in a NEW row.
+SILENCE_SESSIONS = 5
+# Replays are prefix-stable, so a stored row and its replay must agree to
+# floating-point precision; anything larger is a late fill or a data
+# correction and REFUSES the run (an attested `rebuild` rewrites history).
+DISAGREEMENT_TOLERANCE = 1e-6
+REBUILDS_DDL = """CREATE TABLE IF NOT EXISTS lowfreq_ledger_rebuilds (
+    sleeve VARCHAR NOT NULL, rebuilt_at TIMESTAMP NOT NULL, reason VARCHAR NOT NULL,
+    rows_dropped INTEGER NOT NULL, rows_written INTEGER NOT NULL, disagreements VARCHAR)"""
 
 
 class ReconciliationError(RuntimeError):
     """The sleeve's journaled holdings exceed what the broker shows (D13)."""
+
+
+class LedgerDisagreement(RuntimeError):
+    """A replay differs from stored rows; nothing was appended."""
+    def __init__(self, sleeve: str, disagreements: List[Dict[str, Any]]):
+        self.disagreements = disagreements
+        shown = '; '.join(f"{d['session']} {d['column']} stored {d['stored']:.2f} replayed {d['replayed']:.2f}"
+                          for d in disagreements[:5])
+        super().__init__(f'{sleeve}: replay disagrees with {len(disagreements)} stored value(s) - {shown}'
+                         f'{" ..." if len(disagreements) > 5 else ""}. Nothing appended; investigate (a late '
+                         f'fill? corrected bars?) and run `rebuild --sleeve {sleeve} --reason ... --attest`.')
 
 
 class BarSource(Protocol):
@@ -162,6 +180,22 @@ class LedgerStore:
     def __init__(self, db_path: str):
         self.db = DuckDBConnection(str(Path(db_path).expanduser()))
         self.db.execute(LEDGER_DDL, fetch='none')
+        self.db.execute(REBUILDS_DDL, fetch='none')
+
+    def drop_ledger(self, sleeve: str) -> int:
+        n = self.db.execute('SELECT count(*) FROM lowfreq_paper_ledger WHERE sleeve = ?', [sleeve], fetch='one')
+        self.db.execute('DELETE FROM lowfreq_paper_ledger WHERE sleeve = ?', [sleeve], fetch='none')
+        return int(n[0]) if n else 0
+
+    def record_rebuild(self, sleeve: str, reason: str, dropped: int, written: int, disagreements: list) -> None:
+        self.db.execute('INSERT INTO lowfreq_ledger_rebuilds VALUES (?, now(), ?, ?, ?, ?)',
+                        [sleeve, reason, dropped, written, json.dumps(disagreements, default=str)], fetch='none')
+
+    def rebuilds(self, sleeve: str) -> List[Dict[str, Any]]:
+        rows = self.db.execute('SELECT rebuilt_at, reason, rows_dropped, rows_written FROM lowfreq_ledger_rebuilds '
+                               'WHERE sleeve = ? ORDER BY rebuilt_at', [sleeve], fetch='all') or []
+        return [{'rebuilt_at': str(r[0]), 'reason': r[1], 'rows_dropped': int(r[2]), 'rows_written': int(r[3])}
+                for r in rows]
 
     def fills(self, sleeve: str) -> List[Fill]:
         """Every ``sleeve_fills`` row of the sleeve in trade order. Refuses
@@ -236,6 +270,13 @@ def load_inputs(sleeve: str, store: LedgerStore, targets_dir: Optional[str] = No
         doc = json.loads(side.read_text())
         if doc.get('schema') != BENCHMARK_SCHEMA:
             raise RuntimeError(f'{side}: unexpected schema {doc.get("schema")!r}')
+        pair = read_targets(p)
+        for key, want in (('sleeve', pair['sleeve']), ('as_of', pair['as_of']),
+                          ('candidate', pair['strategy']['id']), ('capital_usd', pair['capital_usd'])):
+            if doc.get(key) != want:
+                raise RuntimeError(f'{side}: {key}={doc.get(key)!r} does not match its D08 file ({want!r})')
+        if pair['strategy']['id'] != first['strategy']['id'] or pair['sleeve'] != sleeve:
+            raise RuntimeError(f'{p}: candidate/sleeve differ from the inception file')
         benches = doc.get('benchmarks') or {}
         if bid is None:
             if len(benches) != 1:
@@ -314,14 +355,30 @@ def backtest_config(start: dt.date, end_excl: dt.date, capital: float, costs: Co
         fill_policy='next_open', panel_terminal_prints=dict(terminal))
 
 
-def live_terminal_prints(panel: PricePanel, silence: int = TERMINAL_SILENCE_SESSIONS) -> Dict[Any, pd.Timestamp]:
-    """``engine.terminal_prints`` (D07) restricted to names silent for at least
-    ``silence`` sessions before the panel's last bar."""
-    idx = pd.DatetimeIndex(panel.close.index)
-    if len(idx) <= silence:
-        return {}
-    cutoff = idx[-1 - silence]
-    return {t: ts for t, ts in engine.terminal_prints(panel).items() if ts <= cutoff}
+def silence_exits(panel: PricePanel, silence: int = SILENCE_SESSIONS) -> Dict[Any, pd.Timestamp]:
+    """ticker -> the session on which its silence is RECOGNISED: the
+    ``silence``-th consecutive session without a print after at least one
+    print (first such run per name; the executor supports one forced exit per
+    name). ``Backtester.run_panel`` sells the holding on that bar at its
+    carried last price (D07's price). Prefix-stable: recognition on session S
+    depends only on bars <= S, so a longer replay never changes it."""
+    close = panel.close.replace([np.inf, -np.inf], np.nan)
+    idx = pd.DatetimeIndex(close.index)
+    out: Dict[Any, pd.Timestamp] = {}
+    for t in close.columns:
+        printed = (close[t] > 0).to_numpy()
+        seen, run = False, 0
+        for i, has in enumerate(printed):
+            if has:
+                seen, run = True, 0
+                continue
+            if not seen:
+                continue
+            run += 1
+            if run == silence:
+                out[t] = cast(pd.Timestamp, idx[i])
+                break
+    return out
 
 
 def replay_benchmark(inputs: SleeveInputs, bars: BarSource, through: dt.date,
@@ -343,7 +400,7 @@ def replay_benchmark(inputs: SleeveInputs, bars: BarSource, through: dt.date,
     frames = panel.frames()
     if len(frames) < 2:
         raise RuntimeError('fewer than 2 benchmark names have stored bars in the window')
-    terminal = live_terminal_prints(panel)
+    terminal = silence_exits(panel)
     cfg = backtest_config(inputs.inception, through + dt.timedelta(days=1), inputs.capital_usd, costs, terminal)
     res = Backtester(cast(Any, _NoStorage()), cfg).run_panel(
         _WeightsReplay(inputs.benchmark_weights), cast(Any, list(frames.keys())), frames=frames)
@@ -423,40 +480,74 @@ def replay(inputs: SleeveInputs, bars: BarSource, through: dt.date, costs: Optio
     return df
 
 
-def track(sleeve: str, store: LedgerStore, bars: BarSource, targets_dir: Optional[str] = None,
-          through: Optional[dt.date] = None, benchmark_id: Optional[str] = None,
-          broker_positions: Optional[Mapping[str, float]] = None) -> Dict[str, Any]:
-    """Append one ledger row per session not yet recorded, through ``through``
-    (default: the last stored session). ``broker_positions`` (symbol ->
-    quantity from IB) reconciles the journaled holdings first and REFUSES on a
-    discrepancy (D13); ``None`` skips reconciliation (the caller must say so).
-    Existing rows are never rewritten; a replayed value that disagrees with a
-    stored row is reported, not applied."""
+def _compare(frame: pd.DataFrame, existing: pd.DataFrame) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    if not len(existing) or not len(frame):
+        return out
+    for ts in frame.index.intersection(existing.index):
+        for col in ('sleeve_value', 'cash', 'benchmark_value', 'benchmark_cash'):
+            a, b = float(frame.at[ts, col]), float(existing.at[ts, col])
+            if abs(a - b) > DISAGREEMENT_TOLERANCE * max(1.0, abs(b)):
+                out.append({'session': cast(pd.Timestamp, ts).date().isoformat(), 'column': col,
+                            'stored': b, 'replayed': a})
+    return out
+
+
+def _prepare(sleeve: str, store: LedgerStore, bars: BarSource, targets_dir: Optional[str],
+             through: Optional[dt.date], benchmark_id: Optional[str],
+             broker_positions: Mapping[str, float]) -> Tuple[SleeveInputs, dt.date, Dict[str, float], pd.DataFrame]:
+    if broker_positions is None:                      # the CLI reads IB; tests pass fakes
+        raise ReconciliationError('broker positions are required (D13): a sleeve may never own more than IB shows')
     inputs = load_inputs(sleeve, store, targets_dir, benchmark_id)
     end = through or bars.last_session()
     if end is None:
         raise RuntimeError('no stored sessions')
     holdings = holdings_from_fills(inputs.fills, end)
-    if broker_positions is not None:
-        reconcile_holdings(holdings, broker_positions)
-    frame = replay(inputs, bars, end)
+    reconcile_holdings(holdings, broker_positions)
+    return inputs, end, holdings, replay(inputs, bars, end)
+
+
+def track(sleeve: str, store: LedgerStore, bars: BarSource, broker_positions: Mapping[str, float],
+          targets_dir: Optional[str] = None, through: Optional[dt.date] = None,
+          benchmark_id: Optional[str] = None) -> Dict[str, Any]:
+    """Append one ledger row per session not yet recorded, through ``through``
+    (default: the last stored session).
+
+    ``broker_positions`` (symbol -> quantity from IB) is REQUIRED: the
+    journaled holdings are reconciled first and a discrepancy refuses the run
+    (D13). The replay of already-stored sessions must agree with the stored
+    rows; any disagreement raises ``LedgerDisagreement`` BEFORE anything is
+    appended, so the table never holds rows from two incompatible histories.
+    ``rebuild`` is the only way to rewrite it, and it is attested and audited."""
+    inputs, end, holdings, frame = _prepare(sleeve, store, bars, targets_dir, through, benchmark_id, broker_positions)
     existing = store.ledger(sleeve)
-    disagreements = []
-    tol = DISAGREEMENT_TOLERANCE * inputs.capital_usd
-    if len(existing) and len(frame):
-        for ts in frame.index.intersection(existing.index):
-            for col in ('sleeve_value', 'benchmark_value'):
-                a, b = float(frame.at[ts, col]), float(existing.at[ts, col])
-                if abs(a - b) > tol:
-                    disagreements.append({'session': cast(pd.Timestamp, ts).date().isoformat(), 'column': col,
-                                          'stored': b, 'replayed': a})
+    disagreements = _compare(frame, existing)
+    if disagreements:
+        raise LedgerDisagreement(sleeve, disagreements)
     new_rows = [dict(r, session=cast(pd.Timestamp, pd.Timestamp(cast(Any, ts))).date()) for ts, r in frame.iterrows()
                 if not len(existing) or ts not in existing.index]
     n = store.append_rows(new_rows)
     return {'sleeve': sleeve, 'appended': n, 'through': end.isoformat(), 'sessions_replayed': int(len(frame)),
-            'disagreements': disagreements, 'benchmark_id': inputs.benchmark_id,
-            'inception': inputs.inception.isoformat(), 'capital_usd': inputs.capital_usd,
-            'reconciled': broker_positions is not None, 'holdings': holdings}
+            'benchmark_id': inputs.benchmark_id, 'inception': inputs.inception.isoformat(),
+            'capital_usd': inputs.capital_usd, 'reconciled': True, 'holdings': holdings}
+
+
+def rebuild(sleeve: str, store: LedgerStore, bars: BarSource, broker_positions: Mapping[str, float],
+            reason: str, targets_dir: Optional[str] = None, through: Optional[dt.date] = None,
+            benchmark_id: Optional[str] = None) -> Dict[str, Any]:
+    """Operator act: drop the sleeve's ledger rows and replay from inception.
+    Requires a non-empty ``reason``; the act, the reason, the counts and the
+    disagreements it resolved are recorded in ``lowfreq_ledger_rebuilds``."""
+    if not (reason or '').strip():
+        raise RuntimeError('rebuild requires a reason')
+    inputs, end, holdings, frame = _prepare(sleeve, store, bars, targets_dir, through, benchmark_id, broker_positions)
+    disagreements = _compare(frame, store.ledger(sleeve))
+    dropped = store.drop_ledger(sleeve)
+    rows = [dict(r, session=cast(pd.Timestamp, pd.Timestamp(cast(Any, ts))).date()) for ts, r in frame.iterrows()]
+    written = store.append_rows(rows)
+    store.record_rebuild(sleeve, reason.strip(), dropped, written, disagreements)
+    return {'sleeve': sleeve, 'rows_dropped': dropped, 'rows_written': written, 'through': end.isoformat(),
+            'disagreements_resolved': disagreements, 'reason': reason.strip(), 'holdings': holdings}
 
 
 def report(sleeve: str, store: LedgerStore) -> Dict[str, Any]:
@@ -482,4 +573,4 @@ def report(sleeve: str, store: LedgerStore) -> Dict[str, Any]:
             'tracking_error_annualised': te,
             'active_return_annualised_mean': float(np.mean(active) * 252) if len(active) else float('nan'),
             'n_holdings': int(df['n_holdings'].iloc[-1]), 'n_unpriced': int(df['n_unpriced'].iloc[-1]),
-            'cash': float(df['cash'].iloc[-1])}
+            'cash': float(df['cash'].iloc[-1]), 'rebuilds': store.rebuilds(sleeve)}

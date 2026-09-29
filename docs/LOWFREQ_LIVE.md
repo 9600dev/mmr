@@ -74,8 +74,9 @@ $EXEC mmr proposals                                             # review sizing 
 $EXEC mmr approve <id>                                          # one by one, SELLs first
 ```
 
-The rebalancer only creates PENDING proposals (D12); approval is the operator's
-act. See `docs/REBALANCE.md`.
+The rebalancer only creates PENDING proposals (D13, the current ruling, which
+carries D12's safety rules forward); approval is the operator's act. See
+`docs/REBALANCE.md`.
 
 ### 4. Reconcile the fills into the journal (C01)
 
@@ -96,30 +97,43 @@ $EXEC python3 -m trader.lowfreq_live track  --sleeve paper_s2p
 $EXEC python3 -m trader.lowfreq_live report --sleeve paper_s2p
 ```
 
-`track` first reads IB positions through `trader_service` and **refuses**
-when the journaled holdings exceed what IB shows, or when IB cannot be read
-(D13, fail closed; `--no-reconcile` records anyway and says so). It then
-appends one row per stored session to `lowfreq_paper_ledger` (in the trading
-DuckDB named by `trader.yaml`): sleeve holdings x closes, cash, sleeve value,
-and the virtual benchmark's value. Both sides are replayed from inception on
-every run from durable inputs only (`sleeve_fills`, the target files and
-sidecars, `pit_daily_bars`); stored rows are never rewritten, and a replay that
-differs from a stored row by more than 1 bp of capital is printed as a
-DISAGREEMENT (exit 2) for the operator to investigate, e.g. a fill reconciled
-late.
+`track` reads IB positions through `trader_service` first and **refuses**
+(exit 2, nothing appended) when the journaled holdings exceed what IB shows or
+when IB cannot be read - there is no bypass (D13: a sleeve may never own more
+than IB shows). It then replays both sides from inception from durable inputs
+only (`sleeve_fills`, the target files and their sidecars, `pit_daily_bars`)
+and appends one row per stored session to `lowfreq_paper_ledger` (in the
+trading DuckDB named by `trader.yaml`): sleeve holdings x closes, cash, sleeve
+value, and the virtual benchmark's value. The replay is prefix-stable, so it
+must reproduce every stored row exactly; if it does not (a fill reconciled
+late, corrected bars) `track` **refuses before appending anything** and names
+the disagreements. History is rewritten only by an attested operator act:
+
+```
+$EXEC python3 -m trader.lowfreq_live rebuild --sleeve paper_s2p \
+    --reason "AAPL fill of 09-05 reconciled on 09-08" --attest
+```
+
+`rebuild` reconciles against IB, drops the sleeve's rows, replays from
+inception and records the act (time, reason, rows dropped/written, the
+disagreements it resolved) in `lowfreq_ledger_rebuilds`; `report` lists it.
 
 Benchmark rules: `Backtester.run_panel` executes the sidecar weights with the
 sleeve's capital and the equity base costs (D01) - whole shares truncated off
 the decision close, fills at the next session's open, buys scaled pro rata to
-cash and floored (D06), a name silent for 5 sessions exits at its last print
-(D07), missing prints carried at the last close and counted. Cash earns zero
-(D03). A held name absent from `pit_daily_bars` on a session (below the
-top-800 storage cutoff that day) is carried at its last close and counted in
-`n_unpriced` / `benchmark_n_unpriced`.
+cash and floored (D06), missing prints carried at the last close and counted.
+Cash earns zero (D03). D07 at the live edge: the harness exits a stopped name
+at its last print, which only hindsight can identify; live, a held name silent
+for 5 consecutive sessions is exited ON the session the silence is recognised,
+at its last print's price (the same proceeds the harness books), so no stored
+row is ever revised. A name absent from `pit_daily_bars` on a session (below
+the top-800 storage cutoff that day) is carried at its last close and counted
+in `n_unpriced` / `benchmark_n_unpriced`.
 
 `report` prints since-inception sleeve and benchmark return, active return,
-its annualised mean, and tracking error (annualised standard deviation of the
-daily active return). `--json` on any command gives machine-readable output.
+its annualised mean, tracking error (annualised standard deviation of the
+daily active return) and any rebuilds. `--json` on any command gives
+machine-readable output.
 
 ## Where things live
 
@@ -130,6 +144,7 @@ daily active return). `--json` on any command gives machine-readable output.
 | Target files + benchmark sidecars | `~/.local/share/mmr/data/targets/<sleeve>/` |
 | Fills journal (C01 writes, D13) | `sleeve_fills` in `duckdb_path` |
 | Paper ledger | `lowfreq_paper_ledger` in `duckdb_path` |
+| Rebuild audit | `lowfreq_ledger_rebuilds` in `duckdb_path` |
 
 ## Tests
 
@@ -140,5 +155,7 @@ clients on a temporary DuckDB, including same-period multi-filing reruns),
 (parity on the research dev DB for 2023-10-02, 2023-11-01, 2023-12-01 against
 the instructions `run_panel` consumed and the book it then held),
 `tests/test_lowfreq_live_ledger.py` (harness-derived known answers: whole
-shares, D06 floor, an opening gap, a stopped name, config parity with
-`engine._config`, reconciliation refusals, append-only, CLI round trip).
+shares, D06 floor, an opening gap, a stopped name exited on recognition without
+revising stored rows, prefix-stable replay, config parity with
+`engine._config`, mandatory reconciliation, disagreement refusal and attested
+rebuild, sidecar/D08 consistency, CLI round trip).
