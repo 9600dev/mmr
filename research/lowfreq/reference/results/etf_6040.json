@@ -109,7 +109,7 @@
   "trial_sharpes": {},
   "value": 0.9900369985961115
  },
- "elapsed_s": 6.8,
+ "elapsed_s": 7.1,
  "entry": {
   "benchmarks": [
    "etf_ew"
@@ -795,13 +795,13 @@
   "selection_stability": 1.0
  },
  "ledger_row": {
-  "elapsed_s": 6.8,
+  "elapsed_s": 7.1,
   "end": "2024-06-28",
   "entry_sha256": "e60cb60c285739072ab0e6c2f83d8c81d0e7d288e1b36c880060d4c8bdffd833",
   "error": null,
   "family": "reference",
   "fixed_params": null,
-  "git_sha": "dc1d60c3e2d8b64ad6de42f20be708a6c28b4be2",
+  "git_sha": "36a8947b493cbce6b87abed1e80c661aa68b3331",
   "grid": {},
   "harness_version": 2,
   "id": "etf_6040",
@@ -829,7 +829,7 @@
   "start": "2007-07-01",
   "status": "ok",
   "strategy_sha256": "b55d4cbd75118ae56d60f332ca430775b35e27b9724891bb136ae35a27c8ff4e",
-  "timestamp": "2026-09-29T10:37:14+00:00",
+  "timestamp": "2026-09-29T10:46:27+00:00",
   "verdict": "PASS"
  },
  "lookahead": {

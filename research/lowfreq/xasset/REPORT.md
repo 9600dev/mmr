@@ -79,10 +79,10 @@ benchmark-role rows never count as trials.
 | 15 | xa_carry | candidate | ok | FAIL | 971e09774198 | 2 | 7 | +0.600 | -2.05% | -1.11 | 0.00 | 2026-09-29T08:40:02 |
 | 16 | xa_trend_6040 | candidate | ok | FAIL | a360adfb0410 | 2 | 7 | +0.827 | -2.95% | -2.01 | 0.00 | 2026-09-29T08:40:30 |
 
-Candidate-role trial count (distinct entry hashes): **7** (budget 40, D04); 16 candidate rows in total.
-
-Ledger rows 17-18 (integration, after selection): the champion's reproduction
-(FAIL) and a one-year `--fixed-params` command check; same hash, N stays 7.
+Candidate-role trial count (distinct entry hashes): **7** (budget 40, D04).
+Rows from 17 on are post-selection reproductions of the champion (walk-forward
+re-runs, verdict FAIL; one-year `--fixed-params` checks; held-out runs): same
+hash, N stays 7.
 
 ## Candidates at the final trial count (results/<id>.json, pass 2)
 

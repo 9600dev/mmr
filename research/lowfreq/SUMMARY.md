@@ -15,17 +15,18 @@ is reproducible with the named command.
 
 ## Champions
 
-| family | champion | verdict | final parameter cell | trials N (distinct entries) | ledger rows | OOS Sharpe vs decisive | active/yr, t(NW) | DSR |
-|---|---|---|---|---|---|---|---|---|
-| xasset | `xa_vol_target` (H5, volatility-managed SPY/BIL) | **FAIL** | `{"TARGET_VOL": 0.15}` (modal over 12 folds; pre-registered default 0.12) | 7 | 18 (16 candidate + 2 benchmark) | 0.897 vs 0.950 (60/40) | +1.22 %, 0.77 | 0.04 |
-| equity | `s2p_top_quintile` (H1, top sales-to-price quintile) | **PROMISING** | `{}` (single registered cell: QUANTILE 0.2, MIN_NAMES 30, monthly, equal weight) | 20 | 42 (all candidate) | 0.878 vs 0.564 (covered-EW) | +12.0 %, 2.01 | 0.64 |
+| family | champion | verdict | final parameter cell | trials N (distinct entries) | OOS Sharpe vs decisive | active/yr, t(NW) | DSR |
+|---|---|---|---|---|---|---|---|
+| xasset | `xa_vol_target` (H5, volatility-managed SPY/BIL) | **FAIL** | `{"TARGET_VOL": 0.15}` (modal over 12 folds; pre-registered default 0.12) | 7 | 0.897 vs 0.950 (60/40) | +1.22 %, 0.77 | 0.04 |
+| equity | `s2p_top_quintile` (H1, top sales-to-price quintile) | **PROMISING** | `{}` (single registered cell: QUANTILE 0.2, MIN_NAMES 30, monthly, equal weight) | 20 | 0.878 vs 0.564 (covered-EW) | +12.0 %, 2.01 | 0.64 |
 
 Sources: `research/lowfreq/xasset/results/xa_vol_target.json`,
 `research/lowfreq/equity/results/s2p_top_quintile.json`; full tables in each
 family's `REPORT.md`. Reproduction on this tree (2026-09-29, `dc1d60c`):
 `uv run python -m trader.research.lowfreq evaluate xasset/xa_vol_target` →
 FAIL and `... evaluate equity/s2p_top_quintile` → PROMISING, matching the
-verdicts and every deterministic field in the results JSONs.
+verdicts and every deterministic field in the results JSONs; the round-1
+critic reproduced both independently (ledger rows xasset 19, equity 43).
 
 **No family produced a PASS.**
 
@@ -62,23 +63,31 @@ every OOS drawdown includes March 2020.
 ## Held-out evaluation (orchestrator, 2024-07-01 onward)
 
 Fixed-cell mode (D02): one registered cell, no selection, warm-up loaded
-before `--start` (500 days ETF, 400 days equity). The CLI requires `--end`
-(exit 2 without it); use the last held-out session available.
+before `--start` (500 days ETF, 400 days equity). The end dates are the last
+sessions in the orchestrator's held-out databases: 2026-09-28 for the ETF
+panel, 2026-07-28 for the PIT universe and fundamentals. Primary commands,
+one per champion:
 
 ```
-uv run python -m trader.research.lowfreq evaluate xasset/xa_vol_target --fixed-params '{"TARGET_VOL": 0.15}' --start 2024-07-01 --end <YYYY-MM-DD>
-uv run python -m trader.research.lowfreq evaluate equity/s2p_top_quintile --fixed-params '{}' --start 2024-07-01 --end <YYYY-MM-DD>
+uv run python -m trader.research.lowfreq evaluate xasset/xa_vol_target --fixed-params '{"TARGET_VOL": 0.15}' --start 2024-07-01 --end 2026-09-28
+uv run python -m trader.research.lowfreq evaluate equity/s2p_top_quintile --fixed-params '{}' --start 2024-07-01 --end 2026-07-28
 ```
 
-The databases named by `LOWFREQ_RESEARCH_CONFIG` must carry `etf_daily_bars`,
-`pit_daily_bars` and `fundamentals` through `--end`. Results land in
-`results/<id>__fixed_2024-07-01_<end>.json`; each call appends one ledger row
-with the same entry hash (N unchanged). Both command shapes were exercised on
-this tree over one dev-period year (`--start 2023-07-03 --end 2024-06-28`,
-ledger rows xasset 18 and equity 42): they run to completion; their one-year
-verdicts (xasset PROMISING, equity FAIL) are inside the dev period and carry
-no evidential weight. Priors for the held-out: xasset is expected to track
-SPY-with-cash and lose to 60/40 on Sharpe; equity's PROMISING rests on t ≈ 2.
+Secondary, xasset only — the pre-registered default cell, chosen by the
+walk-forward in 2 of 12 folds; reported beside the primary, never in its
+place:
+
+```
+uv run python -m trader.research.lowfreq evaluate xasset/xa_vol_target --fixed-params '{"TARGET_VOL": 0.12}' --start 2024-07-01 --end 2026-09-28
+```
+
+Results land in `results/<id>__fixed_2024-07-01_<end>.json`; each call appends
+one ledger row with the same entry hash (N unchanged). Both command shapes
+were exercised on this tree over one dev-period year (`--start 2023-07-03
+--end 2024-06-28`): they run to completion; their one-year verdicts (xasset
+PROMISING, equity FAIL) are inside the dev period and carry no evidential
+weight. Priors for the held-out: xasset is expected to track SPY-with-cash
+and lose to 60/40 on Sharpe; equity's PROMISING rests on t ≈ 2.
 
 ## Bugs fixed (C01; C02 and C03 found none)
 
@@ -113,16 +122,20 @@ artefact tests and the equity artefact checker rejected. Fixed without
 changing any result: `tests/research/test_xasset_report.py` now requires the
 report's ledger rows as a verbatim prefix and accepts later rows only if they
 repeat an earlier ok row's (id, entry hash) and reproduce the results verdict
-(fixed-cell rows carry their own); `xasset/make_report.py check_passes`
+(a fixed-cell row must instead point at its persisted
+`results/<id>__fixed_*.json`, which must embed that row); `xasset/make_report.py check_passes`
 compares deterministic fields, verdict and DSR instead of bytes (pinned by
 `test_check_passes_accepts_a_reproduction_rewrite_but_flags_drift`);
 `equity/check_artifacts.py` excludes reproductions from the 40-row budget and
-accepts an unarchived row whose `results_path` file embeds it. Equity rows
-41–42 are archived (`archive_trials.py`); `check_artifacts.py` and
-`provenance.py` report ALL OK / 0 mismatches. Ledger rows added this round:
-xasset 17 (walk-forward reproduction, FAIL), 18 (fixed-cell check); equity 41
-(reproduction, PROMISING), 42 (fixed-cell check); reference 44–45 (two gate
-runs of `etf_6040`, both PASS).
+accepts an unarchived row whose `results_path` file embeds it. Post-selection ledger rows are reproductions, identified
+here by kind rather than by a running count (gate, review and held-out runs
+keep appending): xasset 17 and equity 41 (2026-09-29 10:04 / 10:06 UTC) are
+the integration re-runs; xasset 18 and equity 42 the fixed-cell command
+checks; xasset 19 and equity 43 the round-1 critic's re-runs; reference rows
+from 44 on are `etf_6040` gate runs (all PASS). Every equity ok row has an
+archived artifact under `results/trials/` (`archive_trials.py`, re-run after
+each reproduction); `check_artifacts.py` and `provenance.py` report ALL OK /
+0 mismatches.
 
 ## Where this leaves the program
 

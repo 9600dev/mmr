@@ -220,18 +220,52 @@ def test_holdings_table_renders_from_json_with_picks_and_cap(tmp_path):
 XASSET = REPO / 'research' / 'lowfreq' / 'xasset'
 
 
-def _is_reproduction(row, earlier, results):
+def _is_reproduction(row, earlier, results, results_dir=None):
     """A ledger row that re-runs an already-reported candidate entry unchanged (same id and
-    entry hash as an earlier ok row). A fixed-cell window carries its own verdict; a
-    walk-forward re-run must reproduce the verdict recorded in results/<id>.json."""
+    entry hash as an earlier ok row). A walk-forward re-run must reproduce the verdict recorded
+    in results/<id>.json. A fixed-cell row must point at its persisted results/<id>__fixed_*.json
+    (by basename, under the family's results dir), and that file must embed this very row - its
+    timestamp, cell, entry hash and verdict; a duplicate id/hash alone is not enough."""
     if row.get('status') != 'ok' or row.get('role') != 'candidate':
         return False
     if not any(e.get('status') == 'ok' and e.get('id') == row.get('id')
                and e.get('entry_sha256') == row.get('entry_sha256') for e in earlier):
         return False
     if row.get('mode') == 'fixed':
-        return True
+        name = Path(str(row.get('results_path') or '')).name
+        art = (results_dir if results_dir is not None else XASSET / 'results') / name
+        if not (name.startswith(f"{row.get('id')}__fixed_") and art.exists()):
+            return False
+        a = json.load(open(art))
+        emb = a.get('ledger_row') or {}
+        return (a.get('mode') == 'fixed' and a.get('entry_sha256') == row.get('entry_sha256')
+                and a.get('verdict') == row.get('verdict')
+                and emb.get('timestamp') == row.get('timestamp')
+                and emb.get('fixed_params') == row.get('fixed_params'))
     return row.get('id') in results and results[row['id']].get('verdict') == row.get('verdict')
+
+
+def test_fixed_cell_reproduction_rows_need_their_persisted_artifact(tmp_path):
+    """A fixed-mode duplicate of a reported (id, hash) is accepted only with the artifact it
+    wrote, embedding the same row; a missing or disagreeing artifact, or a new hash, is not."""
+    earlier = [dict(_row('a', 'a' * 64), mode='walk_forward')]
+    name = 'a__fixed_2023-07-03_2024-06-28.json'
+    row = dict(_row('a', 'a' * 64), mode='fixed', verdict='PROMISING', timestamp='2026-09-29T10:07:35+00:00',
+               fixed_params={'X': 1}, results_path=f'/somewhere/else/{name}')
+    assert not _is_reproduction(row, earlier, {}, results_dir=tmp_path)                      # no artifact
+    art = {'mode': 'fixed', 'entry_sha256': 'a' * 64, 'verdict': 'PROMISING',
+           'ledger_row': {'timestamp': row['timestamp'], 'fixed_params': {'X': 1}}}
+    (tmp_path / name).write_text(json.dumps(art))
+    assert _is_reproduction(row, earlier, {}, results_dir=tmp_path)
+    assert not _is_reproduction(dict(row, entry_sha256='b' * 64), earlier, {}, results_dir=tmp_path)  # new trial
+    assert not _is_reproduction(row, [], {}, results_dir=tmp_path)                           # never reported
+    (tmp_path / name).write_text(json.dumps(dict(art, verdict='FAIL')))
+    assert not _is_reproduction(row, earlier, {}, results_dir=tmp_path)                      # artifact disagrees
+    (tmp_path / name).write_text(json.dumps(dict(art, ledger_row={'timestamp': 'other', 'fixed_params': {'X': 1}})))
+    assert not _is_reproduction(row, earlier, {}, results_dir=tmp_path)                      # another run's file
+    wf = dict(_row('a', 'a' * 64), mode='walk_forward', verdict='FAIL')
+    assert _is_reproduction(wf, earlier, {'a': {'verdict': 'FAIL'}})
+    assert not _is_reproduction(wf, earlier, {'a': {'verdict': 'PROMISING'}})
 
 
 def test_check_passes_accepts_a_reproduction_rewrite_but_flags_drift(tmp_path):
