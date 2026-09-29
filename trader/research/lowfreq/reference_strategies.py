@@ -1,7 +1,8 @@
 """Reference-family strategies: the benchmarks every candidate must beat.
 
-All three are monthly-rebalanced, long-only, gross <= 1.0 (D01), and return
-``None`` between rebalances (hold) rather than ``{}`` (flatten). Cash earns
+All three rebalance on the first trading day of each calendar month
+(``schedule_mask``), are long-only, gross <= 1.0 (D01), and return ``None``
+between rebalances (hold) rather than ``{}`` (flatten). Cash earns
 zero (D03); a book that wants a cash yield must hold BIL explicitly.
 
 ``LowFreqStrategy`` is the optional base for family strategies: the harness
@@ -18,18 +19,59 @@ import pandas as pd
 from trader.trading.strategy import Strategy
 
 
+def schedule_mask(index, every: str = 'month') -> np.ndarray:
+    """True on the first trading day of each calendar ``every`` ('month' or
+    'week') present in ``index`` - the rebalance days.
+
+    Calendar-based, so the schedule does not depend on where a window was
+    sliced: bar 0 counts only if it IS a period's first business day (its
+    previous business day falls in another period). ``index % 21`` looked
+    monthly but rebalanced twice in some months, skipped others, and changed
+    phase with every warm-up origin (D04/D05: "monthly").
+    """
+    idx = pd.DatetimeIndex(index)
+    if idx.tz is not None:
+        idx = idx.tz_convert(None)
+    n = len(idx)
+    if n == 0:
+        return np.zeros(0, dtype=bool)
+    if every == 'month':
+        def period(t) -> int:
+            return int(t.year) * 12 + int(t.month)
+    elif every == 'week':
+        def period(t) -> int:
+            y, w, _ = t.isocalendar()
+            return int(y) * 100 + int(w)
+    else:
+        raise ValueError(f"REBALANCE must be 'month' or 'week', got {every!r}")
+    keys = np.asarray([period(t) for t in idx], dtype=int)
+    mask = np.empty(n, dtype=bool)
+    mask[0] = period(idx[0] - pd.offsets.BDay(1)) != keys[0]
+    mask[1:] = keys[1:] != keys[:-1]
+    return mask
+
+
 class LowFreqStrategy(Strategy):
-    REBALANCE_EVERY = 21          # trading days; ~monthly (D04/D05: no more often than weekly)
+    REBALANCE = 'month'           # calendar month | 'week' (D04/D05: no more often than weekly)
 
     def __init__(self):
         super().__init__()
         self.research_data: Dict[str, Any] = {}
+        self._due_key: Any = None
+        self._due_mask: Optional[np.ndarray] = None
 
     def set_research_data(self, data: Dict[str, Any]) -> None:
         self.research_data = dict(data)
 
-    def due(self, index: int) -> bool:
-        return self.REBALANCE_EVERY <= 1 or index % self.REBALANCE_EVERY == 0
+    def due(self, index: int, panel: pd.DataFrame) -> bool:
+        """Is ``index`` a rebalance day? Needs the panel the harness passed to
+        ``on_panel`` so the calendar is read from the bars actually in play."""
+        idx = panel.index
+        key = (len(idx), idx[0], idx[-1], self.REBALANCE)
+        if self._due_mask is None or self._due_key != key:
+            self._due_mask = schedule_mask(idx, self.REBALANCE)
+            self._due_key = key
+        return bool(self._due_mask[index])
 
 
 class EtfEqualWeight(LowFreqStrategy):
@@ -39,7 +81,7 @@ class EtfEqualWeight(LowFreqStrategy):
         return {'close': panel['close']}
 
     def on_panel(self, panel, state, index) -> Optional[Dict[Any, float]]:
-        if not self.due(index):
+        if not self.due(index, panel):
             return None
         row = state['close'].iloc[index].dropna()
         if len(row) < 2:
@@ -64,7 +106,7 @@ class Etf6040(LowFreqStrategy):
         return {'close': close}
 
     def on_panel(self, panel, state, index) -> Optional[Dict[Any, float]]:
-        if not self.due(index):
+        if not self.due(index, panel):
             return None
         row = state['close'].iloc[index]
         if not (np.isfinite(row.get(self.EQUITY, np.nan)) and np.isfinite(row.get(self.BOND, np.nan))):
@@ -111,7 +153,7 @@ class EqEwCovered(LowFreqStrategy):
         return {'close': close, 'coverage': cov & close.notna()}
 
     def on_panel(self, panel, state, index) -> Optional[Dict[Any, float]]:
-        if not self.due(index):
+        if not self.due(index, panel):
             return None
         cov = state['coverage'].iloc[index]
         names = list(cov.index[cov.to_numpy(dtype=bool)])

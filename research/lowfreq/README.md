@@ -11,27 +11,29 @@ D01–D06 are implemented.
 ```bash
 # walk-forward protocol on the dev period declared by the family
 uv run python -m trader.research.lowfreq evaluate <family>/<id> [--json] [--quiet]
-# fixed-cell mode: ONE parameter cell, no selection, warm-up before --start
+# fixed-cell mode: ONE registered grid cell, no selection, warm-up before --start
 uv run python -m trader.research.lowfreq evaluate <family>/<id> \
     --fixed-params '{"LOOKBACK": 126}' --start 2024-07-01 --end 2025-06-30
 ```
 
+A fixed cell must be a registered grid cell (otherwise refused and ledgered
+as an error); `grid.cells` is then 1, `grid.registered_cells` the grid size.
+
 Exit 0 = completed (whatever the verdict); 1 = error or unregistered id;
-2 = bad arguments (never reaches the ledger).
-Python API: `trader.research.lowfreq.evaluate(target, fixed_params=None,
-start=None, end=None)` returns the results dict; `load_etf_panel(tickers=None,
-start, end)` and `load_equity_panel(start, end, top_n=500)` are the loaders.
+2 = bad arguments (never reaches the ledger). Python API:
+`trader.research.lowfreq.evaluate(target, fixed_params=None, start=None,
+end=None)`; loaders `load_etf_panel(tickers=None, start, end)` and
+`load_equity_panel(start, end, top_n=500)`.
 
 ## Isolation (D03)
 
 Everything reads the two DuckDB files named by `LOWFREQ_RESEARCH_CONFIG`
 (default `~/.local/share/mmr/research_dev/trader_research.yaml`), opened
-**read-only**. The PIT and fundamentals loaders in `scripts/` are wrapped
-(`config.bound_container`, `config.read_only_duckdb_store`) rather than
-copied, so there is one membership rule and one as-of rule in the codebase.
+**read-only**; the PIT and fundamentals loaders in `scripts/` are wrapped
+(`config.bound_container`, `config.read_only_duckdb_store`), not copied.
 Nothing writes `backtest_runs`; no network is touched. Cash earns zero — a
 book that wants a cash yield holds BIL explicitly, benchmarks included.
-`LOWFREQ_RESEARCH_ROOT` relocates the family directories (tests use it).
+`LOWFREQ_RESEARCH_ROOT` relocates the family directories.
 
 ## Registry (`<family>/candidates.yaml`, D02)
 
@@ -53,76 +55,77 @@ candidates:
     registered_at: 2026-09-28
 ```
 
-Entries may override `universe`, `dev_period`, `walk_forward`,
-`warmup_days`, `tickers` (ETF subset) and `top_n`.
+Entries may override `universe`, `dev_period`, `walk_forward`, `warmup_days`,
+`tickers`, `top_n`.
 
-**Equity universe rule (D05).** `load_equity_panel` keeps a name's prices for
-as long as `pit_daily_bars` stores them (top 800 by dollar volume) even after
-it leaves the top-N membership, and exposes the point-in-time membership as
-`fields['member']`. A strategy may only give weight > 0 to a member; the
-harness refuses any BUY fill whose decision bar was outside membership
-(`universe violation`, ledgered as an error). When a name stops printing, its
-last close stands for 30 more sessions as mark and fill price, so the exit a
-strategy issues at its next rebalance fills at the last stored price.
-Without both rules a membership-filtered price panel made every leaver
-unsellable: the covered-EW benchmark ended with 511 frozen holdings worth
-102 % of equity and cash at −$3.2M (full-period Sharpe 0.88 → 0.59; both
-figures pre-D06, see below). `evaluate` refuses an id that is not in the file. The **registry-entry sha256** is the
-hash of the entry's canonical JSON: reordering the YAML is not a new trial,
-changing any field is. Strategy classes subclass
+**Equity universe rule (D05).** `load_equity_panel` keeps a name's prices
+after it leaves the top-N membership (as long as `pit_daily_bars` stores
+them) and exposes membership as `fields['member']`. Weight > 0 is allowed
+only for a member; a BUY fill decided outside membership is refused
+(`universe violation`, ledgered as an error). A name that stops printing
+keeps its last close for 30 sessions as mark and fill price, so the exit at
+the next rebalance fills. Without both rules every leaver was unsellable (511
+frozen holdings, cash −$3.2M in the covered-EW benchmark; pre-D06 figures).
+`evaluate` refuses an id that is not in the file. The **registry-entry
+sha256** hashes the entry's canonical JSON: reordering the YAML is not a new
+trial, changing any field is. Strategy classes subclass
 `trader.trading.strategy.Strategy` and implement `precompute_panel` /
 `on_panel` (weights keyed by ticker; `None` = hold, `{}` = flatten). Upper-case
 class attributes are the tunables the grid overrides. A strategy that defines
 `set_research_data(dict)` receives the equity panel's as-of fundamentals
 (`fields`: shares_diluted, revenue_ttm, …; `signals`: sales_to_price, …)
-before the run; `reference_strategies.LowFreqStrategy` is a ready base.
+before the run; `reference_strategies.LowFreqStrategy` is a ready base whose
+`due(index, panel)` is True on the first trading day of each calendar month
+(`REBALANCE = 'week'` for weeks) — calendar-based, so a warm-up origin never
+shifts the schedule.
 
 ## Protocol (D01), in execution order
 
-1. **Lookahead probes** on the default cell before any metric exists:
-   `assert_no_panel_lookahead` (hiding the last bars must not change a past
-   precomputed value) plus an `on_panel` probe (weights at index *i* must not
-   depend on bars after *i*). Failure raises, is ledgered as `error`, and
-   writes no results.
+1. **Lookahead probes** on **every executable cell and every benchmark**
+   before any metric exists, with no bypass: `assert_no_panel_lookahead`
+   (hiding the last bars must not change a past precomputed value) plus
+   `on_panel` probes at 8 indices (weights at *i* must not depend on bars
+   after *i*). Failure raises, is ledgered as `error`, writes no results.
 2. **Rolling walk-forward** via `trader/simulation/walk_forward.py`: folds of
    `train_days`/`test_days`; the cell with the best train Sharpe is run on the
    test window; every benchmark is run on the identical window through
-   `Backtester.run_panel` (fills at t+1 open, same costs, gross ≤ 1). With one
-   cell no fit is run. OOS series are stitched across folds.
+   `Backtester.run_panel` (fills at t+1 open, same costs, gross ≤ 1), owning
+   the **chosen cell's** coverage. With one cell no fit is run. A fold in
+   which no cell scores, or whose window fails, errors the whole evaluation —
+   folds are never skipped. OOS series are stitched across folds.
 3. **Decisive benchmark**: per fold, the benchmark with the higher OOS Sharpe
    (D04: a candidate must beat BOTH). Active return = strategy − decisive,
    daily, OOS only. Gate (a) compares against the max stitched benchmark
    Sharpe.
-4. **3× cost stress**: the chosen cells and the decisive benchmark re-run on
-   the test windows at 3× slippage, commission and borrow (no re-selection).
+4. **3× cost stress**: chosen cells and the decisive benchmark re-run on the
+   test windows at 3× slippage, commission and borrow (no re-selection).
 5. **Full period**: the default cell, all benchmarks, and — for grids of ≥ 4
-   cells — every cell, whose aligned daily returns feed `pbo_cscv` (CSCV, 16
-   splits). Selection stability = fraction of consecutive folds keeping the
-   same cell.
+   cells — every cell, whose daily returns feed `pbo_cscv` (CSCV, 16 splits).
+   Selection stability = fraction of consecutive folds keeping the same cell.
 6. **Statistics**: annualised Sharpe (√252), arithmetic annualised active
-   mean, Newey-West t with Bartlett bandwidth 4(n/100)^(2/9), per-calendar-year
-   active sums (years with < 60 OOS days are shown with `*` and not counted),
-   max drawdown of the stitched OOS equity, and DSR = PSR of the active series
-   against `expected_max_sharpe(N, V)` with **N = distinct candidate hashes in
-   the family ledger including this run** and V measured from their recorded
-   active Sharpes.
-7. **Ledger line, results JSON, then output.**
+   mean, Newey-West t (Bartlett bandwidth 4(n/100)^(2/9)), per-calendar-year
+   active sums (years with < 60 OOS days shown with `*`, not counted), max
+   drawdown of the stitched OOS equity, and DSR = PSR of the active series
+   against `expected_max_sharpe(N, V)`, **N = distinct candidate hashes in
+   the family ledger including this run**, V from their recorded active
+   Sharpes; with N > 1 and fewer than two recorded Sharpes there is no DSR and
+   gate (c) fails.
+7. **Results JSON, then ledger line, then output.**
 
 Base costs: ETFs 3 bps + $0.005/share; equities 5 bps + $0.005/share; shorts
-50 bps/yr. Capital $1M; whole shares. Capacity (D05) is reported per window:
-turnover/yr, median names held, and the median 21-day $ADV of held names
-(from `dollar_volume`; snapshots at the first measured bar and every fill).
-**Cash is never overdrawn (D06).** In `run_panel` a rebalance's sells settle
-first and its buys are scaled pro rata to the cash then available, in whole
-shares, so a book sized off a holding it could not sell cannot lever itself.
+50 bps/yr. Capital $1M; whole shares. Capacity (D05) per window: turnover/yr,
+median names held, median 21-day $ADV of held names.
+**Cash is never overdrawn (D06).** In `run_panel` a rebalance's sells are
+executed and logged first, then its buys are scaled pro rata to the cash then
+available, in whole shares, so cash after every fill is ≥ 0 and a book sized
+off a holding it could not sell cannot lever itself.
 Every window reports `scaled_buy_fills` / `scaled_rebalances` (how often the
-guard acted) next to `min_cash_fraction`, which is rebuilt independently from
-the fill log and must read ≥ 0 for a long-only book, and
-`frozen_value_fraction_end` (value of holdings with no print in the last 21
-bars, marked at a stale carry-forward, over final equity). Read a result with
-a large frozen fraction or many scaled fills as unresolved, not as return.
-Results written before 2026-09-29 predate the guard and are labelled pre-D06
-wherever quoted.
+guard acted), `min_cash_fraction` (rebuilt from the fill log; ≥ 0 for a
+long-only book) and `frozen_value_fraction_end` (holdings with no print in
+the last 21 bars, marked at a stale carry-forward, over equity). Read a large
+frozen fraction or many scaled fills as unresolved, not as return. Results
+written before 2026-09-29 predate the guard and are labelled pre-D06 wherever
+quoted.
 
 ### Gates
 
@@ -137,28 +140,33 @@ wherever quoted.
 | (g) grid ≥ 4 cells: PBO < 0.35 and stability ≥ 0.5 | required | — |
 
 Anything else is FAIL. A gate whose input could not be computed fails
-(fail closed). Fixed-cell mode has one window and one cell, so (g) is n/a and
-the fold table has one row.
+(fail closed). Fixed-cell mode has one window and one cell, so (g) is n/a.
 
 ## Ledger (`<family>/trials.jsonl`)
 
-One JSON line per `evaluate` call, appended **before** anything is printed,
-including refused ids (`status: refused`, no hash) and errors (`status:
-error`, with the message). Fields: `timestamp`, `git_sha`, `family`, `id`,
-`role`, `entry_sha256`, `strategy_sha256`, `mode`, `grid`, `fixed_params`,
-`start`, `end`, `metrics` (OOS Sharpe/CAGR/DD, active return, t(NW), active
-Sharpe, DSR, 3×-cost active return, PBO, stability), `n_trials`, `verdict`.
-The trial count for DSR is the number of distinct `entry_sha256` values with
-`role: candidate`; benchmark rows never count. Never edit or delete lines.
+One JSON line per `evaluate` call, appended **before** anything is printed:
+a missing family or unregistered id (`status: refused`), any failure
+including a results-write failure (`error`, with the message), or `ok`
+(appended only after the results file exists). Every row has the same keys
+(`ledger.LEDGER_FIELDS`, None when not applicable): `timestamp`, `git_sha`,
+`harness_version`, `family`, `id`, `role`, `entry_sha256`, `strategy_sha256`,
+`mode`, `grid`, `fixed_params`, `start`, `end`, `n_trials`, `metrics`
+(fixed `METRIC_FIELDS`: OOS Sharpe/CAGR/DD, active return, t(NW), active
+Sharpe, DSR, 3×-cost active return, PBO, stability, full-period Sharpe, min
+cash, scaled fills), `verdict`, `status`, `error`, `elapsed_s`,
+`results_path`. The trial count for DSR is the number of distinct
+`entry_sha256` values with `role: candidate`; benchmark rows never count.
+Never edit or delete lines.
 
 ## Results (`<family>/results/<id>.json`)
 
-Full record: entry, window, costs, fold table (chosen cell, OOS and benchmark
-metrics per fold, decisive id), stitched OOS and benchmark summaries, active
-statistics with the per-year table, DSR with its trial list, PBO, stability,
-full-period metrics for the report cell and every grid cell, gate inputs,
-gates, verdict, the ledger row, and the OOS/decisive daily return series.
-Fixed-cell runs go to `results/<id>__fixed_<start>_<end>.json`.
+Full record: entry, window, costs, lookahead report, fold table (chosen
+cell, coverage forwarded, OOS and benchmark metrics, decisive id), stitched
+OOS and benchmark summaries, active statistics with the per-year table, DSR
+with its trial list, PBO, stability, full-period metrics for the report cell
+and every grid cell, gates, verdict, the ledger row, and the OOS/decisive
+daily return series. Fixed-cell runs go to
+`results/<id>__fixed_<start>_<end>.json`.
 
 ## Reference family (`reference/`)
 
@@ -166,20 +174,16 @@ Benchmark-role entries only: `etf_ew` (monthly equal weight of listed ETFs),
 `etf_6040` (60 % SPY / 40 % IEF monthly), `eq_ew_covered` (monthly equal
 weight of the covered PIT universe). A candidate narrows "covered" by
 returning a boolean `coverage` frame (time × ticker) from `precompute_panel`;
-the harness forwards the default cell's frame to every benchmark that defines
-`set_coverage`, so the decisive benchmark owns exactly the names the
-candidate could have chosen from (`coverage.forwarded_to_benchmarks` in the
-results). Their results JSON under `reference/results/` are the dev-period
-numbers (post-D06) every family entry is measured against; each ETF benchmark
+the harness forwards the **chosen cell's** frame in each window to every
+benchmark defining `set_coverage`. Their results JSON under
+`reference/results/` are the post-D06 dev-period numbers; each ETF benchmark
 is evaluated against the other, `eq_ew_covered` against cash.
 
 ## Tests
 
-`tests/research/` runs on a temporary DuckDB pair (synthetic `etf_daily_bars`,
-`pit_daily_bars`, `fundamentals`) and a temporary family root: read-only
-loader isolation, as-of fundamentals, ledger rows for refusals and errors,
-the known answers (identical-to-benchmark → zero active return and FAIL;
-injected drift → PASS; a t+1 reader refused before any metric; sub-unit
-weights leave cash earning zero), coverage forwarding, capacity metrics,
-fixed-cell mode and CLI exit codes. The D06 cash guard is pinned in
-`tests/test_panel_cash.py`.
+`tests/research/` runs on a temporary DuckDB pair and family root: loader
+isolation, DST-aware as-of fundamentals, ledger schema on every path, the
+known answers (identical-to-benchmark → FAIL; injected drift → PASS; t+1
+readers in any cell or benchmark refused; sub-unit weights leave cash earning
+zero), per-cell coverage, calendar schedule, fixed-cell mode, CLI exit codes.
+The D06 cash guard is pinned in `tests/test_panel_cash.py`.

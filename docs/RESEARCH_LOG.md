@@ -710,33 +710,3 @@ membership-filtered loader, so both sides carried frozen leavers and implicit
 leverage. The *spread* may survive (both books were affected), the absolute
 levels quoted there (Sharpe 1.26 vs 1.04, CAGR 31 % vs 20 %) should not be
 believed until re-run through the harness. Not re-run here.
-
----
-
-## 2026-09-29 — D06: `run_panel` no longer overdraws cash; earlier panel results are pre-fix
-
-Design decision D06 (answer to C01's question 1). `Backtester.run_panel`
-filled every BUY at the next open regardless of the cash on hand, so a book
-sized off a holding it could not sell — or simply off yesterday's close when
-today's open gapped up — bought the full target and ran on implicit,
-cost-free leverage. Now a rebalance's sells settle first and its buys are
-scaled pro rata to the cash then available, in whole shares; the guard's
-activity is recorded in `BacktestResult.diagnostics`
-(`panel_scaled_buy_fills`, `panel_scaled_rebalances`, `panel_min_cash`) and
-reported per window by the harness (`scaled_buy_fills`, next to the
-fill-log-rebuilt `min_cash_fraction`). Pinned in `tests/test_panel_cash.py`;
-the `tests/invariants/test_panel_execution.py` properties are unchanged and
-still pass.
-
-Effect on the reference benchmarks, dev period, post-fix (`uv run python -m
-trader.research.lowfreq evaluate reference/<id>`,
-`research/lowfreq/reference/results/<id>.json`): `etf_ew` full-period Sharpe
-0.432 / CAGR 4.95 % (25 buys scaled on 1 date), `etf_6040` 0.719 / 7.69 % (22
-buys scaled on 22 dates, one or two shares each), `eq_ew_covered` 0.592 /
-9.98 % (0 scaled — the loader's exit-at-last-price rule above already kept
-its cash positive). Identical to the pre-fix figures at three decimals, so
-the 0.59 / 10.0 % quoted in the entry above stands; its 0.88 / 16.7 %
-membership-filtered figure and every `run_panel` result before this date
-(the 2026-08-17 size-tilt books and their benchmark, the 2026-07-28 momentum
-panels) are **pre-D06**: their books could overdraw cash and are not
-comparable to harness output until re-run. Not re-run here.

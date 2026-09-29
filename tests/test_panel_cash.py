@@ -180,3 +180,21 @@ def test_cash_rebuilt_from_the_fill_log_never_goes_negative_on_a_long_only_book(
     assert min(c for _, c in path) >= -1e-9
     assert res.diagnostics['panel_min_cash'] >= -1e-9
     assert res.diagnostics['panel_scaled_buy_fills'] >= 1, 'fixture must exercise the guard at least once'
+
+
+def test_sells_execute_and_log_before_buys_whatever_order_the_strategy_used():
+    """Rotation listed as {new: 1.0, old: 0.0}: the SELL of the old name must be
+    executed (and appear in the log) before the BUY, so cash after every single
+    fill stays >= 0 and the buy is not scaled for want of proceeds."""
+    frames = _frames(gap=1.0)
+    res = _run(_Weights({2: {1: 1.0, 2: 0.0, 3: 0.0}, 6: {2: 1.0, 1: 0.0, 3: 0.0}}), frames)
+    same_day = [t for t in res.trades if t.timestamp == frames[1].index[7]]
+    assert [(t.conid, str(t.action).split('.')[-1]) for t in same_day] == [(1, 'SELL'), (2, 'BUY')]
+    cash = 100_000.0
+    for t in res.trades:                       # cash after EVERY fill, in log order
+        cash -= (1.0 if str(t.action).endswith('BUY') else -1.0) * t.quantity * t.price + t.commission
+        assert cash >= -1e-9, (t, cash)
+    equity_at_decision = float(res.equity_curve.loc[frames[1].index[6]])
+    assert same_day[1].quantity == math.trunc(equity_at_decision / float(frames[2]['close'].iloc[6]))
+    assert res.diagnostics['panel_scaled_buy_fills'] == 0
+    assert res.diagnostics['panel_min_cash'] >= 0.0

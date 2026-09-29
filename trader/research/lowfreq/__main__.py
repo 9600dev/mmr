@@ -17,7 +17,6 @@ def main(argv=None) -> int:
     ev.add_argument('--fixed-params', default=None, help='JSON of one parameter cell: fixed-cell mode (no selection)')
     ev.add_argument('--start', default=None, help='fixed-cell window start (YYYY-MM-DD, inclusive)')
     ev.add_argument('--end', default=None, help='fixed-cell window end (YYYY-MM-DD, inclusive)')
-    ev.add_argument('--skip-lookahead-check', action='store_true', help=argparse.SUPPRESS)
     args = p.parse_args(argv)
 
     import logging
@@ -40,8 +39,7 @@ def main(argv=None) -> int:
         print('--start/--end are only valid with --fixed-params', file=sys.stderr)
         return 2
     try:
-        result = evaluate(args.target, fixed_params=fixed, start=args.start, end=args.end,
-                          lookahead=not args.skip_lookahead_check)
+        result = evaluate(args.target, fixed_params=fixed, start=args.start, end=args.end)
     except Exception as exc:                          # noqa: BLE001 - reported, ledgered upstream
         print(f'evaluate failed: {type(exc).__name__}: {exc}', file=sys.stderr)
         return 1

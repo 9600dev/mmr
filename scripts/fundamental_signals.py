@@ -28,6 +28,21 @@ import numpy as np      # noqa: E402
 import pandas as pd     # noqa: E402
 
 
+def session_close_utc(days) -> pd.DatetimeIndex:
+    """16:00 America/New_York on each of ``days``, as UTC instants.
+
+    Daylight-saving aware: 20:00 UTC in summer (EDT), 21:00 UTC in winter
+    (EST). This is the instant a filing must have been ACCEPTED strictly
+    before to be usable at that session's close (``searchsorted`` with
+    ``side='left'`` below).
+    """
+    d = pd.DatetimeIndex(pd.to_datetime(days))
+    if d.tz is not None:
+        d = d.tz_convert(None)
+    local = (d.normalize() + pd.Timedelta(hours=16)).tz_localize('America/New_York')
+    return local.tz_convert('UTC')
+
+
 def build(delay_days: int = 0, pit: bool = False, with_frames: bool = False):
     """(price panel, {signal name: as-of frame}) with acceptance delayed by
     ``delay_days`` - 0 is the honest read, positive is the leak probe.
@@ -74,7 +89,10 @@ def build(delay_days: int = 0, pit: bool = False, with_frames: bool = False):
                             .rolling(4, min_periods=4).sum()
                             .reset_index(level=0, drop=True))
 
-    idx = pd.to_datetime(px.index, utc=True) + pd.Timedelta(hours=21)  # 16:00 ET
+    # hillclimb(C01): changed because 16:00 ET is 20:00 UTC under EDT and 21:00
+    # UTC under EST; a fixed 21:00 UTC treated a filing accepted at 20:30 UTC on
+    # a summer day as known at that day's close, one session early.
+    idx = session_close_utc(px.index)
     out = {}
     fields = ['net_income_ttm', 'stockholders_equity', 'gross_profit_ttm',
               'total_assets', 'cash_from_operations_ttm', 'shares_diluted',

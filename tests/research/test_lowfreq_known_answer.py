@@ -171,3 +171,121 @@ def test_covered_benchmark_sells_leavers_and_reports_cash_and_frozen_diagnostics
     assert r['coverage']['forwarded_to_benchmarks'] is True
     # only members are ever held at the end: CCC left in Aug 2017, the window ends Feb 2018
     assert fp['n_trades'] > 0
+
+
+# ---- round-2 hardening: lookahead on every cell/benchmark, no skipped folds,
+# ---- fixed cells must be registered, coverage follows the chosen cell, calendar months
+
+def _ledger(research_env, fam='fam'):
+    import json
+    return [json.loads(l) for l in (research_env['root'] / fam / 'trials.jsonl').read_text().splitlines()]
+
+
+def test_lookahead_in_a_non_default_grid_cell_is_rejected(research_env):
+    write_family(research_env['root'], 'fam', [BENCH,
+                 entry('flag', 'candidate', 'PeeksWhenFlagged', benchmarks=['bench_ew'],
+                       params={'PEEK': [0, 1]}, default_params={'PEEK': 0})])
+    with pytest.raises(AssertionError, match='LOOKAHEAD'):
+        evaluate('fam/flag')
+    assert not (research_env['root'] / 'fam' / 'results').exists()
+    assert _ledger(research_env)[-1]['status'] == 'error'
+
+
+def test_a_peeking_benchmark_is_rejected_before_any_metric(research_env):
+    peek_bench = entry('bench_peek', 'benchmark', 'PeeksAhead')
+    write_family(research_env['root'], 'fam', [peek_bench, entry('spy', 'candidate', 'HoldOne', benchmarks=['bench_peek'])])
+    with pytest.raises(AssertionError, match='LOOKAHEAD'):
+        evaluate('fam/spy')
+    assert not (research_env['root'] / 'fam' / 'results').exists()
+
+
+def test_a_chosen_cell_failing_in_a_late_fold_errors_the_evaluation(research_env):
+    write_family(research_env['root'], 'fam', [BENCH, entry('late', 'candidate', 'FailsInLateWindows', benchmarks=['bench_ew'])])
+    with pytest.raises(RuntimeError, match='feed died'):
+        evaluate('fam/late')
+    assert not (research_env['root'] / 'fam' / 'results').exists()
+    row = _ledger(research_env)[-1]
+    assert row['status'] == 'error' and 'feed died' in row['error'] and row['verdict'] is None
+
+
+def test_a_fold_in_which_no_cell_scores_is_never_skipped(research_env):
+    write_family(research_env['root'], 'fam', [BENCH,
+                 entry('idle', 'candidate', 'NeverTrades', benchmarks=['bench_ew'], params={'X': [1, 2]})])
+    with pytest.raises(ValueError, match='never skipped'):
+        evaluate('fam/idle')
+    assert _ledger(research_env)[-1]['status'] == 'error'
+
+
+def test_fixed_cell_mode_refuses_cells_outside_the_registered_grid(research_env):
+    write_family(research_env['root'], 'fam', [BENCH,
+                 entry('grid', 'candidate', 'Gridded', benchmarks=['bench_ew'], params={'LOOKBACK': [10, 20], 'WEIGHT': [0.5, 1.0]})])
+    from trader.research.lowfreq.registry import RegistryError
+    with pytest.raises(RegistryError, match='not one of the 4 registered'):
+        evaluate('fam/grid', fixed_params={'LOOKBACK': 15, 'WEIGHT': 0.5}, start='2016-06-01', end='2017-06-01')
+    assert _ledger(research_env)[-1]['status'] == 'error'
+    r = evaluate('fam/grid', fixed_params={'LOOKBACK': 20, 'WEIGHT': 1.0}, start='2016-06-01', end='2017-06-01')
+    assert r['grid'] == {'cells': 1, 'registered_cells': 4, 'report_cell': {'LOOKBACK': 20, 'WEIGHT': 1.0}}
+    assert r['lookahead'] == {'cells_checked': 1, 'benchmarks_checked': ['bench_ew'], 'probe_indices': 8}
+
+
+def test_covered_benchmark_follows_the_chosen_cell_per_fold(research_env):
+    covered_bench = entry('bench_cov', 'benchmark', 'EqEwCovered', module='trader.research.lowfreq.reference_strategies',
+                          params={'MIN_NAMES': [2]}, default_params={'MIN_NAMES': 2})
+    write_family(research_env['root'], 'fam', [covered_bench,
+                 entry('cov', 'candidate', 'CoversByParam', benchmarks=['bench_cov'],
+                       params={'NAMES': [2, 3]}, default_params={'NAMES': 2})])
+    r = evaluate('fam/cov')
+    assert r['lookahead']['cells_checked'] == 2 and r['coverage']['per_chosen_cell'] is True
+    assert len(r['folds']) >= 2
+    for fold in r['folds']:
+        assert fold['coverage_forwarded'] is True
+        # the benchmark owned exactly the names the CHOSEN cell covered
+        assert fold['benchmarks']['bench_cov']['median_names_held'] == fold['chosen']['NAMES']
+    # the full-period benchmark owns the report (default) cell's universe
+    assert r['full_period']['benchmarks']['bench_cov']['median_names_held'] == 2.0
+
+
+def test_rebalance_schedule_is_calendar_months_independent_of_slice_origin():
+    import numpy as np
+    import pandas as pd
+    from trader.research.lowfreq.reference_strategies import schedule_mask
+    idx = pd.bdate_range('2016-02-01', '2016-06-30')
+    mask = schedule_mask(idx, 'month')
+    assert list(idx[mask].strftime('%Y-%m-%d')) == ['2016-02-01', '2016-03-01', '2016-04-01', '2016-05-02', '2016-06-01']
+    sliced = idx[idx >= '2016-02-16']                  # a warm-up origin mid-month
+    m2 = schedule_mask(sliced, 'month')
+    assert not m2[0], 'a mid-month first bar is not a rebalance day'
+    assert list(sliced[m2]) == [d for d in idx[mask] if d >= pd.Timestamp('2016-02-16')]
+    weekly = schedule_mask(idx, 'week')
+    assert idx[weekly].weekday.tolist() == [0] * int(weekly.sum())    # every Monday in the range
+    assert np.array_equal(schedule_mask(pd.DatetimeIndex([]), 'month'), np.zeros(0, dtype=bool))
+    with pytest.raises(ValueError, match='REBALANCE'):
+        schedule_mask(idx, 'fortnight')
+
+
+def test_monthly_reference_strategy_fills_on_the_bar_after_each_month_start():
+    import datetime as dt
+    import numpy as np
+    import pandas as pd
+    from trader.objects import BarSize
+    from trader.research.lowfreq.reference_strategies import EtfEqualWeight, schedule_mask
+    from trader.simulation.backtester import BacktestConfig, Backtester
+    rng = np.random.default_rng(0)
+    idx = pd.bdate_range('2016-01-15', '2016-06-30')              # starts mid-month
+    frames = {}
+    for k, t in enumerate(('A', 'B', 'C')):
+        close = 100.0 * (k + 1) * np.cumprod(1 + rng.normal(0, 0.02, len(idx)))
+        frames[t] = pd.DataFrame({'open': close, 'high': close, 'low': close, 'close': close,
+                                  'volume': np.full(len(idx), 1e6)}, index=idx)
+
+    class _NoStorage:
+        def get_tickdata(self, bar_size):
+            raise AssertionError('frames are injected')
+    cfg = BacktestConfig(start_date=dt.datetime(2016, 1, 1), end_date=dt.datetime(2016, 7, 1), initial_capital=1e6,
+                         bar_size=BarSize.Days1, slippage_bps=0.0, commission_per_share=0.0)
+    res = Backtester(_NoStorage(), cfg).run_panel(EtfEqualWeight(), list(frames), frames=frames)
+    mask = schedule_mask(idx, 'month')
+    expected_fill_days = {idx[i + 1] for i in range(len(idx) - 1) if mask[i]}
+    fill_days = {pd.Timestamp(t.timestamp) for t in res.trades}
+    assert fill_days == expected_fill_days                          # Feb..Jun month starts, +1 bar; none on 2016-01-15
+    assert pd.Timestamp('2016-01-19') not in fill_days

@@ -29,6 +29,7 @@ from trader.strategy.parameters import apply_param_overrides
 from trader.trading.strategy import Strategy, StrategyContext, StrategyState
 
 INITIAL_CAPITAL = 1_000_000.0
+PROBE_INDICES = 8          # on_panel lookahead probes per cell, spread over the panel
 PANEL_FIELDS = ('open', 'high', 'low', 'close', 'volume')
 
 
@@ -296,16 +297,18 @@ def run_window(entry: Dict[str, Any], cell: Dict[str, Any], panel: PricePanel,
 
 
 def lookahead_check(entry: Dict[str, Any], cell: Dict[str, Any], panel: PricePanel,
-                    probe_indices: int = 3) -> Dict[str, Any]:
+                    probe_indices: int = PROBE_INDICES) -> Dict[str, Any]:
     """Refuse a strategy that reads forward, BEFORE any metric is computed.
     Returns the full-panel precompute state (so the caller can read a
     published ``coverage`` frame without recomputing it).
 
     Two probes. (1) ``assert_no_panel_lookahead``: hiding the last bars must
-    not change any past precomputed value. (2) ``on_panel`` at a few indices
-    must return the same weights whether or not bars after ``index`` exist -
-    which catches a strategy that indexes ``panel.iloc[index + 1]`` directly,
-    something the precompute probe cannot see.
+    not change any past precomputed value. (2) ``on_panel`` at PROBE_INDICES
+    indices spread over the last three quarters of the panel must return the
+    same weights whether or not bars after ``index`` exist - which catches a
+    strategy that indexes ``panel.iloc[index + 1]`` directly, something the
+    precompute probe cannot see. The caller runs this for EVERY executable
+    cell of the candidate and for every benchmark; there is no bypass.
     """
     frames = panel.frames()
     if len(frames) < 2:
@@ -317,7 +320,7 @@ def lookahead_check(entry: Dict[str, Any], cell: Dict[str, Any], panel: PricePan
     full_state = strat.precompute_panel(wide)
     if n < 8:
         return full_state
-    for i in np.linspace(n // 2, n - 3, probe_indices).astype(int):
+    for i in sorted(set(np.linspace(n // 4, n - 3, probe_indices).astype(int).tolist())):
         i = int(i)
         full_w = make_strategy(entry, cell, panel).on_panel(wide, full_state, i)
         trunc = wide.iloc[:i + 1]

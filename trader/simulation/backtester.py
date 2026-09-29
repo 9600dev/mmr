@@ -901,6 +901,24 @@ class Backtester:
         scaled_buy_fills = dropped_buy_fills = scaled_rebalances = 0   # D06 diagnostics
         min_cash = cash
 
+        def _execute(ts, conid, delta, fill):
+            nonlocal cash, min_cash
+            cost = abs(delta) * commission
+            cash -= delta * fill + cost
+            min_cash = min(min_cash, cash)          # after EVERY fill, not per bar
+            positions[conid] = positions.get(conid, 0.0) + delta
+            if abs(positions[conid]) < 1e-9:
+                positions.pop(conid, None)
+            trades.append(BacktestTrade(
+                timestamp=ts, conid=conid,
+                action=Action.BUY if delta > 0 else Action.SELL,
+                quantity=abs(delta), price=fill, commission=cost,
+                # A rebalance carries no per-name conviction: the weight came
+                # from a rank, not from a probability. Recording a fabricated
+                # 1.0 would make these trades look like high-confidence calls
+                # in any downstream analysis that reads the field.
+                signal_probability=0.0, signal_risk=0.0))
+
         for i in range(n):
             ts = panel.index[i]
             row_open = opens.iloc[i]
@@ -928,35 +946,26 @@ class Backtester:
                         continue        # cannot fill what cannot be priced
                     fill = px * (1 + slip) if delta > 0 else px * (1 - slip)
                     fills.append((conid, delta, fill))
-                proceeds = sum(-d * f - abs(d) * commission for _, d, f in fills if d < 0)
-                buy_cost = sum(d * f + abs(d) * commission for _, d, f in fills if d > 0)
-                available = cash + proceeds
-                scale = 1.0
-                if buy_cost > 0 and buy_cost > available:
-                    scale = max(available, 0.0) / buy_cost
-                    scaled_rebalances += 1
+                # Sells are EXECUTED and logged first, whatever order the
+                # strategy listed them in, so cash after every single fill
+                # is what a real account would show.
                 for conid, delta, fill in fills:
-                    if delta > 0 and scale < 1.0:
+                    if delta < 0:
+                        _execute(ts, conid, delta, fill)
+                buys = [(c, d, f) for c, d, f in fills if d > 0]
+                buy_cost = sum(d * f + abs(d) * commission for _, d, f in buys)
+                scale = 1.0
+                if buy_cost > 0 and buy_cost > cash:
+                    scale = max(cash, 0.0) / buy_cost
+                    scaled_rebalances += 1
+                for conid, delta, fill in buys:
+                    if scale < 1.0:
                         delta = float(math.floor(delta * scale))
                         scaled_buy_fills += 1
                         if delta <= 0:
                             dropped_buy_fills += 1
                             continue    # budget exhausted: nothing to buy
-                    cost = abs(delta) * commission
-                    cash -= delta * fill + cost
-                    positions[conid] = positions.get(conid, 0.0) + delta
-                    if abs(positions[conid]) < 1e-9:
-                        positions.pop(conid, None)
-                    trades.append(BacktestTrade(
-                        timestamp=ts, conid=conid,
-                        action=Action.BUY if delta > 0 else Action.SELL,
-                        quantity=abs(delta), price=fill, commission=cost,
-                        # A rebalance carries no per-name conviction: the
-                        # weight came from a rank, not from a probability.
-                        # Recording a fabricated 1.0 would make these trades
-                        # look like high-confidence calls in any downstream
-                        # analysis that reads the field.
-                        signal_probability=0.0, signal_risk=0.0))
+                    _execute(ts, conid, delta, fill)
                 pending = None
 
             # 2. Mark the book at this bar's close, carrying the last known
@@ -1013,7 +1022,7 @@ class Backtester:
             'panel_scaled_buy_fills': scaled_buy_fills,      # BUY fills reduced by the D06 cash guard
             'panel_dropped_buy_fills': dropped_buy_fills,    # ... of which reduced to nothing
             'panel_scaled_rebalances': scaled_rebalances,    # fill dates on which the guard acted
-            'panel_min_cash': float(min_cash),               # lowest end-of-bar cash
+            'panel_min_cash': float(min_cash),               # lowest cash after any fill or bar
         })
         return result
 

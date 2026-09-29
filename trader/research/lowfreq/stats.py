@@ -106,16 +106,29 @@ def fraction_positive_years(table: Dict[int, Dict[str, float]]) -> Optional[floa
 
 def deflated_sharpe_n(returns, n_trials: int, trial_sharpes_annualised: Sequence[float]) -> Optional[float]:
     """PSR of ``returns`` against the Sharpe the best of ``n_trials`` would
-    show under the null. Variance across trials is measured from whichever
-    trials have a recorded Sharpe (per-period units); with fewer than two it is
-    zero and the number degenerates to plain PSR - stated, not hidden."""
+    show under the null (``expected_max_sharpe(N, V)``).
+
+    N is the family trial count (D02: distinct candidate hashes, errored ones
+    included - they were tried). V is the spread of the trials' recorded
+    active Sharpes, per period. With N == 1 nothing was selected and V is 0
+    by definition (PSR against zero is exact). With N > 1 the deflation needs
+    a measured V: fewer than two recorded Sharpes means the trial
+    distribution is unavailable, and the function returns None rather than
+    pretending V = 0 (which would silently reduce DSR to plain PSR whatever
+    the trial count). Gate (c) then fails closed (verdict.decide).
+    """
     a = _clean(returns)
     if len(a) < 3:
         return None
+    n = max(int(n_trials), 1)
     s = np.asarray([x for x in trial_sharpes_annualised if x is not None and math.isfinite(x)], dtype=float)
-    per_period = s / math.sqrt(BARS_PER_YEAR)
-    variance = float(np.var(per_period, ddof=1)) if len(per_period) > 1 else 0.0
-    sr_star = expected_max_sharpe(max(int(n_trials), 1), variance)
+    if n == 1:
+        variance = 0.0
+    elif len(s) >= 2:
+        variance = float(np.var(s / math.sqrt(BARS_PER_YEAR), ddof=1))
+    else:
+        return None
+    sr_star = expected_max_sharpe(n, variance)
     if sr_star is None:
         return None
     return probabilistic_sharpe(a, benchmark_sharpe=sr_star)
