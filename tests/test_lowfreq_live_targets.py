@@ -3,6 +3,7 @@ D08 document validity, staleness refusals, hold-day refusal, and parity with
 what ``engine.run_window`` (the real ``Backtester.run_panel`` path) issued."""
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import sys
@@ -102,10 +103,14 @@ def test_validate_targets_document_rules():
             T.validate_targets_document(dict(good, **bad))
 
 
-def record_on_panel(monkeypatch, cid: str, recorded: dict):
-    """Wrap engine.make_strategy so the executing instance's on_panel
-    instructions are recorded per decision session (positive weights only)."""
+@contextlib.contextmanager
+def recording(cid: str):
+    """Wrap engine.make_strategy so the EXECUTING instance's on_panel
+    instructions are recorded per decision session (positive weights only),
+    and RESTORE the real function on exit - the patch must not be active when
+    `targets` runs, or the comparison would be targets against targets."""
     real = engine.make_strategy
+    recorded: dict = {}
 
     def wrapped(entry, cell, panel, coverage=None):
         inst = real(entry, cell, panel, coverage)
@@ -119,20 +124,27 @@ def record_on_panel(monkeypatch, cid: str, recorded: dict):
                 return w
             inst.on_panel = on_panel
         return inst
-    monkeypatch.setattr(engine, 'make_strategy', wrapped)
+    engine.make_strategy = wrapped
+    try:
+        yield recorded
+    finally:
+        engine.make_strategy = real
 
 
-def test_parity_with_run_panel_on_fake_db(equity_family, monkeypatch):
+def test_parity_with_run_panel_on_fake_db(equity_family):
     fam = registry.load_family('equity')
     entry = fam.get('tiny_s2p')
     panel = loaders.load_equity_panel(start='2017-02-01', end='2017-09-15')
-    recorded: dict = {}
-    record_on_panel(monkeypatch, 'tiny_s2p', recorded)
-    engine.run_window(entry, {}, panel, dt.date(2017, 2, 1), dt.date(2017, 4, 1), dt.date(2017, 9, 15),
-                      base_costs('equity'))
-    dates = [d for d in sorted(recorded) if d >= dt.date(2017, 4, 1)]
+    real = engine.make_strategy
+    with recording('tiny_s2p') as rec:
+        engine.run_window(entry, {}, panel, dt.date(2017, 2, 1), dt.date(2017, 4, 1), dt.date(2017, 9, 15),
+                          base_costs('equity'))
+    issued = {d: dict(w) for d, w in rec.items()}          # snapshot of what run_panel consumed
+    assert engine.make_strategy is real                     # targets runs UNPATCHED
+    dates = [d for d in sorted(issued) if d >= dt.date(2017, 4, 1)]
     assert len(dates) >= 3
     for d in dates[:3]:
         sub = panel.sliced(pd.Timestamp('2017-02-01'), pd.Timestamp(d) + pd.Timedelta(days=1))
         res = T.compute_targets('equity', 'tiny_s2p', 'paper_s2p', 10_000.0, d, panel=sub)
-        assert res.document['weights'] == pytest.approx(recorded[d]), d
+        assert res.document['weights'] == pytest.approx(issued[d]), d
+    assert {d: dict(w) for d, w in rec.items()} == issued    # nothing was recorded during targets

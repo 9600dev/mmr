@@ -120,7 +120,7 @@ def load_panel_for(fam: registry.Family, entry: Dict[str, Any], as_of: dt.date) 
     start = as_of - dt.timedelta(days=warm)
     universe = str(entry.get('universe', fam.universe))
     if universe == 'equity':
-        return loaders.load_equity_panel(start=start, end=as_of, top_n=fam.top_n)
+        return loaders.load_equity_panel(start=start, end=as_of, top_n=int(entry.get('top_n', fam.top_n)))
     if universe == 'etf':
         return loaders.load_etf_panel(entry.get('tickers'), start=start, end=as_of)
     raise TargetsRefused(f'unknown universe {universe!r}')
@@ -195,6 +195,11 @@ def compute_targets(family: str, candidate_id: str, sleeve: str, capital_usd: fl
     fam = registry.load_family(family)
     entry = fam.get(candidate_id)
     cell = dict(params) if params is not None else registry.default_cell(entry)
+    # A cell outside the registered grid is a different (unregistered) rule:
+    # refuse it so a sleeve cannot drift from the entry it claims to trade (D02).
+    if params is not None and cell not in registry.expand_grid(entry):
+        raise TargetsRefused(f'params {cell} are not a registered grid cell of {candidate_id} '
+                             f'(registered: {registry.expand_grid(entry)})')
     universe = str(entry.get('universe', fam.universe))
     if panel is None:
         panel = load_panel_for(fam, entry, as_of)
@@ -276,15 +281,20 @@ def write_targets(result: TargetsResult, path: Optional[Path] = None,
     if path.exists() and not overwrite:
         raise TargetsRefused(f'{path} exists; pass --overwrite to replace it')
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix('.json.tmp')
-    tmp.write_text(json.dumps(doc, indent=2, sort_keys=False) + '\n')
-    os.replace(tmp, path)
     side = benchmark_sidecar_path(path)
     side_doc = {'schema': BENCHMARK_SCHEMA, 'sleeve': doc['sleeve'], 'as_of': doc['as_of'],
                 'candidate': doc['strategy']['id'], 'capital_usd': doc['capital_usd'],
                 'benchmarks': {k: (dict(sorted(v.items())) if v is not None else None)
                                for k, v in result.benchmarks.items()}}
-    side.write_text(json.dumps(side_doc, indent=2) + '\n')
+    # Atomic pair: both documents are staged, then the sidecar is published
+    # BEFORE the D08 file, so a valid targets file can never exist without the
+    # ledger input beside it (a sidecar without its D08 file is inert).
+    tmp_side = side.with_suffix('.json.tmp')
+    tmp_doc = path.with_suffix('.json.tmp')
+    tmp_side.write_text(json.dumps(side_doc, indent=2) + '\n')
+    tmp_doc.write_text(json.dumps(doc, indent=2, sort_keys=False) + '\n')
+    os.replace(tmp_side, side)
+    os.replace(tmp_doc, path)
     result.path, result.benchmark_path = path, side
     return result
 

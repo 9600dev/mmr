@@ -1,4 +1,4 @@
-"""``python -m trader.lowfreq_live`` - targets / track / report / record-fill / fills.
+"""``python -m trader.lowfreq_live`` - targets / track / report / fills.
 
 Exit codes: 0 ok, 2 refused (nothing written), 1 unexpected error.
 """
@@ -64,15 +64,46 @@ def _store_and_bars(a: argparse.Namespace):
     return LedgerStore(ledger_db), DuckDBBars(bars_db)
 
 
+def _ib_positions() -> Dict[str, float]:
+    """symbol -> quantity from trader_service (D13 reconciliation source).
+    Any failure to read is raised: the caller must refuse, not guess."""
+    from trader.sdk import MMR
+    df = MMR().positions()
+    out: Dict[str, float] = {}
+    if df is None or len(df) == 0:
+        return out
+    for _, row in df.iterrows():
+        sym = str(row.get('symbol', '')).upper()
+        if sym:
+            out[sym] = out.get(sym, 0.0) + float(row.get('position', 0.0) or 0.0)
+    return out
+
+
 def cmd_track(a: argparse.Namespace) -> int:
-    from trader.lowfreq_live.ledger import track
+    from trader.lowfreq_live.ledger import ReconciliationError, track
     store, bars = _store_and_bars(a)
-    res = track(a.sleeve, store, bars, targets_dir=a.targets_dir, through=_date(a.through), benchmark_id=a.benchmark)
+    broker: Optional[Dict[str, float]] = None
+    if not a.no_reconcile:
+        try:
+            broker = _ib_positions()
+        except Exception as exc:                        # noqa: BLE001 - fail closed
+            print(f'REFUSED: cannot read IB positions for reconciliation ({exc}); '
+                  f'pass --no-reconcile to record without it', file=sys.stderr)
+            return 2
+    else:
+        print('WARNING: --no-reconcile - journaled holdings were not checked against IB', file=sys.stderr)
+    try:
+        res = track(a.sleeve, store, bars, targets_dir=a.targets_dir, through=_date(a.through),
+                    benchmark_id=a.benchmark, broker_positions=broker)
+    except ReconciliationError as exc:
+        print(f'REFUSED: {exc}', file=sys.stderr)
+        return 2
     if a.json:
         print(json.dumps(res, indent=2, default=str))
     else:
         print(f"{a.sleeve}: appended {res['appended']} session(s) through {res['through']} "
-              f"(benchmark {res['benchmark_id']}, inception {res['inception']}, capital {res['capital_usd']:,.2f})")
+              f"(benchmark {res['benchmark_id']}, inception {res['inception']}, capital {res['capital_usd']:,.2f}, "
+              f"reconciled={res['reconciled']})")
         for d in res['disagreements']:
             print(f"  DISAGREEMENT {d['session']} {d['column']}: stored {d['stored']:.2f} replayed {d['replayed']:.2f}")
     return 0 if not res['disagreements'] else 2
@@ -96,15 +127,6 @@ def cmd_report(a: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_record_fill(a: argparse.Namespace) -> int:
-    from trader.lowfreq_live.ledger import Fill
-    store, _ = _store_and_bars(a)
-    store.record_fill(a.sleeve, Fill(dt.date.fromisoformat(a.date), a.ticker.upper(), a.side.upper(),
-                                     float(a.quantity), float(a.price), float(a.commission), a.source))
-    print(f'recorded {a.side.upper()} {a.quantity} {a.ticker.upper()} @ {a.price} on {a.date} for {a.sleeve}')
-    return 0
-
-
 def cmd_fills(a: argparse.Namespace) -> int:
     store, _ = _store_and_bars(a)
     fills = store.fills(a.sleeve)
@@ -112,8 +134,9 @@ def cmd_fills(a: argparse.Namespace) -> int:
         print(json.dumps([f.__dict__ for f in fills], indent=2, default=str))
         return 0
     for f in fills:
-        print(f'{f.fill_date}  {f.side:<4} {f.quantity:>10.2f} {f.ticker:<8} @ {f.price:.4f}  comm {f.commission:.2f}  {f.source}')
-    print(f'{len(fills)} fill(s)')
+        print(f'{f.trade_date}  {f.quantity:>+10.2f} {f.ticker:<8} @ {f.price:.4f}  comm {f.commission:.2f}  '
+              f'exec {f.exec_id} order {f.order_id} proposal {f.proposal_id}')
+    print(f'{len(fills)} fill(s) (sleeve_fills, written by trader.rebalance reconcile)')
     return 0
 
 
@@ -146,21 +169,10 @@ def build_parser() -> argparse.ArgumentParser:
         if name == 'track':
             p.add_argument('--through', default=None, help='last session to record (default: last stored)')
             p.add_argument('--benchmark', default=None, help='benchmark id when the sidecar carries several')
+            p.add_argument('--no-reconcile', action='store_true',
+                           help='skip the IB positions check (D13); default reads trader_service and refuses on a discrepancy')
         p.set_defaults(func=fn)
 
-    r = sub.add_parser('record-fill', help='journal one executed fill of a sleeve')
-    r.add_argument('--sleeve', required=True)
-    r.add_argument('--date', required=True)
-    r.add_argument('--ticker', required=True)
-    r.add_argument('--side', required=True, choices=['BUY', 'SELL', 'buy', 'sell'])
-    r.add_argument('--quantity', type=float, required=True)
-    r.add_argument('--price', type=float, required=True)
-    r.add_argument('--commission', type=float, default=0.0)
-    r.add_argument('--source', default='operator')
-    r.add_argument('--ledger-db', default=None)
-    r.add_argument('--bars-db', default=None)
-    r.add_argument('--targets-dir', default=None)
-    r.set_defaults(func=cmd_record_fill)
     return ap
 
 

@@ -96,7 +96,15 @@ def sec_filing_index(client, ticker: str, key: str, forms=('10-Q', '10-K'),
             filed = f.get('filedAt')
             if not period or not filed:
                 continue
-            out[period] = (filed, f.get('formType', ''), f.get('accessionNo', ''))
+            # The NEWEST acceptance per period wins, decided by the instant
+            # itself rather than by response order: the API pages newest-first,
+            # so "last write wins" kept the OLDEST same-period filing and an
+            # incremental re-run (which asks for anything after the stored
+            # instant) then stored the newer one - a second run changing the
+            # table a first run had left (hillclimb C02, round 2).
+            prev = out.get(period)
+            if prev is None or _later(filed, prev[0]):
+                out[period] = (filed, f.get('formType', ''), f.get('accessionNo', ''))
         if len(filings) < 50:
             break
     return out
@@ -138,6 +146,14 @@ def pit_membership_todo(db, hist_db, min_months: int):
           f'{len(todo)} to fetch (>={min_months} months, '
           f'{len(have)} already covered)', flush=True)
     return todo
+
+
+def _later(a: str, b: str) -> bool:
+    """Is acceptance instant ``a`` strictly after ``b``? Compared as instants
+    (both tz-aware ISO-8601 from sec-api), never as strings."""
+    import pandas as pd
+    ta, tb = pd.Timestamp(a), pd.Timestamp(b)
+    return bool(ta > tb)
 
 
 def _iso_instant(t) -> str:

@@ -183,3 +183,31 @@ def test_fundamentals_incremental_ignore_never_replaces_existing_key(tmp_path):
     out = ff.ingest_ticker(db, FakePoly(['2024-03-31']), index2, '', 'AAA', append_only=True)
     assert out['written'] == 1                     # attempted, but ignored by the key
     assert db.execute('SELECT fetched_at, accepted_at FROM fundamentals', fetch='all') == first
+
+
+def test_same_period_multiple_filings_newest_wins_and_rerun_is_idempotent(tmp_path):
+    """Two acceptances for one period in a single (newest-first) response: the
+    newest must be stored on the FIRST run, so an unchanged re-run has nothing
+    newer to add (the previous last-write-wins kept the oldest and the re-run
+    then stored the newer one - a second run changing what the first left)."""
+    db = DuckDBConnection(str(tmp_path / 'main.duckdb'))
+    hist = DuckDBConnection(str(tmp_path / 'hist.duckdb'))
+    hist.execute(bpu.PIT_TABLE_DDL, fetch='none')
+    hist.execute('INSERT INTO pit_daily_bars VALUES (?,?,?,?,?,?,?,?,?)',
+                 [dt.date(2024, 6, 28), 'AAA', 10, 11, 9, 10, 1e6, 1e7, 1], fetch='none')
+    db.execute(ff.FUNDAMENTALS_DDL, fetch='none')
+    sec = FakeSec([_filing('AAA', '2024-03-31', '2024-05-20T09:00:00-04:00', 'acc-amend'),   # newest first
+                   _filing('AAA', '2024-03-31', '2024-05-01T06:01:00-04:00', 'acc-orig')])
+    poly = FakePoly(['2024-03-31'])
+    index = ff.sec_filing_index(sec, 'AAA', 'k')
+    assert index['2024-03-31'][2] == 'acc-amend'
+    # response order must not matter
+    sec.filings.reverse()
+    assert ff.sec_filing_index(sec, 'AAA', 'k')['2024-03-31'][2] == 'acc-amend'
+    res = ff.run_incremental(db, hist, sec, poly, key='k', log=lambda m: None)
+    assert res['written'] == 1
+    first = db.execute('SELECT accession_no, accepted_at, fetched_at FROM fundamentals', fetch='all')
+    assert first[0][0] == 'acc-amend'
+    res2 = ff.run_incremental(db, hist, sec, poly, key='k', log=lambda m: None)
+    assert res2['written'] == 0 and res2['no_new'] == 1
+    assert db.execute('SELECT accession_no, accepted_at, fetched_at FROM fundamentals', fetch='all') == first

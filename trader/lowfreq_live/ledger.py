@@ -1,21 +1,25 @@
 """Paper ledger: a sleeve's daily value against its virtual decisive benchmark.
 
 Both sides are valued from the SAME stored bars (``pit_daily_bars``, the bars
-the research path reads), and both are REPLAYED from inception on every
-``track`` call from durable inputs only - the sleeve's recorded fills, the
-sleeve's D08 target files (whose ``.benchmark.json`` sidecars carry the
-benchmark weights ``targets`` computed on the identical panel and coverage),
-and the bars. The ledger table is the OUTPUT: one row per session, appended
-once and never rewritten, so a later data correction shows up as a
-disagreement the operator can see rather than a silently changed history.
+the research path reads) and both are REPLAYED from inception on every
+``track`` call from durable inputs only: the sleeve's fills (the D13
+``sleeve_fills`` journal C01 writes from IB executions - this module never
+writes it), the sleeve's D08 target files (whose ``.benchmark.json`` sidecars
+carry the benchmark weights ``targets`` computed on the identical panel and
+coverage), and the bars. The ledger table is the OUTPUT: one row per session,
+appended once and never rewritten, so a late fill or a data correction shows
+up as a DISAGREEMENT the operator sees rather than a silently changed history.
 
-Benchmark rules (D05 decisive benchmark, D01 execution): the virtual book
-fills its new weights at the OPEN of the first stored session after each
-decision session (t+1 open, as ``Backtester.run_panel`` does), pays the
-family's base costs (5 bps slippage + $0.005/share for equities), holds
-fractional shares (a rule, not orders), and is marked at every session's
-close; a holding without a print that day carries its last close forward and
-is counted in ``benchmark_n_unpriced``. Cash earns zero (D03).
+The virtual benchmark is executed by ``Backtester.run_panel`` itself - the
+executor the harness scores every candidate and benchmark with (D01) - fed a
+strategy that replays the sidecar weights on their decision sessions. So its
+whole-share sizing off the decision close, t+1-open fills, D06 pro-rata cash
+guard, D07 terminal-print exits and carry-forward marks are the harness's by
+construction, not a re-implementation. Cash earns zero (D03).
+
+Holdings (D13): per-ticker sums of the sleeve's signed fill quantities,
+reconciled against IB positions when a broker read is supplied - a sleeve may
+never own more than IB shows, and a discrepancy REFUSES the run.
 """
 from __future__ import annotations
 
@@ -24,7 +28,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Protocol, Tuple, cast
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Tuple, cast
 
 import numpy as np
 import pandas as pd
@@ -32,14 +36,18 @@ import pandas as pd
 from trader.data.duckdb_store import DuckDBConnection
 from trader.lowfreq_live.targets import (BENCHMARK_SCHEMA, benchmark_sidecar_path, list_sleeve_targets,
                                          read_targets)
+from trader.objects import BarSize
+from trader.research.lowfreq import engine
 from trader.research.lowfreq.costs import Costs, base_costs
+from trader.research.lowfreq.loaders import PricePanel
+from trader.simulation.backtester import BacktestConfig, Backtester
+from trader.trading.strategy import Strategy
 
-FILLS_DDL = """CREATE TABLE IF NOT EXISTS lowfreq_sleeve_fills (
-    id INTEGER PRIMARY KEY, sleeve VARCHAR NOT NULL, fill_date DATE NOT NULL,
-    ticker VARCHAR NOT NULL, side VARCHAR NOT NULL, quantity DOUBLE NOT NULL,
-    price DOUBLE NOT NULL, commission DOUBLE NOT NULL, source VARCHAR,
-    recorded_at TIMESTAMP NOT NULL)"""
-FILLS_SEQ = 'CREATE SEQUENCE IF NOT EXISTS lowfreq_sleeve_fills_id_seq START 1'
+# D13 schema (C01 writes it; C02 reads it; tests create it from here).
+SLEEVE_FILLS_DDL = """CREATE TABLE IF NOT EXISTS sleeve_fills (
+    sleeve VARCHAR NOT NULL, ticker VARCHAR NOT NULL, trade_date DATE NOT NULL,
+    quantity DOUBLE NOT NULL, price DOUBLE NOT NULL, commission DOUBLE NOT NULL,
+    exec_id VARCHAR PRIMARY KEY, order_id VARCHAR, proposal_id BIGINT, recorded_at TIMESTAMPTZ)"""
 LEDGER_DDL = """CREATE TABLE IF NOT EXISTS lowfreq_paper_ledger (
     sleeve VARCHAR NOT NULL, session DATE NOT NULL,
     holdings_value DOUBLE, cash DOUBLE, sleeve_value DOUBLE, n_holdings INTEGER, n_unpriced INTEGER,
@@ -47,6 +55,18 @@ LEDGER_DDL = """CREATE TABLE IF NOT EXISTS lowfreq_paper_ledger (
     benchmark_n_holdings INTEGER, benchmark_n_unpriced INTEGER,
     capital_usd DOUBLE, recorded_at TIMESTAMP NOT NULL,
     PRIMARY KEY (sleeve, session))"""
+# A name is treated as STOPPED (D07 exit at its last print) only once it has
+# been silent this many sessions: at the live data edge "no print yet today"
+# and "delisted" look identical for a while.
+TERMINAL_SILENCE_SESSIONS = 5
+# A replayed value that differs from a stored row by more than this fraction
+# of capital is a disagreement (a late fill, a data correction); commission
+# -sized effects of a newly recognised terminal exit are below it.
+DISAGREEMENT_TOLERANCE = 1e-4
+
+
+class ReconciliationError(RuntimeError):
+    """The sleeve's journaled holdings exceed what the broker shows (D13)."""
 
 
 class BarSource(Protocol):
@@ -71,8 +91,8 @@ class DuckDBBars:
 
     def bars(self, tickers, start, end):
         names = sorted(set(tickers))
+        idx = self.sessions(start, end)
         if not names:
-            idx = self.sessions(start, end)
             return pd.DataFrame(index=idx), pd.DataFrame(index=idx)
         con = self._con()
         try:
@@ -83,7 +103,6 @@ class DuckDBBars:
         df['day'] = pd.to_datetime(df['day'])
         bad = ~((df['close'] > 0.01) & (df['close'] < 100_000))
         df.loc[bad, ['open', 'close']] = np.nan
-        idx = self.sessions(start, end)
         opens = df.pivot_table(index='day', columns='ticker', values='open', aggfunc='last')
         closes = df.pivot_table(index='day', columns='ticker', values='close', aggfunc='last')
         return (opens.reindex(index=idx, columns=names), closes.reindex(index=idx, columns=names))
@@ -121,46 +140,48 @@ class FrameBars:
         return idx[(idx >= pd.Timestamp(start)) & (idx <= pd.Timestamp(end))]
 
     def last_session(self):
-        return pd.Timestamp(self.closes.index[-1]).date() if len(self.closes.index) else None
+        return cast(pd.Timestamp, pd.Timestamp(self.closes.index[-1])).date() if len(self.closes.index) else None
 
 
 @dataclass(frozen=True)
 class Fill:
-    fill_date: dt.date
+    """One row of ``sleeve_fills`` (D13): ``quantity`` is SIGNED (+ buy, - sell)."""
+    trade_date: dt.date
     ticker: str
-    side: str            # BUY | SELL
     quantity: float
     price: float
     commission: float = 0.0
-    source: str = 'operator'
+    exec_id: str = ''
+    order_id: str = ''
+    proposal_id: Optional[int] = None
 
 
 class LedgerStore:
-    """The fill journal and the ledger table in one DuckDB file."""
+    """The ledger table (written here) and the D13 fills journal (read only)
+    in the MAIN DuckDB."""
     def __init__(self, db_path: str):
         self.db = DuckDBConnection(str(Path(db_path).expanduser()))
-        self.db.execute(FILLS_SEQ, fetch='none')
-        self.db.execute(FILLS_DDL, fetch='none')
         self.db.execute(LEDGER_DDL, fetch='none')
 
-    def record_fill(self, sleeve: str, fill: Fill) -> None:
-        if fill.side not in ('BUY', 'SELL'):
-            raise ValueError(f'side must be BUY or SELL, got {fill.side!r}')
-        if not (fill.quantity > 0 and math.isfinite(fill.quantity)):
-            raise ValueError(f'quantity must be positive and finite, got {fill.quantity!r}')
-        if not (fill.price > 0 and math.isfinite(fill.price)):
-            raise ValueError(f'price must be positive and finite, got {fill.price!r}')
-        if fill.commission < 0 or not math.isfinite(fill.commission):
-            raise ValueError(f'commission must be >= 0, got {fill.commission!r}')
-        self.db.execute(
-            "INSERT INTO lowfreq_sleeve_fills VALUES (nextval('lowfreq_sleeve_fills_id_seq'), ?,?,?,?,?,?,?,?, now())",
-            [sleeve, fill.fill_date, fill.ticker.upper(), fill.side, float(fill.quantity), float(fill.price),
-             float(fill.commission), fill.source], fetch='none')
-
     def fills(self, sleeve: str) -> List[Fill]:
-        rows = self.db.execute('SELECT fill_date, ticker, side, quantity, price, commission, source FROM '
-                               'lowfreq_sleeve_fills WHERE sleeve = ? ORDER BY fill_date, id', [sleeve], fetch='all') or []
-        return [Fill(r[0], r[1], r[2], float(r[3]), float(r[4]), float(r[5]), r[6] or '') for r in rows]
+        """Every ``sleeve_fills`` row of the sleeve in trade order. Refuses
+        (rather than assuming an empty book) when C01 has not created the
+        table: a missing journal is not a flat sleeve."""
+        try:
+            rows = self.db.execute(
+                'SELECT trade_date, ticker, quantity, price, commission, exec_id, order_id, proposal_id '
+                'FROM sleeve_fills WHERE sleeve = ? ORDER BY trade_date, recorded_at, exec_id', [sleeve], fetch='all') or []
+        except Exception as exc:                          # noqa: BLE001 - DuckDB CatalogException
+            raise RuntimeError(f'sleeve_fills is not readable ({exc}); C01\'s `trader.rebalance reconcile` '
+                               f'creates and fills it (D13)') from exc
+        out = []
+        for r in rows:
+            q, p, c = float(r[2]), float(r[3]), float(r[4] or 0.0)
+            if not (math.isfinite(q) and q != 0 and math.isfinite(p) and p > 0 and math.isfinite(c) and c >= 0):
+                raise RuntimeError(f'sleeve_fills row {r[5]!r} for {sleeve} is malformed: qty={q} price={p} comm={c}')
+            out.append(Fill(r[0], str(r[1]).upper(), q, p, c, str(r[5] or ''), str(r[6] or ''),
+                            int(r[7]) if r[7] is not None else None))
+        return out
 
     def ledger(self, sleeve: str) -> pd.DataFrame:
         df = self.db.execute('SELECT * FROM lowfreq_paper_ledger WHERE sleeve = ? ORDER BY session', [sleeve], fetch='df')
@@ -187,7 +208,7 @@ class LedgerStore:
         return n
 
 
-# ---------------------------------------------------------------- replay ---
+# ---------------------------------------------------------------- inputs ---
 
 @dataclass
 class SleeveInputs:
@@ -195,7 +216,7 @@ class SleeveInputs:
     capital_usd: float                        # inception capital: the FIRST D08 file's capital_usd
     inception: dt.date                        # the first decision session
     benchmark_id: str
-    benchmark_weights: Dict[dt.date, Dict[str, float]]   # decision session -> weights
+    benchmark_weights: Dict[dt.date, Dict[str, float]]   # decision session -> weights (sessions it held are absent)
     fills: List[Fill]
 
 
@@ -224,18 +245,135 @@ def load_inputs(sleeve: str, store: LedgerStore, targets_dir: Optional[str] = No
             raise RuntimeError(f'{side} has no benchmark {bid!r}')
         if benches[bid] is None:
             continue                                    # the benchmark held on that session: no rebalance
-        benchmarks_w = {str(k): float(v) for k, v in benches[bid].items() if float(v) > 0}
-        bench[dt.date.fromisoformat(doc['as_of'])] = benchmarks_w
+        bench[dt.date.fromisoformat(doc['as_of'])] = {str(k): float(v) for k, v in benches[bid].items() if float(v) > 0}
     return SleeveInputs(sleeve=sleeve, capital_usd=float(first['capital_usd']),
                         inception=dt.date.fromisoformat(first['as_of']), benchmark_id=str(bid),
                         benchmark_weights=bench, fills=store.fills(sleeve))
 
 
+def holdings_from_fills(fills: Iterable[Fill], through: Optional[dt.date] = None) -> Dict[str, float]:
+    """Per-ticker signed sums of the fills dated on or before ``through`` (D13)."""
+    qty: Dict[str, float] = {}
+    for f in fills:
+        if through is not None and f.trade_date > through:
+            continue
+        qty[f.ticker] = qty.get(f.ticker, 0.0) + f.quantity
+    return {t: q for t, q in qty.items() if abs(q) > 1e-9}
+
+
+def reconcile_holdings(holdings: Mapping[str, float], broker: Mapping[str, float]) -> None:
+    """D13: a sleeve may never own more than IB shows. Raises on the first
+    violation; a short journaled quantity is refused outright (long-only)."""
+    problems = []
+    for t, q in sorted(holdings.items()):
+        if q < -1e-9:
+            problems.append(f'{t}: journaled quantity {q} is negative')
+            continue
+        have = float(broker.get(t, 0.0))
+        if have + 1e-9 < q:
+            problems.append(f'{t}: sleeve journal says {q:g}, IB shows {have:g}')
+    if problems:
+        raise ReconciliationError('holdings exceed IB positions - ' + '; '.join(problems))
+
+
+# ------------------------------------------------------ benchmark replay ---
+
+class _NoStorage:
+    def get_tickdata(self, bar_size):
+        raise RuntimeError('the ledger injects frames; tick_data is not read')
+
+
+class _WeightsReplay(Strategy):
+    """Replays recorded target weights on their decision sessions; holds otherwise."""
+    def __init__(self, schedule: Dict[dt.date, Dict[str, float]]):
+        super().__init__()
+        self._schedule = dict(schedule)
+
+    def precompute_panel(self, panel: pd.DataFrame) -> Dict[str, Any]:
+        return {}
+
+    def on_panel(self, panel, state, index) -> Optional[Dict[Any, float]]:
+        day = cast(pd.Timestamp, pd.Timestamp(panel.index[index])).date()
+        w = self._schedule.get(day)
+        if w is None:
+            return None
+        out: Dict[Any, float] = {c: 0.0 for c in panel['close'].columns}   # explicit flat elsewhere
+        out.update(w)
+        return out
+
+
+def backtest_config(start: dt.date, end_excl: dt.date, capital: float, costs: Costs,
+                    terminal: Dict[Any, pd.Timestamp]) -> BacktestConfig:
+    """Field-for-field the harness's ``engine._config`` with the sleeve's capital
+    (pinned by a test against ``engine._config``)."""
+    return BacktestConfig(
+        start_date=dt.datetime.combine(start, dt.time()), end_date=dt.datetime.combine(end_excl, dt.time()),
+        initial_capital=capital, bar_size=BarSize.Days1,
+        slippage_bps=costs.slippage_bps, commission_per_share=costs.commission_per_share,
+        short_borrow_bps_annual=costs.short_borrow_bps_annual, panel_max_gross=costs.max_gross,
+        fill_policy='next_open', panel_terminal_prints=dict(terminal))
+
+
+def live_terminal_prints(panel: PricePanel, silence: int = TERMINAL_SILENCE_SESSIONS) -> Dict[Any, pd.Timestamp]:
+    """``engine.terminal_prints`` (D07) restricted to names silent for at least
+    ``silence`` sessions before the panel's last bar."""
+    idx = pd.DatetimeIndex(panel.close.index)
+    if len(idx) <= silence:
+        return {}
+    cutoff = idx[-1 - silence]
+    return {t: ts for t, ts in engine.terminal_prints(panel).items() if ts <= cutoff}
+
+
+def replay_benchmark(inputs: SleeveInputs, bars: BarSource, through: dt.date,
+                     costs: Optional[Costs] = None) -> pd.DataFrame:
+    """The virtual benchmark's per-session value/cash/holdings, executed by
+    ``Backtester.run_panel`` over the stored bars."""
+    costs = costs or base_costs('equity')
+    names: set = set()
+    for w in inputs.benchmark_weights.values():
+        names |= set(w)
+    sessions = bars.sessions(inputs.inception, through)
+    if len(sessions) == 0 or cast(pd.Timestamp, sessions[0]).date() != inputs.inception:
+        raise RuntimeError(f'inception {inputs.inception} is not a stored session')
+    cols = ['benchmark_value', 'benchmark_cash', 'benchmark_n_holdings', 'benchmark_n_unpriced']
+    if len(names) < 2:
+        raise RuntimeError('the benchmark names fewer than 2 instruments; nothing to replay')
+    opens, closes = bars.bars(names, inputs.inception, through)
+    panel = PricePanel(open=opens, close=closes)
+    frames = panel.frames()
+    if len(frames) < 2:
+        raise RuntimeError('fewer than 2 benchmark names have stored bars in the window')
+    terminal = live_terminal_prints(panel)
+    cfg = backtest_config(inputs.inception, through + dt.timedelta(days=1), inputs.capital_usd, costs, terminal)
+    res = Backtester(cast(Any, _NoStorage()), cfg).run_panel(
+        _WeightsReplay(inputs.benchmark_weights), cast(Any, list(frames.keys())), frames=frames)
+    equity = res.equity_curve.astype(float)
+    equity.index = pd.DatetimeIndex(equity.index)
+    equity = equity.reindex(sessions).ffill().fillna(inputs.capital_usd)
+    # cash and positions per session, rebuilt from the executor's own fill log
+    by_ts: Dict[Any, list] = {}
+    for t in res.trades:
+        by_ts.setdefault(cast(Any, pd.Timestamp(t.timestamp)), []).append(t)
+    cash = float(inputs.capital_usd)
+    qty: Dict[str, float] = {}
+    out = []
+    for ts in sessions:
+        for t in by_ts.get(pd.Timestamp(ts), []):
+            sgn = 1.0 if str(t.action).endswith('BUY') else -1.0
+            cash -= sgn * t.quantity * t.price + t.commission
+            qty[t.conid] = qty.get(t.conid, 0.0) + sgn * t.quantity
+            if abs(qty[t.conid]) < 1e-9:
+                qty.pop(t.conid)
+        row = closes.loc[ts] if ts in closes.index else pd.Series(dtype=float)
+        unpriced = sum(1 for t in qty if not (np.isfinite(row.get(t, np.nan)) and row.get(t, 0) > 0))
+        out.append({'benchmark_value': float(equity.loc[ts]), 'benchmark_cash': cash,
+                    'benchmark_n_holdings': len(qty), 'benchmark_n_unpriced': unpriced})
+    return pd.DataFrame(out, index=sessions, columns=cols)
+
+
 def _mark(qty: Dict[str, float], closes_row: pd.Series, last: Dict[str, float]) -> Tuple[float, int, int]:
     value, n, unpriced = 0.0, 0, 0
     for t, q in qty.items():
-        if abs(q) < 1e-12:
-            continue
         px = closes_row.get(t, np.nan) if len(closes_row) else np.nan
         if px is not None and np.isfinite(px) and px > 0:
             last[t] = float(px)
@@ -249,90 +387,35 @@ def _mark(qty: Dict[str, float], closes_row: pd.Series, last: Dict[str, float]) 
 
 
 def replay(inputs: SleeveInputs, bars: BarSource, through: dt.date, costs: Optional[Costs] = None) -> pd.DataFrame:
-    """One row per session in (inception, through]: sleeve holdings x closes +
-    cash from the fill journal; the virtual benchmark filled at t+1 open with
-    costs and marked at close."""
-    costs = costs or base_costs('equity')
-    names = set(f.ticker for f in inputs.fills)
-    for w in inputs.benchmark_weights.values():
-        names |= set(w)
-    start = inputs.inception
-    opens, closes = bars.bars(names, start, through)
-    sessions = bars.sessions(start, through)
-    slip = costs.slippage_bps / 10_000.0
-
+    """One row per session in [inception, through]: sleeve holdings x closes +
+    cash from the fills journal, beside the run_panel-executed benchmark."""
+    bench = replay_benchmark(inputs, bars, through, costs)
+    sessions = bench.index
+    names = {f.ticker for f in inputs.fills}
+    _, closes = bars.bars(names, inputs.inception, through)
     fills_by_day: Dict[dt.date, List[Fill]] = {}
     for f in inputs.fills:
-        fills_by_day.setdefault(f.fill_date, []).append(f)
-    pending_bench: Dict[dt.date, Dict[str, float]] = dict(inputs.benchmark_weights)
-
-    s_qty: Dict[str, float] = {}
-    s_cash = float(inputs.capital_usd)
-    s_last: Dict[str, float] = {}
-    b_qty: Dict[str, float] = {}
-    b_cash = float(inputs.capital_usd)
-    b_last: Dict[str, float] = {}
+        fills_by_day.setdefault(f.trade_date, []).append(f)
+    qty: Dict[str, float] = {}
+    cash = float(inputs.capital_usd)
+    last: Dict[str, float] = {}
     rows: List[Dict[str, Any]] = []
     for ts in sessions:
         day = cast(pd.Timestamp, pd.Timestamp(ts)).date()
-        # sleeve: fills dated this session settle at their recorded prices
         for f in fills_by_day.get(day, []):
-            sgn = 1.0 if f.side == 'BUY' else -1.0
-            s_cash -= sgn * f.quantity * f.price + f.commission
-            s_qty[f.ticker] = s_qty.get(f.ticker, 0.0) + sgn * f.quantity
-        # benchmark: every decision session strictly before this one that is
-        # still pending fills now, at this session's open (t+1 open)
-        due = sorted(d for d in pending_bench if d < day)  # type: ignore[operator]
-        if due:
-            weights = pending_bench[due[-1]]
-            for d in due:
-                pending_bench.pop(d, None)
-            open_row = opens.loc[ts] if ts in opens.index else pd.Series(dtype=float)
-            value = b_cash + sum(q * (float(open_row.get(t)) if np.isfinite(open_row.get(t, np.nan)) else b_last.get(t, 0.0))
-                                 for t, q in b_qty.items())
-            targets_q: Dict[str, float] = {}
-            for t, w in weights.items():
-                px = open_row.get(t, np.nan)
-                if np.isfinite(px) and px > 0:
-                    targets_q[t] = w * value / float(px)
-            deltas: Dict[str, float] = {}
-            for t in set(b_qty) | set(targets_q):
-                px = open_row.get(t, np.nan)
-                if not (np.isfinite(px) and px > 0):
-                    continue                      # no print: cannot trade it today, hold
-                delta = targets_q.get(t, 0.0) - b_qty.get(t, 0.0)
-                if abs(delta) >= 1e-12:
-                    deltas[t] = delta
-
-            def _fill(t: str, delta: float) -> None:
-                nonlocal b_cash
-                px = float(open_row.get(t))
-                fill = px * (1 + slip) if delta > 0 else px * (1 - slip)
-                b_cash -= delta * fill + abs(delta) * costs.commission_per_share
-                b_qty[t] = b_qty.get(t, 0.0) + delta
-                if abs(b_qty[t]) < 1e-12:
-                    b_qty.pop(t)
-
-            for t, delta in deltas.items():           # sells first (run_panel order)
-                if delta < 0:
-                    _fill(t, delta)
-            buy_cost = sum(d * float(open_row.get(t)) * (1 + slip) + d * costs.commission_per_share
-                           for t, d in deltas.items() if d > 0)
-            # D06: buys are scaled pro rata to the cash available after the sells, so
-            # costs on a fully invested book can never overdraw the virtual account.
-            scale = 1.0 if buy_cost <= max(b_cash, 0.0) else (max(b_cash, 0.0) / buy_cost if buy_cost > 0 else 0.0)
-            for t, delta in deltas.items():
-                if delta > 0 and scale > 0:
-                    _fill(t, delta * scale)
-            if b_cash < -1e-6:
-                raise RuntimeError(f'virtual benchmark cash {b_cash:.2f} < 0 on {day} (bug: the D06 guard failed)')
-        close_row = closes.loc[ts] if ts in closes.index else pd.Series(dtype=float)
-        hv, hn, hu = _mark(s_qty, close_row, s_last)
-        bv, bn, bu = _mark(b_qty, close_row, b_last)
-        rows.append({'sleeve': inputs.sleeve, 'session': day, 'holdings_value': hv, 'cash': s_cash,
-                     'sleeve_value': hv + s_cash, 'n_holdings': hn, 'n_unpriced': hu,
-                     'benchmark_id': inputs.benchmark_id, 'benchmark_value': bv + b_cash, 'benchmark_cash': b_cash,
-                     'benchmark_n_holdings': bn, 'benchmark_n_unpriced': bu, 'capital_usd': inputs.capital_usd})
+            cash -= f.quantity * f.price + f.commission
+            qty[f.ticker] = qty.get(f.ticker, 0.0) + f.quantity
+            if abs(qty[f.ticker]) < 1e-9:
+                qty.pop(f.ticker)
+        row = closes.loc[ts] if ts in closes.index else pd.Series(dtype=float)
+        hv, hn, hu = _mark(qty, row, last)
+        b = bench.loc[ts]
+        rows.append({'sleeve': inputs.sleeve, 'session': day, 'holdings_value': hv, 'cash': cash,
+                     'sleeve_value': hv + cash, 'n_holdings': hn, 'n_unpriced': hu,
+                     'benchmark_id': inputs.benchmark_id, 'benchmark_value': float(b['benchmark_value']),
+                     'benchmark_cash': float(b['benchmark_cash']),
+                     'benchmark_n_holdings': int(b['benchmark_n_holdings']),
+                     'benchmark_n_unpriced': int(b['benchmark_n_unpriced']), 'capital_usd': inputs.capital_usd})
     df = pd.DataFrame(rows)
     if len(df):
         df['session'] = pd.to_datetime(df['session'])
@@ -341,30 +424,39 @@ def replay(inputs: SleeveInputs, bars: BarSource, through: dt.date, costs: Optio
 
 
 def track(sleeve: str, store: LedgerStore, bars: BarSource, targets_dir: Optional[str] = None,
-          through: Optional[dt.date] = None, benchmark_id: Optional[str] = None) -> Dict[str, Any]:
+          through: Optional[dt.date] = None, benchmark_id: Optional[str] = None,
+          broker_positions: Optional[Mapping[str, float]] = None) -> Dict[str, Any]:
     """Append one ledger row per session not yet recorded, through ``through``
-    (default: the last stored session). Existing rows are never rewritten; a
-    replayed value that disagrees with a stored row is reported, not applied."""
+    (default: the last stored session). ``broker_positions`` (symbol ->
+    quantity from IB) reconciles the journaled holdings first and REFUSES on a
+    discrepancy (D13); ``None`` skips reconciliation (the caller must say so).
+    Existing rows are never rewritten; a replayed value that disagrees with a
+    stored row is reported, not applied."""
     inputs = load_inputs(sleeve, store, targets_dir, benchmark_id)
     end = through or bars.last_session()
     if end is None:
         raise RuntimeError('no stored sessions')
+    holdings = holdings_from_fills(inputs.fills, end)
+    if broker_positions is not None:
+        reconcile_holdings(holdings, broker_positions)
     frame = replay(inputs, bars, end)
     existing = store.ledger(sleeve)
     disagreements = []
+    tol = DISAGREEMENT_TOLERANCE * inputs.capital_usd
     if len(existing) and len(frame):
-        common = frame.index.intersection(existing.index)
-        for ts in common:
+        for ts in frame.index.intersection(existing.index):
             for col in ('sleeve_value', 'benchmark_value'):
                 a, b = float(frame.at[ts, col]), float(existing.at[ts, col])
-                if abs(a - b) > 1e-6 * max(1.0, abs(b)):
-                    disagreements.append({'session': ts.date().isoformat(), 'column': col, 'stored': b, 'replayed': a})
+                if abs(a - b) > tol:
+                    disagreements.append({'session': cast(pd.Timestamp, ts).date().isoformat(), 'column': col,
+                                          'stored': b, 'replayed': a})
     new_rows = [dict(r, session=cast(pd.Timestamp, pd.Timestamp(cast(Any, ts))).date()) for ts, r in frame.iterrows()
                 if not len(existing) or ts not in existing.index]
     n = store.append_rows(new_rows)
     return {'sleeve': sleeve, 'appended': n, 'through': end.isoformat(), 'sessions_replayed': int(len(frame)),
             'disagreements': disagreements, 'benchmark_id': inputs.benchmark_id,
-            'inception': inputs.inception.isoformat(), 'capital_usd': inputs.capital_usd}
+            'inception': inputs.inception.isoformat(), 'capital_usd': inputs.capital_usd,
+            'reconciled': broker_positions is not None, 'holdings': holdings}
 
 
 def report(sleeve: str, store: LedgerStore) -> Dict[str, Any]:
@@ -382,8 +474,7 @@ def report(sleeve: str, store: LedgerStore) -> Dict[str, Any]:
     b_daily = pd.concat([pd.Series([cap]), bv]).pct_change().dropna()
     active = (s_daily.to_numpy() - b_daily.to_numpy())
     te = float(np.std(active, ddof=1) * np.sqrt(252)) if len(active) > 1 else float('nan')
-    days = int(len(df))
-    return {'sleeve': sleeve, 'benchmark_id': str(df['benchmark_id'].iloc[-1]), 'sessions': days,
+    return {'sleeve': sleeve, 'benchmark_id': str(df['benchmark_id'].iloc[-1]), 'sessions': int(len(df)),
             'first_session': cast(pd.Timestamp, df.index[0]).date().isoformat(),
             'last_session': cast(pd.Timestamp, df.index[-1]).date().isoformat(),
             'capital_usd': cap, 'sleeve_value': float(sv.iloc[-1]), 'benchmark_value': float(bv.iloc[-1]),
