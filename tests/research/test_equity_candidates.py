@@ -147,6 +147,11 @@ def test_latest_change_and_first_observed_helpers():
     assert (new['A'].iloc[4], prev['A'].iloc[4]) == (3.0, 1.0)
     assert (new['A'].iloc[6], prev['A'].iloc[6]) == (2.0, 3.0)
     assert (new['A'].iloc[9], prev['A'].iloc[9]) == (2.0, 3.0)                  # carried forward
+    # PREREG addendum R2 item 6: a filing that leaves the TTM value unchanged is
+    # not a change - the previous surprise carries (value semantics, not filing events)
+    g = pd.DataFrame({'A': [1.0, 1.0, 2.0, 2.0, 2.0, 2.0]}, index=idx[:6])
+    n2, p2 = latest_change(g)
+    assert (n2['A'].iloc[2:] == 2.0).all() and (p2['A'].iloc[2:] == 1.0).all()
     frozen = first_observed(f)
     assert np.isnan(frozen['A'].iloc[0]) and (frozen['A'].iloc[1:] == 1.0).all()
 

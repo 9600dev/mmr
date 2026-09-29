@@ -79,3 +79,73 @@ what was seen first; any such addition is a new trial and counts.
 Every candidate's `stopped_names` block is reported; the champion's forced
 exits are re-marked to zero (terminal-loss stress) in REPORT.md before it is
 believed.
+
+---
+
+## Addendum R2 — 2026-09-29, written BEFORE the first `evaluate` call
+
+State when written: the round-1 checkpoint (commit `92653bf`) holds the
+registration above and NO `trials.jsonl` / `results/` — no result of any
+kind existed. The changes below answer the round-1 review; each makes the
+test stricter or the rule more conservative, none could be tuned to a
+result. The ledger rows of every run carry `git_sha = 92653bf`, i.e. they
+descend from that checkpoint.
+
+1. **H6 low volatility — implementation aligned with the registered rule.**
+   The round-1 file also required an as-of `shares_diluted` (via market cap)
+   for coverage, which the rule above never said; that condition is removed.
+   Coverage for H6 is member ∧ priced ∧ 126-session volatility computable, so
+   candidate and decisive benchmark share exactly that universe.
+2. **Decomposition controls for every ratio candidate** (all
+   `role: candidate`, so they COUNT in the DSR trial count; none can be
+   champion):
+
+   | id | control for | signal |
+   |---|---|---|
+   | `size_small_assets` (D3) | `pead_earnings`, `quality_value_blend`, `low_accruals` (asset denominators) | −as-of total assets |
+   | `size_small_revenue` (D4) | `pead_revenue` (prior-revenue denominator) | −as-of TTM revenue |
+   | `quality_value_frozen` (D5) | `quality_value_blend` (both numerators) | rank(first GP / assets) + rank(first revenue / mcap) |
+   | `accruals_frozen` (D6) | `low_accruals` (numerator) | −first (NI − CFO) / assets |
+
+   Change-based signals (H2, H3) have no meaningful frozen-numerator variant
+   (a frozen change is a constant, i.e. the denominator control itself), so
+   their denominator control is the whole decomposition.
+3. **Eligibility guards (extend rule 2).** A candidate is eligible only if
+   its OOS active annualised return exceeds that of EVERY control listed:
+   `pead_earnings` → `size_small_assets`; `pead_revenue` → `size_small_revenue`;
+   `quality_value_blend` → `s2p_top_quintile`, `size_smallcap`,
+   `size_small_assets`, `quality_value_frozen`; `low_accruals` →
+   `size_small_assets`, `accruals_frozen`; `value_momentum_filter` →
+   `s2p_top_quintile`, `size_smallcap` (its value half is a ratio);
+   `low_volatility` → no control (price-only, not a ratio). Only
+   `s2p_top_quintile` is REPLACED by its denominator (`size_smallcap`) when it
+   fails its guard; every other guarded candidate is simply ineligible.
+   `size_smallcap`, `size_small_assets`, `size_small_revenue` are pure size
+   tilts: eligible as the "size effect" hypothesis only if no guarded
+   hypothesis is eligible, and then only `size_smallcap` (registered as H-D1).
+4. **Trial-count protocol for DSR.** The harness deflates by the distinct
+   candidate hashes present in the ledger at run time, so a single pass
+   would give the first run N = 1 and the last N = 13. Protocol: **pass 1**
+   evaluates all 13 candidates (rows kept, their N is partial by
+   construction); **pass 2** re-evaluates all 13 against the complete ledger,
+   so every FINAL `results/<id>.json` reports N = 13 with the same
+   trial-Sharpe set. Re-running an identical entry hash adds no trial. Every
+   ledger row (both passes, any error re-run) is listed in REPORT.md. Any
+   run whose code or registry entry changes after pass 1 is a new hash and
+   a new trial.
+5. **D07 terminal-loss stress — procedure** (`stress_d07.py`, run on the
+   champion after pass 2): re-run the champion's OOS fold windows (the fold
+   table in its results JSON) and the decisive benchmark through the same
+   engine path; a forced exit is a SELL fill dated at the name's terminal
+   print (`engine.terminal_prints`); the stress removes the proceeds of every
+   such fill from equity from that day on (the name marked to ZERO), (i) for
+   the candidate alone and (ii) for candidate and benchmark alike. The event
+   list (date, ticker, quantity, price, value) and the stressed OOS Sharpe /
+   active return are stored in `results/<id>__d07_stress.json`. The
+   champion is believed only if the fair (ii) active return stays > 0.
+6. **PEAD semantics pinned.** `latest_change` detects a change in the as-of
+   TTM value, not a filing event: a filing that leaves the TTM numerically
+   unchanged (Q_t = Q_{t−4} to the dollar) is not a surprise and the previous
+   one carries. Rare for TTM sums; documented, tested, not varied.
+7. Shared files (`docs/RESEARCH_LOG.md`, `research/lowfreq/SUMMARY.md`) are
+   not edited by this component; findings live in `REPORT.md`.

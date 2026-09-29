@@ -3,10 +3,14 @@
 Signal: -(standard deviation of daily close-to-close returns over the past
 VOL_WINDOW sessions, at least MIN_OBS of them). Backward-looking rolling
 window: row t uses rows <= t. Bottom-volatility quintile held.
+
+Coverage is exactly the common definition (member, priced, signal
+computable): a price-only signal needs no filing, so no fundamentals field
+narrows the candidate's or the benchmark's universe (PREREG addendum R2).
 """
 from __future__ import annotations
 
-from strategies.lowfreq_equity_base import CoveredTilt, aligned, market_cap
+from strategies.lowfreq_equity_base import CoveredTilt
 
 
 class LowVolatilityQuintile(CoveredTilt):
@@ -15,7 +19,4 @@ class LowVolatilityQuintile(CoveredTilt):
 
     def signal(self, close, fields, signals):
         rets = close.pct_change(fill_method=None)
-        vol = rets.rolling(self.VOL_WINDOW, min_periods=self.MIN_OBS).std()
-        # covered = priced with an as-of filing, like every other candidate
-        covered = market_cap(close, fields).notna()
-        return -vol.where(covered)
+        return -rets.rolling(self.VOL_WINDOW, min_periods=self.MIN_OBS).std()

@@ -87,3 +87,36 @@ candidates:
     params: {}
     benchmarks: [eq_ew_covered]
     registered_at: 2026-09-29
+  # ---- PREREG.md addendum R2 (2026-09-29, before the first evaluate call): decomposition controls
+  - id: size_small_assets
+    role: candidate
+    hypothesis: The smallest-total-assets quintile of the covered universe beats owning it (PREREG addendum R2 D3, denominator control for asset-scaled ratios; never a champion).
+    rationale: pead_earnings, quality_value_blend and low_accruals divide by as-of total assets; a candidate that cannot beat its own denominator measured asset size.
+    strategy: {module: strategies.lowfreq_equity_size_assets, class: SmallAssetsQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: size_small_revenue
+    role: candidate
+    hypothesis: The smallest-TTM-revenue quintile of the covered universe beats owning it (PREREG addendum R2 D4, denominator control for pead_revenue; never a champion).
+    rationale: pead_revenue divides the revenue change by prior TTM revenue; a candidate that cannot beat its own denominator measured revenue size.
+    strategy: {module: strategies.lowfreq_equity_size_revenue, class: SmallRevenueQuintile}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: quality_value_frozen
+    role: candidate
+    hypothesis: The quality/value blend with both numerators frozen per name performs like quality_value_blend (PREREG addendum R2 D5, numerator control; never a champion).
+    rationale: Same knowledge mask, fundamental information removed - if it matches the blend, the blend is its denominators.
+    strategy: {module: strategies.lowfreq_equity_quality_value_frozen, class: QualityValueFrozen}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
+  - id: accruals_frozen
+    role: candidate
+    hypothesis: Low accruals with the numerator frozen per name performs like low_accruals (PREREG addendum R2 D6, numerator control; never a champion).
+    rationale: Same knowledge mask, accrual information removed - if it matches low_accruals, that book is an asset-size tilt.
+    strategy: {module: strategies.lowfreq_equity_accruals_frozen, class: LowAccrualsFrozen}
+    params: {}
+    benchmarks: [eq_ew_covered]
+    registered_at: 2026-09-29
