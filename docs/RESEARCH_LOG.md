@@ -712,3 +712,62 @@ levels quoted there (Sharpe 1.26 vs 1.04, CAGR 31 % vs 20 %) should not be
 believed until re-run through the harness. Not re-run here.
 
 **2026-09-29 (C01, D06 labelling).** Every `Backtester.run_panel` figure in this log dated before 2026-09-29 — including the 2026-08-17 size-tilt / sales-to-price books and their covered-EW benchmark (Sharpe 1.26 vs 1.04) and the 12-1 momentum panel runs — is **pre-D06**: produced before the panel executor's cash guard (BUY fills scaled to available cash) and before stopped names were exited at their last stored print (D07), so those books could run on implicit leverage and stale marks. Read them as pre-fix until re-run through `trader.research.lowfreq`.
+
+---
+
+## 2026-09-29 — low-frequency program: cross-asset null, sales-to-price PROMISING at N = 20
+
+Program `20260928-185549` (summary `research/lowfreq/SUMMARY.md`): a
+pre-registered, trial-counted harness (`trader/research/lowfreq`, protocol
+D01–D07 in `research/lowfreq/README.md`) applied to two information sets the
+program had not exploited well — a 49-ETF total-return panel and the
+point-in-time equity universe with EDGAR-acceptance-keyed fundamentals.
+Rolling walk-forward, t+1-open fills, decisive benchmark through the identical
+path, Newey-West t on active return, DSR deflated by distinct-entry count, 3×
+cost stress. Dev data end 2024-06-28; the period from 2024-07-01 is held out
+and will be evaluated by the orchestrator with the fixed-cell commands in
+`SUMMARY.md`. **Neither family produced a PASS.**
+
+| family | trials | champion | verdict | OOS Sharpe vs decisive | active/yr | t(NW) | DSR |
+|---|---|---|---|---|---|---|---|
+| xasset (5 mechanisms, 24 cells, 12 folds 2012–24) | 7 | `xa_vol_target`, TARGET_VOL 0.15 | **FAIL** | 0.897 vs 0.950 (60/40) | +1.22 % | 0.77 | 0.04 |
+| equity (7 hypotheses + 13 controls, 4 folds 2019–23) | 20 | `s2p_top_quintile` | **PROMISING** | 0.878 vs 0.564 (covered-EW) | +12.0 % | 2.01 | 0.64 |
+
+Commands: `uv run python -m trader.research.lowfreq evaluate xasset/xa_vol_target`
+and `... evaluate equity/s2p_top_quintile`; results
+`research/lowfreq/<family>/results/<id>.json`; every trial in each family's
+`trials.jsonl` and `REPORT.md`.
+
+**Cross-asset (C02).** All seven candidates fail gate (a); none reaches
+60/40's OOS Sharpe and only the champion has positive active return. Unlevered
+long-only trend, risk parity and vol-targeting on this universe put 49–72 % of
+the book in bonds/BIL and earned bond-like returns (Sharpe 0.59–0.65, CAGR
+2.3–3.7 %) against a 60/40 that compounded at 9 %; the champion is 85 % SPY on
+average and its Sharpe is lower than 60/40's because de-risking follows the
+fall (2020 active −18.6 %). Dual momentum and carry failed the drawdown gate
+(−40.8 %, −34.4 %). PBO on the 4-cell grids 0.34 / 0.73 / 0.51.
+
+**Equity (C03).** The sales-to-price quintile beats owning its covered
+universe on every gate but DSR: +12.0 %/yr active in all five counted years,
++11.5 % at 3× cost, max DD −36.8 % vs −32.7 %, D07 terminal-loss stress
+(all stopped names to zero, both books) active +13.8 %, t 2.25. Decomposition
+(`s2p_frozen_revenue` 0.88 / +11.9 %; `size_smallcap` 0.76 / +8.7 %;
+`revenue_raw` 0.53 / −0.4 %): the signal is the LEVEL of sales relative to
+price — not revenue updates, not only size. Momentum 12-1, low volatility and
+gross profitability do not beat covered-EW. Fragility stated before belief:
+t ≈ 2 on four years of monthly returns, every OOS drawdown containing March
+2020. This supersedes the 2026-08-17 figures (Sharpe 1.26 vs 1.04), which
+were pre-D06/D07 (see the correction above): after honest execution the
+spread survives, the levels do not (OOS CAGR 22.9 % vs 10.5 %).
+
+**Bugs fixed on the way (C01):** `run_panel` could overdraw cash — buys now
+scale to available cash (D06, `tests/test_panel_cash.py`); membership-filtered
+PIT prices froze every leaver in the book — prices are kept for every name
+ever a member and stopped names exit at their last stored print (D07,
+`tests/research/test_lowfreq_round4.py`). Details and consequences in
+`SUMMARY.md` and the correction entry above.
+
+**Conclusion.** Low-frequency allocation on liquid ETFs is a clean null under
+this protocol. The one construction in the program's history that beats its
+own universe honestly is a monthly sales-to-price tilt, PROMISING at N = 20;
+the held-out period, not more search, decides whether it is real.

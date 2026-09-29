@@ -52,7 +52,8 @@ pass 2 ran the same seven commands with unchanged entries at 08:37-08:40
 (rows 10-16; identical hashes, N stays 7), then pass-2 snapshots. Ledger
 row (id, pass k) maps to `results/snapshots/<id>__pass<k>.json`.
 `make_report.py check`: no deterministic field differs between passes for
-any candidate and each `results/<id>.json` equals its pass-2 snapshot; only
+any candidate and each `results/<id>.json` matches its pass-2 snapshot
+(deterministic fields, verdict, DSR); only
 `dsr` changed (N = 1..7 in pass 1, 7 in pass 2) and every verdict is FAIL in
 both. The champion rule was applied to the pass-2 files. The two
 benchmark-role rows never count as trials.
@@ -78,7 +79,10 @@ benchmark-role rows never count as trials.
 | 15 | xa_carry | candidate | ok | FAIL | 971e09774198 | 2 | 7 | +0.600 | -2.05% | -1.11 | 0.00 | 2026-09-29T08:40:02 |
 | 16 | xa_trend_6040 | candidate | ok | FAIL | a360adfb0410 | 2 | 7 | +0.827 | -2.95% | -2.01 | 0.00 | 2026-09-29T08:40:30 |
 
-Candidate-role trial count (distinct entry hashes): **7** (budget 40, D04); 14 candidate rows in total.
+Candidate-role trial count (distinct entry hashes): **7** (budget 40, D04); 16 candidate rows in total.
+
+Ledger rows 17-18 (integration, after selection): the champion's reproduction
+(FAIL) and a one-year `--fixed-params` command check; same hash, N stays 7.
 
 ## Candidates at the final trial count (results/<id>.json, pass 2)
 

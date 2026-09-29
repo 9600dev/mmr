@@ -83,7 +83,7 @@
   },
   "value": 0.644916394218161
  },
- "elapsed_s": 167.6,
+ "elapsed_s": 138.1,
  "entry": {
   "benchmarks": [
    "eq_ew_covered"
@@ -384,13 +384,13 @@
   "selection_stability": 1.0
  },
  "ledger_row": {
-  "elapsed_s": 167.6,
+  "elapsed_s": 138.1,
   "end": "2024-06-28",
   "entry_sha256": "f26522f826099257e9a31a5ac196e3f812667fa0d62486775983c8c1bbf8289b",
   "error": null,
   "family": "equity",
   "fixed_params": null,
-  "git_sha": "a75a485ee0d64644f0bcdf8edb7b84e790c16a38",
+  "git_sha": "dc1d60c3e2d8b64ad6de42f20be708a6c28b4be2",
   "grid": {},
   "harness_version": 2,
   "id": "s2p_top_quintile",
@@ -413,12 +413,12 @@
   },
   "mode": "walk_forward",
   "n_trials": 20,
-  "results_path": "/Users/joelpob/.local/share/llmvm_lite/scratch_directory/llmvm_scratch_jsx5vvxn/hillclimb-meta/20260928-185549/worktrees/C03/research/lowfreq/equity/results/s2p_top_quintile.json",
+  "results_path": "/Users/joelpob/dev/mmr/research/lowfreq/equity/results/s2p_top_quintile.json",
   "role": "candidate",
   "start": "2016-08-01",
   "status": "ok",
   "strategy_sha256": "a84415c3bb2da80e4604309cde60611d32ff588669521d2a79c107ea0785eb64",
-  "timestamp": "2026-09-29T09:11:33+00:00",
+  "timestamp": "2026-09-29T10:32:02+00:00",
   "verdict": "PROMISING"
  },
  "lookahead": {
@@ -449,7 +449,7 @@
   }
  },
  "pbo": null,
- "results_path": "/Users/joelpob/.local/share/llmvm_lite/scratch_directory/llmvm_scratch_jsx5vvxn/hillclimb-meta/20260928-185549/worktrees/C03/research/lowfreq/equity/results/s2p_top_quintile.json",
+ "results_path": "/Users/joelpob/dev/mmr/research/lowfreq/equity/results/s2p_top_quintile.json",
  "role": "candidate",
  "selection_stability": 1.0,
  "series": {

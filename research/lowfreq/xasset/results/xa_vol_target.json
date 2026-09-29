@@ -117,7 +117,7 @@
   },
   "value": 0.03656319449036523
  },
- "elapsed_s": 21.1,
+ "elapsed_s": 20.9,
  "entry": {
   "benchmarks": [
    "etf_ew",
@@ -1072,13 +1072,13 @@
   "selection_stability": 0.6363636363636364
  },
  "ledger_row": {
-  "elapsed_s": 21.1,
+  "elapsed_s": 20.9,
   "end": "2024-06-28",
   "entry_sha256": "320965185b282faf2fbbe3a9336992d993d3c9e9922ebd3c024d27c368adb8f8",
   "error": null,
   "family": "xasset",
   "fixed_params": null,
-  "git_sha": "1797ccacf7888573bef5cb3fd5fe9f51a01da021",
+  "git_sha": "dc1d60c3e2d8b64ad6de42f20be708a6c28b4be2",
   "grid": {
    "TARGET_VOL": [
     0.1,
@@ -1107,12 +1107,12 @@
   },
   "mode": "walk_forward",
   "n_trials": 7,
-  "results_path": "/Users/joelpob/.local/share/llmvm_lite/scratch_directory/llmvm_scratch_jsx5vvxn/hillclimb-meta/20260928-185549/worktrees/C02/research/lowfreq/xasset/results/xa_vol_target.json",
+  "results_path": "/Users/joelpob/dev/mmr/research/lowfreq/xasset/results/xa_vol_target.json",
   "role": "candidate",
   "start": "2007-07-01",
   "status": "ok",
   "strategy_sha256": "5772e4027424b72ae9b6e8f1e2807ab47866237a891e6d966c48ffc881051987",
-  "timestamp": "2026-09-29T08:39:39+00:00",
+  "timestamp": "2026-09-29T10:29:19+00:00",
   "verdict": "FAIL"
  },
  "lookahead": {
@@ -1151,7 +1151,7 @@
   }
  },
  "pbo": null,
- "results_path": "/Users/joelpob/.local/share/llmvm_lite/scratch_directory/llmvm_scratch_jsx5vvxn/hillclimb-meta/20260928-185549/worktrees/C02/research/lowfreq/xasset/results/xa_vol_target.json",
+ "results_path": "/Users/joelpob/dev/mmr/research/lowfreq/xasset/results/xa_vol_target.json",
  "role": "candidate",
  "selection_stability": 0.6363636363636364,
  "series": {

@@ -801,7 +801,7 @@
   "error": null,
   "family": "reference",
   "fixed_params": null,
-  "git_sha": "8def3dd8e5b188b3bc1ca1a0d88103ebc3a99595",
+  "git_sha": "dc1d60c3e2d8b64ad6de42f20be708a6c28b4be2",
   "grid": {},
   "harness_version": 2,
   "id": "etf_6040",
@@ -824,12 +824,12 @@
   },
   "mode": "walk_forward",
   "n_trials": 0,
-  "results_path": "/Users/joelpob/.local/share/llmvm_lite/scratch_directory/llmvm_scratch_jsx5vvxn/hillclimb-meta/20260928-185549/worktrees/C01/research/lowfreq/reference/results/etf_6040.json",
+  "results_path": "/Users/joelpob/dev/mmr/research/lowfreq/reference/results/etf_6040.json",
   "role": "benchmark",
   "start": "2007-07-01",
   "status": "ok",
   "strategy_sha256": "b55d4cbd75118ae56d60f332ca430775b35e27b9724891bb136ae35a27c8ff4e",
-  "timestamp": "2026-09-29T07:55:40+00:00",
+  "timestamp": "2026-09-29T10:37:14+00:00",
   "verdict": "PASS"
  },
  "lookahead": {
@@ -860,7 +860,7 @@
   }
  },
  "pbo": null,
- "results_path": "/Users/joelpob/.local/share/llmvm_lite/scratch_directory/llmvm_scratch_jsx5vvxn/hillclimb-meta/20260928-185549/worktrees/C01/research/lowfreq/reference/results/etf_6040.json",
+ "results_path": "/Users/joelpob/dev/mmr/research/lowfreq/reference/results/etf_6040.json",
  "role": "benchmark",
  "selection_stability": 1.0,
  "series": {

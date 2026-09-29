@@ -220,6 +220,41 @@ def test_holdings_table_renders_from_json_with_picks_and_cap(tmp_path):
 XASSET = REPO / 'research' / 'lowfreq' / 'xasset'
 
 
+def _is_reproduction(row, earlier, results):
+    """A ledger row that re-runs an already-reported candidate entry unchanged (same id and
+    entry hash as an earlier ok row). A fixed-cell window carries its own verdict; a
+    walk-forward re-run must reproduce the verdict recorded in results/<id>.json."""
+    if row.get('status') != 'ok' or row.get('role') != 'candidate':
+        return False
+    if not any(e.get('status') == 'ok' and e.get('id') == row.get('id')
+               and e.get('entry_sha256') == row.get('entry_sha256') for e in earlier):
+        return False
+    if row.get('mode') == 'fixed':
+        return True
+    return row.get('id') in results and results[row['id']].get('verdict') == row.get('verdict')
+
+
+def test_check_passes_accepts_a_reproduction_rewrite_but_flags_drift(tmp_path):
+    """Integration: re-running `evaluate xasset/<id>` after the passes rewrites results/<id>.json
+    with new run provenance; check_passes must still call it the pass-2 result, and must still
+    flag a changed verdict or deterministic field."""
+    here = tmp_path
+    (here / 'results').mkdir()
+    (here / 'candidates.yaml').write_text(
+        'family: xasset\nuniverse: etf\ncandidates:\n  - {id: a, role: candidate}\n  - {id: e, role: benchmark}\n')
+    (here / 'trials.jsonl').write_text(json.dumps(_row('a', 'a' * 64)) + '\n')
+    r = result('a', 'FAIL', 1.0, 0.5, dsr=0.2, n_trials=7)
+    (here / 'results' / 'a.json').write_text(json.dumps(r))
+    mr.snapshot('pass1', here)
+    mr.snapshot('pass2', here)
+    (here / 'results' / 'a.json').write_text(json.dumps(dict(r, elapsed_s=99.0, ledger_row={'timestamp': 'later', 'git_sha': 'x'})))
+    assert '| a | 0.20 (7) | 0.20 (7) | FAIL | FAIL | none |' in mr.check_passes(here)
+    (here / 'results' / 'a.json').write_text(json.dumps(dict(r, verdict='PROMISING')))
+    assert '(results/<id>.json != pass2 snapshot!)' in mr.check_passes(here)
+    (here / 'results' / 'a.json').write_text(json.dumps(result('a', 'FAIL', 1.0, 0.6, dsr=0.2, n_trials=7)))
+    assert '(results/<id>.json != pass2 snapshot!)' in mr.check_passes(here)
+
+
 def test_report_tables_match_current_artifacts():
     """REPORT.md must contain, verbatim, every line the renderer produces from
     the CURRENT ledger, results JSONs and holdings diagnostic; its champion
@@ -229,9 +264,26 @@ def test_report_tables_match_current_artifacts():
     report = (XASSET / 'REPORT.md').read_text()
     assert len(order) >= 4 and set(order) <= set(results)           # >= 4 distinct hypotheses, all evaluated
     assert 4 <= mr.distinct_candidate_hashes(rows) <= 40             # D04 trial budget
-    for table in (mr.ledger_table(order, rows), mr.candidate_table(order, results), mr.fold_table(order, results)):
+    for table in (mr.candidate_table(order, results), mr.fold_table(order, results)):
         for line in table.splitlines():
             assert (not line.strip()) or line in report, line
+    # Ledger table: every row the report was written from appears verbatim, as a prefix. Rows
+    # appended AFTER the report - the integration/held-out reproductions (`evaluate xasset/<id>`
+    # re-runs and `--fixed-params` runs of an already-reported entry) - need not, but each must
+    # repeat an earlier ok row's (id, entry hash), never a new or changed trial, and a
+    # walk-forward re-run must reproduce the verdict of results/<id>.json.
+    ledger_lines = mr.ledger_table(order, rows).splitlines()
+    header, body = ledger_lines[:2], ledger_lines[2:2 + len(rows)]
+    assert all(line in report for line in header)
+    documented = 0
+    for k, (line, row) in enumerate(zip(body, rows)):
+        if line in report:
+            assert documented == k, f'row {k + 1} is in the report but an earlier row is not: {line}'
+            documented += 1
+        else:
+            assert _is_reproduction(row, rows[:k], results), line
+    assert documented >= 1
+    assert f'Candidate-role trial count (distinct entry hashes): **{mr.distinct_candidate_hashes(rows)}**' in report
     cid, r = mr.champion(order, results)
     assert f"## Champion: `{cid}` — verdict **{r['verdict']}**" in report
     for line in mr.champion_section(cid, r).splitlines()[1:]:

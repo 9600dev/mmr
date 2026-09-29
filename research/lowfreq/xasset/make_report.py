@@ -194,7 +194,12 @@ def check_passes(here: Path = HERE) -> str:
             continue
         a, b = json.load(open(p1)), json.load(open(p2))
         final = results.get(cid)
-        same_final = final is not None and json.dumps(final, sort_keys=True, default=str) == json.dumps(b, sort_keys=True, default=str)
+        # Integration: a later reproduction (`evaluate xasset/<id>` after the two passes) rewrites
+        # results/<id>.json with new run provenance only (timestamp, git sha, elapsed time, ledger
+        # row). It IS the pass-2 result when no deterministic field, the verdict and the DSR
+        # (value, N) differ; byte identity is not required.
+        same_final = (final is not None and not compare_passes(final, b) and final.get('verdict') == b.get('verdict')
+                      and (final['dsr']['value'], final['dsr']['n_trials']) == (b['dsr']['value'], b['dsr']['n_trials']))
         diffs = compare_passes(a, b)
         lines.append(f"| {cid} | {_f(a['dsr']['value'], '{:.2f}')} ({a['dsr']['n_trials']}) | {_f(b['dsr']['value'], '{:.2f}')} ({b['dsr']['n_trials']}) | "
                      f"{a['verdict']} | {b['verdict']} | {', '.join(diffs) if diffs else 'none'}{'' if same_final else ' (results/<id>.json != pass2 snapshot!)'} |")
