@@ -40,7 +40,7 @@ from trader.objects import BarSize
 from trader.research.lowfreq import engine
 from trader.research.lowfreq.costs import Costs, base_costs
 from trader.research.lowfreq.loaders import PricePanel
-from trader.simulation.backtester import BacktestConfig, Backtester
+from trader.simulation.backtester import BacktestConfig, Backtester, BacktestResult
 from trader.trading.strategy import Strategy
 
 # D13 schema (C01 writes it; C02 reads it; tests create it from here).
@@ -58,10 +58,15 @@ LEDGER_DDL = """CREATE TABLE IF NOT EXISTS lowfreq_paper_ledger (
 # D07 at the live data edge. The harness exits a stopped name at its LAST
 # print, which it can only know with hindsight. Live, "no print yet today" and
 # "delisted" look identical, so the ledger's rule is PREFIX-STABLE instead: a
-# held name that has been silent for this many consecutive sessions is exited
+# HELD name that has been silent for this many consecutive sessions is exited
 # ON THE SESSION THE SILENCE IS RECOGNISED, at its last print's price (the
-# carried mark, exactly what the harness would have sold it for). Rows already
-# stored are never replayed differently; the exit appears in a NEW row.
+# carried mark: exactly the proceeds the harness books at the last print; only
+# the exit's slippage and commission land these sessions later). Rows already
+# stored are never replayed differently; the exit appears in a NEW row. The
+# rule is applied per EPISODE: every recognised silence is handed to the
+# executor, which sells only if the name is HELD then, so a name that stops,
+# re-enters through a later rebalance and stops again is exited each time, and
+# a gap before the benchmark first held it changes nothing.
 SILENCE_SESSIONS = 5
 # Replays are prefix-stable, so a stored row and its replay must agree to
 # floating-point precision; anything larger is a late fill or a data
@@ -182,14 +187,28 @@ class LedgerStore:
         self.db.execute(LEDGER_DDL, fetch='none')
         self.db.execute(REBUILDS_DDL, fetch='none')
 
-    def drop_ledger(self, sleeve: str) -> int:
-        n = self.db.execute('SELECT count(*) FROM lowfreq_paper_ledger WHERE sleeve = ?', [sleeve], fetch='one')
-        self.db.execute('DELETE FROM lowfreq_paper_ledger WHERE sleeve = ?', [sleeve], fetch='none')
-        return int(n[0]) if n else 0
-
-    def record_rebuild(self, sleeve: str, reason: str, dropped: int, written: int, disagreements: list) -> None:
-        self.db.execute('INSERT INTO lowfreq_ledger_rebuilds VALUES (?, now(), ?, ?, ?, ?)',
-                        [sleeve, reason, dropped, written, json.dumps(disagreements, default=str)], fetch='none')
+    def rebuild_atomic(self, sleeve: str, rows: List[Dict[str, Any]], reason: str,
+                       disagreements: list) -> Tuple[int, int]:
+        """Drop the sleeve's rows, write the replay and record the audit row in
+        ONE transaction (``execute_atomic`` commits or rolls the whole callback
+        back), so a failure part-way leaves the table exactly as it was - never
+        a half-written history, and never a rewritten one without its audit
+        entry. Returns ``(rows_dropped, rows_written)``."""
+        def _do(con):
+            n = con.execute('SELECT count(*) FROM lowfreq_paper_ledger WHERE sleeve = ?', [sleeve]).fetchone()
+            dropped = int(n[0]) if n else 0
+            con.execute('DELETE FROM lowfreq_paper_ledger WHERE sleeve = ?', [sleeve])
+            written = 0
+            for r in rows:
+                con.execute('INSERT INTO lowfreq_paper_ledger VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, now())',
+                            [sleeve, r['session'], r['holdings_value'], r['cash'], r['sleeve_value'], r['n_holdings'],
+                             r['n_unpriced'], r['benchmark_id'], r['benchmark_value'], r['benchmark_cash'],
+                             r['benchmark_n_holdings'], r['benchmark_n_unpriced'], r['capital_usd']])
+                written += 1
+            con.execute('INSERT INTO lowfreq_ledger_rebuilds VALUES (?, now(), ?, ?, ?, ?)',
+                        [sleeve, reason, dropped, written, json.dumps(disagreements, default=str)])
+            return dropped, written
+        return self.db.execute_atomic(_do)
 
     def rebuilds(self, sleeve: str) -> List[Dict[str, Any]]:
         rows = self.db.execute('SELECT rebuilt_at, reason, rows_dropped, rows_written FROM lowfreq_ledger_rebuilds '
@@ -344,9 +363,11 @@ class _WeightsReplay(Strategy):
 
 
 def backtest_config(start: dt.date, end_excl: dt.date, capital: float, costs: Costs,
-                    terminal: Dict[Any, pd.Timestamp]) -> BacktestConfig:
+                    terminal: Mapping[Any, Any]) -> BacktestConfig:
     """Field-for-field the harness's ``engine._config`` with the sleeve's capital
-    (pinned by a test against ``engine._config``)."""
+    (pinned by a test against ``engine._config``). ``terminal`` maps a name to
+    its terminal print (the harness) or to every recognised silence (the live
+    rule); ``run_panel`` accepts both."""
     return BacktestConfig(
         start_date=dt.datetime.combine(start, dt.time()), end_date=dt.datetime.combine(end_excl, dt.time()),
         initial_capital=capital, bar_size=BarSize.Days1,
@@ -355,16 +376,18 @@ def backtest_config(start: dt.date, end_excl: dt.date, capital: float, costs: Co
         fill_policy='next_open', panel_terminal_prints=dict(terminal))
 
 
-def silence_exits(panel: PricePanel, silence: int = SILENCE_SESSIONS) -> Dict[Any, pd.Timestamp]:
-    """ticker -> the session on which its silence is RECOGNISED: the
-    ``silence``-th consecutive session without a print after at least one
-    print (first such run per name; the executor supports one forced exit per
-    name). ``Backtester.run_panel`` sells the holding on that bar at its
-    carried last price (D07's price). Prefix-stable: recognition on session S
-    depends only on bars <= S, so a longer replay never changes it."""
+def silence_exits(panel: PricePanel, silence: int = SILENCE_SESSIONS) -> Dict[Any, List[pd.Timestamp]]:
+    """ticker -> EVERY session on which a silence is RECOGNISED: the
+    ``silence``-th consecutive session without a print, after a print. One
+    entry per episode, so a name that stops, prints again and stops again has
+    two. ``Backtester.run_panel`` sells the holding on such a session at its
+    carried last price (D07's price) IF the name is held then, and does nothing
+    when it is not (a gap before the benchmark ever held the name, or after it
+    sold it). Prefix-stable: recognition on session S depends only on bars <=
+    S, so a longer replay never changes or adds an earlier entry."""
     close = panel.close.replace([np.inf, -np.inf], np.nan)
     idx = pd.DatetimeIndex(close.index)
-    out: Dict[Any, pd.Timestamp] = {}
+    out: Dict[Any, List[pd.Timestamp]] = {}
     for t in close.columns:
         printed = (close[t] > 0).to_numpy()
         seen, run = False, 0
@@ -376,15 +399,16 @@ def silence_exits(panel: PricePanel, silence: int = SILENCE_SESSIONS) -> Dict[An
                 continue
             run += 1
             if run == silence:
-                out[t] = cast(pd.Timestamp, idx[i])
-                break
+                out.setdefault(t, []).append(cast(pd.Timestamp, idx[i]))
     return out
 
 
-def replay_benchmark(inputs: SleeveInputs, bars: BarSource, through: dt.date,
-                     costs: Optional[Costs] = None) -> pd.DataFrame:
-    """The virtual benchmark's per-session value/cash/holdings, executed by
-    ``Backtester.run_panel`` over the stored bars."""
+def run_benchmark(inputs: SleeveInputs, bars: BarSource, through: dt.date,
+                  costs: Optional[Costs] = None) -> Tuple[BacktestResult, PricePanel, pd.DatetimeIndex]:
+    """Execute the virtual benchmark with ``Backtester.run_panel`` over the
+    stored bars in [inception, through]. Returns the executor's result (trade
+    log and diagnostics, including ``panel_forced_exits``), the price panel it
+    ran on and the stored sessions."""
     costs = costs or base_costs('equity')
     names: set = set()
     for w in inputs.benchmark_weights.values():
@@ -392,7 +416,6 @@ def replay_benchmark(inputs: SleeveInputs, bars: BarSource, through: dt.date,
     sessions = bars.sessions(inputs.inception, through)
     if len(sessions) == 0 or cast(pd.Timestamp, sessions[0]).date() != inputs.inception:
         raise RuntimeError(f'inception {inputs.inception} is not a stored session')
-    cols = ['benchmark_value', 'benchmark_cash', 'benchmark_n_holdings', 'benchmark_n_unpriced']
     if len(names) < 2:
         raise RuntimeError('the benchmark names fewer than 2 instruments; nothing to replay')
     opens, closes = bars.bars(names, inputs.inception, through)
@@ -400,10 +423,21 @@ def replay_benchmark(inputs: SleeveInputs, bars: BarSource, through: dt.date,
     frames = panel.frames()
     if len(frames) < 2:
         raise RuntimeError('fewer than 2 benchmark names have stored bars in the window')
-    terminal = silence_exits(panel)
+    terminal = silence_exits(panel)                      # D07, live rule: every recognised silence per name
     cfg = backtest_config(inputs.inception, through + dt.timedelta(days=1), inputs.capital_usd, costs, terminal)
     res = Backtester(cast(Any, _NoStorage()), cfg).run_panel(
         _WeightsReplay(inputs.benchmark_weights), cast(Any, list(frames.keys())), frames=frames)
+    return res, panel, sessions
+
+
+def replay_benchmark(inputs: SleeveInputs, bars: BarSource, through: dt.date,
+                     costs: Optional[Costs] = None) -> pd.DataFrame:
+    """The virtual benchmark's per-session value/cash/holdings, executed by
+    ``Backtester.run_panel`` over the stored bars. The executor's ``panel_*``
+    diagnostics (forced exits, D06 scaling) ride along in ``.attrs['diagnostics']``."""
+    res, panel, sessions = run_benchmark(inputs, bars, through, costs)
+    closes = panel.close
+    cols = ['benchmark_value', 'benchmark_cash', 'benchmark_n_holdings', 'benchmark_n_unpriced']
     equity = res.equity_curve.astype(float)
     equity.index = pd.DatetimeIndex(equity.index)
     equity = equity.reindex(sessions).ffill().fillna(inputs.capital_usd)
@@ -425,7 +459,9 @@ def replay_benchmark(inputs: SleeveInputs, bars: BarSource, through: dt.date,
         unpriced = sum(1 for t in qty if not (np.isfinite(row.get(t, np.nan)) and row.get(t, 0) > 0))
         out.append({'benchmark_value': float(equity.loc[ts]), 'benchmark_cash': cash,
                     'benchmark_n_holdings': len(qty), 'benchmark_n_unpriced': unpriced})
-    return pd.DataFrame(out, index=sessions, columns=cols)
+    df = pd.DataFrame(out, index=sessions, columns=cols)
+    df.attrs['diagnostics'] = {k: v for k, v in res.diagnostics.items() if str(k).startswith('panel_')}
+    return df
 
 
 def _mark(qty: Dict[str, float], closes_row: pd.Series, last: Dict[str, float]) -> Tuple[float, int, int]:
@@ -477,6 +513,7 @@ def replay(inputs: SleeveInputs, bars: BarSource, through: dt.date, costs: Optio
     if len(df):
         df['session'] = pd.to_datetime(df['session'])
         df = df.set_index('session')
+    df.attrs['benchmark_diagnostics'] = dict(bench.attrs.get('diagnostics', {}))
     return df
 
 
@@ -527,9 +564,12 @@ def track(sleeve: str, store: LedgerStore, bars: BarSource, broker_positions: Ma
     new_rows = [dict(r, session=cast(pd.Timestamp, pd.Timestamp(cast(Any, ts))).date()) for ts, r in frame.iterrows()
                 if not len(existing) or ts not in existing.index]
     n = store.append_rows(new_rows)
+    diag = frame.attrs.get('benchmark_diagnostics', {})
     return {'sleeve': sleeve, 'appended': n, 'through': end.isoformat(), 'sessions_replayed': int(len(frame)),
             'benchmark_id': inputs.benchmark_id, 'inception': inputs.inception.isoformat(),
-            'capital_usd': inputs.capital_usd, 'reconciled': True, 'holdings': holdings}
+            'capital_usd': inputs.capital_usd, 'reconciled': True, 'holdings': holdings,
+            'benchmark_forced_exits': int(diag.get('panel_forced_exits', 0)),          # D07 live-rule exits
+            'benchmark_forced_exit_value': float(diag.get('panel_forced_exit_value', 0.0))}
 
 
 def rebuild(sleeve: str, store: LedgerStore, bars: BarSource, broker_positions: Mapping[str, float],
@@ -542,12 +582,12 @@ def rebuild(sleeve: str, store: LedgerStore, bars: BarSource, broker_positions: 
         raise RuntimeError('rebuild requires a reason')
     inputs, end, holdings, frame = _prepare(sleeve, store, bars, targets_dir, through, benchmark_id, broker_positions)
     disagreements = _compare(frame, store.ledger(sleeve))
-    dropped = store.drop_ledger(sleeve)
     rows = [dict(r, session=cast(pd.Timestamp, pd.Timestamp(cast(Any, ts))).date()) for ts, r in frame.iterrows()]
-    written = store.append_rows(rows)
-    store.record_rebuild(sleeve, reason.strip(), dropped, written, disagreements)
+    dropped, written = store.rebuild_atomic(sleeve, rows, reason.strip(), disagreements)
+    diag = frame.attrs.get('benchmark_diagnostics', {})
     return {'sleeve': sleeve, 'rows_dropped': dropped, 'rows_written': written, 'through': end.isoformat(),
-            'disagreements_resolved': disagreements, 'reason': reason.strip(), 'holdings': holdings}
+            'disagreements_resolved': disagreements, 'reason': reason.strip(), 'holdings': holdings,
+            'benchmark_forced_exits': int(diag.get('panel_forced_exits', 0))}
 
 
 def report(sleeve: str, store: LedgerStore) -> Dict[str, Any]:

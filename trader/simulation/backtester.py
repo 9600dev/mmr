@@ -10,8 +10,9 @@ from trader.objects import Action, BarSize
 from trader.simulation.slippage import FixedBPS, SlippageModel
 from trader.trading.risk_gate import RiskGate, RiskLimits
 from trader.trading.strategy import Signal, Strategy, StrategyContext, StrategyState
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional
 
+from collections.abc import Iterable
 import datetime as dt
 import importlib
 import importlib.util
@@ -83,7 +84,10 @@ class BacktestConfig:
     # ``diagnostics['panel_forced_exits']`` / ``['panel_forced_exit_value']``.
     # Without it a delisted or storage-cutoff name sits in the book forever at
     # a stale mark and can never be sold (no later open exists to fill
-    # against). No open is ever fabricated.
+    # against). No open is ever fabricated. hillclimb(C02): a value may also
+    # be an ITERABLE of timestamps - one per stopped episode - for callers
+    # applying D07 without hindsight (trader/lowfreq_live/ledger.py); the
+    # exit fires on whichever of them the name is held at.
     panel_terminal_prints: Optional[Dict[Any, Any]] = None
     # Per-trade notional in ``live`` mode. None -> 2% of initial_capital
     # (mirrors the PositionSizer's base_position default). Live sizing also
@@ -918,9 +922,20 @@ class Backtester:
         # by the strategy and never inferred from this window's frames.
         forced_exits = 0
         forced_exit_value = 0.0
-        terminal: Dict[Any, Any] = {}
+        # hillclimb(C02): changed because the live paper ledger
+        # (trader/lowfreq_live/ledger.py) applies D07 WITHOUT hindsight: it
+        # recognises a stopped name after a run of silent sessions, and a
+        # name can stop, re-enter through a later rebalance and stop again,
+        # so one conid may carry SEVERAL terminal prints. A value is one
+        # timestamp-like (the harness's hindsight rule, unchanged) or an
+        # iterable of them; the exit fires on whichever of them the name is
+        # HELD at, and never on one it is not.
+        terminal: Dict[Any, FrozenSet[Any]] = {}      # frozenset of pd.Timestamp per conid
         for conid, t in (self.config.panel_terminal_prints or {}).items():
-            terminal[conid] = pd.Timestamp(t)
+            if isinstance(t, (str, bytes)) or not isinstance(t, Iterable):
+                terminal[conid] = frozenset([pd.Timestamp(t)])
+            else:
+                terminal[conid] = frozenset(pd.Timestamp(x) for x in t)
 
         def _execute(ts, conid, delta, fill):
             nonlocal cash, min_cash
@@ -1004,8 +1019,9 @@ class Backtester:
             # hillclimb(C01): D07 forced exit at the terminal print. Runs
             # BEFORE the mark so the equity curve shows the book that exists.
             if terminal:
+                now = pd.Timestamp(ts)
                 for conid in [c for c, q in positions.items()
-                              if abs(q) > 1e-9 and terminal.get(c) == pd.Timestamp(ts)
+                              if abs(q) > 1e-9 and now in terminal.get(c, frozenset())
                               and c in last_price]:
                     qty = positions[conid]
                     px = last_price[conid]

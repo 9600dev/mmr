@@ -74,9 +74,8 @@ $EXEC mmr proposals                                             # review sizing 
 $EXEC mmr approve <id>                                          # one by one, SELLs first
 ```
 
-The rebalancer only creates PENDING proposals (D13, the current ruling, which
-carries D12's safety rules forward); approval is the operator's act. See
-`docs/REBALANCE.md`.
+The rebalancer only creates PENDING proposals and never approves, places or
+cancels anything (D15); approval is the operator's act. See `docs/REBALANCE.md`.
 
 ### 4. Reconcile the fills into the journal (C01)
 
@@ -104,7 +103,8 @@ than IB shows). It then replays both sides from inception from durable inputs
 only (`sleeve_fills`, the target files and their sidecars, `pit_daily_bars`)
 and appends one row per stored session to `lowfreq_paper_ledger` (in the
 trading DuckDB named by `trader.yaml`): sleeve holdings x closes, cash, sleeve
-value, and the virtual benchmark's value. The replay is prefix-stable, so it
+value, and the virtual benchmark's value; its output line also carries the
+benchmark's running count of D07 exits. The replay is prefix-stable, so it
 must reproduce every stored row exactly; if it does not (a fill reconciled
 late, corrected bars) `track` **refuses before appending anything** and names
 the disagreements. History is rewritten only by an attested operator act:
@@ -123,12 +123,19 @@ sleeve's capital and the equity base costs (D01) - whole shares truncated off
 the decision close, fills at the next session's open, buys scaled pro rata to
 cash and floored (D06), missing prints carried at the last close and counted.
 Cash earns zero (D03). D07 at the live edge: the harness exits a stopped name
-at its last print, which only hindsight can identify; live, a held name silent
+at its last print, which only hindsight can identify; live, a HELD name silent
 for 5 consecutive sessions is exited ON the session the silence is recognised,
-at its last print's price (the same proceeds the harness books), so no stored
-row is ever revised. A name absent from `pit_daily_bars` on a session (below
-the top-800 storage cutoff that day) is carried at its last close and counted
-in `n_unpriced` / `benchmark_n_unpriced`.
+at its last print's price - the same proceeds the harness books, with only the
+exit's slippage and commission landing five sessions later - so no stored row
+is ever revised. The rule is applied per episode: every recognised silence is
+handed to `run_panel`, which sells only if the name is held then, so a name
+that stops, re-enters through a later rebalance and stops again is exited each
+time, and a gap before the benchmark first held it changes nothing. A name
+that prints again after a recognised silence (a long halt) has been sold at
+its last print and re-enters only through the next sidecar's weights. A name
+absent from `pit_daily_bars` on a session (below the top-800 storage cutoff
+that day) is carried at its last close and counted in `n_unpriced` /
+`benchmark_n_unpriced`.
 
 `report` prints since-inception sleeve and benchmark return, active return,
 its annualised mean, tracking error (annualised standard deviation of the
@@ -156,6 +163,9 @@ clients on a temporary DuckDB, including same-period multi-filing reruns),
 the instructions `run_panel` consumed and the book it then held),
 `tests/test_lowfreq_live_ledger.py` (harness-derived known answers: whole
 shares, D06 floor, an opening gap, a stopped name exited on recognition without
-revising stored rows, prefix-stable replay, config parity with
-`engine._config`, mandatory reconciliation, disagreement refusal and attested
-rebuild, sidecar/D08 consistency, CLI round trip).
+revising stored rows, a name that stops, re-enters and stops again exited
+twice while an unheld gap changes nothing, prefix-stable replay, config parity
+with `engine._config`, mandatory reconciliation, disagreement refusal, attested
+single-transaction rebuild, sidecar/D08 consistency, CLI round trip), and
+`tests/test_lowfreq_live_terminal_exits.py` (`run_panel` with several terminal
+prints per name; a single timestamp behaves exactly as before).

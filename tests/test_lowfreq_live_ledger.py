@@ -157,7 +157,7 @@ def test_stopped_name_exits_when_silence_is_recognised_without_revising_history(
     bars = L.FrameBars(opens, closes)
     _write(tdir, 'stopped', '2026-09-01', {'AAA': 0.5}, {'AAA': 0.5, 'CCC': 0.5})
     panel = L.PricePanel(open=opens, close=closes)
-    assert L.silence_exits(panel) == {'CCC': pd.Timestamp('2026-09-10')}
+    assert L.silence_exits(panel) == {'CCC': [pd.Timestamp('2026-09-10')]}
     assert L.silence_exits(panel.sliced('2026-09-01', '2026-09-10')) == {}         # not yet recognised on 09-09
     qa, qc = 500, 166                                        # trunc(5000/10), trunc(5000/30); no D06 scaling needed
     cash0 = 10_000 - _cost(qa, 10.0) - _cost(qc, 30.0)
@@ -253,7 +253,7 @@ def test_missing_fills_table_refuses(tmp_path):
         store.fills('paper_s2p')
 
 
-def test_cli_roundtrip_with_fake_broker(world, monkeypatch):
+def test_cli_roundtrip_with_fake_broker(world, monkeypatch, capsys):
     from trader.lowfreq_live import __main__ as cli
     store = world['store']
     _fill(store, 'paper_s2p', dt.date(2026, 9, 2), 'AAA', 500, 10.0)
@@ -292,4 +292,116 @@ def test_cli_roundtrip_with_fake_broker(world, monkeypatch):
     assert len(store.ledger('paper_s2p')) == 8
     assert cli.main(['track', '--sleeve', 'paper_s2p', *common]) == 0
     assert cli.main(['--json', 'report', '--sleeve', 'paper_s2p', *common]) == 0
+    capsys.readouterr()
+    assert cli.main(['report', '--sleeve', 'paper_s2p', *common]) == 0
+    text = capsys.readouterr().out
+    assert 'rebuilds (1' in text and 'late fill' in text                     # the text report lists rebuilds
     assert cli.main(['fills', '--sleeve', 'paper_s2p', *common]) == 0
+
+
+@pytest.fixture
+def episodes(tmp_path):
+    """24 sessions (09-01 .. 10-02). CCC prints 09-01..09-03, is silent five
+    sessions (recognised 09-10), prints again 09-11..09-15, then stops for good
+    (recognised 09-22). DDD prints 09-01, is silent five sessions BEFORE the
+    benchmark ever holds it (recognised 09-08 while unheld), prints
+    09-09..09-15, then stops for good (recognised 09-22). AAA is flat at 10."""
+    days = pd.bdate_range('2026-09-01', periods=24)
+    nan = np.nan
+    closes = pd.DataFrame({'AAA': [10.0] * 24,
+                           'CCC': [30, 30, 33] + [nan] * 5 + [30, 30, 30] + [nan] * 13,
+                           'DDD': [40] + [nan] * 5 + [40, 40, 40, 40, 44] + [nan] * 13}, index=days)
+    opens = closes.shift(1).fillna(closes.iloc[0])
+    tdir = tmp_path / 'targets'
+    _write(tdir, 'multi', '2026-09-01', {'AAA': 0.5}, {'AAA': 0.5, 'CCC': 0.5})
+    _write(tdir, 'multi', '2026-09-14', {'AAA': 0.5}, {'AAA': 0.4, 'CCC': 0.3, 'DDD': 0.3})
+    store = L.LedgerStore(str(tmp_path / 'ledger.duckdb'))
+    store.db.execute(L.SLEEVE_FILLS_DDL, fetch='none')
+    return {'bars': L.FrameBars(opens, closes), 'tdir': tdir, 'store': store, 'opens': opens, 'closes': closes}
+
+
+def _log(res):
+    return [(str(pd.Timestamp(t.timestamp).date()), str(t.action).rsplit('.', 1)[-1], t.conid, t.quantity)
+            for t in res.trades]
+
+
+def test_every_recognised_silence_is_handed_to_the_executor(episodes):
+    panel = L.PricePanel(open=episodes['opens'], close=episodes['closes'])
+    assert L.silence_exits(panel) == {'CCC': [pd.Timestamp('2026-09-10'), pd.Timestamp('2026-09-22')],
+                                      'DDD': [pd.Timestamp('2026-09-08'), pd.Timestamp('2026-09-22')]}
+    # prefix-stable: a shorter panel has the same earlier entries and nothing later
+    assert L.silence_exits(panel.sliced('2026-09-01', '2026-09-22')) == {
+        'CCC': [pd.Timestamp('2026-09-10')], 'DDD': [pd.Timestamp('2026-09-08')]}
+    # a name whose silence began before the window is never recognised (never printed here)
+    assert L.silence_exits(panel.sliced('2026-09-16', '2026-10-03')) == {}
+
+
+def test_stop_reenter_stop_exits_twice_and_an_unheld_gap_changes_nothing(episodes):
+    """CCC is exited at BOTH recognitions (it re-entered through the 09-14
+    rebalance); DDD's first recognition (09-08) fires nothing because the
+    benchmark does not hold it, and its second (09-22) sells it. Under the
+    first-gap-only rule both re-entered names were carried forever. Known
+    answers derived by hand from run_panel's rules."""
+    store, bars, tdir = episodes['store'], episodes['bars'], episodes['tdir']
+    inputs = L.load_inputs('multi', store, str(tdir))
+    res, _, _ = L.run_benchmark(inputs, bars, dt.date(2026, 10, 2))
+    assert _log(res) == [('2026-09-02', 'BUY', 'AAA', 500.0), ('2026-09-02', 'BUY', 'CCC', 166.0),
+                         ('2026-09-10', 'SELL', 'CCC', 166.0),                    # first stop, recognised
+                         ('2026-09-15', 'SELL', 'AAA', 81.0), ('2026-09-15', 'BUY', 'CCC', 104.0),
+                         ('2026-09-15', 'BUY', 'DDD', 78.0),                     # re-entry / first entry
+                         ('2026-09-22', 'SELL', 'CCC', 104.0), ('2026-09-22', 'SELL', 'DDD', 78.0)]   # second stops
+    assert res.diagnostics['panel_forced_exits'] == 3
+    # 09-02: 500 AAA + 166 CCC off the 09-01 closes, no D06 scaling
+    cash0 = 10_000 - _cost(500, 10.0) - _cost(166, 30.0)
+    # 09-10: CCC sold at its carried 09-03 print (33)
+    cash1 = cash0 + 166 * 33.0 * (1 - SLIP) - 166 * COMM
+    # 09-14 decision off equity cash1 + 500 x 10 -> 419 AAA / 104 CCC / 78 DDD, filled at the 09-15 opens
+    eq = cash1 + 500 * 10.0
+    assert (math.trunc(0.4 * eq / 10), math.trunc(0.3 * eq / 30), math.trunc(0.3 * eq / 40)) == (419, 104, 78)
+    cash2 = cash1 + 81 * 10.0 * (1 - SLIP) - 81 * COMM - _cost(104, 30.0) - _cost(78, 40.0)
+    # 09-22: both names sold at their carried 09-15 prints (30 and 44)
+    cash3 = cash2 + 104 * 30.0 * (1 - SLIP) - 104 * COMM + 78 * 44.0 * (1 - SLIP) - 78 * COMM
+    out = L.track('multi', store, bars, {}, targets_dir=str(tdir))
+    assert out['benchmark_forced_exits'] == 3
+    led = store.ledger('multi')
+    r21 = led.loc[pd.Timestamp('2026-09-21')]
+    assert r21['benchmark_n_holdings'] == 3 and r21['benchmark_n_unpriced'] == 2
+    assert r21['benchmark_value'] == pytest.approx(cash2 + 419 * 10 + 104 * 30 + 78 * 44)
+    r22 = led.loc[pd.Timestamp('2026-09-22')]
+    assert r22['benchmark_n_holdings'] == 1 and r22['benchmark_n_unpriced'] == 0
+    assert r22['benchmark_cash'] == pytest.approx(cash3)
+    assert r22['benchmark_value'] == pytest.approx(cash3 + 419 * 10)
+    assert led.iloc[-1]['benchmark_n_holdings'] == 1 and led.iloc[-1]['benchmark_n_unpriced'] == 0
+
+
+def test_second_exit_appears_in_a_new_row_only(episodes):
+    """A daily operator tracking through 09-21 and then 09-22: stored rows are
+    identical afterwards, the second episode's exits are booked in the one
+    appended row, and the running count is reported."""
+    store, bars, tdir = episodes['store'], episodes['bars'], episodes['tdir']
+    r1 = L.track('multi', store, bars, {}, targets_dir=str(tdir), through=dt.date(2026, 9, 21))
+    assert r1['benchmark_forced_exits'] == 1
+    before = store.ledger('multi')
+    r2 = L.track('multi', store, bars, {}, targets_dir=str(tdir), through=dt.date(2026, 9, 22))
+    assert r2['appended'] == 1 and r2['benchmark_forced_exits'] == 3
+    after = store.ledger('multi')
+    pd.testing.assert_frame_equal(after.loc[before.index], before)
+    assert after.iloc[-1]['benchmark_n_holdings'] == 1
+
+
+def test_rebuild_is_one_transaction(world):
+    """A failure in the LAST statement (the audit row) leaves the ledger exactly
+    as it was: no half-written history, no rewrite without its audit entry."""
+    store, bars, tdir = world['store'], world['bars'], world['tdir']
+    _fill(store, 'paper_s2p', dt.date(2026, 9, 2), 'AAA', 500, 10.0)
+    L.track('paper_s2p', store, bars, {'AAA': 500}, targets_dir=str(tdir), through=dt.date(2026, 9, 3))
+    stored = store.ledger('paper_s2p')
+    inputs = L.load_inputs('paper_s2p', store, str(tdir))
+    frame = L.replay(inputs, bars, dt.date(2026, 9, 10))
+    rows = [dict(r, session=pd.Timestamp(ts).date()) for ts, r in frame.iterrows()]
+    with pytest.raises(Exception):
+        store.rebuild_atomic('paper_s2p', rows, None, [])          # type: ignore[arg-type]  reason is NOT NULL
+    pd.testing.assert_frame_equal(store.ledger('paper_s2p'), stored)
+    assert store.rebuilds('paper_s2p') == []
+    dropped, written = store.rebuild_atomic('paper_s2p', rows, 'ok', [])
+    assert (dropped, written) == (3, 8) and len(store.ledger('paper_s2p')) == 8

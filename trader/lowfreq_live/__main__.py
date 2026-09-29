@@ -106,7 +106,7 @@ def cmd_track(a: argparse.Namespace) -> int:
     else:
         print(f"{a.sleeve}: appended {res['appended']} session(s) through {res['through']} "
               f"(benchmark {res['benchmark_id']}, inception {res['inception']}, capital {res['capital_usd']:,.2f}, "
-              f"reconciled against IB)")
+              f"reconciled against IB; benchmark D07 exits since inception: {res['benchmark_forced_exits']})")
     return 0
 
 
@@ -151,6 +151,12 @@ def cmd_report(a: argparse.Namespace) -> int:
     print(f"  active return     {100*r['active_return']:+.2f}%   (annualised mean {100*r['active_return_annualised_mean']:+.2f}%)")
     print(f"  tracking error    {100*r['tracking_error_annualised']:.2f}% annualised")
     print(f"  holdings {r['n_holdings']} ({r['n_unpriced']} unpriced today), cash {r['cash']:,.2f}")
+    if r['rebuilds']:
+        print(f"  rebuilds ({len(r['rebuilds'])}; history was rewritten by an attested operator act):")
+        for rb in r['rebuilds']:
+            print(f"    {rb['rebuilt_at']}  dropped {rb['rows_dropped']} wrote {rb['rows_written']}  {rb['reason']}")
+    else:
+        print("  rebuilds          none (append-only history)")
     return 0
 
 
