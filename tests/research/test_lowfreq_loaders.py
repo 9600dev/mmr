@@ -142,3 +142,13 @@ def test_equity_panel_is_loud_on_an_empty_pit_table(research_env):
     con.close()
     with pytest.raises(Exception):
         load_equity_panel('2016-08-01', '2024-06-28')
+
+
+def test_equity_panel_includes_the_requested_start_month(research_env):
+    """Membership needs the PRIOR month's ranks; the loader must read them
+    itself rather than returning a window that starts a month late."""
+    from trader.research.lowfreq import load_equity_panel
+    p = load_equity_panel('2016-11-01', '2017-06-01')
+    assert p.close.index[0] == pd.Timestamp('2016-11-01')
+    assert p.fields['member'].loc['2016-11-01':'2016-11-30', ['AAA', 'BBB', 'CCC']].all().all()
+    assert p.close.index[-1] <= pd.Timestamp('2017-06-01')

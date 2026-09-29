@@ -29,18 +29,30 @@ import pandas as pd     # noqa: E402
 
 
 def session_close_utc(days) -> pd.DatetimeIndex:
-    """16:00 America/New_York on each of ``days``, as UTC instants.
+    """The NYSE close of each of ``days``, as UTC instants.
 
-    Daylight-saving aware: 20:00 UTC in summer (EDT), 21:00 UTC in winter
-    (EST). This is the instant a filing must have been ACCEPTED strictly
-    before to be usable at that session's close (``searchsorted`` with
-    ``side='left'`` below).
+    Read from the exchange calendar (pandas_market_calendars XNYS), so it is
+    daylight-saving aware (20:00 UTC in summer, 21:00 in winter) AND honours
+    early closes (13:00 New York on the day after Thanksgiving, Christmas
+    Eve, ...). A day the calendar has no session for (synthetic bars) gets
+    16:00 America/New_York. This is the instant a filing must have been
+    ACCEPTED strictly before to be usable at that session's close
+    (``searchsorted`` with ``side='left'`` below).
     """
+    import pandas_market_calendars as mcal
     d = pd.DatetimeIndex(pd.to_datetime(days))
     if d.tz is not None:
         d = d.tz_convert(None)
-    local = (d.normalize() + pd.Timedelta(hours=16)).tz_localize('America/New_York')
-    return local.tz_convert('UTC')
+    d = d.normalize()
+    regular = pd.Series((d + pd.Timedelta(hours=16)).tz_localize('America/New_York').tz_convert('UTC'), index=d)
+    if len(d):
+        sched = mcal.get_calendar('XNYS').schedule(d.min().strftime('%Y-%m-%d'), d.max().strftime('%Y-%m-%d'))
+        closes = pd.Series(pd.DatetimeIndex(sched['market_close']).tz_convert('UTC'),
+                           index=pd.DatetimeIndex(sched.index).normalize())
+        common = d.intersection(closes.index)
+        if len(common):
+            regular.loc[common] = closes.loc[common].to_numpy()
+    return pd.DatetimeIndex(regular)
 
 
 def build(delay_days: int = 0, pit: bool = False, with_frames: bool = False):

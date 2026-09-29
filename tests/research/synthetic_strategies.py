@@ -106,9 +106,10 @@ class ChurnsOneName(LowFreqStrategy):
     def on_panel(self, panel, state, index) -> Optional[Dict[Any, float]]:
         if not self.due(index, panel):
             return None
-        state['n'] = state.get('n', 0) + 1
+        from trader.research.lowfreq.reference_strategies import schedule_mask
+        n_due = int(schedule_mask(panel.index[:index + 1], self.REBALANCE).sum())   # pure: no state mutation
         w = {c: 0.0 for c in state['close'].columns}
-        w[self.TICKER] = 1.0 if state['n'] % 2 == 1 else 0.0
+        w[self.TICKER] = 1.0 if n_due % 2 == 1 else 0.0
         return w
 
 
@@ -172,4 +173,48 @@ class CoversByParam(LowFreqStrategy):
             return None
         w = {c: 0.0 for c in state['close'].columns}
         w[state['hold']] = 1.0
+        return w
+
+
+class ScheduledPeeker(LowFreqStrategy):
+    """Reads t+1 ONLY on its monthly due bars, None elsewhere - a sampled probe
+    that lands between due bars sees nothing wrong."""
+
+    def precompute_panel(self, panel: pd.DataFrame) -> Dict[str, Any]:
+        return {'close': panel['close']}
+
+    def on_panel(self, panel, state, index) -> Optional[Dict[Any, float]]:
+        if not self.due(index, panel):
+            return None
+        nxt = state['close'].iloc[index + 1]
+        best = (nxt / state['close'].iloc[index]).dropna().idxmax()
+        w = {c: 0.0 for c in state['close'].columns}
+        w[best] = 1.0
+        return w
+
+
+class PeeksOnlyWithCoverage(LowFreqStrategy):
+    """A benchmark that is clean when run bare but reads t+1 once a candidate
+    coverage frame has been installed - the form it is actually executed in."""
+
+    def __init__(self):
+        super().__init__()
+        self._coverage = None
+
+    def set_coverage(self, frame) -> None:
+        self._coverage = frame
+
+    def precompute_panel(self, panel: pd.DataFrame) -> Dict[str, Any]:
+        close = panel['close']
+        return {'close': close, 'tomorrow': close.shift(-1) if self._coverage is not None else close}
+
+    def on_panel(self, panel, state, index) -> Optional[Dict[Any, float]]:
+        if not self.due(index, panel):
+            return None
+        row = state['tomorrow'].iloc[index].dropna()
+        if len(row) < 2:
+            return None
+        best = (row / state['close'].iloc[index]).idxmax()
+        w = {c: 0.0 for c in state['close'].columns}
+        w[best] = 1.0
         return w

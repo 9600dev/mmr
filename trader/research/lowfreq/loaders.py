@@ -171,13 +171,15 @@ def load_equity_panel(start=None, end=None, top_n: int = 500) -> PricePanel:
     pit_panel = importlib.import_module('pit_panel')                    # scripts/pit_panel.py
     fundamental_signals = importlib.import_module('fundamental_signals')  # scripts/fundamental_signals.py
 
-    start_str = _ts(start).strftime('%Y-%m-%d') if start is not None else '2016-08-01'
+    # Membership for a month is decided from the PRIOR month's ranks, so the
+    # point-in-time loader must see ~45 days before the requested start or the
+    # first requested month comes back with no members (the window silently
+    # began a month late). Load early, slice to the inclusive window below.
+    s_req = _ts(start) if start is not None else pd.Timestamp('2016-08-01')
+    pit_start = (s_req - pd.Timedelta(days=PIT_MEMBERSHIP_LEAD_DAYS)).strftime('%Y-%m-%d')
     with _cfg.bound_container(), _cfg.read_only_duckdb_store():
         px, signals, frames = fundamental_signals.build(pit=True, with_frames=True)
-        if top_n != 500 or start_str != '2016-08-01':
-            member_close, _ = pit_panel.load_pit_panel(top_n, start_str, verbose=False)
-        else:
-            member_close = px
+        member_close, _ = pit_panel.load_pit_panel(top_n, pit_start, verbose=False)
     if member_close is None or len(member_close) == 0:
         raise ValueError('pit_daily_bars returned no rows')
     member_close = member_close.copy()
@@ -220,6 +222,7 @@ def load_equity_panel(start=None, end=None, top_n: int = 500) -> PricePanel:
 
 
 EXIT_GRACE_BARS = 30      # > one month of sessions: a monthly rebalance always falls inside
+PIT_MEMBERSHIP_LEAD_DAYS = 45   # prior-month ranks needed to decide the first requested month
 
 
 def _pit_price_frames(start: pd.Timestamp, end: pd.Timestamp) -> Dict[str, pd.DataFrame]:

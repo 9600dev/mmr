@@ -296,45 +296,133 @@ def run_window(entry: Dict[str, Any], cell: Dict[str, Any], panel: PricePanel,
                         scaled_rebalances=diag.get('panel_scaled_rebalances'))
 
 
+def _weights_equal(a: Optional[Dict[Any, float]], b: Optional[Dict[Any, float]], tol: float = 1e-9) -> bool:
+    if (a is None) != (b is None):
+        return False
+    if a is None or b is None:
+        return True
+    for k in set(a) | set(b):
+        x, y = float(a.get(k, 0.0) or 0.0), float(b.get(k, 0.0) or 0.0)
+        if not (abs(x - y) <= tol or (np.isnan(x) and np.isnan(y))):
+            return False
+    return True
+
+
+def _values_equal(full, trunc, rows: int, tol: float = 1e-9) -> bool:
+    """Do the first ``rows`` rows of a precomputed value agree? Frames/Series
+    aligned with the panel and 1-d arrays of panel length are compared
+    element-wise (NaN == NaN); scalars by equality; anything else is not
+    comparable and is skipped."""
+    if isinstance(full, (pd.DataFrame, pd.Series)) and isinstance(trunc, (pd.DataFrame, pd.Series)):
+        a, b = full.iloc[:rows], trunc.iloc[:rows]
+        if a.shape != b.shape:
+            return False
+        try:
+            x = a.to_numpy(dtype=float), b.to_numpy(dtype=float)
+        except (TypeError, ValueError):
+            return bool(a.astype(object).equals(b.astype(object)))
+        return bool(np.all((np.abs(x[0] - x[1]) <= tol) | (np.isnan(x[0]) & np.isnan(x[1]))))
+    if isinstance(full, np.ndarray) and isinstance(trunc, np.ndarray) and full.ndim >= 1:
+        a, b = full[:rows], trunc[:rows]
+        if a.shape != b.shape:
+            return False
+        if a.dtype.kind in 'fiub' and b.dtype.kind in 'fiub':
+            x, y = a.astype(float), b.astype(float)
+            return bool(np.all((np.abs(x - y) <= tol) | (np.isnan(x) & np.isnan(y))))
+        return bool(np.array_equal(a, b))
+    if isinstance(full, (int, float, str, bool, type(None))) and isinstance(trunc, (int, float, str, bool, type(None))):
+        return full == trunc or (isinstance(full, float) and isinstance(trunc, float) and np.isnan(full) and np.isnan(trunc))
+    return True
+
+
+def _truncate_state(state: Dict[str, Any], rows: int) -> Dict[str, Any]:
+    out = {}
+    for k, v in state.items():
+        if isinstance(v, (pd.DataFrame, pd.Series)):
+            out[k] = v.iloc[:rows]
+        elif isinstance(v, np.ndarray) and v.ndim >= 1 and len(v) >= rows:
+            out[k] = v[:rows]
+        else:
+            out[k] = v
+    return out
+
+
 def lookahead_check(entry: Dict[str, Any], cell: Dict[str, Any], panel: PricePanel,
-                    probe_indices: int = PROBE_INDICES) -> Dict[str, Any]:
+                    coverage: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
     """Refuse a strategy that reads forward, BEFORE any metric is computed.
     Returns the full-panel precompute state (so the caller can read a
     published ``coverage`` frame without recomputing it).
 
-    Two probes. (1) ``assert_no_panel_lookahead``: hiding the last bars must
-    not change any past precomputed value. (2) ``on_panel`` at PROBE_INDICES
-    indices spread over the last three quarters of the panel must return the
-    same weights whether or not bars after ``index`` exist - which catches a
-    strategy that indexes ``panel.iloc[index + 1]`` directly, something the
-    precompute probe cannot see. The caller runs this for EVERY executable
-    cell of the candidate and for every benchmark; there is no bypass.
+    Three probes, together covering every index the backtester will ask about:
+    (1) ``assert_no_panel_lookahead``: hiding the last bars must not change any
+        past precomputed value;
+    (2) at EVERY index i < n-1, ``on_panel`` on the panel and state truncated
+        to bars <= i must return the same instruction as on the full data - a
+        direct ``iloc[index + 1]`` read fails here (IndexError), on a scheduled
+        strategy exactly at its due bars;
+    (3) at every DECISION index (where either run returned an instruction) the
+        whole strategy is recomputed from scratch on bars <= i: the precomputed
+        values over those bars must equal the full run's, and the instruction
+        must match - so a leak that lives only in the rows a scheduled strategy
+        reads (a month-end looking at the next month) cannot hide between the
+        sampled truncations of probe (1).
+    ``on_panel`` is treated as a pure function of (panel, state, index) - the
+    contract the backtester's replay assumes; a strategy that mutates its
+    state is reported here rather than silently accepted. A benchmark is
+    checked in the form it is executed: ``coverage`` installs the candidate's
+    frame first. There is no bypass.
     """
     frames = panel.frames()
     if len(frames) < 2:
         raise ValueError('lookahead check needs at least two instruments')
     wide = wide_panel(frames)
-    strat = make_strategy(entry, cell, panel)
-    assert_no_panel_lookahead(strat, wide)
+    idx = wide.index
     n = len(wide)
+
+    def fresh(upto: Optional[int] = None) -> Strategy:
+        if upto is None:
+            return make_strategy(entry, cell, panel, coverage=coverage)
+        sub = panel.sliced(idx[0], idx[upto] + pd.Timedelta(days=1))
+        cov = coverage.loc[coverage.index <= idx[upto]] if coverage is not None else None
+        return make_strategy(entry, cell, sub, coverage=cov)
+
+    strat = fresh()
+    assert_no_panel_lookahead(strat, wide)                        # probe (1)
     full_state = strat.precompute_panel(wide)
-    if n < 8:
+    if n < 4:
         return full_state
-    for i in sorted(set(np.linspace(n // 4, n - 3, probe_indices).astype(int).tolist())):
-        i = int(i)
-        full_w = make_strategy(entry, cell, panel).on_panel(wide, full_state, i)
+    full_w: Dict[int, Optional[Dict[Any, float]]] = {}
+    for i in range(n - 1):
+        full_w[i] = strat.on_panel(wide, full_state, i)
+    decisions = set()
+    probe = fresh()                                                # probe (2)
+    for i in range(n - 1):
         trunc = wide.iloc[:i + 1]
-        trunc_strat = make_strategy(entry, cell, panel.sliced(wide.index[0], wide.index[i] + pd.Timedelta(days=1)))
         try:
-            trunc_w = trunc_strat.on_panel(trunc, trunc_strat.precompute_panel(trunc), i)
+            w = probe.on_panel(trunc, _truncate_state(full_state, i + 1), i)
         except (IndexError, KeyError) as exc:
-            raise AssertionError(f'LOOKAHEAD: on_panel at index {i} failed without future bars: {exc}') from exc
-        if (full_w is None) != (trunc_w is None):
-            raise AssertionError(f'LOOKAHEAD: on_panel at index {i} returned an instruction only when future bars were present')
-        if full_w is not None and trunc_w is not None:
-            keys = set(full_w) | set(trunc_w)
-            for k in keys:
-                a, b = float(full_w.get(k, 0.0) or 0.0), float(trunc_w.get(k, 0.0) or 0.0)
-                if not (abs(a - b) <= 1e-9 or (np.isnan(a) and np.isnan(b))):
-                    raise AssertionError(f'LOOKAHEAD: on_panel weight for {k!r} at index {i} depends on bars after {i} ({a} vs {b})')
+            raise AssertionError(f'LOOKAHEAD: on_panel at index {i} ({idx[i].date()}) failed once bars '
+                                 f'after it were hidden: {type(exc).__name__}: {exc}') from exc
+        if not _weights_equal(w, full_w[i]):
+            raise AssertionError(f'LOOKAHEAD: on_panel at index {i} ({idx[i].date()}) returned a different '
+                                 f'instruction once bars after it were hidden (or on_panel mutates its state)')
+        if w is not None or full_w[i] is not None:
+            decisions.add(i)
+    for i in sorted(decisions):                                    # probe (3)
+        trunc = wide.iloc[:i + 1]
+        s_i = fresh(i)
+        try:
+            st = s_i.precompute_panel(trunc)
+            w = s_i.on_panel(trunc, st, i)
+        except (IndexError, KeyError) as exc:
+            raise AssertionError(f'LOOKAHEAD: recomputing on bars <= {idx[i].date()} failed: {type(exc).__name__}: {exc}') from exc
+        if set(st) != set(full_state):
+            raise AssertionError(f'LOOKAHEAD: precompute state keys differ on bars <= {idx[i].date()}: '
+                                 f'{sorted(set(st) ^ set(full_state))}')
+        for k in st:
+            if not _values_equal(full_state[k], st[k], i + 1):
+                raise AssertionError(f'LOOKAHEAD: precomputed {k!r} over bars <= {idx[i].date()} changes when '
+                                     f'later bars are hidden')
+        if not _weights_equal(w, full_w[i]):
+            raise AssertionError(f'LOOKAHEAD: the instruction at {idx[i].date()} (index {i}) depends on bars after it')
     return full_state

@@ -225,7 +225,7 @@ def test_fixed_cell_mode_refuses_cells_outside_the_registered_grid(research_env)
     assert _ledger(research_env)[-1]['status'] == 'error'
     r = evaluate('fam/grid', fixed_params={'LOOKBACK': 20, 'WEIGHT': 1.0}, start='2016-06-01', end='2017-06-01')
     assert r['grid'] == {'cells': 1, 'registered_cells': 4, 'report_cell': {'LOOKBACK': 20, 'WEIGHT': 1.0}}
-    assert r['lookahead'] == {'cells_checked': 1, 'benchmarks_checked': ['bench_ew'], 'probe_indices': 8}
+    assert r['lookahead'] == {'cells_checked': 1, 'benchmarks_checked': ['bench_ew'], 'benchmark_coverage_frames_checked': 1, 'every_index': True}
 
 
 def test_covered_benchmark_follows_the_chosen_cell_per_fold(research_env):
@@ -289,3 +289,71 @@ def test_monthly_reference_strategy_fills_on_the_bar_after_each_month_start():
     fill_days = {pd.Timestamp(t.timestamp) for t in res.trades}
     assert fill_days == expected_fill_days                          # Feb..Jun month starts, +1 bar; none on 2016-01-15
     assert pd.Timestamp('2016-01-19') not in fill_days
+
+
+# ---- round-3 hardening: complete lookahead coverage, holiday-aware schedule ------
+
+def test_a_scheduled_t_plus_1_reader_is_rejected(research_env):
+    """Peeks only on its monthly due bars: a sampled probe between due bars sees
+    nothing; the every-index probe fails exactly at a due bar."""
+    write_family(research_env['root'], 'fam', [BENCH, entry('sched', 'candidate', 'ScheduledPeeker', benchmarks=['bench_ew'])])
+    with pytest.raises(AssertionError, match='LOOKAHEAD'):
+        evaluate('fam/sched')
+    assert not (research_env['root'] / 'fam' / 'results').exists()
+    assert _ledger(research_env)[-1]['status'] == 'error'
+
+
+def test_a_benchmark_that_peeks_only_under_candidate_coverage_is_rejected(research_env):
+    """The benchmark is checked in the form it is executed in: with each
+    candidate coverage frame installed. Bare it is clean."""
+    peek_bench = entry('bench_cov_peek', 'benchmark', 'PeeksOnlyWithCoverage')
+    write_family(research_env['root'], 'fam', [peek_bench,
+                 entry('cov', 'candidate', 'CoversTwo', benchmarks=['bench_cov_peek']),
+                 entry('bare', 'candidate', 'HoldOne', benchmarks=['bench_cov_peek'])])
+    r = evaluate('fam/bare')                          # no coverage published: benchmark runs bare, is clean
+    assert r['lookahead']['benchmark_coverage_frames_checked'] == 1 and r['coverage']['forwarded_to_benchmarks'] is False
+    with pytest.raises(AssertionError, match='LOOKAHEAD'):
+        evaluate('fam/cov')
+    assert not (research_env['root'] / 'fam' / 'results' / 'cov.json').exists()
+
+
+def test_lookahead_report_says_every_index_and_recomputes_every_decision(research_env):
+    write_family(research_env['root'], 'fam', [BENCH, entry('spy', 'candidate', 'HoldOne', benchmarks=['bench_ew'])])
+    r = evaluate('fam/spy')
+    assert r['lookahead'] == {'cells_checked': 1, 'benchmarks_checked': ['bench_ew'],
+                              'benchmark_coverage_frames_checked': 1, 'every_index': True}
+
+
+def test_lookahead_engine_recomputes_at_every_decision_index(research_env, monkeypatch):
+    """Probe (3) runs a fresh precompute at every index the strategy issued an
+    instruction on - counted here on the ETF fixture (monthly due bars)."""
+    from trader.research.lowfreq import engine, load_etf_panel
+    from trader.research.lowfreq.reference_strategies import EtfEqualWeight, schedule_mask
+    panel = load_etf_panel(None, '2015-01-01', '2016-12-31')
+    calls = []
+    orig = EtfEqualWeight.precompute_panel
+
+    def counting(self, wide):
+        calls.append(len(wide))
+        return orig(self, wide)
+    monkeypatch.setattr(EtfEqualWeight, 'precompute_panel', counting)
+    e = entry('ew', 'benchmark', 'EtfEqualWeight', module='trader.research.lowfreq.reference_strategies')
+    engine.lookahead_check(e, {}, panel)
+    wide = engine.wide_panel(panel.frames())
+    due = [i for i in range(len(wide) - 1) if schedule_mask(wide.index, 'month')[i]]
+    # one full precompute, the assert_no_panel_lookahead truncations, then one per decision index
+    assert sorted(c for c in calls if c - 1 in due) == sorted(i + 1 for i in due)
+    assert len(due) >= 20
+
+
+def test_schedule_mask_is_holiday_aware_at_the_first_bar():
+    import pandas as pd
+    from trader.research.lowfreq.reference_strategies import previous_session, schedule_mask
+    # 2023-01-03 is the first NYSE session of January (Jan 1 Sunday, Jan 2 observed holiday)
+    assert schedule_mask(pd.DatetimeIndex(['2023-01-03', '2023-01-04']), 'month').tolist() == [True, False]
+    # 2024-09-03: first session after Labor Day
+    assert schedule_mask(pd.DatetimeIndex(['2024-09-03', '2024-09-04']), 'month').tolist() == [True, False]
+    assert schedule_mask(pd.DatetimeIndex(['2024-09-03', '2024-09-04']), 'week').tolist() == [True, False]
+    assert schedule_mask(pd.DatetimeIndex(['2024-09-04', '2024-09-05']), 'month').tolist() == [False, False]
+    assert previous_session(pd.Timestamp('2023-01-03')) == pd.Timestamp('2022-12-30')
+    assert previous_session(pd.Timestamp('2024-09-03')) == pd.Timestamp('2024-08-30')

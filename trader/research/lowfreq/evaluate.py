@@ -101,12 +101,18 @@ def evaluate(target: str, fixed_params: Optional[Dict[str, Any]] = None, start: 
     the results file) is ``error``, and ``ok`` is appended only after the
     results JSON is on disk.
     """
-    if '/' not in target:
-        raise ValueError(f'target must be <family>/<candidate_id>, got {target!r}')
-    fam_name, cid = target.split('/', 1)
     t0 = time.time()
     mode = 'fixed' if fixed_params is not None else 'walk_forward'
     root_path = Path(root) if root is not None else _cfg.research_root()
+    if '/' not in target:
+        # No family to file it under: the root-level ledger records the call.
+        msg = f'target must be <family>/<candidate_id>, got {target!r}'
+        ledger.append(root_path / 'trials.jsonl',
+                      {'family': None, 'id': target, 'mode': mode, 'status': 'refused', 'error': msg,
+                       'fixed_params': dict(fixed_params) if fixed_params is not None else None,
+                       'start': start, 'end': end, 'elapsed_s': _elapsed(t0)})
+        raise ValueError(msg)
+    fam_name, cid = target.split('/', 1)
     row: Dict[str, Any] = {'family': fam_name, 'id': cid, 'mode': mode,
                            'fixed_params': dict(fixed_params) if fixed_params is not None else None}
     if fixed_params is not None:
@@ -198,10 +204,19 @@ def _evaluate(fam: Family, entry: Dict[str, Any], sha: str, fixed_params, start,
     for cell in cells:
         state = engine.lookahead_check(entry, cell, panel)          # raises on lookahead
         coverage_by_cell[_cell_key(cell)] = engine.candidate_coverage(state)
+    # Benchmarks are checked in every form they will actually be executed in:
+    # once per DISTINCT coverage frame a candidate cell may hand them (and
+    # bare, when some cell publishes none).
+    distinct_cov: List[Optional[pd.DataFrame]] = []
+    for cov in coverage_by_cell.values():
+        if not any((cov is None and c is None) or (cov is not None and c is not None and cov.equals(c))
+                   for c in distinct_cov):
+            distinct_cov.append(cov)
     for be in bench_entries.values():
-        engine.lookahead_check(be, default_cell(be), panel)
+        for cov in distinct_cov:
+            engine.lookahead_check(be, default_cell(be), panel, coverage=cov)
     lookahead_report = {'cells_checked': len(cells), 'benchmarks_checked': bench_ids,
-                        'probe_indices': engine.PROBE_INDICES}
+                        'benchmark_coverage_frames_checked': len(distinct_cov), 'every_index': True}
 
     def cov_of(cell: Dict[str, Any]) -> Optional[pd.DataFrame]:
         return coverage_by_cell.get(_cell_key(cell))
@@ -402,8 +417,8 @@ def render_summary(r: Dict[str, Any]) -> str:
                  f"({fp.get('n_frozen_holdings_end')} names)  cash-guard scaled buys {_f(fp.get('scaled_buy_fills'), '{:d}')} "
                  f"on {_f(fp.get('scaled_rebalances'), '{:d}')} dates (D06)")
     la = r.get('lookahead', {})
-    lines.append(f"lookahead cells checked {la.get('cells_checked')}  benchmarks {la.get('benchmarks_checked')}  "
-                 f"probes/cell {la.get('probe_indices')}")
+    lines.append(f"lookahead cells checked {la.get('cells_checked')}  benchmarks {la.get('benchmarks_checked')} "
+                 f"x {la.get('benchmark_coverage_frames_checked')} coverage frame(s)  every index + every decision recomputed")
     lines.append('gates     ' + '  '.join(f"{k}={'n/a' if v is None else ('ok' if v else 'FAIL')}" for k, v in r['gates'].items()))
     lines.append(f"results   {r.get('results_path', '')}")
     lines.append(f"VERDICT   {r['verdict']}")

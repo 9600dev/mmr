@@ -11,7 +11,7 @@ for the equity universe) before the backtest starts.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 import numpy as np
 import pandas as pd
@@ -19,15 +19,37 @@ import pandas as pd
 from trader.trading.strategy import Strategy
 
 
-def schedule_mask(index, every: str = 'month') -> np.ndarray:
+_SESSION_CALENDAR = None
+
+
+def previous_session(day: pd.Timestamp, calendar: str = 'XNYS') -> pd.Timestamp:
+    """The exchange session strictly before ``day`` (holiday-aware, via
+    pandas_market_calendars). Falls back to the previous business day when the
+    calendar has no session in the two weeks before ``day``."""
+    global _SESSION_CALENDAR
+    import pandas_market_calendars as mcal
+    if _SESSION_CALENDAR is None or _SESSION_CALENDAR.name != calendar:
+        _SESSION_CALENDAR = mcal.get_calendar(calendar)
+    day = cast(pd.Timestamp, pd.Timestamp(day)).normalize()
+    days = pd.DatetimeIndex(_SESSION_CALENDAR.valid_days(
+        (day - pd.Timedelta(days=14)).strftime('%Y-%m-%d'), day.strftime('%Y-%m-%d')))
+    if days.tz is not None:
+        days = days.tz_convert(None)          # valid_days are midnight instants already
+    prev = days[days < day]
+    return prev[-1] if len(prev) else day - pd.offsets.BDay(1)
+
+
+def schedule_mask(index, every: str = 'month', calendar: str = 'XNYS') -> np.ndarray:
     """True on the first trading day of each calendar ``every`` ('month' or
     'week') present in ``index`` - the rebalance days.
 
     Calendar-based, so the schedule does not depend on where a window was
-    sliced: bar 0 counts only if it IS a period's first business day (its
-    previous business day falls in another period). ``index % 21`` looked
-    monthly but rebalanced twice in some months, skipped others, and changed
-    phase with every warm-up origin (D04/D05: "monthly").
+    sliced: bar 0 counts only if it IS a period's first session, judged
+    against the exchange calendar's previous SESSION (so 2023-01-03, the
+    first session after New Year's Day and its observed holiday, is a month
+    start; a mid-month first bar is not). ``index % 21`` looked monthly but
+    rebalanced twice in some months, skipped others, and changed phase with
+    every warm-up origin (D04/D05: "monthly").
     """
     idx = pd.DatetimeIndex(index)
     if idx.tz is not None:
@@ -46,7 +68,7 @@ def schedule_mask(index, every: str = 'month') -> np.ndarray:
         raise ValueError(f"REBALANCE must be 'month' or 'week', got {every!r}")
     keys = np.asarray([period(t) for t in idx], dtype=int)
     mask = np.empty(n, dtype=bool)
-    mask[0] = period(idx[0] - pd.offsets.BDay(1)) != keys[0]
+    mask[0] = period(previous_session(idx[0], calendar)) != keys[0]
     mask[1:] = keys[1:] != keys[:-1]
     return mask
 

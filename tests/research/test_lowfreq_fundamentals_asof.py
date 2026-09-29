@@ -49,3 +49,21 @@ def test_as_of_uses_the_dst_aware_close(research_env):
     assert shares.loc['2017-12-14'] == pytest.approx(7e8), 'accepted 15:30 EST, before the winter close: known same day'
     assert shares.loc['2018-01-18'] == pytest.approx(7e8), 'accepted at the close instant is not strictly before it'
     assert shares.loc['2018-01-19'] == pytest.approx(9e8)
+
+
+def test_session_close_honours_early_closes():
+    close = _fs().session_close_utc(pd.DatetimeIndex(['2017-11-24', '2017-07-03', '2017-11-27', '2019-12-24']))
+    assert [str(t) for t in close] == ['2017-11-24 18:00:00+00:00',   # day after Thanksgiving: 13:00 EST
+                                       '2017-07-03 17:00:00+00:00',   # 13:00 EDT
+                                       '2017-11-27 21:00:00+00:00',
+                                       '2019-12-24 18:00:00+00:00']
+
+
+def test_as_of_uses_the_early_close_on_a_half_day(research_env):
+    """2017-11-24 closed at 13:00 EST (18:00 UTC): a filing accepted 19:30 UTC is
+    after the real close - not known that session, known the next one."""
+    from trader.research.lowfreq import load_equity_panel
+    _add_bbb_filing(research_env['main'], '2017-11-24 19:30:00', 6e8, '2017-09-30')
+    shares = load_equity_panel('2016-08-01', '2018-03-01').fields['shares_diluted']['BBB']
+    assert shares.loc['2017-11-24'] == pytest.approx(2e8), 'accepted after the 18:00 UTC early close'
+    assert shares.loc['2017-11-27'] == pytest.approx(6e8)

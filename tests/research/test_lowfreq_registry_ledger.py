@@ -154,3 +154,14 @@ def test_compose_refuses_rows_outside_the_schema():
         ledger.compose({'status': 'ok', 'bogus': 1})
     with pytest.raises(ValueError, match='status'):
         ledger.compose({'family': 'f', 'status': 'done'})
+
+
+def test_a_malformed_target_without_a_family_is_ledgered_at_the_root(research_env):
+    with pytest.raises(ValueError, match='<family>/<candidate_id>'):
+        evaluate('fam')
+    rows = _rows(research_env['root'] / 'trials.jsonl')
+    assert len(rows) == 1 and rows[0]['status'] == 'refused' and rows[0]['family'] is None and rows[0]['id'] == 'fam'
+    assert set(rows[0]) == set(ledger.LEDGER_FIELDS)
+    with pytest.raises(ValueError):
+        evaluate('nofamily', fixed_params={}, start='2016-01-01', end='2016-06-01')
+    assert len(_rows(research_env['root'] / 'trials.jsonl')) == 2

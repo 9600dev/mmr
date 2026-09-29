@@ -107,7 +107,7 @@
   "trial_sharpes": {},
   "value": 0.009963001403888554
  },
- "elapsed_s": 4.2,
+ "elapsed_s": 13.0,
  "entry": {
   "benchmarks": [
    "etf_6040"
@@ -741,13 +741,13 @@
   "selection_stability": 1.0
  },
  "ledger_row": {
-  "elapsed_s": 4.2,
+  "elapsed_s": 13.0,
   "end": "2024-06-28",
   "entry_sha256": "7c24a6dff7e7cd49c8eabe0a5e3ae64ba664c4d82831cf8ec5f1257359d9a630",
   "error": null,
   "family": "reference",
   "fixed_params": null,
-  "git_sha": "941e275772e17dbc111b3587e0af84eb9bfc6f33",
+  "git_sha": "750ab144f1fc948594c3af80b4908328b0ca0312",
   "grid": {},
   "harness_version": 2,
   "id": "etf_ew",
@@ -774,16 +774,17 @@
   "role": "benchmark",
   "start": "2007-07-01",
   "status": "ok",
-  "strategy_sha256": "b09b1afb40b828dc5790d40c10f9444aba737e49d70bd87fbfe9fe892b7bf518",
-  "timestamp": "2026-09-29T04:27:42+00:00",
+  "strategy_sha256": "b55d4cbd75118ae56d60f332ca430775b35e27b9724891bb136ae35a27c8ff4e",
+  "timestamp": "2026-09-29T05:45:14+00:00",
   "verdict": "FAIL"
  },
  "lookahead": {
+  "benchmark_coverage_frames_checked": 1,
   "benchmarks_checked": [
    "etf_6040"
   ],
   "cells_checked": 1,
-  "probe_indices": 8
+  "every_index": true
  },
  "mode": "walk_forward",
  "oos": {
@@ -6842,7 +6843,7 @@
    "2024-06-26": -0.003606632802674703
   }
  },
- "strategy_sha256": "b09b1afb40b828dc5790d40c10f9444aba737e49d70bd87fbfe9fe892b7bf518",
+ "strategy_sha256": "b55d4cbd75118ae56d60f332ca430775b35e27b9724891bb136ae35a27c8ff4e",
  "universe": "etf",
  "verdict": "FAIL",
  "window": {

@@ -60,7 +60,7 @@
   "trial_sharpes": {},
   "value": 0.8604340948806122
  },
- "elapsed_s": 39.0,
+ "elapsed_s": 43.6,
  "entry": {
   "benchmarks": [],
   "dev_period": {
@@ -264,13 +264,13 @@
   "selection_stability": 1.0
  },
  "ledger_row": {
-  "elapsed_s": 39.0,
+  "elapsed_s": 43.6,
   "end": "2024-06-28",
   "entry_sha256": "8f6050c76d4e5c1aed9aeffa3a89e92584534f337bf54efa54c0603692db8818",
   "error": null,
   "family": "reference",
   "fixed_params": null,
-  "git_sha": "941e275772e17dbc111b3587e0af84eb9bfc6f33",
+  "git_sha": "750ab144f1fc948594c3af80b4908328b0ca0312",
   "grid": {},
   "harness_version": 2,
   "id": "eq_ew_covered",
@@ -297,14 +297,15 @@
   "role": "benchmark",
   "start": "2016-08-01",
   "status": "ok",
-  "strategy_sha256": "b09b1afb40b828dc5790d40c10f9444aba737e49d70bd87fbfe9fe892b7bf518",
-  "timestamp": "2026-09-29T04:28:28+00:00",
+  "strategy_sha256": "b55d4cbd75118ae56d60f332ca430775b35e27b9724891bb136ae35a27c8ff4e",
+  "timestamp": "2026-09-29T05:46:12+00:00",
   "verdict": "FAIL"
  },
  "lookahead": {
+  "benchmark_coverage_frames_checked": 1,
   "benchmarks_checked": [],
   "cells_checked": 1,
-  "probe_indices": 8
+  "every_index": true
  },
  "mode": "walk_forward",
  "oos": {
@@ -2335,7 +2336,7 @@
    "2023-07-28": 0.010087522032717011
   }
  },
- "strategy_sha256": "b09b1afb40b828dc5790d40c10f9444aba737e49d70bd87fbfe9fe892b7bf518",
+ "strategy_sha256": "b55d4cbd75118ae56d60f332ca430775b35e27b9724891bb136ae35a27c8ff4e",
  "universe": "equity",
  "verdict": "FAIL",
  "window": {
