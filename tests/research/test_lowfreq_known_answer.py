@@ -1,6 +1,9 @@
 """Known answers on synthetic panels (criterion 5) and the fixed-cell mode (3)."""
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import duckdb
 import numpy as np
 import pytest
@@ -73,8 +76,24 @@ def test_fixed_cell_mode_runs_one_cell_over_the_window_without_selection(researc
     assert r['gates']['g_pbo_and_stability'] is None
     first, last = min(r['series']['oos_returns']), max(r['series']['oos_returns'])
     assert first >= '2016-06-01' and last <= '2017-06-01'
-    assert r['results_path'].endswith('grid__fixed_2016-06-01_2017-06-01.json')
+    assert Path(r['results_path']).name.startswith('grid__fixed_2016-06-01_2017-06-01_')
     assert 'bench_ew' in r['oos_benchmarks']
+
+
+def test_two_fixed_cells_over_one_window_keep_two_results_files(research_env):
+    """Regression (2026-09-29): the fixed-cell results name carried only the
+    window, so a second registered cell over the same window overwrote the
+    first cell's file while the ledger kept both rows."""
+    _reload_with_drift(research_env, {'SPY': 0.40})
+    write_family(research_env['root'], 'fam', [BENCH,
+                 entry('grid', 'candidate', 'Gridded', benchmarks=['bench_ew'], params={'LOOKBACK': [10, 20], 'WEIGHT': [0.5, 1.0]})])
+    a = evaluate('fam/grid', fixed_params={'LOOKBACK': 10, 'WEIGHT': 0.5}, start='2016-06-01', end='2017-06-01')
+    b = evaluate('fam/grid', fixed_params={'LOOKBACK': 20, 'WEIGHT': 1.0}, start='2016-06-01', end='2017-06-01')
+    assert a['results_path'] != b['results_path']
+    for r, cell in ((a, {'LOOKBACK': 10, 'WEIGHT': 0.5}), (b, {'LOOKBACK': 20, 'WEIGHT': 1.0})):
+        saved = json.loads(Path(r['results_path']).read_text())
+        assert saved['grid']['report_cell'] == cell
+        assert saved['ledger_row']['fixed_params'] == cell
 
 
 def test_grid_of_four_cells_reports_pbo_and_stability(research_env):

@@ -75,6 +75,21 @@ def _cell_key(cell: Optional[Dict[str, Any]]) -> str:
     return json.dumps(cell or {}, sort_keys=True, default=str)
 
 
+def _fixed_results_name(cid: str, start: Any, end: Any, cell: Optional[Dict[str, Any]]) -> str:
+    """Results file for a fixed-cell run: window AND cell in the name.
+
+    The cell is part of the key because two registered cells evaluated over
+    the same window are two different results. Without it the second run
+    silently overwrote the first file while the ledger kept both rows - the
+    first row then pointed at an artifact embedding another run (found
+    2026-09-29 running the xasset champion's primary and secondary held-out
+    cells back to back).
+    """
+    import hashlib
+    digest = hashlib.sha256(_cell_key(cell).encode('utf-8')).hexdigest()[:8]
+    return f'{cid}__fixed_{start}_{end}_{digest}.json'
+
+
 def _elapsed(t0: float) -> float:
     return round(time.time() - t0, 1)
 
@@ -147,7 +162,8 @@ def evaluate(target: str, fixed_params: Optional[Dict[str, Any]] = None, start: 
         result = _evaluate(fam, entry, sha, fixed_params, start, end, rows)
         result['elapsed_s'] = _elapsed(t0)
         name = (f'{cid}.json' if mode == 'walk_forward'
-                else f"{cid}__fixed_{result['window']['start']}_{result['window']['end']}.json")
+                else _fixed_results_name(cid, result['window']['start'], result['window']['end'],
+                                         fixed_params))
         path = fam.results_dir / name
         result['results_path'] = str(path)
         composed = ledger.compose(dict(
