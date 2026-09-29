@@ -173,3 +173,53 @@ the rule above with OOS Sharpe/CAGR/max DD vs both benchmarks, per-year
 active returns, 3x-cost active return, DSR with N, PBO/stability where the
 grid has >= 4 cells, final cell; every number copied from
 `results/<id>.json` with the producing command.
+
+## Amendment A1 — 2026-09-29 (round 2), written BEFORE any candidate evaluation
+
+At the time of this amendment `trials.jsonl` holds two benchmark-role rows
+and no candidate-role row (`git log -- research/lowfreq/xasset/trials.jsonl`
+shows the file at commit e82afb3 with those two rows). Three procedural
+rules above are superseded; no hypothesis, rule, grid or expected sign
+changes.
+
+### A1.1 Stop rule (supersedes "Stop rule")
+
+All seven candidates are evaluated, in registry order, whatever the interim
+verdicts. A PASS never ends the search: the family's acceptance requires at
+least four distinct mechanisms evaluated, and the list is short. The search
+ends only when the finalization below has completed for all seven.
+
+### A1.2 Finalization — DSR at the final trial count (new)
+
+Each `evaluate` deflates DSR by the number of distinct candidate hashes in
+the ledger *at that moment*, so the first candidate evaluated would carry
+N = 1 and the last N = 7; verdict class would then depend on evaluation
+order. Procedure, fixed now:
+
+1. **Pass 1.** `uv run python -m trader.research.lowfreq evaluate xasset/<id>`
+   for H1..H7 in registry order. Every call appends its ledger row.
+2. **Snapshot.** Copy each `results/<id>.json` to
+   `results/snapshots/<id>__pass1.json`. Snapshots are never overwritten.
+3. **Pass 2 (refresh).** With the searched set final (N = 7 distinct
+   candidate hashes), run the same seven commands again in the same order
+   with UNCHANGED registry entries — identical hashes, so N stays 7 and no
+   new trial is created (the ledger gains seven more rows, which the report
+   lists). Each `results/<id>.json` is now the pass-2 file, carrying DSR at
+   N = 7 with V from all seven recorded active Sharpes; it is also copied to
+   `results/snapshots/<id>__pass2.json`, so every ledger row with
+   `status: ok` has an immutable JSON.
+4. **Selection.** The champion rule is applied to the pass-2 files only.
+   Everything except `dsr`, gate (c) and the verdict is deterministic and
+   must be identical between passes; `make_report.py` checks this and the
+   report states the result of the check.
+5. **Errors.** If a pass-1 or pass-2 run errors for a code defect, the fix
+   is a new dated registry entry (new hash, N grows by one); after it
+   completes, steps 2-4 are repeated for the whole set. The erroring rows
+   stay in the ledger and are tabulated.
+
+### A1.3 Final parameter cell tie-break (supersedes rule 4's tie clause)
+
+The final cell is the cell chosen in the most folds. When several cells tie
+for that count, the tie goes to the **latest fold whose choice is one of the
+tied cells** (not simply the last fold's choice, which may be a non-modal
+cell). `make_report.py::final_cell` implements this and is tested.
