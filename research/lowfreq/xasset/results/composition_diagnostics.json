@@ -1,0 +1,90 @@
+{
+ "bond_tickers": [
+  "AGG",
+  "IEF",
+  "IEI",
+  "SHY",
+  "TLT",
+  "TIP",
+  "LQD",
+  "MUB",
+  "HYG",
+  "EMB"
+ ],
+ "candidates": {
+  "xa_carry": {
+   "bonds_plus_bil_mean": 0.3271,
+   "cell": {
+    "TOP_N": 10
+   },
+   "invested_mean": 1.0,
+   "names_held_mean": 11.0,
+   "rebalance_days": 144,
+   "spy_mean": 0.0
+  },
+  "xa_dual_mom": {
+   "bonds_plus_bil_mean": 0.0528,
+   "cell": {
+    "LOOKBACK_DAYS": 252,
+    "TOP_N": 5
+   },
+   "invested_mean": 0.9958,
+   "names_held_mean": 4.99,
+   "rebalance_days": 144,
+   "spy_mean": 0.0042
+  },
+  "xa_faber_sma": {
+   "bonds_plus_bil_mean": 0.4899,
+   "cell": {
+    "SMA_DAYS": 210
+   },
+   "invested_mean": 0.6523,
+   "names_held_mean": 31.69,
+   "rebalance_days": 144,
+   "spy_mean": 0.0183
+  },
+  "xa_risk_parity": {
+   "bonds_plus_bil_mean": 0.5489,
+   "cell": {
+    "VOL_DAYS": 63
+   },
+   "invested_mean": 1.0,
+   "names_held_mean": 47.65,
+   "rebalance_days": 144,
+   "spy_mean": 0.0138
+  },
+  "xa_trend_6040": {
+   "bonds_plus_bil_mean": 0.4875,
+   "cell": {
+    "OFF_ASSET": "BIL",
+    "TREND_DAYS": 252
+   },
+   "invested_mean": 0.9125,
+   "names_held_mean": 2.0,
+   "rebalance_days": 144,
+   "spy_mean": 0.5125
+  },
+  "xa_tsmom_rp": {
+   "bonds_plus_bil_mean": 0.7211,
+   "cell": {
+    "LOOKBACK_DAYS": 252
+   },
+   "invested_mean": 0.6444,
+   "names_held_mean": 29.77,
+   "rebalance_days": 144,
+   "spy_mean": 0.012
+  },
+  "xa_vol_target": {
+   "bonds_plus_bil_mean": 0.1521,
+   "cell": {
+    "TARGET_VOL": 0.12
+   },
+   "invested_mean": 0.8479,
+   "names_held_mean": 1.49,
+   "rebalance_days": 144,
+   "spy_mean": 0.8479
+  }
+ },
+ "command": "uv run python research/lowfreq/xasset/make_report.py composition",
+ "oos_start": "2012-06-30"
+}

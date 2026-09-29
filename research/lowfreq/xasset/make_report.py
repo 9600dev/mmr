@@ -201,7 +201,49 @@ def check_passes(here: Path = HERE) -> str:
     return '\n'.join(lines)
 
 
+def composition(here: Path = HERE, oos_start: str = '2012-06-30') -> Dict[str, Any]:
+    """Average book composition of each candidate's DEFAULT cell on its OOS
+    rebalance days (weights from precompute_panel on the real dev panel; no
+    execution): invested fraction, share in bonds/BIL, in SPY. Written to
+    results/composition_diagnostics.json so the report's prose numbers are
+    traceable to a file. Needs the research databases."""
+    from typing import cast
+
+    import numpy as np
+    import pandas as pd
+    from trader.research.lowfreq import engine, load_etf_panel
+    from trader.research.lowfreq.registry import default_cell, load_family
+    fam = load_family(here.name, here.parent)
+    panel = load_etf_panel(None, '2006-02-01', str(fam.dev_end))
+    wide = engine.wide_panel(panel.frames())
+    oos = wide.index >= oos_start
+    bonds = [c for c in ('AGG', 'IEF', 'IEI', 'SHY', 'TLT', 'TIP', 'LQD', 'MUB', 'HYG', 'EMB') if c in wide['close'].columns]
+    out: Dict[str, Any] = {'command': 'uv run python research/lowfreq/xasset/make_report.py composition',
+                           'oos_start': oos_start, 'bond_tickers': bonds, 'candidates': {}}
+    for cid, e in fam.entries.items():
+        if e['role'] != 'candidate':
+            continue
+        s = cast(Any, engine.make_strategy(e, default_cell(e), panel))   # XAssetBase: has due()
+        w = s.precompute_panel(wide)['weights']
+        due = np.array([s.due(i, wide) for i in range(len(wide))]) & oos
+        rows = w[due]
+        bil = rows['BIL'] if 'BIL' in rows else pd.Series(0.0, index=rows.index)
+        out['candidates'][cid] = {
+            'cell': default_cell(e), 'rebalance_days': int(len(rows)),
+            'invested_mean': round(float((1.0 - bil).mean()), 4),
+            'bonds_plus_bil_mean': round(float((rows[bonds].sum(axis=1) + bil).mean()), 4),
+            'spy_mean': round(float(rows['SPY'].mean()) if 'SPY' in rows else 0.0, 4),
+            'names_held_mean': round(float((rows > 0).sum(axis=1).mean()), 2)}
+    path = here / 'results' / 'composition_diagnostics.json'
+    path.write_text(json.dumps(out, indent=1, sort_keys=True))
+    out['path'] = str(path)
+    return out
+
+
 def main(argv: List[str]) -> int:
+    if len(argv) >= 2 and argv[1] == 'composition':
+        print(json.dumps(composition(), indent=1, sort_keys=True))
+        return 0
     if len(argv) >= 2 and argv[1] == 'snapshot':
         for p in snapshot(argv[2]):
             print(p)

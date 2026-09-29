@@ -105,14 +105,19 @@
   "etf_6040"
  ],
  "dsr": {
-  "n_trials": 2,
+  "n_trials": 7,
   "trial_sharpes": {
    "06a4a17d3342590dadcb61392114e20d34c5ced81a098f77e4517e5710e76d69": -0.9960462404055015,
-   "8ce2f38ba43a47113823ba6624f3691de72e42dad14b84ee84e7dde7a99c2399": -1.04382739182009
+   "320965185b282faf2fbbe3a9336992d993d3c9e9922ebd3c024d27c368adb8f8": 0.21007856280404447,
+   "49516e9af9ff11a170407bce3dbe1c4f80615856346c1e348e5cab266a8fa31c": -0.39215561009153943,
+   "7767f140e256fac2b6d3796347c7c4a21cf52639f8a9c5511d805ce85662334e": -1.3299525559830316,
+   "8ce2f38ba43a47113823ba6624f3691de72e42dad14b84ee84e7dde7a99c2399": -1.04382739182009,
+   "971e09774198ef76bca5dfbf612ac531c83d6931394d691add890bc45e782df7": -0.3092365085873934,
+   "a360adfb0410749c3013b8d7c299e058bfb71898fa475260df46f0f6a7f8e8e4": -0.5602152238045401
   },
-  "value": 0.0002200951753493058
+  "value": 1.0676912814203863e-09
  },
- "elapsed_s": 31.7,
+ "elapsed_s": 29.0,
  "entry": {
   "benchmarks": [
    "etf_ew",
@@ -1094,7 +1099,7 @@
  "gate_inputs": {
   "active_ann_return": -0.06147881530427766,
   "active_ann_return_stressed": -0.06421175815770923,
-  "active_dsr": 0.0002200951753493058,
+  "active_dsr": 1.0676912814203863e-09,
   "active_t_nw": -3.5349366412864605,
   "benchmark_max_drawdown": -0.18642893163095364,
   "benchmark_oos_sharpe_max": 0.9504253373213228,
@@ -1126,7 +1131,7 @@
  "ledger_metrics": {
   "active_ann_return": -0.06147881530427766,
   "active_ann_return_3x": -0.06421175815770923,
-  "active_dsr": 0.0002200951753493058,
+  "active_dsr": 1.0676912814203863e-09,
   "active_t_nw": -3.5349366412864605,
   "benchmark_oos_sharpe_max": 0.9504253373213228,
   "full_min_cash_fraction": 3.6457263999967835e-05,
@@ -1141,13 +1146,13 @@
   "selection_stability": 0.2727272727272727
  },
  "ledger_row": {
-  "elapsed_s": 31.7,
+  "elapsed_s": 29.0,
   "end": "2024-06-28",
   "entry_sha256": "06a4a17d3342590dadcb61392114e20d34c5ced81a098f77e4517e5710e76d69",
   "error": null,
   "family": "xasset",
   "fixed_params": null,
-  "git_sha": "517708106dc354b0e41ba250748aae4af570a88c",
+  "git_sha": "1797ccacf7888573bef5cb3fd5fe9f51a01da021",
   "grid": {
    "SMA_DAYS": [
     126,
@@ -1161,7 +1166,7 @@
   "metrics": {
    "active_ann_return": -0.06147881530427766,
    "active_ann_return_3x": -0.06421175815770923,
-   "active_dsr": 0.0002200951753493058,
+   "active_dsr": 1.0676912814203863e-09,
    "active_t_nw": -3.5349366412864605,
    "benchmark_oos_sharpe_max": 0.9504253373213228,
    "full_min_cash_fraction": 3.6457263999967835e-05,
@@ -1176,13 +1181,13 @@
    "selection_stability": 0.2727272727272727
   },
   "mode": "walk_forward",
-  "n_trials": 2,
+  "n_trials": 7,
   "results_path": "/Users/joelpob/.local/share/llmvm_lite/scratch_directory/llmvm_scratch_jsx5vvxn/hillclimb-meta/20260928-185549/worktrees/C02/research/lowfreq/xasset/results/xa_faber_sma.json",
   "role": "candidate",
   "start": "2007-07-01",
   "status": "ok",
   "strategy_sha256": "7897860f2dd49c50dd685e8aedc8a9bafc4a5667d144da4838785353ae361042",
-  "timestamp": "2026-09-29T08:28:31+00:00",
+  "timestamp": "2026-09-29T08:38:23+00:00",
   "verdict": "FAIL"
  },
  "lookahead": {
