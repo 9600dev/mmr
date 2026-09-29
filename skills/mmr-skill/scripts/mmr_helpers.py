@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -42,6 +43,11 @@ _CONTAINER_HOME = "/home/trader"
 _DB_MARKER = Path.home() / ".local" / "share" / "mmr" / "data" / ".db_in_container_volume"
 _ENV_FORWARD_SKIP = {"MMR_SKILL_EXEC", "MMR_CONTAINER", "MMR_LOG_DIR", "MMR_ALLOW_HOST_DB"}
 _exec_mode_cache: Optional[str] = None
+# When auto mode lands on 'host' only because the container was NOT running,
+# that answer goes stale the moment the stack comes up. It is re-probed after
+# this many seconds instead of being cached for the life of the process.
+_HOST_FALLBACK_TTL_S = 30.0
+_exec_mode_host_fallback_at: Optional[float] = None
 
 
 def _container_running() -> bool:
@@ -56,9 +62,23 @@ def _container_running() -> bool:
 
 
 def _exec_mode() -> str:
-    """'host' or 'container'. Decided once per process; see the block above."""
-    global _exec_mode_cache
+    """'host' or 'container'; see the block above.
+
+    A forced mode, MMR_ALLOW_HOST_DB, a container decision and a host decision
+    with no DB marker are all stable and cached for the process. A host
+    decision made only because the container was not running is NOT: in a
+    long-lived session (an llmvm REPL) the stack is often started after the
+    first helper call, and caching that answer sent every DuckDB-backed helper
+    to the empty host stub for the rest of the session (found 2026-09-29:
+    exec_mode() reported container_running=True next to mode='host'). It is
+    re-probed once `_HOST_FALLBACK_TTL_S` has passed.
+    """
+    global _exec_mode_cache, _exec_mode_host_fallback_at
+    if (_exec_mode_cache == "host" and _exec_mode_host_fallback_at is not None
+            and time.monotonic() - _exec_mode_host_fallback_at >= _HOST_FALLBACK_TTL_S):
+        _exec_mode_cache = None
     if _exec_mode_cache is None:
+        _exec_mode_host_fallback_at = None
         forced = os.environ.get("MMR_SKILL_EXEC", "auto").strip().lower()
         if forced in ("host", "container"):
             _exec_mode_cache = forced
@@ -68,6 +88,9 @@ def _exec_mode() -> str:
             _exec_mode_cache = "container"
         else:
             _exec_mode_cache = "host"
+            if _DB_MARKER.exists():
+                # marker present, container down: provisional, re-probe later
+                _exec_mode_host_fallback_at = time.monotonic()
     return _exec_mode_cache
 
 
