@@ -96,14 +96,18 @@ class EqEwCovered(LowFreqStrategy):
 
     def precompute_panel(self, panel: pd.DataFrame) -> Dict[str, Any]:
         close = panel['close']
+        fields = self.research_data.get('fields') or {}
         if self._coverage is not None:
             cov = self._coverage.reindex(index=close.index, columns=close.columns).fillna(False).astype(bool)
         else:
-            shares = (self.research_data.get('fields') or {}).get('shares_diluted')
+            shares = fields.get('shares_diluted')
             if shares is None:
                 cov = pd.DataFrame(True, index=close.index, columns=close.columns)
             else:
                 cov = shares.reindex(index=close.index, columns=close.columns).notna()
+        member = fields.get('member')
+        if member is not None:                 # D05: never own a name outside the PIT universe
+            cov = cov & member.reindex(index=close.index, columns=close.columns).fillna(False).astype(bool)
         return {'close': close, 'coverage': cov & close.notna()}
 
     def on_panel(self, panel, state, index) -> Optional[Dict[Any, float]]:

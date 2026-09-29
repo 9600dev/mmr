@@ -88,8 +88,10 @@ def per_calendar_year(returns: pd.Series, min_days: int = 60) -> Dict[int, Dict[
     out: Dict[int, Dict[str, float]] = {}
     if len(s) == 0:
         return out
-    idx = pd.DatetimeIndex(s.index)
-    for year, grp in s.groupby(idx.year):
+    years = np.asarray([pd.Timestamp(str(t)).year for t in s.index], dtype=int)
+    values = s.to_numpy(dtype=float)
+    for year in np.unique(years):
+        grp = values[years == year]
         out[int(year)] = {'active_return': float(grp.sum()), 'days': int(len(grp)),
                           'counted': bool(len(grp) >= min_days)}
     return out

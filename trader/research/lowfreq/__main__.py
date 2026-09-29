@@ -20,7 +20,12 @@ def main(argv=None) -> int:
     ev.add_argument('--skip-lookahead-check', action='store_true', help=argparse.SUPPRESS)
     args = p.parse_args(argv)
 
+    import logging
     from trader.research.lowfreq.evaluate import evaluate, render_summary
+    # The root rich handler writes INFO to stdout; the backtester's per-run
+    # "panel: N instruments x M periods" line would otherwise precede the
+    # verdict / JSON and break machine readers of --quiet / --json output.
+    logging.getLogger('backtester').setLevel(logging.WARNING)
     fixed = None
     if args.fixed_params is not None:
         try:

@@ -50,6 +50,46 @@ def make_etf_rows(n_days: int = 700, seed: int = 0, drift: dict | None = None, s
     return rows
 
 
+PIT_TICKERS = ('AAA', 'BBB', 'CCC')
+
+
+LEAVES_AT = 250          # CCC's dv_rank becomes 600 from this session: it leaves the top 500
+                         # the month after (membership is decided monthly, lagged) while its
+                         # prices keep being stored - the situation the member mask exists for.
+
+
+def make_pit_rows(n_days: int = 420, start='2016-08-01', seed: int = 1):
+    """pit_daily_bars rows for three names (dv_rank 1..3; CCC drops to 600 at LEAVES_AT)."""
+    rng = np.random.default_rng(seed)
+    days = pd.bdate_range(start, periods=n_days)
+    rows = []
+    for k, t in enumerate(PIT_TICKERS):
+        close = 50.0 * (k + 1) * np.cumprod(1 + rng.normal(0.0002, 0.01, n_days))
+        for i in range(n_days):
+            opn = close[i - 1] if i else close[i]
+            rank = 600 if (t == 'CCC' and i >= LEAVES_AT) else k + 1
+            rows.append((days[i].date(), t, float(opn), float(max(opn, close[i]) * 1.001),
+                         float(min(opn, close[i]) * 0.999), float(close[i]), 1e6 * (k + 1),
+                         float(close[i] * 1e6 * (k + 1)), rank))
+    return rows
+
+
+def make_fundamentals_rows(n_quarters: int = 8, first_period_end='2016-03-31'):
+    """Quarterly filings accepted 35 days after period end at 21:30 UTC (after
+    the 16:00 ET close, so they are usable from the NEXT session)."""
+    rows = []
+    for k, t in enumerate(PIT_TICKERS):
+        pe = pd.Timestamp(first_period_end)
+        for q in range(n_quarters):
+            accepted = (pe + pd.Timedelta(days=35)).replace(hour=21, minute=30, tzinfo=dt.timezone.utc)
+            rev = 1e9 * (k + 1) * (1 + 0.02 * q)
+            rows.append((f'{1000 + k}', t, pe.date(), accepted, '10-Q', f'acc-{t}-{q}', rev, rev * 0.1,
+                         rev * 0.4, rev * 0.15, rev * 3, rev * 1.5, rev * 1.5, rev * 0.12,
+                         1e8 * (k + 1), accepted))
+            pe = pe + pd.offsets.QuarterEnd()
+    return rows
+
+
 @pytest.fixture
 def research_env(tmp_path, monkeypatch):
     """Temp history + main DuckDB, config YAML, family root. Yields the paths."""
@@ -63,6 +103,7 @@ def research_env(tmp_path, monkeypatch):
     con.execute("""CREATE TABLE pit_daily_bars(day DATE, ticker VARCHAR, open DOUBLE, high DOUBLE,
                    low DOUBLE, close DOUBLE, volume DOUBLE, dollar_volume DOUBLE, dv_rank INTEGER,
                    PRIMARY KEY(day, ticker))""")
+    con.executemany('INSERT INTO pit_daily_bars VALUES (?,?,?,?,?,?,?,?,?)', make_pit_rows())
     con.close()
     con = duckdb.connect(str(main))
     con.execute("""CREATE TABLE fundamentals(conid VARCHAR, ticker VARCHAR, period_end DATE,
@@ -70,6 +111,7 @@ def research_env(tmp_path, monkeypatch):
                    net_income DOUBLE, gross_profit DOUBLE, operating_income DOUBLE, total_assets DOUBLE,
                    total_liabilities DOUBLE, stockholders_equity DOUBLE, cash_from_operations DOUBLE,
                    shares_diluted DOUBLE, fetched_at TIMESTAMPTZ)""")
+    con.executemany('INSERT INTO fundamentals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', make_fundamentals_rows())
     con.close()
     cfg = tmp_path / 'trader_research.yaml'
     cfg.write_text(yaml.safe_dump({'duckdb_path': str(main), 'history_duckdb_path': str(hist),

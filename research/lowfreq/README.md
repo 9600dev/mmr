@@ -55,7 +55,19 @@ candidates:
 ```
 
 Per-entry overrides of `universe`, `dev_period`, `walk_forward`,
-`warmup_days`, `tickers` (ETF subset) and `top_n` are allowed. `evaluate`
+`warmup_days`, `tickers` (ETF subset) and `top_n` are allowed.
+
+**Equity universe rule (D05).** `load_equity_panel` keeps a name's prices for
+as long as `pit_daily_bars` stores them (top 800 by dollar volume) even after
+it leaves the top-N membership, and exposes the point-in-time membership as
+`fields['member']`. A strategy may only give weight > 0 to a member; the
+harness refuses any BUY fill whose decision bar was outside membership
+(`universe violation`, ledgered as an error). When a name stops printing, its
+last close stands for 30 more sessions as mark and fill price, so the exit a
+strategy issues at its next rebalance fills at the last stored price.
+Without both rules a membership-filtered price panel made every leaver
+unsellable: the covered-EW benchmark ended with 511 frozen holdings worth
+102 % of equity and cash at −$3.2M (full-period Sharpe 0.88 → 0.59 honest). `evaluate`
 refuses an id that is not in the file. The **registry-entry sha256** is the
 hash of the entry's canonical JSON: reordering the YAML is not a new trial,
 changing any field is. Strategy classes subclass
@@ -98,7 +110,14 @@ before the run; `reference_strategies.LowFreqStrategy` is a ready base.
 7. **Ledger line, results JSON, then output.**
 
 Base costs: ETFs 3 bps + $0.005/share; equities 5 bps + $0.005/share; shorts
-50 bps/yr. Capital $1M; whole shares.
+50 bps/yr. Capital $1M; whole shares. Capacity (D05) is reported per window:
+turnover/yr, median names held, and the median 21-day $ADV of held names
+(from `dollar_volume`; snapshots at the first measured bar and every fill).
+Two honesty diagnostics accompany every window: `min_cash_fraction` (minimum
+cash over initial capital; materially negative means the book ran on implicit
+leverage) and `frozen_value_fraction_end` (value of holdings with no print in
+the last 21 bars, marked at a stale carry-forward, over final equity). Read a
+result with a large frozen fraction as unresolved, not as return.
 
 ### Gates
 
@@ -140,17 +159,22 @@ Fixed-cell runs go to `results/<id>__fixed_<start>_<end>.json`.
 
 Benchmark-role entries only: `etf_ew` (monthly equal weight of listed ETFs),
 `etf_6040` (60 % SPY / 40 % IEF monthly), `eq_ew_covered` (monthly equal
-weight of the covered PIT universe; a candidate can narrow "covered" by
-publishing a boolean `coverage` frame in its `precompute_panel` state). Their
-results JSON under `reference/results/` are the dev-period numbers every
-family entry is measured against; each is evaluated against the other ETF
-benchmark, `eq_ew_covered` against cash.
+weight of the covered PIT universe). A candidate narrows "covered" by
+returning a boolean `coverage` frame (time × ticker) from `precompute_panel`;
+the harness forwards the default cell's frame to every benchmark that defines
+`set_coverage`, so the decisive benchmark owns exactly the names the
+candidate could have chosen from (`coverage.forwarded_to_benchmarks` in the
+results). Their results JSON under `reference/results/` are the dev-period
+numbers every family entry is measured against; each ETF benchmark is
+evaluated against the other, `eq_ew_covered` against cash.
 
 ## Tests
 
-`tests/research/` runs on a temporary DuckDB pair and a temporary family
-root: loaders read only the configured files read-only; refusal, error and
-benchmark rows in the ledger; the known answers (identical-to-benchmark → zero
-active return and FAIL; injected drift → PASS; a t+1 reader is refused before
-any metric; sub-unit weights leave cash earning zero); fixed-cell mode; CLI
-exit codes.
+`tests/research/` runs on a temporary DuckDB pair (synthetic `etf_daily_bars`,
+`pit_daily_bars`, `fundamentals`) and a temporary family root: loaders read
+only the configured files read-only, the equity loader's fundamentals are
+as-of the acceptance instant; refusal, error and benchmark rows in the ledger;
+the known answers (identical-to-benchmark → zero active return and FAIL;
+injected drift → PASS; a t+1 reader is refused before any metric; sub-unit
+weights leave cash earning zero); coverage forwarding; capacity metrics;
+fixed-cell mode; CLI exit codes.

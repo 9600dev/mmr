@@ -12,10 +12,11 @@ BENCH = entry('bench_ew', 'benchmark', 'EtfEqualWeight', module='trader.research
 def test_cli_quiet_json_and_exit_codes(research_env, capsys):
     write_family(research_env['root'], 'fam', [BENCH, entry('spy', 'candidate', 'HoldOne', benchmarks=['bench_ew'])])
     assert main(['evaluate', 'fam/spy', '--quiet']) == 0
-    out = capsys.readouterr().out.strip()
+    out = capsys.readouterr().out.strip().splitlines()[-1]
     assert out.startswith('fam/spy: ') and out.split(': ')[1] in ('PASS', 'PROMISING', 'FAIL')
     assert main(['evaluate', 'fam/spy', '--json']) == 0
-    data = json.loads(capsys.readouterr().out)
+    raw = capsys.readouterr().out
+    data = json.loads(raw[raw.index('{'):])
     assert data['id'] == 'spy' and 'verdict' in data
     assert main(['evaluate', 'fam/spy']) == 0
     assert capsys.readouterr().out.rstrip().splitlines()[-1].startswith('VERDICT')

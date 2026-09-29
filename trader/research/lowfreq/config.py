@@ -87,11 +87,11 @@ def read_only_duckdb_store() -> Iterator[None]:
         kwargs.pop('read_only', None)
         return original(path, *args, read_only=True, **kwargs)
 
-    duckdb_store.duckdb.connect = _ro_connect  # type: ignore[assignment]
+    setattr(duckdb_store.duckdb, 'connect', _ro_connect)
     try:
         yield
     finally:
-        duckdb_store.duckdb.connect = original  # type: ignore[assignment]
+        setattr(duckdb_store.duckdb, 'connect', original)
 
 
 @contextlib.contextmanager

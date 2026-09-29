@@ -25,7 +25,7 @@ import pandas as pd
 from trader.research.lowfreq import config as _cfg
 from trader.research.lowfreq import engine, ledger, stats
 from trader.research.lowfreq.costs import STRESS_MULTIPLIER, Costs, base_costs
-from trader.research.lowfreq.loaders import PricePanel, load_equity_panel, load_etf_panel
+from trader.research.lowfreq.loaders import PricePanel, load_equity_panel, load_etf_panel, to_date
 from trader.research.lowfreq.registry import (Family, RegistryError, default_cell, entry_sha256,
                                              expand_grid, load_family)
 from trader.research.lowfreq.verdict import GateInputs, decide
@@ -41,8 +41,8 @@ def _entry_setting(fam: Family, entry: Dict[str, Any], key: str, default):
 def _dates(fam: Family, entry: Dict[str, Any]) -> Tuple[dt.date, dt.date, int, int, int]:
     dev = entry.get('dev_period') or fam.raw.get('dev_period') or {}
     wf = entry.get('walk_forward') or fam.raw.get('walk_forward') or {}
-    start = pd.Timestamp(dev.get('start', fam.dev_start)).date()
-    end = pd.Timestamp(dev.get('end', fam.dev_end)).date()
+    start = to_date(dev.get('start', fam.dev_start))
+    end = to_date(dev.get('end', fam.dev_end))
     return (start, end, int(wf.get('train_days', fam.train_days)), int(wf.get('test_days', fam.test_days)),
             int(_entry_setting(fam, entry, 'warmup_days', fam.warmup_days)))
 
@@ -64,7 +64,7 @@ def _stitch(parts: List[pd.Series]) -> pd.Series:
 
 
 def _series_json(s: pd.Series) -> Dict[str, float]:
-    return {str(pd.Timestamp(k).date()): float(v) for k, v in s.items()}
+    return {str(to_date(k)): float(v) for k, v in s.items()}
 
 
 def evaluate(target: str, fixed_params: Optional[Dict[str, Any]] = None, start: Optional[str] = None,
@@ -110,7 +110,7 @@ def evaluate(target: str, fixed_params: Optional[Dict[str, Any]] = None, start: 
 def _evaluate(fam: Family, entry: Dict[str, Any], sha: str, fixed_params, start, end, lookahead) -> Dict[str, Any]:
     dev_start, dev_end, train_days, test_days, warmup = _dates(fam, entry)
     if fixed_params is not None:
-        dev_start, dev_end = pd.Timestamp(start).date(), pd.Timestamp(end).date()
+        dev_start, dev_end = to_date(start), to_date(end)
     if dev_end <= dev_start:
         raise ValueError(f'window end {dev_end} must be after start {dev_start}')
     universe = str(_entry_setting(fam, entry, 'universe', fam.universe))
@@ -124,13 +124,22 @@ def _evaluate(fam: Family, entry: Dict[str, Any], sha: str, fixed_params, start,
     end_excl = dev_end + dt.timedelta(days=1)
 
     panel = _load_panel(fam, entry, dev_start - warm, dev_end)
+    dv = panel.fields.get('dollar_volume')
+    if dv is not None:                                    # capacity diagnostic (D05), backward-looking
+        panel.fields['adv_usd_21d'] = dv.rolling(21, min_periods=5).median()
     cls = engine.load_strategy_class(entry['strategy']['module'], entry['strategy']['class'])
     strategy_sha = engine.strategy_source_sha256(cls)
     if lookahead:
-        engine.lookahead_check(entry, report_cell, panel)      # raises before any metric exists
+        state = engine.lookahead_check(entry, report_cell, panel)      # raises before any metric exists
+    else:
+        state = engine.make_strategy(entry, report_cell, panel).precompute_panel(
+            engine.wide_panel(panel.frames()))
+    # D05: the decisive benchmark owns the names the candidate could choose from.
+    coverage = engine.candidate_coverage(state)
 
-    def run(e: Dict[str, Any], cell: Dict[str, Any], data_start, meas_start, stop, c: Costs) -> engine.WindowResult:
-        return engine.run_window(e, cell, panel, data_start, meas_start, stop, c)
+    def run(e: Dict[str, Any], cell: Dict[str, Any], data_start, meas_start, stop, c: Costs,
+            cov: Optional[pd.DataFrame] = None) -> engine.WindowResult:
+        return engine.run_window(e, cell, panel, data_start, meas_start, stop, c, coverage=cov)
 
     # ---- windows: walk-forward folds or the single fixed window --------------
     folds: List[Fold]
@@ -177,10 +186,13 @@ def _evaluate(fam: Family, entry: Dict[str, Any], sha: str, fixed_params, start,
                                'chosen': chosen, 'note': 'no usable cell'})
             continue
         b_res = {b: run(bench_entries[b], default_cell(bench_entries[b]), fold.test_data_start, fold.test_start,
-                        fold.test_end, costs) for b in bench_ids}
+                        fold.test_end, costs, coverage) for b in bench_ids}
         b_sharpes = {b: stats.ann_sharpe(r.returns) for b, r in b_res.items()}
         if bench_ids:
-            dec = max(bench_ids, key=lambda b: (b_sharpes[b] if b_sharpes[b] is not None else -np.inf))
+            def _score(b: str) -> float:
+                v = b_sharpes.get(b)
+                return v if v is not None else float('-inf')
+            dec = max(bench_ids, key=_score)
             dec_ret = b_res[dec].returns
         else:
             dec, dec_ret = 'cash', pd.Series(0.0, index=res.returns.index)
@@ -195,7 +207,7 @@ def _evaluate(fam: Family, entry: Dict[str, Any], sha: str, fixed_params, start,
             stress_decisive.append(pd.Series(0.0, index=s_res.returns.index))
         else:
             sd = run(bench_entries[dec], default_cell(bench_entries[dec]), fold.test_data_start, fold.test_start,
-                     fold.test_end, stressed)
+                     fold.test_end, stressed, coverage)
             stress_decisive.append(sd.returns.reindex(s_res.returns.index).fillna(0.0))
         fold_table.append({'fold': fold.index, 'train_start': str(fold.train_start), 'train_end': str(fold.train_end),
                            'test_start': str(fold.test_start), 'test_end': str(fold.test_end), 'chosen': chosen,
@@ -211,10 +223,11 @@ def _evaluate(fam: Family, entry: Dict[str, Any], sha: str, fixed_params, start,
 
     # ---- full period: report cell, every cell (PBO), benchmarks -------------------
     full = run(entry, report_cell, dev_start - warm, dev_start, end_excl, costs)
-    full_bench = {b: run(bench_entries[b], default_cell(bench_entries[b]), dev_start - warm, dev_start, end_excl, costs)
-                  for b in bench_ids}
+    full_bench = {b: run(bench_entries[b], default_cell(bench_entries[b]), dev_start - warm, dev_start, end_excl,
+                         costs, coverage) for b in bench_ids}
     full_cells: Dict[str, Dict[str, Any]] = {}
-    pbo = None
+    pbo: Optional[Dict[str, Any]] = None
+    pbo_value: Optional[float] = None
     if fixed_params is None and len(cells) >= 4:
         cols = []
         for cell in cells:
@@ -224,8 +237,10 @@ def _evaluate(fam: Family, entry: Dict[str, Any], sha: str, fixed_params, start,
             cols.append(r.returns.rename(key))
         matrix = pd.concat(cols, axis=1).fillna(0.0).to_numpy()
         p = pbo_cscv(matrix, n_splits=16)
-        pbo = None if p is None else {'pbo': p.pbo, 'n_splits': p.n_splits, 'n_trials': p.n_trials,
-                                      'n_observations': p.n_observations, 'caveat': p.caveat}
+        if p is not None:
+            pbo_value = float(p.pbo)
+            pbo = {'pbo': pbo_value, 'n_splits': p.n_splits, 'n_trials': p.n_trials,
+                   'n_observations': p.n_observations, 'caveat': p.caveat}
     stability = selection_stability(fold_results) if fold_results else None
 
     # ---- statistics, trial count, verdict ------------------------------------------
@@ -246,14 +261,14 @@ def _evaluate(fam: Family, entry: Dict[str, Any], sha: str, fixed_params, start,
         oos_max_drawdown=stats.max_drawdown(oos), benchmark_max_drawdown=stats.max_drawdown(decisive),
         fraction_positive_years=stats.fraction_positive_years(years),
         active_ann_return_stressed=stats.ann_mean(stress_active), n_cells=len(cells) if fixed_params is None else 1,
-        pbo=(pbo or {}).get('pbo'), selection_stability=stability)
+        pbo=pbo_value, selection_stability=stability)
     decision = decide(gates)
     oos_summary = stats.summarise(oos)
     ledger_metrics = {'oos_sharpe': oos_summary['sharpe'], 'oos_cagr': oos_summary['cagr'],
                       'oos_max_drawdown': oos_summary['max_drawdown'], 'active_ann_return': gates.active_ann_return,
                       'active_t_nw': t_nw, 'oos_active_sharpe': act_sharpe, 'active_dsr': gates.active_dsr,
                       'benchmark_oos_sharpe_max': gates.benchmark_oos_sharpe_max,
-                      'active_ann_return_3x': gates.active_ann_return_stressed, 'pbo': (pbo or {}).get('pbo'),
+                      'active_ann_return_3x': gates.active_ann_return_stressed, 'pbo': pbo_value,
                       'selection_stability': stability, 'full_sharpe': stats.ann_sharpe(full.returns),
                       'oos_days': int(len(oos))}
     return {
@@ -263,6 +278,9 @@ def _evaluate(fam: Family, entry: Dict[str, Any], sha: str, fixed_params, start,
                    'train_days': train_days, 'test_days': test_days, 'n_folds': len(folds)},
         'costs': {'base': costs.as_dict(), 'stress_multiplier': STRESS_MULTIPLIER},
         'grid': {'cells': len(cells), 'report_cell': report_cell},
+        'coverage': ({'forwarded_to_benchmarks': True,
+                      'median_names_covered_per_day': float(coverage.sum(axis=1).median())}
+                     if coverage is not None else {'forwarded_to_benchmarks': False}),
         'folds': fold_table, 'decisive_per_fold': decisive_ids,
         'oos': oos_summary, 'oos_benchmarks': {b: stats.summarise(s) for b, s in bench_oos.items()},
         'active': {'ann_return': gates.active_ann_return, 'sharpe': act_sharpe, 't_nw': t_nw, 'nw_lags': lags,
@@ -298,6 +316,9 @@ def render_summary(r: Dict[str, Any]) -> str:
     lines.append(f"full      sharpe {_f(fp['sharpe'])}  cagr {_f(fp['cagr'], '{:+.2%}')}  maxDD {_f(fp['max_drawdown'], '{:.1%}')}  "
                  f"turnover/yr {_f(fp['turnover_per_year'], '{:.2f}')}  PBO {_f((r['pbo'] or {}).get('pbo'), '{:.2f}')}  "
                  f"stability {_f(r['selection_stability'], '{:.2f}')}")
+    lines.append(f"capacity  names {_f(fp.get('median_names_held'), '{:.0f}')}  median $ADV {_f(fp.get('median_holding_adv_usd'), '{:,.0f}')}  "
+                 f"min cash {_f(fp.get('min_cash_fraction'), '{:+.2f}')}x  frozen@end {_f(fp.get('frozen_value_fraction_end'), '{:.1%}')} "
+                 f"({fp.get('n_frozen_holdings_end')} names)")
     lines.append('gates     ' + '  '.join(f"{k}={'n/a' if v is None else ('ok' if v else 'FAIL')}" for k, v in r['gates'].items()))
     lines.append(f"results   {r.get('results_path', '')}")
     lines.append(f"VERDICT   {r['verdict']}")

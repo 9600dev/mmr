@@ -5,6 +5,7 @@ import os
 
 import duckdb
 import numpy as np
+import pandas as pd
 import pytest
 
 from trader.research.lowfreq import config as cfg
@@ -79,11 +80,8 @@ def test_bound_container_points_at_research_config(research_env):
     assert os.environ.get('TRADER_CONFIG') != str(research_env['config'])
 
 
-def test_equity_panel_wraps_pit_and_fundamentals_read_only(research_env, monkeypatch):
-    """Empty PIT table -> the wrapped script has nothing -> loud error, and every
-    connection opened on the way was read-only against the research DBs."""
+def _spy_connects(monkeypatch):
     from trader.data import duckdb_store
-    from trader.research.lowfreq import load_equity_panel
     opened = []
     real = duckdb.connect
 
@@ -91,8 +89,56 @@ def test_equity_panel_wraps_pit_and_fundamentals_read_only(research_env, monkeyp
         opened.append((os.path.realpath(str(path)), kw.get('read_only')))
         return real(path, *a, **kw)
     monkeypatch.setattr(duckdb_store.duckdb, 'connect', spy)
+    monkeypatch.setattr(cfg.duckdb, 'connect', spy)
+    return opened
+
+
+def test_equity_panel_wraps_pit_and_fundamentals_as_of_and_read_only(research_env, monkeypatch):
+    from trader.research.lowfreq import load_equity_panel
+    from research.conftest import PIT_TICKERS
+    opened = _spy_connects(monkeypatch)
+    p = load_equity_panel('2016-08-01', '2018-03-01')
+    # every connection on the way: one of the two research DBs, read-only
+    assert opened
+    assert {path for path, _ in opened} <= {os.path.realpath(str(research_env['hist'])),
+                                            os.path.realpath(str(research_env['main']))}
+    assert all(ro is True for _, ro in opened)
+    # membership is lagged a month: the panel starts in September, holds all three names
+    assert sorted(p.close.columns) == sorted(PIT_TICKERS)
+    assert p.close.index[0] >= pd.Timestamp('2016-09-01')
+    assert p.open.shape == p.close.shape and p.close.notna().all().all()
+    assert p.universe == 'equity'
+    # as-of fundamentals: shares_diluted is NaN until the first ACCEPTANCE instant, then the filed value
+    shares = p.fields['shares_diluted']['AAA']
+    first_accept = pd.Timestamp('2016-03-31') + pd.Timedelta(days=35)     # 2016-05-05 21:30 UTC
+    assert shares.loc[shares.index > first_accept + pd.Timedelta(days=1)].iloc[0] == pytest.approx(1e8)
+    # sales_to_price needs four accepted quarters (TTM): NaN before the 4th acceptance, finite after,
+    # and equal to revenue_ttm / (close * shares) on a sample day
+    s2p = p.signals['sales_to_price']['AAA']
+    fourth_accept = pd.Timestamp('2016-12-31') + pd.Timedelta(days=35)   # 2017-02-04
+    assert s2p.loc[s2p.index < fourth_accept].isna().all()
+    after = s2p.loc[s2p.index > fourth_accept + pd.Timedelta(days=2)]
+    assert after.notna().all()
+    day = after.index[10]
+    expect = p.fields['revenue_ttm']['AAA'].loc[day] / (p.close['AAA'].loc[day] * shares.loc[day])
+    assert s2p.loc[day] == pytest.approx(expect)
+    # capacity input present and aligned
+    assert p.fields['dollar_volume'].shape == p.close.shape
+    assert p.fields['dollar_volume']['CCC'].iloc[-1] == pytest.approx(p.close['CCC'].iloc[-1] * 3e6)
+    # CCC leaves the top 500 in August 2017: its PRICES persist (so it can be sold) while
+    # the member mask turns False; AAA/BBB are members throughout
+    m = p.fields['member']
+    assert m.shape == p.close.shape and m.dtypes.eq(bool).all()
+    assert m['CCC'].loc['2016-10-01':'2017-06-30'].all()
+    assert not m['CCC'].loc['2017-09-01':].any()
+    assert m[['AAA', 'BBB']].all().all()
+    assert p.close['CCC'].loc['2017-09-01':].notna().all()
+
+
+def test_equity_panel_is_loud_on_an_empty_pit_table(research_env):
+    from trader.research.lowfreq import load_equity_panel
+    con = duckdb.connect(str(research_env['hist']))
+    con.execute('delete from pit_daily_bars')
+    con.close()
     with pytest.raises(Exception):
         load_equity_panel('2016-08-01', '2024-06-28')
-    assert opened
-    assert {p for p, _ in opened} <= {os.path.realpath(str(research_env['hist'])), os.path.realpath(str(research_env['main']))}
-    assert all(ro is True for _, ro in opened)
