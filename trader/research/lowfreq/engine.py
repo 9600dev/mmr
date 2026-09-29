@@ -50,6 +50,8 @@ class WindowResult:
     min_cash_fraction: Optional[float] = None         # min cash / initial capital (< 0 = implicit leverage)
     frozen_value_fraction_end: Optional[float] = None  # value of unpriceable holdings at window end / equity
     n_frozen_holdings_end: Optional[int] = None
+    scaled_buy_fills: Optional[int] = None            # D06: BUY fills the cash guard scaled down
+    scaled_rebalances: Optional[int] = None           # D06: fill dates on which the guard acted
 
     def metrics(self) -> Dict[str, Any]:
         from trader.research.lowfreq import stats
@@ -59,7 +61,9 @@ class WindowResult:
                   'median_names_held': self.median_names_held,
                   'min_cash_fraction': self.min_cash_fraction,
                   'frozen_value_fraction_end': self.frozen_value_fraction_end,
-                  'n_frozen_holdings_end': self.n_frozen_holdings_end})
+                  'n_frozen_holdings_end': self.n_frozen_holdings_end,
+                  'scaled_buy_fills': self.scaled_buy_fills,
+                  'scaled_rebalances': self.scaled_rebalances})
         return m
 
 
@@ -215,8 +219,10 @@ def _non_member_buys(trades, member: pd.DataFrame, index: pd.Index) -> list:
 
 def _cash_and_frozen(trades, closes: pd.DataFrame, equity: pd.Series, capital: float) -> tuple:
     """(min cash / capital, frozen value at end / final equity, n frozen).
-    Cash is rebuilt from the fill log; a holding is frozen when it printed no
-    close in the window's last 21 bars, so its mark is a stale carry-forward."""
+    Cash is rebuilt from the fill log - independently of the backtester's own
+    ledger, so it also checks that the D06 guard held (a long-only book must
+    never show it below zero); a holding is frozen when it printed no close in
+    the window's last 21 bars, so its mark is a stale carry-forward."""
     if not trades or len(equity) == 0:
         return None, None, None
     cash = capital
@@ -279,11 +285,14 @@ def run_window(entry: Dict[str, Any], cell: Dict[str, Any], panel: PricePanel,
     turnover = (notional / max(float(eq_meas.mean()), 1e-9) / years) if len(eq_meas) else None
     adv_med, n_held = _holdings_capacity(res.trades, window.fields.get('adv_usd_21d'), ms, eq.index)
     min_cash, frozen, n_frozen = _cash_and_frozen(res.trades, window.close, eq, INITIAL_CAPITAL)
+    diag = getattr(res, 'diagnostics', None) or {}      # D06: how often the cash guard acted
     return WindowResult(returns=measured, equity=eq_meas, n_trades=len(res.trades),
                         turnover_per_year=turnover, cell=dict(cell),
                         median_holding_adv_usd=adv_med, median_names_held=n_held,
                         min_cash_fraction=min_cash, frozen_value_fraction_end=frozen,
-                        n_frozen_holdings_end=n_frozen)
+                        n_frozen_holdings_end=n_frozen,
+                        scaled_buy_fills=diag.get('panel_scaled_buy_fills'),
+                        scaled_rebalances=diag.get('panel_scaled_rebalances'))
 
 
 def lookahead_check(entry: Dict[str, Any], cell: Dict[str, Any], panel: PricePanel,

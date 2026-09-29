@@ -2,10 +2,9 @@
 
 Evaluates a **registered** daily-bar panel strategy honestly and emits a
 machine-readable `PASS / PROMISING / FAIL` verdict. It searches for nothing
-itself: the families `xasset/` (C02, cross-asset ETFs, D04) and `equity/`
-(C03, point-in-time equities, D05) register candidates here and read the
-verdicts. Design decisions D01–D05 are in the program design record; this
-file says how they are implemented.
+itself: the families `xasset/` (C02, D04) and `equity/` (C03, D05) register
+candidates here and read the verdicts. This file says how design decisions
+D01–D06 are implemented.
 
 ## Run
 
@@ -17,8 +16,8 @@ uv run python -m trader.research.lowfreq evaluate <family>/<id> \
     --fixed-params '{"LOOKBACK": 126}' --start 2024-07-01 --end 2025-06-30
 ```
 
-Exit 0 = the evaluation completed (whatever the verdict). Exit 1 = it errored
-or the id is unregistered. Exit 2 = bad arguments (never reaches the ledger).
+Exit 0 = completed (whatever the verdict); 1 = error or unregistered id;
+2 = bad arguments (never reaches the ledger).
 Python API: `trader.research.lowfreq.evaluate(target, fixed_params=None,
 start=None, end=None)` returns the results dict; `load_etf_panel(tickers=None,
 start, end)` and `load_equity_panel(start, end, top_n=500)` are the loaders.
@@ -54,8 +53,8 @@ candidates:
     registered_at: 2026-09-28
 ```
 
-Per-entry overrides of `universe`, `dev_period`, `walk_forward`,
-`warmup_days`, `tickers` (ETF subset) and `top_n` are allowed.
+Entries may override `universe`, `dev_period`, `walk_forward`,
+`warmup_days`, `tickers` (ETF subset) and `top_n`.
 
 **Equity universe rule (D05).** `load_equity_panel` keeps a name's prices for
 as long as `pit_daily_bars` stores them (top 800 by dollar volume) even after
@@ -67,8 +66,8 @@ last close stands for 30 more sessions as mark and fill price, so the exit a
 strategy issues at its next rebalance fills at the last stored price.
 Without both rules a membership-filtered price panel made every leaver
 unsellable: the covered-EW benchmark ended with 511 frozen holdings worth
-102 % of equity and cash at −$3.2M (full-period Sharpe 0.88 → 0.59 honest). `evaluate`
-refuses an id that is not in the file. The **registry-entry sha256** is the
+102 % of equity and cash at −$3.2M (full-period Sharpe 0.88 → 0.59; both
+figures pre-D06, see below). `evaluate` refuses an id that is not in the file. The **registry-entry sha256** is the
 hash of the entry's canonical JSON: reordering the YAML is not a new trial,
 changing any field is. Strategy classes subclass
 `trader.trading.strategy.Strategy` and implement `precompute_panel` /
@@ -113,11 +112,17 @@ Base costs: ETFs 3 bps + $0.005/share; equities 5 bps + $0.005/share; shorts
 50 bps/yr. Capital $1M; whole shares. Capacity (D05) is reported per window:
 turnover/yr, median names held, and the median 21-day $ADV of held names
 (from `dollar_volume`; snapshots at the first measured bar and every fill).
-Two honesty diagnostics accompany every window: `min_cash_fraction` (minimum
-cash over initial capital; materially negative means the book ran on implicit
-leverage) and `frozen_value_fraction_end` (value of holdings with no print in
-the last 21 bars, marked at a stale carry-forward, over final equity). Read a
-result with a large frozen fraction as unresolved, not as return.
+**Cash is never overdrawn (D06).** In `run_panel` a rebalance's sells settle
+first and its buys are scaled pro rata to the cash then available, in whole
+shares, so a book sized off a holding it could not sell cannot lever itself.
+Every window reports `scaled_buy_fills` / `scaled_rebalances` (how often the
+guard acted) next to `min_cash_fraction`, which is rebuilt independently from
+the fill log and must read ≥ 0 for a long-only book, and
+`frozen_value_fraction_end` (value of holdings with no print in the last 21
+bars, marked at a stale carry-forward, over final equity). Read a result with
+a large frozen fraction or many scaled fills as unresolved, not as return.
+Results written before 2026-09-29 predate the guard and are labelled pre-D06
+wherever quoted.
 
 ### Gates
 
@@ -165,16 +170,16 @@ the harness forwards the default cell's frame to every benchmark that defines
 `set_coverage`, so the decisive benchmark owns exactly the names the
 candidate could have chosen from (`coverage.forwarded_to_benchmarks` in the
 results). Their results JSON under `reference/results/` are the dev-period
-numbers every family entry is measured against; each ETF benchmark is
-evaluated against the other, `eq_ew_covered` against cash.
+numbers (post-D06) every family entry is measured against; each ETF benchmark
+is evaluated against the other, `eq_ew_covered` against cash.
 
 ## Tests
 
 `tests/research/` runs on a temporary DuckDB pair (synthetic `etf_daily_bars`,
-`pit_daily_bars`, `fundamentals`) and a temporary family root: loaders read
-only the configured files read-only, the equity loader's fundamentals are
-as-of the acceptance instant; refusal, error and benchmark rows in the ledger;
+`pit_daily_bars`, `fundamentals`) and a temporary family root: read-only
+loader isolation, as-of fundamentals, ledger rows for refusals and errors,
 the known answers (identical-to-benchmark → zero active return and FAIL;
-injected drift → PASS; a t+1 reader is refused before any metric; sub-unit
-weights leave cash earning zero); coverage forwarding; capacity metrics;
-fixed-cell mode; CLI exit codes.
+injected drift → PASS; a t+1 reader refused before any metric; sub-unit
+weights leave cash earning zero), coverage forwarding, capacity metrics,
+fixed-cell mode and CLI exit codes. The D06 cash guard is pinned in
+`tests/test_panel_cash.py`.

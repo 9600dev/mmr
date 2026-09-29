@@ -125,6 +125,11 @@ def test_capacity_metrics_are_reported(research_env):
     write_family(research_env['root'], 'fam', [BENCH, entry('spy', 'candidate', 'HoldOne', benchmarks=['bench_ew'])])
     r = evaluate('fam/spy')
     fp = r['full_period']['report_cell']
+    assert fp['min_cash_fraction'] >= -1e-9                      # D06 holds through the harness
+    for fold in r['folds']:
+        assert fold['oos']['min_cash_fraction'] >= -1e-9
+        for b in fold['benchmarks'].values():
+            assert b['min_cash_fraction'] >= -1e-9
     assert fp['median_names_held'] == 1.0
     assert fp['median_holding_adv_usd'] is not None and fp['median_holding_adv_usd'] > 0
     assert fp['turnover_per_year'] is not None and fp['turnover_per_year'] < 0.5   # buy once, hold
@@ -157,7 +162,11 @@ def test_covered_benchmark_sells_leavers_and_reports_cash_and_frozen_diagnostics
     r = evaluate('eq/eq_ew_covered')
     fp = r['full_period']['report_cell']
     assert fp['n_frozen_holdings_end'] == 0 and fp['frozen_value_fraction_end'] == 0.0
-    assert fp['min_cash_fraction'] > -0.02
+    # D06: cash rebuilt from the fill log never below zero on a long-only book,
+    # and the guard's activity is reported (a count, possibly zero)
+    assert fp['min_cash_fraction'] >= -1e-9
+    assert isinstance(fp['scaled_buy_fills'], int) and isinstance(fp['scaled_rebalances'], int)
+    assert r['ledger_metrics']['full_min_cash_fraction'] >= -1e-9
     assert fp['median_names_held'] in (2.0, 3.0)
     assert r['coverage']['forwarded_to_benchmarks'] is True
     # only members are ever held at the end: CCC left in Aug 2017, the window ends Feb 2018

@@ -122,6 +122,10 @@ class BacktestResult:
     # Effective param overrides applied via ``apply_param_overrides``. Empty
     # when the run used class defaults. Populated by ``run_from_module``.
     applied_params: Dict[str, Any] = field(default_factory=dict)
+    # Execution diagnostics that are not performance metrics. run_panel
+    # records how often the D06 cash guard scaled a BUY fill
+    # (``panel_scaled_buy_fills`` etc.); empty for the per-instrument path.
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 
 
@@ -894,6 +898,8 @@ class Backtester:
         borrow_per_period = (
             (self.config.short_borrow_bps_annual / 10_000.0)
             / max(self._bars_per_year(self.config.bar_size), 1.0))
+        scaled_buy_fills = dropped_buy_fills = scaled_rebalances = 0   # D06 diagnostics
+        min_cash = cash
 
         for i in range(n):
             ts = panel.index[i]
@@ -903,11 +909,39 @@ class Backtester:
             # 1. Fill what was decided while observing the PREVIOUS bar, at
             #    this bar's open. This ordering is the no-lookahead rule.
             if pending:
+                # D06: a fill may never take cash below zero. The rebalance's
+                # SELLS settle first (short-sale proceeds count as cash, as
+                # before) and its BUYS are scaled pro rata to the cash then
+                # available, truncated to whole shares so the scaled book
+                # never costs more than the budget. Without this a book sized
+                # off a holding it could not sell (a name that stopped
+                # printing, marked at a stale carry-forward) bought the full
+                # target anyway and ran on implicit, cost-free leverage: the
+                # covered-EW PIT benchmark sat at -$3.2M cash on 99% of fill
+                # dates (docs/RESEARCH_LOG.md, 2026-09-29). Scaled fills are
+                # counted in ``BacktestResult.diagnostics`` so a result that
+                # leaned on the guard says so.
+                fills = []
                 for conid, delta in pending.items():
                     px = row_open.get(conid)
                     if px is None or not np.isfinite(px) or px <= 0:
                         continue        # cannot fill what cannot be priced
                     fill = px * (1 + slip) if delta > 0 else px * (1 - slip)
+                    fills.append((conid, delta, fill))
+                proceeds = sum(-d * f - abs(d) * commission for _, d, f in fills if d < 0)
+                buy_cost = sum(d * f + abs(d) * commission for _, d, f in fills if d > 0)
+                available = cash + proceeds
+                scale = 1.0
+                if buy_cost > 0 and buy_cost > available:
+                    scale = max(available, 0.0) / buy_cost
+                    scaled_rebalances += 1
+                for conid, delta, fill in fills:
+                    if delta > 0 and scale < 1.0:
+                        delta = float(math.floor(delta * scale))
+                        scaled_buy_fills += 1
+                        if delta <= 0:
+                            dropped_buy_fills += 1
+                            continue    # budget exhausted: nothing to buy
                     cost = abs(delta) * commission
                     cash -= delta * fill + cost
                     positions[conid] = positions.get(conid, 0.0) + delta
@@ -947,6 +981,7 @@ class Backtester:
                     if px is not None and px > 0:
                         cash -= abs(qty) * px * borrow_per_period
 
+            min_cash = min(min_cash, cash)
             mark = cash
             for conid, qty in positions.items():
                 px = last_price.get(conid)
@@ -973,7 +1008,14 @@ class Backtester:
             pending = orders or None
 
         equity_curve = pd.Series(equity_values, index=pd.Index(equity_timestamps))
-        return self._summarise(equity_curve, trades, [], positions)
+        result = self._summarise(equity_curve, trades, [], positions)
+        result.diagnostics.update({
+            'panel_scaled_buy_fills': scaled_buy_fills,      # BUY fills reduced by the D06 cash guard
+            'panel_dropped_buy_fills': dropped_buy_fills,    # ... of which reduced to nothing
+            'panel_scaled_rebalances': scaled_rebalances,    # fill dates on which the guard acted
+            'panel_min_cash': float(min_cash),               # lowest end-of-bar cash
+        })
+        return result
 
     def run_from_module(
         self,

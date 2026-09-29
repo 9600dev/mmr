@@ -270,6 +270,7 @@ def _evaluate(fam: Family, entry: Dict[str, Any], sha: str, fixed_params, start,
                       'benchmark_oos_sharpe_max': gates.benchmark_oos_sharpe_max,
                       'active_ann_return_3x': gates.active_ann_return_stressed, 'pbo': pbo_value,
                       'selection_stability': stability, 'full_sharpe': stats.ann_sharpe(full.returns),
+                      'full_min_cash_fraction': full.min_cash_fraction, 'full_scaled_buy_fills': full.scaled_buy_fills,
                       'oos_days': int(len(oos))}
     return {
         'family': fam.name, 'id': entry['id'], 'role': entry['role'], 'mode': 'fixed' if fixed_params is not None else 'walk_forward',
@@ -318,7 +319,8 @@ def render_summary(r: Dict[str, Any]) -> str:
                  f"stability {_f(r['selection_stability'], '{:.2f}')}")
     lines.append(f"capacity  names {_f(fp.get('median_names_held'), '{:.0f}')}  median $ADV {_f(fp.get('median_holding_adv_usd'), '{:,.0f}')}  "
                  f"min cash {_f(fp.get('min_cash_fraction'), '{:+.2f}')}x  frozen@end {_f(fp.get('frozen_value_fraction_end'), '{:.1%}')} "
-                 f"({fp.get('n_frozen_holdings_end')} names)")
+                 f"({fp.get('n_frozen_holdings_end')} names)  cash-guard scaled buys {_f(fp.get('scaled_buy_fills'), '{:d}')} "
+                 f"on {_f(fp.get('scaled_rebalances'), '{:d}')} dates (D06)")
     lines.append('gates     ' + '  '.join(f"{k}={'n/a' if v is None else ('ok' if v else 'FAIL')}" for k, v in r['gates'].items()))
     lines.append(f"results   {r.get('results_path', '')}")
     lines.append(f"VERDICT   {r['verdict']}")

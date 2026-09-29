@@ -59,7 +59,7 @@
   "trial_sharpes": {},
   "value": 0.8503570456854048
  },
- "elapsed_s": 38.7,
+ "elapsed_s": 38.0,
  "entry": {
   "benchmarks": [],
   "dev_period": {
@@ -102,6 +102,8 @@
     "min_cash_fraction": 0.013682051746200597,
     "n_frozen_holdings_end": 0,
     "n_trades": 3893,
+    "scaled_buy_fills": 0,
+    "scaled_rebalances": 0,
     "sharpe": 0.34727749307918104,
     "turnover_per_year": 4.1026130721651475
    },
@@ -126,6 +128,8 @@
     "min_cash_fraction": 0.008499685429950965,
     "n_frozen_holdings_end": 0,
     "n_trades": 3899,
+    "scaled_buy_fills": 0,
+    "scaled_rebalances": 0,
     "sharpe": 2.5795878841893485,
     "turnover_per_year": 4.7034726867032175
    },
@@ -150,6 +154,8 @@
     "min_cash_fraction": 0.021292725291350362,
     "n_frozen_holdings_end": 0,
     "n_trades": 4061,
+    "scaled_buy_fills": 0,
+    "scaled_rebalances": 0,
     "sharpe": -0.535858194880948,
     "turnover_per_year": 4.260683206368722
    },
@@ -174,6 +180,8 @@
     "min_cash_fraction": 0.021782060863850632,
     "n_frozen_holdings_end": 0,
     "n_trades": 4248,
+    "scaled_buy_fills": 0,
+    "scaled_rebalances": 0,
     "sharpe": 0.5822335787018288,
     "turnover_per_year": 4.5153501108110925
    },
@@ -197,6 +205,8 @@
    "min_cash_fraction": 0.008134414488401128,
    "n_frozen_holdings_end": 0,
    "n_trades": 31683,
+   "scaled_buy_fills": 0,
+   "scaled_rebalances": 0,
    "sharpe": 0.5917240864077336,
    "turnover_per_year": 4.995922720808455
   }
@@ -236,6 +246,8 @@
   "active_dsr": 0.8503570456854048,
   "active_t_nw": 1.124875236427526,
   "benchmark_oos_sharpe_max": 0.0,
+  "full_min_cash_fraction": 0.008134414488401128,
+  "full_scaled_buy_fills": 0,
   "full_sharpe": 0.5917240864077336,
   "oos_active_sharpe": 0.5264586204201058,
   "oos_cagr": 0.10192128533858447,
@@ -246,12 +258,12 @@
   "selection_stability": 1.0
  },
  "ledger_row": {
-  "elapsed_s": 38.7,
+  "elapsed_s": 38.0,
   "end": "2024-06-28",
   "entry_sha256": "8f6050c76d4e5c1aed9aeffa3a89e92584534f337bf54efa54c0603692db8818",
   "family": "reference",
   "fixed_params": null,
-  "git_sha": "56e75b90c453a3f060e19be5da843f9ca803c2c0",
+  "git_sha": "7e21ae2ab1f5aafe0afa72667025db08b1d90f93",
   "grid": {},
   "harness_version": 1,
   "id": "eq_ew_covered",
@@ -261,6 +273,8 @@
    "active_dsr": 0.8503570456854048,
    "active_t_nw": 1.124875236427526,
    "benchmark_oos_sharpe_max": 0.0,
+   "full_min_cash_fraction": 0.008134414488401128,
+   "full_scaled_buy_fills": 0,
    "full_sharpe": 0.5917240864077336,
    "oos_active_sharpe": 0.5264586204201058,
    "oos_cagr": 0.10192128533858447,
@@ -276,7 +290,7 @@
   "start": "2016-08-01",
   "status": "ok",
   "strategy_sha256": "1fb3e06c9e678b4b0e94cde89f59c78fa3a8f85364bbb0d693364616aa57239b",
-  "timestamp": "2026-09-29T02:36:45+00:00",
+  "timestamp": "2026-09-29T02:52:43+00:00",
   "verdict": "FAIL"
  },
  "mode": "walk_forward",
