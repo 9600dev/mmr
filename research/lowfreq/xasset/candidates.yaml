@@ -1,0 +1,96 @@
+# Cross-asset ETF allocation family (C02, D04). Hypotheses, rationale, rules
+# and grids are pre-registered in PREREG.md (same directory) BEFORE any
+# candidate row existed in trials.jsonl. Changing any field of an entry is a
+# new trial (D02: registry-entry sha256).
+family: xasset
+universe: etf
+dev_period: {start: 2007-07-01, end: 2024-06-28}
+walk_forward: {train_days: 1826, test_days: 365}     # D04: train 5y, test 1y, rolling
+warmup_days: 500      # >= 273 sessions so a 12-1 signal is defined before measurement starts
+candidates:
+  - id: etf_ew
+    role: benchmark
+    hypothesis: Owning the eligible ETF universe equal-weighted, rebalanced monthly, is the return a cross-asset allocator gets for free.
+    rationale: Any allocation rule that cannot beat equal ownership of its own universe is concentration, not selection (D04 benchmark i).
+    strategy: {module: trader.research.lowfreq.reference_strategies, class: EtfEqualWeight}
+    params: {}
+    benchmarks: [etf_6040]
+    registered_at: 2026-09-29
+  - id: etf_6040
+    role: benchmark
+    hypothesis: 60% SPY / 40% IEF rebalanced monthly is the conventional balanced portfolio a cross-asset rule must improve on.
+    rationale: The classic stock/bond mix is what an allocator would hold absent any signal (D04 benchmark ii).
+    strategy: {module: trader.research.lowfreq.reference_strategies, class: Etf6040}
+    params: {}
+    benchmarks: [etf_ew]
+    registered_at: 2026-09-29
+
+  - id: xa_tsmom_rp
+    role: candidate
+    hypothesis: H1 - an ETF whose 3-12 month excess return over T-bills is positive keeps rising; holding only such ETFs, sized inverse to volatility with the rest in BIL, beats owning the universe and 60/40.
+    rationale: Time-series momentum (Moskowitz-Ooi-Pedersen 2012; Hurst-Ooi-Pedersen 2013) - initial under-reaction and herding make 1-12 month trends persist in every asset class; inverse-vol sizing lets bonds and commodities carry risk comparable to equities.
+    strategy: {module: strategies.lowfreq_xasset_tsmom_rp, class: TsMomRiskParity}
+    params: {LOOKBACK_DAYS: [63, 126, 252]}
+    default_params: {LOOKBACK_DAYS: 252}
+    benchmarks: [etf_ew, etf_6040]
+    registered_at: 2026-09-29
+
+  - id: xa_faber_sma
+    role: candidate
+    hypothesis: H2 - an equal-weight book that holds each ETF only while it trades above its 6-12 month moving average (else BIL) has a shallower drawdown and a higher Sharpe than holding the universe.
+    rationale: Faber 2007 tactical asset allocation - the moving-average filter is a trend signal (Levine-Pedersen 2016) that steps out of extended bear markets; registered as trend-family (same mechanism as H1, different signal construction).
+    strategy: {module: strategies.lowfreq_xasset_faber_sma, class: FaberSma}
+    params: {SMA_DAYS: [126, 168, 210, 252]}
+    default_params: {SMA_DAYS: 210}
+    benchmarks: [etf_ew, etf_6040]
+    registered_at: 2026-09-29
+
+  - id: xa_dual_mom
+    role: candidate
+    hypothesis: H3 - the ETFs with the highest trailing 6/12-month return (skipping the latest month) keep outperforming; holding the top N, with any name below T-bills replaced by BIL, beats both benchmarks.
+    rationale: Cross-sectional momentum across asset classes (Asness-Moskowitz-Pedersen 2013) plus the absolute-momentum switch (Antonacci 2012 dual momentum); a ranking effect distinct from the time-series sign of H1/H2.
+    strategy: {module: strategies.lowfreq_xasset_dual_mom, class: DualMomentum}
+    params: {TOP_N: [5, 10], LOOKBACK_DAYS: [126, 252]}
+    default_params: {TOP_N: 5, LOOKBACK_DAYS: 252}
+    benchmarks: [etf_ew, etf_6040]
+    registered_at: 2026-09-29
+
+  - id: xa_risk_parity
+    role: candidate
+    hypothesis: H4 - weighting every ETF inverse to its volatility (fully invested, no filter) earns a higher Sharpe than equal weight; expected to LOSE to 60/40 on return (control that isolates the trend filter in H1).
+    rationale: Leverage aversion (Asness-Frazzini-Pedersen 2012) - low-risk assets offer higher risk-adjusted returns and balancing risk diversifies better than balancing capital; without leverage the book is bond-heavy, so gate (b) is expected to fail.
+    strategy: {module: strategies.lowfreq_xasset_risk_parity, class: RiskParity}
+    params: {VOL_DAYS: [21, 63, 252]}
+    default_params: {VOL_DAYS: 63}
+    benchmarks: [etf_ew, etf_6040]
+    registered_at: 2026-09-29
+
+  - id: xa_vol_target
+    role: candidate
+    hypothesis: H5 - scaling SPY exposure to min(1, target vol / last month's realised vol) with the remainder in BIL earns a higher Sharpe than SPY and at least matches 60/40.
+    rationale: Volatility-managed portfolios (Moreira-Muir 2017) - variance is persistent while the equity premium does not rise with it; unlevered, only the de-risking half remains (Cederburg et al. 2020), so the effect is expected to be weak.
+    strategy: {module: strategies.lowfreq_xasset_vol_target, class: VolTarget}
+    params: {TARGET_VOL: [0.10, 0.12, 0.15]}
+    default_params: {TARGET_VOL: 0.12}
+    benchmarks: [etf_ew, etf_6040]
+    registered_at: 2026-09-29
+
+  - id: xa_carry
+    role: candidate
+    hypothesis: H6 - the ETFs with the highest trailing 12-month distribution yield earn higher total returns; holding the top N equal-weighted beats owning the universe.
+    rationale: Carry (Koijen-Moskowitz-Pedersen-Vrugt 2018) - the return if prices do not change predicts returns across asset classes because prices do not fully offset yield differences; for an ETF carry is its distribution yield, recovered from total-return vs price closes.
+    strategy: {module: strategies.lowfreq_xasset_carry, class: Carry}
+    params: {TOP_N: [5, 10, 15]}
+    default_params: {TOP_N: 10}
+    benchmarks: [etf_ew, etf_6040]
+    registered_at: 2026-09-29
+
+  - id: xa_trend_6040
+    role: candidate
+    hypothesis: H7 - 60/40 whose equity leg moves to BIL (or IEF) while SPY's 6/12-month excess return is negative keeps 60/40's return with a shallower drawdown, so its Sharpe is higher.
+    rationale: The decisive benchmark's drawdowns are equity bear markets, which trend (Faber 2007; Antonacci's GEM switch); filtering only the equity leg targets that failure mode without the basis risk of the whole universe. Trend-family, registered separately because it tests the filter on the benchmark's own composition.
+    strategy: {module: strategies.lowfreq_xasset_trend_6040, class: Trend6040}
+    params: {TREND_DAYS: [126, 252], OFF_ASSET: [BIL, IEF]}
+    default_params: {TREND_DAYS: 252, OFF_ASSET: BIL}
+    benchmarks: [etf_ew, etf_6040]
+    registered_at: 2026-09-29
