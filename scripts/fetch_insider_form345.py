@@ -413,7 +413,7 @@ def ingest_quarter(con: duckdb.DuckDBPyConnection, quarter: str, frames: Dict[st
 # --------------------------------------------------------------------------- derived columns
 
 SUPERSESSION_SQL = """
--- D10: an amendment replaces the filing it amends. Five matching tiers, each
+-- D10: an amendment replaces the filing it amends. Six matching tiers, each
 -- tried only when the previous one found no candidate; within a tier the
 -- candidates are ranked JOINTLY (same period of report +2, an original rather
 -- than an amendment +1) and only the top-scored one(s) are linked. Ranking
@@ -471,6 +471,18 @@ SUPERSESSION_SQL = """
 --           0001741956-22-000014) beside a colleague's identical withholding
 --           is amending their own filing, not the colleague's. Refused
 --           candidates are counted, never linked.
+--   tier 6  OWNER + PERIOD, NO WINDOW: tier 3 beyond its 45 days. Same
+--           issuer/base form/shared owner, a UNIQUE original with the same
+--           PERIOD_OF_REPORT filed any time earlier. Corrections of months-old
+--           filings are ordinary (observed: LSCC 0000855658-22-000265 re-files
+--           its 2022-05-17 original 157 days later to attach a power of
+--           attorney; OKE 0001741956-22-000014 corrects a withholding reported
+--           308 days earlier; a sample of 14 such pairs on the full history was
+--           all same-owner restatements or corrections by their footnotes). The
+--           period of report is the filing's earliest transaction date, so two
+--           filings by one owner sharing it are the same report unless the
+--           owner filed twice for that period - then the match is ambiguous and
+--           refused (counted).
 CREATE OR REPLACE TEMP TABLE _sig AS
 SELECT accession,
        string_agg(coalesce(trans_date::VARCHAR, '') || '|' || coalesce(trans_code, '') || '|' ||
@@ -573,9 +585,26 @@ WITH am AS (
                         AND (p.filing_date < a.filing_date
                              OR (p.filing_date = a.filing_date AND p.accession < a.accession)))
     QUALIFY count(*) OVER (PARTITION BY a.accession) = 1
+), t6 AS (
+    SELECT a.accession AS amend_acc, o.accession AS target_acc, o.is_amendment AS target_is_amend,
+           TRUE AS same_period, 6 AS tier
+    FROM am a
+    JOIN form345_submissions o
+      ON o.issuer_cik = a.issuer_cik AND o.base_form = a.base_form AND o.accession <> a.accession
+     AND NOT o.is_amendment AND o.period_of_report = a.period_of_report
+     AND o.filing_date <= a.filing_date
+    WHERE a.period_of_report IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM t1 WHERE t1.amend_acc = a.accession)
+      AND NOT EXISTS (SELECT 1 FROM t2 WHERE t2.amend_acc = a.accession)
+      AND NOT EXISTS (SELECT 1 FROM t3 WHERE t3.amend_acc = a.accession)
+      AND NOT EXISTS (SELECT 1 FROM t4 WHERE t4.amend_acc = a.accession)
+      AND NOT EXISTS (SELECT 1 FROM t5 WHERE t5.amend_acc = a.accession)
+      AND EXISTS (SELECT 1 FROM form345_owners x JOIN form345_owners y ON y.owner_cik = x.owner_cik
+                  WHERE x.accession = a.accession AND y.accession = o.accession)
+    QUALIFY count(*) OVER (PARTITION BY a.accession) = 1
 ), cand AS (
     SELECT * FROM t1 UNION ALL SELECT * FROM t2 UNION ALL SELECT * FROM t3 UNION ALL SELECT * FROM t4
-    UNION ALL SELECT * FROM t5
+    UNION ALL SELECT * FROM t5 UNION ALL SELECT * FROM t6
 ), scored AS (
     SELECT *, (CASE WHEN same_period THEN 2 ELSE 0 END) + (CASE WHEN target_is_amend THEN 0 ELSE 1 END) AS score
     FROM cand
@@ -627,6 +656,21 @@ JOIN form345_submissions o
 JOIN _sig so ON so.accession = o.accession AND so.signature = sa.signature
 WHERE NOT EXISTS (SELECT 1 FROM _links l WHERE l.amend_acc = a.accession)
 GROUP BY 1;
+
+-- tier-6 candidates that were NOT unique (the owner filed more than one original for the
+-- period), for the diagnostics; those already counted as tier-3 ambiguous are excluded
+CREATE OR REPLACE TEMP TABLE _tier6_ambiguous AS
+WITH am AS (SELECT accession, issuer_cik, base_form, period_of_report, filing_date FROM form345_submissions WHERE is_amendment)
+SELECT a.accession AS amend_acc, count(*) AS n
+FROM am a
+JOIN form345_submissions o
+  ON o.issuer_cik = a.issuer_cik AND o.base_form = a.base_form AND o.accession <> a.accession
+ AND NOT o.is_amendment AND o.period_of_report = a.period_of_report AND o.filing_date <= a.filing_date
+WHERE NOT EXISTS (SELECT 1 FROM _links l WHERE l.amend_acc = a.accession)
+  AND NOT EXISTS (SELECT 1 FROM _tier3_ambiguous t WHERE t.amend_acc = a.accession)
+  AND EXISTS (SELECT 1 FROM form345_owners x JOIN form345_owners y ON y.owner_cik = x.owner_cik
+              WHERE x.accession = a.accession AND y.accession = o.accession)
+GROUP BY 1 HAVING count(*) > 1;
 """
 
 GROUP_SQL = """
@@ -679,6 +723,7 @@ def apply_supersession(con: duckdb.DuckDBPyConnection) -> Dict[str, int]:
     n_t3_amb = int(con.execute('SELECT count(*) FROM _tier3_ambiguous').fetchone()[0])
     n_t4_amb = int(con.execute('SELECT count(*) FROM _tier4_ambiguous').fetchone()[0])
     n_t5_ref = int(con.execute('SELECT count(*) FROM _tier5_refused').fetchone()[0])
+    n_t6_amb = int(con.execute('SELECT count(*) FROM _tier6_ambiguous').fetchone()[0])
     n_superseded = int(con.execute('SELECT count(*) FROM form345_submissions WHERE superseded_by IS NOT NULL').fetchone()[0])
     n_unlinked_amend = int(con.execute("""
         SELECT count(*) FROM form345_submissions s WHERE is_amendment
@@ -688,6 +733,7 @@ def apply_supersession(con: duckdb.DuckDBPyConnection) -> Dict[str, int]:
             'linked_tier3_period': int(tiers.get(3, 0)), 'tier3_ambiguous_unlinked': n_t3_amb,
             'linked_tier4_owner_free': int(tiers.get(4, 0)), 'tier4_ambiguous_unlinked': n_t4_amb,
             'linked_tier5_owner_free_core': int(tiers.get(5, 0)), 'tier5_refused_unlinked': n_t5_ref,
+            'linked_tier6_owner_period_nowindow': int(tiers.get(6, 0)), 'tier6_ambiguous_unlinked': n_t6_amb,
             'amendments_unlinked': n_unlinked_amend, 'filings_superseded': n_superseded}
 
 

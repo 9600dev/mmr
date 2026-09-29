@@ -545,6 +545,14 @@ CHAIN_SUBS = [
     _sub('0017-24-000140', '24-JUN-2024', '20-JUN-2024', '4', '1700', 'RHO CO', 'RHO'),
     _sub('0017-24-000141', '24-JUN-2024', '20-JUN-2024', '4', '1700', 'RHO CO', 'RHO'),
     _sub('0017-24-000142', '25-JUN-2024', '20-JUN-2024', '4/A', '1700', 'RHO CO', 'RHO', orig='24-JUN-2024'),
+    # N (tier 6, OKE pattern): the owner's own original is 5 months old and the 4/A CHANGES the numbers
+    # (a corrected withholding); DATE_OF_ORIG_SUB is the amendment's own date -> linked without a window
+    _sub('0018-24-000150', '15-JAN-2024', '10-JAN-2024', '4', '1800', 'SIGMA INC', 'SGMA'),
+    _sub('0018-24-000151', '24-JUN-2024', '10-JAN-2024', '4/A', '1800', 'SIGMA INC', 'SGMA', orig='24-JUN-2024'),
+    # N-amb: the owner filed TWO originals for the period, months earlier -> ambiguous at tier 6, refused
+    _sub('0019-24-000160', '15-JAN-2024', '10-JAN-2024', '4', '1900', 'TAU LTD', 'TAU'),
+    _sub('0019-24-000161', '16-JAN-2024', '10-JAN-2024', '4', '1900', 'TAU LTD', 'TAU'),
+    _sub('0019-24-000162', '24-JUN-2024', '10-JAN-2024', '4/A', '1900', 'TAU LTD', 'TAU', orig='24-JUN-2024'),
 ]
 CHAIN_OWNS = [_own(acc, cik, name, 'Director') for acc, cik, name in [
     ('0003-24-000011', '31', 'Gamma Dir'), ('0003-24-000010', '31', 'Gamma Dir'),
@@ -563,6 +571,8 @@ CHAIN_OWNS = [_own(acc, cik, name, 'Director') for acc, cik, name in [
     ('0151-24-000001', '151', 'Omicron Officer One'), ('0152-24-000001', '152', 'Omicron Officer Two'),
     ('0016-24-000130', '161', 'Pi Officer One'), ('0016-24-000131', '162', 'Pi Officer Two'), ('0016-24-000132', '161', 'Pi Officer One'),
     ('0017-24-000140', '171', 'Rho Dir One'), ('0017-24-000141', '172', 'Rho Dir Two'), ('0017-24-000142', '173', 'Rho Dir Three'),
+    ('0018-24-000150', '181', 'Sigma Officer'), ('0018-24-000151', '181', 'Sigma Officer'),
+    ('0019-24-000160', '191', 'Tau Officer'), ('0019-24-000161', '191', 'Tau Officer'), ('0019-24-000162', '191', 'Tau Officer'),
 ]]
 CHAIN_NDTS = [
     _ndt('0003-24-000011', '111', '20-JUN-2024', 'P', '1000.0', '27.15', 'A', '7000.0'),
@@ -604,6 +614,11 @@ CHAIN_NDTS = [
     _ndt('0017-24-000140', '250', '20-JUN-2024', 'A', '500.0', '0', 'A', '1500.0'),
     _ndt('0017-24-000141', '251', '20-JUN-2024', 'A', '500.0', '0', 'A', '2500.0'),
     _ndt('0017-24-000142', '252', '20-JUN-2024', 'A', '500.0', '0', 'A', '3500.0'),
+    _ndt('0018-24-000150', '260', '10-JAN-2024', 'F', '6000.0', '61.81', 'D', '100000.0'),   # OKE numbers
+    _ndt('0018-24-000151', '261', '10-JAN-2024', 'F', '6197.0', '61.81', 'D', '106131.39'),
+    _ndt('0019-24-000160', '270', '10-JAN-2024', 'S', '100.0', '20.0', 'D', '900.0'),
+    _ndt('0019-24-000161', '271', '10-JAN-2024', 'S', '200.0', '20.0', 'D', '700.0'),
+    _ndt('0019-24-000162', '272', '10-JAN-2024', 'S', '150.0', '20.0', 'D', '750.0'),
 ]
 
 
@@ -665,13 +680,15 @@ def test_ambiguous_amendment_supersedes_all_candidates_and_is_counted(chain_db):
     sup = _superseded(db)
     assert sup['0007-24-000050'] == '0007-24-000052' and sup['0007-24-000051'] == '0007-24-000052'
     assert sup['0007-24-000052'] is None
-    assert diag['amendments'] == 17 and diag['amendments_linked'] == 11 and diag['amendments_unlinked'] == 6
+    assert diag['amendments'] == 19 and diag['amendments_linked'] == 13 and diag['amendments_unlinked'] == 6
     assert diag['amendments_ambiguous'] == 1
     assert diag['linked_tier1_date'] == 7 and diag['linked_tier2_content'] == 1 and diag['linked_tier3_period'] == 1
     assert diag['linked_tier4_owner_free'] == 1 and diag['linked_tier5_owner_free_core'] == 1
+    assert diag['linked_tier6_owner_period_nowindow'] == 2   # B-own (identical, 5 months) + N (changed numbers)
     assert diag['tier3_ambiguous_unlinked'] == 1 and diag['tier4_ambiguous_unlinked'] == 1
-    assert diag['tier5_refused_unlinked'] == 4        # O-amb, B-self, B-own, B-amb
-    assert diag['filings_superseded'] == 12           # S 1 + T 2 + Y 1 + D 2 + X 2 + C2 1 + P3 1 + O 1 + B 1
+    assert diag['tier5_refused_unlinked'] == 3        # O-amb, B-self, B-amb (B-own is linked to its own original)
+    assert diag['tier6_ambiguous_unlinked'] == 1      # N-amb (P3-ambiguous is counted under tier 3 only)
+    assert diag['filings_superseded'] == 14           # S 1 + T 2 + Y 1 + D 2 + X 2 + C2 1 + P3 1 + O 1 + B 1 + B-own 1 + N 1
     assert diag['dup_pairs_amend'] == 0          # no identical amendment/original pair left effective
     assert diag['dup_pairs_amend_owner_free'] == 2   # the refused O-amb triple: amendment x two identical originals
 
@@ -755,18 +772,36 @@ def test_core_content_tier_links_owner_correction_that_also_corrects_holdings(ch
 
 
 def test_core_content_tier_guards_refuse_look_alikes(chain_db):
-    """The core-content match alone is not evidence of a correction. Refused, all filings effective:
+    """The core-content match alone is not evidence of a correction. Refused at tier 5:
     B-self  two insiders each self-filing an identical grant (different submitter prefixes; ABCB shape);
     B-own   the amending owner already reported the same period themselves months earlier - the 4/A
-            amends THEIR filing, not the colleague's identical one on the named day (LSCC/OKE shape);
+            amends THEIR filing, not the colleague's identical one on the named day (LSCC/OKE shape),
+            and tier 6 then links it to that own filing while the colleague's stays effective;
     B-amb   two same-submitter originals with the identical core transaction on the named day."""
     db, _ = chain_db
     sup = _superseded(db)
-    for acc in ('0151-24-000001', '0152-24-000001', '0016-24-000130', '0016-24-000131', '0016-24-000132',
+    for acc in ('0151-24-000001', '0152-24-000001', '0016-24-000131', '0016-24-000132',
                 '0017-24-000140', '0017-24-000141', '0017-24-000142'):
         assert sup[acc] is None, acc
+    assert sup['0016-24-000130'] == '0016-24-000132'          # the owner's OWN January filing, not the colleague's
     ev = load_insider_events('2024-01-01', '2024-06-30', tickers=['OMI', 'PII', 'RHO'], db_path=db)
-    assert len(ev) == 8
+    assert len(ev) == 7
+    assert sorted(ev.loc[ev['ticker'] == 'PII', 'accession']) == ['0016-24-000131', '0016-24-000132']
+
+
+def test_owner_period_fallback_links_months_old_original_without_window(chain_db):
+    """Tier 6 (OKE 0001741956-22-000014 / LSCC 0000855658-22-000265 pattern): the owner's own original
+    is older than the 45-day window of tiers 2-3 and DATE_OF_ORIG_SUB is the amendment's own date;
+    a UNIQUE same-owner original with the same period is replaced whatever its age, even when the
+    amendment changes the numbers. Two own originals for the period -> ambiguous, refused."""
+    db, _ = chain_db
+    sup = _superseded(db)
+    assert sup['0018-24-000150'] == '0018-24-000151' and sup['0018-24-000151'] is None
+    ev = load_insider_events('2024-01-01', '2024-06-30', tickers=['SGMA'], db_path=db)
+    assert list(ev['accession']) == ['0018-24-000151'] and list(ev['shares']) == [6197.0]
+    assert sup['0019-24-000160'] is None and sup['0019-24-000161'] is None and sup['0019-24-000162'] is None
+    ev = load_insider_events('2024-01-01', '2024-06-30', tickers=['TAU'], db_path=db)
+    assert sorted(ev['shares']) == [100.0, 150.0, 200.0]
 
 
 _FULL_DB = Path(os.path.expanduser('~/.local/share/mmr/research_full/insider.duckdb'))
@@ -784,9 +819,18 @@ def test_real_full_database_supersedes_the_observed_cases():
              '0001209191-21-056028', '0001209191-21-056275', '0001437749-22-016953', '0001437749-22-029426',
              '0001090009-15-000020', '0001090009-16-000028',
              '0001239875-16-000012', '0001356555-16-000004', '0000855658-22-000264', '0000855658-22-000265',
-             '0001741956-22-000011', '0001741956-22-000014')""").fetchall())
+             '0001741956-22-000011', '0001741956-22-000014',
+             '0000855658-22-000137', '0000855658-22-000131', '0001741956-22-000002')""").fetchall())
     finally:
         con.close()
+    # tier 6: the same owner's months-old original is replaced whatever its age (no 45-day window)
+    assert sup['0000855658-22-000137'] == '0000855658-22-000265' and sup['0000855658-22-000265'] is None   # LSCC Luther, 157 days
+    assert sup['0000855658-22-000131'] == '0000855658-22-000264' and sup['0000855658-22-000264'] is None   # LSCC Elashmawi
+    assert sup['0001741956-22-000002'] == '0001741956-22-000014' and sup['0001741956-22-000014'] is None   # OKE Kelley, 308 days
+    lscc = load_insider_events('2022-05-01', '2022-10-31', codes=['F'], tickers=['LSCC'], db_path=_FULL_DB)
+    got = set(lscc['accession'])
+    assert {'0000855658-22-000264', '0000855658-22-000265'} <= got
+    assert not ({'0000855658-22-000137', '0000855658-22-000131'} & got)
     # tier 5: owner corrections that also correct the holdings, confirmed by the filings' own text
     assert sup['0001209191-21-056028'] == '0001209191-21-056275' and sup['0001209191-21-056275'] is None   # BATL
     assert sup['0001437749-22-016953'] == '0001437749-22-029426'                                          # CLRO
