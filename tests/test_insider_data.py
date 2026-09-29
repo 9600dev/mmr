@@ -528,6 +528,23 @@ CHAIN_SUBS = [
     # O-diff: new owner, named date holds one same-period filing with DIFFERENT content -> never linked
     _sub('0013-24-000110', '24-JUN-2024', '21-JUN-2024', '4', '1300', 'NU PLC', 'NUU'),
     _sub('0013-24-000111', '26-JUN-2024', '21-JUN-2024', '4/A', '1300', 'NU PLC', 'NUU', orig='24-JUN-2024'),
+    # B (tier 5, BATL pattern): the 4/A corrects the reporting owner AND the holdings: same submitter
+    # prefix, named date, same period, identical core transaction, different shares_after -> replaced
+    _sub('0014-24-000120', '24-JUN-2024', '20-JUN-2024', '4', '1400', 'XI CORP', 'XII'),
+    _sub('0014-24-000121', '25-JUN-2024', '20-JUN-2024', '4/A', '1400', 'XI CORP', 'XII', orig='24-JUN-2024'),
+    # B-self (ABCB pattern): two insiders each SELF-file an identical grant (submitter prefix = own CIK) -> refused
+    _sub('0151-24-000001', '24-JUN-2024', '20-JUN-2024', '4', '1500', 'OMICRON INC', 'OMI'),
+    _sub('0152-24-000001', '25-JUN-2024', '20-JUN-2024', '4/A', '1500', 'OMICRON INC', 'OMI', orig='24-JUN-2024'),
+    # B-own (LSCC/OKE pattern): the amending owner has an OWN earlier same-period filing (outside the 45-day
+    # window) and a colleague's identical withholding sits on the named day -> refused, all three effective
+    _sub('0016-24-000130', '15-JAN-2024', '10-JAN-2024', '4', '1600', 'PI LTD', 'PII'),
+    _sub('0016-24-000131', '24-JUN-2024', '10-JAN-2024', '4', '1600', 'PI LTD', 'PII'),
+    _sub('0016-24-000132', '24-JUN-2024', '10-JAN-2024', '4/A', '1600', 'PI LTD', 'PII', orig='24-JUN-2024'),
+    # B-amb: two same-submitter originals with the identical core transaction but different holdings on the
+    # named day, a third owner's 4/A -> ambiguous at tier 5, refused
+    _sub('0017-24-000140', '24-JUN-2024', '20-JUN-2024', '4', '1700', 'RHO CO', 'RHO'),
+    _sub('0017-24-000141', '24-JUN-2024', '20-JUN-2024', '4', '1700', 'RHO CO', 'RHO'),
+    _sub('0017-24-000142', '25-JUN-2024', '20-JUN-2024', '4/A', '1700', 'RHO CO', 'RHO', orig='24-JUN-2024'),
 ]
 CHAIN_OWNS = [_own(acc, cik, name, 'Director') for acc, cik, name in [
     ('0003-24-000011', '31', 'Gamma Dir'), ('0003-24-000010', '31', 'Gamma Dir'),
@@ -542,6 +559,10 @@ CHAIN_OWNS = [_own(acc, cik, name, 'Director') for acc, cik, name in [
     ('0011-24-000090', '111', 'Lambda Corp (misfiled as owner)'), ('0011-24-000091', '112', 'Lambda Dir'),
     ('0012-24-000100', '121', 'Mu Dir One'), ('0012-24-000101', '122', 'Mu Dir Two'), ('0012-24-000102', '123', 'Mu Dir Three'),
     ('0013-24-000110', '131', 'Nu Dir One'), ('0013-24-000111', '132', 'Nu Dir Two'),
+    ('0014-24-000120', '141', 'Xi Officer (misattributed)'), ('0014-24-000121', '142', 'Xi Dir'),
+    ('0151-24-000001', '151', 'Omicron Officer One'), ('0152-24-000001', '152', 'Omicron Officer Two'),
+    ('0016-24-000130', '161', 'Pi Officer One'), ('0016-24-000131', '162', 'Pi Officer Two'), ('0016-24-000132', '161', 'Pi Officer One'),
+    ('0017-24-000140', '171', 'Rho Dir One'), ('0017-24-000141', '172', 'Rho Dir Two'), ('0017-24-000142', '173', 'Rho Dir Three'),
 ]]
 CHAIN_NDTS = [
     _ndt('0003-24-000011', '111', '20-JUN-2024', 'P', '1000.0', '27.15', 'A', '7000.0'),
@@ -573,6 +594,16 @@ CHAIN_NDTS = [
     _ndt('0012-24-000102', '202', '21-JUN-2024', 'A', '9000.0', '0', 'A', '9000.0'),
     _ndt('0013-24-000110', '210', '21-JUN-2024', 'F', '653.0', '33.69', 'D', '5000.0'),
     _ndt('0013-24-000111', '211', '21-JUN-2024', 'F', '485.0', '33.69', 'D', '4000.0'),
+    _ndt('0014-24-000120', '220', '20-JUN-2024', 'P', '6201.0', '7.99', 'A', '9551.0'),    # BATL numbers
+    _ndt('0014-24-000121', '221', '20-JUN-2024', 'P', '6201.0', '7.99', 'A', '11601.0'),
+    _ndt('0151-24-000001', '230', '20-JUN-2024', 'A', '4930.0', '0', 'A', '62428.0'),
+    _ndt('0152-24-000001', '231', '20-JUN-2024', 'A', '4930.0', '0', 'A', '65737.0'),
+    _ndt('0016-24-000130', '240', '10-JAN-2024', 'F', '902.0', '49.38', 'D', '139868.0'),
+    _ndt('0016-24-000131', '241', '10-JAN-2024', 'F', '902.0', '49.38', 'D', '167459.0'),
+    _ndt('0016-24-000132', '242', '10-JAN-2024', 'F', '902.0', '49.38', 'D', '139868.0'),
+    _ndt('0017-24-000140', '250', '20-JUN-2024', 'A', '500.0', '0', 'A', '1500.0'),
+    _ndt('0017-24-000141', '251', '20-JUN-2024', 'A', '500.0', '0', 'A', '2500.0'),
+    _ndt('0017-24-000142', '252', '20-JUN-2024', 'A', '500.0', '0', 'A', '3500.0'),
 ]
 
 
@@ -634,12 +665,13 @@ def test_ambiguous_amendment_supersedes_all_candidates_and_is_counted(chain_db):
     sup = _superseded(db)
     assert sup['0007-24-000050'] == '0007-24-000052' and sup['0007-24-000051'] == '0007-24-000052'
     assert sup['0007-24-000052'] is None
-    assert diag['amendments'] == 13 and diag['amendments_linked'] == 10 and diag['amendments_unlinked'] == 3
+    assert diag['amendments'] == 17 and diag['amendments_linked'] == 11 and diag['amendments_unlinked'] == 6
     assert diag['amendments_ambiguous'] == 1
     assert diag['linked_tier1_date'] == 7 and diag['linked_tier2_content'] == 1 and diag['linked_tier3_period'] == 1
-    assert diag['linked_tier4_owner_free'] == 1
+    assert diag['linked_tier4_owner_free'] == 1 and diag['linked_tier5_owner_free_core'] == 1
     assert diag['tier3_ambiguous_unlinked'] == 1 and diag['tier4_ambiguous_unlinked'] == 1
-    assert diag['filings_superseded'] == 11           # S 1 + T 2 + Y 1 + D 2 + X 2 + C2 1 + P3 1 + O 1
+    assert diag['tier5_refused_unlinked'] == 4        # O-amb, B-self, B-own, B-amb
+    assert diag['filings_superseded'] == 12           # S 1 + T 2 + Y 1 + D 2 + X 2 + C2 1 + P3 1 + O 1 + B 1
     assert diag['dup_pairs_amend'] == 0          # no identical amendment/original pair left effective
     assert diag['dup_pairs_amend_owner_free'] == 2   # the refused O-amb triple: amendment x two identical originals
 
@@ -709,6 +741,34 @@ def test_owner_free_tier_refuses_ambiguous_and_different_content(chain_db):
     assert len(ev) == 5
 
 
+def test_core_content_tier_links_owner_correction_that_also_corrects_holdings(chain_db):
+    """Tier 5 (BATL 0001209191-21-056275 pattern): the 4/A moves the trade to another reporting owner
+    AND corrects shares owned after, so tier 4's extended signature cannot match. Same submitter
+    prefix, named date, same period, identical core transaction, unique -> replaced; the loader
+    returns only the amendment, under the corrected owner with the corrected holdings."""
+    db, _ = chain_db
+    sup = _superseded(db)
+    assert sup['0014-24-000120'] == '0014-24-000121' and sup['0014-24-000121'] is None
+    ev = load_insider_events('2024-06-01', '2024-06-30', tickers=['XII'], db_path=db)
+    assert list(ev['accession']) == ['0014-24-000121']
+    assert list(ev['owner_cik']) == [142] and list(ev['shares_after']) == [11601.0]
+
+
+def test_core_content_tier_guards_refuse_look_alikes(chain_db):
+    """The core-content match alone is not evidence of a correction. Refused, all filings effective:
+    B-self  two insiders each self-filing an identical grant (different submitter prefixes; ABCB shape);
+    B-own   the amending owner already reported the same period themselves months earlier - the 4/A
+            amends THEIR filing, not the colleague's identical one on the named day (LSCC/OKE shape);
+    B-amb   two same-submitter originals with the identical core transaction on the named day."""
+    db, _ = chain_db
+    sup = _superseded(db)
+    for acc in ('0151-24-000001', '0152-24-000001', '0016-24-000130', '0016-24-000131', '0016-24-000132',
+                '0017-24-000140', '0017-24-000141', '0017-24-000142'):
+        assert sup[acc] is None, acc
+    ev = load_insider_events('2024-01-01', '2024-06-30', tickers=['OMI', 'PII', 'RHO'], db_path=db)
+    assert len(ev) == 8
+
+
 _FULL_DB = Path(os.path.expanduser('~/.local/share/mmr/research_full/insider.duckdb'))
 
 
@@ -720,9 +780,26 @@ def test_real_full_database_supersedes_the_observed_cases():
             ('0001062993-22-012378', '0001062993-22-012373', '0001207097-21-000451', '0001207097-21-000455',
              '0001207097-22-000001', '0001207097-21-000456', '0001207097-21-000457',
              '0001207097-22-000067', '0001207097-22-000069',
-             '0001010549-14-000083', '0001010549-14-000096')""").fetchall())
+             '0001010549-14-000083', '0001010549-14-000096',
+             '0001209191-21-056028', '0001209191-21-056275', '0001437749-22-016953', '0001437749-22-029426',
+             '0001090009-15-000020', '0001090009-16-000028',
+             '0001239875-16-000012', '0001356555-16-000004', '0000855658-22-000264', '0000855658-22-000265',
+             '0001741956-22-000011', '0001741956-22-000014')""").fetchall())
     finally:
         con.close()
+    # tier 5: owner corrections that also correct the holdings, confirmed by the filings' own text
+    assert sup['0001209191-21-056028'] == '0001209191-21-056275' and sup['0001209191-21-056275'] is None   # BATL
+    assert sup['0001437749-22-016953'] == '0001437749-22-029426'                                          # CLRO
+    assert sup['0001090009-15-000020'] == '0001090009-16-000028'                                          # SFST
+    # tier-5 guards: look-alikes stay effective (two self-filers; own months-old filing being amended)
+    for acc in ('0001239875-16-000012', '0001356555-16-000004',      # ABCB: identical grants, two self-filers
+                '0000855658-22-000264', '0000855658-22-000265',      # LSCC: two officers' POA amendments
+                '0001741956-22-000011', '0001741956-22-000014'):     # OKE: two officers' clerical amendments
+        assert sup[acc] is None, acc
+    batl = load_insider_events('2021-09-01', '2021-09-30', codes=['P'], tickers=['BATL'], db_path=_FULL_DB)
+    assert '0001209191-21-056028' not in set(batl['accession'])
+    hinds = batl[batl['accession'] == '0001209191-21-056275']
+    assert len(hinds) == 1 and hinds['owner_cik'].iloc[0] == 1545974 and hinds['shares_after'].iloc[0] == 11601.0
     assert sup['0001010549-14-000083'] == '0001010549-14-000096' and sup['0001010549-14-000096'] is None   # CYAN owner fix
     assert sup['0001062993-22-012378'] == '0001062993-22-012373' and sup['0001062993-22-012373'] is None   # SWM
     assert sup['0001207097-21-000451'] == '0001207097-22-000001'                                          # TPL chain root
