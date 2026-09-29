@@ -63,20 +63,26 @@ def receipt(exec_id: str, order_id: int, shares: float, price: float | None = 10
 
 
 def observed(order_id: int, symbol: str, action: str, status: str = 'Filled', filled: float = 0.0,
-             known: bool = True, ambiguous: bool = False) -> OrderObservation:
+             known: bool = True, ambiguous: bool = False, total: float | None = None) -> OrderObservation:
     return OrderObservation(order_id=order_id, symbol=symbol, action=action, status=status, filled=filled,
-                            fill_quantity_known=known, con_id=1, identity_ambiguous=ambiguous)
+                            fill_quantity_known=known, con_id=1, identity_ambiguous=ambiguous,
+                            total_quantity=filled if total is None else total)
 
 
 def evidence(orders: Sequence[OrderObservation] = (), executions: Sequence[Execution] = (), *,
              receipts_available: bool = True, history_complete: bool = True, account_confirmed: bool = True,
-             orders_complete: bool = True, account: str = ACCOUNT,
+             orders_complete: bool = True, complete: bool | None = None, account: str = ACCOUNT,
              observed_at: str = '2026-09-29T14:35:00+00:00',
              replay_scope: str = 'broker_available_recent_history') -> ExecutionEvidence:
+    """``complete`` defaults to what the runtime would compute from the other flags and the rows."""
+    if complete is None:
+        complete = (receipts_available and history_complete and account_confirmed and orders_complete
+                    and not any(o.identity_ambiguous for o in orders))
     return ExecutionEvidence(account=account, account_confirmed=account_confirmed,
                              receipts_available=receipts_available, history_complete=history_complete,
                              orders_complete=orders_complete, observed_at=observed_at,
-                             orders=tuple(orders), executions=tuple(executions), replay_scope=replay_scope)
+                             orders=tuple(orders), executions=tuple(executions), complete=complete,
+                             replay_scope=replay_scope)
 
 
 def filled_order(order_id: int, symbol: str, action: str, shares: float, price: float = 100.0,

@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 import datetime as dt
+from pathlib import Path
 
 import duckdb
 import pytest
 
 from rebalance_fakes import T0, FakeGateway, evidence, executed, filled_order, observed, receipt
 from trader.rebalance.fills import (
-    SLEEVE_FILLS_DDL, ExecutionMismatch, ExecutionsIncomplete, SleeveFillsStore, match_executions,
-    reconcile_sleeve, trade_date_of,
+    SLEEVE_FILLS_DDL, ExecutionMismatch, ExecutionsIncomplete, SleeveFillsStore, WorkingOrder, match_executions,
+    reconcile_sleeve, submitted_quantity, trade_date_of,
 )
 from trader.rebalance.plan import Refusal
 from trader.rebalance.ports import Fill
@@ -25,6 +26,8 @@ def _fill(exec_id, ticker='AAPL', qty=25.0, price=200.0, pid=1, sleeve='s2p'):
 
 
 def tables(path: str) -> set[str]:
+    if not Path(path).exists():          # a refusal before any connection leaves no file at all
+        return set()
     con = duckdb.connect(path, read_only=True)
     try:
         return {r[0] for r in con.execute('SELECT table_name FROM duckdb_tables()').fetchall()}
@@ -114,6 +117,9 @@ def test_match_journals_one_row_per_receipt_dated_by_ib_execution_time():
     assert all(f.sleeve == 's2p' and f.recorded_at == NOW and f.commission is None for f in res.fills)
     assert [(u.proposal_id, u.order_id, u.broker_status) for u in res.unfilled] == [(2, 902, 'Submitted')]
     assert res.unfilled_proposal_ids == [2] and list(res.proposals_without_order_ids) == [5] and res.warnings == ()
+    assert res.working == (WorkingOrder(proposal_id=2, order_id=902, broker_status='Submitted', filled=0.0,
+                                        total_quantity=0.0),)          # 901 is Filled: terminal, not working
+    assert res.receipt_only_orders == ()
 
 
 def test_match_signs_sells_negative_and_refuses_symbol_or_side_mismatch():
@@ -159,21 +165,85 @@ def test_prior_day_fill_replayed_without_receipts_is_refused_not_guessed():
     assert exc.value.code == 'EXECUTIONS_INCOMPLETE' and gw.recorded == [] and 'record_fills' not in gw.method_names
 
 
-def test_orders_the_broker_shows_unfilled_or_dead_are_reported_not_journaled():
-    records = [executed(1, 'AAPL', 'BUY', 25, order_ids=[901]), executed(2, 'MSFT', 'BUY', 7, order_ids=[902]),
-               executed(3, 'NVDA', 'BUY', 4, order_ids=[903])]
-    ev = evidence([observed(901, 'AAPL', 'BUY', 'Cancelled', filled=0),                # DAY order expired
-                   observed(902, 'MSFT', 'BUY', 'Unknown', filled=0, known=False)], [])  # outcome unknown, no receipt
+def test_orders_the_broker_positively_shows_unfilled_are_reported_not_journaled():
+    """Cancelled (a DAY order that expired) or still Submitted with a KNOWN zero fill: resolved, nothing to journal."""
+    records = [executed(1, 'AAPL', 'BUY', 25, order_ids=[901]), executed(2, 'MSFT', 'BUY', 7, order_ids=[902])]
+    ev = evidence([observed(901, 'AAPL', 'BUY', 'Cancelled', filled=0, total=25),
+                   observed(902, 'MSFT', 'BUY', 'Submitted', filled=0, total=7)], [])
     res = match_executions('s2p', records, ev)
     assert res.fills == ()
-    assert [(u.order_id, u.broker_status) for u in res.unfilled] == [(901, 'Cancelled'), (902, 'Unknown'), (903, 'unknown')]
+    assert [(u.order_id, u.broker_status) for u in res.unfilled] == [(901, 'Cancelled'), (902, 'Submitted')]
+    assert [(w.order_id, w.broker_status, w.filled, w.total_quantity) for w in res.working] == [(902, 'Submitted', 0.0, 7.0)]
 
 
-def test_receipt_without_an_order_observation_is_matched_by_order_id_with_a_warning():
-    res = match_executions('s2p', [executed(1, 'AAPL', 'BUY', 25, order_ids=[901])],
-                           evidence([], [receipt('x1', 901, 25, 200.0)]))
-    assert [(f.ticker, f.quantity) for f in res.fills] == [('AAPL', 25.0)]
-    assert res.warnings and 'no broker order observation' in res.warnings[0]
+def test_an_executed_order_with_no_evidence_at_all_is_unknown_not_unfilled():
+    """The critic's reproduction: order 901 absent from observations AND receipts must refuse, never pass as unfilled.
+
+    Journaling nothing for an order that may have filled makes the next plan buy it again (D13 fail-closed).
+    """
+    records = [executed(1, 'AAPL', 'BUY', 25, order_ids=[901])]
+    with pytest.raises(ExecutionsIncomplete, match=r'order 901 \(proposal #1\): unknown to the broker tracker'):
+        match_executions('s2p', records, evidence([], []))
+    gw = FakeGateway(proposals=records, evidence=evidence([], []), positions={'AAPL': 25})
+    for dry_run in (True, False):
+        with pytest.raises(Refusal) as exc:
+            reconcile_sleeve('s2p', gw, dry_run=dry_run)
+        assert exc.value.code == 'EXECUTIONS_INCOMPLETE' and 'cannot establish whether it filled' in exc.value.message
+    assert gw.recorded == [] and 'record_fills' not in gw.method_names
+
+
+def test_an_unknown_fill_quantity_is_refused_with_or_without_receipts():
+    """A tracker row with fillQuantityKnown=False (status Unknown) proves nothing about what filled."""
+    records = [executed(1, 'AAPL', 'BUY', 25, order_ids=[901])]
+    unknown = observed(901, 'AAPL', 'BUY', 'Unknown', filled=0, known=False)
+    with pytest.raises(ExecutionsIncomplete, match='cannot establish the fill quantity \(status Unknown\)'):
+        match_executions('s2p', records, evidence([unknown], []))
+    # Receipts alongside an Unknown observation cannot prove they are ALL the executions: still refused.
+    with pytest.raises(ExecutionsIncomplete, match='cannot establish the fill quantity'):
+        match_executions('s2p', records, evidence([observed(901, 'AAPL', 'BUY', 'Unknown', filled=25, known=False)],
+                                                  [receipt('x1', 901, 25, 200.0)]))
+    gw = FakeGateway(proposals=records, evidence=evidence([unknown], []), positions={'AAPL': 25})
+    with pytest.raises(Refusal) as exc:
+        reconcile_sleeve('s2p', gw, dry_run=True)
+    assert exc.value.code == 'EXECUTIONS_INCOMPLETE' and gw.recorded == []
+
+
+def test_receipts_exceeding_the_broker_fill_or_without_cum_qty_are_contradictions_not_fills():
+    records = [executed(1, 'AAPL', 'BUY', 25, order_ids=[901])]
+    with pytest.raises(ExecutionsIncomplete, match='receipts cover 25 but the broker reports only 20 filled'):
+        match_executions('s2p', records, evidence([observed(901, 'AAPL', 'BUY', 'Submitted', filled=20, total=25)],
+                                                  [receipt('x1', 901, 25, 200.0)]))
+    with pytest.raises(ExecutionsIncomplete, match='carries no cumulative quantity'):
+        match_executions('s2p', records, evidence([observed(901, 'AAPL', 'BUY', 'Filled', filled=25)],
+                                                  [receipt('x1', 901, 25, 200.0, cum_qty=0)]))
+
+
+def test_a_partially_filled_working_order_journals_its_receipts_and_is_reported_working():
+    records = [executed(1, 'AAPL', 'BUY', 25, order_ids=[901])]
+    res = match_executions('s2p', records, evidence([observed(901, 'AAPL', 'BUY', 'Submitted', filled=20, total=25)],
+                                                    [receipt('x1', 901, 20, 199.5)]))
+    assert [(f.exec_id, f.quantity) for f in res.fills] == [('x1', 20.0)] and res.unfilled == ()
+    assert res.working == (WorkingOrder(proposal_id=1, order_id=901, broker_status='Submitted', filled=20.0,
+                                        total_quantity=25.0),)
+
+
+def test_receipts_without_an_order_observation_match_only_when_they_cover_the_whole_submission():
+    """No tracker row, but IB receipts for every submitted share: the order cannot have filled more — accepted, flagged."""
+    records = [executed(1, 'AAPL', 'BUY', 25, order_ids=[901])]           # metadata.submission_quantity = 25
+    res = match_executions('s2p', records, evidence([], [receipt('x1', 901, 20, 200.0, cum_qty=20),
+                                                         receipt('x2', 901, 5, 201.0, cum_qty=25)]))
+    assert [(f.ticker, f.quantity) for f in res.fills] == [('AAPL', 20.0), ('AAPL', 5.0)]
+    assert res.receipt_only_orders == (901,) and res.working == () and res.unfilled == ()
+    assert len(res.warnings) == 1 and 'no broker order observation' in res.warnings[0] and 'whole submitted quantity 25' in res.warnings[0]
+    # Partial coverage with no observation: the remainder's fate is unknown — refused, nothing journaled.
+    with pytest.raises(ExecutionsIncomplete, match='receipts cover 20 of the submitted 25'):
+        match_executions('s2p', records, evidence([], [receipt('x1', 901, 20, 200.0)]))
+    # No usable submitted quantity: receipts alone can never prove completeness.
+    bare = executed(1, 'AAPL', 'BUY', 25, order_ids=[901]).__class__(
+        **{**executed(1, 'AAPL', 'BUY', 25, order_ids=[901]).__dict__, 'quantity': None, 'metadata': {}})
+    assert submitted_quantity(bare) is None and submitted_quantity(records[0]) == 25.0
+    with pytest.raises(ExecutionsIncomplete, match='of the submitted unknown'):
+        match_executions('s2p', [bare], evidence([], [receipt('x1', 901, 25, 200.0)]))
 
 
 def test_ambiguous_identity_timeless_or_empty_receipts_are_incomplete():
@@ -204,7 +274,10 @@ def test_reconcile_journals_once_reports_and_is_idempotent():
     gw = _two_orders()
     report = reconcile_sleeve('s2p', gw)
     assert report.inserted == 1 and report.matched_by_symbol == {'AAPL': 25.0}
-    assert report.unfilled_proposals == (2,) and report.holdings == {'AAPL': 25.0} and report.warnings == ()
+    assert report.unfilled_proposals == (2,) and report.holdings == {'AAPL': 25.0}
+    assert report.working == (WorkingOrder(2, 902, 'Submitted', 0.0, 0.0),) and report.broker_snapshot_complete
+    assert [w for w in report.warnings] == ['still working at the broker (more executions can arrive): '
+                                            'order 902 (proposal #2, Submitted, 0/0 filled)']
     assert report.evidence_observed_at == '2026-09-29T14:35:00+00:00' and report.replay_scope == 'broker_available_recent_history'
     assert ('execution_evidence', {'order_ids': [901, 902]}) in gw.calls          # scoped to the sleeve's orders
     again = reconcile_sleeve('s2p', gw)
@@ -234,6 +307,7 @@ def test_reconcile_warns_when_journal_exceeds_ib_or_goes_short():
     ({'evidence': evidence(receipts_available=False)}, 'execution receipts'),
     ({'evidence': evidence(history_complete=False)}, 'replay is incomplete'),
     ({'evidence': evidence(account_confirmed=False)}, 'not confirmed'),
+    ({'evidence': evidence(orders_complete=False)}, 'open-orders refresh did not complete'),
 ])
 def test_reconcile_refuses_when_the_broker_read_is_unavailable_or_incomplete(kwargs, needle):
     gw = FakeGateway(proposals=[executed(1, 'AAPL', 'BUY', 25, order_ids=[901])], positions={'AAPL': 25}, **kwargs)
@@ -259,3 +333,25 @@ def test_reconcile_refuses_when_ib_cannot_be_read_or_an_observation_contradicts_
     with pytest.raises(Refusal) as exc:
         reconcile_sleeve('s2p', gw)
     assert exc.value.code == 'EXECUTION_MISMATCH' and gw.recorded == []
+
+
+def test_reconcile_honours_the_runtime_complete_verdict_unless_receipts_explain_it():
+    """``execution_snapshot.complete`` is copied, not inferred: an unexplained False refuses; a receipt-only order explains it."""
+    records = [executed(1, 'AAPL', 'BUY', 25, order_ids=[901])]
+    obs, rc = filled_order(901, 'AAPL', 'BUY', 25, 200.0)
+    gw = FakeGateway(proposals=records, evidence=evidence([obs], [rc], complete=False), positions={'AAPL': 25})
+    with pytest.raises(Refusal) as exc:
+        reconcile_sleeve('s2p', gw)
+    assert exc.value.code == 'EXECUTIONS_INCOMPLETE' and 'reason the receipts do not explain' in exc.value.message
+    assert gw.recorded == []
+    # The runtime marks the snapshot incomplete precisely when a requested order is unknown to its tracker;
+    # receipts covering the whole submission are the one accepted explanation, and the report says so.
+    gw = FakeGateway(proposals=records, evidence=evidence([], [rc], complete=False), positions={'AAPL': 25})
+    report = reconcile_sleeve('s2p', gw)
+    assert report.inserted == 1 and not report.broker_snapshot_complete
+    assert any('flagged the execution snapshot incomplete; orders resolved by receipts alone: 901' in w
+               for w in report.warnings)
+    # With no EXECUTED orders there is nothing the verdict could be about.
+    gw = FakeGateway(proposals=[executed(3, 'NVDA', 'BUY', 4, status='PENDING')],
+                     evidence=evidence(complete=False, orders_complete=False), positions={})
+    assert reconcile_sleeve('s2p', gw).matched == ()

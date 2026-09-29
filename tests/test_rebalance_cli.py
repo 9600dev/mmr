@@ -208,6 +208,20 @@ def test_reconcile_journals_receipts_and_prints_them():
     doc = json.loads(out)
     assert code == 0 and doc['inserted'] == 0 and doc['holdings'] == {'AAPL': 25.0} and doc['unfilled_proposals'] == [2]
     assert doc['unfilled'] == [{'proposal_id': 2, 'order_id': 902, 'broker_status': 'Submitted'}]
+    assert doc['working'] == [{'proposal_id': 2, 'order_id': 902, 'broker_status': 'Submitted', 'filled': 0.0,
+                               'total_quantity': 0.0}] and doc['broker_snapshot_complete'] is True
+    assert 'still working at the broker: #2 (order 902, Submitted, 0/0 filled)' in out or True  # text form checked below
+    code, out = _run(['reconcile', '--sleeve', 's2p'], gw)
+    assert 'still working at the broker: #2 (order 902, Submitted, 0/0 filled)' in out
+
+
+def test_reconcile_cli_refuses_an_executed_order_with_no_broker_evidence(capsys):
+    gw = FakeGateway(proposals=[executed(1, 'AAPL', 'BUY', 25, order_ids=[901])], positions={'AAPL': 25},
+                     evidence=evidence([], []))
+    code, out = _run(['reconcile', '--sleeve', 's2p', '--dry-run'], gw)
+    err = capsys.readouterr().err
+    assert code == 1 and out == '' and 'EXECUTIONS_INCOMPLETE' in err and 'unknown to the broker tracker' in err
+    assert gw.recorded == [] and 'record_fills' not in gw.method_names
 
 
 def test_reconcile_refuses_when_executions_cannot_be_read_or_are_incomplete(capsys):

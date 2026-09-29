@@ -9,9 +9,16 @@ in its tests from :data:`SLEEVE_FILLS_DDL`.
 read-only ``execution_snapshot`` — to the broker order ids of the sleeve's
 EXECUTED proposals and inserts each execution once (``exec_id`` is the primary
 key). It refuses rather than guesses (D13): when the receipts cannot be read,
-when IB's history replay is incomplete, and when the receipts do not cover
-what the broker says an order filled (an ``orderStatus`` seen before its
-``execDetails``, or a fill outside IB's bounded history window).
+when IB's history replay or the open-orders refresh is incomplete, and when the
+receipts do not cover what the broker says an order filled (an ``orderStatus``
+seen before its ``execDetails``, or a fill outside IB's bounded history window).
+Every EXECUTED order must be resolved AFFIRMATIVELY: a broker observation with
+a known fill quantity that the receipts match exactly (zero included — a
+cancelled DAY order), or receipts that account for the whole submitted
+quantity. An order the tracker has never seen, or whose fill quantity it
+cannot establish, is not "unfilled" — it is unknown, and the whole reconcile
+refuses, because journaling nothing for a filled order makes the next plan buy
+it again.
 
 Reads never create the table: ``plan``, ``status`` and ``reconcile --dry-run``
 leave a database without ``sleeve_fills`` exactly as they found it.
@@ -19,6 +26,7 @@ leave a database without ``sleeve_fills`` exactly as they found it.
 from __future__ import annotations
 
 import datetime as dt
+import math
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
@@ -138,11 +146,23 @@ class UnfilledOrder:
 
 
 @dataclass(frozen=True)
+class WorkingOrder:
+    """An order the broker still shows live: more executions can arrive after this reconcile."""
+    proposal_id: int
+    order_id: int
+    broker_status: str
+    filled: float
+    total_quantity: float     # 0 when the broker did not report it
+
+
+@dataclass(frozen=True)
 class MatchResult:
     fills: Sequence[Fill]
-    unfilled: Sequence[UnfilledOrder]                 # EXECUTED proposals whose orders have no receipt
+    unfilled: Sequence[UnfilledOrder]                 # orders the broker positively reports with nothing filled
     proposals_without_order_ids: Sequence[int]
     warnings: Sequence[str] = field(default_factory=tuple)
+    working: Sequence[WorkingOrder] = field(default_factory=tuple)   # non-terminal at the broker
+    receipt_only_orders: Sequence[int] = field(default_factory=tuple)  # resolved by receipts alone (no observation)
 
     @property
     def unfilled_proposal_ids(self) -> list[int]:
@@ -163,6 +183,8 @@ class ReconcileReport:
     unfilled: Sequence[UnfilledOrder] = field(default_factory=tuple)
     evidence_observed_at: str = ''
     replay_scope: str = ''
+    working: Sequence[WorkingOrder] = field(default_factory=tuple)    # still live at the broker: run again later
+    broker_snapshot_complete: bool = True                              # trader_service's own verdict, copied
 
     @property
     def matched_by_symbol(self) -> dict[str, float]:
@@ -191,27 +213,52 @@ def executed_order_ids(records: Iterable[ProposalRecord]) -> tuple[dict[int, Pro
     return order_to_proposal, sorted(without_ids)
 
 
+def submitted_quantity(rec: ProposalRecord) -> Optional[float]:
+    """The quantity approve sent to the broker for this proposal (recorded before transport), else the proposal's."""
+    raw = rec.metadata.get('submission_quantity', rec.quantity) if rec.metadata else rec.quantity
+    try:
+        quantity = float(raw) if raw is not None else float('nan')
+    except (TypeError, ValueError):
+        return None
+    return quantity if math.isfinite(quantity) and quantity > 0 else None
+
+
 def match_executions(sleeve: str, records: Iterable[ProposalRecord], evidence: ExecutionEvidence,
                      now: Optional[dt.datetime] = None) -> MatchResult:
     """Pair IB execution receipts with the sleeve's EXECUTED proposals by broker order id.
 
-    One journal row per receipt, dated by IB's execution time. Raises
-    :class:`ExecutionMismatch` when the broker's order observation contradicts
-    the proposal (symbol or side), and :class:`ExecutionsIncomplete` when the
-    receipts of an order do not add up to what the broker says filled — that is
-    the ``orderStatus``-before-``execDetails`` race, or a fill outside IB's
-    bounded history window; either way there is nothing to journal yet.
+    One journal row per receipt, dated by IB's execution time. Every EXECUTED
+    order must be resolved affirmatively, or the whole match fails (D13):
+
+    * an observation whose fill quantity the tracker knows, matched EXACTLY by
+      the receipts (zero filled and no receipt = a positively unfilled order —
+      a cancelled or still-working DAY order); or
+    * no observation at all, but receipts that cover the whole submitted
+      quantity (the order cannot have filled more than it asked for).
+
+    Raises :class:`ExecutionMismatch` when an observation contradicts the
+    proposal (symbol or side) and :class:`ExecutionsIncomplete` for everything
+    the receipts do not settle: an order the tracker has never seen, a fill
+    quantity it cannot establish (``Unknown``), receipts short of what the
+    broker says filled (``orderStatus`` before ``execDetails``, or a fill
+    outside IB's bounded history window), receipts EXCEEDING it, a gap in the
+    receipt chain, an ambiguous identity, or a receipt without shares, time or
+    cumulative quantity. Nothing is journaled for any order in that case.
     """
     now = now or dt.datetime.now(dt.timezone.utc)
     order_to_proposal, without_ids = executed_order_ids(records)
     fills: list[Fill] = []
     unfilled: list[UnfilledOrder] = []
+    working: list[WorkingOrder] = []
+    receipt_only: list[int] = []
     problems: list[str] = []
     warnings: list[str] = []
     for oid in sorted(order_to_proposal):
         rec = order_to_proposal[oid]
+        tag = f'order {oid} (proposal #{rec.id})'
         observations = [o for o in evidence.orders if o.order_id == oid]
         receipts = sorted((e for e in evidence.executions if e.order_id == oid), key=lambda e: (e.cum_qty, e.exec_id))
+        before = len(problems)
         for obs in observations:
             if obs.symbol and obs.symbol != rec.symbol.upper():
                 raise ExecutionMismatch(f'broker order {oid} is {obs.symbol}, but proposal #{rec.id} is '
@@ -219,38 +266,63 @@ def match_executions(sleeve: str, records: Iterable[ProposalRecord], evidence: E
             if obs.action and obs.action != rec.action.upper():
                 raise ExecutionMismatch(f'broker order {oid} is a {obs.action} but proposal #{rec.id} is a {rec.action}')
             if obs.identity_ambiguous:
-                problems.append(f'order {oid} (proposal #{rec.id}): broker identity is ambiguous')
-        covered = sum(e.shares for e in receipts)
-        cum_max = max((e.cum_qty for e in receipts), default=0.0)
-        if receipts and cum_max > 0 and abs(covered - cum_max) > _EPS:
-            problems.append(f'order {oid} (proposal #{rec.id}): receipts cover {covered:g} of {cum_max:g} '
-                            f'cumulative shares — an execution is missing')
-        known = [o.filled for o in observations if o.fill_quantity_known]
-        if known and max(known) > covered + _EPS:
-            problems.append(f'order {oid} (proposal #{rec.id}): broker reports {max(known):g} filled but the '
-                            f'execution receipts cover {covered:g} (execDetails not yet replayed, or the fill '
-                            f'lies outside IB\'s history window)')
-        if not observations and receipts:
-            warnings.append(f'order {oid} (proposal #{rec.id}): no broker order observation; symbol and side '
-                            f'taken from the proposal, receipts matched by order id')
+                problems.append(f'{tag}: broker identity is ambiguous')
+        usable: list[tuple[Execution, dt.datetime]] = []      # receipts with shares, a time and a cumQty
         for e in receipts:
+            when = e.time
             if e.shares <= 0:
-                problems.append(f'order {oid}: receipt {e.exec_id} reports {e.shares:g} shares')
-                continue
-            if e.time is None:
-                problems.append(f'order {oid}: receipt {e.exec_id} carries no execution time')
-                continue
+                problems.append(f'{tag}: receipt {e.exec_id} reports {e.shares:g} shares')
+            elif when is None:
+                problems.append(f'{tag}: receipt {e.exec_id} carries no execution time')
+            elif e.cum_qty <= 0:
+                problems.append(f'{tag}: receipt {e.exec_id} carries no cumulative quantity — the chain cannot be checked')
+            else:
+                usable.append((e, when))
+        covered = float(sum(e.shares for e, _ in usable))
+        cum_max = max((e.cum_qty for e, _ in usable), default=0.0)
+        if usable and abs(covered - cum_max) > _EPS:
+            problems.append(f'{tag}: receipts cover {covered:g} of {cum_max:g} cumulative shares — an execution is missing')
+        unknown = [o for o in observations if not o.fill_quantity_known]
+        known = [o for o in observations if o.fill_quantity_known]
+        if unknown:
+            statuses = ', '.join(sorted({o.status or 'Unknown' for o in unknown}))
+            problems.append(f'{tag}: the broker tracker cannot establish the fill quantity (status {statuses}); '
+                            f'it is not evidence of an unfilled order')
+        elif not observations:
+            submitted = submitted_quantity(rec)
+            if (usable and len(problems) == before and submitted is not None and abs(covered - submitted) <= _EPS):
+                warnings.append(f'{tag}: no broker order observation; the receipts account for the whole submitted '
+                                f'quantity {submitted:g}, symbol and side taken from the proposal')
+                receipt_only.append(oid)
+            else:
+                shown = 'unknown' if submitted is None else f'{submitted:g}'
+                problems.append(f'{tag}: unknown to the broker tracker (no order observation) and the receipts cover '
+                                f'{covered:g} of the submitted {shown} — cannot establish whether it filled')
+        else:
+            broker_filled = max(o.filled for o in known)
+            if broker_filled > covered + _EPS:
+                problems.append(f'{tag}: broker reports {broker_filled:g} filled but the execution receipts cover '
+                                f'{covered:g} (execDetails not yet replayed, or the fill lies outside IB\'s history window)')
+            elif covered > broker_filled + _EPS:
+                problems.append(f'{tag}: receipts cover {covered:g} but the broker reports only {broker_filled:g} '
+                                f'filled — contradictory evidence')
+            latest = max(known, key=lambda o: (o.filled, o.terminal))
+            if not any(o.terminal for o in known):
+                working.append(WorkingOrder(proposal_id=rec.id, order_id=oid, broker_status=latest.status or 'unknown',
+                                            filled=broker_filled, total_quantity=latest.total_quantity))
+            if not usable and broker_filled <= _EPS:
+                unfilled.append(UnfilledOrder(proposal_id=rec.id, order_id=oid, broker_status=latest.status or 'unknown'))
+        if len(problems) != before:
+            continue
+        for e, when in usable:
             signed = float(e.shares) if rec.action.upper() == 'BUY' else -float(e.shares)
-            fills.append(Fill(sleeve=sleeve, ticker=rec.symbol.upper(), trade_date=trade_date_of(e.time),
+            fills.append(Fill(sleeve=sleeve, ticker=rec.symbol.upper(), trade_date=trade_date_of(when),
                               quantity=signed, price=e.price, commission=None, exec_id=e.exec_id,
                               order_id=str(oid), proposal_id=rec.id, recorded_at=now))
-        if not receipts:
-            status = next((o.status for o in observations if o.status), 'unknown')
-            unfilled.append(UnfilledOrder(proposal_id=rec.id, order_id=oid, broker_status=status))
     if problems:
         raise ExecutionsIncomplete('; '.join(problems))
     return MatchResult(fills=tuple(fills), unfilled=tuple(unfilled), proposals_without_order_ids=tuple(without_ids),
-                       warnings=tuple(warnings))
+                       warnings=tuple(warnings), working=tuple(working), receipt_only_orders=tuple(receipt_only))
 
 
 def reconcile_sleeve(sleeve: str, gateway: Gateway, *, dry_run: bool = False,
@@ -273,6 +345,10 @@ def reconcile_sleeve(sleeve: str, gateway: Gateway, *, dry_run: bool = False,
         if not evidence.account_confirmed:
             raise Refusal('EXECUTIONS_UNREADABLE', 'the broker has not confirmed the trading account; '
                                                    'nothing journaled')
+        if not evidence.orders_complete:
+            raise Refusal('EXECUTIONS_UNREADABLE', "the broker's open-orders refresh did not complete (IB "
+                                                   'disconnected or the request failed), so order statuses '
+                                                   'may be stale; nothing journaled')
     try:
         ib_positions = dict(gateway.stock_positions())
     except Exception as exc:
@@ -283,9 +359,22 @@ def reconcile_sleeve(sleeve: str, gateway: Gateway, *, dry_run: bool = False,
         raise Refusal('EXECUTION_MISMATCH', str(exc)) from exc
     except ExecutionsIncomplete as exc:
         raise Refusal('EXECUTIONS_INCOMPLETE', f'{exc}; run reconcile again once the receipts are in') from exc
+    if order_to_proposal and not evidence.complete and not match.receipt_only_orders:
+        # The runtime's own verdict covers reasons the per-order matching may not recognise
+        # (an order it never tracked, an ambiguous identity, a future flag). Only an order the
+        # receipts fully account for is allowed to explain an incomplete snapshot.
+        raise Refusal('EXECUTIONS_INCOMPLETE', 'trader_service reports its execution snapshot incomplete for a '
+                                               'reason the receipts do not explain; nothing journaled')
     inserted = 0 if dry_run else gateway.record_fills(match.fills)
     holdings = dict(gateway.sleeve_holdings(sleeve))
     warnings: list[str] = list(match.warnings)
+    if order_to_proposal and not evidence.complete:
+        warnings.append('trader_service flagged the execution snapshot incomplete; orders resolved by receipts '
+                        'alone: ' + ', '.join(str(o) for o in match.receipt_only_orders))
+    if match.working:
+        warnings.append('still working at the broker (more executions can arrive): '
+                        + ', '.join(f'order {w.order_id} (proposal #{w.proposal_id}, {w.broker_status}, '
+                                    f'{w.filled:g}/{w.total_quantity:g} filled)' for w in match.working))
     for sym, qty in sorted(holdings.items()):
         ib_qty = float(ib_positions.get(sym, 0.0))
         if qty > ib_qty + _EPS:
@@ -300,4 +389,5 @@ def reconcile_sleeve(sleeve: str, gateway: Gateway, *, dry_run: bool = False,
                            proposals_without_order_ids=tuple(match.proposals_without_order_ids),
                            holdings=holdings, ib_positions=ib_positions, warnings=tuple(warnings),
                            unfilled=tuple(match.unfilled), evidence_observed_at=evidence.observed_at,
-                           replay_scope=evidence.replay_scope)
+                           replay_scope=evidence.replay_scope, working=tuple(match.working),
+                           broker_snapshot_complete=bool(evidence.complete))

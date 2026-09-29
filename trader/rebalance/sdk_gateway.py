@@ -92,7 +92,7 @@ class SdkGateway:
         if not ids:
             return ExecutionEvidence(account='', account_confirmed=True, receipts_available=True,
                                      history_complete=True, orders_complete=True, observed_at='',
-                                     orders=(), executions=(), replay_scope='nothing requested')
+                                     orders=(), executions=(), complete=True, replay_scope='nothing requested')
         snap = self._mmr.execution_snapshot(order_ids=ids)
         if not isinstance(snap, Mapping):
             raise ConnectionError(f'execution_snapshot returned {type(snap).__name__}, not a snapshot')
@@ -158,8 +158,9 @@ def _time(value: Any) -> Optional[dt.datetime]:
 def evidence_from_snapshot(snap: Mapping[str, Any], order_ids: Iterable[int]) -> ExecutionEvidence:
     """Map the ``execution_snapshot`` RPC reply onto :class:`ExecutionEvidence`, scoped to ``order_ids``.
 
-    Completeness flags are copied, never inferred: a missing key reads as False.
-    Receipts and observations for other order ids or another account are dropped.
+    Completeness flags — including the runtime's overall ``complete`` verdict —
+    are copied, never inferred: a missing key reads as False. Receipts and
+    observations for other order ids or another account are dropped.
     """
     wanted = {int(o) for o in order_ids}
     account = str(snap.get('account') or '')
@@ -178,7 +179,8 @@ def evidence_from_snapshot(snap: Mapping[str, Any], order_ids: Iterable[int]) ->
             order_id=oid, symbol=str(row.get('symbol') or '').upper(), action=str(row.get('action') or '').upper(),
             status=str(row.get('status') or ''), filled=_num(row.get('filled')),
             fill_quantity_known=bool(row.get('fillQuantityKnown', False)), con_id=int(row.get('conId') or 0),
-            identity_ambiguous=bool(row.get('identityAmbiguous', False))))
+            identity_ambiguous=bool(row.get('identityAmbiguous', False)),
+            total_quantity=_num(row.get('totalQuantity'))))
     executions: list[Execution] = []
     for rec in snap.get('executions') or []:
         if not isinstance(rec, Mapping):
@@ -201,6 +203,7 @@ def evidence_from_snapshot(snap: Mapping[str, Any], order_ids: Iterable[int]) ->
         orders_complete=bool(snap.get('orders_complete', False)),
         observed_at=str(snap.get('observed_at') or ''),
         orders=tuple(orders), executions=tuple(sorted(executions, key=lambda e: (e.order_id, e.cum_qty, e.exec_id))),
+        complete=bool(snap.get('complete', False)),
         replay_scope=str(replay.get('scope') or '') if isinstance(replay, Mapping) else '')
 
 

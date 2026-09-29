@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from pathlib import Path
 import sys
 from types import SimpleNamespace
 
@@ -139,6 +140,8 @@ def _mmr(duckdb_path='', **kw):
 
 
 def tables(path: str) -> set[str]:
+    if not Path(path).exists():          # a refusal before any connection leaves no file at all
+        return set()
     con = duckdb.connect(path, read_only=True)
     try:
         return {r[0] for r in con.execute('SELECT table_name FROM duckdb_tables()').fetchall()}
@@ -199,12 +202,12 @@ def test_execution_evidence_is_the_read_only_snapshot_scoped_to_the_sleeve_order
     ev = SdkGateway(m).execution_evidence([902, 901])
     assert m.calls[-1] == ('execution_snapshot', '', [901, 902])
     assert ev.account == ACCOUNT and ev.account_confirmed and ev.receipts_available and ev.history_complete
-    assert ev.orders_complete and ev.observed_at == '2026-09-29T14:35:00+00:00'
+    assert ev.orders_complete and ev.complete and ev.observed_at == '2026-09-29T14:35:00+00:00'
     assert ev.replay_scope == 'broker_available_recent_history'
-    assert [(o.order_id, o.symbol, o.action, o.status, o.filled, o.fill_quantity_known, o.identity_ambiguous)
-            for o in ev.orders] == [(901, 'AAPL', 'BUY', 'Filled', 25.0, True, False),
-                                    (902, 'MSFT', 'BUY', 'Submitted', 0.0, False, False),
-                                    (902, 'MSFT', 'BUY', 'Filled', 7.0, True, True)]
+    assert [(o.order_id, o.symbol, o.action, o.status, o.filled, o.fill_quantity_known, o.identity_ambiguous, o.total_quantity)
+            for o in ev.orders] == [(901, 'AAPL', 'BUY', 'Filled', 25.0, True, False, 25.0),
+                                    (902, 'MSFT', 'BUY', 'Submitted', 0.0, False, False, 0.0),
+                                    (902, 'MSFT', 'BUY', 'Filled', 7.0, True, True, 7.0)]
     assert [(e.exec_id, e.order_id, e.shares, e.cum_qty, e.price, e.time) for e in ev.executions] == [
         ('0000e.901.01', 901, 20.0, 20.0, 199.5, dt.datetime(2026, 9, 28, 19, 59, 30, tzinfo=UTC)),
         ('0000e.901.02', 901, 5.0, 25.0, 200.5, dt.datetime(2026, 9, 29, 14, 31, 5, tzinfo=UTC)),
@@ -212,12 +215,16 @@ def test_execution_evidence_is_the_read_only_snapshot_scoped_to_the_sleeve_order
 
 
 def test_execution_evidence_copies_completeness_flags_and_never_infers_them():
-    degraded = snapshot_reply(execution_receipts_available=False, executions_complete=False, account_confirmed=False)
+    degraded = snapshot_reply(execution_receipts_available=False, executions_complete=False, account_confirmed=False,
+                              orders_complete=False, complete=False)
     ev = SdkGateway(_mmr(exec_snapshot=degraded)).execution_evidence([901])
     assert not ev.receipts_available and not ev.history_complete and not ev.account_confirmed
+    assert not ev.orders_complete and not ev.complete
     missing_keys = {'account': ACCOUNT, 'orders': [], 'executions': []}     # an old server: absent flags read False
     ev = evidence_from_snapshot(missing_keys, [901])
     assert not ev.receipts_available and not ev.history_complete and not ev.account_confirmed
+    assert not ev.orders_complete and not ev.complete
+    assert SdkGateway(_mmr()).execution_evidence([]).complete                # nothing requested: trivially complete
     m = _mmr()
     assert SdkGateway(m).execution_evidence([]).receipts_available            # nothing requested: no RPC at all
     assert not any(isinstance(c, tuple) and c[0] == 'execution_snapshot' for c in m.calls)
@@ -281,3 +288,99 @@ def test_close_only_disconnects_when_the_gateway_connected():
     assert not m.closed
     SdkGateway(m, connected=True).close()
     assert m.closed
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: runtime-shaped snapshot replies through SdkGateway into reconcile_sleeve (D13 fail-closed)
+# ---------------------------------------------------------------------------
+
+def _sleeve_gateway(tmp_duckdb_path, reply, rows=None):
+    """One EXECUTED AAPL BUY 25 (order 901) in sleeve_s2p over a real DuckDB, with the given snapshot reply."""
+    rows = rows if rows is not None else [_row(1, 'AAPL', 'BUY', 25, 'EXECUTED', meta={'submission_quantity': 25.0}, order_ids=[901])]
+    positions = pd.DataFrame([{'symbol': 'AAPL', 'secType': 'STK', 'position': 25.0}])
+    snaps = {'AAPL': {'last': 200.0, 'bid': 199.9, 'ask': 200.1}}
+    return SdkGateway(FakeMMR(rows, positions, snaps, duckdb_path=tmp_duckdb_path, exec_snapshot=reply))
+
+
+def test_snapshot_with_zero_evidence_for_an_executed_order_refuses_and_journals_nothing(tmp_duckdb_path):
+    """The critic's reproduction, end to end: trading_runtime.execution_snapshot returns no row and no receipt for
+    requested order 901 (and therefore ``complete: False``, since ``expected <= known`` fails). The order may well
+    have filled; treating it as unfilled would make the next plan buy AAPL again."""
+    reply = snapshot_reply(orders=[], executions=[], complete=False)
+    gw = _sleeve_gateway(tmp_duckdb_path, reply)
+    for dry_run in (True, False):
+        with pytest.raises(Refusal) as exc:
+            reconcile_sleeve('s2p', gw, dry_run=dry_run)
+        assert exc.value.code == 'EXECUTIONS_INCOMPLETE'
+        assert 'order 901 (proposal #1): unknown to the broker tracker' in exc.value.message
+    assert gw.sleeve_holdings('s2p') == {} and 'sleeve_fills' not in tables(tmp_duckdb_path)
+    # Even a runtime that (wrongly) said complete=True would be refused: the per-order rule needs evidence.
+    with pytest.raises(Refusal, match='EXECUTIONS_INCOMPLETE'):
+        reconcile_sleeve('s2p', _sleeve_gateway(tmp_duckdb_path, snapshot_reply(orders=[], executions=[])), dry_run=True)
+    assert 'sleeve_fills' not in tables(tmp_duckdb_path)
+
+
+@pytest.mark.parametrize('reply_kwargs, code, needle', [
+    # tracker row present but its fill quantity unknown (restored checkpoint / Filled with filled<=0): not "unfilled"
+    (dict(orders=[order_row(901, 'AAPL', 'BUY', 'Unknown', filled=0.0, known=False, totalQuantity=25.0)]),
+     'EXECUTIONS_INCOMPLETE', 'cannot establish the fill quantity (status Unknown)'),
+    # Unknown row with a receipt: the receipt is real, but nothing proves it is the ONLY one
+    (dict(orders=[order_row(901, 'AAPL', 'BUY', 'Unknown', filled=25.0, known=False, totalQuantity=25.0)],
+          executions=[receipt_row('0000e.901.01', 901, 25.0, 200.0)]),
+     'EXECUTIONS_INCOMPLETE', 'cannot establish the fill quantity'),
+    # completedOrders says Filled 25, IB's bounded history returned no execution
+    (dict(orders=[order_row(901, 'AAPL', 'BUY', 'Filled', filled=25.0, totalQuantity=25.0)]),
+     'EXECUTIONS_INCOMPLETE', "outside IB's history window"),
+    # open-orders refresh failed: statuses may be stale
+    (dict(orders=[order_row(901, 'AAPL', 'BUY', 'Filled', filled=25.0, totalQuantity=25.0)],
+          executions=[receipt_row('0000e.901.01', 901, 25.0, 200.0)], orders_complete=False, complete=False),
+     'EXECUTIONS_UNREADABLE', 'open-orders refresh did not complete'),
+    # the runtime's verdict is False for a reason the receipts do not explain (e.g. an ambiguous identity elsewhere)
+    (dict(orders=[order_row(901, 'AAPL', 'BUY', 'Filled', filled=25.0, totalQuantity=25.0)],
+          executions=[receipt_row('0000e.901.01', 901, 25.0, 200.0)], complete=False),
+     'EXECUTIONS_INCOMPLETE', 'reason the receipts do not explain'),
+    # same numeric id seen from another broker client
+    (dict(orders=[order_row(901, 'AAPL', 'BUY', 'Filled', filled=25.0, totalQuantity=25.0, identityAmbiguous=True)],
+          executions=[receipt_row('0000e.901.01', 901, 25.0, 200.0)], complete=False),
+     'EXECUTIONS_INCOMPLETE', 'identity is ambiguous'),
+])
+def test_snapshot_outcomes_that_prove_nothing_refuse_end_to_end(tmp_duckdb_path, reply_kwargs, code, needle):
+    gw = _sleeve_gateway(tmp_duckdb_path, snapshot_reply(**reply_kwargs))
+    with pytest.raises(Refusal) as exc:
+        reconcile_sleeve('s2p', gw)
+    assert exc.value.code == code and needle in exc.value.message
+    assert 'sleeve_fills' not in tables(tmp_duckdb_path)
+
+
+def test_snapshot_outcomes_that_prove_the_order_resolve_end_to_end(tmp_duckdb_path):
+    # (1) a Cancelled DAY order with a known zero fill: positively unfilled, nothing journaled, no refusal
+    cancelled = snapshot_reply(orders=[order_row(901, 'AAPL', 'BUY', 'Cancelled', filled=0.0, totalQuantity=25.0)])
+    report = reconcile_sleeve('s2p', _sleeve_gateway(tmp_duckdb_path, cancelled))
+    assert report.matched == () and report.unfilled_proposals == (1,) and report.working == ()
+    assert report.unfilled[0].broker_status == 'Cancelled' and 'sleeve_fills' not in tables(tmp_duckdb_path)
+    # (2) still Submitted, 20 of 25 filled with its receipt: journal the 20, report the order as working
+    partial = snapshot_reply(orders=[order_row(901, 'AAPL', 'BUY', 'Submitted', filled=20.0, totalQuantity=25.0)],
+                             executions=[receipt_row('0000e.901.01', 901, 20.0, 199.5, cum_qty=20.0)])
+    report = reconcile_sleeve('s2p', _sleeve_gateway(tmp_duckdb_path, partial))
+    assert report.inserted == 1 and report.matched_by_symbol == {'AAPL': 20.0}
+    assert [(w.order_id, w.broker_status, w.filled, w.total_quantity) for w in report.working] == [(901, 'Submitted', 20.0, 25.0)]
+    assert any('still working at the broker' in w for w in report.warnings)
+    # (3) the second execution arrives and the order is Filled: one more row, idempotent on the first
+    done = snapshot_reply(orders=[order_row(901, 'AAPL', 'BUY', 'Filled', filled=25.0, totalQuantity=25.0)],
+                          executions=[receipt_row('0000e.901.01', 901, 20.0, 199.5, cum_qty=20.0),
+                                      receipt_row('0000e.901.02', 901, 5.0, 200.5, cum_qty=25.0)])
+    report = reconcile_sleeve('s2p', _sleeve_gateway(tmp_duckdb_path, done))
+    assert report.inserted == 1 and report.holdings == {'AAPL': 25.0} and report.working == () and report.broker_snapshot_complete
+    # (4) receipt-only: the tracker never saw the order (runtime says complete=False) but IB receipts cover all 25
+    receipt_only = snapshot_reply(orders=[], executions=[receipt_row('0000e.901.01', 901, 20.0, 199.5, cum_qty=20.0),
+                                                        receipt_row('0000e.901.02', 901, 5.0, 200.5, cum_qty=25.0)],
+                                  complete=False)
+    report = reconcile_sleeve('s2p', _sleeve_gateway(tmp_duckdb_path, receipt_only))
+    assert report.inserted == 0 and report.holdings == {'AAPL': 25.0} and not report.broker_snapshot_complete
+    assert any('no broker order observation; the receipts account for the whole submitted quantity 25' in w
+               for w in report.warnings)
+    assert any('orders resolved by receipts alone: 901' in w for w in report.warnings)
+    # (5) receipt-only but short of the submission: the remainder's fate is unknown — refused
+    short = snapshot_reply(orders=[], executions=[receipt_row('0000e.901.01', 901, 20.0, 199.5, cum_qty=20.0)], complete=False)
+    with pytest.raises(Refusal, match='receipts cover 20 of the submitted 25'):
+        reconcile_sleeve('s2p', _sleeve_gateway(tmp_duckdb_path, short))

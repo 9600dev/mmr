@@ -65,6 +65,16 @@ class OrderObservation:
     fill_quantity_known: bool      # False when the tracker could not establish the fill quantity
     con_id: int = 0
     identity_ambiguous: bool = False   # the same numeric id was seen from another broker client
+    total_quantity: float = 0.0        # the order's totalQuantity as the broker reported it (0 = not reported)
+
+    @property
+    def terminal(self) -> bool:
+        """The broker will not fill this order any further (Filled, or dead)."""
+        return self.status in TERMINAL_ORDER_STATUSES
+
+
+# IB order statuses after which no further execution can arrive (order_lifecycle's _FILLED | _DEAD).
+TERMINAL_ORDER_STATUSES = frozenset({'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'})
 
 
 @dataclass(frozen=True)
@@ -73,9 +83,13 @@ class ExecutionEvidence:
 
     ``receipts_available`` is False when the durable receipt journal could not
     be read; ``history_complete`` is False when IB's execution-history replay
-    has not completed. Either one means the executions cannot be read and
-    ``reconcile`` must refuse (D13). ``replay_scope`` names IB's bounded window:
-    absence of a receipt is evidence only inside it.
+    has not completed; ``orders_complete`` is False when the open-orders refresh
+    failed or IB was disconnected. Any of them means the executions cannot be
+    read and ``reconcile`` must refuse (D13). ``complete`` is the runtime's own
+    overall verdict (all of the above, plus every requested order id known to
+    its tracker and no ambiguous identity) — copied, never inferred, so a reason
+    the per-order matching does not recognise still refuses. ``replay_scope``
+    names IB's bounded window: absence of a receipt is evidence only inside it.
     """
 
     account: str
@@ -86,6 +100,7 @@ class ExecutionEvidence:
     observed_at: str
     orders: Sequence[OrderObservation]
     executions: Sequence[Execution]
+    complete: bool
     replay_scope: str = ''
 
 

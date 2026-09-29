@@ -150,6 +150,8 @@ def reconcile_to_dict(report: ReconcileReport) -> dict[str, Any]:
         'matched_by_symbol': report.matched_by_symbol,
         'unfilled_proposals': list(report.unfilled_proposals),
         'unfilled': [dataclasses.asdict(u) for u in report.unfilled],
+        'working': [dataclasses.asdict(w) for w in report.working],
+        'broker_snapshot_complete': report.broker_snapshot_complete,
         'proposals_without_order_ids': list(report.proposals_without_order_ids),
         'evidence_observed_at': report.evidence_observed_at, 'replay_scope': report.replay_scope,
         'holdings': dict(report.holdings), 'ib_positions': dict(report.ib_positions),
@@ -169,9 +171,14 @@ def render_reconcile(report: ReconcileReport) -> str:
         lines.append('  no execution yet for EXECUTED proposals: '
                      + ', '.join(f'#{u.proposal_id} (order {u.order_id}, broker status {u.broker_status})'
                                  for u in report.unfilled))
+    if report.working:
+        lines.append('  still working at the broker: '
+                     + ', '.join(f'#{w.proposal_id} (order {w.order_id}, {w.broker_status}, '
+                                 f'{w.filled:g}/{w.total_quantity:g} filled)' for w in report.working))
     if report.evidence_observed_at:
         lines.append(f'  broker evidence observed {report.evidence_observed_at}'
-                     + (f'  replay scope {report.replay_scope}' if report.replay_scope else ''))
+                     + (f'  replay scope {report.replay_scope}' if report.replay_scope else '')
+                     + ('' if report.broker_snapshot_complete else '  (snapshot flagged INCOMPLETE by trader_service)'))
     lines.append('  journal holdings vs IB:')
     for sym in sorted(set(report.holdings) | set(report.ib_positions)):
         j = report.holdings.get(sym)
