@@ -28,6 +28,33 @@ import numpy as np      # noqa: E402
 import pandas as pd     # noqa: E402
 
 
+def session_close_utc(days) -> pd.DatetimeIndex:
+    """The NYSE close of each of ``days``, as UTC instants.
+
+    Read from the exchange calendar (pandas_market_calendars XNYS), so it is
+    daylight-saving aware (20:00 UTC in summer, 21:00 in winter) AND honours
+    early closes (13:00 New York on the day after Thanksgiving, Christmas
+    Eve, ...). A day the calendar has no session for (synthetic bars) gets
+    16:00 America/New_York. This is the instant a filing must have been
+    ACCEPTED strictly before to be usable at that session's close
+    (``searchsorted`` with ``side='left'`` below).
+    """
+    import pandas_market_calendars as mcal
+    d = pd.DatetimeIndex(pd.to_datetime(days))
+    if d.tz is not None:
+        d = d.tz_convert(None)
+    d = d.normalize()
+    regular = pd.Series((d + pd.Timedelta(hours=16)).tz_localize('America/New_York').tz_convert('UTC'), index=d)
+    if len(d):
+        sched = mcal.get_calendar('XNYS').schedule(d.min().strftime('%Y-%m-%d'), d.max().strftime('%Y-%m-%d'))
+        closes = pd.Series(pd.DatetimeIndex(sched['market_close']).tz_convert('UTC'),
+                           index=pd.DatetimeIndex(sched.index).normalize())
+        common = d.intersection(closes.index)
+        if len(common):
+            regular.loc[common] = closes.loc[common].to_numpy()
+    return pd.DatetimeIndex(regular)
+
+
 def build(delay_days: int = 0, pit: bool = False, with_frames: bool = False):
     """(price panel, {signal name: as-of frame}) with acceptance delayed by
     ``delay_days`` - 0 is the honest read, positive is the leak probe.
@@ -74,7 +101,10 @@ def build(delay_days: int = 0, pit: bool = False, with_frames: bool = False):
                             .rolling(4, min_periods=4).sum()
                             .reset_index(level=0, drop=True))
 
-    idx = pd.to_datetime(px.index, utc=True) + pd.Timedelta(hours=21)  # 16:00 ET
+    # hillclimb(C01): changed because 16:00 ET is 20:00 UTC under EDT and 21:00
+    # UTC under EST; a fixed 21:00 UTC treated a filing accepted at 20:30 UTC on
+    # a summer day as known at that day's close, one session early.
+    idx = session_close_utc(px.index)
     out = {}
     fields = ['net_income_ttm', 'stockholders_equity', 'gross_profit_ttm',
               'total_assets', 'cash_from_operations_ttm', 'shares_diluted',

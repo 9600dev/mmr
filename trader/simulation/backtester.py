@@ -72,6 +72,19 @@ class BacktestConfig:
     # 1.0 = fully invested, 2.0 = 2x levered. Scaling is DOWN only — an
     # under-invested book is a choice the strategy made, not a budget to fill.
     panel_max_gross: float = 1.0
+    # hillclimb(C01): changed because the lowfreq harness needs an honest exit
+    # for names that stop printing (design decision D07). Cross-sectional books
+    # only, OFF (None) by default: a mapping conid -> timestamp of that name's
+    # LAST stored print in the COMPLETE dataset (the caller derives it from the
+    # full history, never from the window being run - a name merely missing
+    # the last session of a slice is not a stopped name). A holding whose bar
+    # is its terminal print is sold at that close - slippage and commission
+    # charged, the fill logged like any other trade and counted in
+    # ``diagnostics['panel_forced_exits']`` / ``['panel_forced_exit_value']``.
+    # Without it a delisted or storage-cutoff name sits in the book forever at
+    # a stale mark and can never be sold (no later open exists to fill
+    # against). No open is ever fabricated.
+    panel_terminal_prints: Optional[Dict[Any, Any]] = None
     # Per-trade notional in ``live`` mode. None -> 2% of initial_capital
     # (mirrors the PositionSizer's base_position default). Live sizing also
     # ATR-scales each trade (~0.4-1.5x); a fixed notional keeps per-trade
@@ -122,6 +135,10 @@ class BacktestResult:
     # Effective param overrides applied via ``apply_param_overrides``. Empty
     # when the run used class defaults. Populated by ``run_from_module``.
     applied_params: Dict[str, Any] = field(default_factory=dict)
+    # Execution diagnostics that are not performance metrics. run_panel
+    # records how often the D06 cash guard scaled a BUY fill
+    # (``panel_scaled_buy_fills`` etc.); empty for the per-instrument path.
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 
 
@@ -894,6 +911,34 @@ class Backtester:
         borrow_per_period = (
             (self.config.short_borrow_bps_annual / 10_000.0)
             / max(self._bars_per_year(self.config.bar_size), 1.0))
+        scaled_buy_fills = dropped_buy_fills = scaled_rebalances = 0   # D06 diagnostics
+        min_cash = cash
+        # hillclimb(C01): D07 - each name's terminal print as supplied by the
+        # caller from the COMPLETE dataset; a fact about the data, never read
+        # by the strategy and never inferred from this window's frames.
+        forced_exits = 0
+        forced_exit_value = 0.0
+        terminal: Dict[Any, Any] = {}
+        for conid, t in (self.config.panel_terminal_prints or {}).items():
+            terminal[conid] = pd.Timestamp(t)
+
+        def _execute(ts, conid, delta, fill):
+            nonlocal cash, min_cash
+            cost = abs(delta) * commission
+            cash -= delta * fill + cost
+            min_cash = min(min_cash, cash)          # after EVERY fill, not per bar
+            positions[conid] = positions.get(conid, 0.0) + delta
+            if abs(positions[conid]) < 1e-9:
+                positions.pop(conid, None)
+            trades.append(BacktestTrade(
+                timestamp=ts, conid=conid,
+                action=Action.BUY if delta > 0 else Action.SELL,
+                quantity=abs(delta), price=fill, commission=cost,
+                # A rebalance carries no per-name conviction: the weight came
+                # from a rank, not from a probability. Recording a fabricated
+                # 1.0 would make these trades look like high-confidence calls
+                # in any downstream analysis that reads the field.
+                signal_probability=0.0, signal_risk=0.0))
 
         for i in range(n):
             ts = panel.index[i]
@@ -903,26 +948,45 @@ class Backtester:
             # 1. Fill what was decided while observing the PREVIOUS bar, at
             #    this bar's open. This ordering is the no-lookahead rule.
             if pending:
+                # D06: a fill may never take cash below zero. The rebalance's
+                # SELLS settle first (short-sale proceeds count as cash, as
+                # before) and its BUYS are scaled pro rata to the cash then
+                # available, truncated to whole shares so the scaled book
+                # never costs more than the budget. Without this a book sized
+                # off a holding it could not sell (a name that stopped
+                # printing, marked at a stale carry-forward) bought the full
+                # target anyway and ran on implicit, cost-free leverage: the
+                # covered-EW PIT benchmark sat at -$3.2M cash on 99% of fill
+                # dates (docs/RESEARCH_LOG.md, 2026-09-29). Scaled fills are
+                # counted in ``BacktestResult.diagnostics`` so a result that
+                # leaned on the guard says so.
+                fills = []
                 for conid, delta in pending.items():
                     px = row_open.get(conid)
                     if px is None or not np.isfinite(px) or px <= 0:
                         continue        # cannot fill what cannot be priced
                     fill = px * (1 + slip) if delta > 0 else px * (1 - slip)
-                    cost = abs(delta) * commission
-                    cash -= delta * fill + cost
-                    positions[conid] = positions.get(conid, 0.0) + delta
-                    if abs(positions[conid]) < 1e-9:
-                        positions.pop(conid, None)
-                    trades.append(BacktestTrade(
-                        timestamp=ts, conid=conid,
-                        action=Action.BUY if delta > 0 else Action.SELL,
-                        quantity=abs(delta), price=fill, commission=cost,
-                        # A rebalance carries no per-name conviction: the
-                        # weight came from a rank, not from a probability.
-                        # Recording a fabricated 1.0 would make these trades
-                        # look like high-confidence calls in any downstream
-                        # analysis that reads the field.
-                        signal_probability=0.0, signal_risk=0.0))
+                    fills.append((conid, delta, fill))
+                # Sells are EXECUTED and logged first, whatever order the
+                # strategy listed them in, so cash after every single fill
+                # is what a real account would show.
+                for conid, delta, fill in fills:
+                    if delta < 0:
+                        _execute(ts, conid, delta, fill)
+                buys = [(c, d, f) for c, d, f in fills if d > 0]
+                buy_cost = sum(d * f + abs(d) * commission for _, d, f in buys)
+                scale = 1.0
+                if buy_cost > 0 and buy_cost > cash:
+                    scale = max(cash, 0.0) / buy_cost
+                    scaled_rebalances += 1
+                for conid, delta, fill in buys:
+                    if scale < 1.0:
+                        delta = float(math.floor(delta * scale))
+                        scaled_buy_fills += 1
+                        if delta <= 0:
+                            dropped_buy_fills += 1
+                            continue    # budget exhausted: nothing to buy
+                    _execute(ts, conid, delta, fill)
                 pending = None
 
             # 2. Mark the book at this bar's close, carrying the last known
@@ -937,6 +1001,18 @@ class Backtester:
                 px = row_close.get(conid)
                 if px is not None and np.isfinite(px) and px > 0:
                     last_price[conid] = float(px)
+            # hillclimb(C01): D07 forced exit at the terminal print. Runs
+            # BEFORE the mark so the equity curve shows the book that exists.
+            if terminal:
+                for conid in [c for c, q in positions.items()
+                              if abs(q) > 1e-9 and terminal.get(c) == pd.Timestamp(ts)
+                              and c in last_price]:
+                    qty = positions[conid]
+                    px = last_price[conid]
+                    fill = px * (1 - slip) if qty > 0 else px * (1 + slip)
+                    forced_exits += 1
+                    forced_exit_value += abs(qty) * px
+                    _execute(ts, conid, -qty, fill)
             # Borrow accrues on shorts BEFORE marking, so the fee is paid out
             # of cash rather than quietly reducing the position's value.
             if borrow_per_period > 0:
@@ -947,6 +1023,7 @@ class Backtester:
                     if px is not None and px > 0:
                         cash -= abs(qty) * px * borrow_per_period
 
+            min_cash = min(min_cash, cash)
             mark = cash
             for conid, qty in positions.items():
                 px = last_price.get(conid)
@@ -973,7 +1050,16 @@ class Backtester:
             pending = orders or None
 
         equity_curve = pd.Series(equity_values, index=pd.Index(equity_timestamps))
-        return self._summarise(equity_curve, trades, [], positions)
+        result = self._summarise(equity_curve, trades, [], positions)
+        result.diagnostics.update({
+            'panel_scaled_buy_fills': scaled_buy_fills,      # BUY fills reduced by the D06 cash guard
+            'panel_dropped_buy_fills': dropped_buy_fills,    # ... of which reduced to nothing
+            'panel_scaled_rebalances': scaled_rebalances,    # fill dates on which the guard acted
+            'panel_min_cash': float(min_cash),               # lowest cash after any fill or bar
+            'panel_forced_exits': forced_exits,              # D07: holdings sold at their last stored print
+            'panel_forced_exit_value': float(forced_exit_value),   # ... gross value at that print
+        })
+        return result
 
     def run_from_module(
         self,

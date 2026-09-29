@@ -679,3 +679,36 @@ The code was correct; the claim about it was wrong. No type system, contract
 or property has anything to say about a claim. Mitigations are procedural -
 resolve identifiers at point of use, separate observation from inference, and
 prefer a second measurement to a better explanation.
+
+---
+
+## 2026-09-29 — correction: membership-filtered PIT prices froze every leaver in the book
+
+Found while building the low-frequency harness (`trader/research/lowfreq`,
+C01). `scripts/pit_panel.load_pit_panel` returns prices ONLY on days a name
+is a member, so the month a name leaves the top-500 its series vanishes and
+the sell a monthly book issues can never fill (`run_panel` skips fills it
+cannot price). The position then sits in the book forever, marked at a stale
+carry-forward, and every later rebalance sizes new buys off equity that
+includes it — implicit, cost-free leverage.
+
+Measured on the covered-EW benchmark, 2016-08..2024-06, `run_panel`, 5 bps +
+$0.005/sh (`research/lowfreq/reference/trials.jsonl`, rows for
+`eq_ew_covered`; command `uv run python -m trader.research.lowfreq evaluate
+reference/eq_ew_covered`): with membership-filtered prices 511 of 857 held
+names had no price at the end, worth **102 % of reported equity**, and cash
+was **−$3.2M on 99 % of fill dates** (full-period Sharpe 0.88, CAGR 16.7 %).
+With prices kept for every name ever a member (`fields['member']` carries
+membership; opens refused outside it) and a stopped name's last price
+standing for 30 sessions so the exit fills: 0 frozen names, min cash +0.01×,
+**full-period Sharpe 0.59, CAGR 10.0 %**
+(`research/lowfreq/reference/results/eq_ew_covered.json`).
+
+Consequence for earlier entries: the 2026-08-17 size-tilt / sales-to-price
+books AND their covered-EW benchmark were run through the same
+membership-filtered loader, so both sides carried frozen leavers and implicit
+leverage. The *spread* may survive (both books were affected), the absolute
+levels quoted there (Sharpe 1.26 vs 1.04, CAGR 31 % vs 20 %) should not be
+believed until re-run through the harness. Not re-run here.
+
+**2026-09-29 (C01, D06 labelling).** Every `Backtester.run_panel` figure in this log dated before 2026-09-29 — including the 2026-08-17 size-tilt / sales-to-price books and their covered-EW benchmark (Sharpe 1.26 vs 1.04) and the 12-1 momentum panel runs — is **pre-D06**: produced before the panel executor's cash guard (BUY fills scaled to available cash) and before stopped names were exited at their last stored print (D07), so those books could run on implicit leverage and stale marks. Read them as pre-fix until re-run through `trader.research.lowfreq`.
