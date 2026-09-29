@@ -160,10 +160,22 @@ def load_equity_panel(start=None, end=None, top_n: int = 500) -> PricePanel:
     price panel made a name's series vanish the month it left the top 500, so
     its sell could never fill - in the covered-EW benchmark 511 of 857 holdings
     were frozen at stale prices worth 102% of reported equity, with cash at
-    -$3.2M on 99% of fill dates (2026-09-29 diagnostic). Names that also fall
-    below the storage cutoff or delist still freeze at their last price; the
-    harness reports that residual (``frozen_value_fraction_end``) rather than
-    hiding it.
+    -$3.2M on 99% of fill dates (2026-09-29 diagnostic).
+
+    NO PRICE IS EVER FABRICATED (D07). When a name stops printing (fell below
+    the storage cutoff, or delisted) its ``open``/``close`` are NaN from then
+    on: nothing can fill against a session that had no print. The executor
+    (``BacktestConfig.panel_exit_at_last_print``, set by ``engine._config``)
+    sells a holding at the close of its LAST stored print, and every such exit
+    and its value is counted in the results diagnostics (``forced_exits``,
+    ``forced_exit_value_fraction``) so a result that leaned on them says so.
+    For a name that really went to zero this is optimistic - the accepted,
+    documented approximation the prior research also used.
+
+    DATA BOUNDARY: ``pit_daily_bars`` starts 2016-08-01 and membership for a
+    month needs the PRIOR month's ranks, so there is no membership for August
+    2016 and a window requested from 2016-08-01 effectively begins with the
+    September 2016 rebalance.
     """
     scripts_dir = str(_cfg.repo_root() / 'scripts')
     if scripts_dir not in sys.path:
@@ -202,17 +214,8 @@ def load_equity_panel(start=None, end=None, top_n: int = 500) -> PricePanel:
     opens = align(full['open'])
     # A member day must have a stored price; the mask can never exceed the data.
     member = member_close.notna() & close.notna()
-    # EXIT AT THE LAST STORED PRICE. When a name stops printing (fell below the
-    # storage cutoff, or delisted) its last close stands for up to EXIT_GRACE_BARS
-    # more sessions - as the mark AND as the fill price - so the sell a strategy
-    # issues at its next rebalance can fill, instead of the position sitting in
-    # the book forever at a stale mark that inflates equity and sizes new buys
-    # (implicit leverage). Same assumption scripts/size_tilt_backtest.py made;
-    # for a name that actually went to zero it is optimistic, which is why the
-    # harness also reports the frozen fraction that remains.
-    stale = close.isna() & close.ffill(limit=EXIT_GRACE_BARS).notna()
-    close = close.ffill(limit=EXIT_GRACE_BARS)
-    opens = opens.where(~stale, close)
+    # D07: a stopped name's open/close stay NaN - the executor exits it at its
+    # last stored print; the loader never invents a price (see docstring).
     fields = {k: align(v) for k, v in frames.items()}
     fields['member'] = member
     fields['dollar_volume'] = align(full['dollar_volume'])
@@ -221,7 +224,6 @@ def load_equity_panel(start=None, end=None, top_n: int = 500) -> PricePanel:
                       universe='equity')
 
 
-EXIT_GRACE_BARS = 30      # > one month of sessions: a monthly rebalance always falls inside
 PIT_MEMBERSHIP_LEAD_DAYS = 45   # prior-month ranks needed to decide the first requested month
 
 

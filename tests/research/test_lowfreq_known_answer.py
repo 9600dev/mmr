@@ -225,7 +225,8 @@ def test_fixed_cell_mode_refuses_cells_outside_the_registered_grid(research_env)
     assert _ledger(research_env)[-1]['status'] == 'error'
     r = evaluate('fam/grid', fixed_params={'LOOKBACK': 20, 'WEIGHT': 1.0}, start='2016-06-01', end='2017-06-01')
     assert r['grid'] == {'cells': 1, 'registered_cells': 4, 'report_cell': {'LOOKBACK': 20, 'WEIGHT': 1.0}}
-    assert r['lookahead'] == {'cells_checked': 1, 'benchmarks_checked': ['bench_ew'], 'benchmark_coverage_frames_checked': 1, 'every_index': True}
+    assert r['lookahead']['cells_checked'] == 1 and r['lookahead']['benchmark_coverage_frames_checked'] == 1
+    assert r['lookahead']['mode'] == 'sampled_prefixes_fresh_state'
 
 
 def test_covered_benchmark_follows_the_chosen_cell_per_fold(research_env):
@@ -320,13 +321,17 @@ def test_a_benchmark_that_peeks_only_under_candidate_coverage_is_rejected(resear
 def test_lookahead_report_says_every_index_and_recomputes_every_decision(research_env):
     write_family(research_env['root'], 'fam', [BENCH, entry('spy', 'candidate', 'HoldOne', benchmarks=['bench_ew'])])
     r = evaluate('fam/spy')
-    assert r['lookahead'] == {'cells_checked': 1, 'benchmarks_checked': ['bench_ew'],
-                              'benchmark_coverage_frames_checked': 1, 'every_index': True}
+    la = r['lookahead']
+    assert la['cells_checked'] == 1 and la['benchmarks_checked'] == ['bench_ew']
+    assert la['benchmark_coverage_frames_checked'] == 1 and la['mode'] == 'sampled_prefixes_fresh_state'
+    assert la['prefixes_replayed'] >= 6 and la['reference_indices'] > la['prefixes_replayed']
 
 
-def test_lookahead_engine_recomputes_at_every_decision_index(research_env, monkeypatch):
-    """Probe (3) runs a fresh precompute at every index the strategy issued an
-    instruction on - counted here on the ETF fixture (monthly due bars)."""
+def test_lookahead_engine_recomputes_at_every_sampled_prefix(research_env, monkeypatch):
+    """Probe (3) runs a fresh precompute on the truncated panel at every
+    SAMPLED prefix (boundaries + consecutive runs, each run longer than a month
+    of sessions so every run holds a monthly due bar) - counted here on the ETF
+    fixture."""
     from trader.research.lowfreq import engine, load_etf_panel
     from trader.research.lowfreq.reference_strategies import EtfEqualWeight, schedule_mask
     panel = load_etf_panel(None, '2015-01-01', '2016-12-31')
@@ -340,9 +345,11 @@ def test_lookahead_engine_recomputes_at_every_decision_index(research_env, monke
     e = entry('ew', 'benchmark', 'EtfEqualWeight', module='trader.research.lowfreq.reference_strategies')
     engine.lookahead_check(e, {}, panel)
     wide = engine.wide_panel(panel.frames())
+    picks = engine.sampled_prefixes(len(wide))
     due = [i for i in range(len(wide) - 1) if schedule_mask(wide.index, 'month')[i]]
-    # one full precompute, the assert_no_panel_lookahead truncations, then one per decision index
-    assert sorted(c for c in calls if c - 1 in due) == sorted(i + 1 for i in due)
+    # one fresh precompute per sampled prefix (length i + 1), besides the full-panel ones
+    assert {c for c in calls if c - 1 in picks} == {i + 1 for i in picks}
+    assert len([i for i in picks if i in due]) >= engine.PROBE_WINDOWS     # every run holds a due bar
     assert len(due) >= 20
 
 

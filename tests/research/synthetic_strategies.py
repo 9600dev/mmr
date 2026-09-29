@@ -106,10 +106,9 @@ class ChurnsOneName(LowFreqStrategy):
     def on_panel(self, panel, state, index) -> Optional[Dict[Any, float]]:
         if not self.due(index, panel):
             return None
-        from trader.research.lowfreq.reference_strategies import schedule_mask
-        n_due = int(schedule_mask(panel.index[:index + 1], self.REBALANCE).sum())   # pure: no state mutation
+        state['n'] = state.get('n', 0) + 1      # honest STATEFUL strategy: counts its own rebalances
         w = {c: 0.0 for c in state['close'].columns}
-        w[self.TICKER] = 1.0 if n_due % 2 == 1 else 0.0
+        w[self.TICKER] = 1.0 if state['n'] % 2 == 1 else 0.0
         return w
 
 
@@ -217,4 +216,57 @@ class PeeksOnlyWithCoverage(LowFreqStrategy):
         best = (row / state['close'].iloc[index]).idxmax()
         w = {c: 0.0 for c in state['close'].columns}
         w[best] = 1.0
+        return w
+
+
+class StatefulAlternator(LowFreqStrategy):
+    """An honest strategy that MUTATES its precompute state sequentially (the
+    executor's contract: one state, on_panel called in order): alternates
+    SPY / IEF each month by counting its own rebalances. Must pass the
+    lookahead check and evaluate normally."""
+
+    def precompute_panel(self, panel: pd.DataFrame) -> Dict[str, Any]:
+        return {'close': panel['close'], 'n': 0}
+
+    def on_panel(self, panel, state, index) -> Optional[Dict[Any, float]]:
+        if not self.due(index, panel):
+            return None
+        state['n'] += 1
+        w = {c: 0.0 for c in state['close'].columns}
+        w['SPY' if state['n'] % 2 else 'IEF'] = 1.0
+        return w
+
+
+class SuppressesOnFullData(LowFreqStrategy):
+    """A t+1-derived state that SUPPRESSES its instruction on full data and
+    emits one on the honest prefix: ``known_future`` is True wherever a next
+    bar exists. On the full panel every index < n-1 returns None; on a prefix
+    ending at i the last bar has no future, so it emits a weight there."""
+
+    def precompute_panel(self, panel: pd.DataFrame) -> Dict[str, Any]:
+        close = panel['close']
+        return {'close': close, 'known_future': close.shift(-1).notna().any(axis=1)}
+
+    def on_panel(self, panel, state, index) -> Optional[Dict[Any, float]]:
+        if bool(state['known_future'].iloc[index]):
+            return None
+        w = {c: 0.0 for c in state['close'].columns}
+        w['SPY'] = 1.0
+        return w
+
+
+class OmitsKeyWhenPeeking(HoldOne):
+    """Same weights as HoldOne except that, when tomorrow's SPY close is below
+    today's, IEF's key is OMITTED instead of written as 0.0 - a difference the
+    executor acts on (omitted = hold the current IEF position) and the checker
+    must not equate with an explicit zero."""
+
+    def precompute_panel(self, panel: pd.DataFrame) -> Dict[str, Any]:
+        close = panel['close']
+        return {'close': close, 'down_tomorrow': close['SPY'].shift(-1) < close['SPY']}
+
+    def on_panel(self, panel, state, index) -> Optional[Dict[Any, float]]:
+        w = super().on_panel(panel, state, index)
+        if w is not None and bool(state['down_tomorrow'].iloc[index]):
+            w.pop('IEF', None)
         return w

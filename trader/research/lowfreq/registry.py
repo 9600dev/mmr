@@ -32,6 +32,7 @@ import datetime as dt
 import hashlib
 import itertools
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -41,6 +42,14 @@ import yaml
 from trader.research.lowfreq import config as _cfg
 
 ROLES = ('candidate', 'benchmark')
+# One path segment of ``research/lowfreq/<family>/`` or ``results/<id>.json``:
+# lower-case letters, digits, underscore. Anything else is refused before any
+# filesystem access (D02: the target names files under the family directory).
+SEGMENT_RE = re.compile(r'^[a-z0-9_]+$')
+
+
+def is_safe_segment(s: Any) -> bool:
+    return isinstance(s, str) and bool(SEGMENT_RE.match(s))
 
 
 class RegistryError(ValueError):
@@ -97,6 +106,8 @@ def _date(v, what: str) -> dt.date:
 
 
 def load_family(name: str, root: Optional[Path] = None) -> Family:
+    if not is_safe_segment(name):
+        raise RegistryError(f'family {name!r} must match {SEGMENT_RE.pattern}')
     root = root or _cfg.research_root()
     path = root / name
     reg = path / 'candidates.yaml'
@@ -139,6 +150,8 @@ def load_family(name: str, root: Optional[Path] = None) -> Family:
 
 def validate_entry(e: Dict[str, Any], reg: Path) -> None:
     cid = e['id']
+    if not is_safe_segment(cid):
+        raise RegistryError(f'{reg}: id {cid!r} must match {SEGMENT_RE.pattern} (it names results/<id>.json)')
     if e.get('role') not in ROLES:
         raise RegistryError(f'{reg}: {cid}: role must be one of {ROLES}')
     strat = e.get('strategy') or {}
@@ -147,6 +160,9 @@ def validate_entry(e: Dict[str, Any], reg: Path) -> None:
     grid = e.get('params') or {}
     if not isinstance(grid, dict) or any(not isinstance(v, list) or not v for v in grid.values()):
         raise RegistryError(f'{reg}: {cid}: params must map names to non-empty lists')
+    if any(not isinstance(k, str) for k in grid):
+        raise RegistryError(f'{reg}: {cid}: params keys must be strings (tunable names), got '
+                            f'{sorted(repr(k) for k in grid if not isinstance(k, str))}')
     for k in ('hypothesis', 'rationale', 'registered_at'):
         if k not in e:
             raise RegistryError(f'{reg}: {cid}: missing {k}')

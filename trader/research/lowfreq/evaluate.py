@@ -30,8 +30,8 @@ from trader.research.lowfreq import config as _cfg
 from trader.research.lowfreq import engine, ledger, stats
 from trader.research.lowfreq.costs import STRESS_MULTIPLIER, Costs, base_costs
 from trader.research.lowfreq.loaders import PricePanel, load_equity_panel, load_etf_panel, to_date
-from trader.research.lowfreq.registry import (Family, RegistryError, default_cell, entry_sha256,
-                                             expand_grid, load_family)
+from trader.research.lowfreq.registry import (SEGMENT_RE, Family, RegistryError, default_cell,
+                                             entry_sha256, expand_grid, is_safe_segment, load_family)
 from trader.research.lowfreq.verdict import GateInputs, decide
 from trader.simulation.selection_bias import pbo_cscv
 from trader.simulation.walk_forward import (Fold, FoldResult, plan_fold_offsets, resolve_folds,
@@ -95,24 +95,28 @@ def evaluate(target: str, fixed_params: Optional[Dict[str, Any]] = None, start: 
              end: Optional[str] = None, root=None) -> Dict[str, Any]:
     """Run the protocol; write results; append the ledger line; return the result dict.
 
-    Exactly one ledger line per call, whatever happens after the family
-    directory is known: a family that cannot be loaded or an id it does not
-    contain is ``refused``, any failure during the run (including writing
-    the results file) is ``error``, and ``ok`` is appended only after the
-    results JSON is on disk.
+    Exactly one ledger line per call. A target that is not two safe path
+    segments (``^[a-z0-9_]+$`` each) is ``refused`` at the root-level ledger
+    before any file under the root is touched; a family that cannot be
+    loaded, or an id it does not contain, is ``refused`` in the family ledger;
+    everything after the entry is resolved - a corrupt ledger, an unhashable
+    entry, any failure during the run (including writing the results file) -
+    is ``error``; ``ok`` is appended only after the results JSON is on disk.
     """
     t0 = time.time()
     mode = 'fixed' if fixed_params is not None else 'walk_forward'
     root_path = Path(root) if root is not None else _cfg.research_root()
-    if '/' not in target:
-        # No family to file it under: the root-level ledger records the call.
-        msg = f'target must be <family>/<candidate_id>, got {target!r}'
+    parts = target.split('/')
+    if len(parts) != 2 or not all(is_safe_segment(x) for x in parts):
+        # No (safe) family to file it under: the root-level ledger records the call.
+        msg = (f'target must be <family>/<candidate_id> with each segment matching '
+               f'{SEGMENT_RE.pattern}, got {target!r}')
         ledger.append(root_path / 'trials.jsonl',
                       {'family': None, 'id': target, 'mode': mode, 'status': 'refused', 'error': msg,
                        'fixed_params': dict(fixed_params) if fixed_params is not None else None,
                        'start': start, 'end': end, 'elapsed_s': _elapsed(t0)})
         raise ValueError(msg)
-    fam_name, cid = target.split('/', 1)
+    fam_name, cid = parts
     row: Dict[str, Any] = {'family': fam_name, 'id': cid, 'mode': mode,
                            'fixed_params': dict(fixed_params) if fixed_params is not None else None}
     if fixed_params is not None:
@@ -123,23 +127,23 @@ def evaluate(target: str, fixed_params: Optional[Dict[str, Any]] = None, start: 
         ledger.append(root_path / fam_name / 'trials.jsonl',
                       dict(row, status='refused', error=_error_text(exc), elapsed_s=_elapsed(t0)))
         raise
-    rows = ledger.read(fam.ledger_path)
+    entry: Optional[Dict[str, Any]] = None
+    composed: Optional[Dict[str, Any]] = None
+    rows: Optional[List[Dict[str, Any]]] = None
     try:
-        entry = fam.get(cid)
-    except RegistryError as exc:
-        ledger.append(fam.ledger_path, dict(row, status='refused', error=str(exc),
-                                            n_trials=ledger.trial_count(rows), elapsed_s=_elapsed(t0)))
-        raise
-    sha = entry_sha256(entry)
-    row.update(role=entry['role'], entry_sha256=sha, grid=entry.get('params') or {},
-               n_trials=ledger.trial_count(rows, including=sha if entry['role'] == 'candidate' else None))
-    if fixed_params is None:
-        try:
-            d0, d1, *_ = _dates(fam, entry)
-            row['start'], row['end'] = str(d0), str(d1)
-        except Exception:                              # noqa: BLE001 - _evaluate reports it
-            pass
-    try:
+        rows = ledger.read(fam.ledger_path)            # a corrupt ledger is an error row, appended
+        row['n_trials'] = ledger.trial_count(rows)
+        entry = fam.get(cid)                           # RegistryError -> refused (below)
+        row['role'] = entry['role']
+        sha = entry_sha256(entry)
+        row.update(entry_sha256=sha, grid=entry.get('params') or {},
+                   n_trials=ledger.trial_count(rows, including=sha if entry['role'] == 'candidate' else None))
+        if fixed_params is None:
+            try:
+                d0, d1, *_ = _dates(fam, entry)
+                row['start'], row['end'] = str(d0), str(d1)
+            except Exception:                          # noqa: BLE001 - _evaluate reports it
+                pass
         result = _evaluate(fam, entry, sha, fixed_params, start, end, rows)
         result['elapsed_s'] = _elapsed(t0)
         name = (f'{cid}.json' if mode == 'walk_forward'
@@ -156,9 +160,12 @@ def evaluate(target: str, fixed_params: Optional[Dict[str, Any]] = None, start: 
         with open(path, 'w', encoding='utf-8') as fh:
             json.dump(result, fh, indent=1, sort_keys=True, default=str)
     except Exception as exc:                           # noqa: BLE001 - errors are trials too (D02)
-        ledger.append(fam.ledger_path, dict(row, status='error', error=_error_text(exc),
-                                            strategy_sha256=_strategy_sha(entry), elapsed_s=_elapsed(t0)))
+        status = 'refused' if entry is None and isinstance(exc, RegistryError) else 'error'
+        ledger.append(fam.ledger_path, dict(row, status=status, error=_error_text(exc),
+                                            strategy_sha256=_strategy_sha(entry) if entry is not None else None,
+                                            elapsed_s=_elapsed(t0)))
         raise
+    assert composed is not None
     ledger.append(fam.ledger_path, composed)
     return result
 
@@ -201,6 +208,7 @@ def _evaluate(fam: Family, entry: Dict[str, Any], sha: str, fixed_params, start,
     # coverage frame (D05): the decisive benchmark must own exactly the names
     # the cell that was actually chosen could have picked from.
     coverage_by_cell: Dict[str, Optional[pd.DataFrame]] = {}
+    n_prefixes = len(engine.sampled_prefixes(len(panel.close)))
     for cell in cells:
         state = engine.lookahead_check(entry, cell, panel)          # raises on lookahead
         coverage_by_cell[_cell_key(cell)] = engine.candidate_coverage(state)
@@ -216,10 +224,9 @@ def _evaluate(fam: Family, entry: Dict[str, Any], sha: str, fixed_params, start,
         for cov in distinct_cov:
             engine.lookahead_check(be, default_cell(be), panel, coverage=cov)
     lookahead_report = {'cells_checked': len(cells), 'benchmarks_checked': bench_ids,
-                        'benchmark_coverage_frames_checked': len(distinct_cov), 'every_index': True}
-
-    def cov_of(cell: Dict[str, Any]) -> Optional[pd.DataFrame]:
-        return coverage_by_cell.get(_cell_key(cell))
+                        'benchmark_coverage_frames_checked': len(distinct_cov),
+                        'mode': 'sampled_prefixes_fresh_state', 'prefixes_replayed': n_prefixes,
+                        'reference_indices': max(len(panel.close) - 1, 0)}
 
     def run(e: Dict[str, Any], cell: Dict[str, Any], data_start, meas_start, stop, c: Costs,
             cov: Optional[pd.DataFrame] = None) -> engine.WindowResult:
@@ -273,7 +280,7 @@ def _evaluate(fam: Family, entry: Dict[str, Any], sha: str, fixed_params, start,
     stress_parts, stress_decisive = [], []
     fold_table = []
     for fold, chosen, res in windows:
-        cov = cov_of(chosen)
+        cov = res.coverage                    # D05: derived from THIS window's candidate run, on ITS bars
         b_res = {b: run(bench_entries[b], default_cell(bench_entries[b]), fold.test_data_start, fold.test_start,
                         fold.test_end, costs, cov) for b in bench_ids}
         b_sharpes = {b: stats.ann_sharpe(r.returns) for b, r in b_res.items()}
@@ -312,8 +319,8 @@ def _evaluate(fam: Family, entry: Dict[str, Any], sha: str, fixed_params, start,
     stress_active = stress_oos - _stitch(stress_decisive).reindex(stress_oos.index).fillna(0.0)
 
     # ---- full period: report cell, every cell (PBO), benchmarks -------------------
-    report_cov = cov_of(report_cell)
     full = run(entry, report_cell, dev_start - warm, dev_start, end_excl, costs)
+    report_cov = full.coverage                # D05: the full-period run's own published coverage
     full_bench = {b: run(bench_entries[b], default_cell(bench_entries[b]), dev_start - warm, dev_start, end_excl,
                          costs, report_cov) for b in bench_ids}
     full_cells: Dict[str, Dict[str, Any]] = {}
@@ -372,9 +379,11 @@ def _evaluate(fam: Family, entry: Dict[str, Any], sha: str, fixed_params, start,
         'costs': {'base': costs.as_dict(), 'stress_multiplier': STRESS_MULTIPLIER},
         'grid': {'cells': len(cells), 'registered_cells': len(registered_cells), 'report_cell': report_cell},
         'lookahead': lookahead_report,
-        'coverage': ({'forwarded_to_benchmarks': True, 'per_chosen_cell': True,
+        'coverage': ({'forwarded_to_benchmarks': True, 'per_chosen_cell': True, 'per_window': True,
+                      'candidate_buys_validated': True,
                       'median_names_covered_per_day': float(report_cov.sum(axis=1).median())}
-                     if report_cov is not None else {'forwarded_to_benchmarks': False, 'per_chosen_cell': True}),
+                     if report_cov is not None else {'forwarded_to_benchmarks': False, 'per_chosen_cell': True,
+                                                     'per_window': True, 'candidate_buys_validated': False}),
         'folds': fold_table, 'decisive_per_fold': decisive_ids,
         'oos': oos_summary, 'oos_benchmarks': {b: stats.summarise(s) for b, s in bench_oos.items()},
         'active': {'ann_return': gates.active_ann_return, 'sharpe': act_sharpe, 't_nw': t_nw, 'nw_lags': lags,
@@ -385,6 +394,11 @@ def _evaluate(fam: Family, entry: Dict[str, Any], sha: str, fixed_params, start,
         'pbo': pbo, 'selection_stability': stability,
         'full_period': {'report_cell': full.metrics(), 'benchmarks': {b: r.metrics() for b, r in full_bench.items()},
                         'cells': full_cells},
+        'stopped_names': {'rule': 'D07: a holding is sold at the close of its last stored print; no open is fabricated',
+                          'full_period_forced_exits': full.forced_exits,
+                          'full_period_forced_exit_value_fraction': full.forced_exit_value_fraction,
+                          'oos_forced_exits': int(sum((r.forced_exits or 0) for _, _, r in windows)),
+                          'benchmark_full_period_forced_exits': {b: r.forced_exits for b, r in full_bench.items()}},
         'verdict': decision['verdict'], 'gates': decision['gates'], 'gate_inputs': decision['inputs'],
         'ledger_metrics': ledger_metrics,
         'series': {'oos_returns': _series_json(oos), 'decisive_returns': _series_json(decisive)},
@@ -418,7 +432,12 @@ def render_summary(r: Dict[str, Any]) -> str:
                  f"on {_f(fp.get('scaled_rebalances'), '{:d}')} dates (D06)")
     la = r.get('lookahead', {})
     lines.append(f"lookahead cells checked {la.get('cells_checked')}  benchmarks {la.get('benchmarks_checked')} "
-                 f"x {la.get('benchmark_coverage_frames_checked')} coverage frame(s)  every index + every decision recomputed")
+                 f"x {la.get('benchmark_coverage_frames_checked')} coverage frame(s)  "
+                 f"{la.get('prefixes_replayed')} prefixes replayed with fresh state of {la.get('reference_indices')} indices")
+    sn = r.get('stopped_names', {})
+    lines.append(f"stopped   forced exits at last print: full {sn.get('full_period_forced_exits')} "
+                 f"(value {_f(sn.get('full_period_forced_exit_value_fraction'), '{:.2%}')} of capital)  "
+                 f"oos {sn.get('oos_forced_exits')}  benchmarks {sn.get('benchmark_full_period_forced_exits')} (D07)")
     lines.append('gates     ' + '  '.join(f"{k}={'n/a' if v is None else ('ok' if v else 'FAIL')}" for k, v in r['gates'].items()))
     lines.append(f"results   {r.get('results_path', '')}")
     lines.append(f"VERDICT   {r['verdict']}")

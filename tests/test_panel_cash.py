@@ -101,7 +101,9 @@ def test_without_a_gap_nothing_is_scaled_and_the_diagnostics_say_so():
     (t,) = res.trades
     assert t.quantity == math.trunc(100_000.0 / float(frames[1]['close'].iloc[2]))
     assert res.diagnostics == {'panel_scaled_buy_fills': 0, 'panel_dropped_buy_fills': 0,
-                               'panel_scaled_rebalances': 0, 'panel_min_cash': res.diagnostics['panel_min_cash']}
+                               'panel_scaled_rebalances': 0, 'panel_min_cash': res.diagnostics['panel_min_cash'],
+                               # hillclimb(C01): D07 forced-exit counters (flag off here, always reported)
+                               'panel_forced_exits': 0, 'panel_forced_exit_value': 0.0}
     assert res.diagnostics['panel_min_cash'] >= 0.0
 
 

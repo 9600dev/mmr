@@ -14,7 +14,7 @@ import importlib.util
 import inspect
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, cast
+from typing import Any, Dict, List, Optional, cast
 
 import numpy as np
 import pandas as pd
@@ -29,8 +29,15 @@ from trader.strategy.parameters import apply_param_overrides
 from trader.trading.strategy import Strategy, StrategyContext, StrategyState
 
 INITIAL_CAPITAL = 1_000_000.0
-PROBE_INDICES = 8          # on_panel lookahead probes per cell, spread over the panel
 PANEL_FIELDS = ('open', 'high', 'low', 'close', 'volume')
+# Lookahead sampling (orchestrator ruling, round 3): prefixes are replayed with
+# FRESH state at the first/last EDGE decision indices and in PROBE_WINDOWS runs
+# of PROBE_WINDOW_LEN consecutive indices spread over the panel. A run is longer
+# than any calendar month of sessions, so a monthly schedule's due bar lies
+# inside every run and a weekly one several times.
+PROBE_WINDOWS = 3
+PROBE_WINDOW_LEN = 23
+PROBE_EDGE = 3
 
 
 class _NoStorage:
@@ -53,6 +60,9 @@ class WindowResult:
     n_frozen_holdings_end: Optional[int] = None
     scaled_buy_fills: Optional[int] = None            # D06: BUY fills the cash guard scaled down
     scaled_rebalances: Optional[int] = None           # D06: fill dates on which the guard acted
+    forced_exits: Optional[int] = None                # D07: holdings sold at their last stored print
+    forced_exit_value_fraction: Optional[float] = None  # D07: their gross value / initial capital
+    coverage: Optional[pd.DataFrame] = None           # D05: coverage THIS run published, on ITS bars
 
     def metrics(self) -> Dict[str, Any]:
         from trader.research.lowfreq import stats
@@ -64,7 +74,9 @@ class WindowResult:
                   'frozen_value_fraction_end': self.frozen_value_fraction_end,
                   'n_frozen_holdings_end': self.n_frozen_holdings_end,
                   'scaled_buy_fills': self.scaled_buy_fills,
-                  'scaled_rebalances': self.scaled_rebalances})
+                  'scaled_rebalances': self.scaled_rebalances,
+                  'forced_exits': self.forced_exits,
+                  'forced_exit_value_fraction': self.forced_exit_value_fraction})
         return m
 
 
@@ -196,12 +208,14 @@ def _config(start: dt.date, end_excl: dt.date, costs: Costs) -> BacktestConfig:
         initial_capital=INITIAL_CAPITAL, bar_size=BarSize.Days1,
         slippage_bps=costs.slippage_bps, commission_per_share=costs.commission_per_share,
         short_borrow_bps_annual=costs.short_borrow_bps_annual, panel_max_gross=costs.max_gross,
-        fill_policy='next_open')
+        fill_policy='next_open',
+        panel_exit_at_last_print=True)     # D07: a stopped name exits at its last stored print
 
 
-def _non_member_buys(trades, member: pd.DataFrame, index: pd.Index) -> list:
+def _buys_outside(trades, member: pd.DataFrame, index: pd.Index) -> list:
     """BUY fills whose DECISION bar (the bar before the fill) was outside the
-    point-in-time membership - a universe violation under D05."""
+    boolean (time x ticker) mask - point-in-time membership or a published
+    coverage frame (D05)."""
     idx = pd.DatetimeIndex(index)
     pos = {ts: i for i, ts in enumerate(idx)}
     out = []
@@ -264,7 +278,15 @@ def run_window(entry: Dict[str, Any], cell: Dict[str, Any], panel: PricePanel,
     if len(frames) < 2:
         raise ValueError(f'{entry["id"]}: fewer than 2 instruments with data in '
                          f'[{data_start}, {end_excl})')
-    strat = make_strategy(entry, cell, window, coverage=coverage)
+    wide = wide_panel(frames)
+    # D05: a received coverage frame is sliced to THIS window's bars before it
+    # is installed - never the unsliced full-period frame.
+    cov_in = (coverage.reindex(index=wide.index, columns=wide['close'].columns).fillna(False).astype(bool)
+              if coverage is not None else None)
+    strat = make_strategy(entry, cell, window, coverage=cov_in)
+    # The coverage THIS run publishes, derived from THIS window's data by a
+    # separate instance (the executing one must enter the backtest unreplayed).
+    own_cov = candidate_coverage(make_strategy(entry, cell, window, coverage=cov_in).precompute_panel(wide))
     bt = Backtester(cast(Any, _NoStorage()), _config(to_date(data_start), to_date(end_excl), costs))
     # run_panel is typed for conId keys; the research panels are ticker-keyed
     # (delisted names have no conId - see the PIT universe notes in CLAUDE.md).
@@ -272,10 +294,16 @@ def run_window(entry: Dict[str, Any], cell: Dict[str, Any], panel: PricePanel,
     eq = res.equity_curve.astype(float)
     member = window.fields.get('member')
     if member is not None:                     # D05: opens only inside the point-in-time universe
-        bad = _non_member_buys(res.trades, member, eq.index)
+        bad = _buys_outside(res.trades, member, eq.index)
         if bad:
             raise ValueError(f'{entry["id"]}: universe violation - {len(bad)} BUY fill(s) in names '
                              f'outside point-in-time membership on the decision bar, e.g. {bad[:3]}')
+    check_cov = own_cov if own_cov is not None else cov_in
+    if check_cov is not None:                  # D05: opens only inside the coverage that was published
+        bad = _buys_outside(res.trades, check_cov, eq.index)
+        if bad:
+            raise ValueError(f'{entry["id"]}: coverage violation - {len(bad)} BUY fill(s) in names outside '
+                             f'the published coverage frame on the decision bar, e.g. {bad[:3]}')
     rets = eq.pct_change()
     ms = pd.Timestamp(meas_start)
     measured = rets[(rets.index >= ms)].dropna()
@@ -293,16 +321,23 @@ def run_window(entry: Dict[str, Any], cell: Dict[str, Any], panel: PricePanel,
                         min_cash_fraction=min_cash, frozen_value_fraction_end=frozen,
                         n_frozen_holdings_end=n_frozen,
                         scaled_buy_fills=diag.get('panel_scaled_buy_fills'),
-                        scaled_rebalances=diag.get('panel_scaled_rebalances'))
+                        scaled_rebalances=diag.get('panel_scaled_rebalances'),
+                        forced_exits=diag.get('panel_forced_exits'),
+                        forced_exit_value_fraction=(float(diag['panel_forced_exit_value']) / INITIAL_CAPITAL
+                                                    if diag.get('panel_forced_exit_value') is not None else None),
+                        coverage=own_cov)
 
 
 def _weights_equal(a: Optional[Dict[Any, float]], b: Optional[Dict[Any, float]], tol: float = 1e-9) -> bool:
-    if (a is None) != (b is None):
-        return False
+    """Exact instruction semantics: None (hold) != {} (flatten) != {x: 0.0}
+    (explicit flat), and an OMITTED key is not an explicit 0 - the panel
+    executor treats them differently, so the checker must too."""
     if a is None or b is None:
-        return True
-    for k in set(a) | set(b):
-        x, y = float(a.get(k, 0.0) or 0.0), float(b.get(k, 0.0) or 0.0)
+        return a is None and b is None
+    if set(a) != set(b):
+        return False
+    for k in a:
+        x, y = float(a[k]), float(b[k])
         if not (abs(x - y) <= tol or (np.isnan(x) and np.isnan(y))):
             return False
     return True
@@ -335,42 +370,50 @@ def _values_equal(full, trunc, rows: int, tol: float = 1e-9) -> bool:
     return True
 
 
-def _truncate_state(state: Dict[str, Any], rows: int) -> Dict[str, Any]:
-    out = {}
-    for k, v in state.items():
-        if isinstance(v, (pd.DataFrame, pd.Series)):
-            out[k] = v.iloc[:rows]
-        elif isinstance(v, np.ndarray) and v.ndim >= 1 and len(v) >= rows:
-            out[k] = v[:rows]
-        else:
-            out[k] = v
-    return out
+def sampled_prefixes(n: int, windows: int = PROBE_WINDOWS, window_len: int = PROBE_WINDOW_LEN,
+                     edge: int = PROBE_EDGE) -> List[int]:
+    """Prefix end-indices ``i`` (0 <= i <= n-2, the indices the executor asks
+    ``on_panel`` about) that ``lookahead_check`` replays with fresh state: the
+    first and last ``edge`` of them, plus ``windows`` runs of ``window_len``
+    consecutive indices spread over the panel. Every index when the panel is
+    short enough for that to be cheap; never empty for n >= 2."""
+    last = n - 2
+    if last < 0:
+        return []
+    picks = set(range(0, min(edge, last + 1)))
+    picks |= set(range(max(0, last - edge + 1), last + 1))
+    for k in range(windows):
+        centre = int(round((k + 1) * (last + 1) / (windows + 1)))
+        start = max(0, min(centre - window_len // 2, last - window_len + 1))
+        picks |= set(range(start, min(start + window_len, last + 1)))
+    return sorted(picks)
 
 
 def lookahead_check(entry: Dict[str, Any], cell: Dict[str, Any], panel: PricePanel,
-                    coverage: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+                    coverage: Optional[pd.DataFrame] = None,
+                    prefixes: Optional[List[int]] = None) -> Dict[str, Any]:
     """Refuse a strategy that reads forward, BEFORE any metric is computed.
-    Returns the full-panel precompute state (so the caller can read a
-    published ``coverage`` frame without recomputing it).
+    Returns the full-panel precompute state (never replayed), so the caller
+    can read a published ``coverage`` frame without recomputing it.
 
-    Three probes, together covering every index the backtester will ask about:
     (1) ``assert_no_panel_lookahead``: hiding the last bars must not change any
-        past precomputed value;
-    (2) at EVERY index i < n-1, ``on_panel`` on the panel and state truncated
-        to bars <= i must return the same instruction as on the full data - a
-        direct ``iloc[index + 1]`` read fails here (IndexError), on a scheduled
-        strategy exactly at its due bars;
-    (3) at every DECISION index (where either run returned an instruction) the
-        whole strategy is recomputed from scratch on bars <= i: the precomputed
-        values over those bars must equal the full run's, and the instruction
-        must match - so a leak that lives only in the rows a scheduled strategy
-        reads (a month-end looking at the next month) cannot hide between the
-        sampled truncations of probe (1).
-    ``on_panel`` is treated as a pure function of (panel, state, index) - the
-    contract the backtester's replay assumes; a strategy that mutates its
-    state is reported here rather than silently accepted. A benchmark is
-    checked in the form it is executed: ``coverage`` installs the candidate's
-    frame first. There is no bypass.
+        past precomputed value.
+    (2) A REFERENCE run replays the strategy exactly as the executor does: one
+        ``precompute_panel`` on the full panel, then ``on_panel`` at every index
+        in order, sharing one state - so an honest STATEFUL strategy (one that
+        counts its own rebalances in ``state``) is replayed on its own terms.
+    (3) For every sampled prefix ``i`` (``sampled_prefixes``: boundaries plus
+        runs of consecutive indices, or the caller's list) a FRESH instance is
+        built on the panel truncated to bars <= i, ``precompute_panel`` is run
+        on that truncated panel (its values over those bars must equal the
+        full-panel values) and ``on_panel`` is replayed sequentially over
+        0..i: every instruction must equal the reference run's under exact
+        key semantics (``_weights_equal``). Nothing is skipped where the full
+        run returned None - a t+1-derived state that SUPPRESSES an
+        instruction on full data and emits one on the honest prefix fails
+        here, as does a direct ``iloc[index + 1]`` read (IndexError).
+    A benchmark is checked in the form it is executed: ``coverage`` installs
+    the candidate's frame first. There is no short-panel bypass.
     """
     frames = panel.frames()
     if len(frames) < 2:
@@ -378,6 +421,8 @@ def lookahead_check(entry: Dict[str, Any], cell: Dict[str, Any], panel: PricePan
     wide = wide_panel(frames)
     idx = wide.index
     n = len(wide)
+    if n < 2:
+        raise ValueError('lookahead check needs at least two bars')
 
     def fresh(upto: Optional[int] = None) -> Strategy:
         if upto is None:
@@ -386,43 +431,39 @@ def lookahead_check(entry: Dict[str, Any], cell: Dict[str, Any], panel: PricePan
         cov = coverage.loc[coverage.index <= idx[upto]] if coverage is not None else None
         return make_strategy(entry, cell, sub, coverage=cov)
 
-    strat = fresh()
-    assert_no_panel_lookahead(strat, wide)                        # probe (1)
-    full_state = strat.precompute_panel(wide)
-    if n < 4:
-        return full_state
-    full_w: Dict[int, Optional[Dict[Any, float]]] = {}
-    for i in range(n - 1):
-        full_w[i] = strat.on_panel(wide, full_state, i)
-    decisions = set()
-    probe = fresh()                                                # probe (2)
-    for i in range(n - 1):
-        trunc = wide.iloc[:i + 1]
-        try:
-            w = probe.on_panel(trunc, _truncate_state(full_state, i + 1), i)
-        except (IndexError, KeyError) as exc:
-            raise AssertionError(f'LOOKAHEAD: on_panel at index {i} ({idx[i].date()}) failed once bars '
-                                 f'after it were hidden: {type(exc).__name__}: {exc}') from exc
-        if not _weights_equal(w, full_w[i]):
-            raise AssertionError(f'LOOKAHEAD: on_panel at index {i} ({idx[i].date()}) returned a different '
-                                 f'instruction once bars after it were hidden (or on_panel mutates its state)')
-        if w is not None or full_w[i] is not None:
-            decisions.add(i)
-    for i in sorted(decisions):                                    # probe (3)
+    assert_no_panel_lookahead(fresh(), wide)                       # probe (1)
+    snapshot = fresh().precompute_panel(wide)                      # pre-replay reference values
+    if not isinstance(snapshot, dict):
+        raise TypeError(f'{entry["id"]}: precompute_panel must return a dict, got {type(snapshot).__name__}')
+    ref = fresh()                                                  # probe (2): the executor's sequence
+    ref_state = ref.precompute_panel(wide)
+    ref_w: List[Optional[Dict[Any, float]]] = [ref.on_panel(wide, ref_state, i) for i in range(n - 1)]
+
+    picks = sorted(set(prefixes)) if prefixes is not None else sampled_prefixes(n)
+    for i in picks:                                                # probe (3)
+        if not 0 <= i <= n - 2:
+            raise ValueError(f'prefix index {i} outside 0..{n - 2}')
         trunc = wide.iloc[:i + 1]
         s_i = fresh(i)
         try:
             st = s_i.precompute_panel(trunc)
-            w = s_i.on_panel(trunc, st, i)
         except (IndexError, KeyError) as exc:
-            raise AssertionError(f'LOOKAHEAD: recomputing on bars <= {idx[i].date()} failed: {type(exc).__name__}: {exc}') from exc
-        if set(st) != set(full_state):
+            raise AssertionError(f'LOOKAHEAD: precompute_panel on bars <= {idx[i].date()} failed: '
+                                 f'{type(exc).__name__}: {exc}') from exc
+        if set(st) != set(snapshot):
             raise AssertionError(f'LOOKAHEAD: precompute state keys differ on bars <= {idx[i].date()}: '
-                                 f'{sorted(set(st) ^ set(full_state))}')
+                                 f'{sorted(set(st) ^ set(snapshot))}')
         for k in st:
-            if not _values_equal(full_state[k], st[k], i + 1):
+            if not _values_equal(snapshot[k], st[k], i + 1):
                 raise AssertionError(f'LOOKAHEAD: precomputed {k!r} over bars <= {idx[i].date()} changes when '
                                      f'later bars are hidden')
-        if not _weights_equal(w, full_w[i]):
-            raise AssertionError(f'LOOKAHEAD: the instruction at {idx[i].date()} (index {i}) depends on bars after it')
-    return full_state
+        for j in range(i + 1):
+            try:
+                w = s_i.on_panel(trunc, st, j)
+            except (IndexError, KeyError) as exc:
+                raise AssertionError(f'LOOKAHEAD: on_panel at index {j} ({idx[j].date()}) failed once bars '
+                                     f'after {idx[i].date()} were hidden: {type(exc).__name__}: {exc}') from exc
+            if not _weights_equal(w, ref_w[j]):
+                raise AssertionError(f'LOOKAHEAD: the instruction at {idx[j].date()} (index {j}) differs when '
+                                     f'bars after {idx[i].date()} (index {i}) are hidden - it depends on them')
+    return snapshot
