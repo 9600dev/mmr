@@ -1,7 +1,11 @@
 """research/lowfreq/xasset/make_report.py: the PREREG champion rule, the modal
 final-cell rule with its A1.3 tie-break, distinct-hash trial counting under
-refresh rows, pass-1/pass-2 determinism comparison, immutable snapshots, and
-rendered values matching their JSON source."""
+refresh rows, pass-1/pass-2 determinism comparison, immutable snapshots,
+rendered values matching their JSON source (fold, per-year and dated-holdings
+tables included) - and, at the artefact level, that the checked-in REPORT.md
+contains exactly what the renderer produces from the CURRENT ledger, results
+and diagnostics, names the rule's champion with its JSON verdict, and stays
+under the 3000-word limit."""
 from __future__ import annotations
 
 import importlib.util
@@ -99,7 +103,7 @@ def test_ledger_counts_distinct_hashes_and_numbers_passes():
     assert mr.distinct_candidate_hashes(rows) == 2
     assert mr.pass_numbers(rows) == [None, 1, 1, 2, 2, None]
     table = mr.ledger_table(['a', 'b'], rows)
-    assert 'distinct entry hashes): **2**' in table and 'snapshots/a__pass2.json' in table
+    assert 'distinct entry hashes): **2**' in table and '| aaaaaaaaaaaa | 2 | 7 |' in table   # (id, pass) -> snapshot file
     assert '5 candidate rows in total' in table
 
 
@@ -143,3 +147,120 @@ def test_rendered_numbers_match_json_source():
     assert '| 2013 | +2.00% | yes |' in section and '| 2024 | -1.00% | no (<60 days)' in section
     assert 'Final parameter cell' in section and '`{"A": 2}`' in section
     assert 'DSR 0.50 with N = 7 trials' in section
+    assert 'Gates (D01): a_sharpe_vs_benchmark ok; b_active_t_ge_2 FAIL; b_active_t_ge_1 ok;' in section
+    assert 'g_pbo_and_stability n/a.' in section
+    assert '| a | **PROMISING** | 3 | +1.057 | +9.12% | -20.0% | -21.2% | +1.00% | 1.23 | 0.50 (7) | +0.50% | 60% | n/a | 1.00 | bc |' in table
+
+
+# ------------------------------------------------------------------ fold / per-year / holdings tables
+WINDOWS = [('2012-06-30', '2013-06-30'), ('2013-06-30', '2014-06-30'), ('2014-06-30', '2015-06-30')]
+
+
+def _fold(k, cand, b6040, bew, chosen=None):
+    start, end = WINDOWS[k]
+    return {'fold': k, 'test_start': start, 'test_end': end, 'chosen': chosen or {'A': 1},
+            'oos': {'sharpe': cand, 'cagr': 0.0}, 'decisive': 'etf_6040' if b6040 >= bew else 'etf_ew',
+            'benchmarks': {'etf_6040': {'sharpe': b6040}, 'etf_ew': {'sharpe': bew}}}
+
+
+def test_fold_table_marks_wins_only_beyond_visible_margin():
+    a, b = result('a', 'FAIL', 0.0, 0.0), result('b', 'FAIL', 0.0, 0.0)
+    a['folds'] = [_fold(0, 1.0, 0.5, 0.2), _fold(1, 0.504, 0.5, 0.9), _fold(2, 0.553, 0.5, 0.55)]
+    b['folds'] = [_fold(0, 0.1, 0.5, 0.2), _fold(1, 1.0, 0.5, 0.9), _fold(2, 0.2, 0.5, 0.55)]
+    table = mr.fold_table(['a', 'b'], {'a': a, 'b': b})
+    assert '| series | 0:12-13 | 1:13-14 | 2:14-15 | >60/40 | >both |' in table
+    assert '| 60/40 | +0.50 | +0.50 | +0.50 | - | - |' in table
+    assert '| EW | +0.20 | +0.90 | +0.55 | - | - |' in table
+    # fold 1: +0.004 above 60/40 is a tie (below the table's precision); fold 2: +0.053 above 60/40
+    # earns `*` but +0.003 above EW does not earn `!`
+    assert '| a | +1.00*! | +0.50 | +0.55* | 2/3 | 1/3 |' in table
+    assert '| b | +0.10 | +1.00*! | +0.20 | 1/3 | 1/3 |' in table
+    assert mr.fold_table(['a'], {}) == 'No candidate evaluated yet.'
+
+
+def test_fold_table_refuses_inconsistent_benchmark_folds():
+    a, b = result('a', 'FAIL', 0.0, 0.0), result('b', 'FAIL', 0.0, 0.0)
+    a['folds'] = [_fold(0, 1.0, 0.5, 0.2)]
+    b['folds'] = [_fold(0, 1.0, 0.7, 0.2)]                    # same window, different benchmark Sharpe
+    with pytest.raises(ValueError):
+        mr.fold_table(['a', 'b'], {'a': a, 'b': b})
+    b['folds'] = [dict(_fold(0, 1.0, 0.5, 0.2), test_end='2013-07-30')]   # different window
+    with pytest.raises(ValueError):
+        mr.fold_table(['a', 'b'], {'a': a, 'b': b})
+
+
+def test_positive_years_table_counts_strictly_positive_like_gate_e():
+    a, b = result('a', 'FAIL', 0.0, 0.0), result('b', 'FAIL', 0.0, 0.0)
+    a['active']['per_year'] = {'2013': {'active_return': 0.021, 'counted': True}, '2014': {'active_return': 0.0, 'counted': True}}
+    b['active']['per_year'] = {'2013': {'active_return': -0.05, 'counted': True}, '2014': {'active_return': 1e-6, 'counted': True}}
+    table = mr.positive_years_table(['a', 'b'], {'a': a, 'b': b})
+    assert '| year | a | b | positive |' in table
+    assert '| 2013 | +2.1% | -5.0% | 1/2 |' in table
+    assert '| 2014 | +0.0% | +0.0% | 1/2 |' in table      # exactly 0 is not positive; 1e-6 is (the harness's gate (e) rule)
+
+
+def test_holdings_table_renders_from_json_with_picks_and_cap(tmp_path):
+    (tmp_path / 'results').mkdir()
+    data = {'top': 3, 'candidates': {'xa_x': {'folds': [
+        {'fold': 0, 'test_start': '2012-06-30', 'test_end': '2013-06-30', 'chosen': {'B': 2, 'A': 1},
+         'top_holdings': [{'ticker': 'XLE', 'mean_weight': 0.18}, {'ticker': 'USO', 'mean_weight': 0.13},
+                          {'ticker': 'BIL', 'mean_weight': 0.05}]},
+        {'fold': 1, 'test_start': '2013-06-30', 'test_end': '2014-06-30', 'chosen': {'A': 1, 'B': 2},
+         'top_holdings': [{'ticker': 'SPY', 'mean_weight': 0.6}]}]}}}
+    (tmp_path / 'results' / 'holdings_diagnostics.json').write_text(json.dumps(data))
+    full = mr.holdings_table(tmp_path)
+    assert '| xa_x | 0 | 2012-06-30..2013-06-30 | `{"A": 1, "B": 2}` | XLE 18%, USO 13%, BIL 5% |' in full
+    assert '| xa_x | 1 | 2013-06-30..2014-06-30 | `{"A": 1, "B": 2}` | SPY 60% |' in full
+    picked = mr.holdings_table(tmp_path, picks=[('xa_x', 0)], max_names=2)
+    assert '| xa_x | 1 |' not in picked
+    assert '| XLE 18%, USO 13% +1 more |' in picked
+
+
+# ------------------------------------------------------------------ the checked-in artefacts
+XASSET = REPO / 'research' / 'lowfreq' / 'xasset'
+
+
+def test_report_tables_match_current_artifacts():
+    """REPORT.md must contain, verbatim, every line the renderer produces from
+    the CURRENT ledger, results JSONs and holdings diagnostic; its champion
+    heading must name the rule's champion with the verdict of that champion's
+    results JSON; and it must stay under the 3000-word limit."""
+    _, order, rows, results = mr.load(XASSET)
+    report = (XASSET / 'REPORT.md').read_text()
+    assert len(order) >= 4 and set(order) <= set(results)           # >= 4 distinct hypotheses, all evaluated
+    assert 4 <= mr.distinct_candidate_hashes(rows) <= 40             # D04 trial budget
+    for table in (mr.ledger_table(order, rows), mr.candidate_table(order, results), mr.fold_table(order, results)):
+        for line in table.splitlines():
+            assert (not line.strip()) or line in report, line
+    cid, r = mr.champion(order, results)
+    assert f"## Champion: `{cid}` — verdict **{r['verdict']}**" in report
+    for line in mr.champion_section(cid, r).splitlines()[1:]:
+        assert (not line.strip()) or line in report, line
+    assert json.load(open(XASSET / 'results' / f'{cid}.json'))['verdict'] == r['verdict']
+    assert f"verdict **{r['verdict']}** in\n`results/{cid}.json`" in report or \
+        f"verdict **{r['verdict']}** in `results/{cid}.json`" in report
+    # every dated-holdings row quoted in the report is a row of the diagnostic (at some display cap)
+    data = json.load(open(XASSET / 'results' / 'holdings_diagnostics.json'))
+    quoted = [l for l in report.splitlines() if l.startswith('| xa_') and '`{' in l]
+    assert quoted, 'the report quotes no dated-holdings row'
+    for line in quoted:
+        cells = [c.strip() for c in line.strip().strip('|').split('|')]
+        cid_q, fold_q = cells[0], int(cells[1])
+        assert any(line in mr.holdings_table(XASSET, picks=[(cid_q, fold_q)], max_names=m)
+                   for m in [None] + list(range(1, int(data['top']) + 1))), line
+    assert len(report.split()) < 3000
+
+
+def test_pass_snapshots_agree_and_final_json_is_pass2():
+    """PREREG A1.2 as executed: for every candidate no deterministic field
+    differs between the pass-1 and pass-2 snapshots, results/<id>.json IS the
+    pass-2 snapshot, and its DSR is deflated by the FINAL trial count."""
+    _, order, rows, results = mr.load(XASSET)
+    table = mr.check_passes(XASSET)
+    for cid in order:
+        row = next(l for l in table.splitlines() if l.startswith(f'| {cid} |'))
+        assert row.endswith('| none |'), row
+    n = mr.distinct_candidate_hashes(rows)
+    for cid in order:
+        assert results[cid]['dsr']['n_trials'] == n
+        assert results[cid]['role'] == 'candidate' and results[cid]['family'] == 'xasset'

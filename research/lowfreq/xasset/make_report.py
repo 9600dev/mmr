@@ -8,6 +8,8 @@ Usage (from the repo root):
   uv run python research/lowfreq/xasset/make_report.py            # tables (stdout)
   uv run python research/lowfreq/xasset/make_report.py snapshot pass1   # PREREG A1.2 step 2/3
   uv run python research/lowfreq/xasset/make_report.py check      # pass1 vs pass2 determinism
+  uv run python research/lowfreq/xasset/make_report.py folds      # per-fold Sharpe vs both benchmarks
+  uv run python research/lowfreq/xasset/make_report.py holdings   # dated top holdings per fold (needs the research DBs)
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 VERDICT_RANK = {'PASS': 0, 'PROMISING': 1, 'FAIL': 2}
+FOLD_TIE = 0.005   # fold-Sharpe differences at or below this are ties in fold_table (below the table's precision)
 # Fields that must be byte-identical between pass 1 and pass 2 (everything the
 # trial count does not touch); `dsr`, gate (c), the verdict and bookkeeping may differ.
 DETERMINISTIC_FIELDS = ('oos', 'oos_benchmarks', 'folds', 'decisive_per_fold', 'pbo', 'selection_stability',
@@ -62,13 +65,12 @@ def pass_numbers(rows: List[Dict[str, Any]]) -> List[Optional[int]]:
 
 def ledger_table(order, rows):
     passes = pass_numbers(rows)
-    out = ['| # | id | role | status | verdict | entry sha256[:12] | pass | snapshot | n_trials | OOS Sharpe | active ann | t(NW) | DSR | timestamp (UTC) |',
-           '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
+    out = ['| # | id | role | status | verdict | entry sha256[:12] | pass | n_trials | OOS Sharpe | active ann | t(NW) | DSR | timestamp (UTC) |',
+           '|---|---|---|---|---|---|---|---|---|---|---|---|---|']
     for k, (r, p) in enumerate(zip(rows, passes), 1):
         m = r.get('metrics') or {}
-        snap = f"snapshots/{r.get('id')}__pass{p}.json" if p else '-'
         out.append(f"| {k} | {r.get('id')} | {r.get('role')} | {r.get('status')} | {r.get('verdict') or '-'} | "
-                   f"{(r.get('entry_sha256') or '')[:12]} | {p or '-'} | {snap} | {r.get('n_trials')} | {_f(m.get('oos_sharpe'))} | "
+                   f"{(r.get('entry_sha256') or '')[:12]} | {p or '-'} | {r.get('n_trials')} | {_f(m.get('oos_sharpe'))} | "
                    f"{_f(m.get('active_ann_return'), '{:+.2%}')} | {_f(m.get('active_t_nw'), '{:.2f}')} | "
                    f"{_f(m.get('active_dsr'), '{:.2f}')} | {str(r.get('timestamp'))[:19]} |")
     n_cand = distinct_candidate_hashes(rows)
@@ -82,20 +84,20 @@ def distinct_candidate_hashes(rows) -> int:
 
 
 def candidate_table(order, results):
-    out = ['| id | verdict | cells | OOS Sharpe | bench max Sharpe | OOS CAGR | OOS maxDD | decisive maxDD | active ann | t(NW) | DSR (N) | 3x-cost active | pos. years | PBO | stability | gates failed |',
-           '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
+    out = ['| id | verdict | cells | OOS Sharpe | OOS CAGR | OOS maxDD | decisive maxDD | active ann | t(NW) | DSR (N) | 3x-cost active | pos. years | PBO | stability | gates failed |',
+           '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
     for cid in order:
         r = results.get(cid)
         if r is None:
-            out.append(f'| {cid} | not evaluated | | | | | | | | | | | | | | |')
+            out.append(f'| {cid} | not evaluated | | | | | | | | | | | | | |')
             continue
         g, a, o, d = r['gate_inputs'], r['active'], r['oos'], r['dsr']
-        failed = [k for k, v in r['gates'].items() if v is False and k != 'b_active_t_ge_1']
-        out.append(f"| {cid} | **{r['verdict']}** | {r['grid']['cells']} | {_f(o['sharpe'])} | {_f(g['benchmark_oos_sharpe_max'])} | "
+        failed = [k[0] for k in r['gates'] if r['gates'][k] is False and k != 'b_active_t_ge_1']   # D01 gate letters a-g
+        out.append(f"| {cid} | **{r['verdict']}** | {r['grid']['cells']} | {_f(o['sharpe'])} | "
                    f"{_f(o['cagr'], '{:+.2%}')} | {_f(o['max_drawdown'], '{:.1%}')} | {_f(g['benchmark_max_drawdown'], '{:.1%}')} | "
                    f"{_f(a['ann_return'], '{:+.2%}')} | {_f(a['t_nw'], '{:.2f}')} | {_f(d['value'], '{:.2f}')} ({d['n_trials']}) | "
                    f"{_f(a['ann_return_3x_cost'], '{:+.2%}')} | {_f(a['fraction_positive_years'], '{:.0%}')} | "
-                   f"{_f((r['pbo'] or {}).get('pbo'), '{:.2f}')} | {_f(r['selection_stability'], '{:.2f}')} | {', '.join(failed) or '-'} |")
+                   f"{_f((r['pbo'] or {}).get('pbo'), '{:.2f}')} | {_f(r['selection_stability'], '{:.2f}')} | {''.join(failed) or '-'} |")
     return '\n'.join(out)
 
 
@@ -145,9 +147,7 @@ def champion_section(cid, r):
         lines.append(f"| {y} | {v['active_return']:+.2%} | {'yes' if v['counted'] else 'no (<60 days)'} |")
     lines += ['', f"Per-fold chosen cells: {counts}. **Final parameter cell (modal; tie -> latest fold in the tied set): "
               f"`{json.dumps(cell)}`**; pre-registered default cell: `{json.dumps(r['grid']['report_cell'])}`.", '',
-              '| gate | result |', '|---|---|']
-    for k, v in r['gates'].items():
-        lines.append(f"| {k} | {'n/a' if v is None else ('ok' if v else 'FAIL')} |")
+              'Gates (D01): ' + '; '.join(f"{k} {'n/a' if v is None else ('ok' if v else 'FAIL')}" for k, v in r['gates'].items()) + '.']
     fp = r['full_period']['report_cell']
     lines += ['', f"Full dev period, default cell: Sharpe {_f(fp['sharpe'])}, CAGR {_f(fp['cagr'], '{:+.2%}')}, max DD "
               f"{_f(fp['max_drawdown'], '{:.1%}')}, turnover/yr {_f(fp['turnover_per_year'], '{:.2f}')}, names held (median) "
@@ -201,6 +201,61 @@ def check_passes(here: Path = HERE) -> str:
     return '\n'.join(lines)
 
 
+def fold_table(order, results) -> str:
+    """One row per series, one column per walk-forward fold: the candidate's
+    OOS Sharpe inside that test window (`folds[k].oos.sharpe`) and both
+    benchmarks' Sharpe over the SAME window (`folds[k].benchmarks.<b>.sharpe`).
+    `*` marks a candidate above 60/40's fold Sharpe by more than FOLD_TIE
+    (a difference visible at the table's two decimals), `!` above both
+    benchmarks' by that margin; a smaller difference is a tie, not a win
+    (`xa_trend_6040` equals 60/40 to ~1e-4 in every fold it never switched,
+    the residue of whole-share rounding). Column k is the zero-based fold
+    index of the JSON (`folds[k].fold`), labelled with the test window's start
+    and end years. Fold windows and benchmark values are asserted identical
+    across candidates."""
+    evaluated = [cid for cid in order if cid in results]
+    if not evaluated:
+        return 'No candidate evaluated yet.'
+    ref = results[evaluated[0]]['folds']
+    for cid in evaluated[1:]:
+        for a, b in zip(ref, results[cid]['folds']):
+            if (a['test_start'], a['test_end']) != (b['test_start'], b['test_end']) or \
+               any(abs(a['benchmarks'][k]['sharpe'] - b['benchmarks'][k]['sharpe']) > 1e-9 for k in a['benchmarks']):
+                raise ValueError(f'fold windows or benchmark Sharpes differ between {evaluated[0]} and {cid}')
+    labels = [f"{f['fold']}:{f['test_start'][2:4]}-{f['test_end'][2:4]}" for f in ref]   # "8:20-21" = fold 8, mid-2020..mid-2021
+    n = len(ref)
+    out = ['| series | ' + ' | '.join(labels) + ' | >60/40 | >both |', '|---|' + '---|' * n + '---|---|']
+    for b, name in (('etf_6040', '60/40'), ('etf_ew', 'EW')):
+        out.append(f'| {name} | ' + ' | '.join(f"{f['benchmarks'][b]['sharpe']:+.2f}" for f in ref) + ' | - | - |')
+    for cid in evaluated:
+        cells, n_6040, n_both = [], 0, 0
+        for k, f in enumerate(ref):
+            b6040, bew = f['benchmarks']['etf_6040']['sharpe'], f['benchmarks']['etf_ew']['sharpe']
+            sh = results[cid]['folds'][k]['oos']['sharpe']
+            beats_6040, beats_both = sh > b6040 + FOLD_TIE, sh > max(b6040, bew) + FOLD_TIE
+            n_6040 += beats_6040
+            n_both += beats_both
+            cells.append(f"{sh:+.2f}{'*' if beats_6040 else ''}{'!' if beats_both else ''}")
+        out.append(f"| {cid.replace('xa_', '')} | " + ' | '.join(cells) + f' | {n_6040}/{n} | {n_both}/{n} |')
+    return '\n'.join(out)
+
+
+def positive_years_table(order, results) -> str:
+    """How many candidates had a positive calendar-year active return (vs their
+    decisive series, `active.per_year`) in each OOS year, and which."""
+    evaluated = [cid for cid in order if cid in results]
+    if not evaluated:
+        return 'No candidate evaluated yet.'
+    years = sorted({y for cid in evaluated for y in results[cid]['active']['per_year']})
+    out = ['| year | ' + ' | '.join(cid.replace('xa_', '') for cid in evaluated) + ' | positive |',
+           '|---|' + '---|' * len(evaluated) + '---|']
+    for y in years:
+        vals = [results[cid]['active']['per_year'].get(y, {}).get('active_return') for cid in evaluated]
+        out.append(f"| {y} | " + ' | '.join(_f(v, '{:+.1%}') for v in vals)
+                   + f" | {sum(1 for v in vals if v is not None and v > 0)}/{len(evaluated)} |")
+    return '\n'.join(out)
+
+
 def composition(here: Path = HERE, oos_start: str = '2012-06-30') -> Dict[str, Any]:
     """Average book composition of each candidate's DEFAULT cell on its OOS
     rebalance days (weights from precompute_panel on the real dev panel; no
@@ -240,6 +295,77 @@ def composition(here: Path = HERE, oos_start: str = '2012-06-30') -> Dict[str, A
     return out
 
 
+def holdings(here: Path = HERE, top: int = 12) -> Dict[str, Any]:
+    """Dated holdings: for every candidate and every walk-forward fold, the
+    mean weight of each ticker over the rebalance days inside the fold's TEST
+    window, computed from `precompute_panel` with the cell the walk-forward
+    actually CHOSE for that fold (`folds[k].chosen`), on the real dev panel.
+    Written to results/holdings_diagnostics.json so any statement about what
+    a book held in a given year is traceable to a file. Needs the research
+    databases. (Weights are targets on decision bars, not executed fills.)"""
+    from typing import cast
+
+    import numpy as np
+    import pandas as pd
+    from trader.research.lowfreq import engine, load_etf_panel
+    from trader.research.lowfreq.registry import load_family
+    fam = load_family(here.name, here.parent)
+    _, order, _, results = load(here)
+    panel = load_etf_panel(None, '2006-02-01', str(fam.dev_end))
+    wide = engine.wide_panel(panel.frames())
+    idx = pd.DatetimeIndex(wide.index)
+    out: Dict[str, Any] = {'command': 'uv run python research/lowfreq/xasset/make_report.py holdings',
+                           'weights_are': 'mean target weight per ticker over the rebalance (decision) days inside the fold test window, '
+                                          'using the cell the walk-forward chose for that fold',
+                           'top': top, 'candidates': {}}
+    for cid in order:
+        r = results.get(cid)
+        e = fam.entries.get(cid)
+        if r is None or e is None:
+            continue
+        cache: Dict[str, Any] = {}
+        folds_out = []
+        for f in r['folds']:
+            key = json.dumps(f['chosen'], sort_keys=True)
+            if key not in cache:
+                s = cast(Any, engine.make_strategy(e, dict(f['chosen']), panel))   # XAssetBase: has due()
+                w = s.precompute_panel(wide)['weights']
+                due = np.array([s.due(i, wide) for i in range(len(wide))])
+                cache[key] = (w, due)
+            w, due = cache[key]
+            inside = (idx >= pd.Timestamp(f['test_start'])) & (idx < pd.Timestamp(f['test_end'])) & due
+            rows = w[inside]
+            mean = rows.mean().sort_values(ascending=False)
+            folds_out.append({'fold': f['fold'], 'test_start': f['test_start'], 'test_end': f['test_end'],
+                              'chosen': f['chosen'], 'rebalance_days': int(len(rows)),
+                              'top_holdings': [{'ticker': t, 'mean_weight': round(float(v), 4)}
+                                               for t, v in mean.head(top).items() if v > 0]})
+        out['candidates'][cid] = {'folds': folds_out}
+    path = here / 'results' / 'holdings_diagnostics.json'
+    path.write_text(json.dumps(out, indent=1, sort_keys=True))
+    out['path'] = str(path)
+    return out
+
+
+def holdings_table(here: Path = HERE, picks: Optional[List[Tuple[str, int]]] = None, max_names: Optional[int] = None) -> str:
+    """Rows of results/holdings_diagnostics.json for the (candidate, fold)
+    pairs the report discusses; default = every pair (long). `max_names` caps
+    the names shown per row (the JSON keeps `top`); a capped row ends with
+    '+k more'."""
+    data = json.load(open(here / 'results' / 'holdings_diagnostics.json'))
+    out = ['| candidate | fold | test window | chosen cell | top holdings (mean target weight) |', '|---|---|---|---|---|']
+    for cid, block in data['candidates'].items():
+        for f in block['folds']:
+            if picks is not None and (cid, f['fold']) not in picks:
+                continue
+            shown = f['top_holdings'] if max_names is None else f['top_holdings'][:max_names]
+            hold = ', '.join(f"{h['ticker']} {h['mean_weight']:.0%}" for h in shown)
+            if len(shown) < len(f['top_holdings']):
+                hold += f" +{len(f['top_holdings']) - len(shown)} more"
+            out.append(f"| {cid} | {f['fold']} | {f['test_start']}..{f['test_end']} | `{json.dumps(f['chosen'], sort_keys=True)}` | {hold} |")
+    return '\n'.join(out)
+
+
 def main(argv: List[str]) -> int:
     if len(argv) >= 2 and argv[1] == 'composition':
         print(json.dumps(composition(), indent=1, sort_keys=True))
@@ -250,6 +376,19 @@ def main(argv: List[str]) -> int:
         return 0
     if len(argv) >= 2 and argv[1] == 'check':
         print(check_passes())
+        return 0
+    if len(argv) >= 2 and argv[1] == 'folds':
+        _, order, _, results = load()
+        print(fold_table(order, results))
+        print()
+        print(positive_years_table(order, results))
+        return 0
+    if len(argv) >= 2 and argv[1] == 'holdings':
+        holdings()
+        picks = None
+        if len(argv) > 2:      # e.g. holdings xa_dual_mom:10 xa_carry:7
+            picks = [(a.split(':')[0], int(a.split(':')[1])) for a in argv[2:]]
+        print(holdings_table(picks=picks))
         return 0
     _, order, rows, results = load()
     print('## Every trial (research/lowfreq/xasset/trials.jsonl)\n')

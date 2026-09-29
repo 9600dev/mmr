@@ -1,0 +1,4067 @@
+{
+ "candidates": {
+  "xa_carry": {
+   "folds": [
+    {
+     "chosen": {
+      "TOP_N": 10
+     },
+     "fold": 0,
+     "rebalance_days": 12,
+     "test_end": "2013-06-30",
+     "test_start": "2012-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1,
+       "ticker": "EWA"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EWU"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EFA"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0917,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.075,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.025,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0083,
+       "ticker": "XLP"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TOP_N": 10
+     },
+     "fold": 1,
+     "rebalance_days": 12,
+     "test_end": "2014-06-30",
+     "test_start": "2013-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EWA"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "TLT"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "EFA"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "EWZ"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "FXI"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TOP_N": 10
+     },
+     "fold": 2,
+     "rebalance_days": 12,
+     "test_end": "2015-06-30",
+     "test_start": "2014-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1,
+       "ticker": "EWA"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EWZ"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EWU"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.0833,
+       "ticker": "EFA"
+      },
+      {
+       "mean_weight": 0.0167,
+       "ticker": "TLT"
+      },
+      {
+       "mean_weight": 0.0,
+       "ticker": "BIL"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TOP_N": 15
+     },
+     "fold": 3,
+     "rebalance_days": 12,
+     "test_end": "2016-06-29",
+     "test_start": "2015-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.0667,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLE"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EFA"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EWA"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EWU"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TOP_N": 15
+     },
+     "fold": 4,
+     "rebalance_days": 12,
+     "test_end": "2017-06-29",
+     "test_start": "2016-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.0667,
+       "ticker": "FXI"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EFA"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EWA"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EWU"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "XLE"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TOP_N": 15
+     },
+     "fold": 5,
+     "rebalance_days": 12,
+     "test_end": "2018-06-29",
+     "test_start": "2017-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.0667,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "TLT"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLRE"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EFA"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EWA"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EWU"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "HYG"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TOP_N": 15
+     },
+     "fold": 6,
+     "rebalance_days": 12,
+     "test_end": "2019-06-29",
+     "test_start": "2018-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLE"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLRE"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EFA"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EWA"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EWU"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "HYG"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TOP_N": 15
+     },
+     "fold": 7,
+     "rebalance_days": 12,
+     "test_end": "2020-06-28",
+     "test_start": "2019-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLE"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLRE"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EFA"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EWA"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EWU"
+      },
+      {
+       "mean_weight": 0.0556,
+       "ticker": "XLP"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TOP_N": 10
+     },
+     "fold": 8,
+     "rebalance_days": 12,
+     "test_end": "2021-06-28",
+     "test_start": "2020-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "XLRE"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EWU"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "XLE"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "EWA"
+      },
+      {
+       "mean_weight": 0.025,
+       "ticker": "EFA"
+      },
+      {
+       "mean_weight": 0.025,
+       "ticker": "XLF"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TOP_N": 10
+     },
+     "fold": 9,
+     "rebalance_days": 12,
+     "test_end": "2022-06-28",
+     "test_start": "2021-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "XLE"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EWU"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0917,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "EWG"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "XLRE"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "EWA"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "EFA"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TOP_N": 10
+     },
+     "fold": 10,
+     "rebalance_days": 12,
+     "test_end": "2023-06-28",
+     "test_start": "2022-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "XLE"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EWZ"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EWA"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0583,
+       "ticker": "EWU"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "EWG"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "EFA"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "XLRE"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TOP_N": 10
+     },
+     "fold": 11,
+     "rebalance_days": 12,
+     "test_end": "2024-06-27",
+     "test_start": "2023-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EWU"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EWA"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "EWZ"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "XLE"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "XLRE"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "DBA"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "DBC"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "UUP"
+      }
+     ]
+    }
+   ]
+  },
+  "xa_dual_mom": {
+   "folds": [
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 126,
+      "TOP_N": 10
+     },
+     "fold": 0,
+     "rebalance_days": 12,
+     "test_end": "2013-06-30",
+     "test_start": "2012-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLY"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "EWA"
+      },
+      {
+       "mean_weight": 0.0583,
+       "ticker": "XLV"
+      },
+      {
+       "mean_weight": 0.0583,
+       "ticker": "XLF"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "FXI"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "EFA"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "TLT"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "VGK"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 126,
+      "TOP_N": 10
+     },
+     "fold": 1,
+     "rebalance_days": 12,
+     "test_end": "2014-06-30",
+     "test_start": "2013-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.0833,
+       "ticker": "XLV"
+      },
+      {
+       "mean_weight": 0.0833,
+       "ticker": "XLI"
+      },
+      {
+       "mean_weight": 0.0833,
+       "ticker": "QQQ"
+      },
+      {
+       "mean_weight": 0.075,
+       "ticker": "IWM"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLY"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLB"
+      },
+      {
+       "mean_weight": 0.0583,
+       "ticker": "VTI"
+      },
+      {
+       "mean_weight": 0.0583,
+       "ticker": "MDY"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "XLF"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "EWG"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "UNG"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 252,
+      "TOP_N": 10
+     },
+     "fold": 2,
+     "rebalance_days": 12,
+     "test_end": "2015-06-30",
+     "test_start": "2014-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1,
+       "ticker": "XLV"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "QQQ"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.075,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "TLT"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "VTI"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "XLB"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "XLF"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "FXI"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 252,
+      "TOP_N": 10
+     },
+     "fold": 3,
+     "rebalance_days": 12,
+     "test_end": "2016-06-29",
+     "test_start": "2015-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.0917,
+       "ticker": "XLY"
+      },
+      {
+       "mean_weight": 0.075,
+       "ticker": "QQQ"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "TLT"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLV"
+      },
+      {
+       "mean_weight": 0.0583,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "XLF"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "XLU"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 126,
+      "TOP_N": 10
+     },
+     "fold": 4,
+     "rebalance_days": 12,
+     "test_end": "2017-06-29",
+     "test_start": "2016-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.075,
+       "ticker": "EWZ"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "IWM"
+      },
+      {
+       "mean_weight": 0.0583,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.0583,
+       "ticker": "XLF"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "UNG"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "XLB"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "MDY"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "SLV"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "GDX"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "XLE"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "XLI"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "DIA"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 126,
+      "TOP_N": 10
+     },
+     "fold": 5,
+     "rebalance_days": 12,
+     "test_end": "2018-06-29",
+     "test_start": "2017-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.0917,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.0917,
+       "ticker": "FXI"
+      },
+      {
+       "mean_weight": 0.0833,
+       "ticker": "EEM"
+      },
+      {
+       "mean_weight": 0.075,
+       "ticker": "QQQ"
+      },
+      {
+       "mean_weight": 0.0583,
+       "ticker": "USO"
+      },
+      {
+       "mean_weight": 0.0583,
+       "ticker": "DIA"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "EWZ"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "XLF"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "XLY"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "DBC"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "EWG"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 126,
+      "TOP_N": 10
+     },
+     "fold": 6,
+     "rebalance_days": 12,
+     "test_end": "2019-06-29",
+     "test_start": "2018-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.0667,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "XLRE"
+      },
+      {
+       "mean_weight": 0.0583,
+       "ticker": "USO"
+      },
+      {
+       "mean_weight": 0.0583,
+       "ticker": "XLY"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "QQQ"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "XLV"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "UNG"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "EWZ"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "IWM"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 126,
+      "TOP_N": 10
+     },
+     "fold": 7,
+     "rebalance_days": 12,
+     "test_end": "2020-06-28",
+     "test_start": "2019-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.075,
+       "ticker": "QQQ"
+      },
+      {
+       "mean_weight": 0.075,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.0667,
+       "ticker": "GDX"
+      },
+      {
+       "mean_weight": 0.0583,
+       "ticker": "TLT"
+      },
+      {
+       "mean_weight": 0.0583,
+       "ticker": "GLD"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "XLRE"
+      },
+      {
+       "mean_weight": 0.0417,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "SLV"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "VNQ"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 126,
+      "TOP_N": 5
+     },
+     "fold": 8,
+     "rebalance_days": 12,
+     "test_end": "2021-06-28",
+     "test_start": "2020-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1,
+       "ticker": "MDY"
+      },
+      {
+       "mean_weight": 0.0833,
+       "ticker": "GDX"
+      },
+      {
+       "mean_weight": 0.0833,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.0833,
+       "ticker": "XLF"
+      },
+      {
+       "mean_weight": 0.0833,
+       "ticker": "SLV"
+      },
+      {
+       "mean_weight": 0.0833,
+       "ticker": "QQQ"
+      },
+      {
+       "mean_weight": 0.0833,
+       "ticker": "IWM"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "XLI"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "XLE"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "USO"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "GLD"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "TLT"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 126,
+      "TOP_N": 5
+     },
+     "fold": 9,
+     "rebalance_days": 12,
+     "test_end": "2022-06-28",
+     "test_start": "2021-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1667,
+       "ticker": "USO"
+      },
+      {
+       "mean_weight": 0.1167,
+       "ticker": "UNG"
+      },
+      {
+       "mean_weight": 0.1167,
+       "ticker": "DBC"
+      },
+      {
+       "mean_weight": 0.1167,
+       "ticker": "XLE"
+      },
+      {
+       "mean_weight": 0.0833,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.0833,
+       "ticker": "XLRE"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "XLY"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "QQQ"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "GDX"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "DBA"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "XLV"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 252,
+      "TOP_N": 5
+     },
+     "fold": 10,
+     "rebalance_days": 12,
+     "test_end": "2023-06-28",
+     "test_start": "2022-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1833,
+       "ticker": "XLE"
+      },
+      {
+       "mean_weight": 0.1333,
+       "ticker": "USO"
+      },
+      {
+       "mean_weight": 0.1333,
+       "ticker": "DBC"
+      },
+      {
+       "mean_weight": 0.1167,
+       "ticker": "UNG"
+      },
+      {
+       "mean_weight": 0.1,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "EWZ"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "EWG"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "SLV"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "GLD"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 252,
+      "TOP_N": 5
+     },
+     "fold": 11,
+     "rebalance_days": 12,
+     "test_end": "2024-06-27",
+     "test_start": "2023-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.2,
+       "ticker": "QQQ"
+      },
+      {
+       "mean_weight": 0.1833,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.15,
+       "ticker": "XLC"
+      },
+      {
+       "mean_weight": 0.0833,
+       "ticker": "EWZ"
+      },
+      {
+       "mean_weight": 0.0833,
+       "ticker": "EWG"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "XLY"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "GDX"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "XLF"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "SLV"
+      },
+      {
+       "mean_weight": 0.0167,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.0167,
+       "ticker": "GLD"
+      },
+      {
+       "mean_weight": 0.0167,
+       "ticker": "VTI"
+      }
+     ]
+    }
+   ]
+  },
+  "xa_faber_sma": {
+   "folds": [
+    {
+     "chosen": {
+      "SMA_DAYS": 126
+     },
+     "fold": 0,
+     "rebalance_days": 12,
+     "test_end": "2013-06-30",
+     "test_start": "2012-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.2663,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "VTI"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "XLV"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "DIA"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "QQQ"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "EWU"
+      },
+      {
+       "mean_weight": 0.0199,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.0199,
+       "ticker": "XLY"
+      },
+      {
+       "mean_weight": 0.0199,
+       "ticker": "IWM"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "SMA_DAYS": 126
+     },
+     "fold": 1,
+     "rebalance_days": 12,
+     "test_end": "2014-06-30",
+     "test_start": "2013-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.3388,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "XLV"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "XLI"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "VTI"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "EWG"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "QQQ"
+      },
+      {
+       "mean_weight": 0.0199,
+       "ticker": "MDY"
+      },
+      {
+       "mean_weight": 0.0199,
+       "ticker": "XLF"
+      },
+      {
+       "mean_weight": 0.0199,
+       "ticker": "XLE"
+      },
+      {
+       "mean_weight": 0.0181,
+       "ticker": "XLB"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "SMA_DAYS": 168
+     },
+     "fold": 2,
+     "rebalance_days": 12,
+     "test_end": "2015-06-30",
+     "test_start": "2014-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.3333,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "FXI"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "XLV"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "XLF"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "VTI"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "QQQ"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "IEI"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "SMA_DAYS": 252
+     },
+     "fold": 3,
+     "rebalance_days": 12,
+     "test_end": "2016-06-29",
+     "test_start": "2015-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.5761,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0217,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0199,
+       "ticker": "XLY"
+      },
+      {
+       "mean_weight": 0.0199,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0199,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0199,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0181,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.0181,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0163,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0163,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.0163,
+       "ticker": "TLT"
+      },
+      {
+       "mean_weight": 0.0145,
+       "ticker": "VNQ"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "SMA_DAYS": 168
+     },
+     "fold": 4,
+     "rebalance_days": 12,
+     "test_end": "2017-06-29",
+     "test_start": "2016-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.2594,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0214,
+       "ticker": "MDY"
+      },
+      {
+       "mean_weight": 0.0214,
+       "ticker": "FXI"
+      },
+      {
+       "mean_weight": 0.0214,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.0214,
+       "ticker": "XLI"
+      },
+      {
+       "mean_weight": 0.0214,
+       "ticker": "DIA"
+      },
+      {
+       "mean_weight": 0.0214,
+       "ticker": "XLF"
+      },
+      {
+       "mean_weight": 0.0214,
+       "ticker": "VTI"
+      },
+      {
+       "mean_weight": 0.0214,
+       "ticker": "EWA"
+      },
+      {
+       "mean_weight": 0.0214,
+       "ticker": "EWC"
+      },
+      {
+       "mean_weight": 0.0214,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.0214,
+       "ticker": "QQQ"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "SMA_DAYS": 252
+     },
+     "fold": 5,
+     "rebalance_days": 12,
+     "test_end": "2018-06-29",
+     "test_start": "2017-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.2535,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0213,
+       "ticker": "MDY"
+      },
+      {
+       "mean_weight": 0.0213,
+       "ticker": "EWU"
+      },
+      {
+       "mean_weight": 0.0213,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.0213,
+       "ticker": "XLI"
+      },
+      {
+       "mean_weight": 0.0213,
+       "ticker": "XLF"
+      },
+      {
+       "mean_weight": 0.0213,
+       "ticker": "VTI"
+      },
+      {
+       "mean_weight": 0.0213,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.0213,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.0213,
+       "ticker": "QQQ"
+      },
+      {
+       "mean_weight": 0.0213,
+       "ticker": "IWM"
+      },
+      {
+       "mean_weight": 0.0213,
+       "ticker": "FXI"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "SMA_DAYS": 210
+     },
+     "fold": 6,
+     "rebalance_days": 12,
+     "test_end": "2019-06-29",
+     "test_start": "2018-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.4703,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0212,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.0212,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0212,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0194,
+       "ticker": "VNQ"
+      },
+      {
+       "mean_weight": 0.0194,
+       "ticker": "XLRE"
+      },
+      {
+       "mean_weight": 0.0194,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0177,
+       "ticker": "DIA"
+      },
+      {
+       "mean_weight": 0.0177,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.0177,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.016,
+       "ticker": "XLV"
+      },
+      {
+       "mean_weight": 0.0159,
+       "ticker": "QQQ"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "SMA_DAYS": 168
+     },
+     "fold": 7,
+     "rebalance_days": 12,
+     "test_end": "2020-06-28",
+     "test_start": "2019-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.3212,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "TLT"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "GLD"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0191,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0191,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.0191,
+       "ticker": "QQQ"
+      },
+      {
+       "mean_weight": 0.0191,
+       "ticker": "LQD"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "SMA_DAYS": 126
+     },
+     "fold": 8,
+     "rebalance_days": 12,
+     "test_end": "2021-06-28",
+     "test_start": "2020-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.2049,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "MDY"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "XLV"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "XLC"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "XLB"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "VTI"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "QQQ"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "IWM"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "XLY"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "SMA_DAYS": 126
+     },
+     "fold": 9,
+     "rebalance_days": 12,
+     "test_end": "2022-06-28",
+     "test_start": "2021-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.5035,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "DBA"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0191,
+       "ticker": "USO"
+      },
+      {
+       "mean_weight": 0.0191,
+       "ticker": "DBC"
+      },
+      {
+       "mean_weight": 0.0174,
+       "ticker": "UNG"
+      },
+      {
+       "mean_weight": 0.0174,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.0174,
+       "ticker": "XLE"
+      },
+      {
+       "mean_weight": 0.0156,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.0156,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.0139,
+       "ticker": "EWU"
+      },
+      {
+       "mean_weight": 0.0139,
+       "ticker": "XLK"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "SMA_DAYS": 126
+     },
+     "fold": 10,
+     "rebalance_days": 12,
+     "test_end": "2023-06-28",
+     "test_start": "2022-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.5295,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0139,
+       "ticker": "XLE"
+      },
+      {
+       "mean_weight": 0.0139,
+       "ticker": "XLI"
+      },
+      {
+       "mean_weight": 0.0139,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0122,
+       "ticker": "DIA"
+      },
+      {
+       "mean_weight": 0.0122,
+       "ticker": "FXE"
+      },
+      {
+       "mean_weight": 0.0122,
+       "ticker": "XLV"
+      },
+      {
+       "mean_weight": 0.0122,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.0122,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0122,
+       "ticker": "GLD"
+      },
+      {
+       "mean_weight": 0.0122,
+       "ticker": "GDX"
+      },
+      {
+       "mean_weight": 0.0122,
+       "ticker": "XLP"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "SMA_DAYS": 168
+     },
+     "fold": 11,
+     "rebalance_days": 12,
+     "test_end": "2024-06-27",
+     "test_start": "2023-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.2639,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "DBA"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "XLK"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "QQQ"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "XLC"
+      },
+      {
+       "mean_weight": 0.0208,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0191,
+       "ticker": "XLY"
+      },
+      {
+       "mean_weight": 0.0191,
+       "ticker": "VTI"
+      },
+      {
+       "mean_weight": 0.0191,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.0191,
+       "ticker": "GLD"
+      },
+      {
+       "mean_weight": 0.0191,
+       "ticker": "HYG"
+      }
+     ]
+    }
+   ]
+  },
+  "xa_risk_parity": {
+   "folds": [
+    {
+     "chosen": {
+      "VOL_DAYS": 21
+     },
+     "fold": 0,
+     "rebalance_days": 12,
+     "test_end": "2013-06-30",
+     "test_start": "2012-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.3478,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0599,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0508,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.042,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0318,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.031,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0291,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0252,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0243,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0204,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0159,
+       "ticker": "FXE"
+      },
+      {
+       "mean_weight": 0.0152,
+       "ticker": "FXY"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "VOL_DAYS": 21
+     },
+     "fold": 1,
+     "rebalance_days": 12,
+     "test_end": "2014-06-30",
+     "test_start": "2013-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.2512,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0515,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0471,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0411,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0376,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0294,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0286,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0285,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0264,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0261,
+       "ticker": "FXE"
+      },
+      {
+       "mean_weight": 0.0237,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0179,
+       "ticker": "DBA"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "VOL_DAYS": 21
+     },
+     "fold": 2,
+     "rebalance_days": 12,
+     "test_end": "2015-06-30",
+     "test_start": "2014-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1948,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0652,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0544,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0527,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.034,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0338,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0321,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0299,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0289,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0263,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0235,
+       "ticker": "FXY"
+      },
+      {
+       "mean_weight": 0.0229,
+       "ticker": "FXE"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "VOL_DAYS": 21
+     },
+     "fold": 3,
+     "rebalance_days": 12,
+     "test_end": "2016-06-29",
+     "test_start": "2015-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1979,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0867,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0616,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0607,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0419,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0379,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0337,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0329,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0262,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0239,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0215,
+       "ticker": "FXY"
+      },
+      {
+       "mean_weight": 0.0196,
+       "ticker": "FXE"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "VOL_DAYS": 21
+     },
+     "fold": 4,
+     "rebalance_days": 12,
+     "test_end": "2017-06-29",
+     "test_start": "2016-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1724,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0637,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.054,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0487,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0372,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0325,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0321,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0311,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0286,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0221,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0203,
+       "ticker": "FXE"
+      },
+      {
+       "mean_weight": 0.0199,
+       "ticker": "DIA"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "VOL_DAYS": 63
+     },
+     "fold": 5,
+     "rebalance_days": 12,
+     "test_end": "2018-06-29",
+     "test_start": "2017-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1762,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0661,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0624,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0542,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0426,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0352,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0351,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0343,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0326,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0228,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0193,
+       "ticker": "FXE"
+      },
+      {
+       "mean_weight": 0.0179,
+       "ticker": "FXY"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "VOL_DAYS": 21
+     },
+     "fold": 6,
+     "rebalance_days": 12,
+     "test_end": "2019-06-29",
+     "test_start": "2018-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1705,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.078,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0616,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0606,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0458,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0394,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.039,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0367,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0286,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0265,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.026,
+       "ticker": "FXY"
+      },
+      {
+       "mean_weight": 0.0237,
+       "ticker": "FXE"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "VOL_DAYS": 252
+     },
+     "fold": 7,
+     "rebalance_days": 12,
+     "test_end": "2020-06-28",
+     "test_start": "2019-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1619,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0661,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0624,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0523,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0432,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0363,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0359,
+       "ticker": "FXE"
+      },
+      {
+       "mean_weight": 0.0357,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0304,
+       "ticker": "FXY"
+      },
+      {
+       "mean_weight": 0.0303,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0274,
+       "ticker": "EMB"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "VOL_DAYS": 21
+     },
+     "fold": 8,
+     "rebalance_days": 12,
+     "test_end": "2021-06-28",
+     "test_start": "2020-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.3641,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0766,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0708,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0458,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0369,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0317,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0245,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0238,
+       "ticker": "FXY"
+      },
+      {
+       "mean_weight": 0.0221,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0206,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0203,
+       "ticker": "FXE"
+      },
+      {
+       "mean_weight": 0.0179,
+       "ticker": "EMB"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "VOL_DAYS": 21
+     },
+     "fold": 9,
+     "rebalance_days": 12,
+     "test_end": "2022-06-28",
+     "test_start": "2021-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1869,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.088,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0547,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0413,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0386,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0327,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0304,
+       "ticker": "FXY"
+      },
+      {
+       "mean_weight": 0.0291,
+       "ticker": "FXE"
+      },
+      {
+       "mean_weight": 0.0291,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0263,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.025,
+       "ticker": "LQD"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "VOL_DAYS": 252
+     },
+     "fold": 10,
+     "rebalance_days": 12,
+     "test_end": "2023-06-28",
+     "test_start": "2022-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.1321,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0715,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0519,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.041,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0364,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0351,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0331,
+       "ticker": "FXE"
+      },
+      {
+       "mean_weight": 0.0315,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.028,
+       "ticker": "FXY"
+      },
+      {
+       "mean_weight": 0.0271,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0266,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0218,
+       "ticker": "EMB"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "VOL_DAYS": 252
+     },
+     "fold": 11,
+     "rebalance_days": 12,
+     "test_end": "2024-06-27",
+     "test_start": "2023-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.101,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0564,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.044,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0368,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0351,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0345,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.033,
+       "ticker": "FXE"
+      },
+      {
+       "mean_weight": 0.0327,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0281,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0263,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0244,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.024,
+       "ticker": "FXY"
+      }
+     ]
+    }
+   ]
+  },
+  "xa_trend_6040": {
+   "folds": [
+    {
+     "chosen": {
+      "OFF_ASSET": "IEF",
+      "TREND_DAYS": 126
+     },
+     "fold": 0,
+     "rebalance_days": 12,
+     "test_end": "2013-06-30",
+     "test_start": "2012-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.6,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.4,
+       "ticker": "IEF"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "OFF_ASSET": "IEF",
+      "TREND_DAYS": 126
+     },
+     "fold": 1,
+     "rebalance_days": 12,
+     "test_end": "2014-06-30",
+     "test_start": "2013-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.6,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.4,
+       "ticker": "IEF"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "OFF_ASSET": "IEF",
+      "TREND_DAYS": 126
+     },
+     "fold": 2,
+     "rebalance_days": 12,
+     "test_end": "2015-06-30",
+     "test_start": "2014-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.6,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.4,
+       "ticker": "IEF"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "OFF_ASSET": "BIL",
+      "TREND_DAYS": 252
+     },
+     "fold": 3,
+     "rebalance_days": 12,
+     "test_end": "2016-06-29",
+     "test_start": "2015-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.4,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.4,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.2,
+       "ticker": "BIL"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "OFF_ASSET": "IEF",
+      "TREND_DAYS": 126
+     },
+     "fold": 4,
+     "rebalance_days": 12,
+     "test_end": "2017-06-29",
+     "test_start": "2016-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.6,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.4,
+       "ticker": "IEF"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "OFF_ASSET": "IEF",
+      "TREND_DAYS": 252
+     },
+     "fold": 5,
+     "rebalance_days": 12,
+     "test_end": "2018-06-29",
+     "test_start": "2017-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.6,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.4,
+       "ticker": "IEF"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "OFF_ASSET": "IEF",
+      "TREND_DAYS": 252
+     },
+     "fold": 6,
+     "rebalance_days": 12,
+     "test_end": "2019-06-29",
+     "test_start": "2018-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.5,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.5,
+       "ticker": "SPY"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "OFF_ASSET": "IEF",
+      "TREND_DAYS": 252
+     },
+     "fold": 7,
+     "rebalance_days": 12,
+     "test_end": "2020-06-28",
+     "test_start": "2019-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.55,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.45,
+       "ticker": "SPY"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "OFF_ASSET": "IEF",
+      "TREND_DAYS": 252
+     },
+     "fold": 8,
+     "rebalance_days": 12,
+     "test_end": "2021-06-28",
+     "test_start": "2020-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.6,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.4,
+       "ticker": "IEF"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "OFF_ASSET": "BIL",
+      "TREND_DAYS": 252
+     },
+     "fold": 9,
+     "rebalance_days": 12,
+     "test_end": "2022-06-28",
+     "test_start": "2021-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.55,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.4,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "BIL"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "OFF_ASSET": "BIL",
+      "TREND_DAYS": 252
+     },
+     "fold": 10,
+     "rebalance_days": 12,
+     "test_end": "2023-06-28",
+     "test_start": "2022-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.55,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.4,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.05,
+       "ticker": "SPY"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "OFF_ASSET": "BIL",
+      "TREND_DAYS": 252
+     },
+     "fold": 11,
+     "rebalance_days": 12,
+     "test_end": "2024-06-27",
+     "test_start": "2023-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.6,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.4,
+       "ticker": "IEF"
+      }
+     ]
+    }
+   ]
+  },
+  "xa_tsmom_rp": {
+   "folds": [
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 63
+     },
+     "fold": 0,
+     "rebalance_days": 12,
+     "test_end": "2013-06-30",
+     "test_start": "2012-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.2858,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.2711,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0372,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0366,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.032,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0237,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0219,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.021,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.021,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0151,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0124,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.0113,
+       "ticker": "XLV"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 63
+     },
+     "fold": 1,
+     "rebalance_days": 12,
+     "test_end": "2014-06-30",
+     "test_start": "2013-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.2888,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.1796,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0362,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.034,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0307,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0306,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.023,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0187,
+       "ticker": "FXE"
+      },
+      {
+       "mean_weight": 0.0177,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0162,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0151,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0135,
+       "ticker": "SPY"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 63
+     },
+     "fold": 2,
+     "rebalance_days": 12,
+     "test_end": "2015-06-30",
+     "test_start": "2014-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.274,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.1824,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0538,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0512,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.047,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0298,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0285,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0225,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0213,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0195,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0165,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0138,
+       "ticker": "XLP"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 252
+     },
+     "fold": 3,
+     "rebalance_days": 12,
+     "test_end": "2016-06-29",
+     "test_start": "2015-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.3313,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.202,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0858,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0623,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0552,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0338,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.025,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0222,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0169,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0145,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.012,
+       "ticker": "XLY"
+      },
+      {
+       "mean_weight": 0.0117,
+       "ticker": "TLT"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 126
+     },
+     "fold": 4,
+     "rebalance_days": 12,
+     "test_end": "2017-06-29",
+     "test_start": "2016-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.3353,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0935,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.03,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0298,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0272,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0258,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0202,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.019,
+       "ticker": "DIA"
+      },
+      {
+       "mean_weight": 0.0186,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0183,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.0176,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0176,
+       "ticker": "VTI"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 126
+     },
+     "fold": 5,
+     "rebalance_days": 12,
+     "test_end": "2018-06-29",
+     "test_start": "2017-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.405,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0435,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0402,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.03,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0236,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0222,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0212,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0195,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.019,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0174,
+       "ticker": "FXE"
+      },
+      {
+       "mean_weight": 0.0159,
+       "ticker": "DIA"
+      },
+      {
+       "mean_weight": 0.0154,
+       "ticker": "SPY"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 126
+     },
+     "fold": 6,
+     "rebalance_days": 12,
+     "test_end": "2019-06-29",
+     "test_start": "2018-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.4924,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0782,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0476,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.041,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0368,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0303,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0272,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0249,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0179,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0157,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0146,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0111,
+       "ticker": "FXY"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 126
+     },
+     "fold": 7,
+     "rebalance_days": 12,
+     "test_end": "2020-06-28",
+     "test_start": "2019-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.2035,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.1613,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0624,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0609,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0453,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0382,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0332,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.031,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0289,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0268,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0225,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0176,
+       "ticker": "FXY"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 63
+     },
+     "fold": 8,
+     "rebalance_days": 12,
+     "test_end": "2021-06-28",
+     "test_start": "2020-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.3285,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.2375,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0437,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0327,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0286,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0226,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.021,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0163,
+       "ticker": "FXE"
+      },
+      {
+       "mean_weight": 0.0135,
+       "ticker": "IEF"
+      },
+      {
+       "mean_weight": 0.0135,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.012,
+       "ticker": "DBA"
+      },
+      {
+       "mean_weight": 0.0114,
+       "ticker": "EMB"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 63
+     },
+     "fold": 9,
+     "rebalance_days": 12,
+     "test_end": "2022-06-28",
+     "test_start": "2021-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.587,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0644,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0313,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0287,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0196,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.0194,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0178,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0141,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0134,
+       "ticker": "DBA"
+      },
+      {
+       "mean_weight": 0.0118,
+       "ticker": "XLU"
+      },
+      {
+       "mean_weight": 0.0099,
+       "ticker": "XLP"
+      },
+      {
+       "mean_weight": 0.0093,
+       "ticker": "IEF"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 63
+     },
+     "fold": 10,
+     "rebalance_days": 12,
+     "test_end": "2023-06-28",
+     "test_start": "2022-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.5695,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0342,
+       "ticker": "SHY"
+      },
+      {
+       "mean_weight": 0.0316,
+       "ticker": "MUB"
+      },
+      {
+       "mean_weight": 0.0184,
+       "ticker": "FXE"
+      },
+      {
+       "mean_weight": 0.0182,
+       "ticker": "UUP"
+      },
+      {
+       "mean_weight": 0.0159,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0158,
+       "ticker": "AGG"
+      },
+      {
+       "mean_weight": 0.0154,
+       "ticker": "DBA"
+      },
+      {
+       "mean_weight": 0.0149,
+       "ticker": "IEI"
+      },
+      {
+       "mean_weight": 0.0138,
+       "ticker": "LQD"
+      },
+      {
+       "mean_weight": 0.0119,
+       "ticker": "TIP"
+      },
+      {
+       "mean_weight": 0.011,
+       "ticker": "GLD"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "LOOKBACK_DAYS": 252
+     },
+     "fold": 11,
+     "rebalance_days": 12,
+     "test_end": "2024-06-27",
+     "test_start": "2023-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.5098,
+       "ticker": "BIL"
+      },
+      {
+       "mean_weight": 0.0333,
+       "ticker": "HYG"
+      },
+      {
+       "mean_weight": 0.0227,
+       "ticker": "EMB"
+      },
+      {
+       "mean_weight": 0.0206,
+       "ticker": "DIA"
+      },
+      {
+       "mean_weight": 0.0194,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.0187,
+       "ticker": "VTI"
+      },
+      {
+       "mean_weight": 0.0184,
+       "ticker": "GLD"
+      },
+      {
+       "mean_weight": 0.018,
+       "ticker": "EFA"
+      },
+      {
+       "mean_weight": 0.0177,
+       "ticker": "DBA"
+      },
+      {
+       "mean_weight": 0.0174,
+       "ticker": "XLI"
+      },
+      {
+       "mean_weight": 0.0168,
+       "ticker": "VGK"
+      },
+      {
+       "mean_weight": 0.0161,
+       "ticker": "EWU"
+      }
+     ]
+    }
+   ]
+  },
+  "xa_vol_target": {
+   "folds": [
+    {
+     "chosen": {
+      "TARGET_VOL": 0.1
+     },
+     "fold": 0,
+     "rebalance_days": 12,
+     "test_end": "2013-06-30",
+     "test_start": "2012-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.8234,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.1766,
+       "ticker": "BIL"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TARGET_VOL": 0.1
+     },
+     "fold": 1,
+     "rebalance_days": 12,
+     "test_end": "2014-06-30",
+     "test_start": "2013-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.888,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.112,
+       "ticker": "BIL"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TARGET_VOL": 0.15
+     },
+     "fold": 2,
+     "rebalance_days": 12,
+     "test_end": "2015-06-30",
+     "test_start": "2014-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.974,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.026,
+       "ticker": "BIL"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TARGET_VOL": 0.15
+     },
+     "fold": 3,
+     "rebalance_days": 12,
+     "test_end": "2016-06-29",
+     "test_start": "2015-06-30",
+     "top_holdings": [
+      {
+       "mean_weight": 0.8742,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.1258,
+       "ticker": "BIL"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TARGET_VOL": 0.15
+     },
+     "fold": 4,
+     "rebalance_days": 12,
+     "test_end": "2017-06-29",
+     "test_start": "2016-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.9822,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.0178,
+       "ticker": "BIL"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TARGET_VOL": 0.15
+     },
+     "fold": 5,
+     "rebalance_days": 12,
+     "test_end": "2018-06-29",
+     "test_start": "2017-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.9394,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.0606,
+       "ticker": "BIL"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TARGET_VOL": 0.15
+     },
+     "fold": 6,
+     "rebalance_days": 12,
+     "test_end": "2019-06-29",
+     "test_start": "2018-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.8978,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.1022,
+       "ticker": "BIL"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TARGET_VOL": 0.15
+     },
+     "fold": 7,
+     "rebalance_days": 12,
+     "test_end": "2020-06-28",
+     "test_start": "2019-06-29",
+     "top_holdings": [
+      {
+       "mean_weight": 0.7833,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.2167,
+       "ticker": "BIL"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TARGET_VOL": 0.1
+     },
+     "fold": 8,
+     "rebalance_days": 12,
+     "test_end": "2021-06-28",
+     "test_start": "2020-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.6833,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.3167,
+       "ticker": "BIL"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TARGET_VOL": 0.15
+     },
+     "fold": 9,
+     "rebalance_days": 12,
+     "test_end": "2022-06-28",
+     "test_start": "2021-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.8454,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.1546,
+       "ticker": "BIL"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TARGET_VOL": 0.12
+     },
+     "fold": 10,
+     "rebalance_days": 12,
+     "test_end": "2023-06-28",
+     "test_start": "2022-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.6443,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.3557,
+       "ticker": "BIL"
+      }
+     ]
+    },
+    {
+     "chosen": {
+      "TARGET_VOL": 0.12
+     },
+     "fold": 11,
+     "rebalance_days": 12,
+     "test_end": "2024-06-27",
+     "test_start": "2023-06-28",
+     "top_holdings": [
+      {
+       "mean_weight": 0.9782,
+       "ticker": "SPY"
+      },
+      {
+       "mean_weight": 0.0218,
+       "ticker": "BIL"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ "command": "uv run python research/lowfreq/xasset/make_report.py holdings",
+ "top": 12,
+ "weights_are": "mean target weight per ticker over the rebalance (decision) days inside the fold test window, using the cell the walk-forward chose for that fold"
+}
