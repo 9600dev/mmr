@@ -1,0 +1,82 @@
+# Insider family (C04, design record D11 / D14). Hypotheses, the overlay
+# construction and the champion rule are pre-registered in PREREG.md; every
+# candidate is a single pre-registered cell (no grid) - see PREREG.md.
+family: insider
+universe: equity
+dev_period: {start: 2016-08-01, end: 2024-06-28}
+walk_forward: {train_days: 1095, test_days: 365}     # D11: train 3y, test 1y, rolling
+warmup_days: 400                                     # 126-session windows + ADV medians need < 200 sessions
+top_n: 500
+candidates:
+  - id: eq_ew_pit
+    role: benchmark
+    hypothesis: Monthly equal weight of the point-in-time top-500 members (coverage = membership) is the return of owning the names an insider rule could overlay.
+    rationale: D11 decisive benchmark, run through the identical path and costs; every candidate publishes coverage = member AND priced.
+    strategy: {module: trader.research.lowfreq.reference_strategies, class: EqEwCovered}
+    params: {}
+    benchmarks: []
+    registered_at: 2026-09-29
+  - id: ins_any_purchase
+    role: candidate
+    hypothesis: Names with any officer/director open-market purchase (>= $25k, trailing 63 sessions) beat the equal-weight PIT basket when overlaid on it (PREREG C0, the purchase-count baseline every refinement must beat).
+    rationale: Insiders buy with their own money only when they expect a rise (Seyhun 1986, Lakonishok & Lee 2001); the plainest form of the information, and the confounder for every refined rule.
+    strategy: {module: strategies.lowfreq_insider_any_purchase, class: AnyPurchaseOverlay}
+    params: {}
+    benchmarks: [eq_ew_pit]
+    registered_at: 2026-09-29
+  - id: ins_opportunistic
+    role: candidate
+    hypothesis: Purchases by NON-routine insiders (no same-calendar-month purchase in each of the 3 prior years) carry the information; routine purchases carry none (PREREG H1).
+    rationale: Cohen, Malloy & Pomorski (2012) - stripping routine traders roughly doubles the predictive content of insider trades.
+    strategy: {module: strategies.lowfreq_insider_opportunistic, class: OpportunisticPurchaseOverlay}
+    params: {}
+    benchmarks: [eq_ew_pit]
+    registered_at: 2026-09-29
+  - id: ins_cluster
+    role: candidate
+    hypothesis: Names where >= 2 distinct officers/directors bought within 63 sessions beat the basket by more than names with a lone buyer (PREREG H2).
+    rationale: Independent insiders agreeing is a stronger signal than one insider's liquidity-driven trade (Alldredge & Blank 2019 on clustered insider buying).
+    strategy: {module: strategies.lowfreq_insider_cluster, class: ClusterPurchaseOverlay}
+    params: {}
+    benchmarks: [eq_ew_pit]
+    registered_at: 2026-09-29
+  - id: ins_conviction
+    role: candidate
+    hypothesis: Purchases that were >= 10% of the insider's post-trade holding (a stake increase of >= 11%) carry more information than small top-ups (PREREG H3).
+    rationale: The cost of being wrong scales with the trade relative to the insider's own wealth in the firm; holding-relative size, not dollar size, measures conviction.
+    strategy: {module: strategies.lowfreq_insider_conviction, class: ConvictionPurchaseOverlay}
+    params: {}
+    benchmarks: [eq_ew_pit]
+    registered_at: 2026-09-29
+  - id: ins_officer
+    role: candidate
+    hypothesis: Officer purchases (>= $25k, trailing 63 sessions) beat the basket by more than director purchases (PREREG H4a).
+    rationale: Officers hold the day-to-day private information; directors trade on less (Seyhun 1986 hierarchy result).
+    strategy: {module: strategies.lowfreq_insider_officer, class: OfficerPurchaseOverlay}
+    params: {}
+    benchmarks: [eq_ew_pit]
+    registered_at: 2026-09-29
+  - id: ins_director
+    role: candidate
+    hypothesis: Director (non-officer) purchases beat the basket by less than officer purchases (PREREG H4b, the contrast to H4a).
+    rationale: If H4b matches H4a the officer/director split carries nothing; a contrast, eligible on its own merits.
+    strategy: {module: strategies.lowfreq_insider_director, class: DirectorPurchaseOverlay}
+    params: {}
+    benchmarks: [eq_ew_pit]
+    registered_at: 2026-09-29
+  - id: ins_net_buy_ratio
+    role: candidate
+    hypothesis: Names whose 126-session net purchase ratio (P$ - S$)/(P$ + S$) is >= 0.5 with P$ >= $25k beat the basket; netting sales removes names insiders are also selling (PREREG H5).
+    rationale: Lakonishok & Lee (2001) - aggregate net buying predicts returns; sales alone are noise (scheduled, option-related).
+    strategy: {module: strategies.lowfreq_insider_net_buy_ratio, class: NetBuyRatioOverlay}
+    params: {}
+    benchmarks: [eq_ew_pit]
+    registered_at: 2026-09-29
+  - id: ins_size_matched_any
+    role: candidate
+    hypothesis: Replacing every C0 qualifier by the covered non-qualifier nearest in trailing-63-session dollar-volume rank earns C0's active return if that return is a size effect (PREREG D1, size control; never a champion).
+    rationale: Insider purchases cluster in smaller, cheaper names; the control isolates what the SIZE of the bought names earns without the buying.
+    strategy: {module: strategies.lowfreq_insider_size_matched, class: SizeMatchedAnyPurchaseOverlay}
+    params: {}
+    benchmarks: [eq_ew_pit]
+    registered_at: 2026-09-29
