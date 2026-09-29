@@ -1,0 +1,39 @@
+# Reference family (C01): benchmark-role entries only. They are what the
+# xasset (D04) and equity (D05) families must beat; they never count as trials.
+family: reference
+universe: etf
+dev_period: {start: 2007-07-01, end: 2024-06-28}
+walk_forward: {train_days: 1826, test_days: 365}     # D04: train 5y, test 1y, rolling
+warmup_days: 60
+top_n: 500
+candidates:
+  - id: etf_ew
+    role: benchmark
+    hypothesis: Owning the eligible ETF universe equal-weighted, rebalanced monthly, is the return a cross-asset allocator gets for free.
+    rationale: Any allocation rule that cannot beat equal ownership of its own universe is concentration, not selection (D04 benchmark i).
+    strategy: {module: trader.research.lowfreq.reference_strategies, class: EtfEqualWeight}
+    params: {}
+    universe: etf
+    benchmarks: [etf_6040]
+    registered_at: 2026-09-28
+  - id: etf_6040
+    role: benchmark
+    hypothesis: 60% SPY / 40% IEF rebalanced monthly is the conventional balanced portfolio a cross-asset rule must improve on.
+    rationale: The classic stock/bond mix is what an allocator would hold absent any signal (D04 benchmark ii).
+    strategy: {module: trader.research.lowfreq.reference_strategies, class: Etf6040}
+    params: {}
+    universe: etf
+    benchmarks: [etf_ew]
+    registered_at: 2026-09-28
+  - id: eq_ew_covered
+    role: benchmark
+    hypothesis: Equal weight of the covered point-in-time universe, rebalanced monthly, is the return of owning the names an equity signal could choose from.
+    rationale: The benchmark that killed long-only momentum; a tilt that cannot beat owning its universe is concentration (D05).
+    strategy: {module: trader.research.lowfreq.reference_strategies, class: EqEwCovered}
+    params: {}
+    universe: equity
+    dev_period: {start: 2016-08-01, end: 2024-06-28}
+    walk_forward: {train_days: 1095, test_days: 365}   # D05: train 3y, test 1y
+    warmup_days: 30
+    benchmarks: []
+    registered_at: 2026-09-28
