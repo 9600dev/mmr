@@ -3,7 +3,7 @@
 Evaluates a **registered** daily-bar panel strategy honestly and emits a
 machine-readable `PASS / PROMISING / FAIL` verdict. It searches for nothing
 itself: the families `xasset/` (C02, D04) and `equity/` (C03, D05) register
-candidates here. This file says how decisions D01–D06 are implemented.
+candidates here. This file says how decisions D01–D07 are implemented.
 
 ## Run
 
@@ -16,7 +16,7 @@ uv run python -m trader.research.lowfreq evaluate <family>/<id> \
 ```
 
 A fixed cell must be a registered grid cell (else refused and ledgered).
-Exit 0 = completed (any verdict); 1 = error or unregistered id; 2 = bad
+Exit 0 = completed (any verdict); 1 = error/unregistered id; 2 = bad
 arguments (no ledger row). Python API:
 `trader.research.lowfreq.evaluate(target, fixed_params=None, start=None,
 end=None)`, `load_etf_panel(tickers=None, start, end)`,
@@ -29,8 +29,7 @@ Everything reads the two DuckDB files named by `LOWFREQ_RESEARCH_CONFIG`
 **read-only**; the PIT and fundamentals loaders in `scripts/` are wrapped
 (`config.bound_container`, `config.read_only_duckdb_store`). Nothing writes
 `backtest_runs`; no network. Cash earns zero — a cash yield means holding
-BIL explicitly, benchmarks included. `LOWFREQ_RESEARCH_ROOT` relocates the
-family directories.
+BIL, benchmarks included. `LOWFREQ_RESEARCH_ROOT` relocates the families.
 
 ## Registry (`<family>/candidates.yaml`, D02)
 
@@ -56,15 +55,14 @@ Entries may override `universe`, `dev_period`, `walk_forward`, `warmup_days`,
 `tickers`, `top_n`.
 
 **Equity universe rule (D05).** `load_equity_panel` reads 45 days before
-the requested start so the first month has members and keeps a name's prices
-after it leaves the top-N membership and exposes membership as
-`fields['member']`. Weight > 0 only for a member; a BUY fill decided outside
+the requested start so the first month has members, keeps a name's prices
+after it leaves the top-N membership and exposes `fields['member']`. Weight > 0 only for a member; a BUY fill decided outside
 membership is refused (`universe violation`, ledgered as an error).
 **Stopped names (D07):** no price is ever fabricated; a holding whose bar is
-its last stored print is sold by the executor at that close
-(`panel_exit_at_last_print`); count and value are reported under
-`stopped_names`. Without both rules every leaver was unsellable (511 frozen
-holdings, cash −$3.2M in covered-EW; pre-D06). `pit_daily_bars` starts
+its last stored print in the COMPLETE loaded panel (`engine.terminal_prints`,
+handed to every window) is sold at that close; count and value are reported
+under `stopped_names`. Without both rules every leaver was unsellable (511 frozen
+holdings, cash −$3.2M; pre-D06). `pit_daily_bars` starts
 2016-08-01 and membership needs the prior month's ranks, so a window from
 2016-08-01 begins with September's rebalance. `evaluate`
 refuses an id that is not in the file. The **registry-entry
@@ -169,7 +167,7 @@ delete lines.
 Entry, window, costs, lookahead report, fold table, OOS and benchmark
 summaries, active statistics per year, DSR with its trial list, PBO,
 stability, full-period metrics per cell, `stopped_names`, gates, verdict,
-ledger row, OOS/decisive daily series. Fixed-cell runs go to
+ledger row, OOS/decisive daily series. Fixed-cell runs:
 `results/<id>__fixed_<start>_<end>.json`.
 
 ## Reference family (`reference/`)
@@ -185,8 +183,8 @@ benchmark vs the other, `eq_ew_covered` vs cash).
 ## Tests
 
 `tests/research/` runs on a temporary DuckDB pair and family root: loader
-isolation, as-of fundamentals, ledger schema on every path, known answers
-(identical → FAIL; drift → PASS; t+1 readers refused; sub-unit weights leave
-cash at zero), stateful strategies accepted, per-window coverage, D07 exits,
-safe paths, fixed-cell mode, CLI exit codes. D06 is pinned in
-`tests/test_panel_cash.py`.
+isolation, as-of fundamentals, ledger schema, known answers (identical →
+FAIL; drift → PASS; t+1 readers refused; sub-unit weights leave cash at
+zero), stateful strategies, per-window coverage, D07 exits (a name missing
+at a fold boundary that resumes is not stopped), safe paths, fixed-cell
+mode, CLI exit codes. D06: `tests/test_panel_cash.py`.

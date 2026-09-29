@@ -122,23 +122,19 @@ def _net(trades):
     return qty
 
 
-def _stopped_frames(n=60, stop_at=30):
+def _stopped_frames(n=60, stop_at=30, gap=()):
     days = pd.bdate_range('2020-01-01', periods=n)
     a = pd.DataFrame({'open': 100.0, 'high': 101.0, 'low': 99.0, 'close': 100.0, 'volume': 1e6}, index=days)
     b = a.copy()
     b.iloc[stop_at:] = np.nan                       # B's last print is bar stop_at-1
+    for g in gap:
+        b.iloc[g] = np.nan                          # a missing session B prints AFTER
     b = b.dropna()
     return {'A': a, 'B': b}, days
 
 
-def test_executor_sells_a_stopped_name_at_its_last_print_and_never_after(tmp_path):
-    """No open exists after B's last print, so nothing can fill there; with the
-    D07 flag the executor sells B at its last stored close (costs charged) and
-    counts it. Without the flag B stays in the book at a stale mark forever."""
-    from trader.objects import BarSize
-    from trader.simulation.backtester import BacktestConfig, Backtester
+def _hold_both():
     from trader.trading.strategy import Strategy
-    frames, days = _stopped_frames()
 
     class HoldBoth(Strategy):
         def precompute_panel(self, panel):
@@ -146,12 +142,26 @@ def test_executor_sells_a_stopped_name_at_its_last_print_and_never_after(tmp_pat
 
         def on_panel(self, panel, state, index):
             return {'A': 0.5, 'B': 0.5} if index == 0 else None
+    return HoldBoth()
+
+
+def _run_exec(frames, terminal, start=dt.datetime(2020, 1, 1), end=dt.datetime(2020, 4, 1)):
+    from trader.objects import BarSize
+    from trader.simulation.backtester import BacktestConfig, Backtester
+    cfg = BacktestConfig(start_date=start, end_date=end, initial_capital=1e6, bar_size=BarSize.Days1,
+                         slippage_bps=10.0, commission_per_share=0.005, panel_terminal_prints=terminal)
+    return Backtester(engine._NoStorage(), cfg).run_panel(_hold_both(), ['A', 'B'], frames=frames)
+
+
+def test_executor_sells_a_stopped_name_at_its_last_print_and_never_after(tmp_path):
+    """No open exists after B's last print, so nothing can fill there; given
+    B's terminal print (from the complete dataset) the executor sells B at that
+    close (costs charged) and counts it. Without the mapping B stays in the
+    book at a stale mark forever."""
+    frames, days = _stopped_frames()
 
     def run(flag):
-        cfg = BacktestConfig(start_date=dt.datetime(2020, 1, 1), end_date=dt.datetime(2020, 4, 1),
-                             initial_capital=1e6, bar_size=BarSize.Days1, slippage_bps=10.0,
-                             commission_per_share=0.005, panel_exit_at_last_print=flag)
-        return Backtester(engine._NoStorage(), cfg).run_panel(HoldBoth(), ['A', 'B'], frames=frames)
+        return _run_exec(frames, {'B': days[29]} if flag else None)
 
     on = run(True)
     sells = [t for t in on.trades if str(t.action).endswith('SELL')]
@@ -167,22 +177,39 @@ def test_executor_sells_a_stopped_name_at_its_last_print_and_never_after(tmp_pat
 
 
 def test_a_name_alive_at_the_window_end_is_not_force_exited():
-    from trader.objects import BarSize
-    from trader.simulation.backtester import BacktestConfig, Backtester
-    from trader.trading.strategy import Strategy
-    frames, _ = _stopped_frames(n=60, stop_at=60)        # nothing stops
-
-    class HoldBoth(Strategy):
-        def precompute_panel(self, panel):
-            return {}
-
-        def on_panel(self, panel, state, index):
-            return {'A': 0.5, 'B': 0.5} if index == 0 else None
-    cfg = BacktestConfig(start_date=dt.datetime(2020, 1, 1), end_date=dt.datetime(2020, 4, 1), initial_capital=1e6,
-                         bar_size=BarSize.Days1, panel_exit_at_last_print=True)
-    res = Backtester(engine._NoStorage(), cfg).run_panel(HoldBoth(), ['A', 'B'], frames=frames)
+    from trader.research.lowfreq.loaders import PricePanel
+    frames, days = _stopped_frames(n=60, stop_at=60)        # nothing stops
+    close = pd.DataFrame({k: v['close'] for k, v in frames.items()}).reindex(days)
+    assert engine.terminal_prints(PricePanel(open=close, close=close)) == {}
+    res = _run_exec(frames, engine.terminal_prints(PricePanel(open=close, close=close)))
     assert res.diagnostics['panel_forced_exits'] == 0
     assert _net(res.trades)['A'] > 0 and _net(res.trades)['B'] > 0
+
+
+def test_a_name_missing_at_a_window_boundary_that_prints_again_is_not_a_stopped_name():
+    """Terminal prints are a property of the COMPLETE dataset: a slice that
+    ends on a session B skipped must not liquidate B, because B prints again
+    after the slice. Only the executor's window-local view would call bar 29 B's
+    last print; the globally derived mapping says B never stopped."""
+    from trader.research.lowfreq.loaders import PricePanel
+    frames, days = _stopped_frames(n=60, stop_at=60, gap=(29,))     # B misses bar 29 only
+    close = pd.DataFrame({k: v['close'] for k, v in frames.items()}).reindex(days)
+    full = PricePanel(open=close, close=close)
+    assert engine.terminal_prints(full) == {}                        # B is alive at the end of the data
+    window_frames = {k: v.loc[v.index <= days[29]] for k, v in frames.items()}   # slice ends on B's gap
+    assert window_frames['B'].index[-1] == days[28]                  # B's last bar IN THE SLICE is 28
+    res = _run_exec(window_frames, engine.terminal_prints(full), end=dt.datetime(2020, 2, 12))
+    assert res.diagnostics['panel_forced_exits'] == 0 and _net(res.trades)['B'] > 0
+    # ... and the harness feeds exactly that global mapping to every window
+    panel = PricePanel(open=close, close=close)
+    entry_hold = entry('hb', 'candidate', 'HoldOne', TICKER='B', WEIGHT=0.5)
+    from trader.research.lowfreq.costs import base_costs
+    r = engine.run_window(entry_hold, {}, panel, days[0], days[0], days[29] + pd.Timedelta(days=1), base_costs('etf'))
+    assert r.forced_exits == 0
+    # whereas a name that TRULY stops inside the data is exited at its terminal print
+    frames2, days2 = _stopped_frames(n=60, stop_at=30)
+    close2 = pd.DataFrame({k: v['close'] for k, v in frames2.items()}).reindex(days2)
+    assert engine.terminal_prints(PricePanel(open=close2, close=close2)) == {'B': days2[29]}
 
 
 EQ_BENCH = entry('eq_ew_covered', 'benchmark', 'EqEwCovered', module='trader.research.lowfreq.reference_strategies',

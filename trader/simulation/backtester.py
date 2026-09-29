@@ -74,14 +74,17 @@ class BacktestConfig:
     panel_max_gross: float = 1.0
     # hillclimb(C01): changed because the lowfreq harness needs an honest exit
     # for names that stop printing (design decision D07). Cross-sectional books
-    # only, OFF by default: when True, a holding whose bar is its LAST finite
-    # close in the panel (and the panel continues past it) is sold at that
-    # close - slippage and commission charged, the fill logged like any other
-    # trade and counted in ``diagnostics['panel_forced_exits']`` /
-    # ``['panel_forced_exit_value']``. Without it a delisted or storage-cutoff
-    # name sits in the book forever at a stale mark and can never be sold (no
-    # later open exists to fill against). No open is ever fabricated.
-    panel_exit_at_last_print: bool = False
+    # only, OFF (None) by default: a mapping conid -> timestamp of that name's
+    # LAST stored print in the COMPLETE dataset (the caller derives it from the
+    # full history, never from the window being run - a name merely missing
+    # the last session of a slice is not a stopped name). A holding whose bar
+    # is its terminal print is sold at that close - slippage and commission
+    # charged, the fill logged like any other trade and counted in
+    # ``diagnostics['panel_forced_exits']`` / ``['panel_forced_exit_value']``.
+    # Without it a delisted or storage-cutoff name sits in the book forever at
+    # a stale mark and can never be sold (no later open exists to fill
+    # against). No open is ever fabricated.
+    panel_terminal_prints: Optional[Dict[Any, Any]] = None
     # Per-trade notional in ``live`` mode. None -> 2% of initial_capital
     # (mirrors the PositionSizer's base_position default). Live sizing also
     # ATR-scales each trade (~0.4-1.5x); a fixed notional keeps per-trade
@@ -910,17 +913,14 @@ class Backtester:
             / max(self._bars_per_year(self.config.bar_size), 1.0))
         scaled_buy_fills = dropped_buy_fills = scaled_rebalances = 0   # D06 diagnostics
         min_cash = cash
-        # hillclimb(C01): D07 - position (row) of each name's last finite close;
-        # a panel-level fact about the DATA, never read by the strategy.
+        # hillclimb(C01): D07 - each name's terminal print as supplied by the
+        # caller from the COMPLETE dataset; a fact about the data, never read
+        # by the strategy and never inferred from this window's frames.
         forced_exits = 0
         forced_exit_value = 0.0
-        last_print_pos: Dict[Any, int] = {}
-        if self.config.panel_exit_at_last_print:
-            finite = closes.replace([np.inf, -np.inf], np.nan).gt(0)
-            for conid in closes.columns:
-                hits = np.flatnonzero(finite[conid].to_numpy())
-                if len(hits):
-                    last_print_pos[conid] = int(hits[-1])
+        terminal: Dict[Any, Any] = {}
+        for conid, t in (self.config.panel_terminal_prints or {}).items():
+            terminal[conid] = pd.Timestamp(t)
 
         def _execute(ts, conid, delta, fill):
             nonlocal cash, min_cash
@@ -1001,11 +1001,12 @@ class Backtester:
                 px = row_close.get(conid)
                 if px is not None and np.isfinite(px) and px > 0:
                     last_price[conid] = float(px)
-            # hillclimb(C01): D07 forced exit at the last stored print. Runs
+            # hillclimb(C01): D07 forced exit at the terminal print. Runs
             # BEFORE the mark so the equity curve shows the book that exists.
-            if last_print_pos and i < n - 1:
+            if terminal:
                 for conid in [c for c, q in positions.items()
-                              if last_print_pos.get(c) == i and abs(q) > 1e-9]:
+                              if abs(q) > 1e-9 and terminal.get(c) == pd.Timestamp(ts)
+                              and c in last_price]:
                     qty = positions[conid]
                     px = last_price[conid]
                     fill = px * (1 - slip) if qty > 0 else px * (1 + slip)

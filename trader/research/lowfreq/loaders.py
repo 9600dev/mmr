@@ -165,7 +165,9 @@ def load_equity_panel(start=None, end=None, top_n: int = 500) -> PricePanel:
     NO PRICE IS EVER FABRICATED (D07). When a name stops printing (fell below
     the storage cutoff, or delisted) its ``open``/``close`` are NaN from then
     on: nothing can fill against a session that had no print. The executor
-    (``BacktestConfig.panel_exit_at_last_print``, set by ``engine._config``)
+    (``BacktestConfig.panel_terminal_prints``, derived by
+    ``engine.terminal_prints`` from the COMPLETE loaded panel and handed to
+    every execution window - never inferred from a window's own slice)
     sells a holding at the close of its LAST stored print, and every such exit
     and its value is counted in the results diagnostics (``forced_exits``,
     ``forced_exit_value_fraction``) so a result that leaned on them says so.

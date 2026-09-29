@@ -202,14 +202,38 @@ def wide_panel(frames: Dict[Any, pd.DataFrame]) -> pd.DataFrame:
          for f in PANEL_FIELDS}, axis=1).sort_index()
 
 
-def _config(start: dt.date, end_excl: dt.date, costs: Costs) -> BacktestConfig:
+def terminal_prints(panel: PricePanel) -> Dict[Any, pd.Timestamp]:
+    """D07: ticker -> timestamp of its LAST stored print in the COMPLETE loaded
+    panel, for names that stopped printing before the panel's final bar. A
+    name alive at the end of the data is absent. Derived once from the full
+    panel and handed to every execution window, so a name merely missing the
+    last session of a slice (and printing again after it) is never mistaken
+    for a stopped name."""
+    close = panel.close.replace([np.inf, -np.inf], np.nan)
+    if len(close.index) == 0:
+        return {}
+    last_bar = close.index[-1]
+    out: Dict[Any, pd.Timestamp] = {}
+    for t in close.columns:
+        last = close[t].where(close[t] > 0).last_valid_index()
+        if last is None:
+            continue
+        ts = cast(pd.Timestamp, pd.Timestamp(last))
+        if pd.isna(ts) or ts >= last_bar:
+            continue
+        out[t] = ts
+    return out
+
+
+def _config(start: dt.date, end_excl: dt.date, costs: Costs,
+            terminal: Optional[Dict[Any, pd.Timestamp]] = None) -> BacktestConfig:
     return BacktestConfig(
         start_date=dt.datetime.combine(start, dt.time()), end_date=dt.datetime.combine(end_excl, dt.time()),
         initial_capital=INITIAL_CAPITAL, bar_size=BarSize.Days1,
         slippage_bps=costs.slippage_bps, commission_per_share=costs.commission_per_share,
         short_borrow_bps_annual=costs.short_borrow_bps_annual, panel_max_gross=costs.max_gross,
         fill_policy='next_open',
-        panel_exit_at_last_print=True)     # D07: a stopped name exits at its last stored print
+        panel_terminal_prints=dict(terminal or {}))     # D07: stopped names exit at their terminal print
 
 
 def _buys_outside(trades, member: pd.DataFrame, index: pd.Index) -> list:
@@ -287,7 +311,9 @@ def run_window(entry: Dict[str, Any], cell: Dict[str, Any], panel: PricePanel,
     # The coverage THIS run publishes, derived from THIS window's data by a
     # separate instance (the executing one must enter the backtest unreplayed).
     own_cov = candidate_coverage(make_strategy(entry, cell, window, coverage=cov_in).precompute_panel(wide))
-    bt = Backtester(cast(Any, _NoStorage()), _config(to_date(data_start), to_date(end_excl), costs))
+    # D07: terminal prints come from the FULL loaded panel, never from this window's slice.
+    bt = Backtester(cast(Any, _NoStorage()),
+                    _config(to_date(data_start), to_date(end_excl), costs, terminal_prints(panel)))
     # run_panel is typed for conId keys; the research panels are ticker-keyed
     # (delisted names have no conId - see the PIT universe notes in CLAUDE.md).
     res = bt.run_panel(strat, cast(Any, list(frames.keys())), frames=frames)
