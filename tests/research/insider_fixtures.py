@@ -1,10 +1,11 @@
 """Synthetic panel + synthetic Form 4 events for the insider-family tests (C04).
 
 No database: events are injected with ``insider_signals.set_events_override``.
-Reserved names carry one deterministic pattern each (routine buyer, cluster,
-joint filing, ten-percent-only buyer, mis-keyed price, heavy seller, and the
-D14 timing MARKER whose ``usable_from`` is a rebalance session); every other
-name receives random officer/director purchases and sales.
+Reserved names carry one deterministic pattern each (routine buyer, a routine
+buyer with one LATE-filed prior purchase, cluster, joint filing,
+ten-percent-only buyer, mis-keyed price, heavy seller, and the D14 timing
+MARKER whose ``usable_from`` is a rebalance session); every other name
+receives random officer/director purchases and sales.
 """
 from __future__ import annotations
 
@@ -20,9 +21,11 @@ from trader.research.lowfreq.reference_strategies import schedule_mask
 N_NAMES, N_DAYS = 80, 440
 SESSIONS = pd.bdate_range('2016-08-01', periods=N_DAYS)
 TICKERS = [f'T{i:03d}' for i in range(N_NAMES)]
-ROUTINE, CLUSTER, JOINT, TENPCT, MISKEYED, SELLER, MARKER = 'T010', 'T020', 'T030', 'T040', 'T050', 'T060', 'T070'
-RESERVED = {ROUTINE, CLUSTER, JOINT, TENPCT, MISKEYED, SELLER, MARKER}
+ROUTINE, ROUTINE_LATE, CLUSTER, JOINT, TENPCT, MISKEYED, SELLER, MARKER = (
+    'T010', 'T011', 'T020', 'T030', 'T040', 'T050', 'T060', 'T070')
+RESERVED = {ROUTINE, ROUTINE_LATE, CLUSTER, JOINT, TENPCT, MISKEYED, SELLER, MARKER}
 MARKER_VALUE = 80_000.0
+LATE_FILING = pd.Timestamp('2017-05-15')          # the March-2016 purchase of owner 901 is filed here
 
 
 def make_panel(seed: int = 7) -> PricePanel:
@@ -33,8 +36,10 @@ def make_panel(seed: int = 7) -> PricePanel:
     opn = close.shift(1).fillna(close.iloc[0])
     member = pd.DataFrame(True, index=SESSIONS, columns=TICKERS)
     member.iloc[300:, :3] = False                    # three names leave the universe
+    shares = np.tile(1e6 * (1.0 + np.arange(N_NAMES) / 3.0), (N_DAYS, 1))
     fields = {'member': member,
-              'dollar_volume': close * 1e5 * (1.0 + np.arange(N_NAMES))[None, :]}
+              'dollar_volume': close * 1e5 * (1.0 + np.arange(N_NAMES))[None, :],
+              'shares_diluted': pd.DataFrame(shares, index=SESSIONS, columns=TICKERS)}
     return PricePanel(open=opn, close=close, fields=fields, signals={}, universe='equity')
 
 
@@ -59,7 +64,8 @@ def _row(ticker: str, filing_date: Any, usable_from: Any, shares: float, price: 
             'accession': accession or f'acc-{acc_id[0]}', 'trans_sk': acc_id[0], 'n_owners': n_owners}
 
 
-def make_events(seed: int = 11, with_marker: bool = True, marker_shift: int = 0) -> pd.DataFrame:
+def make_events(seed: int = 11, with_marker: bool = True, marker_shift: int = 0,
+                with_late_prior: bool = True) -> pd.DataFrame:
     """Events frame in the ``insider_events`` interface shape."""
     rng = np.random.default_rng(seed)
     rows: List[Dict[str, Any]] = []
@@ -76,9 +82,15 @@ def make_events(seed: int = 11, with_marker: bool = True, marker_shift: int = 0)
         i = int(rng.integers(5, N_DAYS - 40))
         rows.append(_row(t, SESSIONS[i], SESSIONS[i + 1], float(rng.integers(500, 20000)),
                          float(rng.uniform(20, 80)), int(rng.integers(100, 400)), code='S'))
-    for year in range(2013, 2020):                         # routine buyer: every March
+    for year in range(2013, 2020):                         # routine buyer: every March, filed promptly
         fd = pd.Timestamp(f'{year}-03-12')
         rows.append(_row(ROUTINE, fd, fd + pd.offsets.BDay(1), 1500, 40.0, 900, trans_date=f'{year}-03-10'))
+    for year in (2014, 2015, 2017, 2018):                  # owner 901: every March, filed promptly ...
+        fd = pd.Timestamp(f'{year}-03-12')
+        rows.append(_row(ROUTINE_LATE, fd, fd + pd.offsets.BDay(1), 1500, 40.0, 901, trans_date=f'{year}-03-10'))
+    if with_late_prior:                                    # ... except March 2016, filed 14 months late
+        rows.append(_row(ROUTINE_LATE, LATE_FILING, LATE_FILING + pd.offsets.BDay(1), 1500, 40.0, 901,
+                         trans_date='2016-03-10'))
     for k, i in enumerate((100, 104, 108)):                # cluster: three distinct buyers
         rows.append(_row(CLUSTER, SESSIONS[i], SESSIONS[i + 1], 3000, 30.0, 501 + k))
     for owner in (601, 602):                               # one joint filing, two reporting owners

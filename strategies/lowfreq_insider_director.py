@@ -1,14 +1,14 @@
 """H4b - director (non-officer) purchases, the contrast to H4a (C04 PREREG.md; D11, D14).
 
-Qualify: trailing-63-session open-market purchase value by directors who are
-NOT officers of at least $25,000. Directors buy less often and with less
-day-to-day information; if H4b matches H4a the officer/director split carries
-nothing.
+Qualify: at least one open-market purchase filing by a director who is NOT
+an officer usable within the trailing 63 sessions. Directors buy with less
+day-to-day information; if H4b matches H4a the officer/director split
+carries nothing.
 """
 from __future__ import annotations
 
-from strategies.lowfreq_insider_base import ValueRuleOverlay
+from strategies.lowfreq_insider_base import CountRuleOverlay
 
 
-class DirectorPurchaseOverlay(ValueRuleOverlay):
-    MEASURE = 'p_value_director'
+class DirectorPurchaseOverlay(CountRuleOverlay):
+    MEASURE = 'p_filings_director'

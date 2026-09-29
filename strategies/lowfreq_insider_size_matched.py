@@ -1,31 +1,53 @@
-"""D1 - size-matched control for the purchase baseline (C04 PREREG.md; D11).
+"""D1..D8 - size-matched controls, one per rule (C04 PREREG.md; D11).
 
-Same construction as C0 (``AnyPurchaseOverlay``), but on every rebalance each
-qualifying name is REPLACED by the covered non-qualifying name nearest to it
-in trailing-63-session median dollar-volume rank (the PIT universe's own size
-variable), ties by ticker, each match used once. What it earns is the part of
-C0's active return that comes from the SIZE of the names insiders buy, not
-from the buying. A control, never a champion.
+Each control mirrors one rule's qualifiers exactly, but on every rebalance
+overlays, for each qualifier, the covered NON-qualifying name nearest in
+MARKET CAP (close x as-of diluted shares; ties by ticker; each match used
+once) instead of the qualifier itself. What a control earns is the part of
+its rule's active return that comes from the SIZE of the names insiders
+bought, not from the buying. Controls are never champions; a rule is
+credited only if it beats its own control (PREREG.md, champion rule).
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from strategies.lowfreq_insider_base import SizeMatchedOverlay
+from strategies.lowfreq_insider_cluster import ClusterPurchaseOverlay
+from strategies.lowfreq_insider_conviction import ConvictionPurchaseOverlay
+from strategies.lowfreq_insider_director import DirectorPurchaseOverlay
+from strategies.lowfreq_insider_net_buy_ratio import NetBuyRatioOverlay
+from strategies.lowfreq_insider_officer import OfficerPurchaseOverlay
+from strategies.lowfreq_insider_opportunistic import OpportunisticPurchaseOverlay
+from strategies.lowfreq_insider_purchase_count import PurchaseCountOverlay
+from strategies.lowfreq_insider_value_to_mcap import ValueToMcapOverlay
 
-import numpy as np
-import pandas as pd
 
-from strategies.lowfreq_insider_any_purchase import AnyPurchaseOverlay
-from strategies.lowfreq_insider_base import adv_rank_matches
+class SizeMatchedPurchaseCount(SizeMatchedOverlay):
+    RULE = PurchaseCountOverlay
 
 
-class SizeMatchedAnyPurchaseOverlay(AnyPurchaseOverlay):
-    ADV_WINDOW = 63
+class SizeMatchedOpportunistic(SizeMatchedOverlay):
+    RULE = OpportunisticPurchaseOverlay
 
-    def extra_state(self, close: pd.DataFrame) -> Dict[str, Any]:
-        dv = self._field(close, 'dollar_volume')
-        if dv is None:
-            dv = pd.DataFrame(np.nan, index=close.index, columns=close.columns)
-        return {'adv': dv.astype(float).rolling(self.ADV_WINDOW, min_periods=20).median()}
 
-    def select(self, state: Dict[str, Any], index: int, covered: List[str], signal: List[str]) -> List[str]:
-        return adv_rank_matches(signal, covered, state['adv'].iloc[index])
+class SizeMatchedCluster(SizeMatchedOverlay):
+    RULE = ClusterPurchaseOverlay
+
+
+class SizeMatchedConviction(SizeMatchedOverlay):
+    RULE = ConvictionPurchaseOverlay
+
+
+class SizeMatchedOfficer(SizeMatchedOverlay):
+    RULE = OfficerPurchaseOverlay
+
+
+class SizeMatchedDirector(SizeMatchedOverlay):
+    RULE = DirectorPurchaseOverlay
+
+
+class SizeMatchedNetBuyRatio(SizeMatchedOverlay):
+    RULE = NetBuyRatioOverlay
+
+
+class SizeMatchedValueToMcap(SizeMatchedOverlay):
+    RULE = ValueToMcapOverlay

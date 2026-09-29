@@ -40,9 +40,9 @@ CONVICTION_MIN = 0.10                   # a purchase that is >= 10% of the insid
 MAX_PRICE = 100_000.0                   # DATA.md: mis-keyed prices above this are excluded from value sums
 MAX_VALUE = 1e10
 
-#: Daily measures produced by ``daily_frames`` (all dollar values are 1/n_owners weighted).
-MEASURES: Tuple[str, ...] = ('p_value', 'p_filings', 'p_value_opp', 'p_value_officer',
-                             'p_value_director', 'p_value_conv', 's_value')
+#: Daily measures produced by ``daily_frames`` (dollar values are 1/n_owners weighted).
+FILTERS: Tuple[str, ...] = ('', '_opp', '_officer', '_director', '_conv')
+MEASURES: Tuple[str, ...] = tuple(f'p_filings{s}' for s in FILTERS) + tuple(f'p_value{s}' for s in FILTERS) + ('s_value',)
 
 _events_override: Optional[pd.DataFrame] = None
 _events_cache: Dict[str, pd.DataFrame] = {}
@@ -125,9 +125,13 @@ def prepare_events(ev: pd.DataFrame) -> pd.DataFrame:
 def routine_flags(df: pd.DataFrame, years: int = ROUTINE_YEARS) -> pd.Series:
     """Cohen, Malloy & Pomorski (2012) routine trader, per (ticker, owner):
     a purchase is ROUTINE when the same owner bought the same issuer in the
-    same calendar month in each of the ``years`` PRIOR years (by trade
-    month). Only prior months are consulted, so a flag can never change when
-    later events are added or removed. Sales and non-purchases are False.
+    same calendar month (by trade month) in each of the ``years`` PRIOR
+    years, counting only prior purchases whose ``usable_from`` is at or
+    before the classified purchase's own ``usable_from`` - what was KNOWN at
+    that close (D14). A late or backdated filing therefore cannot make an
+    earlier purchase routine, and the flag depends only on events usable at
+    or before the event's own session, so it is identical on any prefix.
+    Sales and non-purchases are False.
     """
     out = pd.Series(False, index=df.index)
     p = df[df['code'] == 'P']
@@ -136,10 +140,23 @@ def routine_flags(df: pd.DataFrame, years: int = ROUTINE_YEARS) -> pd.Series:
     td = pd.to_datetime(p['trans_date'])
     ym = (td.dt.year * 12 + td.dt.month).astype('int64')
     owner = pd.to_numeric(p['owner_cik'], errors='coerce').fillna(-1).astype('int64')
-    keys = pd.DataFrame({'ticker': p['ticker'].astype(str), 'owner': owner, 'ym': ym})
-    have = set(zip(keys['ticker'], keys['owner'], keys['ym']))
-    flags = np.fromiter((all((t, o, m - 12 * k) in have for k in range(1, years + 1))
-                         for t, o, m in zip(keys['ticker'], keys['owner'], keys['ym'])),
+    usable = pd.to_datetime(p['usable_from']).to_numpy(dtype='datetime64[ns]')
+    keys = pd.DataFrame({'ticker': p['ticker'].astype(str).to_numpy(), 'owner': owner.to_numpy(),
+                         'ym': ym.to_numpy(), 'usable': usable})
+    # the FIRST session a purchase in (ticker, owner, trade month) became usable
+    first_usable = keys.groupby(['ticker', 'owner', 'ym'])['usable'].min()
+    known: Dict[Tuple[str, int, int], np.datetime64] = {
+        (str(t), int(o), int(m)): np.datetime64(u) for (t, o, m), u in first_usable.items()}
+
+    def is_routine(t: str, o: int, m: int, u: np.datetime64) -> bool:
+        for k in range(1, years + 1):
+            prior = known.get((t, o, m - 12 * k))
+            if prior is None or prior > u:
+                return False
+        return True
+
+    flags = np.fromiter((is_routine(str(t), int(o), int(m), u)
+                         for t, o, m, u in zip(keys['ticker'], keys['owner'], keys['ym'], keys['usable'])),
                         dtype=bool, count=len(keys))
     out.loc[p.index] = flags
     return out
@@ -177,32 +194,45 @@ def _pivot_sum(ev: pd.DataFrame, mask: pd.Series, col: str, index: pd.DatetimeIn
     return out.fillna(0.0)
 
 
+def _pivot_filings(ev: pd.DataFrame, mask: pd.Series, index: pd.DatetimeIndex,
+                   tickers: Sequence[str]) -> pd.DataFrame:
+    """Distinct FILINGS (accessions) per session and ticker - a joint filing
+    with several reporting owners is one filing, a filing with several
+    purchase lines is one filing."""
+    sub = ev[mask]
+    out = pd.DataFrame(0.0, index=index, columns=list(tickers))
+    if len(sub) == 0:
+        return out
+    g = sub.groupby(['pos', 'ticker'])['accession'].nunique().unstack('ticker')
+    g.index = index[g.index.to_numpy(dtype=int)]
+    cols = [c for c in g.columns if c in out.columns]
+    out.loc[g.index, cols] = g[cols].astype(float)
+    return out.fillna(0.0)
+
+
 def daily_frames(prepared: pd.DataFrame, index: pd.DatetimeIndex, tickers: Sequence[str]) -> Dict[str, pd.DataFrame]:
     """The ``MEASURES`` as dense (session x ticker) frames, zero where nothing
     became usable that session (pure; row t holds only events whose
-    ``usable_from`` maps to session t)."""
+    ``usable_from`` maps to session t). ``p_filings*`` count filings,
+    ``p_value*``/``s_value`` sum 1/n_owners-weighted dollars; the suffix
+    names the filter (``_opp`` non-routine, ``_officer``, ``_director``
+    = director and not officer, ``_conv`` holding increase >= 10%)."""
     idx = pd.DatetimeIndex(index)
     ev = events_in_window(prepared, idx, tickers)
     is_p = (ev['code'] == 'P') & ev['is_od']
     is_s = (ev['code'] == 'S') & ev['is_od']
-    conv = is_p & (ev['holding_increase'] >= CONVICTION_MIN)
-    out = {
-        'p_value': _pivot_sum(ev, is_p, 'value_w', idx, tickers),
-        'p_value_opp': _pivot_sum(ev, is_p & ~ev['routine'].astype(bool), 'value_w', idx, tickers),
-        'p_value_officer': _pivot_sum(ev, is_p & ev['is_officer'], 'value_w', idx, tickers),
-        'p_value_director': _pivot_sum(ev, is_p & ev['is_director'] & ~ev['is_officer'], 'value_w', idx, tickers),
-        'p_value_conv': _pivot_sum(ev, conv, 'value_w', idx, tickers),
-        's_value': _pivot_sum(ev, is_s, 'value_w', idx, tickers),
+    filters = {
+        '': is_p,
+        '_opp': is_p & ~ev['routine'].astype(bool),
+        '_officer': is_p & ev['is_officer'],
+        '_director': is_p & ev['is_director'] & ~ev['is_officer'],
+        '_conv': is_p & (ev['holding_increase'] >= CONVICTION_MIN),
     }
-    # distinct filings per session (a joint filing is one filing)
-    sub = ev[is_p]
-    filings = pd.DataFrame(0.0, index=idx, columns=list(tickers))
-    if len(sub):
-        g = sub.groupby(['pos', 'ticker'])['accession'].nunique().unstack('ticker')
-        g.index = idx[g.index.to_numpy(dtype=int)]
-        cols = [c for c in g.columns if c in filings.columns]
-        filings.loc[g.index, cols] = g[cols].astype(float)
-    out['p_filings'] = filings.fillna(0.0)
+    out: Dict[str, pd.DataFrame] = {}
+    for suffix, mask in filters.items():
+        out['p_filings' + suffix] = _pivot_filings(ev, mask, idx, tickers)
+        out['p_value' + suffix] = _pivot_sum(ev, mask, 'value_w', idx, tickers)
+    out['s_value'] = _pivot_sum(ev, is_s, 'value_w', idx, tickers)
     return out
 
 

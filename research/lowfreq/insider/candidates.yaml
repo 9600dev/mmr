@@ -1,11 +1,13 @@
 # Insider family (C04, design record D11 / D14). Hypotheses, the overlay
-# construction and the champion rule are pre-registered in PREREG.md; every
-# candidate is a single pre-registered cell (no grid) - see PREREG.md.
+# construction, the decomposition controls and the champion rule are
+# pre-registered in PREREG.md; every entry is a single pre-registered cell
+# (no grid). Order: benchmark, the count baseline C0, hypotheses H1-H6, then
+# one size-matched control per rule (D1-D8).
 family: insider
 universe: equity
 dev_period: {start: 2016-08-01, end: 2024-06-28}
 walk_forward: {train_days: 1095, test_days: 365}     # D11: train 3y, test 1y, rolling
-warmup_days: 400                                     # 126-session windows + ADV medians need < 200 sessions
+warmup_days: 400                                     # 126-session windows need < 200 sessions
 top_n: 500
 candidates:
   - id: eq_ew_pit
@@ -16,17 +18,17 @@ candidates:
     params: {}
     benchmarks: []
     registered_at: 2026-09-29
-  - id: ins_any_purchase
+  - id: ins_purchase_count
     role: candidate
-    hypothesis: Names with any officer/director open-market purchase (>= $25k, trailing 63 sessions) beat the equal-weight PIT basket when overlaid on it (PREREG C0, the purchase-count baseline every refinement must beat).
-    rationale: Insiders buy with their own money only when they expect a rise (Seyhun 1986, Lakonishok & Lee 2001); the plainest form of the information, and the confounder for every refined rule.
-    strategy: {module: strategies.lowfreq_insider_any_purchase, class: AnyPurchaseOverlay}
+    hypothesis: Names with at least one officer/director open-market purchase filing usable in the trailing 63 sessions beat the equal-weight PIT basket when overlaid on it (PREREG C0, the purchase-count baseline every refinement must beat).
+    rationale: Insiders buy with their own money only when they expect a rise (Seyhun 1986, Lakonishok & Lee 2001); the fact of buying alone, and the confounder for every refined rule.
+    strategy: {module: strategies.lowfreq_insider_purchase_count, class: PurchaseCountOverlay}
     params: {}
     benchmarks: [eq_ew_pit]
     registered_at: 2026-09-29
   - id: ins_opportunistic
     role: candidate
-    hypothesis: Purchases by NON-routine insiders (no same-calendar-month purchase in each of the 3 prior years) carry the information; routine purchases carry none (PREREG H1).
+    hypothesis: Purchase filings by NON-routine insiders (no same-calendar-month purchase already usable in each of the 3 prior years) carry the information; routine purchases carry none (PREREG H1).
     rationale: Cohen, Malloy & Pomorski (2012) - stripping routine traders roughly doubles the predictive content of insider trades.
     strategy: {module: strategies.lowfreq_insider_opportunistic, class: OpportunisticPurchaseOverlay}
     params: {}
@@ -35,14 +37,14 @@ candidates:
   - id: ins_cluster
     role: candidate
     hypothesis: Names where >= 2 distinct officers/directors bought within 63 sessions beat the basket by more than names with a lone buyer (PREREG H2).
-    rationale: Independent insiders agreeing is a stronger signal than one insider's liquidity-driven trade (Alldredge & Blank 2019 on clustered insider buying).
+    rationale: Independent insiders agreeing is stronger evidence than one insider's possibly liquidity-driven trade (Alldredge & Blank 2019).
     strategy: {module: strategies.lowfreq_insider_cluster, class: ClusterPurchaseOverlay}
     params: {}
     benchmarks: [eq_ew_pit]
     registered_at: 2026-09-29
   - id: ins_conviction
     role: candidate
-    hypothesis: Purchases that were >= 10% of the insider's post-trade holding (a stake increase of >= 11%) carry more information than small top-ups (PREREG H3).
+    hypothesis: Purchase filings that were >= 10% of the insider's post-trade holding (a stake increase of >= 11%) carry more information than small top-ups (PREREG H3).
     rationale: The cost of being wrong scales with the trade relative to the insider's own wealth in the firm; holding-relative size, not dollar size, measures conviction.
     strategy: {module: strategies.lowfreq_insider_conviction, class: ConvictionPurchaseOverlay}
     params: {}
@@ -50,7 +52,7 @@ candidates:
     registered_at: 2026-09-29
   - id: ins_officer
     role: candidate
-    hypothesis: Officer purchases (>= $25k, trailing 63 sessions) beat the basket by more than director purchases (PREREG H4a).
+    hypothesis: Officer purchase filings (trailing 63 sessions) beat the basket by more than director purchases (PREREG H4a).
     rationale: Officers hold the day-to-day private information; directors trade on less (Seyhun 1986 hierarchy result).
     strategy: {module: strategies.lowfreq_insider_officer, class: OfficerPurchaseOverlay}
     params: {}
@@ -58,7 +60,7 @@ candidates:
     registered_at: 2026-09-29
   - id: ins_director
     role: candidate
-    hypothesis: Director (non-officer) purchases beat the basket by less than officer purchases (PREREG H4b, the contrast to H4a).
+    hypothesis: Director (non-officer) purchase filings beat the basket by less than officer purchases (PREREG H4b, the contrast to H4a).
     rationale: If H4b matches H4a the officer/director split carries nothing; a contrast, eligible on its own merits.
     strategy: {module: strategies.lowfreq_insider_director, class: DirectorPurchaseOverlay}
     params: {}
@@ -66,17 +68,81 @@ candidates:
     registered_at: 2026-09-29
   - id: ins_net_buy_ratio
     role: candidate
-    hypothesis: Names whose 126-session net purchase ratio (P$ - S$)/(P$ + S$) is >= 0.5 with P$ >= $25k beat the basket; netting sales removes names insiders are also selling (PREREG H5).
+    hypothesis: Names with >= 1 purchase filing and a 126-session net purchase ratio (P$ - S$)/(P$ + S$) >= 0.5 beat the basket; netting sales removes names insiders are also selling (PREREG H5).
     rationale: Lakonishok & Lee (2001) - aggregate net buying predicts returns; sales alone are noise (scheduled, option-related).
     strategy: {module: strategies.lowfreq_insider_net_buy_ratio, class: NetBuyRatioOverlay}
     params: {}
     benchmarks: [eq_ew_pit]
     registered_at: 2026-09-29
-  - id: ins_size_matched_any
+  - id: ins_value_to_mcap
     role: candidate
-    hypothesis: Replacing every C0 qualifier by the covered non-qualifier nearest in trailing-63-session dollar-volume rank earns C0's active return if that return is a size effect (PREREG D1, size control; never a champion).
-    rationale: Insider purchases cluster in smaller, cheaper names; the control isolates what the SIZE of the bought names earns without the buying.
-    strategy: {module: strategies.lowfreq_insider_size_matched, class: SizeMatchedAnyPurchaseOverlay}
+    hypothesis: Names whose trailing-63-session purchase value is >= 0.2 basis points of market cap (the calibrated median among purchasers) beat the basket; dollar conviction scaled by firm size (PREREG H6).
+    rationale: A purchase that is large relative to the firm moves the insider's wealth materially into it; scaling by market cap removes the mechanical dollar advantage of large firms.
+    strategy: {module: strategies.lowfreq_insider_value_to_mcap, class: ValueToMcapOverlay}
+    params: {}
+    benchmarks: [eq_ew_pit]
+    registered_at: 2026-09-29
+  - id: ins_size_matched_count
+    role: candidate
+    hypothesis: C0's qualifiers each replaced by the covered non-qualifier nearest in market cap earns C0's active return if that return is a size effect (PREREG D1, size control of ins_purchase_count; never a champion).
+    rationale: Insider purchases cluster in smaller names; the control isolates what the SIZE of the bought names earns without the buying.
+    strategy: {module: strategies.lowfreq_insider_size_matched, class: SizeMatchedPurchaseCount}
+    params: {}
+    benchmarks: [eq_ew_pit]
+    registered_at: 2026-09-29
+  - id: ins_size_matched_opportunistic
+    role: candidate
+    hypothesis: Size control of ins_opportunistic (PREREG D2; never a champion).
+    rationale: Same construction as D1 mirroring H1's qualifiers.
+    strategy: {module: strategies.lowfreq_insider_size_matched, class: SizeMatchedOpportunistic}
+    params: {}
+    benchmarks: [eq_ew_pit]
+    registered_at: 2026-09-29
+  - id: ins_size_matched_cluster
+    role: candidate
+    hypothesis: Size control of ins_cluster (PREREG D3; never a champion).
+    rationale: Same construction as D1 mirroring H2's qualifiers.
+    strategy: {module: strategies.lowfreq_insider_size_matched, class: SizeMatchedCluster}
+    params: {}
+    benchmarks: [eq_ew_pit]
+    registered_at: 2026-09-29
+  - id: ins_size_matched_conviction
+    role: candidate
+    hypothesis: Size control of ins_conviction (PREREG D4; never a champion).
+    rationale: Same construction as D1 mirroring H3's qualifiers.
+    strategy: {module: strategies.lowfreq_insider_size_matched, class: SizeMatchedConviction}
+    params: {}
+    benchmarks: [eq_ew_pit]
+    registered_at: 2026-09-29
+  - id: ins_size_matched_officer
+    role: candidate
+    hypothesis: Size control of ins_officer (PREREG D5; never a champion).
+    rationale: Same construction as D1 mirroring H4a's qualifiers.
+    strategy: {module: strategies.lowfreq_insider_size_matched, class: SizeMatchedOfficer}
+    params: {}
+    benchmarks: [eq_ew_pit]
+    registered_at: 2026-09-29
+  - id: ins_size_matched_director
+    role: candidate
+    hypothesis: Size control of ins_director (PREREG D6; never a champion).
+    rationale: Same construction as D1 mirroring H4b's qualifiers.
+    strategy: {module: strategies.lowfreq_insider_size_matched, class: SizeMatchedDirector}
+    params: {}
+    benchmarks: [eq_ew_pit]
+    registered_at: 2026-09-29
+  - id: ins_size_matched_net_buy_ratio
+    role: candidate
+    hypothesis: Size control of ins_net_buy_ratio (PREREG D7; never a champion).
+    rationale: Same construction as D1 mirroring H5's qualifiers.
+    strategy: {module: strategies.lowfreq_insider_size_matched, class: SizeMatchedNetBuyRatio}
+    params: {}
+    benchmarks: [eq_ew_pit]
+    registered_at: 2026-09-29
+  - id: ins_size_matched_value_to_mcap
+    role: candidate
+    hypothesis: Size control of ins_value_to_mcap (PREREG D8; never a champion).
+    rationale: Same construction as D1 mirroring H6's qualifiers.
+    strategy: {module: strategies.lowfreq_insider_size_matched, class: SizeMatchedValueToMcap}
     params: {}
     benchmarks: [eq_ew_pit]
     registered_at: 2026-09-29

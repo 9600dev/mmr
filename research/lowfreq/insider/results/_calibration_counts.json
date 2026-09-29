@@ -1,0 +1,117 @@
+{
+ "elapsed_s": 14.9,
+ "mcap_coverage_share_of_covered": 0.5779935803217469,
+ "panel": {
+  "end": "2024-06-28",
+  "load_s": 6.9,
+  "sessions": 1968,
+  "start": "2016-08-01",
+  "tickers": 2771
+ },
+ "rules": {
+  "ins_cluster": {
+   "K_max": 45.0,
+   "K_median": 14.0,
+   "K_min": 0.0,
+   "K_p25": 11.0,
+   "K_p75": 19.0,
+   "N_covered_median": 494.5,
+   "months_below_min_signal": 3,
+   "precompute_s": 0.0,
+   "qualifier_mcap_percentile_median": 0.41666666666666663,
+   "rebalances": 94
+  },
+  "ins_conviction": {
+   "K_max": 78.0,
+   "K_median": 36.5,
+   "K_min": 2.0,
+   "K_p25": 29.25,
+   "K_p75": 45.75,
+   "N_covered_median": 494.5,
+   "months_below_min_signal": 1,
+   "precompute_s": 0.1,
+   "qualifier_mcap_percentile_median": 0.5093107950250808,
+   "rebalances": 94
+  },
+  "ins_director": {
+   "K_max": 82.0,
+   "K_median": 43.5,
+   "K_min": 1.0,
+   "K_p25": 35.25,
+   "K_p75": 51.0,
+   "N_covered_median": 494.5,
+   "months_below_min_signal": 1,
+   "precompute_s": 0.1,
+   "qualifier_mcap_percentile_median": 0.5080971659919028,
+   "rebalances": 94
+  },
+  "ins_net_buy_ratio": {
+   "K_max": 42.0,
+   "K_median": 24.0,
+   "K_min": 2.0,
+   "K_p25": 19.0,
+   "K_p75": 28.0,
+   "N_covered_median": 494.5,
+   "months_below_min_signal": 1,
+   "precompute_s": 0.2,
+   "qualifier_mcap_percentile_median": 0.443034489526655,
+   "rebalances": 94
+  },
+  "ins_officer": {
+   "K_max": 44.0,
+   "K_median": 19.0,
+   "K_min": 1.0,
+   "K_p25": 12.0,
+   "K_p75": 23.0,
+   "N_covered_median": 494.5,
+   "months_below_min_signal": 2,
+   "precompute_s": 0.1,
+   "qualifier_mcap_percentile_median": 0.44113974922302,
+   "rebalances": 94
+  },
+  "ins_opportunistic": {
+   "K_max": 102.0,
+   "K_median": 56.0,
+   "K_min": 2.0,
+   "K_p25": 44.0,
+   "K_p75": 65.0,
+   "N_covered_median": 494.5,
+   "months_below_min_signal": 1,
+   "precompute_s": 0.1,
+   "qualifier_mcap_percentile_median": 0.5048705379587732,
+   "rebalances": 94
+  },
+  "ins_purchase_count": {
+   "K_max": 103.0,
+   "K_median": 56.0,
+   "K_min": 2.0,
+   "K_p25": 44.0,
+   "K_p75": 65.0,
+   "N_covered_median": 494.5,
+   "months_below_min_signal": 1,
+   "precompute_s": 3.3,
+   "qualifier_mcap_percentile_median": 0.5048705379587732,
+   "rebalances": 94
+  },
+  "ins_value_to_mcap": {
+   "K_max": 47.0,
+   "K_median": 17.0,
+   "K_min": 1.0,
+   "K_p25": 13.0,
+   "K_p75": 23.0,
+   "N_covered_median": 494.5,
+   "months_below_min_signal": 1,
+   "precompute_s": 0.1,
+   "qualifier_mcap_percentile_median": 0.2598365691816171,
+   "rebalances": 94
+  }
+ },
+ "value_to_mcap_among_purchasers": {
+  "n": 6048,
+  "q10": 9.45168728197115e-07,
+  "q25": 3.7678688621979066e-06,
+  "q50": 1.7060271099480588e-05,
+  "q75": 9.816103022135021e-05,
+  "q90": 0.0013327089911848115
+ }
+}

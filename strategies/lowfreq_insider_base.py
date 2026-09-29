@@ -14,6 +14,17 @@ long-only, never fewer than ``MIN_COVERED`` names. Fewer than
 then the benchmark itself). This is the D11 overlay: qualifying insider
 events are sparse, so the unfilled weight sits in the benchmark basket.
 
+Rules are COUNT-based unless the hypothesis is about dollars: the baseline
+``CountRuleOverlay`` qualifies a name on >= ``MIN_COUNT`` purchase FILINGS
+in the trailing ``LOOKBACK`` sessions, and every refined rule is the same
+count applied after one filter - so "refined minus baseline" is exactly what
+the filter contributed (PREREG.md, decomposition).
+
+``SizeMatchedOverlay`` is the size control: it mirrors a rule's qualifiers
+but overlays, for each of them, the covered NON-qualifier nearest in
+MARKET CAP (close x as-of diluted shares) instead - what the size of the
+bought names earns without the buying.
+
 Insider events reach the strategy through
 ``trader.research.lowfreq.insider_signals`` (C03's loader, D14 timing), as
 dense daily frames the subclasses reduce with backward-looking windows only;
@@ -50,6 +61,36 @@ def overlay_weights(covered: Sequence[str], signal: Sequence[str], w_name: float
     return w
 
 
+def market_cap(close: pd.DataFrame, fields: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Close x as-of diluted shares (the loader's EDGAR-acceptance as-of frame);
+    NaN where unknown or non-positive. A per-row product: prefix-stable."""
+    shares = fields.get('shares_diluted')
+    if shares is None:
+        return pd.DataFrame(np.nan, index=close.index, columns=close.columns)
+    mcap = close * shares.reindex(index=close.index, columns=close.columns).astype(float)
+    return mcap.where(mcap > 0)
+
+
+def rank_matches(signal: Sequence[str], covered: Sequence[str], size: pd.Series) -> List[str]:
+    """Pure: for each signal name (ticker order) the covered NON-signal name
+    with the nearest ``size`` rank not already used (ties: ticker order);
+    names without a size are skipped. The size-matched control's book."""
+    cov = sorted(set(str(c) for c in covered))
+    sig = sorted(set(str(s) for s in signal) & set(cov))
+    ranks = size.reindex(cov).astype(float)
+    ranks = ranks[ranks.notna()].rank(method='first')
+    pool = {t: float(r) for t, r in ranks.items() if t not in sig}
+    out: List[str] = []
+    for s in sig:
+        if s not in ranks.index or not pool:
+            continue
+        target = float(ranks[s])
+        best = min(pool.items(), key=lambda kv: (abs(kv[1] - target), kv[0]))
+        out.append(best[0])
+        pool.pop(best[0])
+    return out
+
+
 class InsiderOverlay(LowFreqStrategy):
     REBALANCE = 'month'             # D11: no more often than weekly; monthly like the benchmark
     LOOKBACK = 63                   # sessions of usable events a purchase stays "recent" (~3 months)
@@ -57,40 +98,41 @@ class InsiderOverlay(LowFreqStrategy):
     SLEEVE_MAX = 0.60               # cap on the overlay's share of the book
     MIN_SIGNAL_NAMES = 5            # below this many qualifiers the book is the plain EW basket
     MIN_COVERED = 30                # D05/D11: hold (None) rather than rebalance a thin universe
-    MIN_VALUE_USD = 25_000.0        # trailing purchase value a name needs to qualify
     BUYER_WINDOW = 63               # sessions over which distinct buyers are counted (cluster rule)
 
-    def qualifies(self, frames: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    def qualifies(self, frames: Dict[str, pd.DataFrame], close: pd.DataFrame,
+                  fields: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         """Boolean (session x ticker): does the name qualify on that bar, reading
-        only rows <= t of the daily frames (rolling windows)."""
+        only rows <= t of the daily frames (rolling windows) and of the as-of fields."""
         raise NotImplementedError
 
-    def _field(self, close: pd.DataFrame, name: str) -> Optional[pd.DataFrame]:
-        raw = (self.research_data.get('fields') or {}).get(name)
-        if not isinstance(raw, pd.DataFrame):
-            return None
-        return raw.reindex(index=close.index, columns=close.columns)
+    def _fields(self, close: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+        raw = self.research_data.get('fields') or {}
+        return {k: v.reindex(index=close.index, columns=close.columns) for k, v in raw.items()
+                if isinstance(v, pd.DataFrame)}
 
-    def coverage(self, close: pd.DataFrame) -> pd.DataFrame:
-        member = self._field(close, 'member')
+    def coverage(self, close: pd.DataFrame, fields: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+        member = fields.get('member')
         if member is None:                     # a panel without membership (tests): every priced name
             member = pd.DataFrame(True, index=close.index, columns=close.columns)
         return member.fillna(False).astype(bool) & close.notna()
 
     def precompute_panel(self, panel: pd.DataFrame) -> Dict[str, Any]:
         close = panel['close'].astype(float)
-        cov = self.coverage(close)
+        fields = self._fields(close)
+        cov = self.coverage(close, fields)
         frames = ins.signal_frames(pd.DatetimeIndex(close.index), [str(c) for c in close.columns], self.BUYER_WINDOW)
-        q = self.qualifies(frames).reindex(index=close.index, columns=close.columns).fillna(False).astype(bool)
+        q = self.qualifies(frames, close, fields).reindex(index=close.index, columns=close.columns)
+        q = q.fillna(False).astype(bool)
         state: Dict[str, Any] = {'close': close, 'coverage': cov, 'sig': (q & cov).astype(float)}
-        state.update(self.extra_state(close))
+        state.update(self.extra_state(close, fields))
         return state
 
-    def extra_state(self, close: pd.DataFrame) -> Dict[str, Any]:
+    def extra_state(self, close: pd.DataFrame, fields: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
         return {}
 
     def select(self, state: Dict[str, Any], index: int, covered: List[str], signal: List[str]) -> List[str]:
-        """The names that receive the overlay (a control may substitute others)."""
+        """The names that receive the overlay (a control substitutes others)."""
         return signal
 
     def on_panel(self, panel, state, index) -> Optional[Dict[Any, float]]:
@@ -108,30 +150,28 @@ class InsiderOverlay(LowFreqStrategy):
         return w
 
 
-class ValueRuleOverlay(InsiderOverlay):
-    """Qualify when the trailing ``LOOKBACK``-session sum of one dollar measure
-    reaches ``MIN_VALUE_USD``."""
-    MEASURE = 'p_value'
+class CountRuleOverlay(InsiderOverlay):
+    """Qualify on >= ``MIN_COUNT`` purchase filings (after ``MEASURE``'s filter)
+    that became usable in the trailing ``LOOKBACK`` sessions."""
+    MEASURE = 'p_filings'
+    MIN_COUNT = 1
 
-    def qualifies(self, frames: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-        return ins.trailing_sum(frames[self.MEASURE], self.LOOKBACK) >= self.MIN_VALUE_USD
+    def qualifies(self, frames, close, fields) -> pd.DataFrame:
+        return ins.trailing_sum(frames[self.MEASURE], self.LOOKBACK) >= self.MIN_COUNT
 
 
-def adv_rank_matches(signal: Sequence[str], covered: Sequence[str], adv: pd.Series) -> List[str]:
-    """Pure: for each signal name (ticker order) the covered NON-signal name
-    with the nearest trailing-ADV rank not already used (ties: ticker order);
-    names without an ADV are skipped. The size-matched control's book."""
-    cov = sorted(set(str(c) for c in covered))
-    sig = sorted(set(str(s) for s in signal) & set(cov))
-    ranks = adv.reindex(cov).astype(float)
-    ranks = ranks[ranks.notna()].rank(method='first')
-    pool = {t: float(r) for t, r in ranks.items() if t not in sig}
-    out: List[str] = []
-    for s in sig:
-        if s not in ranks.index or not pool:
-            continue
-        target = float(ranks[s])
-        best = min(pool.items(), key=lambda kv: (abs(kv[1] - target), kv[0]))
-        out.append(best[0])
-        pool.pop(best[0])
-    return out
+class SizeMatchedOverlay(InsiderOverlay):
+    """The size control of ``RULE``: same qualifiers, but the overlay goes to
+    each qualifier's nearest MARKET-CAP neighbour among covered non-qualifiers."""
+    RULE: type = CountRuleOverlay
+
+    def qualifies(self, frames, close, fields) -> pd.DataFrame:
+        rule = self.RULE()
+        rule.research_data = self.research_data
+        return rule.qualifies(frames, close, fields)
+
+    def extra_state(self, close, fields) -> Dict[str, Any]:
+        return {'mcap': market_cap(close, fields)}
+
+    def select(self, state, index, covered, signal) -> List[str]:
+        return rank_matches(signal, covered, state['mcap'].iloc[index])
