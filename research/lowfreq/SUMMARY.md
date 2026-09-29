@@ -137,6 +137,17 @@ archived artifact under `results/trials/` (`archive_trials.py`, re-run after
 each reproduction); `check_artifacts.py` and `provenance.py` report ALL OK /
 0 mismatches.
 
+## Held-out result (orchestrator, 2026-09-29)
+
+| champion | held-out window | OOS Sharpe | benchmark | active/yr | t(NW) | verdict |
+|---|---|---|---|---|---|---|
+| equity `s2p_top_quintile` | 2024-07-01..2026-07-28 | 1.30 | 1.17 covered-EW | +0.15 % | 0.03 | FAIL |
+| xasset `xa_vol_target` 0.15 | 2024-07-01..2026-09-28 | 0.99 | 1.12 60/40, 1.40 EW | +0.85 % | 0.16 | FAIL |
+| xasset `xa_vol_target` 0.12 (secondary) | 2024-07-01..2026-09-28 | 0.99 | same | −0.81 % | −0.17 | FAIL |
+
+The dev-period edge of the sales-to-price tilt (+12.0 %/yr) did not appear
+held out (+0.15 %/yr). Details in `docs/RESEARCH_LOG.md` (2026-09-29 held-out entry).
+
 ## Where this leaves the program
 
 Two information sets the program had not exploited were searched under

@@ -771,3 +771,30 @@ ever a member and stopped names exit at their last stored print (D07,
 this protocol. The one construction in the program's history that beats its
 own universe honestly is a monthly sales-to-price tilt, PROMISING at N = 20;
 the held-out period, not more search, decides whether it is real.
+
+---
+
+## 2026-09-29 — held-out verdict: neither champion survives 2024-07 onward
+
+Run by the orchestrator on data no agent saw (research DB extended past the
+2024-06-28 dev cut; fixed-cell mode, the champions' pre-registered cells, no
+selection; commands in `research/lowfreq/SUMMARY.md`):
+
+| champion | window | OOS Sharpe | decisive benchmark Sharpe | active/yr | t(NW) | 3x-cost active | verdict |
+|---|---|---|---|---|---|---|---|
+| equity `s2p_top_quintile` | 2024-07-01..2026-07-28 | 1.30 | 1.17 (covered-EW) | **+0.15%** | 0.03 | −0.30% | FAIL |
+| xasset `xa_vol_target` 0.15 (primary) | 2024-07-01..2026-09-28 | 0.99 | 1.40 (EW) / 1.12 (60/40) | +0.85% | 0.16 | +0.73% | FAIL |
+| xasset `xa_vol_target` 0.12 (secondary) | same | 0.99 | same | −0.81% | −0.17 | −1.01% | FAIL |
+
+The sales-to-price tilt earned +12.0%/yr over covered-EW in the dev
+walk-forward (2019-2024, t 2.01, PROMISING) and **+0.15%/yr held out** — its
+absolute Sharpe of 1.30 is the market's, not the tilt's (the benchmark made
+1.17 owning the same names). Two years is a short window (the standard error
+of a two-year active Sharpe is ~0.7), so this does not prove the effect is
+zero; it does mean nothing here clears the bar for capital. The cross-asset
+null was expected and holds. Results:
+`research/lowfreq/{equity,xasset}/results/*__fixed_2024-07-01_*.json`.
+
+Along the way: the fixed-cell results file was keyed by window only, so a
+second cell over the same window overwrote the first (fixed in `fee9e31`,
+regression test pinned).
