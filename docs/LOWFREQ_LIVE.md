@@ -101,13 +101,17 @@ $EXEC python3 -m trader.lowfreq_live report --sleeve paper_s2p
 when IB cannot be read - there is no bypass (D13: a sleeve may never own more
 than IB shows). It then replays both sides from inception from durable inputs
 only (`sleeve_fills`, the target files and their sidecars, `pit_daily_bars`)
-and appends one row per stored session to `lowfreq_paper_ledger` (in the
+and writes one row per stored session to `lowfreq_paper_ledger` (in the
 trading DuckDB named by `trader.yaml`): sleeve holdings x closes, cash, sleeve
 value, and the virtual benchmark's value; its output line also carries the
-benchmark's running count of D07 exits. The replay is prefix-stable, so it
-must reproduce every stored row exactly; if it does not (a fill reconciled
-late, corrected bars) `track` **refuses before appending anything** and names
-the disagreements. History is rewritten only by an attested operator act:
+benchmark's running count of D07 exits. The last 5 stored sessions are
+**provisional**: a D07 exit on one of them may still be booked with hindsight
+(below), and `track` then revises that row's benchmark columns and prints each
+revision. Every earlier session is **settled**, and the replay must reproduce
+it exactly, as it must the sleeve side of every row; if it does not (a fill
+reconciled late, corrected bars) `track` **refuses before writing anything**
+and names the disagreements. Settled history is rewritten only by an attested
+operator act:
 
 ```
 $EXEC python3 -m trader.lowfreq_live rebuild --sleeve paper_s2p \
@@ -122,24 +126,26 @@ Benchmark rules: `Backtester.run_panel` executes the sidecar weights with the
 sleeve's capital and the equity base costs (D01) - whole shares truncated off
 the decision close, fills at the next session's open, buys scaled pro rata to
 cash and floored (D06), missing prints carried at the last close and counted.
-Cash earns zero (D03). D07 at the live edge: the harness exits a stopped name
-at its last print, which only hindsight can identify; live, a HELD name silent
-for 5 consecutive sessions is exited ON the session the silence is recognised,
-at its last print's price - the same proceeds the harness books, with only the
-exit's slippage and commission landing five sessions later - so no stored row
-is ever revised. The rule is applied per episode: every recognised silence is
-handed to `run_panel`, which sells only if the name is held then, so a name
-that stops, re-enters through a later rebalance and stops again is exited each
-time, and a gap before the benchmark first held it changes nothing. A name
-that prints again after a recognised silence (a long halt) has been sold at
-its last print and re-enters only through the next sidecar's weights. A name
-absent from `pit_daily_bars` on a session (below the top-800 storage cutoff
-that day) is carried at its last close and counted in `n_unpriced` /
-`benchmark_n_unpriced`.
+Cash earns zero (D03). D07: a stopped name is exited ON the session of its
+last stored print, at that close less costs - the harness's own fill. The
+harness knows a print was the last with hindsight over the complete dataset;
+live, the ledger learns it once the name has been silent for 5 consecutive
+stored sessions, which is why the trailing 5 sessions stay provisional.
+Applied per episode: a name that stops, re-enters through a later rebalance
+and stops again is exited at the last print of each episode, and a gap before
+the benchmark first held it changes nothing (`run_panel` sells only what it
+holds). A name that prints again after 5 silent sessions (a long halt) has
+been exited at its last print and re-enters only through the next sidecar's
+weights - the one departure from the hindsight rule, which would have carried
+it. A name absent from `pit_daily_bars` on a session (below the top-800
+storage cutoff that day) is carried at its last close and counted in
+`n_unpriced` / `benchmark_n_unpriced` until it prints again or five silent
+sessions decide its exit.
 
 `report` prints since-inception sleeve and benchmark return, active return,
 its annualised mean, tracking error (annualised standard deviation of the
-daily active return) and any rebuilds. `--json` on any command gives
+daily active return), how many trailing sessions are provisional, and any
+rebuilds. `--json` on any command gives
 machine-readable output.
 
 ## Where things live
@@ -162,9 +168,10 @@ clients on a temporary DuckDB, including same-period multi-filing reruns),
 (parity on the research dev DB for 2023-10-02, 2023-11-01, 2023-12-01 against
 the instructions `run_panel` consumed and the book it then held),
 `tests/test_lowfreq_live_ledger.py` (harness-derived known answers: whole
-shares, D06 floor, an opening gap, a stopped name exited on recognition without
-revising stored rows, a name that stops, re-enters and stops again exited
-twice while an unheld gap changes nothing, prefix-stable replay, config parity
+shares, D06 floor, an opening gap, a stopped name exited ON its last print
+once five silent sessions decide it - revising only provisional rows - a name
+that stops, re-enters and stops again exited twice while an unheld gap changes
+nothing, prefix-stable replay of settled rows, config parity
 with `engine._config`, mandatory reconciliation, disagreement refusal, attested
 single-transaction rebuild, sidecar/D08 consistency, CLI round trip), and
 `tests/test_lowfreq_live_terminal_exits.py` (`run_panel` with several terminal

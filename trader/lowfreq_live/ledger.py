@@ -6,9 +6,11 @@ the research path reads) and both are REPLAYED from inception on every
 ``sleeve_fills`` journal C01 writes from IB executions - this module never
 writes it), the sleeve's D08 target files (whose ``.benchmark.json`` sidecars
 carry the benchmark weights ``targets`` computed on the identical panel and
-coverage), and the bars. The ledger table is the OUTPUT: one row per session,
-appended once and never rewritten, so a late fill or a data correction shows
-up as a DISAGREEMENT the operator sees rather than a silently changed history.
+coverage), and the bars. The ledger table is the OUTPUT: one row per session.
+A row is PROVISIONAL until ``SILENCE_SESSIONS`` later sessions are stored (a
+D07 exit ON it may still be booked with hindsight - see below) and SETTLED
+after that, never rewritten, so a late fill or a data correction shows up as
+a DISAGREEMENT the operator sees rather than a silently changed history.
 
 The virtual benchmark is executed by ``Backtester.run_panel`` itself - the
 executor the harness scores every candidate and benchmark with (D01) - fed a
@@ -53,25 +55,31 @@ LEDGER_DDL = """CREATE TABLE IF NOT EXISTS lowfreq_paper_ledger (
     holdings_value DOUBLE, cash DOUBLE, sleeve_value DOUBLE, n_holdings INTEGER, n_unpriced INTEGER,
     benchmark_id VARCHAR, benchmark_value DOUBLE, benchmark_cash DOUBLE,
     benchmark_n_holdings INTEGER, benchmark_n_unpriced INTEGER,
-    capital_usd DOUBLE, recorded_at TIMESTAMP NOT NULL,
+    capital_usd DOUBLE, recorded_at TIMESTAMP NOT NULL, provisional BOOLEAN NOT NULL,
     PRIMARY KEY (sleeve, session))"""
-# D07 at the live data edge. The harness exits a stopped name at its LAST
-# print, which it can only know with hindsight. Live, "no print yet today" and
-# "delisted" look identical, so the ledger's rule is PREFIX-STABLE instead: a
-# HELD name that has been silent for this many consecutive sessions is exited
-# ON THE SESSION THE SILENCE IS RECOGNISED, at its last print's price (the
-# carried mark: exactly the proceeds the harness books at the last print; only
-# the exit's slippage and commission land these sessions later). Rows already
-# stored are never replayed differently; the exit appears in a NEW row. The
-# rule is applied per EPISODE: every recognised silence is handed to the
-# executor, which sells only if the name is HELD then, so a name that stops,
-# re-enters through a later rebalance and stops again is exited each time, and
-# a gap before the benchmark first held it changes nothing.
+# D07, exactly: a stopped name is exited ON the session of its LAST STORED
+# PRINT, at that close (less slippage and commission) - the fill the harness
+# books. The harness knows a print was the last with hindsight over the
+# complete dataset; the ledger only learns it once the name has been silent
+# for SILENCE_SESSIONS consecutive stored sessions. So a session is SETTLED
+# once SILENCE_SESSIONS later sessions are stored (every D07 exit on or before
+# it is then decided) and PROVISIONAL until then: a provisional row may be
+# revised - in the benchmark columns only, when an exit is booked with
+# hindsight - and `track` reports each revision; a settled row never changes
+# except through an attested `rebuild`. Applied per episode: a name that
+# stops, re-enters through a later rebalance and stops again is exited at the
+# last print of each episode, and a gap before the benchmark first held it
+# changes nothing (the executor sells only what it holds). A name that prints
+# again after SILENCE_SESSIONS silent sessions (a long halt) has been exited
+# at its last print and re-enters only through the next sidecar's weights -
+# the one departure from the hindsight rule, which would have carried it.
 SILENCE_SESSIONS = 5
-# Replays are prefix-stable, so a stored row and its replay must agree to
+# Settled rows are prefix-stable, so a stored row and its replay must agree to
 # floating-point precision; anything larger is a late fill or a data
 # correction and REFUSES the run (an attested `rebuild` rewrites history).
 DISAGREEMENT_TOLERANCE = 1e-6
+SLEEVE_COLUMNS = ('sleeve_value', 'cash')                   # never revised silently, provisional or not
+BENCHMARK_COLUMNS = ('benchmark_value', 'benchmark_cash')   # revisable while provisional (D07 hindsight)
 REBUILDS_DDL = """CREATE TABLE IF NOT EXISTS lowfreq_ledger_rebuilds (
     sleeve VARCHAR NOT NULL, rebuilt_at TIMESTAMP NOT NULL, reason VARCHAR NOT NULL,
     rows_dropped INTEGER NOT NULL, rows_written INTEGER NOT NULL, disagreements VARCHAR)"""
@@ -200,10 +208,11 @@ class LedgerStore:
             con.execute('DELETE FROM lowfreq_paper_ledger WHERE sleeve = ?', [sleeve])
             written = 0
             for r in rows:
-                con.execute('INSERT INTO lowfreq_paper_ledger VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, now())',
+                con.execute('INSERT INTO lowfreq_paper_ledger VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, now(), ?)',
                             [sleeve, r['session'], r['holdings_value'], r['cash'], r['sleeve_value'], r['n_holdings'],
                              r['n_unpriced'], r['benchmark_id'], r['benchmark_value'], r['benchmark_cash'],
-                             r['benchmark_n_holdings'], r['benchmark_n_unpriced'], r['capital_usd']])
+                             r['benchmark_n_holdings'], r['benchmark_n_unpriced'], r['capital_usd'],
+                             bool(r['provisional'])])
                 written += 1
             con.execute('INSERT INTO lowfreq_ledger_rebuilds VALUES (?, now(), ?, ?, ?, ?)',
                         [sleeve, reason, dropped, written, json.dumps(disagreements, default=str)])
@@ -241,24 +250,49 @@ class LedgerStore:
         if df is None or len(df) == 0:
             return pd.DataFrame()
         df['session'] = pd.to_datetime(df['session'])
+        df['provisional'] = df['provisional'].astype(bool)
         return df.set_index('session')
 
-    def append_rows(self, rows: List[Dict[str, Any]]) -> int:
-        """Insert rows for sessions not yet in the table; existing rows are
-        never touched (append-only ledger)."""
-        n = 0
-        for r in rows:
-            exists = self.db.execute('SELECT 1 FROM lowfreq_paper_ledger WHERE sleeve = ? AND session = ?',
-                                     [r['sleeve'], r['session']], fetch='one')
-            if exists:
-                continue
-            self.db.execute(
-                'INSERT INTO lowfreq_paper_ledger VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, now())',
-                [r['sleeve'], r['session'], r['holdings_value'], r['cash'], r['sleeve_value'], r['n_holdings'],
-                 r['n_unpriced'], r['benchmark_id'], r['benchmark_value'], r['benchmark_cash'],
-                 r['benchmark_n_holdings'], r['benchmark_n_unpriced'], r['capital_usd']], fetch='none')
-            n += 1
-        return n
+    _VALUE_COLUMNS = ('holdings_value', 'cash', 'sleeve_value', 'n_holdings', 'n_unpriced', 'benchmark_value',
+                      'benchmark_cash', 'benchmark_n_holdings', 'benchmark_n_unpriced')
+
+    def apply_replay(self, sleeve: str, rows: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Write a replay in ONE transaction: sessions not yet stored are
+        inserted; a stored PROVISIONAL row is rewritten when its values changed
+        (a D07 exit booked with hindsight) or when it settles; a stored SETTLED
+        row is never touched (``_compare`` has already refused any difference
+        on it). Returns the counts of rows inserted / revised / settled."""
+        cols = list(self._VALUE_COLUMNS)
+
+        def _do(con):
+            stored = {r[0]: (bool(r[1]), r[2:]) for r in con.execute(
+                'SELECT session, provisional, ' + ', '.join(cols) + ' FROM lowfreq_paper_ledger WHERE sleeve = ?',
+                [sleeve]).fetchall()}
+            inserted = revised = settled = 0
+            for r in rows:
+                cur = stored.get(r['session'])
+                if cur is None:
+                    con.execute('INSERT INTO lowfreq_paper_ledger VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, now(), ?)',
+                                [sleeve, r['session'], r['holdings_value'], r['cash'], r['sleeve_value'], r['n_holdings'],
+                                 r['n_unpriced'], r['benchmark_id'], r['benchmark_value'], r['benchmark_cash'],
+                                 r['benchmark_n_holdings'], r['benchmark_n_unpriced'], r['capital_usd'],
+                                 bool(r['provisional'])])
+                    inserted += 1
+                    continue
+                was_provisional, values = cur
+                if not was_provisional:
+                    continue                                          # settled rows are immutable
+                changed = any(abs(float(r[c]) - float(v)) > DISAGREEMENT_TOLERANCE * max(1.0, abs(float(v)))
+                              for c, v in zip(cols, values))
+                settles = not bool(r['provisional'])
+                if changed or settles:
+                    con.execute('UPDATE lowfreq_paper_ledger SET ' + ', '.join(f'{c} = ?' for c in cols)
+                                + ', provisional = ?, recorded_at = now() WHERE sleeve = ? AND session = ?',
+                                [*(r[c] for c in cols), bool(r['provisional']), sleeve, r['session']])
+                    revised += int(changed)
+                    settled += int(settles)
+            return {'inserted': inserted, 'revised': revised, 'settled': settled}
+        return self.db.execute_atomic(_do)
 
 
 # ---------------------------------------------------------------- inputs ---
@@ -376,31 +410,40 @@ def backtest_config(start: dt.date, end_excl: dt.date, capital: float, costs: Co
         fill_policy='next_open', panel_terminal_prints=dict(terminal))
 
 
-def silence_exits(panel: PricePanel, silence: int = SILENCE_SESSIONS) -> Dict[Any, List[pd.Timestamp]]:
-    """ticker -> EVERY session on which a silence is RECOGNISED: the
-    ``silence``-th consecutive session without a print, after a print. One
-    entry per episode, so a name that stops, prints again and stops again has
-    two. ``Backtester.run_panel`` sells the holding on such a session at its
-    carried last price (D07's price) IF the name is held then, and does nothing
-    when it is not (a gap before the benchmark ever held the name, or after it
-    sold it). Prefix-stable: recognition on session S depends only on bars <=
-    S, so a longer replay never changes or adds an earlier entry."""
+def terminal_prints_live(panel: PricePanel, silence: int = SILENCE_SESSIONS) -> Dict[Any, List[pd.Timestamp]]:
+    """D07 without hindsight: ticker -> the session of EVERY print that is
+    followed by at least ``silence`` consecutive stored sessions without a
+    print (one entry per stopped episode). ``Backtester.run_panel`` sells the
+    holding ON that bar at its close - the harness's own D07 fill - if the name
+    is held then, and does nothing when it is not. Decided from the panel's
+    bars only, so an entry never changes once made; a print followed by fewer
+    than ``silence`` silent sessions is still undecided and lies inside the
+    provisional window (``settled_cutoff``)."""
     close = panel.close.replace([np.inf, -np.inf], np.nan)
     idx = pd.DatetimeIndex(close.index)
     out: Dict[Any, List[pd.Timestamp]] = {}
     for t in close.columns:
         printed = (close[t] > 0).to_numpy()
-        seen, run = False, 0
+        last_print: Optional[int] = None
+        run = 0
         for i, has in enumerate(printed):
             if has:
-                seen, run = True, 0
+                last_print, run = i, 0
                 continue
-            if not seen:
+            if last_print is None:
                 continue
             run += 1
             if run == silence:
-                out.setdefault(t, []).append(cast(pd.Timestamp, idx[i]))
+                out.setdefault(t, []).append(cast(pd.Timestamp, idx[last_print]))
     return out
+
+
+def settled_cutoff(sessions: pd.DatetimeIndex, silence: int = SILENCE_SESSIONS) -> Optional[pd.Timestamp]:
+    """The last SETTLED session of a replay over ``sessions``: the latest one
+    with ``silence`` stored sessions after it, so every D07 exit on or before
+    it is decided. None while nothing is settled."""
+    n = len(sessions)
+    return cast(pd.Timestamp, sessions[n - silence - 1]) if n > silence else None
 
 
 def run_benchmark(inputs: SleeveInputs, bars: BarSource, through: dt.date,
@@ -423,7 +466,7 @@ def run_benchmark(inputs: SleeveInputs, bars: BarSource, through: dt.date,
     frames = panel.frames()
     if len(frames) < 2:
         raise RuntimeError('fewer than 2 benchmark names have stored bars in the window')
-    terminal = silence_exits(panel)                      # D07, live rule: every recognised silence per name
+    terminal = terminal_prints_live(panel)      # D07: last print of every stopped episode decided so far
     cfg = backtest_config(inputs.inception, through + dt.timedelta(days=1), inputs.capital_usd, costs, terminal)
     res = Backtester(cast(Any, _NoStorage()), cfg).run_panel(
         _WeightsReplay(inputs.benchmark_weights), cast(Any, list(frames.keys())), frames=frames)
@@ -493,8 +536,10 @@ def replay(inputs: SleeveInputs, bars: BarSource, through: dt.date, costs: Optio
     cash = float(inputs.capital_usd)
     last: Dict[str, float] = {}
     rows: List[Dict[str, Any]] = []
+    cutoff = settled_cutoff(pd.DatetimeIndex(sessions))
     for ts in sessions:
         day = cast(pd.Timestamp, pd.Timestamp(ts)).date()
+        provisional = cutoff is None or pd.Timestamp(ts) > cutoff
         for f in fills_by_day.get(day, []):
             cash -= f.quantity * f.price + f.commission
             qty[f.ticker] = qty.get(f.ticker, 0.0) + f.quantity
@@ -508,7 +553,8 @@ def replay(inputs: SleeveInputs, bars: BarSource, through: dt.date, costs: Optio
                      'benchmark_id': inputs.benchmark_id, 'benchmark_value': float(b['benchmark_value']),
                      'benchmark_cash': float(b['benchmark_cash']),
                      'benchmark_n_holdings': int(b['benchmark_n_holdings']),
-                     'benchmark_n_unpriced': int(b['benchmark_n_unpriced']), 'capital_usd': inputs.capital_usd})
+                     'benchmark_n_unpriced': int(b['benchmark_n_unpriced']), 'capital_usd': inputs.capital_usd,
+                     'provisional': provisional})
     df = pd.DataFrame(rows)
     if len(df):
         df['session'] = pd.to_datetime(df['session'])
@@ -517,17 +563,24 @@ def replay(inputs: SleeveInputs, bars: BarSource, through: dt.date, costs: Optio
     return df
 
 
-def _compare(frame: pd.DataFrame, existing: pd.DataFrame) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
+def _compare(frame: pd.DataFrame, existing: pd.DataFrame) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """``(disagreements, revisions)``. A difference on a SETTLED stored row, or
+    in a sleeve-side column of any row, is a disagreement (a late fill,
+    corrected bars: the run is refused). A benchmark-side difference on a
+    PROVISIONAL stored row is a revision - a D07 exit booked with hindsight -
+    which is allowed and reported."""
+    dis: List[Dict[str, Any]] = []
+    rev: List[Dict[str, Any]] = []
     if not len(existing) or not len(frame):
-        return out
+        return dis, rev
     for ts in frame.index.intersection(existing.index):
-        for col in ('sleeve_value', 'cash', 'benchmark_value', 'benchmark_cash'):
+        provisional = bool(existing.at[ts, 'provisional'])
+        for col in SLEEVE_COLUMNS + BENCHMARK_COLUMNS:
             a, b = float(frame.at[ts, col]), float(existing.at[ts, col])
             if abs(a - b) > DISAGREEMENT_TOLERANCE * max(1.0, abs(b)):
-                out.append({'session': cast(pd.Timestamp, ts).date().isoformat(), 'column': col,
-                            'stored': b, 'replayed': a})
-    return out
+                item = {'session': cast(pd.Timestamp, ts).date().isoformat(), 'column': col, 'stored': b, 'replayed': a}
+                (rev if provisional and col in BENCHMARK_COLUMNS else dis).append(item)
+    return dis, rev
 
 
 def _prepare(sleeve: str, store: LedgerStore, bars: BarSource, targets_dir: Optional[str],
@@ -547,25 +600,29 @@ def _prepare(sleeve: str, store: LedgerStore, bars: BarSource, targets_dir: Opti
 def track(sleeve: str, store: LedgerStore, bars: BarSource, broker_positions: Mapping[str, float],
           targets_dir: Optional[str] = None, through: Optional[dt.date] = None,
           benchmark_id: Optional[str] = None) -> Dict[str, Any]:
-    """Append one ledger row per session not yet recorded, through ``through``
-    (default: the last stored session).
+    """Record the replay through ``through`` (default: the last stored
+    session): one row per session not yet recorded, and the revision of
+    PROVISIONAL rows on which a D07 exit has since been decided (benchmark
+    columns only; each revision is returned in ``revisions``).
 
     ``broker_positions`` (symbol -> quantity from IB) is REQUIRED: the
     journaled holdings are reconciled first and a discrepancy refuses the run
-    (D13). The replay of already-stored sessions must agree with the stored
-    rows; any disagreement raises ``LedgerDisagreement`` BEFORE anything is
-    appended, so the table never holds rows from two incompatible histories.
-    ``rebuild`` is the only way to rewrite it, and it is attested and audited."""
+    (D13). The replay must agree with every SETTLED stored row, and with the
+    sleeve-side columns of every row; any disagreement raises
+    ``LedgerDisagreement`` BEFORE anything is written, so the table never holds
+    rows from two incompatible histories. ``rebuild`` is the only way to
+    rewrite settled rows, and it is attested and audited."""
     inputs, end, holdings, frame = _prepare(sleeve, store, bars, targets_dir, through, benchmark_id, broker_positions)
     existing = store.ledger(sleeve)
-    disagreements = _compare(frame, existing)
+    disagreements, revisions = _compare(frame, existing)
     if disagreements:
         raise LedgerDisagreement(sleeve, disagreements)
-    new_rows = [dict(r, session=cast(pd.Timestamp, pd.Timestamp(cast(Any, ts))).date()) for ts, r in frame.iterrows()
-                if not len(existing) or ts not in existing.index]
-    n = store.append_rows(new_rows)
+    rows = [dict(r, session=cast(pd.Timestamp, pd.Timestamp(cast(Any, ts))).date()) for ts, r in frame.iterrows()]
+    counts = store.apply_replay(sleeve, rows)
     diag = frame.attrs.get('benchmark_diagnostics', {})
-    return {'sleeve': sleeve, 'appended': n, 'through': end.isoformat(), 'sessions_replayed': int(len(frame)),
+    return {'sleeve': sleeve, 'appended': counts['inserted'], 'revised': counts['revised'],
+            'settled': counts['settled'], 'provisional_sessions': int(frame['provisional'].sum()),
+            'revisions': revisions, 'through': end.isoformat(), 'sessions_replayed': int(len(frame)),
             'benchmark_id': inputs.benchmark_id, 'inception': inputs.inception.isoformat(),
             'capital_usd': inputs.capital_usd, 'reconciled': True, 'holdings': holdings,
             'benchmark_forced_exits': int(diag.get('panel_forced_exits', 0)),          # D07 live-rule exits
@@ -581,7 +638,7 @@ def rebuild(sleeve: str, store: LedgerStore, bars: BarSource, broker_positions: 
     if not (reason or '').strip():
         raise RuntimeError('rebuild requires a reason')
     inputs, end, holdings, frame = _prepare(sleeve, store, bars, targets_dir, through, benchmark_id, broker_positions)
-    disagreements = _compare(frame, store.ledger(sleeve))
+    disagreements, _revisions = _compare(frame, store.ledger(sleeve))
     rows = [dict(r, session=cast(pd.Timestamp, pd.Timestamp(cast(Any, ts))).date()) for ts, r in frame.iterrows()]
     dropped, written = store.rebuild_atomic(sleeve, rows, reason.strip(), disagreements)
     diag = frame.attrs.get('benchmark_diagnostics', {})
@@ -597,6 +654,8 @@ def report(sleeve: str, store: LedgerStore) -> Dict[str, Any]:
     if len(df) == 0:
         raise RuntimeError(f'no ledger rows for sleeve {sleeve!r}; run track first')
     cap = float(df['capital_usd'].iloc[0])
+    prov = df['provisional'].astype(bool)
+    settled = df.index[~prov]
     sv = df['sleeve_value'].astype(float)
     bv = df['benchmark_value'].astype(float)
     s_ret = float(sv.iloc[-1] / cap - 1.0)
@@ -613,4 +672,6 @@ def report(sleeve: str, store: LedgerStore) -> Dict[str, Any]:
             'tracking_error_annualised': te,
             'active_return_annualised_mean': float(np.mean(active) * 252) if len(active) else float('nan'),
             'n_holdings': int(df['n_holdings'].iloc[-1]), 'n_unpriced': int(df['n_unpriced'].iloc[-1]),
-            'cash': float(df['cash'].iloc[-1]), 'rebuilds': store.rebuilds(sleeve)}
+            'cash': float(df['cash'].iloc[-1]), 'rebuilds': store.rebuilds(sleeve),
+            'provisional_sessions': int(prov.sum()),          # trailing rows a D07 exit may still revise
+            'settled_through': cast(pd.Timestamp, settled[-1]).date().isoformat() if len(settled) else None}

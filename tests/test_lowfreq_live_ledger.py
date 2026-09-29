@@ -3,8 +3,10 @@
 Known answers below are derived by hand from the harness executor's rules
 (``Backtester.run_panel``): whole shares truncated off the DECISION close,
 fills at the next open with 5 bps slippage + $0.005/share, D06 buys scaled pro
-rata to cash and floored, D07 exits at the terminal print, carry-forward marks.
-A fractional / next-open re-implementation would fail them."""
+rata to cash and floored, D07 exits ON the last stored print (decided live once
+five later sessions are stored, so the trailing five rows are provisional),
+carry-forward marks. A fractional / next-open re-implementation would fail
+them."""
 from __future__ import annotations
 
 import dataclasses
@@ -47,6 +49,15 @@ def _cost(delta, px):
     return delta * px * (1 + SLIP) + delta * COMM
 
 
+NUM = ['holdings_value', 'cash', 'sleeve_value', 'n_holdings', 'n_unpriced', 'benchmark_value', 'benchmark_cash',
+       'benchmark_n_holdings', 'benchmark_n_unpriced']
+
+
+def _vals(df):
+    """The recorded values, without the write timestamp and the provisional flag."""
+    return df.drop(columns=['recorded_at', 'provisional'])
+
+
 @pytest.fixture
 def world(tmp_path):
     days = pd.bdate_range('2026-09-01', periods=8)          # 09-01 .. 09-10
@@ -66,6 +77,7 @@ def test_benchmark_follows_run_panel_rules_and_ledger_is_append_only(world):
     _fill(store, 'paper_s2p', dt.date(2026, 9, 2), 'AAA', 500, 10.0, 1.0)
     res = L.track('paper_s2p', store, bars, {'AAA': 500}, targets_dir=str(tdir), through=dt.date(2026, 9, 4))
     assert res['appended'] == 4 and res['reconciled'] is True
+    assert res['provisional_sessions'] == 4                   # fewer than six sessions: nothing settled yet
     led = store.ledger('paper_s2p')
     r1 = led.loc[pd.Timestamp('2026-09-01')]
     assert r1['sleeve_value'] == pytest.approx(10_000.0) and r1['benchmark_value'] == pytest.approx(10_000.0)
@@ -84,15 +96,16 @@ def test_benchmark_follows_run_panel_rules_and_ledger_is_append_only(world):
     assert r4['benchmark_value'] == pytest.approx(cash + qa * 12 + qb * 21)
     assert r4['sleeve_value'] == pytest.approx(4_999 + 500 * 12.0)
 
-    # idempotent: nothing appended, nothing disagrees
+    # idempotent: nothing appended, nothing revised, nothing disagrees
     res2 = L.track('paper_s2p', store, bars, {'AAA': 500}, targets_dir=str(tdir), through=dt.date(2026, 9, 4))
-    assert res2['appended'] == 0
+    assert res2['appended'] == 0 and res2['revised'] == 0
     before = store.ledger('paper_s2p')
     res3 = L.track('paper_s2p', store, bars, {'AAA': 500}, targets_dir=str(tdir))
-    assert res3['appended'] == 4
+    assert res3['appended'] == 4 and res3['revised'] == 0 and res3['settled'] == 3
     after = store.ledger('paper_s2p')
-    pd.testing.assert_frame_equal(after.loc[before.index], before)
-    r7 = after.loc[pd.Timestamp('2026-09-09')]               # BBB has no print: carried at 22, counted
+    pd.testing.assert_frame_equal(_vals(after.loc[before.index]), _vals(before))    # values untouched
+    assert after['provisional'].tolist() == [False] * 3 + [True] * 5             # five later sessions settle a row
+    r7 = after.loc[pd.Timestamp('2026-09-09')]               # BBB has no print for ONE session: carried at 22, counted
     assert r7['benchmark_n_unpriced'] == 1
     assert r7['benchmark_value'] == pytest.approx(cash + qa * 13 + qb * 22)
 
@@ -140,16 +153,20 @@ def test_second_rebalance_and_report(world):
     assert r8['benchmark_value'] == pytest.approx(cash2 + (249 + bought) * 22.0)
     rep = L.report('paper_s2p', store)
     assert rep['sessions'] == 8 and rep['capital_usd'] == 10_000.0
+    assert rep['provisional_sessions'] == 5 and rep['settled_through'] == '2026-09-03'
     assert rep['sleeve_return'] == pytest.approx(last['sleeve_value'] / 10_000 - 1)
     assert rep['active_return'] == pytest.approx(rep['sleeve_return'] - rep['benchmark_return'])
     assert np.isfinite(rep['tracking_error_annualised']) and rep['tracking_error_annualised'] >= 0
 
 
-def test_stopped_name_exits_when_silence_is_recognised_without_revising_history(world):
-    """D07 live rule: CCC's last print is 09-03; it is silent on 09-04, 09-07, 09-08,
-    09-09 and 09-10 (five sessions), so the exit is booked ON 09-10 at the carried
-    09-03 price. Rows stored before recognition carry the name and are never
-    replayed differently (a daily track appends exactly one row)."""
+
+def test_stopped_name_exits_at_its_last_print_once_the_silence_is_decided(world):
+    """D07: CCC's last stored print is 09-03 (close 33). It is silent on 09-04,
+    09-07, 09-08, 09-09 and 09-10; after the fifth silent session the exit is
+    booked ON 09-03 at 33 less costs - the harness's own fill. Tracking daily:
+    through 09-09 the name is carried on provisional rows; through 09-10 those
+    rows are revised (benchmark columns only, each revision reported), settled
+    rows and the sleeve side are untouched, and 09-03 settles."""
     store, tdir = world['store'], world['tdir']
     closes = world['closes'].copy()
     closes['CCC'] = [30, 30, 33, np.nan, np.nan, np.nan, np.nan, np.nan]
@@ -157,37 +174,58 @@ def test_stopped_name_exits_when_silence_is_recognised_without_revising_history(
     bars = L.FrameBars(opens, closes)
     _write(tdir, 'stopped', '2026-09-01', {'AAA': 0.5}, {'AAA': 0.5, 'CCC': 0.5})
     panel = L.PricePanel(open=opens, close=closes)
-    assert L.silence_exits(panel) == {'CCC': [pd.Timestamp('2026-09-10')]}
-    assert L.silence_exits(panel.sliced('2026-09-01', '2026-09-10')) == {}         # not yet recognised on 09-09
+    assert L.terminal_prints_live(panel) == {'CCC': [pd.Timestamp('2026-09-03')]}
+    assert L.terminal_prints_live(panel.sliced('2026-09-01', '2026-09-10')) == {}     # undecided through 09-09
+    assert L.settled_cutoff(pd.DatetimeIndex(closes.index)) == pd.Timestamp('2026-09-03')
+    assert L.settled_cutoff(pd.DatetimeIndex(closes.index[:7])) == pd.Timestamp('2026-09-02')
+    assert L.settled_cutoff(pd.DatetimeIndex(closes.index[:5])) is None
     qa, qc = 500, 166                                        # trunc(5000/10), trunc(5000/30); no D06 scaling needed
     cash0 = 10_000 - _cost(qa, 10.0) - _cost(qc, 30.0)
     assert cash0 > 0
-    # a daily operator: track through 09-09, then through 09-10
-    L.track('stopped', store, bars, {}, targets_dir=str(tdir), through=dt.date(2026, 9, 9))
+    r = L.track('stopped', store, bars, {}, targets_dir=str(tdir), through=dt.date(2026, 9, 9))
+    assert r['appended'] == 7 and r['benchmark_forced_exits'] == 0 and r['provisional_sessions'] == 5
     before = store.ledger('stopped')
+    assert before['provisional'].tolist() == [False, False] + [True] * 5
     r9 = before.loc[pd.Timestamp('2026-09-09')]
     assert r9['benchmark_n_holdings'] == 2 and r9['benchmark_n_unpriced'] == 1
     assert r9['benchmark_value'] == pytest.approx(cash0 + qa * 13.0 + qc * 33.0)   # CCC carried at its last print
     res = L.track('stopped', store, bars, {}, targets_dir=str(tdir))
-    assert res['appended'] == 1
+    assert res['appended'] == 1 and res['benchmark_forced_exits'] == 1
+    assert res['revised'] == 5 and res['settled'] == 1                  # 09-03 .. 09-09 revised; 09-03 settles
+    assert {(d['session'], d['column']) for d in res['revisions']} == {
+        (d, c) for d in ('2026-09-03', '2026-09-04', '2026-09-07', '2026-09-08', '2026-09-09')
+        for c in ('benchmark_value', 'benchmark_cash')}
     after = store.ledger('stopped')
-    pd.testing.assert_frame_equal(after.loc[before.index], before)              # nothing revised
-    r10 = after.loc[pd.Timestamp('2026-09-10')]
+    settled = before.index[~before['provisional'].to_numpy()]
+    pd.testing.assert_frame_equal(after.loc[settled], before.loc[settled])           # settled rows untouched
+    sleeve_side = ['holdings_value', 'cash', 'sleeve_value', 'n_holdings', 'n_unpriced']
+    pd.testing.assert_frame_equal(after.loc[before.index, sleeve_side], before[sleeve_side])   # sleeve side untouched
     cash1 = cash0 + qc * 33.0 * (1 - SLIP) - qc * COMM
-    assert r10['benchmark_n_holdings'] == 1 and r10['benchmark_n_unpriced'] == 0
-    assert r10['benchmark_cash'] == pytest.approx(cash1)
-    assert r10['benchmark_value'] == pytest.approx(cash1 + qa * 14.0)
+    r3 = after.loc[pd.Timestamp('2026-09-03')]
+    assert not r3['provisional'] and r3['benchmark_n_holdings'] == 1 and r3['benchmark_n_unpriced'] == 0
+    assert r3['benchmark_cash'] == pytest.approx(cash1)
+    assert r3['benchmark_value'] == pytest.approx(cash1 + qa * 11.0)                # exit booked ON the last print
+    r10 = after.loc[pd.Timestamp('2026-09-10')]
+    assert r10['benchmark_cash'] == pytest.approx(cash1) and r10['benchmark_value'] == pytest.approx(cash1 + qa * 14.0)
+    # the recorded history is now exactly the one a hindsight replay writes
+    fresh = L.replay(L.load_inputs('stopped', store, str(tdir)), bars, dt.date(2026, 9, 10))
+    pd.testing.assert_frame_equal(after[NUM].astype(float), fresh[NUM].astype(float), check_index_type=False)
+    assert L.track('stopped', store, bars, {}, targets_dir=str(tdir))['revised'] == 0     # and it is stable
+
 
 
 def test_replay_is_prefix_stable(world):
-    """The replay through a later session reproduces every earlier session exactly."""
+    """The replay through a later session reproduces every earlier session's
+    values exactly; only the provisional flag moves (later sessions settle)."""
     store, bars, tdir = world['store'], world['bars'], world['tdir']
     _write(tdir, 'paper_s2p', '2026-09-04', {'BBB': 0.5}, {'BBB': 1.0})
     _fill(store, 'paper_s2p', dt.date(2026, 9, 2), 'AAA', 500, 10.0)
     inputs = L.load_inputs('paper_s2p', store, str(tdir))
     short = L.replay(inputs, bars, dt.date(2026, 9, 7))
     full = L.replay(inputs, bars, dt.date(2026, 9, 10))
-    pd.testing.assert_frame_equal(full.loc[short.index], short)
+    pd.testing.assert_frame_equal(full.loc[short.index].drop(columns='provisional'), short.drop(columns='provisional'))
+    assert short['provisional'].all()                                 # five sessions: none settled
+    assert full['provisional'].tolist() == [False] * 3 + [True] * 5
 
 
 def test_backtest_config_matches_engine_config():
@@ -325,67 +363,73 @@ def _log(res):
             for t in res.trades]
 
 
-def test_every_recognised_silence_is_handed_to_the_executor(episodes):
+
+def test_every_stopped_episode_names_its_last_print(episodes):
     panel = L.PricePanel(open=episodes['opens'], close=episodes['closes'])
-    assert L.silence_exits(panel) == {'CCC': [pd.Timestamp('2026-09-10'), pd.Timestamp('2026-09-22')],
-                                      'DDD': [pd.Timestamp('2026-09-08'), pd.Timestamp('2026-09-22')]}
-    # prefix-stable: a shorter panel has the same earlier entries and nothing later
-    assert L.silence_exits(panel.sliced('2026-09-01', '2026-09-22')) == {
-        'CCC': [pd.Timestamp('2026-09-10')], 'DDD': [pd.Timestamp('2026-09-08')]}
-    # a name whose silence began before the window is never recognised (never printed here)
-    assert L.silence_exits(panel.sliced('2026-09-16', '2026-10-03')) == {}
+    assert L.terminal_prints_live(panel) == {'CCC': [pd.Timestamp('2026-09-03'), pd.Timestamp('2026-09-15')],
+                                             'DDD': [pd.Timestamp('2026-09-01'), pd.Timestamp('2026-09-15')]}
+    # decided from the stored bars only: through 09-21 the second episodes are still open
+    assert L.terminal_prints_live(panel.sliced('2026-09-01', '2026-09-22')) == {
+        'CCC': [pd.Timestamp('2026-09-03')], 'DDD': [pd.Timestamp('2026-09-01')]}
+    assert L.terminal_prints_live(panel.sliced('2026-09-16', '2026-10-03')) == {}   # never printed in the window
+
 
 
 def test_stop_reenter_stop_exits_twice_and_an_unheld_gap_changes_nothing(episodes):
-    """CCC is exited at BOTH recognitions (it re-entered through the 09-14
-    rebalance); DDD's first recognition (09-08) fires nothing because the
-    benchmark does not hold it, and its second (09-22) sells it. Under the
-    first-gap-only rule both re-entered names were carried forever. Known
-    answers derived by hand from run_panel's rules."""
+    """CCC is exited at the last print of BOTH its episodes (09-03 and 09-15;
+    it re-entered through the 09-14 rebalance); DDD's first last-print (09-01)
+    fires nothing because the benchmark does not hold it, and its second
+    (09-15, the very session the rebalance bought it) sells it. Known answers
+    derived by hand from run_panel's rules."""
     store, bars, tdir = episodes['store'], episodes['bars'], episodes['tdir']
     inputs = L.load_inputs('multi', store, str(tdir))
     res, _, _ = L.run_benchmark(inputs, bars, dt.date(2026, 10, 2))
     assert _log(res) == [('2026-09-02', 'BUY', 'AAA', 500.0), ('2026-09-02', 'BUY', 'CCC', 166.0),
-                         ('2026-09-10', 'SELL', 'CCC', 166.0),                    # first stop, recognised
+                         ('2026-09-03', 'SELL', 'CCC', 166.0),                    # D07: ON the last print
                          ('2026-09-15', 'SELL', 'AAA', 81.0), ('2026-09-15', 'BUY', 'CCC', 104.0),
                          ('2026-09-15', 'BUY', 'DDD', 78.0),                     # re-entry / first entry
-                         ('2026-09-22', 'SELL', 'CCC', 104.0), ('2026-09-22', 'SELL', 'DDD', 78.0)]   # second stops
+                         ('2026-09-15', 'SELL', 'CCC', 104.0), ('2026-09-15', 'SELL', 'DDD', 78.0)]   # their last print
     assert res.diagnostics['panel_forced_exits'] == 3
-    # 09-02: 500 AAA + 166 CCC off the 09-01 closes, no D06 scaling
-    cash0 = 10_000 - _cost(500, 10.0) - _cost(166, 30.0)
-    # 09-10: CCC sold at its carried 09-03 print (33)
-    cash1 = cash0 + 166 * 33.0 * (1 - SLIP) - 166 * COMM
-    # 09-14 decision off equity cash1 + 500 x 10 -> 419 AAA / 104 CCC / 78 DDD, filled at the 09-15 opens
-    eq = cash1 + 500 * 10.0
+    cash0 = 10_000 - _cost(500, 10.0) - _cost(166, 30.0)                    # 09-02 fills off the 09-01 closes
+    cash1 = cash0 + 166 * 33.0 * (1 - SLIP) - 166 * COMM                     # 09-03 exit at the 33 close
+    eq = cash1 + 500 * 10.0                                                  # 09-14 decision equity
     assert (math.trunc(0.4 * eq / 10), math.trunc(0.3 * eq / 30), math.trunc(0.3 * eq / 40)) == (419, 104, 78)
     cash2 = cash1 + 81 * 10.0 * (1 - SLIP) - 81 * COMM - _cost(104, 30.0) - _cost(78, 40.0)
-    # 09-22: both names sold at their carried 09-15 prints (30 and 44)
-    cash3 = cash2 + 104 * 30.0 * (1 - SLIP) - 104 * COMM + 78 * 44.0 * (1 - SLIP) - 78 * COMM
+    cash3 = cash2 + 104 * 30.0 * (1 - SLIP) - 104 * COMM + 78 * 44.0 * (1 - SLIP) - 78 * COMM   # 09-15 exits
     out = L.track('multi', store, bars, {}, targets_dir=str(tdir))
     assert out['benchmark_forced_exits'] == 3
     led = store.ledger('multi')
-    r21 = led.loc[pd.Timestamp('2026-09-21')]
-    assert r21['benchmark_n_holdings'] == 3 and r21['benchmark_n_unpriced'] == 2
-    assert r21['benchmark_value'] == pytest.approx(cash2 + 419 * 10 + 104 * 30 + 78 * 44)
-    r22 = led.loc[pd.Timestamp('2026-09-22')]
-    assert r22['benchmark_n_holdings'] == 1 and r22['benchmark_n_unpriced'] == 0
-    assert r22['benchmark_cash'] == pytest.approx(cash3)
-    assert r22['benchmark_value'] == pytest.approx(cash3 + 419 * 10)
+    r3 = led.loc[pd.Timestamp('2026-09-03')]
+    assert r3['benchmark_n_holdings'] == 1 and r3['benchmark_cash'] == pytest.approx(cash1)
+    r14 = led.loc[pd.Timestamp('2026-09-14')]
+    assert r14['benchmark_n_holdings'] == 1 and r14['benchmark_value'] == pytest.approx(eq)
+    r15 = led.loc[pd.Timestamp('2026-09-15')]
+    assert r15['benchmark_n_holdings'] == 1 and r15['benchmark_n_unpriced'] == 0
+    assert r15['benchmark_cash'] == pytest.approx(cash3) and r15['benchmark_value'] == pytest.approx(cash3 + 419 * 10)
     assert led.iloc[-1]['benchmark_n_holdings'] == 1 and led.iloc[-1]['benchmark_n_unpriced'] == 0
 
 
-def test_second_exit_appears_in_a_new_row_only(episodes):
-    """A daily operator tracking through 09-21 and then 09-22: stored rows are
-    identical afterwards, the second episode's exits are booked in the one
-    appended row, and the running count is reported."""
+
+def test_second_episode_exit_revises_only_provisional_rows(episodes):
+    """A daily operator tracking through 09-21 and then 09-22: the second
+    episodes' exits are booked ON 09-15 with hindsight, revising the five
+    provisional rows 09-15..09-21 (benchmark columns only, reported); settled
+    rows are untouched and 09-15 settles."""
     store, bars, tdir = episodes['store'], episodes['bars'], episodes['tdir']
     r1 = L.track('multi', store, bars, {}, targets_dir=str(tdir), through=dt.date(2026, 9, 21))
-    assert r1['benchmark_forced_exits'] == 1
+    assert r1['benchmark_forced_exits'] == 1 and r1['provisional_sessions'] == 5
     before = store.ledger('multi')
+    assert before.loc[pd.Timestamp('2026-09-21'), 'benchmark_n_holdings'] == 3      # carried, undecided
     r2 = L.track('multi', store, bars, {}, targets_dir=str(tdir), through=dt.date(2026, 9, 22))
-    assert r2['appended'] == 1 and r2['benchmark_forced_exits'] == 3
+    assert r2['appended'] == 1 and r2['revised'] == 5 and r2['settled'] == 1 and r2['benchmark_forced_exits'] == 3
+    assert {d['session'] for d in r2['revisions']} == {'2026-09-15', '2026-09-16', '2026-09-17', '2026-09-18',
+                                                        '2026-09-21'}
     after = store.ledger('multi')
-    pd.testing.assert_frame_equal(after.loc[before.index], before)
+    settled = before.index[~before['provisional'].to_numpy()]
+    assert len(settled) == 10                                                        # 09-01 .. 09-14
+    pd.testing.assert_frame_equal(after.loc[settled], before.loc[settled])
+    r15 = after.loc[pd.Timestamp('2026-09-15')]
+    assert r15['benchmark_n_holdings'] == 1 and not r15['provisional']
     assert after.iloc[-1]['benchmark_n_holdings'] == 1
 
 
