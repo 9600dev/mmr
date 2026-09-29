@@ -470,3 +470,217 @@ def test_loader_opens_read_only(built, monkeypatch):
     before = built['full_db'].stat().st_mtime_ns
     load_insider_events('2024-06-01', '2024-12-31', db_path=built['full_db'])
     assert built['full_db'].stat().st_mtime_ns == before
+
+
+# --------------------------------------------------------------------------- amendment matching regressions
+#
+# Patterns found in the real data on 2026-09-29 (critic round 1), each pinned here:
+#   S  SWM 0001062993-22-012373 (4/A) amends 0001062993-22-012378 (4): SAME DAY, and the
+#      amendment's accession is LOWER than the original's. Ordering by accession missed it.
+#   T  TPL 0001207097-22-000001 (4/A) names 2021-12-30 as its original date, the filing date of
+#      the PREVIOUS amendment 0001207097-21-000455 (same period), beside two different-period
+#      originals filed that day. "Prefer originals" and "prefer same period" disagreed and,
+#      applied as independent filters, linked nothing; both filings stayed effective.
+#   Y  TPL 0001207097-22-000067 carried a period typo (2021 for 2022); its same-day 4/A has no
+#      same-period candidate and must still link.
+#   D  two amendments of one original filed the same later day: the higher accession wins.
+#   X  two identical-period originals on one day and one amendment naming that day: ambiguous,
+#      both superseded, counted.
+CHAIN_SUBS = [
+    # S: original filed 2024-06-20 with the HIGHER accession, amendment same day with the lower one
+    _sub('0003-24-000011', '20-JUN-2024', '20-JUN-2024', '4', '300', 'GAMMA CO', 'GAMA'),
+    _sub('0003-24-000010', '20-JUN-2024', '20-JUN-2024', '4/A', '300', 'GAMMA CO', 'GAMA', orig='20-JUN-2024'),
+    # T: O (05-06) <- A1 (05-08, names 06-MAY) <- A2 (05-13, names 08-MAY = A1's date); decoys on 05-08
+    _sub('0004-24-000020', '06-MAY-2024', '03-MAY-2024', '4', '400', 'DELTA INC', 'DLTA'),
+    _sub('0004-24-000021', '08-MAY-2024', '03-MAY-2024', '4/A', '400', 'DELTA INC', 'DLTA', orig='06-MAY-2024'),
+    _sub('0004-24-000022', '08-MAY-2024', '07-MAY-2024', '4', '400', 'DELTA INC', 'DLTA'),
+    _sub('0004-24-000023', '08-MAY-2024', '06-MAY-2024', '4', '400', 'DELTA INC', 'DLTA'),
+    _sub('0004-24-000024', '13-MAY-2024', '03-MAY-2024', '4/A', '400', 'DELTA INC', 'DLTA', orig='08-MAY-2024'),
+    # Y: same-day original with a period typo (2023), amendment with the corrected period
+    _sub('0005-24-000030', '17-MAY-2024', '16-MAY-2023', '4', '500', 'EPSILON LTD', 'EPSL'),
+    _sub('0005-24-000031', '17-MAY-2024', '16-MAY-2024', '4/A', '500', 'EPSILON LTD', 'EPSL', orig='17-MAY-2024'),
+    # D: original 2024-05-20, two amendments filed 2024-05-22 naming 20-MAY
+    _sub('0006-24-000040', '20-MAY-2024', '17-MAY-2024', '4', '600', 'ZETA PLC', 'ZETA'),
+    _sub('0006-24-000041', '22-MAY-2024', '17-MAY-2024', '4/A', '600', 'ZETA PLC', 'ZETA', orig='20-MAY-2024'),
+    _sub('0006-24-000042', '22-MAY-2024', '17-MAY-2024', '4/A', '600', 'ZETA PLC', 'ZETA', orig='20-MAY-2024'),
+    # X: two same-period originals on 2024-05-28 by one owner, one amendment on 05-30 naming 28-MAY
+    _sub('0007-24-000050', '28-MAY-2024', '24-MAY-2024', '4', '700', 'ETA CORP', 'ETA'),
+    _sub('0007-24-000051', '28-MAY-2024', '24-MAY-2024', '4', '700', 'ETA CORP', 'ETA'),
+    _sub('0007-24-000052', '30-MAY-2024', '24-MAY-2024', '4/A', '700', 'ETA CORP', 'ETA', orig='28-MAY-2024'),
+    # C2 (content tier): DATE_OF_ORIG_SUB is the TRANSACTION date (no filing that day); identical content
+    _sub('0008-24-000060', '05-JUN-2024', '03-JUN-2024', '4', '800', 'THETA CO', 'THTA'),
+    _sub('0008-24-000061', '07-JUN-2024', '03-JUN-2024', '4/A', '800', 'THETA CO', 'THTA', orig='03-JUN-2024'),
+    # P3 (period tier): same period, different content, exactly one original within 45 days
+    _sub('0009-24-000070', '10-JUN-2024', '07-JUN-2024', '4', '900', 'IOTA INC', 'IOTA'),
+    _sub('0009-24-000071', '12-JUN-2024', '07-JUN-2024', '4/A', '900', 'IOTA INC', 'IOTA', orig='07-JUN-2024'),
+    # P3-ambiguous: two same-period originals on different days -> tier 3 refuses, nothing superseded
+    _sub('0010-24-000080', '14-JUN-2024', '13-JUN-2024', '4', '1000', 'KAPPA LTD', 'KAPA'),
+    _sub('0010-24-000081', '17-JUN-2024', '13-JUN-2024', '4', '1000', 'KAPPA LTD', 'KAPA'),
+    _sub('0010-24-000082', '19-JUN-2024', '13-JUN-2024', '4/A', '1000', 'KAPPA LTD', 'KAPA', orig='13-JUN-2024'),
+]
+CHAIN_OWNS = [_own(acc, cik, name, 'Director') for acc, cik, name in [
+    ('0003-24-000011', '31', 'Gamma Dir'), ('0003-24-000010', '31', 'Gamma Dir'),
+    ('0004-24-000020', '41', 'Delta Dir'), ('0004-24-000021', '41', 'Delta Dir'), ('0004-24-000022', '41', 'Delta Dir'),
+    ('0004-24-000023', '41', 'Delta Dir'), ('0004-24-000024', '41', 'Delta Dir'),
+    ('0005-24-000030', '51', 'Eps Dir'), ('0005-24-000031', '51', 'Eps Dir'),
+    ('0006-24-000040', '61', 'Zeta Dir'), ('0006-24-000041', '61', 'Zeta Dir'), ('0006-24-000042', '61', 'Zeta Dir'),
+    ('0007-24-000050', '71', 'Eta Dir'), ('0007-24-000051', '71', 'Eta Dir'), ('0007-24-000052', '71', 'Eta Dir'),
+    ('0008-24-000060', '81', 'Theta Dir'), ('0008-24-000061', '81', 'Theta Dir'),
+    ('0009-24-000070', '91', 'Iota Dir'), ('0009-24-000071', '91', 'Iota Dir'),
+    ('0010-24-000080', '101', 'Kappa Dir'), ('0010-24-000081', '101', 'Kappa Dir'), ('0010-24-000082', '101', 'Kappa Dir'),
+]]
+CHAIN_NDTS = [
+    _ndt('0003-24-000011', '111', '20-JUN-2024', 'P', '1000.0', '27.15', 'A', '7000.0'),
+    _ndt('0003-24-000010', '110', '20-JUN-2024', 'P', '1000.0', '27.15', 'A', '7000.0'),
+    _ndt('0004-24-000020', '120', '03-MAY-2024', 'P', '10.0', '100.0', 'A', '110.0'),
+    _ndt('0004-24-000021', '121', '03-MAY-2024', 'P', '10.0', '100.0', 'A', '110.0'),
+    _ndt('0004-24-000022', '122', '07-MAY-2024', 'P', '5.0', '101.0', 'A', '115.0'),
+    _ndt('0004-24-000023', '123', '06-MAY-2024', 'P', '7.0', '102.0', 'A', '117.0'),
+    _ndt('0004-24-000024', '124', '03-MAY-2024', 'P', '12.0', '100.0', 'A', '112.0'),
+    _ndt('0005-24-000030', '130', '16-MAY-2024', 'S', '300.0', '50.0', 'D', '700.0'),
+    _ndt('0005-24-000031', '131', '16-MAY-2024', 'S', '300.0', '50.0', 'D', '700.0'),
+    _ndt('0006-24-000040', '140', '17-MAY-2024', 'P', '20.0', '10.0', 'A', '20.0'),
+    _ndt('0006-24-000041', '141', '17-MAY-2024', 'P', '21.0', '10.0', 'A', '21.0'),
+    _ndt('0006-24-000042', '142', '17-MAY-2024', 'P', '22.0', '10.0', 'A', '22.0'),
+    _ndt('0007-24-000050', '150', '24-MAY-2024', 'P', '1.0', '5.0', 'A', '1.0'),
+    _ndt('0007-24-000051', '151', '24-MAY-2024', 'P', '2.0', '5.0', 'A', '3.0'),
+    _ndt('0007-24-000052', '152', '24-MAY-2024', 'P', '3.0', '5.0', 'A', '3.0'),
+    _ndt('0008-24-000060', '160', '03-JUN-2024', 'P', '400.0', '12.5', 'A', '400.0'),
+    _ndt('0008-24-000061', '161', '03-JUN-2024', 'P', '400.0', '12.5', 'A', '400.0'),
+    _ndt('0009-24-000070', '170', '07-JUN-2024', 'P', '100.0', '9.0', 'A', '100.0'),
+    _ndt('0009-24-000071', '171', '07-JUN-2024', 'P', '150.0', '9.0', 'A', '150.0'),
+    _ndt('0010-24-000080', '180', '13-JUN-2024', 'S', '10.0', '8.0', 'D', '90.0'),
+    _ndt('0010-24-000081', '181', '13-JUN-2024', 'S', '20.0', '8.0', 'D', '70.0'),
+    _ndt('0010-24-000082', '182', '13-JUN-2024', 'S', '25.0', '8.0', 'D', '65.0'),
+]
+
+
+@pytest.fixture(scope='module')
+def chain_db(tmp_path_factory):
+    d = tmp_path_factory.mktemp('chain')
+    z = _zip(d / '2024q2_form345.zip', CHAIN_SUBS, CHAIN_OWNS, CHAIN_NDTS)
+    db = d / 'insider.duckdb'
+    diag = F.build_database([('2024q2', z)], db, verbose=False)
+    return db, diag
+
+
+def _superseded(db):
+    return dict(_q(db, 'SELECT accession, superseded_by FROM form345_submissions'))
+
+
+def test_same_day_amendment_with_lower_accession_replaces_original(chain_db):
+    """SWM pattern: the original's accession sorts AFTER the amendment's."""
+    db, _ = chain_db
+    sup = _superseded(db)
+    assert sup['0003-24-000011'] == '0003-24-000010'
+    assert sup['0003-24-000010'] is None
+    ev = load_insider_events('2024-06-01', '2024-06-30', tickers=['GAMA'], db_path=db)
+    assert list(ev['accession']) == ['0003-24-000010'] and len(ev) == 1
+
+
+def test_amendment_chain_through_previous_amendment_with_conflicting_preferences(chain_db):
+    """TPL pattern: A2 names A1's filing date; same-period amendment beats different-period originals."""
+    db, _ = chain_db
+    sup = _superseded(db)
+    assert sup['0004-24-000020'] == '0004-24-000024'      # original -> latest amendment (two hops)
+    assert sup['0004-24-000021'] == '0004-24-000024'      # first amendment -> latest amendment
+    assert sup['0004-24-000024'] is None
+    assert sup['0004-24-000022'] is None and sup['0004-24-000023'] is None   # decoys untouched
+    ev = load_insider_events('2024-05-01', '2024-05-31', tickers=['DLTA'], db_path=db)
+    assert sorted(ev['accession']) == ['0004-24-000022', '0004-24-000023', '0004-24-000024']
+    assert ev.loc[ev['accession'] == '0004-24-000024', 'shares'].iloc[0] == 12.0
+
+
+def test_amendment_links_when_no_candidate_shares_its_period(chain_db):
+    """Period typo in the original: same-day 4/A still replaces it."""
+    db, _ = chain_db
+    sup = _superseded(db)
+    assert sup['0005-24-000030'] == '0005-24-000031' and sup['0005-24-000031'] is None
+
+
+def test_two_same_day_amendments_latest_accession_wins(chain_db):
+    db, _ = chain_db
+    sup = _superseded(db)
+    assert sup['0006-24-000040'] == '0006-24-000042'
+    assert sup['0006-24-000041'] == '0006-24-000042'
+    assert sup['0006-24-000042'] is None
+    ev = load_insider_events('2024-05-01', '2024-06-30', tickers=['ZETA'], db_path=db)
+    assert list(ev['shares']) == [22.0]
+
+
+def test_ambiguous_amendment_supersedes_all_candidates_and_is_counted(chain_db):
+    db, diag = chain_db
+    sup = _superseded(db)
+    assert sup['0007-24-000050'] == '0007-24-000052' and sup['0007-24-000051'] == '0007-24-000052'
+    assert sup['0007-24-000052'] is None
+    assert diag['amendments'] == 10 and diag['amendments_linked'] == 9 and diag['amendments_unlinked'] == 1
+    assert diag['amendments_ambiguous'] == 1
+    assert diag['linked_tier1_date'] == 7 and diag['linked_tier2_content'] == 1 and diag['linked_tier3_period'] == 1
+    assert diag['tier3_ambiguous_unlinked'] == 1
+    assert diag['filings_superseded'] == 10           # S 1 + T 2 + Y 1 + D 2 + X 2 + C2 1 + P3 1
+    assert diag['dup_pairs_amend'] == 0          # no identical amendment/original pair left effective
+
+
+def test_residual_duplicate_metric_detects_a_missed_link(chain_db, tmp_path):
+    """The metric that would have flagged SWM: force the S pair to both be effective and count it."""
+    db, _ = chain_db
+    import shutil
+    copy = tmp_path / 'broken.duckdb'
+    shutil.copy(db, copy)
+    con = duckdb.connect(str(copy))
+    try:
+        con.execute('UPDATE form345_submissions SET superseded_by = NULL')
+        got = F.residual_duplicates(con)
+    finally:
+        con.close()
+    assert got['dup_pairs_amend'] >= 2 and got['dup_pairs_any'] >= got['dup_pairs_amend']
+    con = duckdb.connect(str(db), read_only=True)
+    try:
+        assert F.residual_duplicates(con)['dup_pairs_amend'] == 0
+    finally:
+        con.close()
+
+
+def test_content_tier_links_amendment_whose_orig_date_is_the_transaction_date(chain_db):
+    """Tier 2: DATE_OF_ORIG_SUB names a day with no filing; the identical earlier filing is replaced."""
+    db, _ = chain_db
+    sup = _superseded(db)
+    assert sup['0008-24-000060'] == '0008-24-000061' and sup['0008-24-000061'] is None
+    ev = load_insider_events('2024-06-01', '2024-06-30', tickers=['THTA'], db_path=db)
+    assert list(ev['accession']) == ['0008-24-000061']
+
+
+def test_period_tier_links_unique_same_period_original_only(chain_db):
+    """Tier 3: same period + one original within 45 days -> replaced (content differs);
+    two same-period originals -> ambiguous, refused, all three stay effective."""
+    db, _ = chain_db
+    sup = _superseded(db)
+    assert sup['0009-24-000070'] == '0009-24-000071' and sup['0009-24-000071'] is None
+    ev = load_insider_events('2024-06-01', '2024-06-30', tickers=['IOTA'], db_path=db)
+    assert list(ev['shares']) == [150.0]
+    assert sup['0010-24-000080'] is None and sup['0010-24-000081'] is None and sup['0010-24-000082'] is None
+    ev = load_insider_events('2024-06-01', '2024-06-30', tickers=['KAPA'], db_path=db)
+    assert sorted(ev['shares']) == [10.0, 20.0, 25.0]
+
+
+_FULL_DB = Path(os.path.expanduser('~/.local/share/mmr/research_full/insider.duckdb'))
+
+
+@pytest.mark.skipif(not _FULL_DB.exists(), reason='real research_full insider DB not built on this machine')
+def test_real_full_database_supersedes_the_observed_cases():
+    con = duckdb.connect(str(_FULL_DB), read_only=True)
+    try:
+        sup = dict(con.execute("""SELECT accession, superseded_by FROM form345_submissions WHERE accession IN
+            ('0001062993-22-012378', '0001062993-22-012373', '0001207097-21-000451', '0001207097-21-000455',
+             '0001207097-22-000001', '0001207097-21-000456', '0001207097-21-000457',
+             '0001207097-22-000067', '0001207097-22-000069')""").fetchall())
+    finally:
+        con.close()
+    assert sup['0001062993-22-012378'] == '0001062993-22-012373' and sup['0001062993-22-012373'] is None   # SWM
+    assert sup['0001207097-21-000451'] == '0001207097-22-000001'                                          # TPL chain root
+    assert sup['0001207097-21-000455'] == '0001207097-22-000001' and sup['0001207097-22-000001'] is None
+    assert sup['0001207097-21-000456'] is None and sup['0001207097-21-000457'] is None                    # decoys
+    assert sup['0001207097-22-000067'] == '0001207097-22-000069'                                          # period typo
+    tpl = load_insider_events('2021-12-01', '2022-01-31', codes=['P'], tickers=['TPL'], db_path=_FULL_DB)
+    assert (tpl['accession'] != '0001207097-21-000455').all()
+    assert (tpl['accession'] == '0001207097-22-000001').sum() == 14      # 7 transactions x 2 reporting owners

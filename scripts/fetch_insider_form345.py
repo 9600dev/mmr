@@ -413,52 +413,140 @@ def ingest_quarter(con: duckdb.DuckDBPyConnection, quarter: str, frames: Dict[st
 # --------------------------------------------------------------------------- derived columns
 
 SUPERSESSION_SQL = """
--- D10: an amendment replaces the filing it amends. Link each amendment to the
--- filing(s) of the same issuer and base form whose FILING_DATE equals the
--- amendment's DATE_OF_ORIG_SUB and that share a reporting owner; when several
--- qualify, prefer those with the same period of report. Every amendment of an
--- original is grouped under that original (an amendment may name an EARLIER
--- AMENDMENT's filing date as its original date - one hop is followed); the
--- latest-filed member of the group is effective and the others are superseded.
+-- D10: an amendment replaces the filing it amends. Three matching tiers, each
+-- tried only when the previous one found no candidate; within a tier the
+-- candidates are ranked JOINTLY (same period of report +2, an original rather
+-- than an amendment +1) and only the top-scored one(s) are linked. Ranking
+-- rather than filtering matters because the two preferences can disagree
+-- (observed: TPL 0001207097-22-000001, whose true target is a same-period
+-- earlier AMENDMENT beside two different-period originals filed the same day -
+-- independent filters linked nothing). Ties at the top score are all linked
+-- (ambiguous; counted).
+--   tier 1  DATE: same issuer and base form, FILING_DATE = the amendment's
+--           DATE_OF_ORIG_SUB, a shared reporting owner. Filers name either the
+--           original's filing date or the PREVIOUS amendment's, so an earlier
+--           amendment is a legitimate target and chains are walked to their
+--           root (GROUP_SQL). A same-day ORIGINAL is a candidate whatever its
+--           accession (observed: SWM 0001062993-22-012373 amends -012378, filed
+--           the same day with a HIGHER accession); a same-day AMENDMENT target
+--           must sort before the amendment so two same-day amendments cannot
+--           each replace the other.
+--   tier 2  CONTENT: no tier-1 candidate (DATE_OF_ORIG_SUB is often the
+--           transaction date instead); same issuer/base form/shared owner,
+--           filed within the 45 days up to the amendment, IDENTICAL
+--           non-derivative transaction list. Replacing an identical filing
+--           only removes a double count, so this tier cannot be wrong about
+--           the numbers.
+--   tier 3  PERIOD: neither; same issuer/base form/shared owner, an ORIGINAL
+--           with the same PERIOD_OF_REPORT filed within the 45 days up to the
+--           amendment - linked only when it is UNIQUE (an ambiguous tier-3
+--           match is left unlinked and counted).
+CREATE OR REPLACE TEMP TABLE _sig AS
+SELECT accession,
+       string_agg(coalesce(trans_date::VARCHAR, '') || '|' || coalesce(trans_code, '') || '|' ||
+                  coalesce(shares::VARCHAR, '') || '|' || coalesce(price::VARCHAR, '') || '|' ||
+                  coalesce(acquired_disposed, ''), ';'
+                  ORDER BY trans_date, trans_code, shares, price, acquired_disposed) AS signature
+FROM form345_nonderiv_trans GROUP BY accession;
+
 CREATE OR REPLACE TEMP TABLE _links AS
 WITH am AS (
     SELECT accession, issuer_cik, base_form, date_of_orig_sub, period_of_report, filing_date
-    FROM form345_submissions WHERE is_amendment AND date_of_orig_sub IS NOT NULL
-), cand AS (
+    FROM form345_submissions WHERE is_amendment
+), t1 AS (
     SELECT a.accession AS amend_acc, o.accession AS target_acc, o.is_amendment AS target_is_amend,
-           (o.period_of_report IS NOT DISTINCT FROM a.period_of_report) AS same_period
+           (o.period_of_report IS NOT DISTINCT FROM a.period_of_report) AS same_period, 1 AS tier
     FROM am a
     JOIN form345_submissions o
       ON o.issuer_cik = a.issuer_cik AND o.base_form = a.base_form
      AND o.filing_date = a.date_of_orig_sub AND o.accession <> a.accession
-     AND (o.filing_date < a.filing_date OR (o.filing_date = a.filing_date AND o.accession < a.accession))
-    WHERE EXISTS (SELECT 1 FROM form345_owners x JOIN form345_owners y ON y.owner_cik = x.owner_cik
+     AND (o.filing_date < a.filing_date
+          OR (o.filing_date = a.filing_date AND (NOT o.is_amendment OR o.accession < a.accession)))
+    WHERE a.date_of_orig_sub IS NOT NULL
+      AND EXISTS (SELECT 1 FROM form345_owners x JOIN form345_owners y ON y.owner_cik = x.owner_cik
                   WHERE x.accession = a.accession AND y.accession = o.accession)
+), t2 AS (
+    SELECT a.accession AS amend_acc, o.accession AS target_acc, o.is_amendment AS target_is_amend,
+           (o.period_of_report IS NOT DISTINCT FROM a.period_of_report) AS same_period, 2 AS tier
+    FROM am a
+    JOIN _sig sa ON sa.accession = a.accession
+    JOIN form345_submissions o
+      ON o.issuer_cik = a.issuer_cik AND o.base_form = a.base_form AND o.accession <> a.accession
+     AND o.filing_date <= a.filing_date AND o.filing_date >= a.filing_date - INTERVAL 45 DAY
+     AND (o.filing_date < a.filing_date OR NOT o.is_amendment OR o.accession < a.accession)
+    JOIN _sig so ON so.accession = o.accession AND so.signature = sa.signature
+    WHERE NOT EXISTS (SELECT 1 FROM t1 WHERE t1.amend_acc = a.accession)
+      AND EXISTS (SELECT 1 FROM form345_owners x JOIN form345_owners y ON y.owner_cik = x.owner_cik
+                  WHERE x.accession = a.accession AND y.accession = o.accession)
+), t3 AS (
+    SELECT a.accession AS amend_acc, o.accession AS target_acc, o.is_amendment AS target_is_amend,
+           TRUE AS same_period, 3 AS tier
+    FROM am a
+    JOIN form345_submissions o
+      ON o.issuer_cik = a.issuer_cik AND o.base_form = a.base_form AND o.accession <> a.accession
+     AND NOT o.is_amendment AND o.period_of_report = a.period_of_report
+     AND o.filing_date <= a.filing_date AND o.filing_date >= a.filing_date - INTERVAL 45 DAY
+    WHERE a.period_of_report IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM t1 WHERE t1.amend_acc = a.accession)
+      AND NOT EXISTS (SELECT 1 FROM t2 WHERE t2.amend_acc = a.accession)
+      AND EXISTS (SELECT 1 FROM form345_owners x JOIN form345_owners y ON y.owner_cik = x.owner_cik
+                  WHERE x.accession = a.accession AND y.accession = o.accession)
+    QUALIFY count(*) OVER (PARTITION BY a.accession) = 1
+), cand AS (
+    SELECT * FROM t1 UNION ALL SELECT * FROM t2 UNION ALL SELECT * FROM t3
 ), scored AS (
-    SELECT *, count(*) FILTER (WHERE same_period) OVER (PARTITION BY amend_acc) AS n_same,
-           count(*) FILTER (WHERE NOT target_is_amend) OVER (PARTITION BY amend_acc) AS n_orig
+    SELECT *, (CASE WHEN same_period THEN 2 ELSE 0 END) + (CASE WHEN target_is_amend THEN 0 ELSE 1 END) AS score
     FROM cand
+), best AS (
+    SELECT *, max(score) OVER (PARTITION BY amend_acc) AS best_score FROM scored
 )
-SELECT amend_acc, target_acc, target_is_amend,
+SELECT amend_acc, target_acc, target_is_amend, score, tier,
        count(*) OVER (PARTITION BY amend_acc) AS n_targets
-FROM scored
-WHERE (n_same = 0 OR same_period) AND (n_orig = 0 OR NOT target_is_amend);
+FROM best WHERE score = best_score;
+
+-- tier-3 candidates that were NOT unique (left unlinked), for the diagnostics
+CREATE OR REPLACE TEMP TABLE _tier3_ambiguous AS
+WITH am AS (SELECT accession, issuer_cik, base_form, period_of_report, filing_date FROM form345_submissions WHERE is_amendment)
+SELECT a.accession AS amend_acc, count(*) AS n
+FROM am a
+JOIN form345_submissions o
+  ON o.issuer_cik = a.issuer_cik AND o.base_form = a.base_form AND o.accession <> a.accession
+ AND NOT o.is_amendment AND o.period_of_report = a.period_of_report
+ AND o.filing_date <= a.filing_date AND o.filing_date >= a.filing_date - INTERVAL 45 DAY
+WHERE NOT EXISTS (SELECT 1 FROM _links l WHERE l.amend_acc = a.accession)
+  AND EXISTS (SELECT 1 FROM form345_owners x JOIN form345_owners y ON y.owner_cik = x.owner_cik
+              WHERE x.accession = a.accession AND y.accession = o.accession)
+GROUP BY 1 HAVING count(*) > 1;
 """
 
 GROUP_SQL = """
--- root of each amendment: its original, or the original of the amendment it names
+-- Walk each amendment's link chain to its root (a filing with no outgoing
+-- link: the original, or an amendment whose own original is outside the
+-- data). Links always point to an earlier filing date, or on the same day to
+-- an original or a lower-accession amendment, so the walk is acyclic; the
+-- depth cap is a guard only. The group of a root = the root plus every
+-- amendment that reaches it; its EFFECTIVE member is the latest filed, an
+-- amendment beating an original filed the same day, then the higher accession
+-- (submission order within a filer agent's sequence).
 CREATE OR REPLACE TEMP TABLE _groups AS
-WITH direct AS (
-    SELECT l.amend_acc, CASE WHEN l.target_is_amend THEN coalesce(l2.target_acc, l.target_acc) ELSE l.target_acc END AS root_acc
-    FROM _links l
-    LEFT JOIN _links l2 ON l2.amend_acc = l.target_acc AND NOT l2.target_is_amend
+WITH RECURSIVE chain(start_acc, cur_acc, depth) AS (
+    SELECT amend_acc, target_acc, 1 FROM _links
+    UNION ALL
+    SELECT c.start_acc, l.target_acc, c.depth + 1
+    FROM chain c JOIN _links l ON l.amend_acc = c.cur_acc
+    WHERE c.depth < 12
+), roots AS (
+    SELECT DISTINCT c.start_acc AS accession, c.cur_acc AS root_acc
+    FROM chain c
+    WHERE NOT EXISTS (SELECT 1 FROM _links l WHERE l.amend_acc = c.cur_acc)
 ), members AS (
-    SELECT root_acc, amend_acc AS accession FROM direct
+    SELECT root_acc, accession FROM roots
     UNION
-    SELECT root_acc, root_acc FROM direct
+    SELECT root_acc, root_acc FROM roots
 ), ranked AS (
-    SELECT m.root_acc, m.accession, s.filing_date,
-           row_number() OVER (PARTITION BY m.root_acc ORDER BY s.filing_date DESC, s.accession DESC) AS rn
+    SELECT m.root_acc, m.accession,
+           row_number() OVER (PARTITION BY m.root_acc
+                              ORDER BY s.filing_date DESC, s.is_amendment DESC, s.accession DESC) AS rn
     FROM members m JOIN form345_submissions s ON s.accession = m.accession
 )
 SELECT r.root_acc, r.accession, e.accession AS effective_acc
@@ -477,12 +565,49 @@ def apply_supersession(con: duckdb.DuckDBPyConnection) -> Dict[str, int]:
     n_amend = int(con.execute('SELECT count(*) FROM form345_submissions WHERE is_amendment').fetchone()[0])
     n_linked = int(con.execute('SELECT count(DISTINCT amend_acc) FROM _links').fetchone()[0])
     n_ambiguous = int(con.execute('SELECT count(DISTINCT amend_acc) FROM _links WHERE n_targets > 1').fetchone()[0])
+    tiers = dict(con.execute('SELECT tier, count(DISTINCT amend_acc) FROM _links GROUP BY 1').fetchall())
+    n_t3_amb = int(con.execute('SELECT count(*) FROM _tier3_ambiguous').fetchone()[0])
     n_superseded = int(con.execute('SELECT count(*) FROM form345_submissions WHERE superseded_by IS NOT NULL').fetchone()[0])
     n_unlinked_amend = int(con.execute("""
         SELECT count(*) FROM form345_submissions s WHERE is_amendment
         AND NOT EXISTS (SELECT 1 FROM _links l WHERE l.amend_acc = s.accession)""").fetchone()[0])
     return {'amendments': n_amend, 'amendments_linked': n_linked, 'amendments_ambiguous': n_ambiguous,
+            'linked_tier1_date': int(tiers.get(1, 0)), 'linked_tier2_content': int(tiers.get(2, 0)),
+            'linked_tier3_period': int(tiers.get(3, 0)), 'tier3_ambiguous_unlinked': n_t3_amb,
             'amendments_unlinked': n_unlinked_amend, 'filings_superseded': n_superseded}
+
+
+RESIDUAL_DUPLICATES_SQL = """
+-- Effective Form 4 filings (after supersession) by the same issuer and owner,
+-- filed within 10 days of each other, whose non-derivative transaction lists
+-- are IDENTICAL (date, code, shares, price, A/D). Pairs involving an amendment
+-- are the shape a missed 4/A link leaves behind (SWM 0001062993-22-012373 was
+-- one); pairs of two originals are either genuine re-filings or two identical
+-- trades reported separately and are only counted.
+WITH eff AS (
+    SELECT accession, issuer_cik, filing_date, is_amendment
+    FROM form345_submissions WHERE superseded_by IS NULL AND base_form = '4'
+), sig AS (
+    SELECT e.accession, e.issuer_cik, e.filing_date, e.is_amendment, o.owner_cik,
+           string_agg(coalesce(t.trans_date::VARCHAR, '') || '|' || coalesce(t.trans_code, '') || '|' ||
+                      coalesce(t.shares::VARCHAR, '') || '|' || coalesce(t.price::VARCHAR, '') || '|' ||
+                      coalesce(t.acquired_disposed, ''), ';'
+                      ORDER BY t.trans_date, t.trans_code, t.shares, t.price, t.acquired_disposed) AS signature
+    FROM eff e JOIN form345_owners o USING (accession) JOIN form345_nonderiv_trans t USING (accession)
+    GROUP BY 1, 2, 3, 4, 5
+)
+SELECT count(*) FILTER (WHERE a.is_amendment OR b.is_amendment) AS dup_pairs_amend,
+       count(*) AS dup_pairs_any
+FROM sig a JOIN sig b
+  ON b.issuer_cik = a.issuer_cik AND b.owner_cik = a.owner_cik AND b.signature = a.signature
+ AND b.accession < a.accession AND abs(a.filing_date - b.filing_date) <= 10
+"""
+
+
+def residual_duplicates(con: duckdb.DuckDBPyConnection) -> Dict[str, int]:
+    """How many identical effective filing pairs supersession left behind (see SQL)."""
+    row = con.execute(RESIDUAL_DUPLICATES_SQL).fetchone()
+    return {'dup_pairs_amend': int(row[0] or 0), 'dup_pairs_any': int(row[1] or 0)}
 
 
 def fill_tickers(con: duckdb.DuckDBPyConnection) -> Dict[str, int]:
@@ -527,6 +652,7 @@ def finalize(con: duckdb.DuckDBPyConnection, note: str = '') -> Dict[str, Any]:
     """Recompute every derived column and record build info."""
     diag: Dict[str, Any] = {}
     diag.update(apply_supersession(con))
+    diag.update(residual_duplicates(con))
     diag.update(fill_tickers(con))
     diag['filing_dates'] = fill_usable_from(con)
     bad = con.execute('SELECT count(*) FROM form345_submissions WHERE usable_from IS NULL OR usable_from <= filing_date').fetchone()[0]
