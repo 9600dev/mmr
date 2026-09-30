@@ -1,0 +1,5641 @@
+{
+ "active": {
+  "stressed_all": {
+   "ann_return": 0.0107374014382449,
+   "max_drawdown_benchmark": -0.3191508211899329,
+   "max_drawdown_candidate": -0.3495597949450616,
+   "nw_lags": 7,
+   "sharpe": 0.21899057827117327,
+   "t_nw": 0.6432105973161505
+  },
+  "stressed_collapses": {
+   "ann_return": 0.0010414543950714229,
+   "max_drawdown_benchmark": -0.3123265445395792,
+   "max_drawdown_candidate": -0.3482578280186044,
+   "nw_lags": 7,
+   "sharpe": 0.022101112095586208,
+   "t_nw": 0.06430500543781476
+  },
+  "unstressed": {
+   "ann_return": 0.002813869547447836,
+   "max_drawdown_benchmark": -0.3123265445395792,
+   "max_drawdown_candidate": -0.3482578280186043,
+   "nw_lags": 7,
+   "sharpe": 0.06054488868956573,
+   "t_nw": 0.1757978109388806
+  }
+ },
+ "benchmark": {
+  "cell": {},
+  "collapse_exits": 86,
+  "collapse_net_proceeds_fraction": 0.11966645710125001,
+  "coverage_published": true,
+  "exits": [
+   {
+    "collapse": false,
+    "commission": 1.5,
+    "date": "2016-09-02",
+    "fill": 6.7736115,
+    "net_proceeds": 2030.58345,
+    "quantity": 300.0,
+    "ticker": "ARMH"
+   },
+   {
+    "collapse": false,
+    "commission": 0.875,
+    "date": "2016-09-02",
+    "fill": 12.603695,
+    "net_proceeds": 2204.771625,
+    "quantity": 175.0,
+    "ticker": "SPU"
+   },
+   {
+    "collapse": false,
+    "commission": 0.21,
+    "date": "2016-09-02",
+    "fill": 47.7143309,
+    "net_proceeds": 2003.7918978,
+    "quantity": 42.0,
+    "ticker": "TYC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.35000000000000003,
+    "date": "2016-09-06",
+    "fill": 29.035475,
+    "net_proceeds": 2032.1332500000003,
+    "quantity": 70.0,
+    "ticker": "EMC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.125,
+    "date": "2016-09-27",
+    "fill": 81.39928,
+    "net_proceeds": 2034.8570000000002,
+    "quantity": 25.0,
+    "ticker": "MDVN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.42,
+    "date": "2016-10-04",
+    "fill": 23.988,
+    "net_proceeds": 2014.572,
+    "quantity": 84.0,
+    "ticker": "COTYw"
+   },
+   {
+    "collapse": false,
+    "commission": 0.165,
+    "date": "2016-11-15",
+    "fill": 60.369800000000005,
+    "net_proceeds": 1992.0384000000001,
+    "quantity": 33.0,
+    "ticker": "ININ"
+   },
+   {
+    "collapse": false,
+    "commission": 0.27,
+    "date": "2016-12-05",
+    "fill": 38.870555,
+    "net_proceeds": 2098.73997,
+    "quantity": 54.0,
+    "ticker": "IM"
+   },
+   {
+    "collapse": false,
+    "commission": 0.05,
+    "date": "2016-12-07",
+    "fill": 195.86202000000003,
+    "net_proceeds": 1958.5702000000003,
+    "quantity": 10.0,
+    "ticker": "LNKD"
+   },
+   {
+    "collapse": false,
+    "commission": 0.195,
+    "date": "2016-12-08",
+    "fill": 50.804585,
+    "net_proceeds": 1981.183815,
+    "quantity": 39.0,
+    "ticker": "DWTI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.41000000000000003,
+    "date": "2016-12-08",
+    "fill": 24.60769,
+    "net_proceeds": 2017.42058,
+    "quantity": 82.0,
+    "ticker": "UWTI"
+   },
+   {
+    "collapse": true,
+    "commission": 0.225,
+    "date": "2016-12-12",
+    "fill": 5.287355000000001,
+    "net_proceeds": 237.70597500000002,
+    "quantity": 45.0,
+    "ticker": "OPHT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.125,
+    "date": "2017-01-04",
+    "fill": 80.77959,
+    "net_proceeds": 2019.36475,
+    "quantity": 25.0,
+    "ticker": "STJ"
+   },
+   {
+    "collapse": false,
+    "commission": 0.545,
+    "date": "2017-02-02",
+    "fill": 19.3903,
+    "net_proceeds": 2112.9977,
+    "quantity": 109.0,
+    "ticker": "XXIA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.445,
+    "date": "2017-02-15",
+    "fill": 23.978005,
+    "net_proceeds": 2133.597445,
+    "quantity": 89.0,
+    "ticker": "ARIA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.15,
+    "date": "2017-03-31",
+    "fill": 68.97549500000001,
+    "net_proceeds": 2069.1148500000004,
+    "quantity": 30.0,
+    "ticker": "CSC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.17500000000000002,
+    "date": "2017-04-11",
+    "fill": 56.21188000000001,
+    "net_proceeds": 1967.2408000000003,
+    "quantity": 35.0,
+    "ticker": "WWAV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.12,
+    "date": "2017-06-14",
+    "fill": 89.93501,
+    "net_proceeds": 2158.32024,
+    "quantity": 24.0,
+    "ticker": "MJN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.22,
+    "date": "2017-06-16",
+    "fill": 52.55371,
+    "net_proceeds": 2312.1432400000003,
+    "quantity": 44.0,
+    "ticker": "YHOO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.105,
+    "date": "2017-06-21",
+    "fill": 92.76359500000001,
+    "net_proceeds": 1947.930495,
+    "quantity": 21.0,
+    "ticker": "SYT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.165,
+    "date": "2017-06-22",
+    "fill": 60.939515,
+    "net_proceeds": 2010.838995,
+    "quantity": 33.0,
+    "ticker": "PVTB"
+   },
+   {
+    "collapse": false,
+    "commission": 0.195,
+    "date": "2017-07-03",
+    "fill": 57.651160000000004,
+    "net_proceeds": 2248.20024,
+    "quantity": 39.0,
+    "ticker": "BHI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.005,
+    "date": "2017-07-06",
+    "fill": 794.6025000000001,
+    "net_proceeds": 794.5975000000001,
+    "quantity": 1.0,
+    "ticker": "AWH"
+   },
+   {
+    "collapse": false,
+    "commission": 0.025,
+    "date": "2017-07-17",
+    "fill": 314.772535,
+    "net_proceeds": 1573.837675,
+    "quantity": 5.0,
+    "ticker": "PNRA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.165,
+    "date": "2017-07-24",
+    "fill": 65.36730000000001,
+    "net_proceeds": 2156.9559000000004,
+    "quantity": 33.0,
+    "ticker": "RAI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.11,
+    "date": "2017-07-31",
+    "fill": 99.48023500000001,
+    "net_proceeds": 2188.45517,
+    "quantity": 22.0,
+    "ticker": "TSO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.255,
+    "date": "2017-08-25",
+    "fill": 41.969005,
+    "net_proceeds": 2140.164255,
+    "quantity": 51.0,
+    "ticker": "WFM"
+   },
+   {
+    "collapse": false,
+    "commission": 0.06,
+    "date": "2017-10-02",
+    "fill": 179.700105,
+    "net_proceeds": 2156.34126,
+    "quantity": 12.0,
+    "ticker": "KITE"
+   },
+   {
+    "collapse": false,
+    "commission": 0.805,
+    "date": "2017-10-13",
+    "fill": 11.564215,
+    "net_proceeds": 1861.033615,
+    "quantity": 161.0,
+    "ticker": "BBRY"
+   },
+   {
+    "collapse": false,
+    "commission": 1.345,
+    "date": "2017-10-19",
+    "fill": 7.806095,
+    "net_proceeds": 2098.494555,
+    "quantity": 269.0,
+    "ticker": "FIG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.08,
+    "date": "2017-11-14",
+    "fill": 103.42826000000001,
+    "net_proceeds": 1654.7721600000002,
+    "quantity": 16.0,
+    "ticker": "Q"
+   },
+   {
+    "collapse": false,
+    "commission": 0.16,
+    "date": "2017-11-15",
+    "fill": 53.723125,
+    "net_proceeds": 1718.98,
+    "quantity": 32.0,
+    "ticker": "ABCO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.105,
+    "date": "2017-12-28",
+    "fill": 81.57919000000001,
+    "net_proceeds": 1713.0579900000002,
+    "quantity": 21.0,
+    "ticker": "AAAP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.025,
+    "date": "2017-12-28",
+    "fill": 331.07438,
+    "net_proceeds": 1655.3469,
+    "quantity": 5.0,
+    "ticker": "BCR"
+   },
+   {
+    "collapse": false,
+    "commission": 0.16,
+    "date": "2018-01-23",
+    "fill": 54.972500000000004,
+    "net_proceeds": 1758.96,
+    "quantity": 32.0,
+    "ticker": "BSFT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.305,
+    "date": "2018-01-26",
+    "fill": 33.46326,
+    "net_proceeds": 2040.9538599999998,
+    "quantity": 61.0,
+    "ticker": "ATEST.G"
+   },
+   {
+    "collapse": true,
+    "commission": 0.09,
+    "date": "2018-02-07",
+    "fill": 6.226885000000001,
+    "net_proceeds": 111.99393000000002,
+    "quantity": 18.0,
+    "ticker": "XIV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.21,
+    "date": "2018-02-12",
+    "fill": 53.09344,
+    "net_proceeds": 2229.71448,
+    "quantity": 42.0,
+    "ticker": "CAA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.005,
+    "date": "2018-02-26",
+    "fill": 1904.6871800000001,
+    "net_proceeds": 1904.68218,
+    "quantity": 1.0,
+    "ticker": "PCLN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.20500000000000002,
+    "date": "2018-02-27",
+    "fill": 52.19389,
+    "net_proceeds": 2139.74449,
+    "quantity": 41.0,
+    "ticker": "HCN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.1,
+    "date": "2018-03-06",
+    "fill": 89.99498000000001,
+    "net_proceeds": 1799.7996000000003,
+    "quantity": 20.0,
+    "ticker": "SNI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.26,
+    "date": "2018-04-03",
+    "fill": 41.209385,
+    "net_proceeds": 2142.6280199999997,
+    "quantity": 52.0,
+    "ticker": "CSRA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.2,
+    "date": "2018-05-03",
+    "fill": 44.47775,
+    "net_proceeds": 1778.91,
+    "quantity": 40.0,
+    "ticker": "FNGN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.27,
+    "date": "2018-06-04",
+    "fill": 31.974005000000002,
+    "net_proceeds": 1726.32627,
+    "quantity": 54.0,
+    "ticker": "GXP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.09,
+    "date": "2018-06-06",
+    "fill": 127.886025,
+    "net_proceeds": 2301.8584499999997,
+    "quantity": 18.0,
+    "ticker": "MON"
+   },
+   {
+    "collapse": false,
+    "commission": 0.125,
+    "date": "2018-06-14",
+    "fill": 98.720615,
+    "net_proceeds": 2467.890375,
+    "quantity": 25.0,
+    "ticker": "TWX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.095,
+    "date": "2018-07-09",
+    "fill": 123.59817000000001,
+    "net_proceeds": 2348.2702300000005,
+    "quantity": 19.0,
+    "ticker": "DPS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.355,
+    "date": "2018-07-13",
+    "fill": 23.3883,
+    "net_proceeds": 1660.2143,
+    "quantity": 71.0,
+    "ticker": "VRX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.055,
+    "date": "2018-07-30",
+    "fill": 136.9315,
+    "net_proceeds": 1506.1915,
+    "quantity": 11.0,
+    "ticker": "FMI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.26,
+    "date": "2018-08-31",
+    "fill": 34.11293500000001,
+    "net_proceeds": 1773.6126200000003,
+    "quantity": 52.0,
+    "ticker": "ILG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.08,
+    "date": "2018-09-28",
+    "fill": 153.42325,
+    "net_proceeds": 2454.692,
+    "quantity": 16.0,
+    "ticker": "ANDV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.18,
+    "date": "2018-10-04",
+    "fill": 62.928520000000006,
+    "net_proceeds": 2265.2467200000006,
+    "quantity": 36.0,
+    "ticker": "KLXI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.28,
+    "date": "2018-10-15",
+    "fill": 32.44377,
+    "net_proceeds": 1816.57112,
+    "quantity": 56.0,
+    "ticker": "SVU"
+   },
+   {
+    "collapse": false,
+    "commission": 0.515,
+    "date": "2018-10-18",
+    "fill": 21.459265,
+    "net_proceeds": 2209.789295,
+    "quantity": 103.0,
+    "ticker": "ETP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.07,
+    "date": "2018-10-30",
+    "fill": 164.41775,
+    "net_proceeds": 2301.7785,
+    "quantity": 14.0,
+    "ticker": "PX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.195,
+    "date": "2018-11-02",
+    "fill": 44.41778,
+    "net_proceeds": 1732.09842,
+    "quantity": 39.0,
+    "ticker": "CA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.055,
+    "date": "2018-11-28",
+    "fill": 212.59365,
+    "net_proceeds": 2338.47515,
+    "quantity": 11.0,
+    "ticker": "AET"
+   },
+   {
+    "collapse": false,
+    "commission": 0.12,
+    "date": "2018-12-20",
+    "fill": 92.283835,
+    "net_proceeds": 2214.69204,
+    "quantity": 24.0,
+    "ticker": "ESRX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.075,
+    "date": "2018-12-27",
+    "fill": 79.96000000000001,
+    "net_proceeds": 1199.325,
+    "quantity": 15.0,
+    "ticker": "DVMT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.92,
+    "date": "2018-12-31",
+    "fill": 13.53323,
+    "net_proceeds": 2489.19432,
+    "quantity": 184.0,
+    "ticker": "ABX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.24,
+    "date": "2018-12-31",
+    "fill": 37.90104,
+    "net_proceeds": 1819.0099200000002,
+    "quantity": 48.0,
+    "ticker": "KORS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.065,
+    "date": "2019-01-04",
+    "fill": 179.1104,
+    "net_proceeds": 2328.3702,
+    "quantity": 13.0,
+    "ticker": "SHPG"
+   },
+   {
+    "collapse": true,
+    "commission": 0.11,
+    "date": "2019-01-18",
+    "fill": 74.92251999999999,
+    "net_proceeds": 1648.18544,
+    "quantity": 22.0,
+    "ticker": "TSRO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.23,
+    "date": "2019-02-14",
+    "fill": 42.718630000000005,
+    "net_proceeds": 1964.8269800000003,
+    "quantity": 46.0,
+    "ticker": "AHL"
+   },
+   {
+    "collapse": true,
+    "commission": 3.055,
+    "date": "2019-02-28",
+    "fill": 1.5192400000000001,
+    "net_proceeds": 925.2006400000001,
+    "quantity": 611.0,
+    "ticker": "JCP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.18,
+    "date": "2019-03-29",
+    "fill": 48.96550500000001,
+    "net_proceeds": 1762.5781800000002,
+    "quantity": 36.0,
+    "ticker": "IDTI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.775,
+    "date": "2019-04-17",
+    "fill": 11.184405,
+    "net_proceeds": 1732.807775,
+    "quantity": 155.0,
+    "ticker": "GG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.41500000000000004,
+    "date": "2019-05-01",
+    "fill": 26.636675,
+    "net_proceeds": 2210.429025,
+    "quantity": 83.0,
+    "ticker": "VXXB"
+   },
+   {
+    "collapse": false,
+    "commission": 0.485,
+    "date": "2019-05-28",
+    "fill": 19.49025,
+    "net_proceeds": 1890.06925,
+    "quantity": 97.0,
+    "ticker": "BPR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.305,
+    "date": "2019-05-31",
+    "fill": 30.50474,
+    "net_proceeds": 1860.48414,
+    "quantity": 61.0,
+    "ticker": "DWDP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.06,
+    "date": "2019-06-28",
+    "fill": 189.035435,
+    "net_proceeds": 2268.36522,
+    "quantity": 12.0,
+    "ticker": "HRS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.065,
+    "date": "2019-07-08",
+    "fill": 187.61614500000002,
+    "net_proceeds": 2438.9448850000003,
+    "quantity": 13.0,
+    "ticker": "RHT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.395,
+    "date": "2019-07-26",
+    "fill": 31.674155000000003,
+    "net_proceeds": 2501.863245,
+    "quantity": 79.0,
+    "ticker": "FDC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.1,
+    "date": "2019-07-30",
+    "fill": 134.9325,
+    "net_proceeds": 2698.55,
+    "quantity": 20.0,
+    "ticker": "WP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.06,
+    "date": "2019-07-31",
+    "fill": 169.445235,
+    "net_proceeds": 2033.28282,
+    "quantity": 12.0,
+    "ticker": "DATA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.17,
+    "date": "2019-08-08",
+    "fill": 72.733615,
+    "net_proceeds": 2472.77291,
+    "quantity": 34.0,
+    "ticker": "APC"
+   },
+   {
+    "collapse": true,
+    "commission": 0.48,
+    "date": "2019-10-02",
+    "fill": 19.620185,
+    "net_proceeds": 1883.05776,
+    "quantity": 96.0,
+    "ticker": "AABA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.15,
+    "date": "2019-10-04",
+    "fill": 52.963505000000005,
+    "net_proceeds": 1588.75515,
+    "quantity": 30.0,
+    "ticker": "VSM"
+   },
+   {
+    "collapse": false,
+    "commission": 0.365,
+    "date": "2019-10-17",
+    "fill": 22.06896,
+    "net_proceeds": 1610.6690800000001,
+    "quantity": 73.0,
+    "ticker": "BHGE"
+   },
+   {
+    "collapse": false,
+    "commission": 0.37,
+    "date": "2019-11-04",
+    "fill": 34.912535,
+    "net_proceeds": 2583.15759,
+    "quantity": 74.0,
+    "ticker": "CTRP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.4,
+    "date": "2019-11-04",
+    "fill": 23.738125,
+    "net_proceeds": 1898.6499999999999,
+    "quantity": 80.0,
+    "ticker": "SYMC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.115,
+    "date": "2019-11-20",
+    "fill": 108.18588,
+    "net_proceeds": 2488.16024,
+    "quantity": 23.0,
+    "ticker": "CELG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.32,
+    "date": "2019-12-04",
+    "fill": 40.749615000000006,
+    "net_proceeds": 2607.65536,
+    "quantity": 64.0,
+    "ticker": "CBS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.23,
+    "date": "2019-12-06",
+    "fill": 54.212880000000006,
+    "net_proceeds": 2493.56248,
+    "quantity": 46.0,
+    "ticker": "BBT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.085,
+    "date": "2019-12-09",
+    "fill": 85.79708000000001,
+    "net_proceeds": 1458.4653600000001,
+    "quantity": 17.0,
+    "ticker": "JEC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.15,
+    "date": "2020-01-03",
+    "fill": 84.85755,
+    "net_proceeds": 2545.5765,
+    "quantity": 30.0,
+    "ticker": "MDCO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.025,
+    "date": "2020-01-23",
+    "fill": 349.74504,
+    "net_proceeds": 1748.7002,
+    "quantity": 5.0,
+    "ticker": "WCG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.155,
+    "date": "2020-02-03",
+    "fill": 61.919025000000005,
+    "net_proceeds": 1919.3347750000003,
+    "quantity": 31.0,
+    "ticker": "LPT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.19,
+    "date": "2020-03-06",
+    "fill": 34.972505000000005,
+    "net_proceeds": 1328.76519,
+    "quantity": 38.0,
+    "ticker": "ZAYO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.07,
+    "date": "2020-03-11",
+    "fill": 75.962,
+    "net_proceeds": 1063.3980000000001,
+    "quantity": 14.0,
+    "ticker": "INXN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.07,
+    "date": "2020-04-02",
+    "fill": 116.90152,
+    "net_proceeds": 1636.5512800000001,
+    "quantity": 14.0,
+    "ticker": "RTN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.095,
+    "date": "2020-04-02",
+    "fill": 85.96699500000001,
+    "net_proceeds": 1633.2779050000001,
+    "quantity": 19.0,
+    "ticker": "UTX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.24,
+    "date": "2020-05-04",
+    "fill": 27.296345,
+    "net_proceeds": 1309.9845599999999,
+    "quantity": 48.0,
+    "ticker": "TSG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.055,
+    "date": "2020-05-08",
+    "fill": 192.92349000000002,
+    "net_proceeds": 2122.10339,
+    "quantity": 11.0,
+    "ticker": "AGN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.05,
+    "date": "2020-05-28",
+    "fill": 136.39177,
+    "net_proceeds": 1363.8677,
+    "quantity": 10.0,
+    "ticker": "WBC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.28,
+    "date": "2020-06-02",
+    "fill": 34.86256,
+    "net_proceeds": 1952.0233600000001,
+    "quantity": 56.0,
+    "ticker": "ESNT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.09,
+    "date": "2020-06-19",
+    "fill": 97.801075,
+    "net_proceeds": 1760.32935,
+    "quantity": 18.0,
+    "ticker": "AXE"
+   },
+   {
+    "collapse": false,
+    "commission": 0.035,
+    "date": "2020-06-25",
+    "fill": 553.5539845500001,
+    "net_proceeds": 3874.842891850001,
+    "quantity": 7.0,
+    "ticker": "DGAZ"
+   },
+   {
+    "collapse": false,
+    "commission": 0.065,
+    "date": "2020-06-29",
+    "fill": 144.82755,
+    "net_proceeds": 1882.69315,
+    "quantity": 13.0,
+    "ticker": "TECD"
+   },
+   {
+    "collapse": true,
+    "commission": 0.095,
+    "date": "2020-07-02",
+    "fill": 112.30382,
+    "net_proceeds": 2133.67758,
+    "quantity": 19.0,
+    "ticker": "TVIX"
+   },
+   {
+    "collapse": true,
+    "commission": 0.79,
+    "date": "2020-07-10",
+    "fill": 10.81459,
+    "net_proceeds": 1707.91522,
+    "quantity": 158.0,
+    "ticker": "UGAZ"
+   },
+   {
+    "collapse": false,
+    "commission": 0.295,
+    "date": "2020-07-20",
+    "fill": 38.22088,
+    "net_proceeds": 2254.73692,
+    "quantity": 59.0,
+    "ticker": "ERI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.22,
+    "date": "2020-08-12",
+    "fill": 28.985500000000002,
+    "net_proceeds": 1275.142,
+    "quantity": 44.0,
+    "ticker": "FSCT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.32,
+    "date": "2020-09-04",
+    "fill": 29.775105,
+    "net_proceeds": 1905.28672,
+    "quantity": 64.0,
+    "ticker": "RST"
+   },
+   {
+    "collapse": false,
+    "commission": 1.245,
+    "date": "2020-09-17",
+    "fill": 10.9945,
+    "net_proceeds": 2736.3855000000003,
+    "quantity": 249.0,
+    "ticker": "CTL"
+   },
+   {
+    "collapse": false,
+    "commission": 0.29,
+    "date": "2020-10-01",
+    "fill": 44.887544999999996,
+    "net_proceeds": 2603.18761,
+    "quantity": 58.0,
+    "ticker": "SHLL"
+   },
+   {
+    "collapse": false,
+    "commission": 0.18,
+    "date": "2020-10-07",
+    "fill": 43.058460000000004,
+    "net_proceeds": 1549.9245600000002,
+    "quantity": 36.0,
+    "ticker": "VSLR"
+   },
+   {
+    "collapse": false,
+    "commission": 0.28,
+    "date": "2020-10-09",
+    "fill": 34.572705000000006,
+    "net_proceeds": 1935.7914800000003,
+    "quantity": 56.0,
+    "ticker": "AIMT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.09,
+    "date": "2020-10-22",
+    "fill": 87.81607000000001,
+    "net_proceeds": 1580.5992600000002,
+    "quantity": 18.0,
+    "ticker": "IMMU"
+   },
+   {
+    "collapse": false,
+    "commission": 0.1,
+    "date": "2020-10-29",
+    "fill": 139.700115,
+    "net_proceeds": 2793.9023,
+    "quantity": 20.0,
+    "ticker": "LVGO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.255,
+    "date": "2020-11-10",
+    "fill": 43.868055000000005,
+    "net_proceeds": 2237.015805,
+    "quantity": 51.0,
+    "ticker": "NAV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.11,
+    "date": "2020-12-18",
+    "fill": 91.68413500000001,
+    "net_proceeds": 2016.9409700000003,
+    "quantity": 22.0,
+    "ticker": "GLIBA"
+   },
+   {
+    "collapse": true,
+    "commission": 1.33,
+    "date": "2020-12-22",
+    "fill": 6.8665650000000005,
+    "net_proceeds": 1825.17629,
+    "quantity": 266.0,
+    "ticker": "FIT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.28,
+    "date": "2020-12-23",
+    "fill": 55.962005000000005,
+    "net_proceeds": 3133.5922800000003,
+    "quantity": 56.0,
+    "ticker": "HDS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.5700000000000001,
+    "date": "2020-12-29",
+    "fill": 25.477255,
+    "net_proceeds": 2903.8370699999996,
+    "quantity": 114.0,
+    "ticker": "LCA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.6,
+    "date": "2020-12-30",
+    "fill": 18.110940000000003,
+    "net_proceeds": 2172.7128000000002,
+    "quantity": 120.0,
+    "ticker": "FCAU"
+   },
+   {
+    "collapse": false,
+    "commission": 0.115,
+    "date": "2021-01-06",
+    "fill": 131.39427,
+    "net_proceeds": 3021.9532100000006,
+    "quantity": 23.0,
+    "ticker": "TIF"
+   },
+   {
+    "collapse": false,
+    "commission": 0.72,
+    "date": "2021-01-07",
+    "fill": 16.01199,
+    "net_proceeds": 2305.0065600000003,
+    "quantity": 144.0,
+    "ticker": "IPOC"
+   },
+   {
+    "collapse": true,
+    "commission": 0.42,
+    "date": "2021-01-08",
+    "fill": 27.496245000000002,
+    "net_proceeds": 2309.26458,
+    "quantity": 84.0,
+    "ticker": "CHL"
+   },
+   {
+    "collapse": false,
+    "commission": 1.355,
+    "date": "2021-01-27",
+    "fill": 9.305345,
+    "net_proceeds": 2520.3934950000003,
+    "quantity": 271.0,
+    "ticker": "KNDI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.18,
+    "date": "2021-02-03",
+    "fill": 60.974497500000005,
+    "net_proceeds": 2194.9019100000005,
+    "quantity": 36.0,
+    "ticker": "FIZZ"
+   },
+   {
+    "collapse": false,
+    "commission": 0.20500000000000002,
+    "date": "2021-02-26",
+    "fill": 73.03346499999999,
+    "net_proceeds": 2994.1670649999996,
+    "quantity": 41.0,
+    "ticker": "EV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.66,
+    "date": "2021-03-04",
+    "fill": 17.141424999999998,
+    "net_proceeds": 2262.0081,
+    "quantity": 132.0,
+    "ticker": "SKT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.78,
+    "date": "2021-03-30",
+    "fill": 15.092450000000001,
+    "net_proceeds": 2353.6422,
+    "quantity": 156.0,
+    "ticker": "BFT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.305,
+    "date": "2021-04-09",
+    "fill": 17.29135,
+    "net_proceeds": 1054.4673500000001,
+    "quantity": 61.0,
+    "ticker": "RICE"
+   },
+   {
+    "collapse": false,
+    "commission": 0.07,
+    "date": "2021-04-12",
+    "fill": 177.03144,
+    "net_proceeds": 2478.37016,
+    "quantity": 14.0,
+    "ticker": "VAR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.59,
+    "date": "2021-04-14",
+    "fill": 12.49375,
+    "net_proceeds": 1473.6725000000001,
+    "quantity": 118.0,
+    "ticker": "TV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.725,
+    "date": "2021-04-30",
+    "fill": 15.372310000000002,
+    "net_proceeds": 2228.2599500000006,
+    "quantity": 145.0,
+    "ticker": "APHA"
+   },
+   {
+    "collapse": true,
+    "commission": 0.585,
+    "date": "2021-05-05",
+    "fill": 27.06646,
+    "net_proceeds": 3166.19082,
+    "quantity": 117.0,
+    "ticker": "GSX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.395,
+    "date": "2021-05-26",
+    "fill": 28.595695000000003,
+    "net_proceeds": 2258.664905,
+    "quantity": 79.0,
+    "ticker": "PAY"
+   },
+   {
+    "collapse": false,
+    "commission": 0.47000000000000003,
+    "date": "2021-05-28",
+    "fill": 20.139924999999998,
+    "net_proceeds": 1892.68295,
+    "quantity": 94.0,
+    "ticker": "IPOE"
+   },
+   {
+    "collapse": false,
+    "commission": 2.36,
+    "date": "2021-06-09",
+    "fill": 4.197900000000001,
+    "net_proceeds": 1979.0488000000005,
+    "quantity": 472.0,
+    "ticker": "SAN"
+   },
+   {
+    "collapse": true,
+    "commission": 0.04,
+    "date": "2021-06-29",
+    "fill": 368.4157,
+    "net_proceeds": 2947.2856,
+    "quantity": 8.0,
+    "ticker": "BTX"
+   },
+   {
+    "collapse": false,
+    "commission": 3.585,
+    "date": "2021-07-07",
+    "fill": 5.047475,
+    "net_proceeds": 3615.454575,
+    "quantity": 717.0,
+    "ticker": "BSQR"
+   },
+   {
+    "collapse": true,
+    "commission": 2.745,
+    "date": "2021-07-15",
+    "fill": 6.1169400000000005,
+    "net_proceeds": 3355.4550600000002,
+    "quantity": 549.0,
+    "ticker": "BLIN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.1,
+    "date": "2021-07-20",
+    "fill": 182.40875,
+    "net_proceeds": 3648.0750000000003,
+    "quantity": 20.0,
+    "ticker": "ALXN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.41500000000000004,
+    "date": "2021-07-20",
+    "fill": 45.177400000000006,
+    "net_proceeds": 3749.3092000000006,
+    "quantity": 83.0,
+    "ticker": "WORK"
+   },
+   {
+    "collapse": true,
+    "commission": 1.08,
+    "date": "2021-07-22",
+    "fill": 2.7986,
+    "net_proceeds": 603.4176,
+    "quantity": 216.0,
+    "ticker": "IGC"
+   },
+   {
+    "collapse": true,
+    "commission": 0.5650000000000001,
+    "date": "2021-07-23",
+    "fill": 24.237875000000003,
+    "net_proceeds": 2738.314875,
+    "quantity": 113.0,
+    "ticker": "CCIV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.25,
+    "date": "2021-08-02",
+    "fill": 79.88004000000001,
+    "net_proceeds": 3993.7520000000004,
+    "quantity": 50.0,
+    "ticker": "LB"
+   },
+   {
+    "collapse": true,
+    "commission": 2.24,
+    "date": "2021-08-10",
+    "fill": 9.255370000000001,
+    "net_proceeds": 4144.165760000001,
+    "quantity": 448.0,
+    "ticker": "VXRT"
+   },
+   {
+    "collapse": false,
+    "commission": 18.25,
+    "date": "2021-08-26",
+    "fill": 0.8021987,
+    "net_proceeds": 2909.775255,
+    "quantity": 3650.0,
+    "ticker": "RGC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.065,
+    "date": "2021-09-03",
+    "fill": 138.1309,
+    "net_proceeds": 1795.6367,
+    "quantity": 13.0,
+    "ticker": "LGND"
+   },
+   {
+    "collapse": false,
+    "commission": 0.835,
+    "date": "2021-09-07",
+    "fill": 6.366815000000001,
+    "net_proceeds": 1062.423105,
+    "quantity": 167.0,
+    "ticker": "ADAP"
+   },
+   {
+    "collapse": true,
+    "commission": 0.525,
+    "date": "2021-09-14",
+    "fill": 11.794100000000002,
+    "net_proceeds": 1237.8555000000001,
+    "quantity": 105.0,
+    "ticker": "SPRT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.995,
+    "date": "2021-10-07",
+    "fill": 15.982005000000001,
+    "net_proceeds": 3179.423995,
+    "quantity": 199.0,
+    "ticker": "CLDR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.605,
+    "date": "2021-10-11",
+    "fill": 6.89655,
+    "net_proceeds": 833.87755,
+    "quantity": 121.0,
+    "ticker": "HYLN"
+   },
+   {
+    "collapse": true,
+    "commission": 0.115,
+    "date": "2021-10-12",
+    "fill": 41.15941,
+    "net_proceeds": 946.55143,
+    "quantity": 23.0,
+    "ticker": "CVAC"
+   },
+   {
+    "collapse": true,
+    "commission": 0.87,
+    "date": "2021-10-29",
+    "fill": 6.4667650000000005,
+    "net_proceeds": 1124.3471100000002,
+    "quantity": 174.0,
+    "ticker": "TIGR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.245,
+    "date": "2021-11-08",
+    "fill": 30.04497,
+    "net_proceeds": 1471.95853,
+    "quantity": 49.0,
+    "ticker": "EHTH"
+   },
+   {
+    "collapse": true,
+    "commission": 0.59,
+    "date": "2021-11-16",
+    "fill": 5.227385000000001,
+    "net_proceeds": 616.24143,
+    "quantity": 118.0,
+    "ticker": "RMO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.46,
+    "date": "2021-11-16",
+    "fill": 16.69165,
+    "net_proceeds": 1535.1717999999998,
+    "quantity": 92.0,
+    "ticker": "RXT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.395,
+    "date": "2021-11-19",
+    "fill": 25.807090000000002,
+    "net_proceeds": 2038.3651100000002,
+    "quantity": 79.0,
+    "ticker": "BGFV"
+   },
+   {
+    "collapse": false,
+    "commission": 1.57,
+    "date": "2021-11-26",
+    "fill": 8.315840000000001,
+    "net_proceeds": 2609.6037600000004,
+    "quantity": 314.0,
+    "ticker": "AHPI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.04,
+    "date": "2021-12-13",
+    "fill": 293.443205,
+    "net_proceeds": 2347.50564,
+    "quantity": 8.0,
+    "ticker": "KSU"
+   },
+   {
+    "collapse": false,
+    "commission": 0.085,
+    "date": "2022-02-11",
+    "fill": 194.82254,
+    "net_proceeds": 3311.89818,
+    "quantity": 17.0,
+    "ticker": "XLNX"
+   },
+   {
+    "collapse": true,
+    "commission": 0.54,
+    "date": "2022-02-16",
+    "fill": 29.56521,
+    "net_proceeds": 3192.50268,
+    "quantity": 108.0,
+    "ticker": "VIAC"
+   },
+   {
+    "collapse": true,
+    "commission": 1.08,
+    "date": "2022-02-22",
+    "fill": 4.227885000000001,
+    "net_proceeds": 912.1431600000001,
+    "quantity": 216.0,
+    "ticker": "OCGN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.15,
+    "date": "2022-02-25",
+    "fill": 108.555695,
+    "net_proceeds": 3256.52085,
+    "quantity": 30.0,
+    "ticker": "INFO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.29,
+    "date": "2022-03-03",
+    "fill": 55.962005000000005,
+    "net_proceeds": 3245.5062900000003,
+    "quantity": 58.0,
+    "ticker": "NUAN"
+   },
+   {
+    "collapse": true,
+    "commission": 1.47,
+    "date": "2022-03-03",
+    "fill": 5.787105,
+    "net_proceeds": 1699.9388700000002,
+    "quantity": 294.0,
+    "ticker": "RSX"
+   },
+   {
+    "collapse": true,
+    "commission": 0.015,
+    "date": "2022-03-22",
+    "fill": 177.41125000000002,
+    "net_proceeds": 532.2187500000001,
+    "quantity": 3.0,
+    "ticker": "BKKT"
+   },
+   {
+    "collapse": true,
+    "commission": 0.03,
+    "date": "2022-03-24",
+    "fill": 4.29785,
+    "net_proceeds": 25.7571,
+    "quantity": 6.0,
+    "ticker": "LLL"
+   },
+   {
+    "collapse": false,
+    "commission": 0.34,
+    "date": "2022-04-14",
+    "fill": 35.832075,
+    "net_proceeds": 2436.2411,
+    "quantity": 68.0,
+    "ticker": "MTOR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.07,
+    "date": "2022-04-18",
+    "fill": 52.47375,
+    "net_proceeds": 734.5625,
+    "quantity": 14.0,
+    "ticker": "CEI"
+   },
+   {
+    "collapse": true,
+    "commission": 0.41000000000000003,
+    "date": "2022-04-28",
+    "fill": 16.31184,
+    "net_proceeds": 1337.16088,
+    "quantity": 82.0,
+    "ticker": "LC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.555,
+    "date": "2022-05-05",
+    "fill": 16.09195,
+    "net_proceeds": 1785.65145,
+    "quantity": 111.0,
+    "ticker": "HYMC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.17,
+    "date": "2022-06-07",
+    "fill": 94.87254,
+    "net_proceeds": 3225.49636,
+    "quantity": 34.0,
+    "ticker": "CERN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.08,
+    "date": "2022-06-08",
+    "fill": 196.54167999999999,
+    "net_proceeds": 3144.58688,
+    "quantity": 16.0,
+    "ticker": "FB"
+   },
+   {
+    "collapse": false,
+    "commission": 0.195,
+    "date": "2022-06-10",
+    "fill": 61.46925,
+    "net_proceeds": 2397.1057499999997,
+    "quantity": 39.0,
+    "ticker": "REGI"
+   },
+   {
+    "collapse": true,
+    "commission": 0.245,
+    "date": "2022-06-24",
+    "fill": 8.745625,
+    "net_proceeds": 428.29062500000003,
+    "quantity": 49.0,
+    "ticker": "TSP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.03,
+    "date": "2022-06-27",
+    "fill": 482.33871,
+    "net_proceeds": 2894.0022599999998,
+    "quantity": 6.0,
+    "ticker": "ANTM"
+   },
+   {
+    "collapse": false,
+    "commission": 0.055,
+    "date": "2022-07-05",
+    "fill": 173.60315500000002,
+    "net_proceeds": 1909.579705,
+    "quantity": 11.0,
+    "ticker": "CCMP"
+   },
+   {
+    "collapse": true,
+    "commission": 4.99,
+    "date": "2022-07-08",
+    "fill": 2.768615,
+    "net_proceeds": 2758.08777,
+    "quantity": 998.0,
+    "ticker": "CLVS"
+   },
+   {
+    "collapse": true,
+    "commission": 0.22,
+    "date": "2022-08-11",
+    "fill": 16.89155,
+    "net_proceeds": 743.0081999999999,
+    "quantity": 44.0,
+    "ticker": "WRBY"
+   },
+   {
+    "collapse": true,
+    "commission": 1.49,
+    "date": "2022-08-15",
+    "fill": 3.168415,
+    "net_proceeds": 942.69767,
+    "quantity": 298.0,
+    "ticker": "SNDL"
+   },
+   {
+    "collapse": false,
+    "commission": 0.34500000000000003,
+    "date": "2022-08-16",
+    "fill": 28.415785,
+    "net_proceeds": 1960.344165,
+    "quantity": 69.0,
+    "ticker": "GLNG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.445,
+    "date": "2022-09-07",
+    "fill": 30.88455,
+    "net_proceeds": 2748.27995,
+    "quantity": 89.0,
+    "ticker": "GSAT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.155,
+    "date": "2022-09-29",
+    "fill": 103.84805000000001,
+    "net_proceeds": 3219.13455,
+    "quantity": 31.0,
+    "ticker": "CTXS"
+   },
+   {
+    "collapse": true,
+    "commission": 0.01,
+    "date": "2022-10-14",
+    "fill": 249.62512500000003,
+    "net_proceeds": 499.24025000000006,
+    "quantity": 2.0,
+    "ticker": "ATXI"
+   },
+   {
+    "collapse": true,
+    "commission": 0.14,
+    "date": "2022-10-18",
+    "fill": 93.43326,
+    "net_proceeds": 2615.99128,
+    "quantity": 28.0,
+    "ticker": "AVLR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.515,
+    "date": "2022-10-19",
+    "fill": 4.2378800000000005,
+    "net_proceeds": 435.9866400000001,
+    "quantity": 103.0,
+    "ticker": "OLPX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.34500000000000003,
+    "date": "2022-10-27",
+    "fill": 53.67315000000001,
+    "net_proceeds": 3703.1023500000006,
+    "quantity": 69.0,
+    "ticker": "TWTR"
+   },
+   {
+    "collapse": false,
+    "commission": 0.15,
+    "date": "2022-11-22",
+    "fill": 74.232865,
+    "net_proceeds": 2226.83595,
+    "quantity": 30.0,
+    "ticker": "CLR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.405,
+    "date": "2022-12-09",
+    "fill": 17.941025,
+    "net_proceeds": 1452.818025,
+    "quantity": 81.0,
+    "ticker": "QFIN"
+   },
+   {
+    "collapse": true,
+    "commission": 0.13,
+    "date": "2023-01-10",
+    "fill": 18.9905,
+    "net_proceeds": 493.62300000000005,
+    "quantity": 26.0,
+    "ticker": "DCT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.29,
+    "date": "2023-03-10",
+    "fill": 21.94902,
+    "net_proceeds": 1272.75316,
+    "quantity": 58.0,
+    "ticker": "CUZ"
+   },
+   {
+    "collapse": true,
+    "commission": 0.23,
+    "date": "2023-03-17",
+    "fill": 13.1934,
+    "net_proceeds": 606.6664,
+    "quantity": 46.0,
+    "ticker": "PEB"
+   },
+   {
+    "collapse": true,
+    "commission": 0.4,
+    "date": "2023-04-24",
+    "fill": 6.626685,
+    "net_proceeds": 529.7348000000001,
+    "quantity": 80.0,
+    "ticker": "GETY"
+   },
+   {
+    "collapse": true,
+    "commission": 0.795,
+    "date": "2023-04-28",
+    "fill": 3.508245,
+    "net_proceeds": 557.0159550000001,
+    "quantity": 159.0,
+    "ticker": "FRC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.295,
+    "date": "2023-05-01",
+    "fill": 38.9805,
+    "net_proceeds": 2299.5544999999997,
+    "quantity": 59.0,
+    "ticker": "OSH"
+   },
+   {
+    "collapse": false,
+    "commission": 0.135,
+    "date": "2023-06-06",
+    "fill": 114.17288500000001,
+    "net_proceeds": 3082.532895,
+    "quantity": 27.0,
+    "ticker": "FISV"
+   },
+   {
+    "collapse": true,
+    "commission": 1.05,
+    "date": "2023-06-08",
+    "fill": 7.646175,
+    "net_proceeds": 1604.64675,
+    "quantity": 210.0,
+    "ticker": "MVIS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.06,
+    "date": "2023-06-15",
+    "fill": 199.82004,
+    "net_proceeds": 2397.78048,
+    "quantity": 12.0,
+    "ticker": "RXDX"
+   },
+   {
+    "collapse": true,
+    "commission": 0.245,
+    "date": "2023-06-26",
+    "fill": 18.130930000000003,
+    "net_proceeds": 888.1705700000001,
+    "quantity": 49.0,
+    "ticker": "XM"
+   },
+   {
+    "collapse": true,
+    "commission": 0.27,
+    "date": "2023-07-20",
+    "fill": 12.69365,
+    "net_proceeds": 685.1871,
+    "quantity": 54.0,
+    "ticker": "VIR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.065,
+    "date": "2023-07-24",
+    "fill": 5.11744,
+    "net_proceeds": 66.46172,
+    "quantity": 13.0,
+    "ticker": "BBIG"
+   },
+   {
+    "collapse": true,
+    "commission": 0.93,
+    "date": "2023-07-28",
+    "fill": 5.527235,
+    "net_proceeds": 1027.13571,
+    "quantity": 186.0,
+    "ticker": "SIGA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.13,
+    "date": "2023-07-31",
+    "fill": 63.288340000000005,
+    "net_proceeds": 1645.3668400000001,
+    "quantity": 26.0,
+    "ticker": "PB"
+   },
+   {
+    "collapse": true,
+    "commission": 0.165,
+    "date": "2023-07-31",
+    "fill": 85.5572,
+    "net_proceeds": 2823.2226,
+    "quantity": 33.0,
+    "ticker": "SPCE"
+   },
+   {
+    "collapse": false,
+    "commission": 3.84,
+    "date": "2023-08-04",
+    "fill": 3.568215,
+    "net_proceeds": 2736.5491199999997,
+    "quantity": 768.0,
+    "ticker": "YELL"
+   },
+   {
+    "collapse": false,
+    "commission": 0.265,
+    "date": "2023-08-17",
+    "fill": 48.55571,
+    "net_proceeds": 2573.18763,
+    "quantity": 53.0,
+    "ticker": "AVT"
+   },
+   {
+    "collapse": true,
+    "commission": 0.015,
+    "date": "2023-08-22",
+    "fill": 6.366815000000001,
+    "net_proceeds": 19.085445,
+    "quantity": 3.0,
+    "ticker": "HKD"
+   },
+   {
+    "collapse": true,
+    "commission": 0.105,
+    "date": "2023-08-24",
+    "fill": 5.187405000000001,
+    "net_proceeds": 108.83050500000002,
+    "quantity": 21.0,
+    "ticker": "WOOF"
+   },
+   {
+    "collapse": false,
+    "commission": 0.09,
+    "date": "2023-08-29",
+    "fill": 179.89001,
+    "net_proceeds": 3237.93018,
+    "quantity": 18.0,
+    "ticker": "ABC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.115,
+    "date": "2023-09-11",
+    "fill": 100.599675,
+    "net_proceeds": 2313.6775250000005,
+    "quantity": 23.0,
+    "ticker": "WWE"
+   },
+   {
+    "collapse": true,
+    "commission": 1.24,
+    "date": "2023-09-25",
+    "fill": 6.4767600000000005,
+    "net_proceeds": 1604.99648,
+    "quantity": 248.0,
+    "ticker": "JOBY"
+   },
+   {
+    "collapse": false,
+    "commission": 2.645,
+    "date": "2023-10-03",
+    "fill": 4.147925000000001,
+    "net_proceeds": 2191.6073250000004,
+    "quantity": 529.0,
+    "ticker": "BNOX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.135,
+    "date": "2023-10-05",
+    "fill": 116.24185,
+    "net_proceeds": 3138.39495,
+    "quantity": 27.0,
+    "ticker": "HZNP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.165,
+    "date": "2023-10-12",
+    "fill": 94.37279000000001,
+    "net_proceeds": 3114.13707,
+    "quantity": 33.0,
+    "ticker": "ATVI"
+   },
+   {
+    "collapse": true,
+    "commission": 2.7800000000000002,
+    "date": "2023-10-12",
+    "fill": 2.548725,
+    "net_proceeds": 1414.3111000000001,
+    "quantity": 556.0,
+    "ticker": "TUP"
+   },
+   {
+    "collapse": true,
+    "commission": 0.085,
+    "date": "2023-10-13",
+    "fill": 18.1909,
+    "net_proceeds": 309.1603,
+    "quantity": 17.0,
+    "ticker": "ICPT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.20500000000000002,
+    "date": "2023-10-19",
+    "fill": 43.128425,
+    "net_proceeds": 1768.0604250000001,
+    "quantity": 41.0,
+    "ticker": "TFI"
+   },
+   {
+    "collapse": true,
+    "commission": 0.095,
+    "date": "2023-10-25",
+    "fill": 45.257360000000006,
+    "net_proceeds": 859.79484,
+    "quantity": 19.0,
+    "ticker": "BTAI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.13,
+    "date": "2023-11-07",
+    "fill": 86.946505,
+    "net_proceeds": 2260.4791299999997,
+    "quantity": 26.0,
+    "ticker": "NEWR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.06,
+    "date": "2023-11-20",
+    "fill": 42.3788,
+    "net_proceeds": 508.4856,
+    "quantity": 12.0,
+    "ticker": "CHPT"
+   },
+   {
+    "collapse": true,
+    "commission": 0.055,
+    "date": "2023-11-21",
+    "fill": 69.26535,
+    "net_proceeds": 761.8638500000001,
+    "quantity": 11.0,
+    "ticker": "CDIO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.085,
+    "date": "2023-11-21",
+    "fill": 142.40876,
+    "net_proceeds": 2420.86392,
+    "quantity": 17.0,
+    "ticker": "VMW"
+   },
+   {
+    "collapse": true,
+    "commission": 0.425,
+    "date": "2023-11-30",
+    "fill": 8.445775,
+    "net_proceeds": 717.465875,
+    "quantity": 85.0,
+    "ticker": "VFS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.075,
+    "date": "2023-12-13",
+    "fill": 228.62563000000003,
+    "net_proceeds": 3429.3094500000007,
+    "quantity": 15.0,
+    "ticker": "SGEN"
+   },
+   {
+    "collapse": true,
+    "commission": 0.715,
+    "date": "2024-01-03",
+    "fill": 16.501745000000003,
+    "net_proceeds": 2359.0345350000002,
+    "quantity": 143.0,
+    "ticker": "LTHM"
+   },
+   {
+    "collapse": true,
+    "commission": 0.49,
+    "date": "2024-01-09",
+    "fill": 18.17091,
+    "net_proceeds": 1780.25918,
+    "quantity": 98.0,
+    "ticker": "NEOG"
+   },
+   {
+    "collapse": true,
+    "commission": 0.595,
+    "date": "2024-01-11",
+    "fill": 2.128935,
+    "net_proceeds": 252.74826499999998,
+    "quantity": 119.0,
+    "ticker": "CAN"
+   },
+   {
+    "collapse": true,
+    "commission": 1.195,
+    "date": "2024-01-12",
+    "fill": 7.366315,
+    "net_proceeds": 1759.3542850000001,
+    "quantity": 239.0,
+    "ticker": "QS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.495,
+    "date": "2024-01-26",
+    "fill": 27.976005,
+    "net_proceeds": 2769.129495,
+    "quantity": 99.0,
+    "ticker": "ORI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.225,
+    "date": "2024-01-31",
+    "fill": 40.23987,
+    "net_proceeds": 1810.5691500000003,
+    "quantity": 45.0,
+    "ticker": "HP"
+   },
+   {
+    "collapse": true,
+    "commission": 0.115,
+    "date": "2024-02-08",
+    "fill": 14.792600000000002,
+    "net_proceeds": 340.11480000000006,
+    "quantity": 23.0,
+    "ticker": "LSPD"
+   },
+   {
+    "collapse": false,
+    "commission": 0.13,
+    "date": "2024-02-20",
+    "fill": 103.46824000000001,
+    "net_proceeds": 2690.04424,
+    "quantity": 26.0,
+    "ticker": "SUSA"
+   },
+   {
+    "collapse": true,
+    "commission": 0.19,
+    "date": "2024-02-29",
+    "fill": 31.484250000000003,
+    "net_proceeds": 1196.2115000000001,
+    "quantity": 38.0,
+    "ticker": "YY"
+   },
+   {
+    "collapse": false,
+    "commission": 2.61,
+    "date": "2024-03-01",
+    "fill": 5.807095,
+    "net_proceeds": 3028.69359,
+    "quantity": 522.0,
+    "ticker": "MINM"
+   },
+   {
+    "collapse": false,
+    "commission": 0.435,
+    "date": "2024-03-04",
+    "fill": 31.904040000000002,
+    "net_proceeds": 2775.21648,
+    "quantity": 87.0,
+    "ticker": "ACMR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.035,
+    "date": "2024-03-14",
+    "fill": 11.544225,
+    "net_proceeds": 80.77457500000001,
+    "quantity": 7.0,
+    "ticker": "PGY"
+   },
+   {
+    "collapse": true,
+    "commission": 0.18,
+    "date": "2024-03-15",
+    "fill": 33.992995,
+    "net_proceeds": 1223.56782,
+    "quantity": 36.0,
+    "ticker": "CALX"
+   },
+   {
+    "collapse": true,
+    "commission": 0.38,
+    "date": "2024-03-15",
+    "fill": 18.21089,
+    "net_proceeds": 1383.64764,
+    "quantity": 76.0,
+    "ticker": "COLB"
+   },
+   {
+    "collapse": false,
+    "commission": 0.09,
+    "date": "2024-03-15",
+    "fill": 156.82155,
+    "net_proceeds": 2822.6979,
+    "quantity": 18.0,
+    "ticker": "SPLK"
+   },
+   {
+    "collapse": true,
+    "commission": 0.155,
+    "date": "2024-03-18",
+    "fill": 46.63667,
+    "net_proceeds": 1445.58177,
+    "quantity": 31.0,
+    "ticker": "ZG"
+   },
+   {
+    "collapse": true,
+    "commission": 0.17,
+    "date": "2024-04-10",
+    "fill": 3.8962509000000005,
+    "net_proceeds": 132.30253060000004,
+    "quantity": 34.0,
+    "ticker": "MRIN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.38,
+    "date": "2024-04-12",
+    "fill": 27.64617,
+    "net_proceeds": 2100.72892,
+    "quantity": 76.0,
+    "ticker": "AMJ"
+   },
+   {
+    "collapse": true,
+    "commission": 0.835,
+    "date": "2024-04-16",
+    "fill": 9.51524,
+    "net_proceeds": 1588.21008,
+    "quantity": 167.0,
+    "ticker": "HE"
+   },
+   {
+    "collapse": false,
+    "commission": 0.43,
+    "date": "2024-04-17",
+    "fill": 33.393295,
+    "net_proceeds": 2871.3933700000002,
+    "quantity": 86.0,
+    "ticker": "EWU"
+   },
+   {
+    "collapse": true,
+    "commission": 0.11,
+    "date": "2024-04-19",
+    "fill": 23.88805,
+    "net_proceeds": 525.4271,
+    "quantity": 22.0,
+    "ticker": "BEAM"
+   },
+   {
+    "collapse": false,
+    "commission": 0.67,
+    "date": "2024-04-19",
+    "fill": 11.794100000000002,
+    "net_proceeds": 1579.7394000000002,
+    "quantity": 134.0,
+    "ticker": "DVAX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.045,
+    "date": "2024-04-25",
+    "fill": 401.66906500000005,
+    "net_proceeds": 3614.9765850000003,
+    "quantity": 9.0,
+    "ticker": "CACI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.225,
+    "date": "2024-04-30",
+    "fill": 52.083945,
+    "net_proceeds": 2343.552525,
+    "quantity": 45.0,
+    "ticker": "OMF"
+   },
+   {
+    "collapse": false,
+    "commission": 0.065,
+    "date": "2024-05-02",
+    "fill": 269.48519000000005,
+    "net_proceeds": 3503.2424700000006,
+    "quantity": 13.0,
+    "ticker": "PXD"
+   },
+   {
+    "collapse": false,
+    "commission": 0.15,
+    "date": "2024-05-06",
+    "fill": 99.71012000000002,
+    "net_proceeds": 2991.1536000000006,
+    "quantity": 30.0,
+    "ticker": "GBIL"
+   },
+   {
+    "collapse": true,
+    "commission": 0.08,
+    "date": "2024-05-08",
+    "fill": 29.3853,
+    "net_proceeds": 470.08480000000003,
+    "quantity": 16.0,
+    "ticker": "LAZR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.88,
+    "date": "2024-05-13",
+    "fill": 10.87456,
+    "net_proceeds": 1913.04256,
+    "quantity": 176.0,
+    "ticker": "IOVA"
+   },
+   {
+    "collapse": true,
+    "commission": 0.41500000000000004,
+    "date": "2024-05-17",
+    "fill": 19.790100000000002,
+    "net_proceeds": 1642.1633000000002,
+    "quantity": 83.0,
+    "ticker": "TLRY"
+   },
+   {
+    "collapse": true,
+    "commission": 0.545,
+    "date": "2024-05-20",
+    "fill": 7.9760100000000005,
+    "net_proceeds": 868.8400900000001,
+    "quantity": 109.0,
+    "ticker": "AG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.14,
+    "date": "2024-05-22",
+    "fill": 131.07443,
+    "net_proceeds": 3669.9440400000003,
+    "quantity": 28.0,
+    "ticker": "ASND"
+   },
+   {
+    "collapse": true,
+    "commission": 3.18,
+    "date": "2024-05-23",
+    "fill": 4.9875050000000005,
+    "net_proceeds": 3168.8731800000005,
+    "quantity": 636.0,
+    "ticker": "SOUN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.295,
+    "date": "2024-05-23",
+    "fill": 40.29984,
+    "net_proceeds": 2377.39556,
+    "quantity": 59.0,
+    "ticker": "URBN"
+   },
+   {
+    "collapse": true,
+    "commission": 1.58,
+    "date": "2024-05-30",
+    "fill": 8.585705,
+    "net_proceeds": 2711.5027800000003,
+    "quantity": 316.0,
+    "ticker": "CGC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.3,
+    "date": "2024-05-30",
+    "fill": 26.396795,
+    "net_proceeds": 1583.5077,
+    "quantity": 60.0,
+    "ticker": "IMVT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.045,
+    "date": "2024-05-30",
+    "fill": 334.582625,
+    "net_proceeds": 3011.198625,
+    "quantity": 9.0,
+    "ticker": "SWAV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.81,
+    "date": "2024-06-03",
+    "fill": 22.998495000000002,
+    "net_proceeds": 3724.9461900000006,
+    "quantity": 162.0,
+    "ticker": "JWN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.5700000000000001,
+    "date": "2024-06-10",
+    "fill": 15.442275,
+    "net_proceeds": 1759.8493500000002,
+    "quantity": 114.0,
+    "ticker": "DO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.4,
+    "date": "2024-06-12",
+    "fill": 35.26236,
+    "net_proceeds": 2820.5888,
+    "quantity": 80.0,
+    "ticker": "AMH"
+   },
+   {
+    "collapse": false,
+    "commission": 1.455,
+    "date": "2024-06-12",
+    "fill": 14.25287,
+    "net_proceeds": 4146.13017,
+    "quantity": 291.0,
+    "ticker": "ETRN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.395,
+    "date": "2024-06-12",
+    "fill": 28.795595,
+    "net_proceeds": 2274.4570049999998,
+    "quantity": 79.0,
+    "ticker": "SPTS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.09,
+    "date": "2024-06-13",
+    "fill": 141.08942000000002,
+    "net_proceeds": 2539.51956,
+    "quantity": 18.0,
+    "ticker": "ACLS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.61,
+    "date": "2024-06-13",
+    "fill": 18.71064,
+    "net_proceeds": 2282.08808,
+    "quantity": 122.0,
+    "ticker": "KIM"
+   },
+   {
+    "collapse": true,
+    "commission": 0.41500000000000004,
+    "date": "2024-06-13",
+    "fill": 28.865560000000002,
+    "net_proceeds": 2395.42648,
+    "quantity": 83.0,
+    "ticker": "NEP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.105,
+    "date": "2024-06-14",
+    "fill": 226.46671000000003,
+    "net_proceeds": 4755.695910000001,
+    "quantity": 21.0,
+    "ticker": "EXP"
+   },
+   {
+    "collapse": true,
+    "commission": 0.075,
+    "date": "2024-06-14",
+    "fill": 3.188405,
+    "net_proceeds": 47.75107499999999,
+    "quantity": 15.0,
+    "ticker": "LGVN"
+   },
+   {
+    "collapse": true,
+    "commission": 0.005,
+    "date": "2024-06-18",
+    "fill": 6.64537565,
+    "net_proceeds": 6.64037565,
+    "quantity": 1.0,
+    "ticker": "RELI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.08,
+    "date": "2024-06-21",
+    "fill": 286.34675500000003,
+    "net_proceeds": 4581.468080000001,
+    "quantity": 16.0,
+    "ticker": "AMR"
+   },
+   {
+    "collapse": false,
+    "commission": 0.105,
+    "date": "2024-06-21",
+    "fill": 126.706615,
+    "net_proceeds": 2660.733915,
+    "quantity": 21.0,
+    "ticker": "ARW"
+   },
+   {
+    "collapse": false,
+    "commission": 0.13,
+    "date": "2024-06-21",
+    "fill": 130.47473,
+    "net_proceeds": 3392.21298,
+    "quantity": 26.0,
+    "ticker": "AWK"
+   },
+   {
+    "collapse": false,
+    "commission": 0.085,
+    "date": "2024-06-21",
+    "fill": 169.5152,
+    "net_proceeds": 2881.6733999999997,
+    "quantity": 17.0,
+    "ticker": "FFIV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.085,
+    "date": "2024-06-21",
+    "fill": 125.83705000000002,
+    "net_proceeds": 2139.14485,
+    "quantity": 17.0,
+    "ticker": "MIDD"
+   },
+   {
+    "collapse": false,
+    "commission": 0.3,
+    "date": "2024-06-24",
+    "fill": 48.42577500000001,
+    "net_proceeds": 2905.2465,
+    "quantity": 60.0,
+    "ticker": "CM"
+   },
+   {
+    "collapse": true,
+    "commission": 0.315,
+    "date": "2024-06-24",
+    "fill": 57.111430000000006,
+    "net_proceeds": 3597.7050900000004,
+    "quantity": 63.0,
+    "ticker": "FMC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.195,
+    "date": "2024-06-24",
+    "fill": 67.68614000000001,
+    "net_proceeds": 2639.56446,
+    "quantity": 39.0,
+    "ticker": "IXUS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.28,
+    "date": "2024-06-24",
+    "fill": 56.621675,
+    "net_proceeds": 3170.5338,
+    "quantity": 56.0,
+    "ticker": "LSCC"
+   },
+   {
+    "collapse": false,
+    "commission": 1.625,
+    "date": "2024-06-24",
+    "fill": 10.904545,
+    "net_proceeds": 3542.3521250000003,
+    "quantity": 325.0,
+    "ticker": "ROIV"
+   },
+   {
+    "collapse": true,
+    "commission": 0.49,
+    "date": "2024-06-24",
+    "fill": 23.20839,
+    "net_proceeds": 2273.93222,
+    "quantity": 98.0,
+    "ticker": "UPST"
+   },
+   {
+    "collapse": false,
+    "commission": 0.045,
+    "date": "2024-06-24",
+    "fill": 306.556645,
+    "net_proceeds": 2758.964805,
+    "quantity": 9.0,
+    "ticker": "ZBRA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.22,
+    "date": "2024-06-25",
+    "fill": 83.46824500000001,
+    "net_proceeds": 3672.382780000001,
+    "quantity": 44.0,
+    "ticker": "GL"
+   },
+   {
+    "collapse": false,
+    "commission": 0.155,
+    "date": "2024-06-25",
+    "fill": 115.80207,
+    "net_proceeds": 3589.7091699999996,
+    "quantity": 31.0,
+    "ticker": "IEI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.07,
+    "date": "2024-06-25",
+    "fill": 214.29280000000003,
+    "net_proceeds": 3000.0292000000004,
+    "quantity": 14.0,
+    "ticker": "IWY"
+   },
+   {
+    "collapse": false,
+    "commission": 0.16,
+    "date": "2024-06-26",
+    "fill": 71.054455,
+    "net_proceeds": 2273.5825600000003,
+    "quantity": 32.0,
+    "ticker": "BLV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.6,
+    "date": "2024-06-26",
+    "fill": 29.10544,
+    "net_proceeds": 3492.0528000000004,
+    "quantity": 120.0,
+    "ticker": "CRBG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.61,
+    "date": "2024-06-26",
+    "fill": 24.437775000000002,
+    "net_proceeds": 2980.79855,
+    "quantity": 122.0,
+    "ticker": "GPS"
+   },
+   {
+    "collapse": true,
+    "commission": 0.12,
+    "date": "2024-06-26",
+    "fill": 140.92950000000002,
+    "net_proceeds": 3382.1880000000006,
+    "quantity": 24.0,
+    "ticker": "PAYC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.155,
+    "date": "2024-06-26",
+    "fill": 107.636155,
+    "net_proceeds": 3336.5658049999997,
+    "quantity": 31.0,
+    "ticker": "SJM"
+   },
+   {
+    "collapse": false,
+    "commission": 0.425,
+    "date": "2024-06-26",
+    "fill": 29.195395,
+    "net_proceeds": 2481.183575,
+    "quantity": 85.0,
+    "ticker": "UBS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.095,
+    "date": "2024-06-26",
+    "fill": 157.5212,
+    "net_proceeds": 2992.8078,
+    "quantity": 19.0,
+    "ticker": "WCC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.625,
+    "date": "2024-06-27",
+    "fill": 28.535725000000003,
+    "net_proceeds": 3566.3406250000003,
+    "quantity": 125.0,
+    "ticker": "AI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.18,
+    "date": "2024-06-27",
+    "fill": 87.57619000000001,
+    "net_proceeds": 3152.5628400000005,
+    "quantity": 36.0,
+    "ticker": "COO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.08,
+    "date": "2024-06-27",
+    "fill": 126.886525,
+    "net_proceeds": 2030.1044000000002,
+    "quantity": 16.0,
+    "ticker": "DEO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.19,
+    "date": "2024-06-27",
+    "fill": 76.38179000000001,
+    "net_proceeds": 2902.31802,
+    "quantity": 38.0,
+    "ticker": "EDU"
+   },
+   {
+    "collapse": false,
+    "commission": 0.17500000000000002,
+    "date": "2024-06-27",
+    "fill": 114.70262000000001,
+    "net_proceeds": 4014.4167,
+    "quantity": 35.0,
+    "ticker": "ESTC"
+   },
+   {
+    "collapse": true,
+    "commission": 0.20500000000000002,
+    "date": "2024-06-27",
+    "fill": 44.467755000000004,
+    "net_proceeds": 1822.9729550000002,
+    "quantity": 41.0,
+    "ticker": "EXAS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.71,
+    "date": "2024-06-27",
+    "fill": 24.60769,
+    "net_proceeds": 3493.5819800000004,
+    "quantity": 142.0,
+    "ticker": "GEN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.06,
+    "date": "2024-06-27",
+    "fill": 179.37027,
+    "net_proceeds": 2152.38324,
+    "quantity": 12.0,
+    "ticker": "GLOB"
+   },
+   {
+    "collapse": true,
+    "commission": 0.005,
+    "date": "2024-06-27",
+    "fill": 88.70562500000001,
+    "net_proceeds": 88.70062500000002,
+    "quantity": 1.0,
+    "ticker": "GOVX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.34,
+    "date": "2024-06-27",
+    "fill": 51.23437,
+    "net_proceeds": 3483.59716,
+    "quantity": 68.0,
+    "ticker": "IGSB"
+   },
+   {
+    "collapse": false,
+    "commission": 0.075,
+    "date": "2024-06-27",
+    "fill": 236.16186000000002,
+    "net_proceeds": 3542.3529000000003,
+    "quantity": 15.0,
+    "ticker": "MNDY"
+   },
+   {
+    "collapse": true,
+    "commission": 1.485,
+    "date": "2024-06-27",
+    "fill": 12.67366,
+    "net_proceeds": 3762.59202,
+    "quantity": 297.0,
+    "ticker": "PATH"
+   },
+   {
+    "collapse": false,
+    "commission": 0.315,
+    "date": "2024-06-27",
+    "fill": 63.548210000000005,
+    "net_proceeds": 4003.2222300000003,
+    "quantity": 63.0,
+    "ticker": "RDDT"
+   },
+   {
+    "collapse": true,
+    "commission": 1.025,
+    "date": "2024-06-27",
+    "fill": 20.72963,
+    "net_proceeds": 4248.549150000001,
+    "quantity": 205.0,
+    "ticker": "S"
+   },
+   {
+    "collapse": false,
+    "commission": 0.44,
+    "date": "2024-06-27",
+    "fill": 41.769105,
+    "net_proceeds": 3675.2412400000003,
+    "quantity": 88.0,
+    "ticker": "SRLN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.385,
+    "date": "2024-06-27",
+    "fill": 37.24137,
+    "net_proceeds": 2867.20049,
+    "quantity": 77.0,
+    "ticker": "ST"
+   },
+   {
+    "collapse": false,
+    "commission": 0.68,
+    "date": "2024-06-27",
+    "fill": 19.760115,
+    "net_proceeds": 2686.69564,
+    "quantity": 136.0,
+    "ticker": "STLA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.2,
+    "date": "2024-06-27",
+    "fill": 104.04795,
+    "net_proceeds": 4161.718,
+    "quantity": 40.0,
+    "ticker": "STX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.455,
+    "date": "2024-06-27",
+    "fill": 37.990995,
+    "net_proceeds": 3456.725545,
+    "quantity": 91.0,
+    "ticker": "SU"
+   },
+   {
+    "collapse": false,
+    "commission": 0.23500000000000001,
+    "date": "2024-06-27",
+    "fill": 55.962005000000005,
+    "net_proceeds": 2629.9792350000002,
+    "quantity": 47.0,
+    "ticker": "TWLO"
+   }
+  ],
+  "forced_exit_net_proceeds_fraction": 0.6609504124609,
+  "forced_exit_value_fraction": 0.6614314781999997,
+  "forced_exits": 309,
+  "forced_exits_measured_period": 309,
+  "id": "eq_ew_pit",
+  "reconciliation": {
+   "diag_forced_exits": 309,
+   "diag_gross_value": 661431.4781999997,
+   "fills_forced_exits": 309,
+   "fills_gross_value": 661431.4782,
+   "reconciled": true
+  },
+  "summary": {
+   "stressed_all": {
+    "ann_mean": 0.03753387304972746,
+    "cagr": 0.02482523342169518,
+    "days": 1967,
+    "max_drawdown": -0.3191508211899329,
+    "sharpe": 0.23320105565579072
+   },
+   "stressed_collapses": {
+    "ann_mean": 0.08400561603362768,
+    "cagr": 0.07365918415157902,
+    "days": 1967,
+    "max_drawdown": -0.3123265445395792,
+    "sharpe": 0.5236637031206886
+   },
+   "unstressed": {
+    "ann_mean": 0.09298951705608521,
+    "cagr": 0.08336137844503555,
+    "days": 1967,
+    "max_drawdown": -0.3123265445395792,
+    "sharpe": 0.5800012419793318
+   }
+  }
+ },
+ "candidate": {
+  "cell": {},
+  "collapse_exits": 82,
+  "collapse_net_proceeds_fraction": 0.14839140353160002,
+  "coverage_published": true,
+  "exits": [
+   {
+    "collapse": false,
+    "commission": 1.5,
+    "date": "2016-09-02",
+    "fill": 6.7736115,
+    "net_proceeds": 2030.58345,
+    "quantity": 300.0,
+    "ticker": "ARMH"
+   },
+   {
+    "collapse": false,
+    "commission": 0.875,
+    "date": "2016-09-02",
+    "fill": 12.603695,
+    "net_proceeds": 2204.771625,
+    "quantity": 175.0,
+    "ticker": "SPU"
+   },
+   {
+    "collapse": false,
+    "commission": 0.21,
+    "date": "2016-09-02",
+    "fill": 47.7143309,
+    "net_proceeds": 2003.7918978,
+    "quantity": 42.0,
+    "ticker": "TYC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.35000000000000003,
+    "date": "2016-09-06",
+    "fill": 29.035475,
+    "net_proceeds": 2032.1332500000003,
+    "quantity": 70.0,
+    "ticker": "EMC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.125,
+    "date": "2016-09-27",
+    "fill": 81.39928,
+    "net_proceeds": 2034.8570000000002,
+    "quantity": 25.0,
+    "ticker": "MDVN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.34500000000000003,
+    "date": "2016-10-04",
+    "fill": 23.988,
+    "net_proceeds": 1654.827,
+    "quantity": 69.0,
+    "ticker": "COTYw"
+   },
+   {
+    "collapse": false,
+    "commission": 0.165,
+    "date": "2016-11-15",
+    "fill": 60.369800000000005,
+    "net_proceeds": 1992.0384000000001,
+    "quantity": 33.0,
+    "ticker": "ININ"
+   },
+   {
+    "collapse": false,
+    "commission": 0.18,
+    "date": "2016-12-05",
+    "fill": 38.870555,
+    "net_proceeds": 1399.1599800000001,
+    "quantity": 36.0,
+    "ticker": "IM"
+   },
+   {
+    "collapse": false,
+    "commission": 0.03,
+    "date": "2016-12-07",
+    "fill": 195.86202000000003,
+    "net_proceeds": 1175.1421200000002,
+    "quantity": 6.0,
+    "ticker": "LNKD"
+   },
+   {
+    "collapse": false,
+    "commission": 0.125,
+    "date": "2016-12-08",
+    "fill": 50.804585,
+    "net_proceeds": 1269.9896250000002,
+    "quantity": 25.0,
+    "ticker": "DWTI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.275,
+    "date": "2016-12-08",
+    "fill": 24.60769,
+    "net_proceeds": 1353.14795,
+    "quantity": 55.0,
+    "ticker": "UWTI"
+   },
+   {
+    "collapse": true,
+    "commission": 0.185,
+    "date": "2016-12-12",
+    "fill": 5.287355000000001,
+    "net_proceeds": 195.44713500000003,
+    "quantity": 37.0,
+    "ticker": "OPHT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.09,
+    "date": "2017-01-04",
+    "fill": 80.77959,
+    "net_proceeds": 1453.94262,
+    "quantity": 18.0,
+    "ticker": "STJ"
+   },
+   {
+    "collapse": false,
+    "commission": 0.4,
+    "date": "2017-02-02",
+    "fill": 19.3903,
+    "net_proceeds": 1550.8239999999998,
+    "quantity": 80.0,
+    "ticker": "XXIA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.325,
+    "date": "2017-02-15",
+    "fill": 23.978005,
+    "net_proceeds": 1558.2453249999999,
+    "quantity": 65.0,
+    "ticker": "ARIA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.125,
+    "date": "2017-03-31",
+    "fill": 68.97549500000001,
+    "net_proceeds": 1724.2623750000002,
+    "quantity": 25.0,
+    "ticker": "CSC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.195,
+    "date": "2017-04-11",
+    "fill": 56.21188000000001,
+    "net_proceeds": 2192.0683200000003,
+    "quantity": 39.0,
+    "ticker": "WWAV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.09,
+    "date": "2017-06-14",
+    "fill": 89.93501,
+    "net_proceeds": 1618.7401800000002,
+    "quantity": 18.0,
+    "ticker": "MJN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.16,
+    "date": "2017-06-16",
+    "fill": 52.55371,
+    "net_proceeds": 1681.55872,
+    "quantity": 32.0,
+    "ticker": "YHOO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.1,
+    "date": "2017-06-21",
+    "fill": 92.76359500000001,
+    "net_proceeds": 1855.1719000000003,
+    "quantity": 20.0,
+    "ticker": "SYT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.18,
+    "date": "2017-06-22",
+    "fill": 60.939515,
+    "net_proceeds": 2193.6425400000003,
+    "quantity": 36.0,
+    "ticker": "PVTB"
+   },
+   {
+    "collapse": false,
+    "commission": 0.145,
+    "date": "2017-07-03",
+    "fill": 57.651160000000004,
+    "net_proceeds": 1671.73864,
+    "quantity": 29.0,
+    "ticker": "BHI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.01,
+    "date": "2017-07-17",
+    "fill": 314.772535,
+    "net_proceeds": 629.53507,
+    "quantity": 2.0,
+    "ticker": "PNRA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.095,
+    "date": "2017-07-24",
+    "fill": 65.36730000000001,
+    "net_proceeds": 1241.8837000000003,
+    "quantity": 19.0,
+    "ticker": "RAI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.065,
+    "date": "2017-07-31",
+    "fill": 99.48023500000001,
+    "net_proceeds": 1293.178055,
+    "quantity": 13.0,
+    "ticker": "TSO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.145,
+    "date": "2017-08-25",
+    "fill": 41.969005,
+    "net_proceeds": 1216.956145,
+    "quantity": 29.0,
+    "ticker": "WFM"
+   },
+   {
+    "collapse": false,
+    "commission": 0.035,
+    "date": "2017-10-02",
+    "fill": 179.700105,
+    "net_proceeds": 1257.865735,
+    "quantity": 7.0,
+    "ticker": "KITE"
+   },
+   {
+    "collapse": false,
+    "commission": 0.48,
+    "date": "2017-10-13",
+    "fill": 11.564215,
+    "net_proceeds": 1109.68464,
+    "quantity": 96.0,
+    "ticker": "BBRY"
+   },
+   {
+    "collapse": false,
+    "commission": 1.1400000000000001,
+    "date": "2017-10-19",
+    "fill": 7.806095,
+    "net_proceeds": 1778.6496599999998,
+    "quantity": 228.0,
+    "ticker": "FIG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.045,
+    "date": "2017-11-14",
+    "fill": 103.42826000000001,
+    "net_proceeds": 930.8093400000001,
+    "quantity": 9.0,
+    "ticker": "Q"
+   },
+   {
+    "collapse": false,
+    "commission": 0.11,
+    "date": "2017-11-15",
+    "fill": 53.723125,
+    "net_proceeds": 1181.7987500000002,
+    "quantity": 22.0,
+    "ticker": "ABCO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.06,
+    "date": "2017-12-28",
+    "fill": 81.57919000000001,
+    "net_proceeds": 978.8902800000002,
+    "quantity": 12.0,
+    "ticker": "AAAP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.015,
+    "date": "2017-12-28",
+    "fill": 331.07438,
+    "net_proceeds": 993.2081400000001,
+    "quantity": 3.0,
+    "ticker": "BCR"
+   },
+   {
+    "collapse": false,
+    "commission": 0.095,
+    "date": "2018-01-23",
+    "fill": 54.972500000000004,
+    "net_proceeds": 1044.3825,
+    "quantity": 19.0,
+    "ticker": "BSFT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.185,
+    "date": "2018-01-26",
+    "fill": 33.46326,
+    "net_proceeds": 1237.95562,
+    "quantity": 37.0,
+    "ticker": "ATEST.G"
+   },
+   {
+    "collapse": true,
+    "commission": 0.055,
+    "date": "2018-02-07",
+    "fill": 6.226885000000001,
+    "net_proceeds": 68.440735,
+    "quantity": 11.0,
+    "ticker": "XIV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.13,
+    "date": "2018-02-12",
+    "fill": 53.09344,
+    "net_proceeds": 1380.29944,
+    "quantity": 26.0,
+    "ticker": "CAA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.125,
+    "date": "2018-02-27",
+    "fill": 52.19389,
+    "net_proceeds": 1304.72225,
+    "quantity": 25.0,
+    "ticker": "HCN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.085,
+    "date": "2018-03-06",
+    "fill": 89.99498000000001,
+    "net_proceeds": 1529.82966,
+    "quantity": 17.0,
+    "ticker": "SNI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.23,
+    "date": "2018-04-03",
+    "fill": 41.209385,
+    "net_proceeds": 1895.4017099999999,
+    "quantity": 46.0,
+    "ticker": "CSRA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.16,
+    "date": "2018-05-03",
+    "fill": 44.47775,
+    "net_proceeds": 1423.128,
+    "quantity": 32.0,
+    "ticker": "FNGN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.23,
+    "date": "2018-06-04",
+    "fill": 31.974005000000002,
+    "net_proceeds": 1470.5742300000002,
+    "quantity": 46.0,
+    "ticker": "GXP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.07,
+    "date": "2018-06-06",
+    "fill": 127.886025,
+    "net_proceeds": 1790.33435,
+    "quantity": 14.0,
+    "ticker": "MON"
+   },
+   {
+    "collapse": false,
+    "commission": 0.1,
+    "date": "2018-06-14",
+    "fill": 98.720615,
+    "net_proceeds": 1974.3123,
+    "quantity": 20.0,
+    "ticker": "TWX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.06,
+    "date": "2018-07-09",
+    "fill": 123.59817000000001,
+    "net_proceeds": 1483.1180400000003,
+    "quantity": 12.0,
+    "ticker": "DPS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.23,
+    "date": "2018-07-13",
+    "fill": 23.3883,
+    "net_proceeds": 1075.6318,
+    "quantity": 46.0,
+    "ticker": "VRX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.035,
+    "date": "2018-07-30",
+    "fill": 136.9315,
+    "net_proceeds": 958.4855,
+    "quantity": 7.0,
+    "ticker": "FMI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.21,
+    "date": "2018-08-31",
+    "fill": 34.11293500000001,
+    "net_proceeds": 1432.5332700000004,
+    "quantity": 42.0,
+    "ticker": "ILG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.04,
+    "date": "2018-09-28",
+    "fill": 153.42325,
+    "net_proceeds": 1227.346,
+    "quantity": 8.0,
+    "ticker": "ANDV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.11,
+    "date": "2018-10-04",
+    "fill": 62.928520000000006,
+    "net_proceeds": 1384.3174400000003,
+    "quantity": 22.0,
+    "ticker": "KLXI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.14,
+    "date": "2018-10-15",
+    "fill": 32.44377,
+    "net_proceeds": 908.28556,
+    "quantity": 28.0,
+    "ticker": "SVU"
+   },
+   {
+    "collapse": false,
+    "commission": 0.28500000000000003,
+    "date": "2018-10-18",
+    "fill": 21.459265,
+    "net_proceeds": 1222.8931049999999,
+    "quantity": 57.0,
+    "ticker": "ETP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.04,
+    "date": "2018-10-30",
+    "fill": 164.41775,
+    "net_proceeds": 1315.3020000000001,
+    "quantity": 8.0,
+    "ticker": "PX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.085,
+    "date": "2018-11-02",
+    "fill": 44.41778,
+    "net_proceeds": 755.01726,
+    "quantity": 17.0,
+    "ticker": "CA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.03,
+    "date": "2018-11-28",
+    "fill": 212.59365,
+    "net_proceeds": 1275.5319,
+    "quantity": 6.0,
+    "ticker": "AET"
+   },
+   {
+    "collapse": false,
+    "commission": 0.055,
+    "date": "2018-12-20",
+    "fill": 92.283835,
+    "net_proceeds": 1015.067185,
+    "quantity": 11.0,
+    "ticker": "ESRX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.035,
+    "date": "2018-12-27",
+    "fill": 79.96000000000001,
+    "net_proceeds": 559.6850000000001,
+    "quantity": 7.0,
+    "ticker": "DVMT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.445,
+    "date": "2018-12-31",
+    "fill": 13.53323,
+    "net_proceeds": 1204.0124700000001,
+    "quantity": 89.0,
+    "ticker": "ABX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.115,
+    "date": "2018-12-31",
+    "fill": 37.90104,
+    "net_proceeds": 871.60892,
+    "quantity": 23.0,
+    "ticker": "KORS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.03,
+    "date": "2019-01-04",
+    "fill": 179.1104,
+    "net_proceeds": 1074.6324,
+    "quantity": 6.0,
+    "ticker": "SHPG"
+   },
+   {
+    "collapse": true,
+    "commission": 0.06,
+    "date": "2019-01-18",
+    "fill": 74.92251999999999,
+    "net_proceeds": 899.01024,
+    "quantity": 12.0,
+    "ticker": "TSRO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.115,
+    "date": "2019-02-14",
+    "fill": 42.718630000000005,
+    "net_proceeds": 982.4134900000001,
+    "quantity": 23.0,
+    "ticker": "AHL"
+   },
+   {
+    "collapse": true,
+    "commission": 2.6350000000000002,
+    "date": "2019-02-28",
+    "fill": 1.5192400000000001,
+    "net_proceeds": 798.0044800000001,
+    "quantity": 527.0,
+    "ticker": "JCP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.085,
+    "date": "2019-03-29",
+    "fill": 48.96550500000001,
+    "net_proceeds": 832.3285850000001,
+    "quantity": 17.0,
+    "ticker": "IDTI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.43,
+    "date": "2019-04-17",
+    "fill": 11.184405,
+    "net_proceeds": 961.4288300000001,
+    "quantity": 86.0,
+    "ticker": "GG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.265,
+    "date": "2019-05-01",
+    "fill": 26.636675,
+    "net_proceeds": 1411.4787749999998,
+    "quantity": 53.0,
+    "ticker": "VXXB"
+   },
+   {
+    "collapse": false,
+    "commission": 0.255,
+    "date": "2019-05-28",
+    "fill": 19.49025,
+    "net_proceeds": 993.74775,
+    "quantity": 51.0,
+    "ticker": "BPR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.16,
+    "date": "2019-05-31",
+    "fill": 30.50474,
+    "net_proceeds": 975.9916800000001,
+    "quantity": 32.0,
+    "ticker": "DWDP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.03,
+    "date": "2019-06-28",
+    "fill": 189.035435,
+    "net_proceeds": 1134.18261,
+    "quantity": 6.0,
+    "ticker": "HRS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.035,
+    "date": "2019-07-08",
+    "fill": 187.61614500000002,
+    "net_proceeds": 1313.278015,
+    "quantity": 7.0,
+    "ticker": "RHT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.23,
+    "date": "2019-07-26",
+    "fill": 31.674155000000003,
+    "net_proceeds": 1456.78113,
+    "quantity": 46.0,
+    "ticker": "FDC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.055,
+    "date": "2019-07-30",
+    "fill": 134.9325,
+    "net_proceeds": 1484.2025,
+    "quantity": 11.0,
+    "ticker": "WP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.035,
+    "date": "2019-07-31",
+    "fill": 169.445235,
+    "net_proceeds": 1186.081645,
+    "quantity": 7.0,
+    "ticker": "DATA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.09,
+    "date": "2019-08-08",
+    "fill": 72.733615,
+    "net_proceeds": 1309.11507,
+    "quantity": 18.0,
+    "ticker": "APC"
+   },
+   {
+    "collapse": true,
+    "commission": 0.17500000000000002,
+    "date": "2019-10-02",
+    "fill": 19.620185,
+    "net_proceeds": 686.531475,
+    "quantity": 35.0,
+    "ticker": "AABA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.055,
+    "date": "2019-10-04",
+    "fill": 52.963505000000005,
+    "net_proceeds": 582.5435550000001,
+    "quantity": 11.0,
+    "ticker": "VSM"
+   },
+   {
+    "collapse": false,
+    "commission": 0.135,
+    "date": "2019-10-17",
+    "fill": 22.06896,
+    "net_proceeds": 595.7269200000001,
+    "quantity": 27.0,
+    "ticker": "BHGE"
+   },
+   {
+    "collapse": false,
+    "commission": 0.145,
+    "date": "2019-11-04",
+    "fill": 34.912535,
+    "net_proceeds": 1012.3185149999999,
+    "quantity": 29.0,
+    "ticker": "CTRP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.155,
+    "date": "2019-11-04",
+    "fill": 23.738125,
+    "net_proceeds": 735.7268750000001,
+    "quantity": 31.0,
+    "ticker": "SYMC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.045,
+    "date": "2019-11-20",
+    "fill": 108.18588,
+    "net_proceeds": 973.62792,
+    "quantity": 9.0,
+    "ticker": "CELG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.145,
+    "date": "2019-12-04",
+    "fill": 40.749615000000006,
+    "net_proceeds": 1181.5938350000001,
+    "quantity": 29.0,
+    "ticker": "CBS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.105,
+    "date": "2019-12-06",
+    "fill": 54.212880000000006,
+    "net_proceeds": 1138.3654800000002,
+    "quantity": 21.0,
+    "ticker": "BBT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.045,
+    "date": "2019-12-09",
+    "fill": 85.79708000000001,
+    "net_proceeds": 772.1287200000002,
+    "quantity": 9.0,
+    "ticker": "JEC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.09,
+    "date": "2020-01-03",
+    "fill": 84.85755,
+    "net_proceeds": 1527.3459,
+    "quantity": 18.0,
+    "ticker": "MDCO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.01,
+    "date": "2020-01-23",
+    "fill": 349.74504,
+    "net_proceeds": 699.48008,
+    "quantity": 2.0,
+    "ticker": "WCG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.06,
+    "date": "2020-02-03",
+    "fill": 61.919025000000005,
+    "net_proceeds": 742.9683000000001,
+    "quantity": 12.0,
+    "ticker": "LPT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.185,
+    "date": "2020-03-06",
+    "fill": 34.972505000000005,
+    "net_proceeds": 1293.7976850000002,
+    "quantity": 37.0,
+    "ticker": "ZAYO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.065,
+    "date": "2020-03-11",
+    "fill": 75.962,
+    "net_proceeds": 987.441,
+    "quantity": 13.0,
+    "ticker": "INXN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.045,
+    "date": "2020-04-02",
+    "fill": 116.90152,
+    "net_proceeds": 1052.0686799999999,
+    "quantity": 9.0,
+    "ticker": "RTN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.065,
+    "date": "2020-04-02",
+    "fill": 85.96699500000001,
+    "net_proceeds": 1117.5059350000001,
+    "quantity": 13.0,
+    "ticker": "UTX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.14,
+    "date": "2020-05-04",
+    "fill": 27.296345,
+    "net_proceeds": 764.15766,
+    "quantity": 28.0,
+    "ticker": "TSG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.035,
+    "date": "2020-05-08",
+    "fill": 192.92349000000002,
+    "net_proceeds": 1350.42943,
+    "quantity": 7.0,
+    "ticker": "AGN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.025,
+    "date": "2020-05-28",
+    "fill": 136.39177,
+    "net_proceeds": 681.93385,
+    "quantity": 5.0,
+    "ticker": "WBC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.135,
+    "date": "2020-06-02",
+    "fill": 34.86256,
+    "net_proceeds": 941.15412,
+    "quantity": 27.0,
+    "ticker": "ESNT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.055,
+    "date": "2020-06-19",
+    "fill": 97.801075,
+    "net_proceeds": 1075.756825,
+    "quantity": 11.0,
+    "ticker": "AXE"
+   },
+   {
+    "collapse": false,
+    "commission": 0.015,
+    "date": "2020-06-25",
+    "fill": 553.5539845500001,
+    "net_proceeds": 1660.6469536500001,
+    "quantity": 3.0,
+    "ticker": "DGAZ"
+   },
+   {
+    "collapse": false,
+    "commission": 0.05,
+    "date": "2020-06-29",
+    "fill": 144.82755,
+    "net_proceeds": 1448.2255,
+    "quantity": 10.0,
+    "ticker": "TECD"
+   },
+   {
+    "collapse": true,
+    "commission": 0.04,
+    "date": "2020-07-02",
+    "fill": 112.30382,
+    "net_proceeds": 898.39056,
+    "quantity": 8.0,
+    "ticker": "TVIX"
+   },
+   {
+    "collapse": true,
+    "commission": 0.385,
+    "date": "2020-07-10",
+    "fill": 10.81459,
+    "net_proceeds": 832.33843,
+    "quantity": 77.0,
+    "ticker": "UGAZ"
+   },
+   {
+    "collapse": false,
+    "commission": 0.13,
+    "date": "2020-07-20",
+    "fill": 38.22088,
+    "net_proceeds": 993.61288,
+    "quantity": 26.0,
+    "ticker": "ERI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.13,
+    "date": "2020-08-12",
+    "fill": 28.985500000000002,
+    "net_proceeds": 753.493,
+    "quantity": 26.0,
+    "ticker": "FSCT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.11,
+    "date": "2020-09-04",
+    "fill": 29.775105,
+    "net_proceeds": 654.94231,
+    "quantity": 22.0,
+    "ticker": "RST"
+   },
+   {
+    "collapse": false,
+    "commission": 0.46,
+    "date": "2020-09-17",
+    "fill": 10.9945,
+    "net_proceeds": 1011.034,
+    "quantity": 92.0,
+    "ticker": "CTL"
+   },
+   {
+    "collapse": false,
+    "commission": 0.105,
+    "date": "2020-10-01",
+    "fill": 44.887544999999996,
+    "net_proceeds": 942.5334449999999,
+    "quantity": 21.0,
+    "ticker": "SHLL"
+   },
+   {
+    "collapse": false,
+    "commission": 0.12,
+    "date": "2020-10-07",
+    "fill": 43.058460000000004,
+    "net_proceeds": 1033.2830400000003,
+    "quantity": 24.0,
+    "ticker": "VSLR"
+   },
+   {
+    "collapse": false,
+    "commission": 0.1,
+    "date": "2020-10-09",
+    "fill": 34.572705000000006,
+    "net_proceeds": 691.3541000000001,
+    "quantity": 20.0,
+    "ticker": "AIMT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.06,
+    "date": "2020-10-22",
+    "fill": 87.81607000000001,
+    "net_proceeds": 1053.7328400000001,
+    "quantity": 12.0,
+    "ticker": "IMMU"
+   },
+   {
+    "collapse": false,
+    "commission": 0.045,
+    "date": "2020-10-29",
+    "fill": 139.700115,
+    "net_proceeds": 1257.256035,
+    "quantity": 9.0,
+    "ticker": "LVGO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.15,
+    "date": "2020-11-10",
+    "fill": 43.868055000000005,
+    "net_proceeds": 1315.89165,
+    "quantity": 30.0,
+    "ticker": "NAV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.045,
+    "date": "2020-12-18",
+    "fill": 91.68413500000001,
+    "net_proceeds": 825.1122150000001,
+    "quantity": 9.0,
+    "ticker": "GLIBA"
+   },
+   {
+    "collapse": true,
+    "commission": 0.515,
+    "date": "2020-12-22",
+    "fill": 6.8665650000000005,
+    "net_proceeds": 706.7411950000001,
+    "quantity": 103.0,
+    "ticker": "FIT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.185,
+    "date": "2020-12-23",
+    "fill": 55.962005000000005,
+    "net_proceeds": 2070.4091850000004,
+    "quantity": 37.0,
+    "ticker": "HDS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.25,
+    "date": "2020-12-29",
+    "fill": 25.477255,
+    "net_proceeds": 1273.61275,
+    "quantity": 50.0,
+    "ticker": "LCA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.23,
+    "date": "2020-12-30",
+    "fill": 18.110940000000003,
+    "net_proceeds": 832.8732400000001,
+    "quantity": 46.0,
+    "ticker": "FCAU"
+   },
+   {
+    "collapse": false,
+    "commission": 0.075,
+    "date": "2021-01-06",
+    "fill": 131.39427,
+    "net_proceeds": 1970.83905,
+    "quantity": 15.0,
+    "ticker": "TIF"
+   },
+   {
+    "collapse": false,
+    "commission": 0.455,
+    "date": "2021-01-07",
+    "fill": 16.01199,
+    "net_proceeds": 1456.6360900000002,
+    "quantity": 91.0,
+    "ticker": "IPOC"
+   },
+   {
+    "collapse": true,
+    "commission": 0.26,
+    "date": "2021-01-08",
+    "fill": 27.496245000000002,
+    "net_proceeds": 1429.54474,
+    "quantity": 52.0,
+    "ticker": "CHL"
+   },
+   {
+    "collapse": false,
+    "commission": 0.97,
+    "date": "2021-01-27",
+    "fill": 9.305345,
+    "net_proceeds": 1804.2669300000002,
+    "quantity": 194.0,
+    "ticker": "KNDI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.115,
+    "date": "2021-02-03",
+    "fill": 60.974497500000005,
+    "net_proceeds": 1402.2984425000002,
+    "quantity": 23.0,
+    "ticker": "FIZZ"
+   },
+   {
+    "collapse": false,
+    "commission": 0.14,
+    "date": "2021-02-26",
+    "fill": 73.03346499999999,
+    "net_proceeds": 2044.7970199999997,
+    "quantity": 28.0,
+    "ticker": "EV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.4,
+    "date": "2021-03-04",
+    "fill": 17.141424999999998,
+    "net_proceeds": 1370.9139999999998,
+    "quantity": 80.0,
+    "ticker": "SKT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.485,
+    "date": "2021-03-30",
+    "fill": 15.092450000000001,
+    "net_proceeds": 1463.4826500000001,
+    "quantity": 97.0,
+    "ticker": "BFT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.185,
+    "date": "2021-04-09",
+    "fill": 17.29135,
+    "net_proceeds": 639.5949500000002,
+    "quantity": 37.0,
+    "ticker": "RICE"
+   },
+   {
+    "collapse": false,
+    "commission": 0.04,
+    "date": "2021-04-12",
+    "fill": 177.03144,
+    "net_proceeds": 1416.21152,
+    "quantity": 8.0,
+    "ticker": "VAR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.36,
+    "date": "2021-04-14",
+    "fill": 12.49375,
+    "net_proceeds": 899.19,
+    "quantity": 72.0,
+    "ticker": "TV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.425,
+    "date": "2021-04-30",
+    "fill": 15.372310000000002,
+    "net_proceeds": 1306.2213500000003,
+    "quantity": 85.0,
+    "ticker": "APHA"
+   },
+   {
+    "collapse": true,
+    "commission": 0.44,
+    "date": "2021-05-05",
+    "fill": 27.06646,
+    "net_proceeds": 2381.40848,
+    "quantity": 88.0,
+    "ticker": "GSX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.34,
+    "date": "2021-05-26",
+    "fill": 28.595695000000003,
+    "net_proceeds": 1944.1672600000002,
+    "quantity": 68.0,
+    "ticker": "PAY"
+   },
+   {
+    "collapse": false,
+    "commission": 0.3,
+    "date": "2021-05-28",
+    "fill": 20.139924999999998,
+    "net_proceeds": 1208.0955,
+    "quantity": 60.0,
+    "ticker": "IPOE"
+   },
+   {
+    "collapse": false,
+    "commission": 1.03,
+    "date": "2021-06-09",
+    "fill": 4.197900000000001,
+    "net_proceeds": 863.7374000000002,
+    "quantity": 206.0,
+    "ticker": "SAN"
+   },
+   {
+    "collapse": true,
+    "commission": 0.03,
+    "date": "2021-06-29",
+    "fill": 368.4157,
+    "net_proceeds": 2210.4642,
+    "quantity": 6.0,
+    "ticker": "BTX"
+   },
+   {
+    "collapse": false,
+    "commission": 2.54,
+    "date": "2021-07-07",
+    "fill": 5.047475,
+    "net_proceeds": 2561.5773000000004,
+    "quantity": 508.0,
+    "ticker": "BSQR"
+   },
+   {
+    "collapse": true,
+    "commission": 1.945,
+    "date": "2021-07-15",
+    "fill": 6.1169400000000005,
+    "net_proceeds": 2377.54466,
+    "quantity": 389.0,
+    "ticker": "BLIN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.075,
+    "date": "2021-07-20",
+    "fill": 182.40875,
+    "net_proceeds": 2736.05625,
+    "quantity": 15.0,
+    "ticker": "ALXN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.31,
+    "date": "2021-07-20",
+    "fill": 45.177400000000006,
+    "net_proceeds": 2800.6888000000004,
+    "quantity": 62.0,
+    "ticker": "WORK"
+   },
+   {
+    "collapse": true,
+    "commission": 0.625,
+    "date": "2021-07-22",
+    "fill": 2.7986,
+    "net_proceeds": 349.2,
+    "quantity": 125.0,
+    "ticker": "IGC"
+   },
+   {
+    "collapse": true,
+    "commission": 0.4,
+    "date": "2021-07-23",
+    "fill": 24.237875000000003,
+    "net_proceeds": 1938.63,
+    "quantity": 80.0,
+    "ticker": "CCIV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.185,
+    "date": "2021-08-02",
+    "fill": 79.88004000000001,
+    "net_proceeds": 2955.3764800000004,
+    "quantity": 37.0,
+    "ticker": "LB"
+   },
+   {
+    "collapse": true,
+    "commission": 1.725,
+    "date": "2021-08-10",
+    "fill": 9.255370000000001,
+    "net_proceeds": 3191.3776500000004,
+    "quantity": 345.0,
+    "ticker": "VXRT"
+   },
+   {
+    "collapse": false,
+    "commission": 185.745,
+    "date": "2021-08-26",
+    "fill": 0.8021987,
+    "net_proceeds": 29615.1345063,
+    "quantity": 37149.0,
+    "ticker": "RGC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.04,
+    "date": "2021-09-03",
+    "fill": 138.1309,
+    "net_proceeds": 1105.0072,
+    "quantity": 8.0,
+    "ticker": "LGND"
+   },
+   {
+    "collapse": false,
+    "commission": 0.41000000000000003,
+    "date": "2021-09-07",
+    "fill": 6.366815000000001,
+    "net_proceeds": 521.6688300000001,
+    "quantity": 82.0,
+    "ticker": "ADAP"
+   },
+   {
+    "collapse": true,
+    "commission": 5.3100000000000005,
+    "date": "2021-09-14",
+    "fill": 11.794100000000002,
+    "net_proceeds": 12520.024200000003,
+    "quantity": 1062.0,
+    "ticker": "SPRT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.705,
+    "date": "2021-10-07",
+    "fill": 15.982005000000001,
+    "net_proceeds": 2252.757705,
+    "quantity": 141.0,
+    "ticker": "CLDR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.435,
+    "date": "2021-10-11",
+    "fill": 6.89655,
+    "net_proceeds": 599.5648500000001,
+    "quantity": 87.0,
+    "ticker": "HYLN"
+   },
+   {
+    "collapse": true,
+    "commission": 0.085,
+    "date": "2021-10-12",
+    "fill": 41.15941,
+    "net_proceeds": 699.62497,
+    "quantity": 17.0,
+    "ticker": "CVAC"
+   },
+   {
+    "collapse": true,
+    "commission": 0.62,
+    "date": "2021-10-29",
+    "fill": 6.4667650000000005,
+    "net_proceeds": 801.25886,
+    "quantity": 124.0,
+    "ticker": "TIGR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.16,
+    "date": "2021-11-08",
+    "fill": 30.04497,
+    "net_proceeds": 961.27904,
+    "quantity": 32.0,
+    "ticker": "EHTH"
+   },
+   {
+    "collapse": true,
+    "commission": 0.37,
+    "date": "2021-11-16",
+    "fill": 5.227385000000001,
+    "net_proceeds": 386.45649000000003,
+    "quantity": 74.0,
+    "ticker": "RMO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.16,
+    "date": "2021-11-16",
+    "fill": 16.69165,
+    "net_proceeds": 533.9728,
+    "quantity": 32.0,
+    "ticker": "RXT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.28,
+    "date": "2021-11-19",
+    "fill": 25.807090000000002,
+    "net_proceeds": 1444.91704,
+    "quantity": 56.0,
+    "ticker": "BGFV"
+   },
+   {
+    "collapse": false,
+    "commission": 1.165,
+    "date": "2021-11-26",
+    "fill": 8.315840000000001,
+    "net_proceeds": 1936.4257200000004,
+    "quantity": 233.0,
+    "ticker": "AHPI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.02,
+    "date": "2021-12-13",
+    "fill": 293.443205,
+    "net_proceeds": 1173.75282,
+    "quantity": 4.0,
+    "ticker": "KSU"
+   },
+   {
+    "collapse": false,
+    "commission": 0.05,
+    "date": "2022-02-11",
+    "fill": 194.82254,
+    "net_proceeds": 1948.1754,
+    "quantity": 10.0,
+    "ticker": "XLNX"
+   },
+   {
+    "collapse": true,
+    "commission": 0.315,
+    "date": "2022-02-16",
+    "fill": 29.56521,
+    "net_proceeds": 1862.29323,
+    "quantity": 63.0,
+    "ticker": "VIAC"
+   },
+   {
+    "collapse": true,
+    "commission": 0.675,
+    "date": "2022-02-22",
+    "fill": 4.227885000000001,
+    "net_proceeds": 570.0894750000001,
+    "quantity": 135.0,
+    "ticker": "OCGN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.085,
+    "date": "2022-02-25",
+    "fill": 108.555695,
+    "net_proceeds": 1845.361815,
+    "quantity": 17.0,
+    "ticker": "INFO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.215,
+    "date": "2022-03-03",
+    "fill": 55.962005000000005,
+    "net_proceeds": 2406.151215,
+    "quantity": 43.0,
+    "ticker": "NUAN"
+   },
+   {
+    "collapse": true,
+    "commission": 1.225,
+    "date": "2022-03-03",
+    "fill": 5.787105,
+    "net_proceeds": 1416.615725,
+    "quantity": 245.0,
+    "ticker": "RSX"
+   },
+   {
+    "collapse": true,
+    "commission": 0.005,
+    "date": "2022-03-22",
+    "fill": 177.41125000000002,
+    "net_proceeds": 177.40625000000003,
+    "quantity": 1.0,
+    "ticker": "BKKT"
+   },
+   {
+    "collapse": true,
+    "commission": 0.015,
+    "date": "2022-03-24",
+    "fill": 4.29785,
+    "net_proceeds": 12.87855,
+    "quantity": 3.0,
+    "ticker": "LLL"
+   },
+   {
+    "collapse": false,
+    "commission": 0.20500000000000002,
+    "date": "2022-04-14",
+    "fill": 35.832075,
+    "net_proceeds": 1468.9100750000002,
+    "quantity": 41.0,
+    "ticker": "MTOR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.055,
+    "date": "2022-04-18",
+    "fill": 52.47375,
+    "net_proceeds": 577.1562500000001,
+    "quantity": 11.0,
+    "ticker": "CEI"
+   },
+   {
+    "collapse": true,
+    "commission": 0.27,
+    "date": "2022-04-28",
+    "fill": 16.31184,
+    "net_proceeds": 880.5693600000001,
+    "quantity": 54.0,
+    "ticker": "LC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.455,
+    "date": "2022-05-05",
+    "fill": 16.09195,
+    "net_proceeds": 1463.91245,
+    "quantity": 91.0,
+    "ticker": "HYMC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.09,
+    "date": "2022-06-07",
+    "fill": 94.87254,
+    "net_proceeds": 1707.61572,
+    "quantity": 18.0,
+    "ticker": "CERN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.045,
+    "date": "2022-06-08",
+    "fill": 196.54167999999999,
+    "net_proceeds": 1768.8301199999999,
+    "quantity": 9.0,
+    "ticker": "FB"
+   },
+   {
+    "collapse": false,
+    "commission": 0.165,
+    "date": "2022-06-10",
+    "fill": 61.46925,
+    "net_proceeds": 2028.3202500000002,
+    "quantity": 33.0,
+    "ticker": "REGI"
+   },
+   {
+    "collapse": true,
+    "commission": 0.17,
+    "date": "2022-06-24",
+    "fill": 8.745625,
+    "net_proceeds": 297.18125,
+    "quantity": 34.0,
+    "ticker": "TSP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.015,
+    "date": "2022-06-27",
+    "fill": 482.33871,
+    "net_proceeds": 1447.0011299999999,
+    "quantity": 3.0,
+    "ticker": "ANTM"
+   },
+   {
+    "collapse": false,
+    "commission": 0.035,
+    "date": "2022-07-05",
+    "fill": 173.60315500000002,
+    "net_proceeds": 1215.187085,
+    "quantity": 7.0,
+    "ticker": "CCMP"
+   },
+   {
+    "collapse": true,
+    "commission": 4.055,
+    "date": "2022-07-08",
+    "fill": 2.768615,
+    "net_proceeds": 2241.2917650000004,
+    "quantity": 811.0,
+    "ticker": "CLVS"
+   },
+   {
+    "collapse": true,
+    "commission": 0.18,
+    "date": "2022-08-11",
+    "fill": 16.89155,
+    "net_proceeds": 607.9158,
+    "quantity": 36.0,
+    "ticker": "WRBY"
+   },
+   {
+    "collapse": true,
+    "commission": 1.08,
+    "date": "2022-08-15",
+    "fill": 3.168415,
+    "net_proceeds": 683.29764,
+    "quantity": 216.0,
+    "ticker": "SNDL"
+   },
+   {
+    "collapse": false,
+    "commission": 0.3,
+    "date": "2022-08-16",
+    "fill": 28.415785,
+    "net_proceeds": 1704.6471,
+    "quantity": 60.0,
+    "ticker": "GLNG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.315,
+    "date": "2022-09-07",
+    "fill": 30.88455,
+    "net_proceeds": 1945.41165,
+    "quantity": 63.0,
+    "ticker": "GSAT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.11,
+    "date": "2022-09-29",
+    "fill": 103.84805000000001,
+    "net_proceeds": 2284.5471000000002,
+    "quantity": 22.0,
+    "ticker": "CTXS"
+   },
+   {
+    "collapse": true,
+    "commission": 0.075,
+    "date": "2022-10-18",
+    "fill": 93.43326,
+    "net_proceeds": 1401.4239,
+    "quantity": 15.0,
+    "ticker": "AVLR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.435,
+    "date": "2022-10-19",
+    "fill": 4.2378800000000005,
+    "net_proceeds": 368.26056000000005,
+    "quantity": 87.0,
+    "ticker": "OLPX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.17500000000000002,
+    "date": "2022-10-27",
+    "fill": 53.67315000000001,
+    "net_proceeds": 1878.3852500000003,
+    "quantity": 35.0,
+    "ticker": "TWTR"
+   },
+   {
+    "collapse": false,
+    "commission": 0.08,
+    "date": "2022-11-22",
+    "fill": 74.232865,
+    "net_proceeds": 1187.6458400000001,
+    "quantity": 16.0,
+    "ticker": "CLR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.28500000000000003,
+    "date": "2022-12-09",
+    "fill": 17.941025,
+    "net_proceeds": 1022.353425,
+    "quantity": 57.0,
+    "ticker": "QFIN"
+   },
+   {
+    "collapse": true,
+    "commission": 0.11,
+    "date": "2023-01-10",
+    "fill": 18.9905,
+    "net_proceeds": 417.681,
+    "quantity": 22.0,
+    "ticker": "DCT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.17,
+    "date": "2023-03-10",
+    "fill": 21.94902,
+    "net_proceeds": 746.0966800000001,
+    "quantity": 34.0,
+    "ticker": "CUZ"
+   },
+   {
+    "collapse": true,
+    "commission": 0.1,
+    "date": "2023-03-17",
+    "fill": 13.1934,
+    "net_proceeds": 263.768,
+    "quantity": 20.0,
+    "ticker": "PEB"
+   },
+   {
+    "collapse": true,
+    "commission": 0.19,
+    "date": "2023-04-24",
+    "fill": 6.626685,
+    "net_proceeds": 251.62403,
+    "quantity": 38.0,
+    "ticker": "GETY"
+   },
+   {
+    "collapse": true,
+    "commission": 0.525,
+    "date": "2023-04-28",
+    "fill": 3.508245,
+    "net_proceeds": 367.840725,
+    "quantity": 105.0,
+    "ticker": "FRC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.195,
+    "date": "2023-05-01",
+    "fill": 38.9805,
+    "net_proceeds": 1520.0445,
+    "quantity": 39.0,
+    "ticker": "OSH"
+   },
+   {
+    "collapse": false,
+    "commission": 0.065,
+    "date": "2023-06-06",
+    "fill": 114.17288500000001,
+    "net_proceeds": 1484.182505,
+    "quantity": 13.0,
+    "ticker": "FISV"
+   },
+   {
+    "collapse": true,
+    "commission": 0.78,
+    "date": "2023-06-08",
+    "fill": 7.646175,
+    "net_proceeds": 1192.0233,
+    "quantity": 156.0,
+    "ticker": "MVIS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.04,
+    "date": "2023-06-15",
+    "fill": 199.82004,
+    "net_proceeds": 1598.52032,
+    "quantity": 8.0,
+    "ticker": "RXDX"
+   },
+   {
+    "collapse": true,
+    "commission": 0.16,
+    "date": "2023-06-26",
+    "fill": 18.130930000000003,
+    "net_proceeds": 580.0297600000001,
+    "quantity": 32.0,
+    "ticker": "XM"
+   },
+   {
+    "collapse": true,
+    "commission": 0.165,
+    "date": "2023-07-20",
+    "fill": 12.69365,
+    "net_proceeds": 418.72544999999997,
+    "quantity": 33.0,
+    "ticker": "VIR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.045,
+    "date": "2023-07-24",
+    "fill": 5.11744,
+    "net_proceeds": 46.01196,
+    "quantity": 9.0,
+    "ticker": "BBIG"
+   },
+   {
+    "collapse": true,
+    "commission": 0.42,
+    "date": "2023-07-28",
+    "fill": 5.527235,
+    "net_proceeds": 463.86773999999997,
+    "quantity": 84.0,
+    "ticker": "SIGA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.045,
+    "date": "2023-07-31",
+    "fill": 63.288340000000005,
+    "net_proceeds": 569.5500600000001,
+    "quantity": 9.0,
+    "ticker": "PB"
+   },
+   {
+    "collapse": true,
+    "commission": 0.08,
+    "date": "2023-07-31",
+    "fill": 85.5572,
+    "net_proceeds": 1368.8352,
+    "quantity": 16.0,
+    "ticker": "SPCE"
+   },
+   {
+    "collapse": false,
+    "commission": 2.055,
+    "date": "2023-08-04",
+    "fill": 3.568215,
+    "net_proceeds": 1464.4813649999999,
+    "quantity": 411.0,
+    "ticker": "YELL"
+   },
+   {
+    "collapse": false,
+    "commission": 0.245,
+    "date": "2023-08-17",
+    "fill": 48.55571,
+    "net_proceeds": 2378.98479,
+    "quantity": 49.0,
+    "ticker": "AVT"
+   },
+   {
+    "collapse": true,
+    "commission": 0.075,
+    "date": "2023-08-24",
+    "fill": 5.187405000000001,
+    "net_proceeds": 77.73607500000001,
+    "quantity": 15.0,
+    "ticker": "WOOF"
+   },
+   {
+    "collapse": false,
+    "commission": 0.05,
+    "date": "2023-08-29",
+    "fill": 179.89001,
+    "net_proceeds": 1798.8500999999999,
+    "quantity": 10.0,
+    "ticker": "ABC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.07,
+    "date": "2023-09-11",
+    "fill": 100.599675,
+    "net_proceeds": 1408.32545,
+    "quantity": 14.0,
+    "ticker": "WWE"
+   },
+   {
+    "collapse": true,
+    "commission": 0.63,
+    "date": "2023-09-25",
+    "fill": 6.4767600000000005,
+    "net_proceeds": 815.44176,
+    "quantity": 126.0,
+    "ticker": "JOBY"
+   },
+   {
+    "collapse": false,
+    "commission": 1.405,
+    "date": "2023-10-03",
+    "fill": 4.147925000000001,
+    "net_proceeds": 1164.1619250000003,
+    "quantity": 281.0,
+    "ticker": "BNOX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.08,
+    "date": "2023-10-05",
+    "fill": 116.24185,
+    "net_proceeds": 1859.7896,
+    "quantity": 16.0,
+    "ticker": "HZNP"
+   },
+   {
+    "collapse": false,
+    "commission": 1.81,
+    "date": "2023-10-12",
+    "fill": 94.37279000000001,
+    "net_proceeds": 34161.13998000001,
+    "quantity": 362.0,
+    "ticker": "ATVI"
+   },
+   {
+    "collapse": true,
+    "commission": 1.485,
+    "date": "2023-10-12",
+    "fill": 2.548725,
+    "net_proceeds": 755.4863250000001,
+    "quantity": 297.0,
+    "ticker": "TUP"
+   },
+   {
+    "collapse": true,
+    "commission": 0.055,
+    "date": "2023-10-13",
+    "fill": 18.1909,
+    "net_proceeds": 200.04489999999998,
+    "quantity": 11.0,
+    "ticker": "ICPT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.13,
+    "date": "2023-10-19",
+    "fill": 43.128425,
+    "net_proceeds": 1121.20905,
+    "quantity": 26.0,
+    "ticker": "TFI"
+   },
+   {
+    "collapse": true,
+    "commission": 0.05,
+    "date": "2023-10-25",
+    "fill": 45.257360000000006,
+    "net_proceeds": 452.52360000000004,
+    "quantity": 10.0,
+    "ticker": "BTAI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.05,
+    "date": "2023-11-07",
+    "fill": 86.946505,
+    "net_proceeds": 869.4150500000001,
+    "quantity": 10.0,
+    "ticker": "NEWR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.025,
+    "date": "2023-11-20",
+    "fill": 42.3788,
+    "net_proceeds": 211.869,
+    "quantity": 5.0,
+    "ticker": "CHPT"
+   },
+   {
+    "collapse": true,
+    "commission": 0.055,
+    "date": "2023-11-21",
+    "fill": 69.26535,
+    "net_proceeds": 761.8638500000001,
+    "quantity": 11.0,
+    "ticker": "CDIO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.05,
+    "date": "2023-11-21",
+    "fill": 142.40876,
+    "net_proceeds": 1424.0376,
+    "quantity": 10.0,
+    "ticker": "VMW"
+   },
+   {
+    "collapse": true,
+    "commission": 0.27,
+    "date": "2023-11-30",
+    "fill": 8.445775,
+    "net_proceeds": 455.80185,
+    "quantity": 54.0,
+    "ticker": "VFS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.03,
+    "date": "2023-12-13",
+    "fill": 228.62563000000003,
+    "net_proceeds": 1371.7237800000003,
+    "quantity": 6.0,
+    "ticker": "SGEN"
+   },
+   {
+    "collapse": true,
+    "commission": 0.33,
+    "date": "2024-01-03",
+    "fill": 16.501745000000003,
+    "net_proceeds": 1088.7851700000003,
+    "quantity": 66.0,
+    "ticker": "LTHM"
+   },
+   {
+    "collapse": true,
+    "commission": 0.31,
+    "date": "2024-01-09",
+    "fill": 18.17091,
+    "net_proceeds": 1126.28642,
+    "quantity": 62.0,
+    "ticker": "NEOG"
+   },
+   {
+    "collapse": true,
+    "commission": 0.35000000000000003,
+    "date": "2024-01-11",
+    "fill": 2.128935,
+    "net_proceeds": 148.67544999999998,
+    "quantity": 70.0,
+    "ticker": "CAN"
+   },
+   {
+    "collapse": true,
+    "commission": 0.64,
+    "date": "2024-01-12",
+    "fill": 7.366315,
+    "net_proceeds": 942.24832,
+    "quantity": 128.0,
+    "ticker": "QS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.305,
+    "date": "2024-01-26",
+    "fill": 27.976005,
+    "net_proceeds": 1706.231305,
+    "quantity": 61.0,
+    "ticker": "ORI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.13,
+    "date": "2024-01-31",
+    "fill": 40.23987,
+    "net_proceeds": 1046.10662,
+    "quantity": 26.0,
+    "ticker": "HP"
+   },
+   {
+    "collapse": true,
+    "commission": 0.1,
+    "date": "2024-02-08",
+    "fill": 14.792600000000002,
+    "net_proceeds": 295.752,
+    "quantity": 20.0,
+    "ticker": "LSPD"
+   },
+   {
+    "collapse": false,
+    "commission": 0.05,
+    "date": "2024-02-20",
+    "fill": 103.46824000000001,
+    "net_proceeds": 1034.6324000000002,
+    "quantity": 10.0,
+    "ticker": "SUSA"
+   },
+   {
+    "collapse": true,
+    "commission": 0.14,
+    "date": "2024-02-29",
+    "fill": 31.484250000000003,
+    "net_proceeds": 881.4190000000001,
+    "quantity": 28.0,
+    "ticker": "YY"
+   },
+   {
+    "collapse": false,
+    "commission": 1.085,
+    "date": "2024-03-01",
+    "fill": 5.807095,
+    "net_proceeds": 1259.054615,
+    "quantity": 217.0,
+    "ticker": "MINM"
+   },
+   {
+    "collapse": false,
+    "commission": 0.355,
+    "date": "2024-03-04",
+    "fill": 31.904040000000002,
+    "net_proceeds": 2264.8318400000003,
+    "quantity": 71.0,
+    "ticker": "ACMR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.015,
+    "date": "2024-03-14",
+    "fill": 11.544225,
+    "net_proceeds": 34.617675000000006,
+    "quantity": 3.0,
+    "ticker": "PGY"
+   },
+   {
+    "collapse": true,
+    "commission": 0.1,
+    "date": "2024-03-15",
+    "fill": 33.992995,
+    "net_proceeds": 679.7599,
+    "quantity": 20.0,
+    "ticker": "CALX"
+   },
+   {
+    "collapse": true,
+    "commission": 5.305,
+    "date": "2024-03-15",
+    "fill": 18.21089,
+    "net_proceeds": 19316.44929,
+    "quantity": 1061.0,
+    "ticker": "COLB"
+   },
+   {
+    "collapse": false,
+    "commission": 0.075,
+    "date": "2024-03-15",
+    "fill": 156.82155,
+    "net_proceeds": 2352.24825,
+    "quantity": 15.0,
+    "ticker": "SPLK"
+   },
+   {
+    "collapse": true,
+    "commission": 0.095,
+    "date": "2024-03-18",
+    "fill": 46.63667,
+    "net_proceeds": 886.0017300000001,
+    "quantity": 19.0,
+    "ticker": "ZG"
+   },
+   {
+    "collapse": true,
+    "commission": 0.12,
+    "date": "2024-04-10",
+    "fill": 3.8962509000000005,
+    "net_proceeds": 93.39002160000001,
+    "quantity": 24.0,
+    "ticker": "MRIN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.2,
+    "date": "2024-04-12",
+    "fill": 27.64617,
+    "net_proceeds": 1105.6468,
+    "quantity": 40.0,
+    "ticker": "AMJ"
+   },
+   {
+    "collapse": true,
+    "commission": 0.53,
+    "date": "2024-04-16",
+    "fill": 9.51524,
+    "net_proceeds": 1008.0854400000001,
+    "quantity": 106.0,
+    "ticker": "HE"
+   },
+   {
+    "collapse": false,
+    "commission": 0.28,
+    "date": "2024-04-17",
+    "fill": 33.393295,
+    "net_proceeds": 1869.7445200000002,
+    "quantity": 56.0,
+    "ticker": "EWU"
+   },
+   {
+    "collapse": true,
+    "commission": 0.08,
+    "date": "2024-04-19",
+    "fill": 23.88805,
+    "net_proceeds": 382.1288,
+    "quantity": 16.0,
+    "ticker": "BEAM"
+   },
+   {
+    "collapse": false,
+    "commission": 0.47500000000000003,
+    "date": "2024-04-19",
+    "fill": 11.794100000000002,
+    "net_proceeds": 1119.9645000000003,
+    "quantity": 95.0,
+    "ticker": "DVAX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.025,
+    "date": "2024-04-25",
+    "fill": 401.66906500000005,
+    "net_proceeds": 2008.3203250000001,
+    "quantity": 5.0,
+    "ticker": "CACI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.17,
+    "date": "2024-04-30",
+    "fill": 52.083945,
+    "net_proceeds": 1770.6841299999999,
+    "quantity": 34.0,
+    "ticker": "OMF"
+   },
+   {
+    "collapse": false,
+    "commission": 0.04,
+    "date": "2024-05-02",
+    "fill": 269.48519000000005,
+    "net_proceeds": 2155.8415200000004,
+    "quantity": 8.0,
+    "ticker": "PXD"
+   },
+   {
+    "collapse": false,
+    "commission": 0.11,
+    "date": "2024-05-06",
+    "fill": 99.71012000000002,
+    "net_proceeds": 2193.5126400000004,
+    "quantity": 22.0,
+    "ticker": "GBIL"
+   },
+   {
+    "collapse": true,
+    "commission": 1.165,
+    "date": "2024-05-08",
+    "fill": 29.3853,
+    "net_proceeds": 6845.6099,
+    "quantity": 233.0,
+    "ticker": "LAZR"
+   },
+   {
+    "collapse": true,
+    "commission": 0.715,
+    "date": "2024-05-13",
+    "fill": 10.87456,
+    "net_proceeds": 1554.3470800000002,
+    "quantity": 143.0,
+    "ticker": "IOVA"
+   },
+   {
+    "collapse": true,
+    "commission": 0.265,
+    "date": "2024-05-17",
+    "fill": 19.790100000000002,
+    "net_proceeds": 1048.6103,
+    "quantity": 53.0,
+    "ticker": "TLRY"
+   },
+   {
+    "collapse": true,
+    "commission": 0.355,
+    "date": "2024-05-20",
+    "fill": 7.9760100000000005,
+    "net_proceeds": 565.9417100000001,
+    "quantity": 71.0,
+    "ticker": "AG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.1,
+    "date": "2024-05-22",
+    "fill": 131.07443,
+    "net_proceeds": 2621.3886,
+    "quantity": 20.0,
+    "ticker": "ASND"
+   },
+   {
+    "collapse": true,
+    "commission": 2.42,
+    "date": "2024-05-23",
+    "fill": 4.9875050000000005,
+    "net_proceeds": 2411.53242,
+    "quantity": 484.0,
+    "ticker": "SOUN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.105,
+    "date": "2024-05-23",
+    "fill": 40.29984,
+    "net_proceeds": 846.19164,
+    "quantity": 21.0,
+    "ticker": "URBN"
+   },
+   {
+    "collapse": true,
+    "commission": 1.05,
+    "date": "2024-05-30",
+    "fill": 8.585705,
+    "net_proceeds": 1801.9480500000002,
+    "quantity": 210.0,
+    "ticker": "CGC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.155,
+    "date": "2024-05-30",
+    "fill": 26.396795,
+    "net_proceeds": 818.1456450000001,
+    "quantity": 31.0,
+    "ticker": "IMVT"
+   },
+   {
+    "collapse": false,
+    "commission": 0.03,
+    "date": "2024-05-30",
+    "fill": 334.582625,
+    "net_proceeds": 2007.46575,
+    "quantity": 6.0,
+    "ticker": "SWAV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.28,
+    "date": "2024-06-03",
+    "fill": 22.998495000000002,
+    "net_proceeds": 1287.6357200000002,
+    "quantity": 56.0,
+    "ticker": "JWN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.47000000000000003,
+    "date": "2024-06-10",
+    "fill": 15.442275,
+    "net_proceeds": 1451.10385,
+    "quantity": 94.0,
+    "ticker": "DO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.325,
+    "date": "2024-06-12",
+    "fill": 35.26236,
+    "net_proceeds": 2291.7284000000004,
+    "quantity": 65.0,
+    "ticker": "AMH"
+   },
+   {
+    "collapse": false,
+    "commission": 16.0,
+    "date": "2024-06-12",
+    "fill": 14.25287,
+    "net_proceeds": 45593.184,
+    "quantity": 3200.0,
+    "ticker": "ETRN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.26,
+    "date": "2024-06-12",
+    "fill": 28.795595,
+    "net_proceeds": 1497.11094,
+    "quantity": 52.0,
+    "ticker": "SPTS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.035,
+    "date": "2024-06-13",
+    "fill": 141.08942000000002,
+    "net_proceeds": 987.5909400000002,
+    "quantity": 7.0,
+    "ticker": "ACLS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.275,
+    "date": "2024-06-13",
+    "fill": 18.71064,
+    "net_proceeds": 1028.8102,
+    "quantity": 55.0,
+    "ticker": "KIM"
+   },
+   {
+    "collapse": true,
+    "commission": 0.22,
+    "date": "2024-06-13",
+    "fill": 28.865560000000002,
+    "net_proceeds": 1269.86464,
+    "quantity": 44.0,
+    "ticker": "NEP"
+   },
+   {
+    "collapse": false,
+    "commission": 0.055,
+    "date": "2024-06-14",
+    "fill": 226.46671000000003,
+    "net_proceeds": 2491.0788100000004,
+    "quantity": 11.0,
+    "ticker": "EXP"
+   },
+   {
+    "collapse": true,
+    "commission": 0.06,
+    "date": "2024-06-14",
+    "fill": 3.188405,
+    "net_proceeds": 38.20086,
+    "quantity": 12.0,
+    "ticker": "LGVN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.05,
+    "date": "2024-06-21",
+    "fill": 286.34675500000003,
+    "net_proceeds": 2863.41755,
+    "quantity": 10.0,
+    "ticker": "AMR"
+   },
+   {
+    "collapse": false,
+    "commission": 0.035,
+    "date": "2024-06-21",
+    "fill": 126.706615,
+    "net_proceeds": 886.911305,
+    "quantity": 7.0,
+    "ticker": "ARW"
+   },
+   {
+    "collapse": false,
+    "commission": 0.085,
+    "date": "2024-06-21",
+    "fill": 130.47473,
+    "net_proceeds": 2217.98541,
+    "quantity": 17.0,
+    "ticker": "AWK"
+   },
+   {
+    "collapse": false,
+    "commission": 0.065,
+    "date": "2024-06-21",
+    "fill": 169.5152,
+    "net_proceeds": 2203.6326,
+    "quantity": 13.0,
+    "ticker": "FFIV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.06,
+    "date": "2024-06-21",
+    "fill": 125.83705000000002,
+    "net_proceeds": 1509.9846000000002,
+    "quantity": 12.0,
+    "ticker": "MIDD"
+   },
+   {
+    "collapse": false,
+    "commission": 0.245,
+    "date": "2024-06-24",
+    "fill": 48.42577500000001,
+    "net_proceeds": 2372.6179750000006,
+    "quantity": 49.0,
+    "ticker": "CM"
+   },
+   {
+    "collapse": true,
+    "commission": 3.345,
+    "date": "2024-06-24",
+    "fill": 57.111430000000006,
+    "net_proceeds": 38204.20167,
+    "quantity": 669.0,
+    "ticker": "FMC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.09,
+    "date": "2024-06-24",
+    "fill": 67.68614000000001,
+    "net_proceeds": 1218.2605200000003,
+    "quantity": 18.0,
+    "ticker": "IXUS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.19,
+    "date": "2024-06-24",
+    "fill": 56.621675,
+    "net_proceeds": 2151.43365,
+    "quantity": 38.0,
+    "ticker": "LSCC"
+   },
+   {
+    "collapse": false,
+    "commission": 1.105,
+    "date": "2024-06-24",
+    "fill": 10.904545,
+    "net_proceeds": 2408.799445,
+    "quantity": 221.0,
+    "ticker": "ROIV"
+   },
+   {
+    "collapse": true,
+    "commission": 0.225,
+    "date": "2024-06-24",
+    "fill": 23.20839,
+    "net_proceeds": 1044.1525500000002,
+    "quantity": 45.0,
+    "ticker": "UPST"
+   },
+   {
+    "collapse": false,
+    "commission": 0.03,
+    "date": "2024-06-24",
+    "fill": 306.556645,
+    "net_proceeds": 1839.30987,
+    "quantity": 6.0,
+    "ticker": "ZBRA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.15,
+    "date": "2024-06-25",
+    "fill": 83.46824500000001,
+    "net_proceeds": 2503.89735,
+    "quantity": 30.0,
+    "ticker": "GL"
+   },
+   {
+    "collapse": false,
+    "commission": 0.105,
+    "date": "2024-06-25",
+    "fill": 115.80207,
+    "net_proceeds": 2431.73847,
+    "quantity": 21.0,
+    "ticker": "IEI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.045,
+    "date": "2024-06-25",
+    "fill": 214.29280000000003,
+    "net_proceeds": 1928.5902,
+    "quantity": 9.0,
+    "ticker": "IWY"
+   },
+   {
+    "collapse": false,
+    "commission": 0.115,
+    "date": "2024-06-26",
+    "fill": 71.054455,
+    "net_proceeds": 1634.137465,
+    "quantity": 23.0,
+    "ticker": "BLV"
+   },
+   {
+    "collapse": false,
+    "commission": 0.405,
+    "date": "2024-06-26",
+    "fill": 29.10544,
+    "net_proceeds": 2357.13564,
+    "quantity": 81.0,
+    "ticker": "CRBG"
+   },
+   {
+    "collapse": false,
+    "commission": 0.41000000000000003,
+    "date": "2024-06-26",
+    "fill": 24.437775000000002,
+    "net_proceeds": 2003.48755,
+    "quantity": 82.0,
+    "ticker": "GPS"
+   },
+   {
+    "collapse": true,
+    "commission": 0.075,
+    "date": "2024-06-26",
+    "fill": 140.92950000000002,
+    "net_proceeds": 2113.8675000000003,
+    "quantity": 15.0,
+    "ticker": "PAYC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.105,
+    "date": "2024-06-26",
+    "fill": 107.636155,
+    "net_proceeds": 2260.254255,
+    "quantity": 21.0,
+    "ticker": "SJM"
+   },
+   {
+    "collapse": false,
+    "commission": 0.19,
+    "date": "2024-06-26",
+    "fill": 29.195395,
+    "net_proceeds": 1109.23501,
+    "quantity": 38.0,
+    "ticker": "UBS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.06,
+    "date": "2024-06-26",
+    "fill": 157.5212,
+    "net_proceeds": 1890.1943999999999,
+    "quantity": 12.0,
+    "ticker": "WCC"
+   },
+   {
+    "collapse": false,
+    "commission": 0.425,
+    "date": "2024-06-27",
+    "fill": 28.535725000000003,
+    "net_proceeds": 2425.111625,
+    "quantity": 85.0,
+    "ticker": "AI"
+   },
+   {
+    "collapse": false,
+    "commission": 0.125,
+    "date": "2024-06-27",
+    "fill": 87.57619000000001,
+    "net_proceeds": 2189.27975,
+    "quantity": 25.0,
+    "ticker": "COO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.035,
+    "date": "2024-06-27",
+    "fill": 126.886525,
+    "net_proceeds": 888.1706750000001,
+    "quantity": 7.0,
+    "ticker": "DEO"
+   },
+   {
+    "collapse": false,
+    "commission": 0.14,
+    "date": "2024-06-27",
+    "fill": 76.38179000000001,
+    "net_proceeds": 2138.5501200000003,
+    "quantity": 28.0,
+    "ticker": "EDU"
+   },
+   {
+    "collapse": false,
+    "commission": 0.12,
+    "date": "2024-06-27",
+    "fill": 114.70262000000001,
+    "net_proceeds": 2752.7428800000002,
+    "quantity": 24.0,
+    "ticker": "ESTC"
+   },
+   {
+    "collapse": true,
+    "commission": 0.13,
+    "date": "2024-06-27",
+    "fill": 44.467755000000004,
+    "net_proceeds": 1156.03163,
+    "quantity": 26.0,
+    "ticker": "EXAS"
+   },
+   {
+    "collapse": false,
+    "commission": 0.48,
+    "date": "2024-06-27",
+    "fill": 24.60769,
+    "net_proceeds": 2361.85824,
+    "quantity": 96.0,
+    "ticker": "GEN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.03,
+    "date": "2024-06-27",
+    "fill": 179.37027,
+    "net_proceeds": 1076.19162,
+    "quantity": 6.0,
+    "ticker": "GLOB"
+   },
+   {
+    "collapse": false,
+    "commission": 0.22,
+    "date": "2024-06-27",
+    "fill": 51.23437,
+    "net_proceeds": 2254.0922800000003,
+    "quantity": 44.0,
+    "ticker": "IGSB"
+   },
+   {
+    "collapse": false,
+    "commission": 0.05,
+    "date": "2024-06-27",
+    "fill": 236.16186000000002,
+    "net_proceeds": 2361.5686,
+    "quantity": 10.0,
+    "ticker": "MNDY"
+   },
+   {
+    "collapse": true,
+    "commission": 1.0050000000000001,
+    "date": "2024-06-27",
+    "fill": 12.67366,
+    "net_proceeds": 2546.40066,
+    "quantity": 201.0,
+    "ticker": "PATH"
+   },
+   {
+    "collapse": false,
+    "commission": 0.20500000000000002,
+    "date": "2024-06-27",
+    "fill": 63.548210000000005,
+    "net_proceeds": 2605.2716100000002,
+    "quantity": 41.0,
+    "ticker": "RDDT"
+   },
+   {
+    "collapse": true,
+    "commission": 0.6950000000000001,
+    "date": "2024-06-27",
+    "fill": 20.72963,
+    "net_proceeds": 2880.7235699999997,
+    "quantity": 139.0,
+    "ticker": "S"
+   },
+   {
+    "collapse": false,
+    "commission": 0.3,
+    "date": "2024-06-27",
+    "fill": 41.769105,
+    "net_proceeds": 2505.8463,
+    "quantity": 60.0,
+    "ticker": "SRLN"
+   },
+   {
+    "collapse": false,
+    "commission": 0.28500000000000003,
+    "date": "2024-06-27",
+    "fill": 37.24137,
+    "net_proceeds": 2122.4730900000004,
+    "quantity": 57.0,
+    "ticker": "ST"
+   },
+   {
+    "collapse": false,
+    "commission": 0.495,
+    "date": "2024-06-27",
+    "fill": 19.760115,
+    "net_proceeds": 1955.756385,
+    "quantity": 99.0,
+    "ticker": "STLA"
+   },
+   {
+    "collapse": false,
+    "commission": 0.135,
+    "date": "2024-06-27",
+    "fill": 104.04795,
+    "net_proceeds": 2809.1596499999996,
+    "quantity": 27.0,
+    "ticker": "STX"
+   },
+   {
+    "collapse": false,
+    "commission": 0.305,
+    "date": "2024-06-27",
+    "fill": 37.990995,
+    "net_proceeds": 2317.145695,
+    "quantity": 61.0,
+    "ticker": "SU"
+   },
+   {
+    "collapse": false,
+    "commission": 0.15,
+    "date": "2024-06-27",
+    "fill": 55.962005000000005,
+    "net_proceeds": 1678.71015,
+    "quantity": 30.0,
+    "ticker": "TWLO"
+   }
+  ],
+  "forced_exit_net_proceeds_fraction": 0.58738844916685,
+  "forced_exit_value_fraction": 0.5879842662999999,
+  "forced_exits": 303,
+  "forced_exits_measured_period": 303,
+  "id": "ins_net_buy_ratio",
+  "reconciliation": {
+   "diag_forced_exits": 303,
+   "diag_gross_value": 587984.2662999999,
+   "fills_forced_exits": 303,
+   "fills_gross_value": 587984.2663,
+   "reconciled": true
+  },
+  "summary": {
+   "stressed_all": {
+    "ann_mean": 0.04827127448797236,
+    "cagr": 0.033204234383664044,
+    "days": 1967,
+    "max_drawdown": -0.3495597949450616,
+    "sharpe": 0.2738393870431614
+   },
+   "stressed_collapses": {
+    "ann_mean": 0.08504707042869909,
+    "cagr": 0.07209477944904763,
+    "days": 1967,
+    "max_drawdown": -0.3482578280186044,
+    "sharpe": 0.4852514501349061
+   },
+   "unstressed": {
+    "ann_mean": 0.09580338660353305,
+    "cagr": 0.0837475829514005,
+    "days": 1967,
+    "max_drawdown": -0.3482578280186043,
+    "sharpe": 0.5476443327729241
+   }
+  }
+ },
+ "collapse_definition": {
+  "fraction_of_trailing_high": 0.5,
+  "trailing_sessions": 252
+ },
+ "costs": {
+  "commission_per_share": 0.005,
+  "max_gross": 1.0,
+  "short_borrow_bps_annual": 50.0,
+  "slippage_bps": 5.0
+ },
+ "elapsed_s": 40.4,
+ "generated_at": "2026-09-30T00:38:22+00:00",
+ "rule": "D07 terminal-loss stress: every forced exit (a holding sold at its last stored print) is re-marked to ZERO on the day it was booked, pathwise (E'_t = E'_{t-1} (E_t - P_t)/E_{t-1}); \"stressed_all\" marks every forced exit, \"stressed_collapses\" only those whose terminal close is below 50% of the trailing-252-session high. Candidate and benchmark are stressed on their OWN forced exits through the identical execution path.",
+ "window": {
+  "end": "2024-06-28",
+  "measured_days": 1967,
+  "start": "2016-08-01",
+  "warmup_days": 400
+ }
+}

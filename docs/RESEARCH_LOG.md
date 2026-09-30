@@ -798,38 +798,3 @@ null was expected and holds. Results:
 Along the way: the fixed-cell results file was keyed by window only, so a
 second cell over the same window overwrote the first (fixed in `fee9e31`,
 regression test pinned).
-
----
-
-## 2026-09-29 — insider family (C04): Form 4 purchases add nothing over size in the top 500
-
-Pre-registered (`research/lowfreq/insider/PREREG.md`, git `f0658e5` + addendum 1
-before the first ledger row): eight rules on officer/director open-market
-purchases — any purchase (count baseline C0), non-routine buyers (Cohen–Malloy–
-Pomorski), cluster buying, conviction (>= 10 % of the holding), officer vs
-director, net purchase ratio, value / market cap — each as a 2 %-per-name
-overlay (capped at 60 %) on the monthly equal-weight PIT basket (D11), plus one
-market-cap-matched control per rule holding the same K names' worth of sleeve
-in each qualifier's nearest non-qualifying neighbour. Events usable only from
-the close of the first session after the filing date (D14). 16 trials, two
-passes so every final DSR is deflated by N = 16. Walk-forward 2016-08..2024-06,
-OOS 2019-08..2024-06 (1,005 sessions).
-
-**Result: null.** No rule beats the equal-weight basket after costs: the count
-baseline earns **−0.65 %/yr** active (t −0.25), officer purchases −2.3 %/yr
-(t −1.21), the best rule (net purchase ratio) **+1.75 %/yr, t 0.56**, FAIL.
-Every size control beats the basket (+0.5 % to +6.1 %/yr, t 0.4–2.9, five of
-eight PROMISING), so every rule loses to its own control by 2–8 %/yr: the
-names insiders buy carry a favourable size/operating-company profile, and the
-buying itself subtracts from it — consistent with insiders buying recent
-losers in a market that kept rewarding momentum. Champion by the
-pre-registered rule 4 (no rule passed the guards): `ins_net_buy_ratio`,
-verdict **FAIL**. Full tables, per-year returns, 3x costs, D07 stress and the
-held-out command: `research/lowfreq/insider/REPORT.md`; numbers in
-`research/lowfreq/insider/results/*.json`, ledger `trials.jsonl`.
-
-Caveat on the controls: the matching pool is names WITH an as-of market cap
-(operating companies with EDGAR fundamentals, 58 % of covered name-days), so
-"size control beats EW" is partly "operating companies beat the ETFs/ADRs in
-the PIT basket" — a tilt the rules share, which is why the honest comparison
-is rule vs its control, not rule vs EW.

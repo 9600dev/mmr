@@ -79,7 +79,7 @@
   },
   "value": 0.00655751728493504
  },
- "elapsed_s": 182.2,
+ "elapsed_s": 183.5,
  "entry": {
   "benchmarks": [
    "eq_ew_pit"
@@ -380,13 +380,13 @@
   "selection_stability": 1.0
  },
  "ledger_row": {
-  "elapsed_s": 182.2,
+  "elapsed_s": 183.5,
   "end": "2024-06-28",
   "entry_sha256": "7b7b257f7d25cfaa82d7dfb0a5697e82a14437940a1e08370503ca95ce61d057",
   "error": null,
   "family": "insider",
   "fixed_params": null,
-  "git_sha": "f0658e510347b77955523b9d7fb5760b107af169",
+  "git_sha": "a097b31dcba164bebb52b43f3e3b50e772dc34f1",
   "grid": {},
   "harness_version": 2,
   "id": "ins_opportunistic",
@@ -414,7 +414,7 @@
   "start": "2016-08-01",
   "status": "ok",
   "strategy_sha256": "5f6a139adcb389a7f1356669949d538ca4ece11e1d73db779dcde5d71486b74b",
-  "timestamp": "2026-09-30T00:09:26+00:00",
+  "timestamp": "2026-09-30T00:28:28+00:00",
   "verdict": "FAIL"
  },
  "lookahead": {

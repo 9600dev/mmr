@@ -1,12 +1,18 @@
-"""REPORT.md generator for the insider family (C04; D11).
+"""REPORT.md generator for the insider family (C04; D11, D14).
 
-Reads ONLY ``results/<id>.json`` (the pass-2 files), ``trials.jsonl``,
-``candidates.yaml`` and ``results/_calibration_counts.json``; applies the
-champion rule exactly as PREREG.md states it; every number written is copied
-from those files (no statistic is recomputed here except differences of two
-copied numbers and the terminal-loss bound, whose inputs are named).
-Refuses to render when a pass-2 file was deflated by fewer trials than the
-ledger holds (the order-independence protocol).
+Reads ONLY ``results/<id>.json`` (the FINAL-pass files), the retained
+per-trial artifacts ``results/trials/NNN_<id>.json`` (NNN = 1-based ledger
+row), ``trials.jsonl``, ``candidates.yaml``, ``results/_calibration_counts.json``
+and ``results/_d07_stress.json``; applies the champion rule exactly as
+PREREG.md states it; every number written is copied from those files (no
+statistic is recomputed here except differences of two copied numbers).
+
+Refuses to render when (1) a final file was deflated by fewer trials than the
+ledger holds (the order-independence protocol), (2) a final file is not the
+artifact of the LATEST ok ledger row for its id, (3) a retained per-trial
+artifact disagrees with its ledger row, or (4) the D07 stress artifact's
+unstressed numbers disagree with the champion's final file. A ledger row with
+no retained artifact is listed without numbers.
 
     uv run python research/lowfreq/insider/make_report.py
 """
@@ -21,6 +27,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 HERE = Path(__file__).resolve().parent
+TRIALS_DIR = HERE / 'results' / 'trials'
 RULES = ['ins_purchase_count', 'ins_opportunistic', 'ins_cluster', 'ins_conviction', 'ins_officer',
          'ins_director', 'ins_net_buy_ratio', 'ins_value_to_mcap']
 LABEL = {'ins_purchase_count': 'C0', 'ins_opportunistic': 'H1', 'ins_cluster': 'H2', 'ins_conviction': 'H3',
@@ -33,10 +40,25 @@ CONTROLS = list(CONTROL_OF.values())
 BENCH = 'eq_ew_pit'
 VERDICT_RANK = {'PASS': 0, 'PROMISING': 1, 'FAIL': 2}
 HELD_OUT_START, HELD_OUT_END = '2024-07-01', '2026-03-31'
+LEDGER_METRIC_KEYS = ('oos_sharpe', 'active_ann_return', 'active_t_nw', 'active_dsr')
+STRESS_KEYS = ('sharpe', 'cagr', 'max_drawdown')
+REL_TOL = 1e-6
+
+
+class ReportError(RuntimeError):
+    """An artifact disagrees with the ledger or with another artifact: refuse to render."""
 
 
 def _n(v: Any) -> bool:
     return v is not None and not (isinstance(v, float) and v != v)
+
+
+def _close(a: Any, b: Any, tol: float = REL_TOL) -> bool:
+    if not _n(a) and not _n(b):
+        return True
+    if not (_n(a) and _n(b)):
+        return False
+    return abs(float(a) - float(b)) <= tol * max(1.0, abs(float(b)))
 
 
 def fnum(v: Any, fmt: str = '{:.2f}') -> str:
@@ -47,26 +69,104 @@ def pct(v: Any) -> str:
     return fnum(v, '{:+.2%}')
 
 
+# ---------------------------------------------------------------- artifacts
+def artifact_for_row(i: int, row: Dict[str, Any], trials_dir: Path = TRIALS_DIR) -> Optional[Dict[str, Any]]:
+    """The retained per-trial artifact of ledger row ``i`` (1-based), or None
+    when none was kept. Accepted only if its embedded ``ledger_row`` names the
+    same id, timestamp and trial count AND its ledger metrics equal the row's;
+    any disagreement is a ``ReportError`` (an artifact that contradicts the
+    ledger is worse than no artifact)."""
+    path = trials_dir / f'{i:03d}_{row["id"]}.json'
+    if not path.exists():
+        return None
+    art = json.loads(path.read_text())
+    lr = art.get('ledger_row') or {}
+    if (lr.get('id'), lr.get('timestamp'), lr.get('n_trials')) != (row['id'], row['timestamp'], row['n_trials']):
+        raise ReportError(f'{path.name}: embedded ledger_row does not match ledger row {i} '
+                          f'({row["id"]} @ {row["timestamp"]}, n_trials {row["n_trials"]})')
+    if art.get('verdict') != row.get('verdict'):
+        raise ReportError(f'{path.name}: verdict {art.get("verdict")} != ledger {row.get("verdict")}')
+    am, rm = art.get('ledger_metrics') or {}, row.get('metrics') or {}
+    for k in LEDGER_METRIC_KEYS:
+        if not _close(am.get(k), rm.get(k)):
+            raise ReportError(f'{path.name}: metric {k} {am.get(k)} != ledger {rm.get(k)}')
+    return art
+
+
+def final_row_index(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    """1-based index of the LATEST status=ok row per id."""
+    out: Dict[str, int] = {}
+    for i, r in enumerate(rows, 1):
+        if r.get('status') == 'ok':
+            out[r['id']] = i
+    return out
+
+
+def check_results_are_final(results: Dict[str, Any], rows: List[Dict[str, Any]]) -> None:
+    """Every ``results/<id>.json`` must be the artifact of that id's latest ok
+    ledger row (the harness overwrites the file on every run)."""
+    final = final_row_index(rows)
+    for cid, r in results.items():
+        i = final.get(cid)
+        if i is None:
+            raise ReportError(f'{cid}: no ok ledger row')
+        lr = r.get('ledger_row') or {}
+        if lr.get('timestamp') != rows[i - 1]['timestamp']:
+            raise ReportError(f'results/{cid}.json is the artifact of {lr.get("timestamp")}, not of the latest '
+                              f'ok ledger row {i} ({rows[i - 1]["timestamp"]})')
+
+
+def check_stress_matches(stress: Dict[str, Any], champ: str, r: Dict[str, Any]) -> None:
+    """The D07 stress artifact's UNSTRESSED full-period numbers must equal the
+    champion's final file (same path, same costs) for both books."""
+    if stress['candidate']['id'] != champ:
+        raise ReportError(f'_d07_stress.json is for {stress["candidate"]["id"]}, champion is {champ}')
+    pairs = [('candidate', r['full_period']['report_cell']), ('benchmark', r['full_period']['benchmarks'][BENCH])]
+    for book, cell in pairs:
+        s = stress[book]
+        for k in STRESS_KEYS:
+            if not _close(s['summary']['unstressed'].get(k), cell.get(k)):
+                raise ReportError(f'_d07_stress.json {book} unstressed {k} {s["summary"]["unstressed"].get(k)} '
+                                  f'!= results/{champ}.json {cell.get(k)}')
+        if s['forced_exits'] != cell.get('forced_exits'):
+            raise ReportError(f'_d07_stress.json {book} forced_exits {s["forced_exits"]} != {cell.get("forced_exits")}')
+        if not _close(s['forced_exit_value_fraction'], cell.get('forced_exit_value_fraction')):
+            raise ReportError(f'_d07_stress.json {book} forced_exit_value_fraction differs from results/{champ}.json')
+        if not s['reconciliation'].get('reconciled'):
+            raise ReportError(f'_d07_stress.json {book}: forced exits not reconciled with backtester diagnostics')
+
+
 def load() -> Dict[str, Any]:
     reg = yaml.safe_load((HERE / 'candidates.yaml').read_text())
     ids = [e['id'] for e in reg['candidates'] if e['role'] == 'candidate']
     results = {cid: json.loads((HERE / 'results' / f'{cid}.json').read_text()) for cid in ids}
     rows = [json.loads(line) for line in (HERE / 'trials.jsonl').read_text().splitlines() if line.strip()]
     cal = json.loads((HERE / 'results' / '_calibration_counts.json').read_text())
-    return {'registry': reg, 'ids': ids, 'results': results, 'rows': rows, 'calibration': cal}
+    stress = json.loads((HERE / 'results' / '_d07_stress.json').read_text())
+    artifacts = {i: artifact_for_row(i, row) for i, row in enumerate(rows, 1)}
+    return {'registry': reg, 'ids': ids, 'results': results, 'rows': rows, 'calibration': cal,
+            'stress': stress, 'artifacts': artifacts}
 
 
 def distinct_trials(rows: List[Dict[str, Any]]) -> int:
     return len({r['entry_sha256'] for r in rows if r.get('role') == 'candidate' and r.get('entry_sha256')})
 
 
-def ledger_table(rows: List[Dict[str, Any]]) -> List[str]:
-    out = ['| # | timestamp (UTC) | id | mode | status | trials at run | verdict | OOS Sharpe | active ann | t(NW) | DSR |',
-           '|---|---|---|---|---|---|---|---|---|---|---|']
+# ---------------------------------------------------------------- tables
+def ledger_table(rows: List[Dict[str, Any]], artifacts: Dict[int, Optional[Dict[str, Any]]],
+                 final: Dict[str, int]) -> List[str]:
+    """One line per ledger row; numbers ONLY from a retained artifact."""
+    out = ['| # | timestamp (UTC) | id | artifact | trials at run | verdict | OOS Sharpe | active ann | t(NW) | DSR |',
+           '|---|---|---|---|---|---|---|---|---|---|']
     for i, r in enumerate(rows, 1):
-        m = r.get('metrics') or {}
-        out.append(f"| {i} | {str(r.get('timestamp', ''))[:19]} | `{r['id']}` | {r.get('mode')} | {r.get('status')} | "
-                   f"{r.get('n_trials')} | {r.get('verdict') or '-'} | {fnum(m.get('oos_sharpe'))} | "
+        art = artifacts.get(i)
+        if art is None:
+            out.append(f"| {i} | {str(r.get('timestamp', ''))[:19]} | `{r['id']}` | not retained | - | - | - | - | - | - |")
+            continue
+        m = art.get('ledger_metrics') or {}
+        tag = 'final' if final.get(r['id']) == i else 'retained'
+        out.append(f"| {i} | {str(r.get('timestamp', ''))[:19]} | `{r['id']}` | "
+                   f"{tag} | {art['dsr']['n_trials']} | {art.get('verdict') or '-'} | {fnum(m.get('oos_sharpe'))} | "
                    f"{pct(m.get('active_ann_return'))} | {fnum(m.get('active_t_nw'))} | {fnum(m.get('active_dsr'))} |")
     return out
 
@@ -137,37 +237,57 @@ def decomposition(results: Dict[str, Any], cal: Dict[str, Any]) -> List[str]:
     return out
 
 
+def stress_table(stress: Dict[str, Any]) -> List[str]:
+    c, b, a = stress['candidate'], stress['benchmark'], stress['active']
+    names = {'unstressed': 'unstressed (as reported)', 'stressed_all': 'every forced exit to zero',
+             'stressed_collapses': 'collapses only to zero'}
+    out = ['| variant | cand CAGR | cand Sharpe | cand maxDD | bench CAGR | bench Sharpe | bench maxDD | active ann | t(NW) |',
+           '|---|---|---|---|---|---|---|---|---|']
+    for k, label in names.items():
+        cs, bs, ak = c['summary'][k], b['summary'][k], a[k]
+        out.append(f"| {label} | {pct(cs['cagr'])} | {fnum(cs['sharpe'])} | {fnum(cs['max_drawdown'], '{:.1%}')} | "
+                   f"{pct(bs['cagr'])} | {fnum(bs['sharpe'])} | {fnum(bs['max_drawdown'], '{:.1%}')} | "
+                   f"{pct(ak['ann_return'])} | {fnum(ak['t_nw'])} |")
+    return out
+
+
+# ---------------------------------------------------------------- render
 def render(d: Dict[str, Any]) -> str:
-    results, rows, ids, cal = d['results'], d['rows'], d['ids'], d['calibration']
+    results, rows, ids, cal, stress, artifacts = (d['results'], d['rows'], d['ids'], d['calibration'],
+                                                  d['stress'], d['artifacts'])
     n_ledger = distinct_trials(rows)
     stale = [cid for cid in ids if results[cid]['dsr']['n_trials'] != n_ledger]
     if stale:
-        raise SystemExit(f'pass-2 incomplete: {stale} carry a trial count != {n_ledger}; re-run them before reporting')
+        raise ReportError(f'final pass incomplete: {stale} carry a trial count != {n_ledger}; re-run them before reporting')
+    check_results_are_final(results, rows)
+    final = final_row_index(rows)
     sel = champion(results)
     ch = sel['champion']
     r = results[ch]
+    check_stress_matches(stress, ch, r)
     w, o, a, dsr, fp = r['window'], r['oos'], r['active'], r['dsr'], r['full_period']['report_cell']
     b = r['oos_benchmarks'][BENCH]
     sn = r['stopped_names']
-    years = (dt.date.fromisoformat(w['end']) - dt.date.fromisoformat(w['start'])).days / 365.25
-    fr = sn.get('full_period_forced_exit_value_fraction')
-    bound = (fr / years) if _n(fr) else None
     g = r['gates']
+    n_retained = sum(1 for v in artifacts.values() if v is not None)
+    sc, sb = stress['candidate'], stress['benchmark']
     lines: List[str] = []
     lines += [f'# Insider family — REPORT (C04; D11, D14)', '',
               f'Generated {dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")} by `make_report.py` from '
-              f'`results/*.json` (pass 2), `trials.jsonl`, `candidates.yaml`, `results/_calibration_counts.json`. '
-              f'Pre-registration: `PREREG.md` (git `f0658e5`, addendum 1 before the first ledger row). '
+              f'`results/<id>.json` (final pass), `results/trials/*.json` (retained per-trial artifacts), `trials.jsonl`, '
+              f'`candidates.yaml`, `results/_calibration_counts.json`, `results/_d07_stress.json`. '
+              f'Pre-registration: `PREREG.md` (git `f0658e5`; addendum 1 before the first ledger row; addendum 2 is '
+              f'procedural, written after results). '
               f'Dev period {w["start"]}..{w["end"]}, walk-forward train {w["train_days"]} / test {w["test_days"]} days, '
               f'{w["n_folds"]} folds, OOS {o["days"]} sessions; costs {r["costs"]["base"]["slippage_bps"]:.0f} bps + '
               f'${r["costs"]["base"]["commission_per_share"]}/share, stress x{r["costs"]["stress_multiplier"]:.0f}. '
-              f'Distinct candidate trials in the ledger: **{n_ledger}** (budget 30); every pass-2 file is deflated by {n_ledger}.', '']
+              f'Distinct candidate trials in the ledger: **{n_ledger}** (budget 30); every final file is deflated by {n_ledger}.', '']
     lines += ['## Verdict', '',
               f'**Champion: `{ch}` ({LABEL[ch]}), selected by {sel["how"]}. Harness verdict: {r["verdict"]}.** '
               + ('The champion PASSes D01.' if r['verdict'] == 'PASS' else
                  f'This is the null: no pre-registered insider rule beat the equal-weight PIT basket to the D01 standard. '
                  f'Gates: ' + ', '.join(f'{k}={"n/a" if v is None else ("ok" if v else "FAIL")}' for k, v in g.items()) + '.'), '']
-    lines += ['## Every candidate (pass 2, final trial count)', ''] + results_table(results, ids) + ['',
+    lines += [f'## Every candidate (final pass, N = {n_ledger})', ''] + results_table(results, ids) + ['',
               f'Benchmark `{BENCH}` = monthly equal weight of the covered PIT members (D11), identical path and costs; '
               f'decisive benchmark in every fold: {sorted(set(x for cid in ids for x in results[cid]["decisive_per_fold"]))}. '
               f'`names` = median names held (full period); size controls (D) mirror their rule with market-cap neighbours.', '']
@@ -188,12 +308,26 @@ def render(d: Dict[str, Any]) -> str:
               f'median $ADV of holdings ${fnum(fp.get("median_holding_adv_usd"), "{:,.0f}")}; min cash fraction {fnum(fp.get("min_cash_fraction"))}; '
               f'cash-guard scaled buys {fp.get("scaled_buy_fills")} (D06).',
               f'* Stopped names (D07): {sn.get("full_period_forced_exits")} forced exits over the full period worth '
-              f'{fnum(fr, "{:.2%}")} of initial capital ({sn.get("oos_forced_exits")} inside OOS windows; benchmark '
-              f'{sn.get("benchmark_full_period_forced_exits")}). Terminal-loss stress: had every forced exit gone to zero, '
-              f'the full-period return would be lower by {fnum(fr, "{:.2%}")}, about {pct(-bound) if _n(bound) else "n/a"}/yr over {years:.1f} years.',
+              f'{fnum(sn.get("full_period_forced_exit_value_fraction"), "{:.2%}")} of initial capital ({sn.get("oos_forced_exits")} '
+              f'inside OOS windows; benchmark {sn.get("benchmark_full_period_forced_exits")}). Terminal-loss stress: next section.',
               f'* Lookahead: {r["lookahead"]["cells_checked"]} cell(s) and {r["lookahead"]["benchmarks_checked"]} checked with '
               f'{r["lookahead"]["prefixes_replayed"]} fresh-state prefixes; PBO n/a (single cell).', '',
               '### Per-year active return (OOS)', ''] + per_year(r) + ['']
+    lines += ['### D07 terminal-loss stress (full period, candidate AND benchmark, `results/_d07_stress.json`)', '',
+              f'Both books re-run over {stress["window"]["start"]}..{stress["window"]["end"]} through the identical path; '
+              f'every forced exit is identified in the fill log and reconciled with the backtester\'s own forced-exit count '
+              f'and gross value (candidate {sc["forced_exits"]} exits, {fnum(sc["forced_exit_value_fraction"], "{:.2%}")} of '
+              f'initial capital gross; benchmark {sb["forced_exits"]}, {fnum(sb["forced_exit_value_fraction"], "{:.2%}")}). '
+              f'Stress = the exit\'s proceeds re-marked to zero on its day, pathwise (the book is worth E_t - P_t and everything '
+              f'after scales). "Collapses" = exits whose terminal close is below '
+              f'{stress["collapse_definition"]["fraction_of_trailing_high"]:.0%} of the trailing '
+              f'{stress["collapse_definition"]["trailing_sessions"]}-session high: candidate {sc["collapse_exits"]} '
+              f'({fnum(sc["collapse_net_proceeds_fraction"], "{:.2%}")} of capital), benchmark {sb["collapse_exits"]} '
+              f'({fnum(sb["collapse_net_proceeds_fraction"], "{:.2%}")}).', ''] + stress_table(stress) + ['',
+              'The unstressed row equals the champion\'s final file (`full_period.report_cell` and '
+              f'`full_period.benchmarks.{BENCH}`), which `make_report.py` verifies before rendering. The overlay and the '
+              'basket stop-print in the same names, so the stress moves both books together; the active row is what the '
+              'champion\'s edge looks like when its own stopped names are marked to zero as well as the benchmark\'s.', '']
     lines += ['## Decomposition against the confounders', '',
               'Purchase count alone = C0 (`ins_purchase_count`). Size = each rule\'s market-cap-matched control (same K, same sleeve, '
               'PREREG addendum 1). Calibration columns are qualifier counts, not returns.', ''] + decomposition(results, cal) + ['',
@@ -203,8 +337,18 @@ def render(d: Dict[str, Any]) -> str:
               'companies vs the ETFs/ADRs/trusts in the PIT basket" - a tilt every rule shares by construction (addendum 1). '
               'The honest reading is therefore rule minus control: negative for all eight rules, i.e. conditional on size and on '
               'being an operating company, the names insiders bought did WORSE than their neighbours over 2019-2024. '
-              'The controls are not candidates (PREREG: never champions) and their PROMISING verdicts are reported, not claimed.', '']
-    lines += ['## Every ledger trial', '', f'{len(rows)} rows (`trials.jsonl`, append-only; pass 1 then pass 2).', ''] + ledger_table(rows) + ['']
+              'The controls are candidate-role trials (they count in N) but are not champion-eligible (PREREG rule 1); their '
+              'PROMISING verdicts are reported, not claimed.', '']
+    lines += ['## Every ledger trial', '',
+              f'{len(rows)} rows (`trials.jsonl`, append-only; every row is mode walk_forward, status '
+              f'{"/".join(sorted(set(str(x.get("status")) for x in rows)))}). Pass 1 (rows 1-16) ran the registrations in '
+              'order, so early rows were deflated by partial trial counts; pass 2 (rows 17-32) re-ran all 16 once every hash '
+              'was ledgered; pass 3 (rows 33-48) re-ran all 16 through the mandated '
+              '`uv run python -m trader.research.lowfreq evaluate insider/<id>` (PREREG addendum 2) and is the final pass quoted '
+              'above. The harness overwrites `results/<id>.json` on every run; from pass 2 on each run\'s file is retained as '
+              f'`results/trials/NNN_<id>.json` (NNN = ledger row; {n_retained} retained) and the numbers below come from those '
+              'artifacts only. Pass-1 files were overwritten before retention existed, so those rows carry no numbers.', ''
+              ] + ledger_table(rows, artifacts, final) + ['']
     lines += ['## Held-out evaluation (orchestrator only, D11)', '',
               'The held-out period starts after the dev cutoff; the full research directory\'s insider data ends '
               f'{HELD_OUT_END} (DATA.md), so the window is `{HELD_OUT_START}..{HELD_OUT_END}`:', '', '```',
@@ -212,14 +356,19 @@ def render(d: Dict[str, Any]) -> str:
               f"  uv run python -m trader.research.lowfreq evaluate insider/{ch} --fixed-params '{{}}' --start {HELD_OUT_START} --end {HELD_OUT_END}",
               '```', '',
               f'Source of every number: `results/{ch}.json` keys `oos`, `oos_benchmarks.{BENCH}`, `active`, `dsr`, `full_period.report_cell`, '
-              '`stopped_names`, `gates`; other candidates from their own `results/<id>.json`; ledger rows from `trials.jsonl`; '
-              'K and market-cap percentiles from `results/_calibration_counts.json`.']
+              '`stopped_names`, `gates`; other candidates from their own `results/<id>.json`; ledger rows from their '
+              '`results/trials/NNN_<id>.json`; K and market-cap percentiles from `results/_calibration_counts.json`; the stress '
+              'table from `results/_d07_stress.json`.']
     return '\n'.join(lines) + '\n'
 
 
 def main() -> int:
-    d = load()
-    text = render(d)
+    try:
+        d = load()
+        text = render(d)
+    except ReportError as exc:
+        print(f'refusing to render: {exc}', file=sys.stderr)
+        return 1
     (HERE / 'REPORT.md').write_text(text)
     words = len(text.split())
     print(f'REPORT.md written: {words} words; champion {champion(d["results"])["champion"]}')

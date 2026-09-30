@@ -224,3 +224,36 @@ rule. The cluster rule now sits on the plain basket in 8 of 94 months.
 (K 5/8/13, 16 months below 5, market-cap percentile 0.17), as the critic
 asked. No hypothesis, threshold, benchmark, champion rule or evaluation
 protocol above is otherwise changed; the trial count stays 16.
+
+### Addendum 2 — 2026-09-30, AFTER results (procedure only; no hypothesis, threshold, benchmark or rule changed)
+
+Written after the pass-2 results were seen, so it can add nothing to the
+science; it records three procedural changes the round-3 critic asked for.
+Trial count unchanged at 16 (no new registry hash).
+
+1. **Pass 3 through the mandated command.** Passes 1 and 2 were launched
+   with the venv interpreter directly. Every one of the 16 candidates was
+   re-run as `uv run python -m trader.research.lowfreq evaluate insider/<id>`
+   (ledger rows 33-48, `git_sha a097b31`, all `ok`, N = 16). Every OOS
+   metric of pass 3 equals pass 2 to the last digit (verified across
+   `oos_sharpe`, `active_ann_return`, `active_t_nw`, `active_dsr`,
+   `active_ann_return_3x`, `oos_max_drawdown`, `full_sharpe`); the verdicts
+   are unchanged. REPORT.md quotes the pass-3 (final) files; "pass-2" in the
+   protocol and champion rule above now reads "final pass".
+2. **Per-trial artifacts.** The harness overwrites `results/<id>.json` on
+   every run, so pass-1 files no longer exist. From pass 2 on, each run's
+   file is retained as `results/trials/NNN_<id>.json` (NNN = 1-based ledger
+   row; the file embeds its own `ledger_row`), and REPORT.md quotes a
+   ledger row's numbers ONLY from its retained artifact - pass-1 rows are
+   listed without numbers. `make_report.py` refuses to render if any
+   artifact contradicts its ledger row or any final file is not the latest
+   ok row's artifact.
+3. **D07 stress made pathwise.** The "forced-exit value / years" arithmetic
+   bound in the round-3 REPORT is replaced by `d07_stress.py`: the champion
+   cell and `eq_ew_pit` re-run over the full dev period through the
+   identical path, forced exits identified in the fill log and reconciled
+   with the backtester's own count and gross value (refusing on mismatch),
+   then re-marked to zero on their day, pathwise, for BOTH books (all exits;
+   and "collapses" = terminal close below 50 % of the trailing-252-session
+   high). `results/_d07_stress.json`; its unstressed numbers must equal the
+   champion's final file or the report is not rendered.

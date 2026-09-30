@@ -79,7 +79,7 @@
   },
   "value": 0.03035689888530101
  },
- "elapsed_s": 182.7,
+ "elapsed_s": 184.5,
  "entry": {
   "benchmarks": [
    "eq_ew_pit"
@@ -380,13 +380,13 @@
   "selection_stability": 1.0
  },
  "ledger_row": {
-  "elapsed_s": 182.7,
+  "elapsed_s": 184.5,
   "end": "2024-06-28",
   "entry_sha256": "1fa8d969867238119d7c02e572163a193c7f8403067499aa35c252afda52c058",
   "error": null,
   "family": "insider",
   "fixed_params": null,
-  "git_sha": "f0658e510347b77955523b9d7fb5760b107af169",
+  "git_sha": "a097b31dcba164bebb52b43f3e3b50e772dc34f1",
   "grid": {},
   "harness_version": 2,
   "id": "ins_director",
@@ -414,7 +414,7 @@
   "start": "2016-08-01",
   "status": "ok",
   "strategy_sha256": "89c0d418554b3123e91b5af8140df553a22ed0e7a5c35516007ffd7a1313a9a1",
-  "timestamp": "2026-09-30T00:09:26+00:00",
+  "timestamp": "2026-09-30T00:28:29+00:00",
   "verdict": "FAIL"
  },
  "lookahead": {

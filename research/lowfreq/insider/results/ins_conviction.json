@@ -79,7 +79,7 @@
   },
   "value": 0.007952858879522033
  },
- "elapsed_s": 181.6,
+ "elapsed_s": 184.0,
  "entry": {
   "benchmarks": [
    "eq_ew_pit"
@@ -380,13 +380,13 @@
   "selection_stability": 1.0
  },
  "ledger_row": {
-  "elapsed_s": 181.6,
+  "elapsed_s": 184.0,
   "end": "2024-06-28",
   "entry_sha256": "b41f855ddc026ca67a6d5581ce7507493cf2eb3ea89228ac3e00af646a251f06",
   "error": null,
   "family": "insider",
   "fixed_params": null,
-  "git_sha": "f0658e510347b77955523b9d7fb5760b107af169",
+  "git_sha": "a097b31dcba164bebb52b43f3e3b50e772dc34f1",
   "grid": {},
   "harness_version": 2,
   "id": "ins_conviction",
@@ -414,7 +414,7 @@
   "start": "2016-08-01",
   "status": "ok",
   "strategy_sha256": "b679b9089e7498d07fa9ca3439c634c2a11876472a92abf604c7fa2d6227b362",
-  "timestamp": "2026-09-30T00:09:25+00:00",
+  "timestamp": "2026-09-30T00:28:29+00:00",
   "verdict": "FAIL"
  },
  "lookahead": {

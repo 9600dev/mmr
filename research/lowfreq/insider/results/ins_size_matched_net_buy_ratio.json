@@ -79,7 +79,7 @@
   },
   "value": 0.47052299263000996
  },
- "elapsed_s": 197.0,
+ "elapsed_s": 202.8,
  "entry": {
   "benchmarks": [
    "eq_ew_pit"
@@ -380,13 +380,13 @@
   "selection_stability": 1.0
  },
  "ledger_row": {
-  "elapsed_s": 197.0,
+  "elapsed_s": 202.8,
   "end": "2024-06-28",
   "entry_sha256": "410ba7fcbc475eab0f7af4644ac7de4965fc6623ecb933a32b69158063e68008",
   "error": null,
   "family": "insider",
   "fixed_params": null,
-  "git_sha": "f0658e510347b77955523b9d7fb5760b107af169",
+  "git_sha": "a097b31dcba164bebb52b43f3e3b50e772dc34f1",
   "grid": {},
   "harness_version": 2,
   "id": "ins_size_matched_net_buy_ratio",
@@ -414,7 +414,7 @@
   "start": "2016-08-01",
   "status": "ok",
   "strategy_sha256": "4624c184ab9bc1c22c7af68bc60630b92e41e8b906322a4a9e44366668223a41",
-  "timestamp": "2026-09-30T00:12:45+00:00",
+  "timestamp": "2026-09-30T00:31:54+00:00",
   "verdict": "PROMISING"
  },
  "lookahead": {
