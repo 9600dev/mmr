@@ -26,10 +26,10 @@
       "score": 1.0
     },
     "trader/lowfreq_live/targets.py": {
-      "killed": 552,
-      "survived": 78,
+      "killed": 557,
+      "survived": 73,
       "timeout": 0,
-      "score": 0.87619
+      "score": 0.88413
     },
     "trader/rebalance/fills.py": {
       "killed": 464,

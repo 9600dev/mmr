@@ -281,3 +281,41 @@ def test_benchmark_excludes_a_member_whose_signal_the_candidate_cannot_compute(e
     res = T.compute_targets('equity', 'tiny_s2p', 'paper_s2p', 25_000.0, AS_OF)
     assert 'BBB' not in res.document['weights']
     assert res.benchmarks['tiny_eq_ew'] == {'AAA': pytest.approx(0.5), 'CCC': pytest.approx(0.5)}, res.benchmarks
+
+
+def test_benchmark_excludes_a_member_with_shares_but_no_revenue(equity_family_with_tiny_bench):   # compute_targets_117, 118, 126, 141, 145
+    """The fixture on which the candidate's coverage and EqEwCovered's OWN fallback coverage DIFFER.
+
+    EqEwCovered.precompute_panel without set_coverage: cov = shares_diluted.notna() & member & close.notna()
+    (reference_strategies.py). CoveredTilt.precompute_panel: cov = member & close.notna() & signal.notna(), and
+    TinySalesToPrice's signal is revenue_ttm / (close x shares_diluted). Deleting BBB's fundamentals (the test
+    above) removes BOTH frames, so both rules exclude BBB and the coverage handoff is unobservable. Here BBB
+    keeps its closes, its membership and its as-of shares_diluted but its revenue_ttm is NaN on every session:
+    the benchmark's fallback INCLUDES it (three names), the candidate's coverage EXCLUDES it ({AAA, CCC}).
+    compute_targets must hand the candidate's frame to the benchmark, so the sidecar reads {AAA: .5, CCC: .5};
+    any of the five coverage mutants (coverage=None, cov=None, candidate_coverage(None)) drops the handoff and
+    the benchmark equal-weights all three."""
+    from trader.research.lowfreq import engine
+    panel = loaders.load_equity_panel(start='2017-02-01', end='2017-06-01')
+    rev, shares, member = panel.fields['revenue_ttm'], panel.fields['shares_diluted'], panel.fields['member']
+    assert rev['BBB'].notna().any() and shares['BBB'].notna().any()               # the fixture does give BBB fundamentals
+    rev.loc[:, 'BBB'] = float('nan')
+    last = panel.close.index[-1]
+    assert pd.Timestamp(last).date() == AS_OF
+    assert bool(member['BBB'].loc[last]) and pd.notna(panel.close['BBB'].loc[last]) and pd.notna(shares['BBB'].loc[last])
+
+    # 1. The two coverage rules really disagree on this panel (otherwise the assertion below proves nothing).
+    fam = registry.load_family('equity')
+    wide = engine.wide_panel(panel.frames())
+    cand_cov = engine.candidate_coverage(
+        engine.make_strategy(fam.get('tiny_s2p'), {}, panel).precompute_panel(wide))
+    bench_own_cov = engine.make_strategy(fam.get('tiny_eq_ew'), {}, panel).precompute_panel(wide)['coverage']
+    assert cand_cov is not None
+    assert set(cand_cov.columns[cand_cov.iloc[-1].to_numpy(dtype=bool)]) == {'AAA', 'CCC'}
+    assert set(bench_own_cov.columns[bench_own_cov.iloc[-1].to_numpy(dtype=bool)]) == {'AAA', 'BBB', 'CCC'}
+
+    # 2. compute_targets hands the CANDIDATE's coverage to the benchmark.
+    res = T.compute_targets('equity', 'tiny_s2p', 'paper_s2p', 25_000.0, AS_OF, panel=panel, check_fresh=False)
+    assert 'BBB' not in res.document['weights']
+    assert res.benchmarks['tiny_eq_ew'] == {'AAA': pytest.approx(0.5), 'CCC': pytest.approx(0.5)}, res.benchmarks
+    assert res.benchmarks['eq_ew_covered'] is None                                # MIN_NAMES=30: the real benchmark holds
