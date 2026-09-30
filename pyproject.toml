@@ -210,6 +210,21 @@ only_mutate = [
     "trader/strategy/auto_executor.py",
     "trader/trading/position_sizing.py",
     "trader/trading/risk_gate.py",
+    # The paper-sleeve order path (2026-09-29, before its first live-paper
+    # rebalance on 2026-10-01). targets: the D08 loader whose weight-sum bound
+    # is the only thing between a weights file and leverage. plan: journal
+    # holdings clamped to IB, floor sizing, SELL-before-BUY, the gross-exposure
+    # refusal — a wrong clamp oversells, a wrong floor overdraws. propose: the
+    # one write the rebalancer may express (a PENDING proposal) and the
+    # duplicate/busy-batch refusals. fills: the D13 journal that IS the
+    # sleeve's inventory; a wrong sign or a skipped receipt buys a filled
+    # order again. lowfreq_live/targets: the writer whose quantisation keeps
+    # the exact decimal sum <= 1.0 for the reader above.
+    "trader/rebalance/targets.py",
+    "trader/rebalance/plan.py",
+    "trader/rebalance/propose.py",
+    "trader/rebalance/fills.py",
+    "trader/lowfreq_live/targets.py",
 ]
 # The fast, deterministic oracle: the invariants spec + the focused kernel unit
 # tests + the deal-contract tests. mutmut maps each mutant to the covering
@@ -376,4 +391,16 @@ pytest_add_cli_args_test_selection = [
     "tests/test_executor_deferred_close.py",
     "tests/test_executor_emergency_durable_exclusion.py",
     "tests/test_executor_silent_failures.py",
+    # The paper-sleeve order path oracle (2026-09-29): the unit tests per module
+    # and the Hypothesis properties. NOT test_rebalance_offline.py / _cli.py /
+    # _integration.py / _static.py: the offline end-to-end test reads the
+    # research registry by repo-relative path (research/lowfreq/equity/
+    # candidates.yaml), which mutmut does not copy into its mutants/ sandbox,
+    # so it fails the stats pass there while passing under plain pytest.
+    "tests/test_rebalance_targets.py",
+    "tests/test_rebalance_plan.py",
+    "tests/test_rebalance_propose.py",
+    "tests/test_rebalance_fills.py",
+    "tests/test_rebalance_properties.py",
+    "tests/test_lowfreq_live_targets.py",
 ]

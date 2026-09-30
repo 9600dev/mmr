@@ -187,7 +187,7 @@ def _ty_scopes() -> dict[str, list[str]]:
 # quietly joining the trading path with zero type coverage, which is exactly how
 # auto_executor.py (1052 lines, places the live orders), strategy_runtime.py and
 # sdk.py sat unchecked until 2026-07-24.
-_MUST_BE_TYPE_CHECKED = ['trader/trading', 'trader/strategy']
+_MUST_BE_TYPE_CHECKED = ['trader/trading', 'trader/strategy', 'trader/rebalance', 'trader/lowfreq_live']
 
 
 class TestTradingPathIsTypeChecked:
@@ -213,3 +213,44 @@ class TestTradingPathIsTypeChecked:
         """It places the live orders and is type-clean; it must be held at zero,
         not baselined, so a new diagnostic there fails the gate."""
         assert 'trader/strategy/auto_executor.py' in _ty_scopes()['kernel']
+
+    def test_paper_sleeve_order_path_is_in_the_kernel_scope_at_zero(self):
+        """trader/rebalance/ and trader/lowfreq_live/ turn a targets file into
+        propose->approve orders on a real (paper) IB account. Both were
+        type-clean when adopted (2026-09-29), so they are held at ZERO in the
+        kernel scope — a new diagnostic there fails the gate, it is never
+        baselined away. Pinned as whole directories so a new module in either
+        package is covered the moment it appears."""
+        kernel = _ty_scopes()['kernel']
+        assert 'trader/rebalance/' in kernel
+        assert 'trader/lowfreq_live/' in kernel
+
+
+class TestPaperSleeveOrderPathIsMutationTested:
+    """The five modules that decide what the sleeve sells, buys and journals
+    must be measured, and the tests that constrain them must be in the oracle
+    (a test file outside the oracle constrains no mutant — see the class above)."""
+
+    MODULES = {
+        'trader/rebalance/targets.py',
+        'trader/rebalance/plan.py',
+        'trader/rebalance/propose.py',
+        'trader/rebalance/fills.py',
+        'trader/lowfreq_live/targets.py',
+    }
+    ORACLE = {
+        'tests/test_rebalance_targets.py',
+        'tests/test_rebalance_plan.py',
+        'tests/test_rebalance_propose.py',
+        'tests/test_rebalance_fills.py',
+        'tests/test_rebalance_properties.py',
+        'tests/test_lowfreq_live_targets.py',
+    }
+
+    def test_modules_are_in_only_mutate(self):
+        missing = self.MODULES - _mutation_scope()
+        assert not missing, f'paper-sleeve modules outside mutmut only_mutate: {sorted(missing)}'
+
+    def test_their_tests_are_in_the_oracle(self):
+        missing = self.ORACLE - _mutation_oracle()
+        assert not missing, f'paper-sleeve test files outside the mutmut oracle: {sorted(missing)}'

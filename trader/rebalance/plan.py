@@ -190,6 +190,11 @@ def reconcile_holdings(journal: Mapping[str, float],
     for sym_raw, journal_qty in sorted(journal.items()):
         sym = str(sym_raw).upper()
         journal_qty = float(journal_qty)
+        if not math.isfinite(journal_qty):
+            # A NaN sum used to fall through to math.floor and crash with "cannot convert float NaN
+            # to integer" on every later plan (2026-09-29, bug B). Name the symbol; the caller refuses.
+            raise ValueError(f'{sym}: journal quantity {journal_qty!r} is not a finite number — '
+                             f'the sleeve inventory cannot be established')
         if journal_qty <= 0:
             if journal_qty < 0:
                 warnings.append(f'{sym}: journal is net short {journal_qty:g} — treated as flat')
@@ -347,7 +352,10 @@ def sleeve_state(sleeve: str, gateway: Gateway) -> SleeveState:
         ib_positions = dict(gateway.stock_positions())
     except Exception as exc:
         raise Refusal('IB_UNREADABLE', f'cannot read IB positions to reconcile the sleeve: {exc}') from exc
-    holdings, warnings = reconcile_holdings(journal, ib_positions)
+    try:
+        holdings, warnings = reconcile_holdings(journal, ib_positions)
+    except ValueError as exc:
+        raise Refusal('JOURNAL_UNREADABLE', f'the sleeve_fills journal cannot be reconciled: {exc}') from exc
     return SleeveState(holdings=holdings, warnings=tuple(warnings), open_proposals=tuple(open_proposals(records)),
                        ib_positions=ib_positions, journal=journal)
 

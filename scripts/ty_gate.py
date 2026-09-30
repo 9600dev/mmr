@@ -54,7 +54,14 @@ SCOPES: dict[str, dict[str, object]] = {
                  "trader/strategy/execution_intents.py",
                  "trader/strategy/execution_queue.py",
                  "trader/strategy/live_bars.py",
-                 "trader/strategy/parameters.py"],
+                 "trader/strategy/parameters.py",
+                 # The paper-sleeve order path (targets file -> plan -> PENDING
+                 # proposals; fills journal + reconcile). It turns a weights file
+                 # into propose->approve orders on a real IB account and was
+                 # type-clean when adopted (2026-09-29), so it is held at zero
+                 # like the rest of the kernel rather than baselined.
+                 "trader/rebalance/",
+                 "trader/lowfreq_live/"],
         "baseline": REPO / "scripts" / "ty_baseline.json",
     },
     "advisory": {

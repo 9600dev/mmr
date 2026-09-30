@@ -270,12 +270,15 @@ def match_executions(sleeve: str, records: Iterable[ProposalRecord], evidence: E
         usable: list[tuple[Execution, dt.datetime]] = []      # receipts with shares, a time and a cumQty
         for e in receipts:
             when = e.time
-            if e.shares <= 0:
+            # NaN compares False against everything, so a `<= 0` guard alone let a NaN/inf receipt
+            # through every comparison below and into the journal (2026-09-29, bug A).
+            if not math.isfinite(e.shares) or e.shares <= 0:
                 problems.append(f'{tag}: receipt {e.exec_id} reports {e.shares:g} shares')
             elif when is None:
                 problems.append(f'{tag}: receipt {e.exec_id} carries no execution time')
-            elif e.cum_qty <= 0:
-                problems.append(f'{tag}: receipt {e.exec_id} carries no cumulative quantity — the chain cannot be checked')
+            elif not math.isfinite(e.cum_qty) or e.cum_qty <= 0:
+                problems.append(f'{tag}: receipt {e.exec_id} carries no cumulative quantity ({e.cum_qty:g} is not '
+                                f'a positive finite number) — the chain cannot be checked')
             else:
                 usable.append((e, when))
         covered = float(sum(e.shares for e, _ in usable))
@@ -284,6 +287,12 @@ def match_executions(sleeve: str, records: Iterable[ProposalRecord], evidence: E
             problems.append(f'{tag}: receipts cover {covered:g} of {cum_max:g} cumulative shares — an execution is missing')
         unknown = [o for o in observations if not o.fill_quantity_known]
         known = [o for o in observations if o.fill_quantity_known]
+        not_finite = [o for o in known if not math.isfinite(o.filled)]
+        if not_finite:
+            # A "known" fill quantity that is NaN matches any receipt count, because both inequalities
+            # below are False for NaN. D13 wants an EXACT match; a non-number is not one.
+            problems.append(f'{tag}: the broker tracker reports a fill quantity that is not a finite number '
+                            f'({", ".join(repr(o.filled) for o in not_finite)}); it is not evidence of anything')
         if unknown:
             statuses = ', '.join(sorted({o.status or 'Unknown' for o in unknown}))
             problems.append(f'{tag}: the broker tracker cannot establish the fill quantity (status {statuses}); '
