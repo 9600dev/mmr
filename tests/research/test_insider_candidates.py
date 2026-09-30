@@ -183,6 +183,48 @@ def test_overlay_weights_arithmetic():
     assert overlay_weights(covered, ['ZZZ'], 0.02, 0.6, 1)['N000'] == pytest.approx(0.01)   # unknown name ignored
 
 
+def _overlaid(w: dict) -> set:
+    base = min(v for v in w.values() if v > 0)
+    return {k for k, v in w.items() if v > base + 1e-12}
+
+
+def test_rule_and_its_size_control_hold_the_same_treated_sample_and_sleeve():
+    """PREREG addendum 2026-09-29: with market cap unknown for a third of the
+    names, a rule's treated sample is its qualifiers WITH a market cap, so at
+    every rebalance the rule and its control overlay the same NUMBER of names
+    with the same total sleeve, and the rule never overlays an unmatchable name."""
+    p = FIX.make_panel()
+    shares = p.fields['shares_diluted'].copy()
+    shares.iloc[:, ::3] = np.nan                       # every third name has no market cap
+    p.fields['shares_diluted'] = shares
+    wide = engine.wide_panel(p.frames())
+    mcap = market_cap(wide['close'].astype(float), {'shares_diluted': shares})
+    cands = dict(candidate_entries())
+    pairs = [(c, e) for c, e in cands.items() if c.startswith(CONTROL_PREFIX)]
+    assert pairs
+    activated = 0
+    for ctl_id, ctl_entry in pairs:
+        rule_cls = load_class(ctl_entry).RULE
+        rule_id = next(c for c, e in cands.items() if load_class(e) is rule_cls)
+        _, _, rule_w = replay(cands[rule_id], p)
+        _, _, ctl_w = replay(ctl_entry, p)
+        active = 0
+        for i, (a, c) in enumerate(zip(rule_w, ctl_w)):
+            assert (a is None) == (c is None), f'{rule_id}/{ctl_id}: rebalance schedules differ at {i}'
+            if a is None or c is None:
+                continue
+            sig, over = _overlaid(a), _overlaid(c)
+            assert len(sig) == len(over), f'{rule_id}/{ctl_id}: K differs at index {i} ({len(sig)} vs {len(over)})'
+            assert all(pd.notna(mcap.iloc[i][k]) for k in sig), f'{rule_id}: overlaid a name without a market cap at {i}'
+            assert not (sig & over)
+            base_a = min(v for v in a.values() if v > 0)
+            base_c = min(v for v in c.values() if v > 0)
+            assert sum(a[k] - base_a for k in sig) == pytest.approx(sum(c[k] - base_c for k in over))
+            active += bool(sig)
+        activated += active                    # the cluster rule rarely reaches 5 names on this thin panel
+    assert activated >= 1, 'no rule/control pair ever overlaid on the synthetic panel'
+
+
 def test_size_control_overlays_market_cap_neighbours_instead_of_the_signal_names(panel):
     size = pd.Series({f'N{i}': float(i) for i in range(10)})
     assert rank_matches(['N3'], size.index.tolist(), size) == ['N2']        # nearest rank, tie -> ticker order

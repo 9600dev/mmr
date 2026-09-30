@@ -184,4 +184,43 @@ holdings), per-year active returns, DSR with the family trial count.
 
 ## Addenda
 
-(none yet)
+### Addendum 1 — 2026-09-29, before any ledger row (size decomposition made apples-to-apples)
+
+Pre-registration record (orchestrator ruling): this file is in git at
+`f0658e5` (round 2 checkpoint; round 1 draft `38954c8`) before the first
+ledger row; every ledger row's `entry_sha256` ties the trial to the exact
+registry text it ran under and `strategy_sha256` to the strategy source.
+This addendum is written after `f0658e5` and BEFORE the first `evaluate`
+call (no result of any kind has been seen); the first ledger rows therefore
+carry `git_sha = f0658e5` while running the corrected code below, which the
+round-3 checkpoint commits.
+
+**What changed.** Market cap (close x as-of diluted shares) is known for
+57.8 % of covered name-days, so `SizeMatchedOverlay` could not match a
+qualifier without one and silently dropped it, while the mirrored rule kept
+it: rule and control then differed in K and in sleeve exposure, and a rule
+could beat its control without beating size. Now EVERY rule's treated
+sample is its qualifiers WITH a market cap on the decision bar
+(`InsiderOverlay.precompute_panel`: `sig = qualifies & coverage & market_cap.notna()`),
+so a rule and its control overlay the same number of names with the same
+total sleeve at every rebalance, and the control's names are the
+market-cap neighbours of exactly the names the rule holds. Pinned by
+`test_rule_and_its_size_control_hold_the_same_treated_sample_and_sleeve`.
+Coverage published to the benchmark is unchanged (membership, D11).
+
+**Effect on the treated samples** (counts only, `calibrate_counts.py`
+re-run; K = qualifiers per rebalance, p25 / median / p75, months with
+K < 5): `ins_purchase_count` 44/56/65 (1) -> 32/40/55 (1);
+`ins_opportunistic` 44/56/65 (1) -> 32/40/55 (1); `ins_cluster` 11/14/19 (3)
+-> 8/11/15 (8); `ins_conviction` 29/37/46 (1) -> 21/26/37 (1); `ins_officer`
+12/19/23 (2) -> 9/13/20 (2); `ins_director` 35/44/51 (1) -> 26/34/42 (1);
+`ins_net_buy_ratio` 19/24/28 (1) -> 12/18/23 (2); `ins_value_to_mcap`
+unchanged 13/17/23 (1) (it already required a market cap). About 28 % of
+purchase qualifiers had no as-of share count and are no longer held by any
+rule. The cluster rule now sits on the plain basket in 8 of 94 months.
+
+**Also.** The rejected 1 bp floor of H6 is now persisted in
+`results/_calibration_counts.json` under `ins_value_to_mcap@1bp_rejected`
+(K 5/8/13, 16 months below 5, market-cap percentile 0.17), as the critic
+asked. No hypothesis, threshold, benchmark, champion rule or evaluation
+protocol above is otherwise changed; the trial count stays 16.

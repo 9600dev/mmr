@@ -124,7 +124,13 @@ class InsiderOverlay(LowFreqStrategy):
         frames = ins.signal_frames(pd.DatetimeIndex(close.index), [str(c) for c in close.columns], self.BUYER_WINDOW)
         q = self.qualifies(frames, close, fields).reindex(index=close.index, columns=close.columns)
         q = q.fillna(False).astype(bool)
-        state: Dict[str, Any] = {'close': close, 'coverage': cov, 'sig': (q & cov).astype(float)}
+        # PREREG.md addendum 2026-09-29 (size decomposition, apples-to-apples):
+        # the TREATED sample of every rule is its qualifiers WITH a market cap
+        # on the decision bar, so a rule and its size-matched control hold
+        # exactly the same K names' worth of sleeve; a qualifier the control
+        # could not match is not held by the rule either.
+        matchable = market_cap(close, fields).notna()
+        state: Dict[str, Any] = {'close': close, 'coverage': cov, 'sig': (q & cov & matchable).astype(float)}
         state.update(self.extra_state(close, fields))
         return state
 

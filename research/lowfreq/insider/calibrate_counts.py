@@ -47,15 +47,16 @@ def main(start: str = '2016-08-01', end: str = '2024-06-28') -> Dict[str, Any]:
                                      'tickers': int(close.shape[1]), 'load_s': round(t1 - t0, 1)},
                            'rules': {}}
     due_idx: List[int] = []
-    for cid, e in fam.entries.items():
-        if e['role'] != 'candidate' or cid.startswith('ins_size_matched_'):
-            continue
+    last: Dict[str, Any] = {}
+
+    def measure(label: str, strat) -> None:
+        strat.research_data = {'fields': panel.fields, 'signals': panel.signals, 'universe': panel.universe}
         t2 = time.time()
-        strat = engine.make_strategy(e, {}, panel)
         state = strat.precompute_panel(wide)
         t3 = time.time()
+        last['coverage'] = state['coverage']
         if not due_idx:
-            due_idx = [i for i in range(len(wide) - 1) if strat.due(i, wide)]
+            due_idx.extend(i for i in range(len(wide) - 1) if strat.due(i, wide))
         ks: List[float] = []
         ns: List[float] = []
         pct: List[float] = []
@@ -69,13 +70,22 @@ def main(start: str = '2016-08-01', end: str = '2024-06-28') -> Dict[str, Any]:
                 med = ranks.reindex(sig.index[sig]).median()
                 if pd.notna(med):
                     pct.append(float(med))
-        out['rules'][cid] = {
+        out['rules'][label] = {
             'precompute_s': round(t3 - t2, 1), 'rebalances': len(ks),
             'K_min': _q(ks, 0.0), 'K_p25': _q(ks, 0.25), 'K_median': _q(ks, 0.5), 'K_p75': _q(ks, 0.75),
             'K_max': _q(ks, 1.0), 'months_below_min_signal': int(sum(k < strat.MIN_SIGNAL_NAMES for k in ks)),
             'N_covered_median': _q(ns, 0.5),
             'qualifier_mcap_percentile_median': (float(np.median(pct)) if pct else None),
         }
+
+    for cid, e in fam.entries.items():
+        if e['role'] != 'candidate' or cid.startswith('ins_size_matched_'):
+            continue
+        measure(cid, engine.make_strategy(e, {}, panel))
+    # the H6 floor that was REJECTED at calibration (1 bp), kept for the record
+    from strategies.lowfreq_insider_value_to_mcap import ValueToMcapOverlay
+    one_bp = type('ValueToMcapAt1bp', (ValueToMcapOverlay,), {'VALUE_TO_MCAP_MIN': 1e-4})
+    measure('ins_value_to_mcap@1bp_rejected', one_bp())
     # H6 threshold support: distribution of trailing purchase value / market cap among purchasers
     frames = ins.signal_frames(pd.DatetimeIndex(close.index), [str(c) for c in close.columns], 63)
     ratio = ins.trailing_sum(frames['p_value'], 63) / mcap
@@ -84,8 +94,8 @@ def main(start: str = '2016-08-01', end: str = '2024-06-28') -> Dict[str, Any]:
     out['value_to_mcap_among_purchasers'] = {f'q{int(q * 100):02d}': float(vals.quantile(q))
                                              for q in (0.1, 0.25, 0.5, 0.75, 0.9)}
     out['value_to_mcap_among_purchasers']['n'] = int(len(vals))
-    out['mcap_coverage_share_of_covered'] = float(
-        (mcap.notna() & state['coverage'].astype(bool)).sum().sum() / max(state['coverage'].astype(bool).sum().sum(), 1))
+    coverage = last['coverage'].astype(bool)
+    out['mcap_coverage_share_of_covered'] = float((mcap.notna() & coverage).sum().sum() / max(coverage.sum().sum(), 1))
     out['elapsed_s'] = round(time.time() - t0, 1)
     dest = ROOT / 'research' / 'lowfreq' / 'insider' / 'results' / '_calibration_counts.json'
     dest.parent.mkdir(parents=True, exist_ok=True)

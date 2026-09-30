@@ -148,6 +148,27 @@ each reproduction); `check_artifacts.py` and `provenance.py` report ALL OK /
 The dev-period edge of the sales-to-price tilt (+12.0 %/yr) did not appear
 held out (+0.15 %/yr). Details in `docs/RESEARCH_LOG.md` (2026-09-29 held-out entry).
 
+## Insider family (C04, program 2, 2026-09-29) — null
+
+Eight pre-registered rules on SEC Form 4 officer/director open-market
+purchases (count baseline, non-routine buyers, cluster, conviction, officer,
+director, net purchase ratio, value / market cap) as 2 %-per-name overlays on
+the monthly equal-weight PIT basket (D11), each with a market-cap-matched
+control holding the same sleeve in neighbouring non-qualifiers; D14 event
+timing; 16 trials, two passes (final DSR deflated by N = 16).
+
+| book | OOS Sharpe | bench Sharpe | active/yr | t(NW) | verdict |
+|---|---|---|---|---|---|
+| `ins_purchase_count` (C0) | 0.40 | 0.49 | −0.65 % | −0.25 | FAIL |
+| `ins_net_buy_ratio` (best rule, champion by rule 4) | 0.51 | 0.49 | +1.75 % | 0.56 | FAIL |
+| `ins_size_matched_count` (C0's size control) | 0.68 | 0.49 | +4.69 % | 2.39 | PROMISING |
+
+No rule beats its own size control (gaps of 2–8 %/yr): what insiders buy has a
+favourable size / operating-company profile, and the buying subtracts from it.
+Champion `ins_net_buy_ratio`, verdict FAIL — the null. Details, per-year
+returns, 3x costs, D07 stress and the orchestrator's held-out command:
+`research/lowfreq/insider/REPORT.md`.
+
 ## Where this leaves the program
 
 Two information sets the program had not exploited were searched under
