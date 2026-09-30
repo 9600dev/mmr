@@ -1,6 +1,6 @@
 # Insider family — REPORT (C04; D11, D14)
 
-Generated 2026-09-30T00:39:30+00:00 by `make_report.py` from `results/<id>.json` (final pass), `results/trials/*.json` (retained per-trial artifacts), `trials.jsonl`, `candidates.yaml`, `results/_calibration_counts.json`, `results/_d07_stress.json`. Pre-registration: `PREREG.md` (git `f0658e5`; addendum 1 before the first ledger row; addendum 2 is procedural, written after results). Dev period 2016-08-01..2024-06-28, walk-forward train 1095 / test 365 days, 4 folds, OOS 1005 sessions; costs 5 bps + $0.005/share, stress x3. Distinct candidate trials in the ledger: **16** (budget 30); every final file is deflated by 16.
+Generated 2026-09-30T00:48:28+00:00 by `make_report.py` from `results/<id>.json` (final pass), `results/trials/*.json` (retained per-trial artifacts), `trials.jsonl`, `candidates.yaml`, `results/_calibration_counts.json`, `results/_d07_stress.json`. Pre-registration: `PREREG.md` (git `f0658e5`; addendum 1 before the first ledger row; addendum 2 is procedural, written after results). Dev period 2016-08-01..2024-06-28, walk-forward train 1095 / test 365 days, 4 folds, OOS 1005 sessions; costs 5 bps + $0.005/share, stress x3. Distinct candidate trials in the ledger: **16** (budget 30); every final file is deflated by 16.
 
 ## Verdict
 
@@ -92,26 +92,26 @@ Reading the controls: every control beats the equal-weight basket although it ho
 
 ## Every ledger trial
 
-48 rows (`trials.jsonl`, append-only; every row is mode walk_forward, status ok). Pass 1 (rows 1-16) ran the registrations in order, so early rows were deflated by partial trial counts; pass 2 (rows 17-32) re-ran all 16 once every hash was ledgered; pass 3 (rows 33-48) re-ran all 16 through the mandated `uv run python -m trader.research.lowfreq evaluate insider/<id>` (PREREG addendum 2) and is the final pass quoted above. The harness overwrites `results/<id>.json` on every run; from pass 2 on each run's file is retained as `results/trials/NNN_<id>.json` (NNN = ledger row; 32 retained) and the numbers below come from those artifacts only. Pass-1 files were overwritten before retention existed, so those rows carry no numbers.
+48 rows (`trials.jsonl`, append-only; every row is mode walk_forward, status ok). Pass 1 (rows 1-16) ran the registrations in order, so early rows were deflated by partial trial counts; pass 2 (rows 17-32) re-ran all 16 once every hash was ledgered; pass 3 (rows 33-48) re-ran all 16 through the mandated `uv run python -m trader.research.lowfreq evaluate insider/<id>` (PREREG addendum 2) and is the final pass quoted above. The harness overwrites `results/<id>.json` on every run; from pass 2 on each run's file is retained as `results/trials/NNN_<id>.json` (NNN = ledger row; 32 retained) and the numbers below come from those artifacts only. Pass-1 files were overwritten before retention existed, so those rows show the harness verdict the ledger recorded but no numbers.
 
 | # | timestamp (UTC) | id | artifact | trials at run | verdict | OOS Sharpe | active ann | t(NW) | DSR |
 |---|---|---|---|---|---|---|---|---|---|
-| 1 | 2026-09-30T00:02:34 | `ins_cluster` | not retained | - | - | - | - | - | - |
-| 2 | 2026-09-30T00:02:38 | `ins_purchase_count` | not retained | - | - | - | - | - | - |
-| 3 | 2026-09-30T00:02:39 | `ins_opportunistic` | not retained | - | - | - | - | - | - |
-| 4 | 2026-09-30T00:02:40 | `ins_officer` | not retained | - | - | - | - | - | - |
-| 5 | 2026-09-30T00:02:40 | `ins_value_to_mcap` | not retained | - | - | - | - | - | - |
-| 6 | 2026-09-30T00:02:40 | `ins_director` | not retained | - | - | - | - | - | - |
-| 7 | 2026-09-30T00:02:41 | `ins_conviction` | not retained | - | - | - | - | - | - |
-| 8 | 2026-09-30T00:02:48 | `ins_net_buy_ratio` | not retained | - | - | - | - | - | - |
-| 9 | 2026-09-30T00:06:03 | `ins_size_matched_cluster` | not retained | - | - | - | - | - | - |
-| 10 | 2026-09-30T00:06:07 | `ins_size_matched_officer` | not retained | - | - | - | - | - | - |
-| 11 | 2026-09-30T00:06:08 | `ins_size_matched_value_to_mcap` | not retained | - | - | - | - | - | - |
-| 12 | 2026-09-30T00:06:09 | `ins_size_matched_opportunistic` | not retained | - | - | - | - | - | - |
-| 13 | 2026-09-30T00:06:09 | `ins_size_matched_count` | not retained | - | - | - | - | - | - |
-| 14 | 2026-09-30T00:06:09 | `ins_size_matched_director` | not retained | - | - | - | - | - | - |
-| 15 | 2026-09-30T00:06:10 | `ins_size_matched_conviction` | not retained | - | - | - | - | - | - |
-| 16 | 2026-09-30T00:06:17 | `ins_size_matched_net_buy_ratio` | not retained | - | - | - | - | - | - |
+| 1 | 2026-09-30T00:02:34 | `ins_cluster` | not retained | - | FAIL | - | - | - | - |
+| 2 | 2026-09-30T00:02:38 | `ins_purchase_count` | not retained | - | FAIL | - | - | - | - |
+| 3 | 2026-09-30T00:02:39 | `ins_opportunistic` | not retained | - | FAIL | - | - | - | - |
+| 4 | 2026-09-30T00:02:40 | `ins_officer` | not retained | - | FAIL | - | - | - | - |
+| 5 | 2026-09-30T00:02:40 | `ins_value_to_mcap` | not retained | - | FAIL | - | - | - | - |
+| 6 | 2026-09-30T00:02:40 | `ins_director` | not retained | - | FAIL | - | - | - | - |
+| 7 | 2026-09-30T00:02:41 | `ins_conviction` | not retained | - | FAIL | - | - | - | - |
+| 8 | 2026-09-30T00:02:48 | `ins_net_buy_ratio` | not retained | - | FAIL | - | - | - | - |
+| 9 | 2026-09-30T00:06:03 | `ins_size_matched_cluster` | not retained | - | PROMISING | - | - | - | - |
+| 10 | 2026-09-30T00:06:07 | `ins_size_matched_officer` | not retained | - | FAIL | - | - | - | - |
+| 11 | 2026-09-30T00:06:08 | `ins_size_matched_value_to_mcap` | not retained | - | PROMISING | - | - | - | - |
+| 12 | 2026-09-30T00:06:09 | `ins_size_matched_opportunistic` | not retained | - | PROMISING | - | - | - | - |
+| 13 | 2026-09-30T00:06:09 | `ins_size_matched_count` | not retained | - | PROMISING | - | - | - | - |
+| 14 | 2026-09-30T00:06:09 | `ins_size_matched_director` | not retained | - | PROMISING | - | - | - | - |
+| 15 | 2026-09-30T00:06:10 | `ins_size_matched_conviction` | not retained | - | PROMISING | - | - | - | - |
+| 16 | 2026-09-30T00:06:17 | `ins_size_matched_net_buy_ratio` | not retained | - | PROMISING | - | - | - | - |
 | 17 | 2026-09-30T00:09:21 | `ins_cluster` | retained | 16 | FAIL | 0.38 | -1.64% | -0.71 | 0.00 |
 | 18 | 2026-09-30T00:09:25 | `ins_conviction` | retained | 16 | FAIL | 0.40 | -0.57% | -0.20 | 0.01 |
 | 19 | 2026-09-30T00:09:26 | `ins_officer` | retained | 16 | FAIL | 0.36 | -2.34% | -1.21 | 0.00 |

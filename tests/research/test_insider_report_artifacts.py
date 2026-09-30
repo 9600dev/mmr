@@ -137,12 +137,14 @@ def test_artifact_for_row_accepts_a_matching_file_and_refuses_a_contradicting_on
         MR.artifact_for_row(1, bad_verdict, tmp_path)
 
 
-def test_ledger_table_quotes_numbers_only_for_rows_with_a_retained_artifact():
-    rows = [_row('ins_x', 't1', 1, METRICS), _row('ins_x', 't2', 16, METRICS)]
+def test_ledger_table_quotes_numbers_only_for_rows_with_a_retained_artifact_but_every_verdict():
+    rows = [_row('ins_x', 't1', 1, METRICS, verdict='PROMISING'), _row('ins_x', 't2', 16, METRICS)]
     artifacts = {1: None, 2: _artifact('ins_x', 't2', 16, METRICS)}
     table = MR.ledger_table(rows, artifacts, MR.final_row_index(rows))
     unretained, retained = table[2], table[3]
-    assert 'not retained' in unretained and '| - | - | - | - | - | - |' in unretained
+    # no artifact: the ledger's verdict is shown, every numeric column is blank
+    assert 'not retained' in unretained and '| - | PROMISING | - | - | - | - |' in unretained
+    assert '0.50' not in unretained and '0.05' not in unretained
     assert '| final | 16 | FAIL | 0.50 | +1.00% | 0.60 | 0.05 |' in retained
 
 

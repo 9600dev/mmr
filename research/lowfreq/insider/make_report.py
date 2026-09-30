@@ -155,13 +155,16 @@ def distinct_trials(rows: List[Dict[str, Any]]) -> int:
 # ---------------------------------------------------------------- tables
 def ledger_table(rows: List[Dict[str, Any]], artifacts: Dict[int, Optional[Dict[str, Any]]],
                  final: Dict[str, int]) -> List[str]:
-    """One line per ledger row; numbers ONLY from a retained artifact."""
+    """One line per ledger row; NUMBERS only from a retained artifact. A row
+    without one still shows its harness verdict (a label the ledger carries,
+    not a metric) so every trial is listed with its verdict."""
     out = ['| # | timestamp (UTC) | id | artifact | trials at run | verdict | OOS Sharpe | active ann | t(NW) | DSR |',
            '|---|---|---|---|---|---|---|---|---|---|']
     for i, r in enumerate(rows, 1):
         art = artifacts.get(i)
         if art is None:
-            out.append(f"| {i} | {str(r.get('timestamp', ''))[:19]} | `{r['id']}` | not retained | - | - | - | - | - | - |")
+            out.append(f"| {i} | {str(r.get('timestamp', ''))[:19]} | `{r['id']}` | not retained | - | "
+                       f"{r.get('verdict') or '-'} | - | - | - | - |")
             continue
         m = art.get('ledger_metrics') or {}
         tag = 'final' if final.get(r['id']) == i else 'retained'
@@ -347,7 +350,8 @@ def render(d: Dict[str, Any]) -> str:
               '`uv run python -m trader.research.lowfreq evaluate insider/<id>` (PREREG addendum 2) and is the final pass quoted '
               'above. The harness overwrites `results/<id>.json` on every run; from pass 2 on each run\'s file is retained as '
               f'`results/trials/NNN_<id>.json` (NNN = ledger row; {n_retained} retained) and the numbers below come from those '
-              'artifacts only. Pass-1 files were overwritten before retention existed, so those rows carry no numbers.', ''
+              'artifacts only. Pass-1 files were overwritten before retention existed, so those rows show the harness '
+              'verdict the ledger recorded but no numbers.', ''
               ] + ledger_table(rows, artifacts, final) + ['']
     lines += ['## Held-out evaluation (orchestrator only, D11)', '',
               'The held-out period starts after the dev cutoff; the full research directory\'s insider data ends '
