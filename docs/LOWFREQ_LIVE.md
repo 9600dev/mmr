@@ -49,7 +49,7 @@ Both are idempotent: a second run fetches and writes nothing.
 
 ```
 $EXEC python3 -m trader.lowfreq_live targets equity/s2p_top_quintile \
-    --sleeve paper_s2p --capital 25000 --as-of D
+    --sleeve paper_s2p --capital 50000 --as-of D
 ```
 
 Writes `~/.local/share/mmr/data/targets/paper_s2p/D.json` (`mmr.targets.v1`,
@@ -72,6 +72,18 @@ $EXEC python3 -m trader.rebalance plan    --sleeve paper_s2p    # dry run: order
 $EXEC python3 -m trader.rebalance propose --sleeve paper_s2p    # PENDING proposals in group sleeve_paper_s2p
 $EXEC mmr proposals                                             # review sizing and risk
 $EXEC mmr approve <id>                                          # one by one, SELLs first
+
+**Operating decisions (2026-09-30).**
+- **Capital US$50,000.** The paper account DUM422056 is CAD-based, NetLiquidation
+  CA$92.9k (about US$65k at USD/CAD 1.42) with `max_leverage: 1.0`. US$50k uses about 77% of it. At
+  US$25k each name is about $400, so three names cannot be bought at all under floor-and-refuse
+  sizing and 19% stays in cash; at US$50k, 61 of 62 names fill and about 8.6% stays in cash.
+- **Approve in chunks of at most 15.** Proposals are `MARKET`/`DAY`, regular hours only, and
+  `risk_limits.max_open_orders` is 15. After the close every approved order stays OPEN until
+  the next session, so approve SELLs first, then BUYs, at most 15 open at a time. Approve the
+  next chunk only after `mmr orders` shows the previous one filled.
+- Before approving, `mmr status` must show `account_values.NetLiquidation`, and `mmr proposals`
+  must hold nothing except this batch.
 ```
 
 The rebalancer only creates PENDING proposals and never approves, places or
