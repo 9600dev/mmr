@@ -245,6 +245,8 @@ class TestPaperSleeveOrderPathIsMutationTested:
         'tests/test_rebalance_fills.py',
         'tests/test_rebalance_properties.py',
         'tests/test_lowfreq_live_targets.py',
+        'tests/test_rebalance_mutation_kills.py',
+        'tests/test_lowfreq_live_mutation_kills.py',
     }
 
     def test_modules_are_in_only_mutate(self):

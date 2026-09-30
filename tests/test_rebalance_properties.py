@@ -48,7 +48,7 @@ from trader.lowfreq_live import targets as writer
 from trader.rebalance.fills import ExecutionsIncomplete, match_executions
 from trader.rebalance.plan import Refusal, make_plan, reconcile_holdings, size_orders
 from trader.rebalance.propose import propose_plan
-from trader.rebalance.targets import exact_weight_sum, load_targets, validate_targets
+from trader.rebalance.targets import TargetsError, exact_weight_sum, load_targets, validate_targets
 
 POOL = ['AAA', 'BBB', 'CCC', 'DDD', 'EEE', 'FFF']
 _SLACK = 0.01           # plan.py compares dollar sums with half-cent slack; allow a full cent here
@@ -236,7 +236,7 @@ def test_p5_regression_writer_regex_is_wider_than_the_readers():
     for ticker in ('ABCDEFG', 'A.B.C', 'AB-CDEF'):
         doc = _writer_doc({ticker: 0.5})
         writer.validate_targets_document(doc)                    # writer: fine
-        with pytest.raises(Exception):                           # reader: refused
+        with pytest.raises(TargetsError, match='not a US common-stock symbol'):   # reader: refused, by the ticker rule
             validate_targets(doc)
 
 

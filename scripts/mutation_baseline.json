@@ -25,6 +25,36 @@
       "timeout": 0,
       "score": 1.0
     },
+    "trader/lowfreq_live/targets.py": {
+      "killed": 518,
+      "survived": 112,
+      "timeout": 0,
+      "score": 0.822222
+    },
+    "trader/rebalance/fills.py": {
+      "killed": 460,
+      "survived": 60,
+      "timeout": 0,
+      "score": 0.884615
+    },
+    "trader/rebalance/plan.py": {
+      "killed": 442,
+      "survived": 36,
+      "timeout": 0,
+      "score": 0.924686
+    },
+    "trader/rebalance/propose.py": {
+      "killed": 144,
+      "survived": 24,
+      "timeout": 0,
+      "score": 0.857143
+    },
+    "trader/rebalance/targets.py": {
+      "killed": 397,
+      "survived": 22,
+      "timeout": 0,
+      "score": 0.947494
+    },
     "trader/simulation/panel.py": {
       "killed": 147,
       "survived": 5,
