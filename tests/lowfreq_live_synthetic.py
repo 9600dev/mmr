@@ -12,3 +12,11 @@ class TinySalesToPrice(CoveredTilt):
 
     def signal(self, close, fields, signals):
         return sales_to_price(close, fields)
+
+
+from trader.research.lowfreq.reference_strategies import EqEwCovered
+
+
+class TinyEqEwCovered(EqEwCovered):
+    """The covered equal-weight benchmark, allowed to issue on a three-name test panel."""
+    MIN_NAMES = 1

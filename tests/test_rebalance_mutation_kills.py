@@ -331,3 +331,89 @@ def test_receipt_only_resolution_needs_an_exact_match():                 # (pins
     short = evidence(orders=[], executions=[receipt('x1', 901, 24.0)])
     with pytest.raises(ExecutionsIncomplete):
         match_executions('s2p', recs, short)
+
+
+# ============================================================ round 3: refusal CODES, persisted keys, status fallbacks
+# The older tests matched codes as SUBSTRINGS (`match='BAD_BAND'`), which lets a code mutated to
+# 'XXBAD_BANDXX' live. A refusal code is behaviour — the CLI exits on it — so pin it exactly.
+
+def test_refusal_codes_are_exact_across_plan_and_propose():             # size_orders_11, sleeve_state_12, propose_plan_6/8, check_no_open_batch code
+    with pytest.raises(Refusal) as exc:
+        size_orders(_t(), {}, PRICES, band_pct=-1)
+    assert exc.value.code == 'BAD_BAND'
+
+    class NoJournal(FakeGateway):
+        def sleeve_holdings(self, sleeve):
+            raise OSError('database locked')
+    with pytest.raises(Refusal) as exc:
+        make_plan(_t(), NoJournal(prices=PRICES), today=TODAY)
+    assert exc.value.code == 'JOURNAL_UNREADABLE'
+    gw = FakeGateway(prices=PRICES)
+    at_target = size_orders(_t(), {'AAPL': 25, 'MSFT': 7}, PRICES)
+    assert at_target.orders == ()
+    with pytest.raises(Refusal) as exc:
+        propose_plan(_t(), at_target, gw, gw)
+    assert exc.value.code == 'NOTHING_TO_DO' and gw.propose_calls == []
+    dup = [executed(9, 'AAPL', 'BUY', 5, status='PENDING', source='rebalance:s2p:2026-09-28')]
+    gw = FakeGateway(proposals=dup, prices=PRICES)
+    with pytest.raises(Refusal) as exc:
+        propose_plan(_t(), _plan(), gw, gw)
+    assert exc.value.code == 'DUPLICATE_BATCH' and gw.propose_calls == []
+
+
+def test_proposal_metadata_is_exactly_the_rebalance_block():             # propose_plan_42..53, 57, 58, 69, 70 (persisted keys)
+    gw = FakeGateway(prices=PRICES)
+    t = _t()
+    plan = size_orders(t, {}, PRICES)
+    propose_plan(t, plan, gw, gw)
+    o = plan.orders[0]
+    assert gw.propose_calls[0]['metadata'] == {'rebalance': {
+        'sleeve': 's2p', 'as_of': '2026-09-28', 'targets_file': PATH,
+        'strategy': {'family': 'equity', 'id': 's2p_top_quintile', 'module': 'strategies.lowfreq_s2p',
+                     'class_name': 'S2PTopQuintile', 'params': {'quantile': 0.2}, 'source_sha256': 'a' * 64},
+        'target_weight': o.target_weight, 'target_shares': o.target_shares, 'held_before': 0,
+        'plan_price': o.price, 'capital_usd': 10_000.0, 'limit_flag': None}}
+
+
+@pytest.mark.parametrize('flag', ['receipts_available', 'history_complete', 'account_confirmed', 'orders_complete'])
+def test_reconcile_unreadable_evidence_codes_are_exact(flag):           # reconcile_sleeve_24..64 (the four EXECUTIONS_UNREADABLE sites)
+    gw = FakeGateway(proposals=[executed(1, 'AAPL', 'BUY', 25)], evidence=evidence(**{flag: False}))
+    with pytest.raises(Refusal) as exc:
+        reconcile_sleeve('s2p', gw)
+    assert exc.value.code == 'EXECUTIONS_UNREADABLE' and gw.recorded == []
+
+
+def test_reconcile_other_refusal_codes_are_exact():                     # reconcile_sleeve_68, 83, 88, 105..107 (codes)
+    recs = [executed(1, 'AAPL', 'BUY', 25)]
+    with pytest.raises(Refusal) as exc:
+        reconcile_sleeve('s2p', FakeGateway(proposals=recs, fail_evidence=True))
+    assert exc.value.code == 'EXECUTIONS_UNREADABLE'
+    with pytest.raises(Refusal) as exc:
+        reconcile_sleeve('s2p', FakeGateway(proposals=recs, fail_positions=True))
+    assert exc.value.code == 'IB_UNREADABLE'
+    mismatch = evidence(orders=[observed(901, 'TSLA', 'BUY', 'Filled', filled=25.0)], executions=[receipt('x1', 901, 25.0)])
+    with pytest.raises(Refusal) as exc:
+        reconcile_sleeve('s2p', FakeGateway(proposals=recs, evidence=mismatch))
+    assert exc.value.code == 'EXECUTION_MISMATCH'
+    with pytest.raises(Refusal) as exc:                                   # order unknown to the tracker
+        reconcile_sleeve('s2p', FakeGateway(proposals=recs, evidence=evidence()))
+    assert exc.value.code == 'EXECUTIONS_INCOMPLETE'
+    obs, ex = observed(901, 'AAPL', 'BUY', 'Filled', filled=25.0), receipt('x1', 901, 25.0)
+    with pytest.raises(Refusal) as exc:                                   # runtime verdict incomplete, no receipt-only order to explain it
+        reconcile_sleeve('s2p', FakeGateway(proposals=recs, evidence=evidence(orders=[obs], executions=[ex], complete=False)))
+    assert exc.value.code == 'EXECUTIONS_INCOMPLETE'
+
+
+def test_empty_broker_status_is_reported_as_unknown():                   # match_executions_130, 131, 143, 144
+    recs = [executed(1, 'AAPL', 'BUY', 25)]
+    m = match_executions('s2p', recs, evidence(orders=[observed(901, 'AAPL', 'BUY', '', filled=0.0)]))
+    assert m.unfilled[0].broker_status == 'unknown' and m.working[0].broker_status == 'unknown'
+
+
+def test_validate_targets_default_path_is_empty_and_messages_say_targets():   # validate_targets_1, 4, 5
+    assert validate_targets(make_doc()).path == ''
+    doc = make_doc()
+    del doc['sleeve']
+    with pytest.raises(TargetsError) as exc:
+        validate_targets(doc)
+    assert str(exc.value).startswith('<targets>: ')

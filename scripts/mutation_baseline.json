@@ -26,34 +26,34 @@
       "score": 1.0
     },
     "trader/lowfreq_live/targets.py": {
-      "killed": 518,
-      "survived": 112,
+      "killed": 552,
+      "survived": 78,
       "timeout": 0,
-      "score": 0.822222
+      "score": 0.87619
     },
     "trader/rebalance/fills.py": {
-      "killed": 460,
-      "survived": 60,
+      "killed": 464,
+      "survived": 56,
       "timeout": 0,
-      "score": 0.884615
+      "score": 0.892308
     },
     "trader/rebalance/plan.py": {
-      "killed": 442,
-      "survived": 36,
+      "killed": 444,
+      "survived": 34,
       "timeout": 0,
-      "score": 0.924686
+      "score": 0.92887
     },
     "trader/rebalance/propose.py": {
-      "killed": 144,
-      "survived": 24,
+      "killed": 159,
+      "survived": 9,
       "timeout": 0,
-      "score": 0.857143
+      "score": 0.946429
     },
     "trader/rebalance/targets.py": {
-      "killed": 397,
-      "survived": 22,
+      "killed": 400,
+      "survived": 19,
       "timeout": 0,
-      "score": 0.947494
+      "score": 0.954654
     },
     "trader/simulation/panel.py": {
       "killed": 147,
