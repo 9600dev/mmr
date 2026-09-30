@@ -148,3 +148,33 @@ def test_parity_with_run_panel_on_fake_db(equity_family):
         res = T.compute_targets('equity', 'tiny_s2p', 'paper_s2p', 10_000.0, d, panel=sub)
         assert res.document['weights'] == pytest.approx(issued[d]), d
     assert {d: dict(w) for d, w in rec.items()} == issued    # nothing was recorded during targets
+
+
+def test_written_weights_of_69_equal_names_load_through_the_rebalancer_reader(tmp_path):
+    """Cross-component contract (D08): ``trader.rebalance.targets.load_targets`` parses weights with
+    ``parse_float=Decimal`` and sums them EXACTLY as written. 69 x repr(1/69) sums to
+    1.000000000000000014 as decimals, and the first end-to-end run was refused on it; the writer now
+    floors each weight to 1e-10 so the written sum can never exceed 1.0."""
+    from decimal import Decimal
+    from trader.rebalance.targets import TargetsError, load_targets
+    raw = {f'T{i:02d}': 1 / 69 for i in range(69)}
+    assert sum(Decimal(repr(w)) for w in raw.values()) > 1               # what the reader saw
+    w = T.written_weights(raw)
+    assert len(w) == 69 and T.written_weight_sum(w) <= 1
+    assert all(0 <= raw[k] - w[k] < 1e-10 for k in raw)                  # floored, never raised
+    good = {'schema': 'mmr.targets.v1', 'sleeve': 'paper_s2p', 'as_of': '2026-09-01',
+            'generated_at': '2026-09-01T21:00:00+00:00',
+            'strategy': {'family': 'equity', 'id': 'x', 'module': 'm', 'class': 'C', 'params': {}, 'source_sha256': 'a' * 64},
+            'capital_usd': 100_000.0, 'prices_as_of': '2026-09-01', 'weights': w, 'notes': ''}
+    T.validate_targets_document(good)
+    path = tmp_path / '2026-09-01.json'
+    path.write_text(json.dumps(good, indent=2) + '\n')
+    loaded = load_targets(path)                                          # the reader accepts the file as written
+    assert set(loaded.weights) == set(w) and float(sum(loaded.weights.values())) == pytest.approx(1.0)
+    # the unquantised weights are refused by BOTH sides, for the same reason
+    with pytest.raises(ValueError, match='as written'):
+        T.validate_targets_document(dict(good, weights=raw))
+    bad = tmp_path / 'bad.json'
+    bad.write_text(json.dumps(dict(good, weights=raw)) + '\n')
+    with pytest.raises(TargetsError, match='> 1.0'):
+        load_targets(bad)

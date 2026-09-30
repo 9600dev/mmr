@@ -76,6 +76,12 @@ $EXEC mmr approve <id>                                          # one by one, SE
 
 The rebalancer only creates PENDING proposals and never approves, places or
 cancels anything (D15); approval is the operator's act. See `docs/REBALANCE.md`.
+`--sleeve` resolves the newest `<as_of>.json` under the sleeve's targets
+directory (the `.benchmark.json` sidecar is ignored); a file path works too.
+Without trader_service, `plan <file> --offline` dry-runs the file against an
+EMPTY sleeve priced at the stored `pit_daily_bars` closes of its
+`prices_as_of` (the end-to-end check in `research/lowfreq/SUMMARY.md`);
+`propose --offline` is refused.
 
 ### 4. Reconcile the fills into the journal (C01)
 

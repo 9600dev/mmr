@@ -8,8 +8,9 @@ or closes anything (D15): the operator approves each proposal by hand with
 `mmr approve`, and the server-side gates apply unchanged.
 
 ```
-uv run python -m trader.rebalance plan      <targets.json> [--band-pct 0.25] [--sells-only] [--json]
-uv run python -m trader.rebalance propose   <targets.json> [same flags]
+uv run python -m trader.rebalance plan      <targets.json> | --sleeve <name> [--targets-dir DIR] [--band-pct 0.25] [--sells-only] [--json]
+uv run python -m trader.rebalance plan      <targets.json> --offline [--bars-db DB] [--today YYYY-MM-DD]   # no trader_service: empty sleeve, stored closes
+uv run python -m trader.rebalance propose   <targets.json> | --sleeve <name> [same flags; --offline is refused]
 uv run python -m trader.rebalance reconcile --sleeve <name> [--dry-run] [--json]
 uv run python -m trader.rebalance status    <sleeve> [--targets-dir DIR | --targets-file F] [--json]
 ```
@@ -22,6 +23,19 @@ proposal store, IB positions and IB execution receipts through `trader.sdk`.
 Only `propose` (PENDING proposals) and `reconcile` without `--dry-run` (journal
 rows) write anything; `plan`, `status` and `reconcile --dry-run` write nothing —
 not even the journal table's schema.
+
+`--sleeve <name>` takes the newest `<as_of>.json` under
+`~/.local/share/mmr/data/targets/<name>/` (or `--targets-dir`); the
+`<as_of>.benchmark.json` sidecar C02 writes beside it is ignored. `plan
+--offline` needs no trader_service at all: the sleeve is taken as EMPTY (no
+positions, proposals or journal rows) and every ticker is priced at its stored
+`pit_daily_bars` close on the file's `prices_as_of` (`--bars-db`, default the
+`history_duckdb_path` of `LOWFREQ_RESEARCH_CONFIG`); NetLiquidation is reported
+as unreadable, never guessed, and a name without a stored close is
+`UNPRICEABLE`. It is the dry run for a historical targets file — the
+staleness check runs as of the file's own `as_of` unless `--today` is given —
+and can create nothing: `propose --offline` is refused (`OFFLINE`) before a
+gateway exists.
 
 ## The workflow
 

@@ -23,7 +23,7 @@ from trader.rebalance.render import (
     render_status, status_to_dict,
 )
 from trader.rebalance.status import sleeve_status
-from trader.rebalance.targets import TargetsError, load_targets
+from trader.rebalance.targets import TargetsError, latest_targets_path, load_targets
 
 GatewayFactory = Callable[[], Gateway]
 
@@ -42,7 +42,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest='cmd', required=True)
 
     def common(sp: argparse.ArgumentParser) -> None:
-        sp.add_argument('targets', help='path to an mmr.targets.v1 JSON file (D08)')
+        sp.add_argument('targets', nargs='?', default=None,
+                        help='path to an mmr.targets.v1 JSON file (D08); or give --sleeve')
+        sp.add_argument('--sleeve', default=None,
+                        help='use the newest <as_of>.json under the sleeve\'s targets directory instead of a path')
+        sp.add_argument('--targets-dir', default=None,
+                        help='with --sleeve: override ~/.local/share/mmr/data/targets')
+        sp.add_argument('--offline', action='store_true',
+                        help='dry run without trader_service: an EMPTY sleeve priced at the stored pit_daily_bars '
+                             'closes of prices_as_of (plan only; propose --offline is refused)')
+        sp.add_argument('--bars-db', default=None,
+                        help='with --offline: DuckDB holding pit_daily_bars (default: history_duckdb_path of '
+                             'LOWFREQ_RESEARCH_CONFIG)')
         sp.add_argument('--band-pct', type=float, default=DEFAULT_BAND_PCT,
                         help=f'no-trade band per name, %% of sleeve capital (default {DEFAULT_BAND_PCT})')
         sp.add_argument('--today', type=_parse_date, default=None,
@@ -91,6 +102,32 @@ def _default_gateway(config: str) -> Gateway:
     return SdkGateway.connect(config_file=config)
 
 
+def _resolve_targets_path(args: argparse.Namespace) -> str:
+    """Exactly one of the positional path and ``--sleeve`` (the newest ``<as_of>.json``; sidecars ignored)."""
+    if bool(args.targets) == bool(args.sleeve):
+        raise TargetsError('give a targets file path or --sleeve NAME (not both, not neither)')
+    if args.targets:
+        return str(args.targets)
+    found = latest_targets_path(args.sleeve, args.targets_dir)
+    if found is None:
+        raise TargetsError(f'no <as_of>.json targets file for sleeve {args.sleeve!r}'
+                           + (f' under {args.targets_dir}' if args.targets_dir else ''))
+    return str(found)
+
+
+def _offline_gateway(bars_db: str, prices_as_of: dt.date) -> Gateway:
+    """``--offline``: an empty sleeve priced at the stored closes of ``prices_as_of`` (plan only)."""
+    from trader.rebalance.offline import OfflineEmptySleeve
+    return OfflineEmptySleeve(bars_db, prices_as_of)
+
+
+def _offline_bars_db(args: argparse.Namespace) -> str:
+    if args.bars_db:
+        return str(args.bars_db)
+    from trader.rebalance.offline import default_bars_db
+    return default_bars_db()
+
+
 def main(argv: Optional[list[str]] = None, *, gateway_factory: Optional[GatewayFactory] = None,
          limits: Optional[PositionLimits] = None, out=None) -> int:
     out = out or sys.stdout
@@ -99,14 +136,29 @@ def main(argv: Optional[list[str]] = None, *, gateway_factory: Optional[GatewayF
     try:
         factory = gateway_factory or (lambda: _default_gateway(args.config))
         if args.cmd in ('plan', 'propose'):
-            targets = load_targets(args.targets)
-            gateway = factory()
-            plan = make_plan(targets, gateway, today=args.today, band_pct=args.band_pct,
+            if args.offline and args.cmd == 'propose':
+                raise Refusal('OFFLINE', 'the offline dry run creates nothing; run propose with trader_service')
+            targets = load_targets(_resolve_targets_path(args))
+            bars_db = _offline_bars_db(args) if args.offline else ''
+            gateway = _offline_gateway(bars_db, targets.prices_as_of) if args.offline else factory()
+            # Offline replays a (possibly historical) decision: without --today the staleness check
+            # runs as of the file's own decision session. Live, today is today.
+            today = args.today if args.today is not None or not args.offline else targets.as_of
+            plan = make_plan(targets, gateway, today=today, band_pct=args.band_pct,
                              limits=limits if limits is not None else load_limits(gateway, args.config),
                              sells_only=args.sells_only)
             if args.cmd == 'plan':
-                print(json.dumps(plan_to_dict(plan, targets), indent=2, default=str) if args.json
-                      else render_plan(plan, targets), file=out)
+                if args.json:
+                    payload = plan_to_dict(plan, targets)
+                    if args.offline:
+                        payload['offline'] = {'bars_db': bars_db, 'prices_as_of': targets.prices_as_of.isoformat(),
+                                              'today': today.isoformat()}
+                    print(json.dumps(payload, indent=2, default=str), file=out)
+                else:
+                    if args.offline:
+                        print(f'OFFLINE DRY RUN: empty sleeve, prices = stored closes of {targets.prices_as_of} '
+                              f'from {bars_db}; staleness checked as of {today}; nothing is created', file=out)
+                    print(render_plan(plan, targets), file=out)
                 return 0
             check_no_open_batch(targets, gateway)
             result = propose_plan(targets, plan, gateway, gateway)

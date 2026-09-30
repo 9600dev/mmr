@@ -158,3 +158,87 @@ and it is PROMISING, not proven — the held-out period decides. No further
 search is warranted before that verdict; if it holds, the next step is
 operational (a monthly ~65-name book on MMR's execution path), not
 statistical.
+
+## 2026-09-29 — program `20260929-131516`: the paper-trading path and the insider family
+
+Integration round over the four merged components (C01 rebalancer, C02 live
+signal + paper ledger, C03 Form 4 data, C04 insider family). Every component
+gate and the full suite pass on this tree; the live stack was only read.
+
+### The paper-trading path (D08, D13, D15)
+
+A low-frequency strategy now reaches MMR's `propose -> approve` pipeline
+without any new execution code: `trader.lowfreq_live targets` computes the
+decision session's weights **through the research code path itself** (same
+loader, strategy class and `normalise_weights` that `Backtester.run_panel`
+runs) and writes the D08 targets file plus the decisive benchmark's sidecar;
+`trader.rebalance plan/propose` turns the file into whole-share orders and
+PENDING proposals only (never approve/place/cancel); the operator approves
+each one; `trader.rebalance reconcile` journals IB's execution receipts into
+`sleeve_fills`; `trader.lowfreq_live track/report` values sleeve and virtual
+benchmark from the same stored bars. Runbook: `docs/LOWFREQ_LIVE.md`;
+rebalancer semantics and refusal codes: `docs/REBALANCE.md`.
+
+The end-to-end dry run on the research dev DB (no trader_service, no IB;
+`LOWFREQ_RESEARCH_CONFIG` at its default):
+
+```
+uv run python -m trader.lowfreq_live targets equity/s2p_top_quintile --sleeve s2p --capital 100000 --as-of 2024-06-03 --out /tmp/s2p/2024-06-03.json
+uv run python -m trader.rebalance plan /tmp/s2p/2024-06-03.json --offline
+```
+
+`--offline` (new this round) plans against an **empty sleeve** priced at the
+stored `pit_daily_bars` closes of the file's `prices_as_of` (the closes the
+strategy sized from), with the staleness check run as of the file's own
+`as_of` unless `--today` is given (live, a 2024 file is refused as
+`STALE_TARGETS`). Measured: 69 BUY orders, post-execution gross
+exposure $95,480.53 of capital $100,000.00, expected cash $4,519.47, position
+limit reported as unevaluable (NetLiquidation unreadable offline — never
+guessed). `propose --offline` is refused before anything is built. Pinned by
+`tests/test_rebalance_offline.py::test_end_to_end_targets_on_the_dev_db_then_offline_plan_stays_within_capital`.
+`plan`/`propose` also accept `--sleeve NAME` (newest `<as_of>.json` under the
+sleeve's targets directory, sidecars ignored), which the runbook already used.
+
+Nothing is armed: the sales-to-price sleeve FAILED held out (+0.15 %/yr,
+above), so whether to paper-trade it for evidence is the orchestrator's call;
+the path is exercised end to end and creates nothing without an operator.
+
+### Insider family (C03 + C04): a null, N = 16
+
+SEC Form 4 open-market purchases (code P, usable from the close of the first
+session after `FILING_DATE`, D14; amendments supersede originals) on the PIT
+top-500, long-only overlays on the D11 equal-weight basket, 4 OOS folds
+2019-08..2023-07. **No pre-registered rule beat the basket.** Champion by the
+pre-registered fallback (highest active t among the eight rules, none passing
+the guards): `ins_net_buy_ratio`, OOS Sharpe 0.51 vs 0.49, active
++1.75 %/yr, t(NW) 0.56, DSR 0.05 at N = 16 — **FAIL**. The decisive control:
+every rule's **market-cap-matched control beats the basket by more than the
+rule does** (e.g. director purchases +0.97 %/yr vs their size control
++6.12 %/yr; seven of eight controls PROMISING), so what the overlays carried
+was the operating-company/size tilt of the matching pool, not insider
+information. D07 stress (all stopped names to zero, both books) does not
+change the verdict. Full tables: `research/lowfreq/insider/REPORT.md`;
+data and amendment tiers: `DATA.md`.
+
+Held-out command (orchestrator only, insider data to 2026-03-31):
+
+```
+LOWFREQ_RESEARCH_CONFIG=~/.local/share/mmr/research_full/trader_research.yaml \
+  uv run python -m trader.research.lowfreq evaluate insider/ins_net_buy_ratio --fixed-params '{}' --start 2024-07-01 --end 2026-03-31
+```
+
+### Bugs fixed in integration
+
+* **D08 writer/reader decimal mismatch** (`trader/lowfreq_live/targets.py`):
+  the reader (`trader.rebalance.targets.load_targets`) parses weights with
+  `parse_float=Decimal` and sums them exactly as written; the writer validated
+  the float sum with a 1e-9 tolerance and emitted 69 × `repr(1/69)`, whose
+  decimal sum is 1.000000000000000014 — the first end-to-end run was refused.
+  Weights are now floored to 1e-10 before writing and validated by the reader's
+  rule. Test: `tests/test_lowfreq_live_targets.py::test_written_weights_of_69_equal_names_load_through_the_rebalancer_reader`.
+* **Runbook/CLI mismatch**: `docs/LOWFREQ_LIVE.md` invoked
+  `trader.rebalance plan --sleeve paper_s2p`; the CLI took only a file path.
+  The flag now exists (`tests/test_rebalance_offline.py::test_sleeve_flag_resolves_the_newest_targets_file_and_ignores_the_benchmark_sidecar`).
+* A missing `--bars-db` in offline mode surfaced as 69 unpriceable names
+  (the pricing loop reports per-ticker failures as `UNPRICEABLE`); it now
+  fails loudly at construction (`::test_offline_gateway_names_a_missing_bars_db`).

@@ -21,6 +21,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
 
@@ -93,17 +94,43 @@ def validate_targets_document(doc: Dict[str, Any]) -> None:
     weights = doc.get('weights')
     if not isinstance(weights, dict) or not weights:
         raise ValueError('weights must be a non-empty mapping')
-    total = 0.0
     for ticker, w in weights.items():
         if not isinstance(ticker, str) or not re.fullmatch(r'[A-Z][A-Z0-9.\-]{0,9}', ticker):
             raise ValueError(f'ticker {ticker!r} is not a US symbol')
         if not isinstance(w, (int, float)) or isinstance(w, bool) or not (0.0 < float(w) <= 1.0):
             raise ValueError(f'weight for {ticker} must be in (0, 1], got {w!r}')
-        total += float(w)
-    if total > 1.0 + 1e-9:
-        raise ValueError(f'weights sum to {total:.6f} > 1.0 (D08: the remainder is cash, never leverage)')
+    # D08 as the rebalancer reads it (trader.rebalance.targets.load_targets parses the file with
+    # parse_float=Decimal and sums the weights EXACTLY as written): the sum of the decimal strings
+    # json.dumps will emit must not exceed 1.0. A float-tolerance check here let 69 x repr(1/69)
+    # (= 1.000000000000000014 as decimals) through, and the reader refused the file.
+    total = written_weight_sum(weights)
+    if total > 1:
+        raise ValueError(f'weights sum to {total} > 1.0 as written (D08: the remainder is cash, never leverage)')
     if not isinstance(doc.get('notes'), str):
         raise ValueError('notes must be a string')
+
+
+# Written weights carry at most this many decimal places (1e-10 of capital is far below one share
+# at any price the sleeve will trade), floored so the exact decimal sum can never exceed 1.0.
+WEIGHT_PLACES = Decimal('1e-10')
+
+
+def written_weight_sum(weights: Dict[str, Any]) -> Decimal:
+    """The weights' sum as ``json.dumps`` writes them: the exact sum of ``repr(float)`` decimals,
+    which is the sum ``trader.rebalance.targets.load_targets`` (``parse_float=Decimal``) checks."""
+    return sum((Decimal(repr(float(w))) for w in weights.values()), Decimal(0))
+
+
+def written_weights(weights: Dict[str, float]) -> Dict[str, float]:
+    """Quantise for the D08 file: each weight floored to ``WEIGHT_PLACES`` so the decimal sum of
+    the written values is <= 1.0 whenever the float sum is (flooring only ever lowers the sum;
+    zeros are dropped). ``repr(float(Decimal))`` reproduces the quantised decimal exactly."""
+    out: Dict[str, float] = {}
+    for ticker, w in weights.items():
+        q = Decimal(repr(float(w))).quantize(WEIGHT_PLACES, rounding=ROUND_DOWN)
+        if q > 0:
+            out[str(ticker)] = float(q)
+    return out
 
 
 def _positive(weights: Optional[Dict[Any, float]]) -> Dict[str, float]:
@@ -226,7 +253,7 @@ def compute_targets(family: str, candidate_id: str, sleeve: str, capital_usd: fl
             f'session for REBALANCE={getattr(strat, "REBALANCE", "?")!r}, or too few covered names). '
             f'The strategy holds; run targets on a rebalance session.')
     costs = base_costs(universe)
-    weights = _positive(normalise_weights(raw, max_gross=costs.max_gross))
+    weights = written_weights(_positive(normalise_weights(raw, max_gross=costs.max_gross)))
     if not weights:
         raise TargetsRefused(f'{candidate_id} issued an all-flat instruction on {as_of} (hold nothing)')
 

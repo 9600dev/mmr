@@ -798,3 +798,46 @@ null was expected and holds. Results:
 Along the way: the fixed-cell results file was keyed by window only, so a
 second cell over the same window overwrote the first (fixed in `fee9e31`,
 regression test pinned).
+
+## 2026-09-29 — SEC Form 4 insider purchases: a null against the PIT equal-weight basket (N = 16)
+
+Program `20260929-131516` (C03 data, C04 family; `research/lowfreq/insider/`).
+A genuinely new information source, tested under the harness protocol
+(D01/D11): open-market purchases (code P) from the SEC's quarterly insider
+data sets, 2.19 M filings in the dev copy, usable only from the close of the
+first session AFTER `FILING_DATE` (D14 — filings are frequently accepted after
+the close), amendments superseding their originals through six deterministic
+matching tiers (2,592 unmatched, counted). Long-only overlays on the D11
+monthly equal-weight PIT basket, walk-forward train 3 y / test 1 y, 4 OOS
+folds 2019-08..2023-07 (1,005 sessions), costs 5 bps + $0.005/share.
+
+| rule (H) | OOS Sharpe | bench | active/yr | t(NW) | DSR (16) | its size control, active/yr | verdict |
+|---|---|---|---|---|---|---|---|
+| `ins_purchase_count` (C0) | 0.40 | 0.49 | −0.65 % | −0.25 | 0.01 | +4.69 % | FAIL |
+| `ins_cluster` (H2) | 0.38 | 0.49 | −1.64 % | −0.71 | 0.00 | +1.49 % | FAIL |
+| `ins_officer` (H4a) | 0.36 | 0.49 | −2.34 % | −1.21 | 0.00 | +0.54 % | FAIL |
+| `ins_director` (H4b) | 0.47 | 0.49 | +0.97 % | 0.33 | 0.03 | +6.12 % | FAIL |
+| `ins_net_buy_ratio` (H5, champion) | 0.51 | 0.49 | **+1.75 %** | **0.56** | 0.05 | +3.81 % | **FAIL** |
+| `ins_value_to_mcap` (H6) | 0.44 | 0.49 | +0.37 % | 0.12 | 0.02 | +1.79 % | FAIL |
+
+(`ins_opportunistic` and `ins_conviction` sit between C0 and H4b.) Eight
+rules, eight market-cap-matched controls holding NO insider information, one
+purchase-count control: **every control beats the basket by more than its
+rule does**, and seven of the eight controls are PROMISING on their own
+(director control t 2.94). The matching pool is covered names with an as-of market cap
+(operating companies with EDGAR fundamentals, 58 % of covered name-days), so
+the overlays' excess over the basket is the operating-company/size tilt the
+2026-08-17 fundamentals entry already found — not information in the
+purchases. The pre-registered eligibility rule (beat the size control AND C0)
+admitted nobody; the champion is the fallback (highest active t), and it is
+FAIL on gates (b) and (c). D07 stress (all 303 stopped names to zero, both
+books): active +1.07 %/yr, t 0.64 — still nothing. Full tables and per-trial
+artefacts: `research/lowfreq/insider/REPORT.md`, `results/`.
+
+Held-out (orchestrator only, insider data to 2026-03-31):
+`LOWFREQ_RESEARCH_CONFIG=~/.local/share/mmr/research_full/trader_research.yaml uv run python -m trader.research.lowfreq evaluate insider/ins_net_buy_ratio --fixed-params '{}' --start 2024-07-01 --end 2026-03-31`.
+
+Method note worth keeping: the size-matched control was pre-registered
+(PREREG addendum 1, before the first ledger row), and it is what turned "five
+PROMISING overlays" into a null in one table. Without it, the report would have
+read as an insider effect.
