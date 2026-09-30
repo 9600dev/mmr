@@ -155,6 +155,20 @@ def test_results_must_be_the_artifact_of_the_latest_ok_ledger_row():
         MR.check_results_are_final({'ins_x': {'ledger_row': {'timestamp': 't1'}}}, rows)
 
 
+def test_a_held_out_fixed_row_never_becomes_the_final_dev_row():
+    # Regression (2026-09-30): the orchestrator's held-out run appended a
+    # mode=fixed row for the champion; final_row_index took it as the id's
+    # final row, which has no retained trials/ artifact, and the real-artifact
+    # check failed. Held-out rows are ledger entries, not dev trials.
+    fixed = dict(_row('ins_x', 't3', 16, METRICS), mode='fixed', start='2024-07-01', end='2026-03-31')
+    rows = [_row('ins_x', 't1', 1, METRICS), _row('ins_x', 't2', 16, METRICS), fixed]
+    assert MR.final_row_index(rows) == {'ins_x': 2}
+    MR.check_results_are_final({'ins_x': {'ledger_row': {'timestamp': 't2'}}}, rows)
+    lines = MR.held_out_lines(rows)
+    assert len(lines) == 3 and lines[2].startswith('| 3 | `ins_x` | 2024-07-01..2026-03-31 |')
+    assert MR.held_out_lines(rows[:2]) == ['Not yet run.']
+
+
 def _stress(cand_sharpe=0.4, forced=3):
     book = lambda: {'id': 'ins_x', 'summary': {'unstressed': {'sharpe': cand_sharpe, 'cagr': 0.08, 'max_drawdown': -0.3}},
                     'forced_exits': forced, 'forced_exit_value_fraction': 0.5, 'reconciliation': {'reconciled': True}}

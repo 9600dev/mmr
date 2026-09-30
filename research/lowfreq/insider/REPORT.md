@@ -1,6 +1,6 @@
 # Insider family — REPORT (C04; D11, D14)
 
-Generated 2026-09-30T00:48:28+00:00 by `make_report.py` from `results/<id>.json` (final pass), `results/trials/*.json` (retained per-trial artifacts), `trials.jsonl`, `candidates.yaml`, `results/_calibration_counts.json`, `results/_d07_stress.json`. Pre-registration: `PREREG.md` (git `f0658e5`; addendum 1 before the first ledger row; addendum 2 is procedural, written after results). Dev period 2016-08-01..2024-06-28, walk-forward train 1095 / test 365 days, 4 folds, OOS 1005 sessions; costs 5 bps + $0.005/share, stress x3. Distinct candidate trials in the ledger: **16** (budget 30); every final file is deflated by 16.
+Generated 2026-09-30T01:43:25+00:00 by `make_report.py` from `results/<id>.json` (final pass), `results/trials/*.json` (retained per-trial artifacts), `trials.jsonl`, `candidates.yaml`, `results/_calibration_counts.json`, `results/_d07_stress.json`. Pre-registration: `PREREG.md` (git `f0658e5`; addendum 1 before the first ledger row; addendum 2 is procedural, written after results). Dev period 2016-08-01..2024-06-28, walk-forward train 1095 / test 365 days, 4 folds, OOS 1005 sessions; costs 5 bps + $0.005/share, stress x3. Distinct candidate trials in the ledger: **16** (budget 30); every final file is deflated by 16.
 
 ## Verdict
 
@@ -92,7 +92,7 @@ Reading the controls: every control beats the equal-weight basket although it ho
 
 ## Every ledger trial
 
-48 rows (`trials.jsonl`, append-only; every row is mode walk_forward, status ok). Pass 1 (rows 1-16) ran the registrations in order, so early rows were deflated by partial trial counts; pass 2 (rows 17-32) re-ran all 16 once every hash was ledgered; pass 3 (rows 33-48) re-ran all 16 through the mandated `uv run python -m trader.research.lowfreq evaluate insider/<id>` (PREREG addendum 2) and is the final pass quoted above. The harness overwrites `results/<id>.json` on every run; from pass 2 on each run's file is retained as `results/trials/NNN_<id>.json` (NNN = ledger row; 32 retained) and the numbers below come from those artifacts only. Pass-1 files were overwritten before retention existed, so those rows show the harness verdict the ledger recorded but no numbers.
+49 rows (`trials.jsonl`, append-only; modes fixed/walk_forward, status ok; fixed-mode rows are the held-out evaluations listed in the last section). Pass 1 (rows 1-16) ran the registrations in order, so early rows were deflated by partial trial counts; pass 2 (rows 17-32) re-ran all 16 once every hash was ledgered; pass 3 (rows 33-48) re-ran all 16 through the mandated `uv run python -m trader.research.lowfreq evaluate insider/<id>` (PREREG addendum 2) and is the final pass quoted above. The harness overwrites `results/<id>.json` on every run; from pass 2 on each run's file is retained as `results/trials/NNN_<id>.json` (NNN = ledger row; 32 retained) and the numbers below come from those artifacts only. Pass-1 files were overwritten before retention existed, so those rows show the harness verdict the ledger recorded but no numbers.
 
 | # | timestamp (UTC) | id | artifact | trials at run | verdict | OOS Sharpe | active ann | t(NW) | DSR |
 |---|---|---|---|---|---|---|---|---|---|
@@ -144,6 +144,7 @@ Reading the controls: every control beats the equal-weight basket although it ho
 | 46 | 2026-09-30T00:31:45 | `ins_size_matched_director` | final | 16 | PROMISING | 0.74 | +6.12% | 2.94 | 0.78 |
 | 47 | 2026-09-30T00:31:53 | `ins_size_matched_value_to_mcap` | final | 16 | PROMISING | 0.56 | +1.79% | 1.01 | 0.09 |
 | 48 | 2026-09-30T00:31:54 | `ins_size_matched_net_buy_ratio` | final | 16 | PROMISING | 0.66 | +3.81% | 2.15 | 0.47 |
+| 49 | 2026-09-30T01:32:19 | `ins_net_buy_ratio` | not retained | - | FAIL | - | - | - | - |
 
 ## Held-out evaluation (orchestrator only, D11)
 
@@ -153,5 +154,9 @@ The held-out period starts after the dev cutoff; the full research directory's i
 LOWFREQ_RESEARCH_CONFIG=~/.local/share/mmr/research_full/trader_research.yaml \
   uv run python -m trader.research.lowfreq evaluate insider/ins_net_buy_ratio --fixed-params '{}' --start 2024-07-01 --end 2026-03-31
 ```
+
+| # | id | window | N | verdict | OOS Sharpe | bench Sharpe | active ann | 3x-cost active | t(NW) | DSR |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 49 | `ins_net_buy_ratio` | 2024-07-01..2026-03-31 | 16 | **FAIL** | 0.90 | 0.84 | +0.72% | +0.50% | 0.30 | 0.12 |
 
 Source of every number: `results/ins_net_buy_ratio.json` keys `oos`, `oos_benchmarks.eq_ew_pit`, `active`, `dsr`, `full_period.report_cell`, `stopped_names`, `gates`; other candidates from their own `results/<id>.json`; ledger rows from their `results/trials/NNN_<id>.json`; K and market-cap percentiles from `results/_calibration_counts.json`; the stress table from `results/_d07_stress.json`.

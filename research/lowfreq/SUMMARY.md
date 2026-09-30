@@ -242,3 +242,22 @@ LOWFREQ_RESEARCH_CONFIG=~/.local/share/mmr/research_full/trader_research.yaml \
 * A missing `--bars-db` in offline mode surfaced as 69 unpriceable names
   (the pricing loop reports per-ticker failures as `UNPRICEABLE`); it now
   fails loudly at construction (`::test_offline_gateway_names_a_missing_bars_db`).
+
+### Insider held-out result and live dry run (2026-09-29)
+
+**Held-out result (orchestrator, 2026-09-29): FAIL.** `ins_net_buy_ratio`,
+fixed cell, 2024-07-01..2026-03-31 (the full insider data's end), full
+research DB: OOS Sharpe 0.90 vs `eq_ew_pit` 0.84; active **+0.72 %/yr, t 0.30**,
+DSR 0.12 (N = 16), +0.50 %/yr at 3x costs; per year 2024 +0.8 %, 2025 −0.6 %,
+2026 (Q1) +1.1 %; 136 forced exits in both books. Ledger row 49, artefact
+`research/lowfreq/insider/results/ins_net_buy_ratio__fixed_2024-07-01_2026-03-31_44136fa3.json`.
+The dev null holds out of sample: the insider family is closed.
+
+Live path dry run (container, 2026-09-29): PIT bars and fundamentals caught up
+(44 sessions, 1,418 new filings, 0 errors); `lowfreq_live targets` correctly
+refuses a non-rebalance session; a dry run as of 2026-09-01 (written to /tmp,
+not the live targets directory) plans 62 names at 1/62. At the runbook's
+$25,000 sleeve capital each name is $403, three names cost more than that
+and cannot be bought at all under floor-and-refuse sizing, and 19 % stays in
+cash; at $100,000 all 62 are bought and cash is 4.7 %. The paper sleeve should
+start at $100k (or with a quintile cap on names), not $25k.

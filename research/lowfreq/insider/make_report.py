@@ -94,10 +94,15 @@ def artifact_for_row(i: int, row: Dict[str, Any], trials_dir: Path = TRIALS_DIR)
 
 
 def final_row_index(rows: List[Dict[str, Any]]) -> Dict[str, int]:
-    """1-based index of the LATEST status=ok row per id."""
+    """1-based index of the LATEST status=ok walk-forward row per id.
+
+    Fixed-cell rows (``mode == 'fixed'``: the orchestrator's held-out
+    evaluations, appended after the dev report was frozen) are ledger
+    entries, not dev trials; they never replace a dev row as 'final' and
+    have no retained ``trials/NNN_<id>.json`` artifact."""
     out: Dict[str, int] = {}
     for i, r in enumerate(rows, 1):
-        if r.get('status') == 'ok':
+        if r.get('status') == 'ok' and r.get('mode') != 'fixed':
             out[r['id']] = i
     return out
 
@@ -146,6 +151,24 @@ def load() -> Dict[str, Any]:
     artifacts = {i: artifact_for_row(i, row) for i, row in enumerate(rows, 1)}
     return {'registry': reg, 'ids': ids, 'results': results, 'rows': rows, 'calibration': cal,
             'stress': stress, 'artifacts': artifacts}
+
+
+def held_out_lines(rows: List[Dict[str, Any]]) -> List[str]:
+    """The fixed-cell (held-out) ledger rows, numbers copied from the ledger
+    row itself (the harness writes its metrics; the full artifact is the
+    ``results/<id>__fixed_<start>_<end>_<cellsha>.json`` its ``results_path``
+    names). ``['Not yet run.']`` when there is none."""
+    fixed = [(i, r) for i, r in enumerate(rows, 1) if r.get('mode') == 'fixed' and r.get('status') == 'ok']
+    if not fixed:
+        return ['Not yet run.']
+    out = ['| # | id | window | N | verdict | OOS Sharpe | bench Sharpe | active ann | 3x-cost active | t(NW) | DSR |',
+           '|---|---|---|---|---|---|---|---|---|---|---|']
+    for i, r in fixed:
+        m = r.get('metrics') or {}
+        out.append(f"| {i} | `{r['id']}` | {r.get('start')}..{r.get('end')} | {r.get('n_trials')} | **{r.get('verdict')}** | "
+                   f"{fnum(m.get('oos_sharpe'))} | {fnum(m.get('benchmark_oos_sharpe_max'))} | {pct(m.get('active_ann_return'))} | "
+                   f"{pct(m.get('active_ann_return_3x'))} | {fnum(m.get('active_t_nw'))} | {fnum(m.get('active_dsr'))} |")
+    return out
 
 
 def distinct_trials(rows: List[Dict[str, Any]]) -> int:
@@ -343,8 +366,10 @@ def render(d: Dict[str, Any]) -> str:
               'The controls are candidate-role trials (they count in N) but are not champion-eligible (PREREG rule 1); their '
               'PROMISING verdicts are reported, not claimed.', '']
     lines += ['## Every ledger trial', '',
-              f'{len(rows)} rows (`trials.jsonl`, append-only; every row is mode walk_forward, status '
-              f'{"/".join(sorted(set(str(x.get("status")) for x in rows)))}). Pass 1 (rows 1-16) ran the registrations in '
+              f'{len(rows)} rows (`trials.jsonl`, append-only; modes '
+              f'{"/".join(sorted(set(str(x.get("mode")) for x in rows)))}, status '
+              f'{"/".join(sorted(set(str(x.get("status")) for x in rows)))}; fixed-mode rows are the held-out '
+              'evaluations listed in the last section). Pass 1 (rows 1-16) ran the registrations in '
               'order, so early rows were deflated by partial trial counts; pass 2 (rows 17-32) re-ran all 16 once every hash '
               'was ledgered; pass 3 (rows 33-48) re-ran all 16 through the mandated '
               '`uv run python -m trader.research.lowfreq evaluate insider/<id>` (PREREG addendum 2) and is the final pass quoted '
@@ -358,7 +383,7 @@ def render(d: Dict[str, Any]) -> str:
               f'{HELD_OUT_END} (DATA.md), so the window is `{HELD_OUT_START}..{HELD_OUT_END}`:', '', '```',
               f"LOWFREQ_RESEARCH_CONFIG=~/.local/share/mmr/research_full/trader_research.yaml \\",
               f"  uv run python -m trader.research.lowfreq evaluate insider/{ch} --fixed-params '{{}}' --start {HELD_OUT_START} --end {HELD_OUT_END}",
-              '```', '',
+              '```', ''] + held_out_lines(rows) + ['',
               f'Source of every number: `results/{ch}.json` keys `oos`, `oos_benchmarks.{BENCH}`, `active`, `dsr`, `full_period.report_cell`, '
               '`stopped_names`, `gates`; other candidates from their own `results/<id>.json`; ledger rows from their '
               '`results/trials/NNN_<id>.json`; K and market-cap percentiles from `results/_calibration_counts.json`; the stress '
