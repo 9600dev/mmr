@@ -1,7 +1,7 @@
 """Targeted tests for behavioural mutants that survived the 2026-09-29 mutation pass over
 trader/rebalance (targets, propose, plan, fills). Each test names the mutant(s) it kills; the
 ledger is docs/MUTATION_REBALANCE.md. These are ordinary example tests — the properties live in
-tests/test_rebalance_properties.py."""
+tests/invariants/test_rebalance_sleeve.py."""
 from __future__ import annotations
 
 import datetime as dt

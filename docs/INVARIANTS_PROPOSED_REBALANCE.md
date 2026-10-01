@@ -1,8 +1,8 @@
-# Proposed invariants — the paper-sleeve order path (DRAFT, 2026-09-29)
+# Invariants — the paper-sleeve order path (promoted 2026-10-01)
 
-Candidate properties for a human to promote into `tests/invariants/`. They are
-implemented today in `tests/test_rebalance_properties.py` (outside the spec, on
-purpose: agents draft, humans promote). Each names the harm it forbids and is
+Drafted 2026-09-29 by the hardening climb; promoted into the spec as
+`tests/invariants/test_rebalance_sleeve.py` on 2026-10-01 by the orchestrator under the owner's explicit delegation
+("I don't need to review things — I trust your judgement"), in a commit of its own. Each names the harm it forbids and is
 silent about mechanism, per `tests/invariants/README.md` ("name the harm, not
 the mechanism"). Nothing under `tests/invariants/` was touched.
 

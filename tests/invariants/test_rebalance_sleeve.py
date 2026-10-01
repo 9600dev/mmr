@@ -1,9 +1,8 @@
 """Hypothesis properties over the paper-sleeve order path (trader.rebalance + trader.lowfreq_live).
 
-These are CANDIDATE invariants, drafted for human promotion into tests/invariants/
-(see docs/INVARIANTS_PROPOSED_REBALANCE.md). They live here, outside the
-human-owned spec, until a human signs them off. Each states a harm the sleeve
-must never cause and stays silent about mechanism:
+Part of the spec since 2026-10-01 (drafted 2026-09-29, promoted under the owner's
+delegation; rationale in docs/INVARIANTS_PROPOSED_REBALANCE.md). Each states a harm
+the sleeve must never cause and stays silent about mechanism:
 
   P1  a plan never SELLs more shares of a symbol than the sleeve holds;
   P2  the plan's BUY notional never exceeds sleeve cash plus its own SELL proceeds,

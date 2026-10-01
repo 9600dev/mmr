@@ -401,7 +401,7 @@ pytest_add_cli_args_test_selection = [
     "tests/test_rebalance_plan.py",
     "tests/test_rebalance_propose.py",
     "tests/test_rebalance_fills.py",
-    "tests/test_rebalance_properties.py",
+    "tests/invariants/test_rebalance_sleeve.py",
     "tests/test_lowfreq_live_targets.py",
     # Targeted kills for the behavioural survivors of the first pass (ledger:
     # docs/MUTATION_REBALANCE.md).

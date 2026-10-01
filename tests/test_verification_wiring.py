@@ -243,7 +243,7 @@ class TestPaperSleeveOrderPathIsMutationTested:
         'tests/test_rebalance_plan.py',
         'tests/test_rebalance_propose.py',
         'tests/test_rebalance_fills.py',
-        'tests/test_rebalance_properties.py',
+        'tests/invariants/test_rebalance_sleeve.py',
         'tests/test_lowfreq_live_targets.py',
         'tests/test_rebalance_mutation_kills.py',
         'tests/test_lowfreq_live_mutation_kills.py',
