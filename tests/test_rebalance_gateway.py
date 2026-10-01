@@ -70,7 +70,7 @@ class FakeMMR:
         self.calls.append('positions'); return self._positions_df
 
     def snapshot(self, symbol, **kw):
-        self.calls.append('snapshot'); return self._snapshots[symbol]
+        self.calls.append('snapshot'); self.last_snapshot_kw = kw; return self._snapshots[symbol]
 
     def execution_snapshot(self, intent_id='', order_ids=None, client_intent_id=''):
         self.calls.append(('execution_snapshot', intent_id, list(order_ids or [])))
@@ -278,8 +278,22 @@ def test_propose_forwards_exactly_and_ensure_group_creates_once():
     assert pid == 77
     assert m.last_propose == {'symbol': 'AAPL', 'action': 'BUY', 'quantity': 25.0, 'execution': spec,
                               'reasoning': 'why', 'source': 'rebalance:s2p:2026-09-28', 'group': 'sleeve_s2p',
-                              'metadata': {'rebalance': {'x': 1}}}
+                              'metadata': {'rebalance': {'x': 1}}, 'exchange': 'SMART', 'currency': 'USD'}
     assert set(m.calls) <= {'_proposal_store', '_group_store', '_get_portfolio_state', 'positions', 'snapshot', 'propose'}
+
+
+def test_regression_ambiguous_symbols_are_priced_and_proposed_as_the_us_listing():
+    # Regression (2026-10-01, first live plan): EIX, LEN, SE and SYY each resolve to several IB
+    # contracts (FWB/EUR, EBS/CHF, PURE/CAD, MEXI/MXN, ...) by bare symbol, so pricing refused the
+    # whole plan as UNPRICEABLE and an approved proposal would have failed the same way. The sleeve
+    # trades the US PIT universe only: every price and every proposal is pinned to SMART/USD.
+    m = _mmr(); gw = SdkGateway(m)
+    gw.price('AAPL')
+    assert m.last_snapshot_kw == {'exchange': 'SMART', 'currency': 'USD'}
+    spec = ExecutionSpec(order_type='MARKET', tif='DAY', outside_rth=False)
+    gw.propose(symbol='EIX', action='BUY', quantity=3, execution=spec, reasoning='r', source='s',
+               group='g', metadata={})
+    assert (m.last_propose['exchange'], m.last_propose['currency']) == ('SMART', 'USD')
 
 
 def test_close_only_disconnects_when_the_gateway_connected():

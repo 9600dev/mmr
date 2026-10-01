@@ -109,7 +109,7 @@ class SdkGateway:
 
     # -- Pricer ------------------------------------------------------------
     def price(self, ticker: str) -> Optional[float]:
-        snap = self._mmr.snapshot(ticker)
+        snap = self._mmr.snapshot(ticker, exchange=US_EXCHANGE, currency=US_CURRENCY)
         return price_from_snapshot(snap)
 
     # -- Proposer ----------------------------------------------------------
@@ -123,8 +123,17 @@ class SdkGateway:
         proposal_id, _leverage, _snap = self._mmr.propose(
             symbol=symbol, action=action, quantity=float(quantity), execution=execution,
             reasoning=reasoning, source=source, group=group, metadata=dict(metadata),
+            exchange=US_EXCHANGE, currency=US_CURRENCY,
         )
         return int(proposal_id)
+
+
+# The sleeve trades the US point-in-time universe only. A bare symbol is ambiguous at IB for
+# many US names (EIX also lists on FWB in EUR, LEN is also Lenovo on EBS, SE also a CAD name on
+# PURE, SYY also FWB/MEXI): unpinned, pricing refused the first live plan and an approved
+# proposal would have failed at resolution. Pin every price and proposal to the US listing.
+US_EXCHANGE = 'SMART'
+US_CURRENCY = 'USD'
 
 
 def _num(value: Any) -> float:
