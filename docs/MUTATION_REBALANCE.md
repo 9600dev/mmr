@@ -165,11 +165,13 @@ schema keys; the `'unknown'` broker-status fallback; the ETF loader branch and t
 plumbing (`load_panel_for`, `compute_targets`), reached through an ETF test family and a `MIN_NAMES=1`
 benchmark subclass; entry-level `universe`/`top_n`/`tickers`/`warmup_days` overrides.
 
-## Baseline floors — HUMAN REVIEW REQUIRED
+## Baseline floors — reviewed 2026-10-01
 
 Five entries were ADDED to `scripts/mutation_baseline.json` at the FINAL scores above (existing entries
-byte-identical). Treat them as provisional until a human has seen a second run: `mutation_score.py` records
-that identical code has moved 1–2% between runs in larger modules, and `run_mutation.sh check` still requires
+byte-identical). Reviewed 2026-10-01 by the orchestrator under the owner's delegation: an independent second
+scoped run (after the property file moved to `tests/invariants/test_rebalance_sleeve.py`) reproduced every
+killed/survived count exactly, so the floors stand. `mutation_score.py` records that identical code has moved
+1–2% between runs in larger modules, and `run_mutation.sh check` still requires
 a FULL pass (after a scoped run it reports the other baselined modules as "not exercised" — the gate failing
 closed by design, not a regression).
 
