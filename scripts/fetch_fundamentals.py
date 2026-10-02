@@ -212,17 +212,20 @@ def ingest_ticker(db, poly, index: dict, conid: str, ticker: str,
         filed_at, form, acc = hit
         st = getattr(f, 'financials', None)
         vals = extract_polygon(st) if st else {}
-        db.execute(
+        # RETURNING yields only the rows actually written: a key INSERT OR IGNORE
+        # skipped is not new (the log once reported 160 "new rows" on a re-run
+        # that wrote none, because the sec-api window re-offers the latest day).
+        inserted = db.execute(
             f'{verb} INTO fundamentals VALUES '
-            '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, now())',
+            '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, now()) RETURNING conid',
             [conid, ticker, period, filed_at, form, acc,
              vals.get('revenue'), vals.get('net_income'),
              vals.get('gross_profit'), vals.get('operating_income'),
              vals.get('total_assets'), vals.get('total_liabilities'),
              vals.get('stockholders_equity'),
              vals.get('cash_from_operations'),
-             vals.get('shares_diluted')], fetch='none')
-        written += 1
+             vals.get('shares_diluted')], fetch='all')
+        written += len(inserted or [])
     return {'written': written, 'no_timestamp': no_timestamp, 'no_values': 0}
 
 

@@ -181,7 +181,9 @@ def test_fundamentals_incremental_ignore_never_replaces_existing_key(tmp_path):
     # same key again, even with a changed acceptance instant: INSERT OR IGNORE keeps the stored row
     index2 = {'2024-03-31': ('2024-05-02T06:01:00-04:00', '10-Q', 'acc-1')}
     out = ff.ingest_ticker(db, FakePoly(['2024-03-31']), index2, '', 'AAA', append_only=True)
-    assert out['written'] == 1                     # attempted, but ignored by the key
+    # Regression (2026-10-01): a re-run reported "160 new rows" that INSERT OR IGNORE had skipped.
+    # `written` counts rows actually inserted; an ignored row is not new.
+    assert out['written'] == 0
     assert db.execute('SELECT fetched_at, accepted_at FROM fundamentals', fetch='all') == first
 
 
