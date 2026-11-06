@@ -4346,11 +4346,32 @@ class Trader():
         except Exception as ex:
             logging.warning('reconcile: position-group query failed: %s', ex)
 
+        known_outcomes: dict = {}
+        try:
+            executed = [p for p in proposals if p.status == 'EXECUTED' and p.order_ids]
+            if executed:
+                from trader.data.event_store import EventStore
+                from trader.trading.proposal_outcome import fill_outcome
+                created = [p.created_at for p in executed if p.created_at]
+                since = (min(created) - dt.timedelta(days=1)) if created else None
+                events = EventStore(self.duckdb_path).query_by_order_ids(
+                    [o for p in executed for o in p.order_ids], since=since)
+                for p in executed:
+                    mine = [e for e in events if e.order_id in set(p.order_ids)]
+                    qty = p.quantity if (p.quantity is not None and p.quantity == p.quantity) else None
+                    known_outcomes[p.id] = fill_outcome(mine, p.order_ids, qty)['outcome']
+        except Exception as ex:
+            logging.warning('reconcile: order-journal outcome lookup failed: %s', ex)
+
         report = reconcile(proposals, open_orders, executions, positions,
-                           unprotected_by_design=sleeve_symbols)
+                           unprotected_by_design=sleeve_symbols,
+                           known_outcomes=known_outcomes)
         for f in report.findings:
             if f.severity == 'info':
-                logging.info('reconcile [info] %s: %s', f.symbol, f.detail)
+                # Expected states (sleeve members without stops, journal-known
+                # outcomes) — every `session`/`reconcile` call re-derives them,
+                # so they are DEBUG, not a per-call INFO wall.
+                logging.debug('reconcile [info] %s: %s', f.symbol, f.detail)
                 continue
             level = logging.error if f.severity == 'critical' else logging.warning
             level('reconcile [%s] %s (proposal=%s): %s',

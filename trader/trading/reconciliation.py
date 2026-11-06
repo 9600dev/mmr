@@ -87,6 +87,7 @@ def reconcile(
     positions: List[Dict[str, Any]],
     now: Optional[dt.datetime] = None,
     unprotected_by_design: Optional[set] = None,
+    known_outcomes: Optional[Dict[Any, str]] = None,
 ) -> ReconciliationReport:
     """Pure reconciliation core.
 
@@ -98,6 +99,11 @@ def reconcile(
     stop on those is reported at ``info`` severity, not as a warning.
     """
     unprotected_by_design = set(unprotected_by_design or ())
+    # proposal id -> derived fill outcome from our own order-event journal
+    # (trader.trading.proposal_outcome). IB only replays recent executions, so
+    # an old fill or a cancel is invisible to it; the journal still knows.
+    known_outcomes = dict(known_outcomes or {})
+    _terminal_outcomes = {'filled', 'partially_filled', 'cancelled_unfilled', 'rejected'}
     now = now or dt.datetime.now()
     report = ReconciliationReport(
         ib_open_orders=len(open_orders),
@@ -153,6 +159,12 @@ def reconcile(
                         symbol=symbol, proposal_id=pid,
                         detail=(f'proposal marked EXECUTED but its order(s) {order_ids} are '
                                 f'still WORKING at IB (not filled)')))
+                elif known_outcomes.get(pid) in _terminal_outcomes:
+                    report.findings.append(ReconciliationFinding(
+                        kind='executed_outcome_known', severity='info',
+                        symbol=symbol, proposal_id=pid,
+                        detail=(f'IB no longer reports order(s) {order_ids}; the order '
+                                f'journal records the outcome: {known_outcomes[pid]}')))
                 else:
                     report.findings.append(ReconciliationFinding(
                         kind='executed_no_broker_record', severity='warning',
