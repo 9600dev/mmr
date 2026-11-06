@@ -721,7 +721,8 @@ class StrategyRuntime():
                 self._grant_generation(implementation)
                 if getattr(self, '_isolate_callbacks', False):
                     try:
-                        self._start_callback_worker(implementation)
+                        self._start_callback_worker(
+                            implementation, getattr(implementation, '_deployment_config', None))
                         state = implementation.state
                     except Exception:
                         implementation.state = StrategyState.ERROR
@@ -1920,9 +1921,16 @@ class StrategyRuntime():
                     instance.enable()
 
                 self._grant_generation(instance)
-                if isolated:
+                # Kept so a later enable_strategy starts the worker with the same
+                # deployment config (and so the same effective_config_hash).
+                setattr(instance, '_deployment_config', dict(requested_config))
+                if isolated and instance.state != StrategyState.DISABLED:
                     self._start_callback_worker(instance, requested_config)
                 else:
+                    # Non-isolated, or isolated but DISABLED: a disabled strategy
+                    # gets no worker process (disable_strategy already stops it;
+                    # starting one at load cost ~140MB per disabled strategy —
+                    # 8 idle workers, ~1.1GB, on the paper roster). enable starts it.
                     context.effective_config_hash = hashlib.sha256(json.dumps(
                         {**requested_config, 'params': context.params, 'auto_execute': auto_execute},
                         sort_keys=True, allow_nan=False).encode()).hexdigest()
