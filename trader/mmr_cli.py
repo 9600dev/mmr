@@ -1935,6 +1935,8 @@ def build_parser() -> argparse.ArgumentParser:
     data_query_p.add_argument('--bar-size', default='1 day', help='Bar size (default: "1 day")')
     data_query_p.add_argument('--days', type=int, default=30, help='Days of history (default: 30)')
     data_query_p.add_argument('--tail', type=int, default=None, help='Show only last N rows')
+    data_query_p.add_argument('--include-placeholders', action='store_true', default=False,
+                              help='Keep all-NULL placeholder rows (weekends / empty sessions)')
 
     data_dl_p = data_sub.add_parser(
         'download',
@@ -9728,8 +9730,75 @@ def _handle_data(args: argparse.Namespace):
         console.print(f'[yellow]Unknown data action: {action}[/yellow]')
 
 
+_SUMMARY_DISPLAY_TZ = 'America/New_York'
+
+
+def _conid_symbol_map(accessor) -> Dict[int, str]:
+    """conId -> ticker for every definition in every local universe.
+
+    Built from ONE pass over the catalogue. Per-conId
+    ``resolve_symbol(conid, first_only=True)`` re-read every universe on each
+    cache miss, which over ~1,000 series is most of a minute by itself. The
+    preference order is the one resolve_universe applies: universes in
+    list_universes() order, then a stable sort on the accessor's secType
+    ranking, first wins.
+    """
+    candidates: Dict[int, list] = {}
+    for universe in accessor.get_all():
+        for definition in universe.security_definitions:
+            candidates.setdefault(int(definition.conId), []).append(definition)
+    ranking = list(accessor.sorted_types)
+
+    def _rank(definition) -> int:
+        return ranking.index(definition.secType) if definition.secType in ranking else len(ranking)
+
+    return {cid: sorted(defs, key=_rank)[0].symbol for cid, defs in candidates.items()}
+
+
+def _data_summary_frame(storage, accessor):
+    """The `data summary` table: one row per stored (symbol, bar_size).
+
+    Columns: conId, symbol, bar_size, start, end, rows, placeholders. start/end
+    are tz-aware Timestamps (America/New_York) spanning REAL bars; ``rows`` is
+    every stored row and ``placeholders`` the all-NULL markers among them.
+
+    Storage keys can be conIds (ints stored as strings) or raw ticker strings —
+    the latter from `data download` runs for a symbol not yet in the local
+    universe. A numeric key is resolved back to a ticker when the catalogue
+    knows it and shown as-is otherwise; a ticker key gets an empty conId so it
+    still shows up instead of silently disappearing.
+    """
+    import pandas as pd
+
+    columns = ['conId', 'symbol', 'bar_size', 'start', 'end', 'rows', 'placeholders']
+    inventory = storage.series_summary()
+    if inventory.empty:
+        return pd.DataFrame(columns=columns)
+    names = _conid_symbol_map(accessor)
+
+    rows = []
+    for rec in inventory.itertuples(index=False):
+        key = str(rec.symbol)
+        try:
+            con_id: Optional[int] = int(key)
+        except (TypeError, ValueError):
+            con_id = None
+        start = rec.start.tz_convert(_SUMMARY_DISPLAY_TZ) if pd.notna(rec.start) else None
+        end = rec.end.tz_convert(_SUMMARY_DISPLAY_TZ) if pd.notna(rec.end) else None
+        rows.append({
+            'conId': key if con_id is not None else '',
+            'symbol': names.get(con_id, key) if con_id is not None else key,
+            'bar_size': rec.bar_size,
+            'start': start,
+            'end': end,
+            'rows': int(rec.rows),
+            'placeholders': int(rec.rows) - int(rec.bars),
+        })
+    return pd.DataFrame(rows, columns=columns)
+
+
 def _handle_data_summary():
-    """Show summary of all local historical data."""
+    """Show summary of all local historical data (one grouped query)."""
     import pandas as pd
     from trader.container import Container
     from trader.data.data_access import TickStorage
@@ -9747,55 +9816,17 @@ def _handle_data_summary():
     storage = TickStorage(history_path)
     accessor = UniverseAccessor(duckdb_path, cfg.get('universe_library', 'Universes'))
 
-    bar_sizes = storage.list_libraries()
-    if not bar_sizes:
-        print_df(pd.DataFrame(), title='Data Summary')
-        return
-
-    rows = []
-    for bs_str in bar_sizes:
-        from trader.objects import BarSize
-        bs = BarSize.parse_str(bs_str)
-        tickdata = storage.get_tickdata(bs)
-        symbols = tickdata.list_symbols()
-        for sym in symbols:
-            # Storage keys can be either conIds (ints stored as strings) or
-            # raw ticker strings — the latter happens when `data download`
-            # runs for a symbol that isn't in the local universe yet. Try
-            # conId-first and fall back to passing the key through as-is,
-            # so tickers-only downloads still show up in the summary
-            # instead of silently disappearing.
-            name = sym
-            con_id = None
-            try:
-                con_id = int(sym)
-                storage_key = con_id
-            except (TypeError, ValueError):
-                storage_key = sym
-
-            try:
-                min_date, max_date = tickdata.date_summary(storage_key)
-            except Exception:
-                continue
-
-            if con_id is not None:
-                # Try to resolve conId back to a human symbol name.
-                try:
-                    results = accessor.resolve_symbol(con_id, first_only=True)
-                    if results:
-                        name = results[0].symbol
-                except Exception:
-                    pass
-
-            rows.append({
-                'conId': sym if con_id is not None else '',
-                'symbol': name,
-                'bar_size': bs_str,
-                'start': str(min_date)[:19],
-                'end': str(max_date)[:19],
-            })
-
-    print_df(pd.DataFrame(rows), title='Data Summary')
+    df = _data_summary_frame(storage, accessor)
+    if not df.empty:
+        # JSON keeps the offset (ISO 8601) so a consumer cannot mistake the
+        # New York wall clock for UTC; the table shows the wall clock.
+        if _json_mode:
+            fmt = lambda ts: ts.isoformat() if ts is not None else None  # noqa: E731
+        else:
+            fmt = lambda ts: str(ts)[:19] if ts is not None else ''  # noqa: E731
+        df['start'] = [fmt(ts) for ts in df['start']]
+        df['end'] = [fmt(ts) for ts in df['end']]
+    print_df(df, title='Data Summary')
 
 
 def _handle_data_query(args: argparse.Namespace):
@@ -9847,14 +9878,64 @@ def _handle_data_query(args: argparse.Namespace):
     )
 
     df = tickdata.read(storage_key, date_range=date_range)
-    if df.empty:
-        print_df(pd.DataFrame(), title=f'Data: {symbol} ({bar_size})')
-        return
-
+    title = f'Data: {symbol} ({bar_size})'
+    out, dropped = _query_output_frame(
+        df, include_placeholders=bool(getattr(args, 'include_placeholders', False)))
     if args.tail:
-        df = df.tail(args.tail)
+        out = out.tail(args.tail)
 
-    print_df(df, title=f'Data: {symbol} ({bar_size})')
+    if _json_mode:
+        records = json.loads(out.to_json(orient='records')) if not out.empty else []
+        print(_json_dumps({'data': records, 'title': title,
+                           'placeholders_dropped': dropped}))
+        return
+    print_df(out, title=title)
+    if dropped:
+        console.print(f'[dim]{dropped} placeholder row(s) with no OHLC hidden '
+                      f'(--include-placeholders to show)[/dim]')
+
+
+def _what_to_show_name(value):
+    """WhatToShow int -> enum name; None for a missing value; an int the enum
+    does not know is shown as UNKNOWN(n) rather than passed off as valid."""
+    import math
+    from trader.objects import WhatToShow
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    try:
+        return WhatToShow(int(value)).name
+    except (ValueError, TypeError):
+        return f'UNKNOWN({value})'
+
+
+def _query_output_frame(df, include_placeholders: bool = False):
+    """Shape a TickData read for `data query` output. Returns (frame, dropped).
+
+    * The bar timestamp becomes the first column, ``date``, as an ISO 8601
+      string WITH its offset. It lived only in the index, which
+      ``to_json(orient='records')`` drops, so `--json` rows carried no time at
+      all and nobody could tell which day a close belonged to.
+    * Rows whose open/high/low/close are ALL null are placeholders the IB
+      worker writes for weekends and empty sessions. They are dropped unless
+      ``include_placeholders``; the count is returned so the caller can say so.
+    * ``what_to_show`` is rendered as its WhatToShow name.
+    """
+    import pandas as pd
+
+    if df is None or df.empty:
+        return pd.DataFrame(), 0
+    ohlc = [c for c in ('open', 'high', 'low', 'close') if c in df.columns]
+    dropped = 0
+    if ohlc and not include_placeholders:
+        placeholder = df[ohlc].isna().all(axis=1)
+        dropped = int(placeholder.sum())
+        df = df[~placeholder]
+    out = df.copy()
+    out.insert(0, 'date', [pd.Timestamp(ts).isoformat() for ts in out.index])
+    out = out.reset_index(drop=True)
+    if 'what_to_show' in out.columns:
+        out['what_to_show'] = [_what_to_show_name(v) for v in out['what_to_show']]
+    return out, dropped
 
 
 def _try_get_exchange_calendar_for(security):
@@ -10151,8 +10232,13 @@ def _handle_data_download(args: argparse.Namespace):
                     )
                 if not df.empty:
                     storage_key = conid if conid else symbol
-                    tickdata.write_resolve_overlap(storage_key, df)
-                    symbol_rows += len(df)
+                    # The calendar lets the write chokepoint prove a session
+                    # has closed; keyed by conId it could not find one itself
+                    # and would refuse today's bar even after the close.
+                    write_calendar = (_try_get_exchange_calendar_for(sec_def)
+                                      if sec_def is not None else None)
+                    symbol_rows += tickdata.write_resolve_overlap(
+                        storage_key, df, exchange_calendar=write_calendar)
             except Exception as e:
                 # "No data for this window" is an EMPTY RESULT, not a failure,
                 # even when the vendor delivers it as an HTTP 400. The
@@ -11139,15 +11225,14 @@ def _handle_data_audit(args: argparse.Namespace):
             sys.exit(1)
 
 
-def _handle_data_status():
+def _handle_data_status(now=None):
     """Show freshness of every (universe, bar_size) combination referenced
     in data_refresh.yaml. Surfaces what's stale before deciding whether to
     fire a manual refresh."""
     import datetime as dt
     from trader.container import Container
-    from trader.data.bar_staleness import sessions_behind
     from trader.data.universe import UniverseAccessor
-    from trader.data.duckdb_store import DuckDBConnection
+    from trader.data.duckdb_store import DuckDBDataStore
 
     try:
         cfg = _load_data_refresh_yaml()
@@ -11162,8 +11247,9 @@ def _handle_data_status():
         container_cfg.get('duckdb_path', ''),
         container_cfg.get('universe_library', 'Universes'),
     )
-    db = DuckDBConnection.get_instance(history_path)
-    now = dt.datetime.now(dt.timezone.utc)
+    store = DuckDBDataStore(history_path)
+    now = now or dt.datetime.now(dt.timezone.utc)
+    calendars: Dict[tuple, Any] = {}
 
     rows = []
     for job_name, spec in cfg['jobs'].items():
@@ -11171,49 +11257,10 @@ def _handle_data_status():
         bar_size = spec.get('bar_size', '1 day')
         uni = accessor.get(universe_name) if universe_name else None
         sec_defs = uni.security_definitions if uni else []
-        if not sec_defs:
-            rows.append({'job': job_name, 'universe': universe_name or '—',
-                         'bar_size': bar_size, 'covered': 0, 'total': 0,
-                         'last_bar': None, 'stale_days': None})
-            continue
-
-        cids = [str(sd.conId) for sd in sec_defs]
-        placeholders = ','.join('?' * len(cids))
-        # Per-symbol latest-bar lookup
-        per_sym = db.execute(
-            f"SELECT symbol, MAX(date) FROM tick_data "
-            f"WHERE bar_size = ? AND symbol IN ({placeholders}) GROUP BY symbol",
-            ['1 day' if bar_size == '1 day' else bar_size, *cids],
-            fetch='all',
-        ) or []
-        per_sym_map = {r[0]: r[1] for r in per_sym}
-        latest_bars = [v for v in per_sym_map.values() if v is not None]
-        if latest_bars:
-            latest = max(latest_bars)
-            # Weekday sessions behind, with the offset CONVERTED rather than
-            # dropped. `.replace(tzinfo=None)` on a tz-aware bar keeps the wall
-            # clock and moves the instant, and counting calendar days made a
-            # series current through Friday read as three days stale every
-            # Monday. See trader/data/bar_staleness.py.
-            stale_days = sessions_behind(latest, now)
-        else:
-            latest = None
-            stale_days = None
-        rows.append({
-            'job': job_name,
-            'universe': universe_name,
-            'bar_size': bar_size,
-            'covered': len(per_sym_map),
-            'total': len(cids),
-            # In UTC, so the date shown agrees with the session it names and
-            # with the staleness count beside it. Rendered in the stored local
-            # offset, Monday's session reads as "2026-07-26" (a Sunday), which
-            # is how a perfectly current series comes to look wrong.
-            'last_bar': (latest.astimezone(dt.timezone.utc).isoformat()
-                         if latest and latest.tzinfo else
-                         latest.isoformat() if latest else None),
-            'stale_days': stale_days,
-        })
+        last_bars = store.last_bars([str(sd.conId) for sd in sec_defs], bar_size)
+        row = _job_freshness(sec_defs, last_bars, bar_size, now,
+                             calendar_for=lambda sd: _cached_calendar_for(sd, calendars))
+        rows.append({'job': job_name, 'universe': universe_name or '—', **row})
 
     if _json_mode:
         print(_json_dumps({'data': rows, 'title': 'Data Refresh Status'}))
@@ -11224,18 +11271,114 @@ def _handle_data_status():
     table.add_column('universe')
     table.add_column('bar_size')
     table.add_column('coverage', justify='right')
-    table.add_column('last bar', justify='right')
-    table.add_column('stale (d)', justify='right')
+    table.add_column('newest bar', justify='right')
+    table.add_column('stalest bar', justify='right')
+    table.add_column('behind (sess)', justify='right')
+    table.add_column('stale', justify='right')
     for r in rows:
         cov = f"{r['covered']}/{r['total']}"
-        last = r['last_bar'][:10] if r['last_bar'] else '—'
-        stale = '—' if r['stale_days'] is None else str(r['stale_days'])
-        style = ('red' if r['stale_days'] is not None and r['stale_days'] > 3
-                 else 'yellow' if r['stale_days'] is not None and r['stale_days'] > 1
+        newest = r['last_bar_newest'][:10] if r['last_bar_newest'] else '—'
+        oldest = r['last_bar_oldest'][:10] if r['last_bar_oldest'] else '—'
+        behind = '—' if r['stale_days_max'] is None else str(r['stale_days_max'])
+        stale = f"{r['stale_count']} (>{r['stale_threshold_sessions']})"
+        style = ('red' if r['stale_count'] > 0 or r['covered'] == 0
+                 else 'yellow' if r['uncovered'] > 0
                  else 'green')
-        table.add_row(r['job'], r['universe'] or '—', r['bar_size'],
-                      cov, last, f'[{style}]{stale}[/{style}]')
+        table.add_row(r['job'], r['universe'] or '—', r['bar_size'], cov,
+                      newest, f'[{style}]{oldest}[/{style}]',
+                      f'[{style}]{behind}[/{style}]', f'[{style}]{stale}[/{style}]')
     console.print(table)
+
+
+def _staleness_threshold_sessions(bar_size: str) -> int:
+    """Sessions a series may trail `now` before `data status` calls it stale.
+
+    One session for anything up to a daily bar: a session's bars are final only
+    after its close and the refresh crons run after it, so trailing by exactly
+    the in-progress (or just-closed, not yet refreshed) session is the steady
+    state, and trailing by two means a refresh was missed. A weekly bar may
+    trail by a week of sessions and a monthly one by a month.
+    """
+    if bar_size == '1 week':
+        return 5
+    if bar_size == '1 month':
+        return 23
+    return 1
+
+
+def _cached_calendar_for(sec_def, cache: Dict[tuple, Any]):
+    key = (getattr(sec_def, 'primaryExchange', ''), getattr(sec_def, 'exchange', ''))
+    if key not in cache:
+        cache[key] = _try_get_exchange_calendar_for(sec_def)
+    return cache[key]
+
+
+def _job_freshness(sec_defs, last_bars: Dict[str, Any], bar_size: str, now,
+                   calendar_for=lambda sd: None) -> Dict[str, Any]:
+    """Freshness of one refresh job, computed PER MEMBER.
+
+    The previous status reported max(last bar) across the universe, so one
+    fresh member made the whole job read current: live on 2026-11-05 it showed
+    a 1-min job as "514/514, last bar today, stale 0d" while 469 of those
+    members had ended on 2026-10-22. The job is as stale as its stalest member,
+    so that is what this leads with; the newest is kept beside it because the
+    gap between the two is itself the signal.
+
+    ``last_bars`` maps conId string -> latest REAL bar (placeholders excluded).
+    Sessions behind are counted on each member's exchange calendar when one
+    resolves (holidays are not missed sessions) and by weekdays otherwise.
+    Dates are rendered in UTC ISO 8601, as before, so the date shown agrees
+    with the staleness count beside it.
+    """
+    import datetime as dt
+    from trader.data.bar_staleness import sessions_behind
+
+    threshold = _staleness_threshold_sessions(bar_size)
+    members = []
+    uncovered = []
+    for sd in sec_defs:
+        last = last_bars.get(str(sd.conId))
+        if last is None:
+            uncovered.append({'conId': sd.conId, 'symbol': sd.symbol})
+            continue
+        behind = sessions_behind(last, now, calendar=calendar_for(sd))
+        members.append({
+            'conId': sd.conId,
+            'symbol': sd.symbol,
+            'last_bar': last,
+            'sessions_behind': behind,
+        })
+
+    def _iso(ts):
+        if ts is None:
+            return None
+        return (ts.astimezone(dt.timezone.utc) if ts.tzinfo else ts).isoformat()
+
+    newest = max(members, key=lambda m: m['last_bar']) if members else None
+    oldest = min(members, key=lambda m: m['last_bar']) if members else None
+    # An unknown count (None) is not "fresh": it is counted stale.
+    stale = sorted(
+        (m for m in members
+         if m['sessions_behind'] is None or m['sessions_behind'] > threshold),
+        key=lambda m: m['last_bar'])
+    return {
+        'bar_size': bar_size,
+        'total': len(sec_defs),
+        'covered': len(members),
+        'uncovered': len(uncovered),
+        'last_bar_newest': _iso(newest['last_bar']) if newest else None,
+        'last_bar_oldest': _iso(oldest['last_bar']) if oldest else None,
+        'stalest_symbol': oldest['symbol'] if oldest else None,
+        'stale_days_newest': newest['sessions_behind'] if newest else None,
+        # The largest per-member count, which on a mixed-venue universe need
+        # not belong to the member with the oldest timestamp.
+        'stale_days_max': max(counts) if (counts := [
+            m['sessions_behind'] for m in members if m['sessions_behind'] is not None]) else None,
+        'stale_threshold_sessions': threshold,
+        'stale_count': len(stale),
+        'stale_members': [{**m, 'last_bar': _iso(m['last_bar'])} for m in stale],
+        'uncovered_members': uncovered,
+    }
 
 
 def _handle_depth(mmr: MMR, args: argparse.Namespace):
@@ -11385,8 +11528,12 @@ def _handle_history(mmr: MMR, args: argparse.Namespace):
     symbols = [args.symbol] if args.symbol else None
     universe = args.universe
 
+    def _progress(text: str) -> None:
+        if not _json_mode:
+            console.print(f'[dim]{text}[/dim]')
+
     if action == 'massive':
-        console.print('[dim]Pulling Massive history via data_service...[/dim]')
+        _progress('Pulling Massive history via data_service...')
         result = mmr.pull_massive(
             symbols=symbols,
             universe=universe,
@@ -11394,7 +11541,7 @@ def _handle_history(mmr: MMR, args: argparse.Namespace):
             prev_days=args.prev_days,
         )
     elif action in ('twelvedata', 'td'):
-        console.print('[dim]Pulling TwelveData history via data_service...[/dim]')
+        _progress('Pulling TwelveData history via data_service...')
         result = mmr.pull_twelvedata(
             symbols=symbols,
             universe=universe,
@@ -11402,7 +11549,7 @@ def _handle_history(mmr: MMR, args: argparse.Namespace):
             prev_days=args.prev_days,
         )
     elif action == 'ib':
-        console.print('[dim]Pulling IB history via data_service...[/dim]')
+        _progress('Pulling IB history via data_service...')
         result = mmr.pull_ib(
             symbols=symbols,
             universe=universe,
@@ -11414,15 +11561,56 @@ def _handle_history(mmr: MMR, args: argparse.Namespace):
         console.print(f'[yellow]Unknown history action: {action}[/yellow]')
         return
 
+    summary = _history_pull_summary(action, args, result)
+    if _json_mode:
+        print(_json_dumps(summary))
+        return
+
     if result.get('errors'):
         for err in result['errors']:
             console.print(f'[red]  {err}[/red]')
+    for task in summary['tasks']:
+        if task.get('start') is not None:
+            state = 'ok' if task.get('ok') else 'FAILED'
+            console.print(f"[dim]  {task.get('symbol')} {task.get('start')} → {task.get('end')}: "
+                          f"{task.get('rows', 0)} rows written ({state})[/dim]")
 
     console.print(
         f'[green]Done: {result["enqueued"]} enqueued, '
         f'{result["completed"]} completed, '
         f'{result["failed"]} failed[/green]'
     )
+
+
+def _history_pull_summary(action: str, args, result: dict) -> Dict[str, Any]:
+    """The machine-readable outcome of `history massive|twelvedata|ib`.
+
+    ``enqueued`` counts download TASKS, one per contiguous missing date range
+    per symbol — so one symbol can enqueue several; ``tasks`` lists each with
+    its range so the count explains itself. success is false when any task
+    failed or nothing could be attempted for a reason (e.g. no securities
+    resolved, missing API key).
+    """
+    source = {'td': 'twelvedata'}.get(action, action)
+    errors = list(result.get('errors') or [])
+    failed = int(result.get('failed') or 0)
+    return {
+        'success': failed == 0 and not errors,
+        'source': source,
+        'bar_size': getattr(args, 'bar_size', None),
+        'prev_days': getattr(args, 'prev_days', None),
+        'requested': {'symbol': getattr(args, 'symbol', None),
+                      'universe': getattr(args, 'universe', None)},
+        'symbols': list(result.get('symbols') or []),
+        'enqueued': int(result.get('enqueued') or 0),
+        'completed': int(result.get('completed') or 0),
+        'failed': failed,
+        'rows_written': sum(int(t.get('rows') or 0) for t in (result.get('tasks') or [])
+                            if isinstance(t, dict)),
+        'errors': errors,
+        'tasks': list(result.get('tasks') or []),
+        **({'message': '; '.join(errors)} if errors else {}),
+    }
 
 
 def _fmt_financial_value(val) -> str:

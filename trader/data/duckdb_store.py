@@ -429,6 +429,78 @@ class DuckDBDataStore(DataStore):
             return [row[0] for row in result.fetchall()]
         return self._db.execute_atomic(_list)
 
+    def series_summary(self) -> pd.DataFrame:
+        """Inventory of every stored (symbol, bar_size) series in ONE query.
+
+        Columns: symbol, bar_size, start, end, rows, bars.
+
+        * ``start``/``end`` span REAL bars only (``close IS NOT NULL``). The IB
+          worker injects all-NULL placeholder rows for weekends and empty
+          sessions; letting those set the extent made a series that stopped on
+          Friday read as ending on Sunday. A series holding nothing but
+          placeholders has NULL start/end, which is the honest answer.
+        * ``rows`` counts every stored row, ``bars`` only the real ones, so
+          ``rows - bars`` is the placeholder count.
+        * Rows with a NULL ``bar_size`` are grouped under NULL and left to the
+          caller to report; they are not silently folded into any bar size.
+
+        The previous inventory issued min_date + max_date per symbol per bar
+        size — each its own connection open/close — and took 5m25s over 1,144
+        series. It was also wrong: neither call filtered on bar size, so every
+        symbol appeared under every bar size with the extent of all of them.
+        """
+        query = f"""
+            SELECT symbol,
+                   bar_size,
+                   MIN(date) FILTER (WHERE close IS NOT NULL) AS start,
+                   MAX(date) FILTER (WHERE close IS NOT NULL) AS "end",
+                   COUNT(*) AS rows,
+                   COUNT(close) AS bars
+            FROM {self.TABLE_NAME}
+            GROUP BY symbol, bar_size
+            ORDER BY bar_size, symbol
+        """
+        df = self._db.execute(query, fetch='df')
+        if df is None or df.empty:
+            return pd.DataFrame(columns=['symbol', 'bar_size', 'start', 'end', 'rows', 'bars'])
+        for col in ('start', 'end'):
+            df[col] = pd.to_datetime(df[col], utc=True)
+        df['rows'] = df['rows'].astype('int64')
+        df['bars'] = df['bars'].astype('int64')
+        return df
+
+    def last_bars(self, symbols: list[str], bar_size: str) -> dict[str, dt.datetime]:
+        """Latest REAL bar (``close IS NOT NULL``) per symbol for one bar size.
+
+        One query for the whole list. Symbols with no real bar are absent from
+        the result — a placeholder row is not evidence that a series is
+        current. Values are tz-aware UTC.
+        """
+        if not symbols:
+            return {}
+        placeholders = ','.join('?' * len(symbols))
+        rows = self._db.execute(
+            f"SELECT symbol, MAX(date) FROM {self.TABLE_NAME} "
+            f"WHERE bar_size = ? AND close IS NOT NULL AND symbol IN ({placeholders}) "
+            f"GROUP BY symbol",
+            [bar_size, *symbols],
+            fetch='all',
+        ) or []
+        result: dict[str, dt.datetime] = {}
+        for symbol, last in rows:
+            if last is None:
+                continue
+            if isinstance(last, dt.datetime):
+                value = last
+            else:
+                value = pd.Timestamp(last).to_pydatetime()
+                if not isinstance(value, dt.datetime):     # NaT
+                    continue
+            value = (value.replace(tzinfo=dt.timezone.utc) if value.tzinfo is None
+                     else value.astimezone(dt.timezone.utc))
+            result[str(symbol)] = value
+        return result
+
     def min_date(self, symbol: str, bar_size: Optional[str] = None) -> dt.datetime:
         def _min(conn):
             if bar_size is not None:

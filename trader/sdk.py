@@ -2812,7 +2812,10 @@ class MMR:
 
         cfg = self._container.config()
         db_path = cfg.get('duckdb_path', '')
-        store = DuckDBDataStore(db_path)
+        # Bars live in the HISTORY database; the universe catalogue in the main
+        # one. Reading tick_data from duckdb_path listed whatever happened to
+        # be in the main DB (usually nothing) whenever the two are split.
+        store = DuckDBDataStore(cfg.get('history_duckdb_path', '') or db_path)
 
         # Build the query with optional filters
         conditions = []
