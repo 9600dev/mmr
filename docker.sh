@@ -354,7 +354,8 @@ echo_usage() {
     echo "      on FAIL. Does NOT shell in — use -e, or MMR_GO_SHELL=1 to land"
     echo "      in a container shell as it used to.)"
     echo "  -l (logs: tail logs from all containers)"
-    echo "  -r (restart-ib: restart the IB Gateway container)"
+    echo "  -r (restart-ib: restart the IB Gateway container; the MMR container"
+    echo "      depends on it, so it is recreated too if it was running)"
     echo "  -e (exec: shell into running MMR container)"
     echo "  -n (news: bring up the news scraper stack at \$NEWS_DIR"
     echo "      — default ~/dev/scraper; idempotent. Used by the news skill.)"
@@ -685,11 +686,28 @@ restart_ib() {
     echo "Restarting IB Gateway container..."
     # Same dependent-container guard as ib_only(): podman/docker won't
     # recreate ib-gateway while a container with `depends_on: ib-gateway`
-    # exists, even if it's stopped.
+    # exists, even if it's stopped. Removing it takes the whole trading stack
+    # down, so remember whether it was running and bring it back — until
+    # 2026-11-05 this printed "IB Gateway restarted." and left MMR gone.
+    local mmr_was_running=""
+    if [[ -n "$($RUNTIME ps -q --filter "name=mmr[-_]mmr" 2>/dev/null)" ]]; then
+        mmr_was_running=1
+    fi
     _remove_mmr_dependents
     $COMPOSE -f "$BUILDDIR/docker-compose.yml" up -d --force-recreate ib-gateway
     echo ""
     echo "IB Gateway restarted."
+    if [[ -n "$mmr_was_running" ]]; then
+        echo "Recreating the MMR container (it depends on ib-gateway, so it had to be removed)..."
+        if ! $COMPOSE -f "$BUILDDIR/docker-compose.yml" up -d mmr; then
+            echo "ERROR: MMR container did not come back — the trading stack is DOWN. Run ./docker.sh -u" >&2
+            exit 1
+        fi
+        echo "MMR restarting. Services answer RPC in ~30s; tick flow takes ~2-3 min —"
+        echo "then run: mmr verify"
+    else
+        echo "Note: the MMR container was not running before; start the stack with ./docker.sh -u"
+    fi
 }
 
 # Bring up the sibling news scraper docker stack at $NEWS_DIR (default
@@ -961,16 +979,31 @@ verify_stack() {
         # so a plain `uv sync` layout still works. `if` not `&&` — a bare
         # `[ -d x ] && v=y` returns 1 when the test fails, which errexit would
         # turn into an abort right here.
-        local ok=0
-        if [ -d "$HOME/.cache/mmr-venv" ]; then
-            UV_PROJECT_ENVIRONMENT="$HOME/.cache/mmr-venv" \
-                uv run --project "$BUILDDIR" python -m trader.mmr_cli verify || ok=1
-        else
-            uv run --project "$BUILDDIR" python -m trader.mmr_cli verify || ok=1
-        fi
-        if [ "$ok" = "0" ]; then
-            return 0
-        fi
+        # Tick flow needs ~2-3 min after a (re)start before verify can pass —
+        # strategies load progressively and market-data lines subscribe late.
+        # Retry ONLY when tick_flow is the sole failing check; anything else
+        # is reported at once. (2026-11-05: -g declared a cold stack FAILED.)
+        local ok=1 attempt=1 attempts="${MMR_VERIFY_ATTEMPTS:-4}" out
+        while : ; do
+            ok=0
+            if [ -d "$HOME/.cache/mmr-venv" ]; then
+                out="$(UV_PROJECT_ENVIRONMENT="$HOME/.cache/mmr-venv" \
+                    uv run --project "$BUILDDIR" python -m trader.mmr_cli verify 2>&1)" || ok=1
+            else
+                out="$(uv run --project "$BUILDDIR" python -m trader.mmr_cli verify 2>&1)" || ok=1
+            fi
+            echo "$out"
+            if [ "$ok" = "0" ]; then
+                return 0
+            fi
+            if ! echo "$out" | grep -q 'FAIL' || echo "$out" | grep -E 'FAIL' | grep -vq 'tick_flow' \
+                    || [ "$attempt" -ge "$attempts" ]; then
+                break
+            fi
+            echo "tick flow still warming up (attempt $attempt/$attempts) — re-verifying in ${MMR_VERIFY_RETRY_S:-45}s..."
+            sleep "${MMR_VERIFY_RETRY_S:-45}"
+            attempt=$((attempt + 1))
+        done
         # A host-side failure can mean the stack is fine but the host toolchain
         # isn't — retry inside the container to tell those two apart.
         echo ""
