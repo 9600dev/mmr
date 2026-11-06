@@ -976,6 +976,21 @@ class RPCClient(Generic[T]):
         finally:
             self._lock.release()
 
+    def wait_ready(self, timeout: float = 2.0) -> bool:
+        """True once a server peer is connected (the socket is writable).
+
+        With IMMEDIATE=1 the DEALER only reports POLLOUT when a live peer
+        exists, so this is an honest liveness probe that sends nothing.
+        Lets callers fail in ~2s with a clear message instead of every RPC
+        burning its full timeout against a service that isn't running.
+        """
+        if not (self.socket and self.is_setup):
+            return False
+        try:
+            return bool(self.socket.poll(max(1, int(timeout * 1000)), zmq.POLLOUT))
+        except zmq.ZMQError:
+            return False
+
     def _require_socket(self):
         if not (self.socket and self.is_setup):
             raise ConnectionError('not connected')

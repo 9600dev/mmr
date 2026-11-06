@@ -30,10 +30,59 @@ import shlex
 import sys
 import time
 
-console = Console()
+class _ExitAwareConsole(Console):
+    """Console whose red error lines also set the process exit code.
+
+    Handlers report failures in text mode as ``console.print('[red]...')``;
+    recording that here gives every one of them a non-zero exit status
+    without touching each call site. Tables (where red marks a negative
+    number) are renderables, not strings, so they are unaffected.
+    """
+
+    def print(self, *objects, **kwargs):  # type: ignore[override]
+        if objects and isinstance(objects[0], str):
+            head = objects[0].lstrip()
+            if head.startswith(('[red]', '[bold red]', '[red bold]')):
+                _set_exit_code(1)
+        return super().print(*objects, **kwargs)
+
+
+console = _ExitAwareConsole()
 
 # Module-level flag set per dispatch() call
 _json_mode = False
+# Process exit code for one-shot invocations. Any failure the CLI reports
+# (print_status(success=False), a JSON failure payload, a red error line)
+# sets it, and main() exits with it — so `mmr ...` callers (the LLM loop,
+# cron, scripts) can detect failure from the exit status, not by parsing.
+_exit_code = 0
+
+
+def _set_exit_code(code: int = 1) -> None:
+    global _exit_code
+    if code and not _exit_code:
+        _exit_code = code
+
+
+def _normalize_failure(payload):
+    """Failure payloads share one contract: ``success: false`` + ``message``.
+
+    Historically three shapes existed ({success,message}, {success,error},
+    {error: true, message}); keep every original key and add the missing ones.
+    Also records the failure in the process exit code.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    failed = payload.get('success') is False or payload.get('error') is True
+    if not failed:
+        return payload
+    _set_exit_code(1)
+    out = dict(payload)
+    out['success'] = False
+    if not out.get('message'):
+        err = out.get('error')
+        out['message'] = err if isinstance(err, str) and err else 'failed'
+    return out
 
 
 # ------------------------------------------------------------------
@@ -62,7 +111,7 @@ def _json_dumps(payload) -> str:
             return [_clean(v) for v in o]
         return o
 
-    return json.dumps(_clean(payload), default=str, allow_nan=False)
+    return json.dumps(_clean(_normalize_failure(payload)), default=str, allow_nan=False)
 
 
 def print_df(df, title=None):
@@ -282,6 +331,8 @@ def print_json_result(data, title=None):
 
 def print_status(message, success=True):
     """Print a status message (or JSON if _json_mode)."""
+    if not success:
+        _set_exit_code(1)
     if _json_mode:
         print(_json_dumps({"success": success, "message": message}))
         return
@@ -531,14 +582,22 @@ def build_parser() -> argparse.ArgumentParser:
     to_market_p.add_argument('order_id', type=int, help='Order ID to convert')
 
     # close
-    close_p = sub.add_parser('close', aliases=['c'], help='Close a position by row number',
+    close_p = sub.add_parser('close', aliases=['c'], help='Close a position by symbol (or REPL row number)',
                              epilog='Examples:\n'
-                                    '  close 1              # close entire position at row 1\n'
-                                    '  close 3 --quantity 50 # partial close\n'
-                                    '  c 2',
+                                    '  close F --yes          # close the entire F position at market\n'
+                                    '  close F --quantity 50 --yes  # partial close\n'
+                                    '  close --conid 9599491 --yes  # by exact conId\n'
+                                    '  c 2                    # REPL only: row 2 of the table just shown\n'
+                                    'Row numbers are only accepted inside the interactive REPL, against\n'
+                                    'the portfolio/positions table displayed in that session. One-shot\n'
+                                    'invocations must name the symbol; non-interactive use needs --yes.',
                              formatter_class=fmt)
-    close_p.add_argument('row', type=int, help='Row number from portfolio/watch output')
+    close_p.add_argument('target', nargs='?', default=None,
+                         help='Symbol to close (or a row number, REPL only)')
+    close_p.add_argument('--conid', type=int, default=None, help='Exact conId of the position to close')
     close_p.add_argument('--quantity', type=float, default=None, help='Partial quantity (default: entire position)')
+    close_p.add_argument('--yes', '-y', action='store_true', default=False,
+                         help='Skip the confirmation prompt (required when not on a TTY / with --json)')
 
     protect_p = sub.add_parser(
         'protect', help='Place a protective order (stop / trailing stop / take-profit) for a position',
@@ -563,10 +622,16 @@ def build_parser() -> argparse.ArgumentParser:
     protect_p.add_argument('--currency', default='', help='Currency hint for resolution (e.g. AUD)')
 
     # close-all-positions
-    sub.add_parser('close-all-positions', help='Close all positions at market',
-                   epilog='Examples:\n'
-                          '  close-all-positions',
-                   formatter_class=fmt)
+    close_all_p = sub.add_parser('close-all-positions', help='Close all positions at market',
+                                 epilog='Examples:\n'
+                                        '  close-all-positions          # lists positions, asks y/N\n'
+                                        '  close-all-positions --dry-run\n'
+                                        '  close-all-positions --yes    # non-interactive',
+                                 formatter_class=fmt)
+    close_all_p.add_argument('--yes', '-y', action='store_true', default=False,
+                             help='Skip the confirmation prompt (required when not on a TTY / with --json)')
+    close_all_p.add_argument('--dry-run', action='store_true', default=False,
+                             help='List what would be closed; place nothing')
 
     # resize-positions
     resize_p = sub.add_parser('resize-positions', aliases=['resize'], help='Proportionally resize all positions',
@@ -2083,7 +2148,7 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
     _role_refusal = _role_allows(cmd, args)
     if _role_refusal:
         if _json_mode:
-            print(json.dumps({
+            print(_json_dumps({
                 'error': True,
                 'message': _role_refusal,
                 'role': (os.environ.get('MMR_ROLE') or 'operator'),
@@ -2118,7 +2183,7 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
         upstream_err = mmr.check_ib_upstream()
         if upstream_err:
             if _json_mode:
-                print(json.dumps({
+                print(_json_dumps({
                     'error': True,
                     'message': f'IB Gateway is not connected to IBKR servers: {upstream_err}',
                     'hint': 'Check IB Gateway via VNC (vnc://localhost:5901) or restart it with: docker compose restart ib-gateway',
@@ -2302,7 +2367,7 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
             if not defs:
                 # No match at all — empty local DB, empty IB discovery.
                 if _json_mode:
-                    print(json.dumps({'success': False, 'data': [],
+                    print(_json_dumps({'success': False, 'data': [],
                                       'message': f'Could not resolve: {args.symbol}'}))
                 else:
                     console.print(f'[yellow]Could not resolve: {args.symbol}[/yellow]')
@@ -2406,7 +2471,7 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
             _handle_protect(mmr, args)
 
         elif cmd == 'close-all-positions':
-            _handle_close_all(mmr)
+            _handle_close_all(mmr, args)
 
         elif cmd in ('resize-positions', 'resize'):
             _handle_resize_positions(mmr, args)
@@ -2700,7 +2765,7 @@ def _print_trade_result(result, action: str, symbol: str):
                 'symbol': symbol,
                 'error': str(result.error) if result.error else '',
             }
-        print(json.dumps(data, default=str))
+        print(_json_dumps(data))
         return
 
     if result.is_success():
@@ -3454,37 +3519,79 @@ def _handle_portfolio_risk(mmr: MMR, args: argparse.Namespace):
             console.print(f'  [{color}]{w["level"].upper()}: {w["message"]}[/{color}]')
 
 
-def _handle_close(mmr: MMR, args: argparse.Namespace):
-    row = args.row
-    if row not in mmr._position_map:
-        console.print(f'[yellow]Row #{row} not found. Run "portfolio" or "positions" first.[/yellow]')
-        return
+_interactive = False   # set by repl(): row numbers / prompts are only meaningful there
 
-    symbol = mmr._position_map[row]
-    # Get current position size for confirmation — try portfolio first, fall back to positions
+
+def _confirm(prompt: str, assume_yes: bool) -> Optional[bool]:
+    """y/N confirmation. Returns True/False, or None when it cannot ask.
+
+    Non-interactive callers (no TTY on stdin, or --json) must pass --yes —
+    input() would otherwise hit EOF, or block an LLM loop on a prompt.
+    """
+    if assume_yes:
+        return True
+    if _json_mode or not sys.stdin.isatty():
+        return None
+    try:
+        return input(prompt).strip().lower() == 'y'
+    except EOFError:
+        return None
+
+
+def _trade_summary(result) -> dict:
+    trade = getattr(result, 'obj', None)
+    order = getattr(trade, 'order', None)
+    status = getattr(trade, 'orderStatus', None)
+    return {'order_id': getattr(order, 'orderId', None),
+            'broker_status': getattr(status, 'status', None)}
+
+
+def _handle_close(mmr: MMR, args: argparse.Namespace):
+    target = args.target
+    con_id = args.conid
+    symbol = None
+
+    if target is None and con_id is None:
+        print_status('close: name the symbol to close (e.g. `close F --yes`) or pass --conid', success=False)
+        return
+    if target is not None and str(target).isdigit() and con_id is None:
+        row = int(target)
+        if not _interactive:
+            print_status(
+                f'close {row}: row numbers are only valid inside the interactive REPL (rows are '
+                f'ordered by daily P&L and move between calls). Name the symbol instead, '
+                f'e.g. `mmr close <SYMBOL> --yes`.', success=False)
+            return
+        if row not in mmr._position_map:
+            print_status(f'Row #{row} not found. Run "portfolio" or "positions" first.', success=False)
+            return
+        symbol = mmr._position_map[row]
+    elif target is not None:
+        symbol = str(target).upper()
+
+    # Resolve the live position (portfolio first, then raw positions).
     pos_size = None
     df = mmr.portfolio()
-    if not df.empty and 'symbol' in df.columns:
-        match = df[df['symbol'] == symbol]
+    for frame in (df, None):
+        if frame is None:
+            frame = mmr.positions()
+        if frame.empty or 'symbol' not in frame.columns:
+            continue
+        if con_id is not None and 'conId' in frame.columns:
+            match = frame[frame['conId'].astype('int64') == int(con_id)]
+        else:
+            match = frame[frame['symbol'] == symbol]
         if not match.empty:
-            pos_size = float(match.iloc[0]['position'])
-
-    if pos_size is None:
-        df = mmr.positions()
-        if not df.empty and 'symbol' in df.columns:
-            match = df[df['symbol'] == symbol]
-            if not match.empty:
-                pos_size = float(match.iloc[0]['position'])
+            row0 = match.iloc[0]
+            pos_size = float(row0['position'])
+            symbol = str(row0['symbol'])
+            if 'conId' in frame.columns and row0.get('conId'):
+                con_id = int(row0['conId'])
+            break
 
     if pos_size is None or pos_size == 0.0:
-        console.print(f'[yellow]{symbol}: position is already flat (0 shares). Nothing to close.[/yellow]')
+        print_status(f'{symbol or con_id}: no open position — nothing to close', success=False)
         return
-
-    con_id = None
-    if not df.empty and 'conId' in df.columns:
-        match = df[df['symbol'] == symbol]
-        if not match.empty:
-            con_id = int(match.iloc[0]['conId'])
 
     close_qty = abs(args.quantity) if args.quantity else abs(pos_size)
     # Never close more than we hold — an oversized close would flip the position
@@ -3496,20 +3603,31 @@ def _handle_close(mmr: MMR, args: argparse.Namespace):
             f'position.[/yellow]')
         close_qty = abs(pos_size)
 
-    confirm = input(f'Close #{row}: {symbol} ({close_qty} shares) at market? [y/N] ')
-    if confirm.lower() != 'y':
+    ok = _confirm(f'Close {symbol} ({close_qty:g} shares) at market? [y/N] ', args.yes)
+    if ok is None:
+        print_status(f'close {symbol}: confirmation required — pass --yes for non-interactive use',
+                     success=False)
+        return
+    if not ok:
         console.print('[dim]Cancelled[/dim]')
         return
 
-    result = mmr.close_position(symbol, quantity=close_qty, con_id=con_id,
-                                _pos_size=pos_size)
+    result = mmr.close_position(symbol, quantity=close_qty, con_id=con_id, _pos_size=pos_size)
+    info = _trade_summary(result)
     if result.is_success():
-        console.print(f'[green]Close {symbol}: submitted[/green]')
+        if _json_mode:
+            print(_json_dumps({'success': True, 'symbol': symbol, 'quantity': close_qty, **info,
+                               'message': f'close {symbol} {close_qty:g}: submitted'}))
+        else:
+            console.print(f'[green]Close {symbol} {close_qty:g}: submitted — order '
+                          f'{info["order_id"]}, {info["broker_status"]}[/green]')
     else:
-        console.print(f'[red]Close {symbol}: failed — {result.error}[/red]')
+        print_status(f'Close {symbol}: failed — {result.error}', success=False)
 
 
-def _handle_close_all(mmr: MMR):
+def _handle_close_all(mmr: MMR, args: Optional[argparse.Namespace] = None):
+    assume_yes = bool(getattr(args, 'yes', False))
+    dry_run = bool(getattr(args, 'dry_run', False))
     df = mmr.portfolio()
     if df.empty:
         console.print('[dim]No positions to close.[/dim]')
@@ -3527,8 +3645,16 @@ def _handle_close_all(mmr: MMR):
         direction = 'LONG' if pos > 0 else 'SHORT'
         console.print(f'  {row["symbol"]}: {abs(pos):.0f} shares ({direction})')
 
-    confirm = input(f'\nClose all {len(df)} positions at market? (will cancel all open orders first) [y/N] ')
-    if confirm.lower() != 'y':
+    if dry_run:
+        console.print('[dim]--dry-run: nothing placed[/dim]')
+        return
+    ok = _confirm(f'\nClose all {len(df)} positions at market? (will cancel all open orders first) [y/N] ',
+                  assume_yes)
+    if ok is None:
+        print_status('close-all-positions: confirmation required — pass --yes for non-interactive use',
+                     success=False)
+        return
+    if not ok:
         console.print('[dim]Cancelled[/dim]')
         return
 
@@ -3562,7 +3688,7 @@ def _handle_protect(mmr: MMR, args: argparse.Namespace):
     if len(active) != 1:
         msg = 'specify exactly one of --stop, --trail, or --take-profit'
         if _json_mode:
-            print(json.dumps({'success': False, 'message': msg}))
+            print(_json_dumps({'success': False, 'message': msg}))
         else:
             console.print(f'[red]{msg}[/red]')
         return
@@ -3586,14 +3712,14 @@ def _handle_protect(mmr: MMR, args: argparse.Namespace):
     if not qty:
         msg = f'{symbol}: no open position found — protect only applies to existing positions'
         if _json_mode:
-            print(json.dumps({'success': False, 'message': msg}))
+            print(_json_dumps({'success': False, 'message': msg}))
         else:
             console.print(f'[yellow]{msg}[/yellow]')
         return
     if pos_size and args.quantity and abs(args.quantity) > abs(pos_size):
         msg = f'{symbol}: requested {abs(args.quantity):g} exceeds position size {abs(pos_size):g}'
         if _json_mode:
-            print(json.dumps({'success': False, 'message': msg}))
+            print(_json_dumps({'success': False, 'message': msg}))
         else:
             console.print(f'[yellow]{msg}[/yellow]')
         return
@@ -3610,15 +3736,22 @@ def _handle_protect(mmr: MMR, args: argparse.Namespace):
     ok = result.is_success() if hasattr(result, 'is_success') else bool(result)
     desc = {'STP': f'stop @ {value:g}', 'TRAIL': f'{value:g}% trailing stop',
             'LMT': f'take-profit @ {value:g}'}[order_type]
+    trade = getattr(result, 'obj', None) if ok else None
+    order_id = getattr(getattr(trade, 'order', None), 'orderId', None)
+    broker_status = getattr(getattr(trade, 'orderStatus', None), 'status', None)
     if _json_mode:
-        print(json.dumps({'success': ok,
+        print(_json_dumps({'success': ok,
+                          'order_id': order_id,
+                          'broker_status': broker_status,
                           'message': (f'{args.action} {order_type} ({desc}) for {qty:g} {symbol}'
                                       if ok else getattr(result, 'error', 'failed'))}))
     elif ok:
         console.print(f'[green]Protective {args.action} {order_type} placed: {desc} '
-                      f'for {qty:g} {symbol} ({args.tif})[/green]')
+                      f'for {qty:g} {symbol} ({args.tif}) — order {order_id}, {broker_status}[/green]')
     else:
         console.print(f'[red]Failed to place protective order: {getattr(result, "error", "unknown")}[/red]')
+    if not ok:
+        _set_exit_code(1)
 
 
 def _handle_resize_positions(mmr: MMR, args: argparse.Namespace):
@@ -4537,7 +4670,7 @@ def _handle_strategies_available(args: argparse.Namespace):
             })
 
     if _json_mode:
-        print(json.dumps({'data': rows, 'title': 'Available Strategies'}))
+        print(_json_dumps({'data': rows, 'title': 'Available Strategies'}))
         return
 
     title = f'Available Strategies ({strategies_dir})'
@@ -5328,7 +5461,7 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
     ))
 
     if _json_mode:
-        print(json.dumps({
+        print(_json_dumps({
             'data': {
                 'run_id': run_id,
                 'verdict': result['verdict'],
@@ -5336,7 +5469,7 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
                 'checks': result['checks'],
             },
             'title': 'Strategy Gauntlet',
-        }, default=str))
+        }))
         return
 
     from rich.table import Table as _RTable
@@ -6365,7 +6498,7 @@ def _handle_backtests(args: argparse.Namespace):
                     out.append(s or f'?({cid})')
                 return out
 
-            print(json.dumps({
+            print(_json_dumps({
                 'data': [
                     {
                         'id': r.id,
@@ -6392,7 +6525,7 @@ def _handle_backtests(args: argparse.Namespace):
                     for r in records
                 ],
                 'title': 'Backtest History',
-            }, default=str))
+            }))
             return
 
         if not records:
@@ -6707,10 +6840,8 @@ def _handle_backtests(args: argparse.Namespace):
                 },
             })
         if _json_mode:
-            print(json.dumps(
-                {'data': rows, 'title': 'Backtest Confidence Batch'},
-                default=str,
-            ))
+            print(_json_dumps(
+                {'data': rows, 'title': 'Backtest Confidence Batch'}))
             return
         # Rich output for humans: one row per run, colored by PSR band.
         from rich.table import Table
@@ -7496,7 +7627,7 @@ def _print_backtest_metrics_help():
     from rich.table import Table
 
     if _json_mode:
-        print(json.dumps({
+        print(_json_dumps({
             'data': [
                 {'metric': name, 'what': what, 'good': good, 'watch_out': watch}
                 for name, what, good, watch in _BACKTEST_METRIC_HELP
@@ -7841,7 +7972,7 @@ def _handle_sweep_run(args: argparse.Namespace):
             ],
         }
         if _json_mode:
-            print(json.dumps({'data': plan, 'title': 'Sweep Dry-run'}))
+            print(_json_dumps({'data': plan, 'title': 'Sweep Dry-run'}))
             return
         console.print(f'[bold]Dry-run: {manifest_path.name}[/]')
         console.print(f'  total jobs: {total_jobs}')
@@ -7978,10 +8109,9 @@ async def _run_sweeps_async(
         for plan in plans:
             ran.append({'name': plan['spec']['name'],
                          'jobs': len(plan['jobs'])})
-        print(json.dumps(
+        print(_json_dumps(
             {'data': {'sweeps_run': ran, 'cancelled': cancel_requested['flag']},
-             'title': 'Sweep Batch'}, default=str,
-        ))
+             'title': 'Sweep Batch'}))
 
 
 async def _execute_jobs_parallel(
@@ -8476,7 +8606,7 @@ def _handle_sweep_show(args: argparse.Namespace):
         eta_s = int(elapsed_s / pct_complete - elapsed_s)
 
     if _json_mode:
-        print(json.dumps({
+        print(_json_dumps({
             'data': {
                 'sweep': {
                     'id': swp.id, 'name': swp.name, 'status': swp.status,
@@ -8512,7 +8642,7 @@ def _handle_sweep_show(args: argparse.Namespace):
                 ],
             },
             'title': f'Sweep #{swp.id}: {swp.name}',
-        }, default=str))
+        }))
         return
 
     from rich.table import Table
@@ -9104,7 +9234,7 @@ def _handle_backtest_sweep(args: argparse.Namespace):
 
     # 4. JSON / Rich leaderboard.
     if _json_mode:
-        print(json.dumps({
+        print(_json_dumps({
             'data': {
                 'total_combinations': len(combos),
                 'successful': len(successful),
@@ -9134,7 +9264,7 @@ def _handle_backtest_sweep(args: argparse.Namespace):
                 ],
             },
             'title': f'Sweep: {args.class_name}',
-        }, default=str))
+        }))
         return
 
     from rich.table import Table
@@ -9460,10 +9590,10 @@ def _handle_backtest(args: argparse.Namespace):
         }
         if not summary_only:
             data['trades'] = trades_data
-        print(json.dumps({
+        print(_json_dumps({
             'data': data,
             'title': f'Backtest: {args.class_name}',
-        }, default=str))
+        }))
         return
 
     # Rich output
@@ -10003,7 +10133,7 @@ def _handle_data_download(args: argparse.Namespace):
             pass
 
     if _json_mode:
-        print(json.dumps({
+        print(_json_dumps({
             'success': failed == 0,
             'message': (f'{completed} downloaded, {skipped_up_to_date} already current, '
                         f'{failed} failed, {total_rows_written} rows written'),
@@ -10044,7 +10174,7 @@ def _handle_data_backup(args: argparse.Namespace):
     duckdb_path = _os.path.expanduser(cfg.get('duckdb_path', '') or '')
     if not duckdb_path:
         msg = 'duckdb_path not configured — nothing to back up'
-        print(json.dumps({'success': False, 'message': msg}) if _json_mode else msg)
+        print(_json_dumps({'success': False, 'message': msg}) if _json_mode else msg)
         return
     data_dir = _Path(duckdb_path).parent
     backup_dir = data_dir.parent / 'backups'
@@ -10054,7 +10184,7 @@ def _handle_data_backup(args: argparse.Namespace):
     summary = run_backup(data_dir, backup_dir, keep=keep, name=name)
 
     if _json_mode:
-        print(json.dumps({'data': summary, 'title': 'DB Backup'}))
+        print(_json_dumps({'data': summary, 'title': 'DB Backup'}))
         if not summary.get('complete', False):
             raise SystemExit(1)
         return
@@ -10161,7 +10291,7 @@ def _handle_data_dedup_daily(args: argparse.Namespace):
         details.append({'symbol': sym, 'removed': len(to_delete), 'tz': tz})
 
     if _json_mode:
-        print(json.dumps({'data': {'dry_run': dry, 'total_removed': total_removed,
+        print(_json_dumps({'data': {'dry_run': dry, 'total_removed': total_removed,
                                    'symbols': details}, 'title': 'Dedup Daily'}))
         return
     verb = 'would remove' if dry else 'removed'
@@ -10273,7 +10403,7 @@ def _handle_data_migrate_timezone(args: argparse.Namespace):
         details.append({'symbol': sym, 'tz': tz, 'rekeyed': len(plan)})
 
     if _json_mode:
-        print(json.dumps({'data': {'dry_run': dry, 'total_rekeyed': total_rekeyed,
+        print(_json_dumps({'data': {'dry_run': dry, 'total_rekeyed': total_rekeyed,
                                    'symbols': details}, 'title': 'Migrate Timezone'}))
         return
     verb = 'would re-key' if dry else 're-keyed'
@@ -10397,7 +10527,7 @@ def _handle_data_migrate_symbols(args: argparse.Namespace):
         except Exception: pass
 
     if _json_mode:
-        print(json.dumps({
+        print(_json_dumps({
             'success': skipped == 0,
             'migrated': migrated,
             'skipped': skipped,
@@ -10617,7 +10747,7 @@ def _handle_data_refresh(args: argparse.Namespace):
     ok = sum(1 for r in results if r['success'])
     fail = len(results) - ok
     if _json_mode:
-        print(json.dumps({
+        print(_json_dumps({
             'success': fail == 0,
             'ok': ok, 'failed': fail,
             'results': results,
@@ -11047,7 +11177,7 @@ def _handle_depth(mmr: MMR, args: argparse.Namespace):
         )
     except ValueError as e:
         if _json_mode:
-            print(json.dumps({'success': False, 'message': str(e)}))
+            print(_json_dumps({'success': False, 'message': str(e)}))
         else:
             console.print(f'[red]Error: {e}[/red]')
             if args.exchange:
@@ -11063,7 +11193,7 @@ def _handle_depth(mmr: MMR, args: argparse.Namespace):
         return
     except Exception as e:
         if _json_mode:
-            print(json.dumps({'success': False, 'message': str(e)}))
+            print(_json_dumps({'success': False, 'message': str(e)}))
         else:
             console.print(f'[red]Error: {e}[/red]')
         return
@@ -11093,7 +11223,7 @@ def _handle_depth(mmr: MMR, args: argparse.Namespace):
 
     if _json_mode:
         output = {'data': data, 'chart_path': chart_path}
-        print(json.dumps(output, default=str))
+        print(_json_dumps(output))
 
 
 def _handle_listen(mmr: MMR, args: argparse.Namespace):
@@ -11498,7 +11628,7 @@ def _handle_news_fetch(args: argparse.Namespace):
         return
     article = body.get('article') or {}
     if _json_mode:
-        print(json.dumps(body, default=str))
+        print(_json_dumps(body))
         return
     if not body.get('ok'):
         print_status(f'service returned not-ok: {body.get("status")} {body.get("error", "")}', success=False)
@@ -11717,8 +11847,7 @@ def _handle_news_universe(args: argparse.Namespace):
     rows.sort(key=lambda r: (-(r.get('count') or 0), r['symbol']))
 
     if _json_mode:
-        print(json.dumps({'data': rows, 'title': f'News-universe: {args.universe}'},
-                         default=str))
+        print(_json_dumps({'data': rows, 'title': f'News-universe: {args.universe}'}))
         return
 
     if not rows:
@@ -12151,7 +12280,7 @@ def _handle_scan(mmr: MMR, args: argparse.Namespace):
             print_status(f'Failed to fetch scanner locations: {ex}', success=False)
             return
         if _json_mode:
-            print(json.dumps({'data': locs, 'title': 'Scanner Locations'}))
+            print(_json_dumps({'data': locs, 'title': 'Scanner Locations'}))
             return
         if not locs:
             console.print('[yellow]IB returned no locations — is trader_service connected?[/yellow]')
@@ -13136,6 +13265,8 @@ def _build_completer(parser: argparse.ArgumentParser):
 
 def repl(mmr: MMR):
     """Interactive REPL with prompt_toolkit."""
+    global _interactive
+    _interactive = True
     from prompt_toolkit import PromptSession
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
     from prompt_toolkit.history import FileHistory
@@ -13244,17 +13375,70 @@ _LOCAL_ONLY_COMMANDS = {'backtest', 'bt', 'data', 'propose', 'proposals', 'rejec
 _LOCAL_ONLY_STRAT_ACTIONS = {'create', 'signals', 'backtest', 'pnl'}
 
 
+# Commands that read or write the DuckDB files. On a Docker install those live
+# in the container volume; the host path is an empty shadow (see
+# trader.data.duckdb_store.ShadowedDatabaseError). Run from the host, these are
+# transparently re-executed inside the container so they see the live book.
+_DB_BACKED_COMMANDS = (_LOCAL_ONLY_COMMANDS | {
+    'portfolio-diff', 'pdiff', 'portfolio-risk', 'prisk', 'backtests', 'bts',
+    'sweep', 'walk-forward', 'bt-sweep', 'universe', 'u', 'history', 'strategies', 'strat',
+    'approve',
+}) - {'market-hours', 'mh'}
+
+
+def _maybe_proxy_to_container(cmd: Optional[str]) -> None:
+    """exec `docker exec ... mmr <argv>` when the live DB is in the container.
+
+    No-op inside the container, when the DB isn't shadowed, for commands that
+    don't touch DuckDB, with MMR_ALLOW_HOST_DB=1 / MMR_NO_CONTAINER_PROXY=1, or
+    when docker / the container is unavailable (the store then refuses loudly
+    as before).
+    """
+    if cmd not in _DB_BACKED_COMMANDS:
+        return
+    if os.environ.get('MMR_ALLOW_HOST_DB') == '1' or os.environ.get('MMR_NO_CONTAINER_PROXY') == '1':
+        return
+    if os.path.exists('/.dockerenv'):
+        return
+    try:
+        from trader.container import Container
+        from trader.data.duckdb_store import ShadowedDatabaseError, _assert_not_shadowed
+        db_path = os.path.expanduser(str(Container.instance().config().get('duckdb_path', '') or ''))
+        if not db_path:
+            return
+        try:
+            _assert_not_shadowed(db_path)
+            return                      # not shadowed: the host DB is the live one
+        except ShadowedDatabaseError:
+            pass
+        import shutil
+        import subprocess
+        docker = shutil.which('docker') or shutil.which('podman')
+        name = os.environ.get('MMR_CONTAINER', 'mmr-mmr-1')
+        if not docker:
+            return
+        running = subprocess.run([docker, 'ps', '-q', '-f', f'name=^{name}$'],
+                                 capture_output=True, text=True, timeout=10)
+        if not running.stdout.strip():
+            return
+    except Exception:
+        return
+    flags = ['-i'] + (['-t'] if sys.stdin.isatty() and sys.stdout.isatty() else [])
+    os.execvp(docker, [docker, 'exec', *flags, '-u', 'trader', '-w', '/home/trader/mmr',
+                       name, 'mmr', *sys.argv[1:]])
+
+
 def main():
     # Pre-parse to check if this is a local-only command (no service needed)
     parser = build_parser()
 
     if len(sys.argv) > 1:
-        try:
-            args = parser.parse_args(sys.argv[1:])
-        except SystemExit:
-            return
+        # argparse exits 2 on a usage error (0 for --help); let that status
+        # through instead of swallowing it into a success.
+        args = parser.parse_args(sys.argv[1:])
 
         cmd = getattr(args, 'command', None)
+        _maybe_proxy_to_container(cmd)
         is_local = cmd in _LOCAL_ONLY_COMMANDS
         if cmd in ('strategies', 'strat'):
             strat_action = getattr(args, 'strat_action', None)
@@ -13291,7 +13475,7 @@ def main():
         _enrich = cmd in ('propose', 'session')
         if not is_local or _enrich:
             try:
-                mmr.connect()
+                mmr.connect(probe=True)
             except Exception as e:
                 if not getattr(args, 'json', False):
                     console.print(f'[yellow]Warning: could not connect to trader_service: {e}[/yellow]')
@@ -13301,6 +13485,8 @@ def main():
             dispatch(mmr, args)
         finally:
             mmr.close()
+        if _exit_code:
+            sys.exit(_exit_code)
     else:
         # Interactive REPL — suppress logs by default
         import logging as _logging

@@ -184,14 +184,34 @@ class MMR:
     # Connection lifecycle
     # ------------------------------------------------------------------
 
-    def connect(self) -> 'MMR':
-        """Connect to trader_service.  Returns *self* for chaining."""
+    def connect(self, probe: bool = False) -> 'MMR':
+        """Connect to trader_service.  Returns *self* for chaining.
+
+        ``probe=True`` (the one-shot CLI) verifies a live peer within
+        ``MMR_CONNECT_PROBE_S`` (default 2s) and raises ConnectionError if
+        there is none. Long-lived callers (auto-executor, dashboard) keep the
+        lazy default so an RPC issued during a brief service restart can still
+        complete once the server is back.
+        """
         self._client = RPCClient[TraderServiceApi](
             zmq_server_address=self._rpc_address,
             zmq_server_port=self._rpc_port,
             timeout=self._timeout,
         )
         asyncio.run(self._client.connect())
+        # ZMQ connects lazily, so the line above "succeeds" with no server.
+        # Probe for a live peer so a down stack fails in ~2s with a clear
+        # reason, instead of every RPC waiting out its full timeout.
+        wait_ready = getattr(self._client, 'wait_ready', None)
+        if probe and callable(wait_ready) and not wait_ready(float(os.environ.get('MMR_CONNECT_PROBE_S', '2.0'))):
+            addr = f'{self._rpc_address}:{self._rpc_port}'
+            self._client.close()
+            self._client = None
+            self._connect_error = (
+                f'trader_service is not reachable at {addr} (no response within the connect probe). '
+                f'Is the stack up? Check `docker ps`, then `./docker.sh -u` and `mmr verify`.')
+            raise ConnectionError(self._connect_error)
+        self._connect_error = None
         return self
 
     def _connect_data_service(self) -> None:
@@ -232,7 +252,8 @@ class MMR:
     @property
     def _rpc(self) -> RPCClient[TraderServiceApi]:
         if self._client is None or not self._client.is_setup:
-            raise ConnectionError("Not connected. Call .connect() first.")
+            raise ConnectionError(getattr(self, '_connect_error', None)
+                                  or "Not connected. Call .connect() first.")
         return self._client
 
     # ------------------------------------------------------------------
@@ -961,8 +982,11 @@ class MMR:
 
     def _proposal_ttl(self):
         """PENDING-proposal TTL from trader.yaml ``proposal_ttl_hours`` (default 24h; <=0 disables)."""
-        from trader.data.proposal_expiry import proposal_ttl_from_config
-        return proposal_ttl_from_config(self._container.config())
+        from trader.data.proposal_expiry import proposal_ttl, proposal_ttl_from_config
+        container = getattr(self, '_container', None)
+        if container is None:
+            return proposal_ttl(None)  # no config: the (safe) default, never "disabled"
+        return proposal_ttl_from_config(container.config() or {})
 
     def expire_stale_proposals(self, older_than_hours: Optional[float] = None,
                                dry_run: bool = False) -> dict:
@@ -1280,9 +1304,46 @@ class MMR:
         if validation_errors:
             raise ValueError(f'Invalid execution spec: {"; ".join(validation_errors)}')
 
-        # Auto-size when neither quantity nor amount is provided
+        # Refuse a malformed proposal at the door rather than at approval
+        # (2026-11-05: `propose F BUY --quantity -5` and an unresolvable symbol
+        # were both stored PENDING; only approve refused them).
+        import math as _math
+        if str(action).upper() not in ('BUY', 'SELL'):
+            raise ValueError(f'action must be BUY or SELL, got {action!r}')
+        for _name, _value in (('quantity', quantity), ('amount', amount)):
+            if _value is None:
+                continue
+            if (isinstance(_value, bool) or not isinstance(_value, (int, float))
+                    or not _math.isfinite(_value) or _value <= 0):
+                raise ValueError(f'{_name} must be a finite positive number, got {_value!r}')
+        if not str(symbol or '').strip():
+            raise ValueError('symbol is required')
+
         if metadata is None:
             metadata = {}
+
+        # Resolve the contract now when trader_service is reachable: a symbol
+        # that doesn't exist (or is ambiguous) is refused here, and a resolved
+        # conId is pinned so approval trades exactly what was reviewed.
+        if not (metadata.get('con_id') or metadata.get('conId')):
+            try:
+                self._rpc  # raises ConnectionError when not connected
+            except ConnectionError:
+                metadata['unresolved_at_propose'] = True
+            else:
+                try:
+                    _contract = self._resolve_contract(
+                        symbol, sec_type=sec_type, exchange=exchange, currency=currency)
+                except ValueError as ex:
+                    raise ValueError(f'cannot propose {symbol!r}: {ex}') from ex
+                except Exception as ex:   # transport trouble: don't block, but say so
+                    logging.warning('propose: could not resolve %s (%s); deferring to approval', symbol, ex)
+                    metadata['unresolved_at_propose'] = True
+                else:
+                    if int(getattr(_contract, 'conId', 0) or 0) > 0:
+                        metadata['con_id'] = int(_contract.conId)
+
+        # Auto-size when neither quantity nor amount is provided
         _cached_snap = None  # reused below to avoid duplicate snapshot RPC
         if quantity is None and amount is None:
             try:
