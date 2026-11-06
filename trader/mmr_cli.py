@@ -13500,9 +13500,73 @@ def _maybe_proxy_to_container(cmd: Optional[str]) -> None:
             return
     except Exception:
         return
-    flags = ['-i'] + (['-t'] if sys.stdin.isatty() and sys.stdout.isatty() else [])
-    os.execvp(docker, [docker, 'exec', *flags, '-u', 'trader', '-w', '/home/trader/mmr',
-                       name, 'mmr', *sys.argv[1:]])
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        # With a pty, Ctrl-C / hangup reach the in-container process directly.
+        os.execvp(docker, [docker, 'exec', '-i', '-t', '-u', 'trader', '-w', '/home/trader/mmr',
+                           name, 'mmr', *sys.argv[1:]])
+        return                          # unreachable unless execvp is stubbed
+    sys.exit(_run_proxied(docker, name, sys.argv[1:]))
+
+
+def _run_proxied(docker: str, name: str, argv: List[str]) -> int:
+    """Run ``mmr <argv>`` in the container without a TTY, relaying signals.
+
+    ``docker exec`` without ``-t`` does not forward signals: killing the client
+    (a caller's timeout, Ctrl-C in a pipeline) used to leave the mmr process
+    running inside the container, still holding the DuckDB lock. The inner
+    shell records its pid (then ``exec``s mmr, so the pid IS mmr's) and the
+    SIGINT/SIGTERM/SIGHUP we receive is re-sent to it. SIGKILL of this process
+    cannot be relayed. Returns the in-container exit status.
+    """
+    import signal
+    import subprocess
+    import uuid
+    pidfile = f'/tmp/mmr-proxy-{uuid.uuid4().hex[:12]}.pid'
+    base = [docker, 'exec', '-u', 'trader', '-w', '/home/trader/mmr', name]
+    inner = ['sh', '-c', f'echo $$ > {pidfile}; exec mmr "$@"', 'mmr', *argv]
+    proc = subprocess.Popen([docker, 'exec', '-i', *base[2:], *inner])
+
+    def _relay(sig: int) -> None:
+        try:
+            subprocess.run(
+                [*base, 'sh', '-c', f'p=$(cat {pidfile} 2>/dev/null) && kill -{int(sig)} "$p"'],
+                capture_output=True, timeout=10)
+        except Exception:
+            pass
+
+    received: List[int] = []
+    received_at: List[float] = [0.0]
+
+    def _handler(signum, _frame):
+        if not received:
+            import time as _t
+            received_at[0] = _t.monotonic()
+        received.append(signum)
+        _relay(signum)
+
+    previous = {s: signal.signal(s, _handler) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    import time
+    killed = False
+    try:
+        while True:
+            try:
+                rc = proc.wait(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                # Escalate if the relayed signal was ignored for 10 s.
+                if received and not killed and time.monotonic() - received_at[0] > 10:
+                    _relay(signal.SIGKILL)
+                    killed = True
+    finally:
+        for s, h in previous.items():
+            signal.signal(s, h)
+        try:
+            subprocess.run([*base, 'rm', '-f', pidfile], capture_output=True, timeout=10)
+        except Exception:
+            pass
+    if received and rc == 0:
+        return 128 + received[0]
+    return rc if rc >= 0 else 128 - rc
 
 
 def main():

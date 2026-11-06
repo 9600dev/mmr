@@ -36,13 +36,28 @@ def shadowed(tmp_path, monkeypatch):
     return calls
 
 
-def test_db_backed_command_is_proxied(shadowed):
+def test_db_backed_command_is_proxied_tty(shadowed, monkeypatch):
+    monkeypatch.setattr(cli.sys.stdin, 'isatty', lambda: True, raising=False)
+    monkeypatch.setattr(cli.sys.stdout, 'isatty', lambda: True, raising=False)
     cli._maybe_proxy_to_container('portfolio-diff')
     assert shadowed, 'expected exec into the container'
     argv = shadowed[0]
     assert argv[:2] == ['/usr/bin/docker', 'exec']
+    assert '-t' in argv
     assert argv[-3:] == ['mmr', '--json', 'portfolio-diff']
     assert 'mmr-mmr-1' in argv and '-u' in argv
+
+
+def test_db_backed_command_is_proxied_without_tty(shadowed, monkeypatch):
+    """Off-TTY the proxy supervises docker exec (signal relay) and exits with its rc."""
+    monkeypatch.setattr(cli.sys.stdin, 'isatty', lambda: False, raising=False)
+    calls = []
+    monkeypatch.setattr(cli, '_run_proxied', lambda d, n, a: calls.append((d, n, list(a))) or 3)
+    with pytest.raises(SystemExit) as ex:
+        cli._maybe_proxy_to_container('portfolio-diff')
+    assert ex.value.code == 3
+    assert calls == [('/usr/bin/docker', 'mmr-mmr-1', ['--json', 'portfolio-diff'])]
+    assert shadowed == []          # no bare exec off-TTY
 
 
 def test_rpc_only_command_not_proxied(shadowed):
