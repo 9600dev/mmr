@@ -1183,44 +1183,57 @@ class Trader():
         if conid in self._known_portfolio_conids:
             return
 
-        # First time we've seen this conId — reconcile with the persisted
-        # universe. Thread the read so dill.loads on a multi-position
-        # universe doesn't stall the loop.
-        universe = await asyncio.to_thread(
-            self.universe_accessor.get, 'portfolio',
-        )
+        # Serialize read -> append -> write. Without this, concurrent tasks for
+        # DIFFERENT new conIds each read the same universe, appended their own
+        # entry and wrote it back: last writer wins, the others' entries were
+        # lost and re-added on the next event (one conId was added 14x in a
+        # single session).
+        lock = getattr(self, '_portfolio_universe_lock', None)
+        if lock is None:
+            lock = self._portfolio_universe_lock = asyncio.Lock()
+        async with lock:
+            if conid in self._known_portfolio_conids:
+                return   # added by the task that held the lock before us
+            # First time we've seen this conId — reconcile with the persisted
+            # universe. Thread the read so dill.loads on a multi-position
+            # universe doesn't stall the loop.
+            universe = await asyncio.to_thread(
+                self.universe_accessor.get, 'portfolio',
+            )
 
-        # Seed / re-seed the in-memory set from the freshly read universe.
-        # Any concurrent update_portfolio_universe calls that raced past
-        # the fast-path check will all see the same set after this point.
-        self._known_portfolio_conids = {
-            d.conId for d in universe.security_definitions
-        }
-        if conid in self._known_portfolio_conids:
-            # Another task added it while we were reading, or it's been
-            # persisted across sessions. Either way, nothing to do.
-            return
+            # Seed / re-seed the in-memory set from the freshly read universe.
+            # Any concurrent update_portfolio_universe calls that raced past
+            # the fast-path check will all see the same set after this point.
+            # Union, never replace: replacing with a read taken before another
+            # task's write used to forget conIds that task had just added.
+            self._known_portfolio_conids |= {
+                d.conId for d in universe.security_definitions
+            }
+            if conid in self._known_portfolio_conids:
+                # Another task added it while we were reading, or it's been
+                # persisted across sessions. Either way, nothing to do.
+                return
 
-        # Genuinely new — go fetch contract details and persist.
-        contract = portfolio_item.contract
-        try:
-            contract_details = await self.client.get_contract_details_async(contract)
-        except Exception as ex:
-            logging.warning(f'Failed to get contract details for {contract}: {ex}')
-            return
-        if not contract_details:
-            return
-        universe.security_definitions.append(
-            SecurityDefinition.from_contract_details(contract_details[0])
-        )
-        self._known_portfolio_conids.add(conid)
-        # Full PortfolioItem repr only at TRACE (it is ~600 bytes and this
-        # path re-fires during the connect burst).
-        logging.log(TRACE, 'updating portfolio universe with %s', portfolio_item)
+            # Genuinely new — go fetch contract details and persist.
+            contract = portfolio_item.contract
+            try:
+                contract_details = await self.client.get_contract_details_async(contract)
+            except Exception as ex:
+                logging.warning(f'Failed to get contract details for {contract}: {ex}')
+                return
+            if not contract_details:
+                return
+            universe.security_definitions.append(
+                SecurityDefinition.from_contract_details(contract_details[0])
+            )
+            self._known_portfolio_conids.add(conid)
+            # Full PortfolioItem repr only at TRACE (it is ~600 bytes and this
+            # path re-fires during the connect burst).
+            logging.log(TRACE, 'updating portfolio universe with %s', portfolio_item)
 
-        # Thread the write — dill.dumps on the universe + DuckDB INSERT
-        # can be tens of ms; no reason to run on the loop.
-        await asyncio.to_thread(self.universe_accessor.update, universe)
+            # Thread the write — dill.dumps on the universe + DuckDB INSERT
+            # can be tens of ms; no reason to run on the loop.
+            await asyncio.to_thread(self.universe_accessor.update, universe)
 
     def _update_portfolio_universe_sync(self, portfolio_item: PortfolioItem):
         """Sync fallback when no event loop is running."""
