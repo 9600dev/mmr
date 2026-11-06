@@ -1081,7 +1081,8 @@ CPU-bound bar-by-bar replay. Time scales with number of bars × strategy complex
 | Daily, 1 symbol, 252 bars (simple strategy) | ~1.5s | MA crossover, RSI, mean reversion |
 | Daily, 1 symbol, 252 bars (vectorbt strategy) | ~4s | First run includes numba JIT compilation |
 | Daily, 3 symbols, 252 bars each | ~2.5s | Multi-conid merges timelines |
-| 1-min, 1 symbol, 16K bars (simple strategy) | ~14s | Scales linearly with bar count |
+| 1-min, 1 symbol, 16K bars (simple strategy) | ~14s | Before 2026-11-05 (per-bar pandas groupby/concat, O(N²)) |
+| 1-min, 1 symbol, 55K bars (ORB, `precompute`/`on_bar`) | ~0.35s loop (+~1s CLI startup) | After 2026-11-05: timeline resolved once into numpy positions (`_BarTimeline`); was ~23s live. Results bit-identical (`tests/test_backtester_pin.py`). `on_prices`-only strategies still pay their own O(N²) `prices.iloc[:i+1]` recompute — implement `precompute`/`on_bar` |
 
 **Vectorbt note**: Strategies using `vectorbt` indicators (e.g. `VbtMacdBB`) incur a one-time ~2s numba JIT compilation penalty on first run. Subsequent runs in the same process are fast. The JIT also produces verbose DEBUG logs from numba — these are harmless.
 

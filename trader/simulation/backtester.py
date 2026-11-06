@@ -147,6 +147,77 @@ class BacktestResult:
 
 
 
+class _BarTimeline:
+    """Per-timestamp iteration over the merged multi-conid frame, resolved once.
+
+    Reproduces ``combined.groupby(combined.index)`` exactly — groups in sorted
+    key order, NaN/NaT keys dropped, rows within a group in their original
+    order, conids in first-appearance order — but as integer positions into
+    ``combined`` instead of per-timestamp sub-DataFrames. Scalar reads go
+    through numpy arrays; the bar-row Series (what a slippage model receives)
+    is built only on demand, from the same frame minus the ``conid`` column,
+    so its values, dtype and name are what the old ``bar.iloc[-1]`` produced.
+    """
+
+    def __init__(self, combined: pd.DataFrame):
+        self._combined = combined
+        self._index = combined.index
+        self._bars: Optional[pd.DataFrame] = None   # combined minus 'conid', lazily
+        conid_col = combined['conid'].to_numpy()
+        # Columns may legitimately be absent from a sparse source; the old
+        # loop raised KeyError only when it actually read one, so do we.
+        self._open = combined['open'].to_numpy() if 'open' in combined.columns else None
+        self._close = combined['close'].to_numpy() if 'close' in combined.columns else None
+
+        codes, uniques = pd.factorize(combined.index, sort=True)
+        codes = np.asarray(codes)
+        order = np.argsort(codes, kind='stable')     # stable => original row order kept
+        sorted_codes = codes[order]
+        valid = sorted_codes >= 0                     # -1 = NaN/NaT key (groupby drops it)
+        order, sorted_codes = order[valid], sorted_codes[valid]
+        if len(order):
+            starts = np.flatnonzero(np.r_[True, sorted_codes[1:] != sorted_codes[:-1]])
+            ends = np.r_[starts[1:], len(order)]
+        else:
+            starts = ends = np.array([], dtype=np.intp)
+        self._groups: List[tuple] = []
+        order_list = order.tolist()
+        for s, e, code in zip(starts.tolist(), ends.tolist(), sorted_codes[starts].tolist()):
+            spans: Dict[Any, List[int]] = {}
+            for p in order_list[s:e]:
+                c = conid_col[p]
+                span = spans.get(c)
+                if span is None:
+                    spans[c] = [p, p]
+                else:
+                    span[1] = p
+            self._groups.append((uniques[code], {c: (v[0], v[1]) for c, v in spans.items()}))
+
+    def __iter__(self):
+        return iter(self._groups)
+
+    def __len__(self) -> int:
+        return len(self._groups)
+
+    def open_at(self, pos: int) -> float:
+        if self._open is None:
+            raise KeyError('open')
+        return float(self._open[pos])
+
+    def close_at(self, pos: int) -> float:
+        if self._close is None:
+            raise KeyError('close')
+        return float(self._close[pos])
+
+    def index_at(self, pos: int):
+        return self._index[pos]
+
+    def row(self, pos: int) -> pd.Series:
+        if self._bars is None:
+            self._bars = self._combined.drop(columns=['conid'])
+        return self._bars.iloc[pos]
+
+
 class Backtester:
     def __init__(
         self,
@@ -328,12 +399,21 @@ class Backtester:
             axis=0
         ).sort_index()
 
-        # Walk forward bar-by-bar, building an expanding window for each conid.
-        # To avoid lookahead bias: when a strategy emits a signal while
-        # observing bar t, we queue it for execution at bar t+1's open price.
-        # Under ``fill_policy == 'same_close'`` we preserve the legacy (biased)
-        # behavior for regression tests.
-        accumulated: Dict[int, pd.DataFrame] = {}
+        # Walk forward bar-by-bar. To avoid lookahead bias: when a strategy
+        # emits a signal while observing bar t, we queue it for execution at
+        # bar t+1's open price. Under ``fill_policy == 'same_close'`` we
+        # preserve the legacy (biased) behavior for regression tests.
+        #
+        # Performance: the loop used to ``groupby`` the combined frame, build
+        # a per-conid sub-DataFrame for every timestamp and ``pd.concat`` it
+        # onto an expanding per-conid window — O(N) pandas calls per bar and an
+        # O(N²) copy overall (~26s for a 35k-bar 1-min run, none of it the
+        # strategy). The expanding window was only ever read for its last row.
+        # Everything is now resolved ONCE up front into numpy arrays/positions
+        # into ``combined``; the bar-row Series a fill hands the slippage model
+        # is materialised lazily, only when a fill actually happens. Results
+        # are bit-identical (pinned by tests/test_backtester_pin.py).
+        timeline = _BarTimeline(combined)
         last_prices: Dict[int, float] = {}
         # Pending signals: list of (signal, conid, signal_timestamp)
         pending_signals: List[tuple] = []
@@ -481,32 +561,30 @@ class Backtester:
             ))
             last_fill_ts[conid] = bar_ts
 
-        for timestamp, group in combined.groupby(combined.index):
-            # Snapshot per-conid bars at this timestamp
-            bars_this_ts: Dict[int, pd.DataFrame] = {}
-            for conid in group['conid'].unique():
-                bars_this_ts[conid] = group[group['conid'] == conid].drop(columns=['conid'])
+        for timestamp, bars_this_ts in timeline:
+            # ``bars_this_ts``: conid -> (first_pos, last_pos) of that conid's
+            # row(s) at this timestamp, in first-appearance order. A conid
+            # normally has one row per timestamp; duplicate-timestamp rows
+            # form ONE bar (open from the first row, close/bar row from the
+            # last) exactly as the old per-timestamp sub-DataFrame did.
 
             # 1. Execute any signals queued from the previous bar at THIS bar's open
             if self.config.fill_policy == 'next_open' and pending_signals:
                 still_pending = []
                 for signal, conid, signal_ts in pending_signals:
-                    bar = bars_this_ts.get(conid)
-                    if bar is None or bar.empty:
+                    span = bars_this_ts.get(conid)
+                    if span is None:
                         # No bar for this conid yet — keep waiting (e.g. new listing)
                         still_pending.append((signal, conid, signal_ts))
                         continue
-                    open_price = float(bar['open'].iloc[0])
-                    _execute_signal(signal, conid, signal_ts, timestamp, bar.iloc[-1], open_price)
+                    open_price = timeline.open_at(span[0])
+                    _execute_signal(signal, conid, signal_ts, timestamp,
+                                    timeline.row(span[1]), open_price)
                 pending_signals = still_pending
 
-            # 2. Accumulate this bar into the expanding window + update last prices
-            for conid, bar in bars_this_ts.items():
-                if conid not in accumulated:
-                    accumulated[conid] = bar
-                else:
-                    accumulated[conid] = pd.concat([accumulated[conid], bar], axis=0)
-                last_prices[conid] = float(bar['close'].iloc[-1])
+            # 2. Update last prices + per-conid bar index for this bar
+            for conid, span in bars_this_ts.items():
+                last_prices[conid] = timeline.close_at(span[1])
                 bar_index[conid] = bar_index.get(conid, -1) + 1
 
             # 2b. Check time-based exit conditions for every open position.
@@ -522,10 +600,10 @@ class Backtester:
                 if cond.get('pending_exit'):
                     continue  # synthesized SELL already queued
                 idx = bar_index.get(conid, -1)
-                bar_for_conid = bars_this_ts.get(conid)
-                if bar_for_conid is None or bar_for_conid.empty:
+                span_for_conid = bars_this_ts.get(conid)
+                if span_for_conid is None:
                     continue
-                bar_ts_here = bar_for_conid.index[-1]
+                bar_ts_here = timeline.index_at(span_for_conid[1])
                 triggered = False
                 reason = ''
                 if cond.get('max_hold_bars') is not None:
@@ -555,7 +633,7 @@ class Backtester:
                 if self.config.fill_policy == 'same_close':
                     _execute_signal(
                         synthetic, conid, timestamp, timestamp,
-                        accumulated[conid].iloc[-1],
+                        timeline.row(span_for_conid[1]),
                         last_prices.get(conid, 0.0),
                     )
                 else:
@@ -563,7 +641,7 @@ class Backtester:
 
             # 3. Run the strategy on each conid at its current bar.
             #    on_bar is the fast path (reads precomputed state by index);
-            #    its default impl falls back to on_prices(accumulated) so
+            #    its default impl falls back to on_prices(prices[:index+1]) so
             #    strategies that only implement the legacy API still work.
             for conid in list(bars_this_ts.keys()):
                 idx = bar_index.get(conid, -1)
@@ -579,7 +657,7 @@ class Backtester:
                     # Legacy lookahead-biased path: fill at this bar's close
                     _execute_signal(
                         signal, conid, timestamp, timestamp,
-                        accumulated[conid].iloc[-1],
+                        timeline.row(bars_this_ts[conid][1]),
                         last_prices.get(conid, 0.0),
                     )
                 else:
