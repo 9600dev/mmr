@@ -390,6 +390,7 @@ strategies reload            # Reload strategies from YAML + re-subscribe (immed
 strategies inspect           # AST scan: class name, mode (precompute/on_prices), tunable params with defaults
 strategies gauntlet strategies/orb.py --class OpeningRangeBreakout  # Pre-deploy gauntlet: import allowlist, lookahead, nasty-market battery, PSR (records PASS/FAIL by source hash)
 strategies gauntlet strategies/orb.py --class OpeningRangeBreakout --min-psr 0.7  # Also enforce PSR from the latest backtest of this exact hash
+strategies gauntlet strategies/orb.py --class OpeningRangeBreakout --min-dsr 0.95 # Make DSR a gate (S4/S5 are record-only by default; a PASS then carries edge_credible:false + warnings when PSR/DSR < 0.95)
 strategies intents [--strategy NAME] [--conid N] [--all]   # Executor intent journal: what blocks opens/exits per (strategy, conId) and why
 strategies resolve-intent ID --reason "..." --attest        # Operator resolution of an intent with NO broker order (refused if IB shows one)
 reservations                 # Server-side physical order reservations (capacity held by working/unconfirmed sends)

@@ -137,7 +137,11 @@ Stages: S1 import allowlist (AST — denies socket/subprocess/os/ib_async/
 importlib/eval/exec/… and dynamic-import call forms; S1 is a *static advisory
 scan, not a sandbox*), S2 lookahead (`assert_no_lookahead`), S3 nasty-market
 battery (gaps/halts/NaN/zero-volume — must not crash, must emit well-formed
-signals), S4 PSR (record-only unless `--min-psr`). `deploy`/`enable` refuse
+signals), S4 PSR (record-only unless `--min-psr`), S5 DSR (record-only unless
+`--min-dsr`). Record-only stages never change the verdict, but when PSR/DSR
+fall below their bar (the gate, else 0.95 advisory) the result carries
+`edge_credible: false` + `warnings`, and deploy/enable/`mmr strategies` repeat
+it: a PASS is "safe to run", not "has an edge". `deploy`/`enable` refuse
 without a PASS for the current `(hash, class)`; there is no override flag —
 edit the file, re-run the gauntlet.
 

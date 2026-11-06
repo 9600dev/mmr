@@ -19,6 +19,87 @@ import json
 from trader.data.duckdb_store import DuckDBConnection
 
 
+# Advisory bars for the RECORD-ONLY statistical stages (S4 PSR, S5 DSR).
+# They never change the verdict — gating is opt-in via
+# `mmr strategies gauntlet --min-psr F / --min-dsr F`, and a FAILING gated
+# stage fails the verdict (tests/invariants/test_gauntlet_verdict.py). They
+# exist so a PASS earned only on the safety stages (S1-S3) cannot be read as
+# "this strategy has an edge": a deployed strategy passed with DSR 0.093
+# deflated over 875 trials (2026-11-05), and the PASS line said nothing.
+# 0.95 is the conventional bar for both (see the --min-dsr help text).
+ADVISORY_MIN_PSR = 0.95
+ADVISORY_MIN_DSR = 0.95
+
+
+def assess_statistical_edge(checks: Dict[str, Any]) -> Dict[str, Any]:
+    """Honest read of the statistical stages of a gauntlet run.
+
+    Pure function of the ``checks`` dict a gauntlet run produced (and that
+    the store persists), so it applies retroactively to every stored record.
+    It does NOT affect the PASS/FAIL verdict.
+
+    Each stage is judged against its own gate when one was set
+    (``min_psr``/``min_dsr`` recorded in the check), else against the
+    advisory bar (:data:`ADVISORY_MIN_PSR` / :data:`ADVISORY_MIN_DSR`).
+
+    Returns ``{'edge_credible': bool | None, 'warnings': [str, ...]}``:
+
+    * ``False`` — at least one computed statistic is below its bar. A PASS
+      verdict then means "safe to run", never "has an edge".
+    * ``None`` — DSR was not computed (no backtest for this exact source
+      hash, or no trial history), so there is no evidence either way. PSR
+      alone never makes an edge credible: measured across thirteen sweeps it
+      scored >= 0.96 on every one, including heavily overfit families.
+    * ``True`` — DSR (and PSR, when computed) meet their bars.
+    """
+    warnings: list = []
+    below = False
+    stages = (
+        ('s4_psr', 'psr', 'PSR', 'min_psr', ADVISORY_MIN_PSR),
+        ('s5_dsr', 'dsr', 'DSR', 'min_dsr', ADVISORY_MIN_DSR),
+    )
+    values: Dict[str, Optional[float]] = {}
+    for stage, key, label, gate_key, advisory in stages:
+        check = (checks or {}).get(stage) or {}
+        raw = check.get(key)
+        try:
+            value = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            value = None
+        if value is not None and value != value:          # NaN -> unknown
+            value = None
+        values[key] = value
+        if value is None:
+            continue
+        gate = check.get(gate_key)
+        bar = float(gate) if gate is not None else advisory
+        if value < bar:
+            below = True
+            mode = (f'gated (--{gate_key.replace("_", "-")} {bar:g})'
+                    if gate is not None else
+                    f'record-only, advisory bar {bar:g}')
+            trials = ''
+            if stage == 's5_dsr' and check.get('n_trials') is not None:
+                trials = f' deflated over {check["n_trials"]} trials'
+            warnings.append(
+                f'{stage}: {label} {value:.4f}{trials} is below {bar:g} ({mode}) '
+                f'- no statistically credible edge')
+    if below:
+        warnings.append(
+            'PASS reflects only the safety stages (s1 imports, s2 lookahead, '
+            's3 battery); gate the statistics with --min-dsr '
+            f'{ADVISORY_MIN_DSR:g} to make them block')
+        return {'edge_credible': False, 'warnings': warnings}
+    if values['dsr'] is None:
+        dsr_check = (checks or {}).get('s5_dsr') or {}
+        why = dsr_check.get('note') or 'DSR not computed'
+        warnings.append(
+            f'statistical edge not evaluated ({why}) - a PASS is not '
+            f'evidence of an edge; backtest this exact source and re-run')
+        return {'edge_credible': None, 'warnings': warnings}
+    return {'edge_credible': True, 'warnings': warnings}
+
+
 @dataclass
 class GauntletRecord:
     strategy_name: str
@@ -154,6 +235,22 @@ class GauntletStore:
             params, fetch='one',
         )
         return bool(row and row[0])
+
+    def latest_pass_for_hash(self, code_hash: str,
+                             class_name: str) -> Optional[GauntletRecord]:
+        """Most recent PASS for this exact (source hash, class) — the record
+        that actually authorizes deploy/enable/arm, so callers can surface
+        its statistical-edge assessment (:func:`assess_statistical_edge`)."""
+        if not code_hash:
+            return None
+        rows = self.db.execute(
+            f"SELECT {self._SELECT_FIELDS} FROM gauntlet_runs "
+            f"WHERE code_hash = ? AND class_name = ? AND verdict = 'PASS' "
+            f"ORDER BY created DESC, id DESC LIMIT 1",
+            [code_hash, class_name], fetch='all',
+        ) or []
+        records = self._rows_to_records(rows)
+        return records[0] if records else None
 
     def latest_pass_for_class(self, class_name: str) -> Optional[GauntletRecord]:
         """Most recent PASS for a class name regardless of source hash —
