@@ -172,6 +172,26 @@ class EventStore:
         )
         return self._rows_to_events(rows or [])
 
+    def query_by_order_ids(self, order_ids: List[int],
+                           since: Optional[dt.datetime] = None) -> List[TradingEvent]:
+        """Order lifecycle events for ``order_ids`` (one query), oldest first.
+
+        ``since`` bounds the read so an order id IB reuses after a paper-account
+        reset can't attach a stranger's fills to an old proposal.
+        """
+        ids = sorted({int(o) for o in order_ids if o})
+        if not ids:
+            return []
+        marks = ','.join('?' for _ in ids)
+        sql = (f"SELECT * FROM trading_events WHERE order_id IN ({marks}) "
+               "AND event_type IN ('ORDER_SUBMITTED','ORDER_FILLED','ORDER_CANCELLED','ORDER_REJECTED')")
+        params: list = list(ids)
+        if since is not None:
+            sql += " AND timestamp >= ?"
+            params.append(since)
+        rows = self.db.execute(sql + " ORDER BY timestamp, id", params, fetch='all')
+        return self._rows_to_events(rows or [])
+
     def query_since(self, since: dt.datetime, event_type: Optional[EventType] = None) -> List[TradingEvent]:
         if event_type:
             rows = self.db.execute(

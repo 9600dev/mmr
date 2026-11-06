@@ -3005,6 +3005,15 @@ def _handle_propose(mmr: MMR, args: argparse.Namespace):
         console.print(f'[dim]  Buying power: ${buying_power:,.2f}[/dim]')
 
 
+def _outcome_markup(outcome: Optional[str]) -> str:
+    """Colour an EXECUTED proposal's derived fill outcome."""
+    colours = {'filled': 'green', 'partially_filled': 'yellow', 'working': 'blue',
+               'cancelled_unfilled': 'red', 'rejected': 'red', 'unknown': 'dim'}
+    o = outcome or 'unknown'
+    c = colours.get(o, 'white')
+    return f'[{c}]{o}[/{c}]'
+
+
 def _handle_proposals(mmr: MMR, args: argparse.Namespace):
     action = getattr(args, 'proposals_action', None)
 
@@ -3060,6 +3069,12 @@ def _handle_proposals(mmr: MMR, args: argparse.Namespace):
                 order_ids = detail.get('order_ids')
                 if order_ids:
                     console.print(f'  order_ids:        {order_ids}')
+                fill = detail.get('fill')
+                if fill:
+                    _px = fill.get('avg_fill_price')
+                    _px_s = f' @ {_px:.4g}' if _px else ''
+                    console.print(f'  fill outcome:     {_outcome_markup(fill.get("outcome"))}'
+                                  f'  (filled {fill.get("filled_quantity") or 0:g}{_px_s})')
                 rejection_reason = detail.get('rejection_reason')
                 if rejection_reason:
                     console.print(f'  rejection_reason: {rejection_reason}')
@@ -3117,6 +3132,7 @@ def _handle_proposals(mmr: MMR, args: argparse.Namespace):
         title += f' ({status_filter})'
     console.print(f'[bold]{title}[/bold]\n')
 
+    outcomes = mmr._proposal_fill_outcomes(props)
     for p in props:
         # Size
         if p.quantity is not None and p.quantity == p.quantity:
@@ -3143,6 +3159,8 @@ def _handle_proposals(mmr: MMR, args: argparse.Namespace):
             console.print(f'  +{exit_desc}', end='')
         if status_filter is None:
             console.print(f'  [{sc}]{p.status}[/{sc}]', end='')
+        if p.status == 'EXECUTED':
+            console.print(f'  {_outcome_markup(outcomes.get(p.id, {}).get("outcome", "unknown"))}', end='')
         console.print()
 
         # Detail lines. Reasoning is proposer-supplied — label it so an

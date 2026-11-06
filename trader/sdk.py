@@ -1663,6 +1663,40 @@ class MMR:
 
         return proposal_id, leverage_info, snapshot_info
 
+    def _proposal_fill_outcomes(self, props: list) -> dict:
+        """``{proposal_id: fill_outcome dict}`` for EXECUTED proposals.
+
+        One event-store read for the whole batch. EXECUTED only means the
+        orders were submitted; this says whether they actually filled. An
+        unreadable event store yields no entries (callers show 'unknown')
+        rather than failing the listing.
+        """
+        executed = [p for p in props if p.status == 'EXECUTED' and p.order_ids]
+        if not executed:
+            return {}
+        try:
+            from trader.data.event_store import EventStore
+            from trader.trading.proposal_outcome import fill_outcome
+            cfg = self._container.config()
+            store = EventStore(cfg.get('duckdb_path', ''))
+            created = [p.created_at for p in executed if p.created_at]
+            # A day of slack absorbs naive-timestamp zone differences between
+            # the two tables; still excludes order-id reuse from older resets.
+            since = (min(created) - dt.timedelta(days=1)) if created else None
+            events = store.query_by_order_ids(
+                [o for p in executed for o in p.order_ids], since=since)
+        except Exception as ex:
+            logger.warning('proposal fill outcome unavailable: %s', ex)
+            return {}
+        out = {}
+        for p in executed:
+            floor = (p.created_at - dt.timedelta(days=1)) if p.created_at else None
+            mine = [e for e in events if e.order_id in set(p.order_ids)
+                    and (floor is None or e.timestamp is None or e.timestamp >= floor)]
+            qty = p.quantity if (p.quantity is not None and p.quantity == p.quantity) else None
+            out[p.id] = fill_outcome(mine, p.order_ids, qty)
+        return out
+
     def proposals(self, status: Optional[str] = None, limit: int = 50) -> pd.DataFrame:
         """List proposals. No trader_service needed.
 
@@ -1677,6 +1711,7 @@ class MMR:
         if not props:
             return pd.DataFrame()
 
+        outcomes = self._proposal_fill_outcomes(props)
         rows = []
         for p in props:
             # Build concise size column: "100 sh" or "$5,000"
@@ -1710,6 +1745,13 @@ class MMR:
             }
             # Always present so the JSON schema doesn't depend on the filter.
             row['status'] = p.status
+            # EXECUTED = submitted. `outcome` says whether it actually filled
+            # (filled / partially_filled / cancelled_unfilled / rejected /
+            # working / unknown); None for proposals that never executed.
+            if p.status == 'EXECUTED':
+                row['outcome'] = outcomes.get(p.id, {}).get('outcome', 'unknown')
+            else:
+                row['outcome'] = None
             # Include leverage warning if available
             leverage = p.metadata.get('leverage_estimate')
             if leverage and leverage.get('uses_margin'):
@@ -1752,6 +1794,10 @@ class MMR:
             'rejection_reason': p.rejection_reason,
             'group': p.group,
         }
+        if p.status == 'EXECUTED':
+            detail['fill'] = self._proposal_fill_outcomes([p]).get(
+                p.id, {'outcome': 'unknown', 'filled_quantity': None,
+                       'avg_fill_price': None, 'orders': {}})
 
         # Include snapshot from metadata if present
         snapshot = p.metadata.get('snapshot')
