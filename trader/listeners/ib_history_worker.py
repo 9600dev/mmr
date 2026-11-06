@@ -6,6 +6,7 @@ from trader.common.helpers import dateify, timezoneify, utcify_str
 from trader.common.logging_helper import setup_logging
 from trader.data.data_access import SecurityDefinition
 from trader.data.universe import Universe
+from trader.listeners import ib_informational
 from trader.objects import BarSize, WhatToShow
 from typing import List, Optional, Union
 
@@ -22,8 +23,9 @@ import pytz
 logging = setup_logging(module_name='ib_history')
 
 
-# Error codes that indicate informational messages, not real errors
-IB_INFO_CODES = {2104, 2106, 2107, 2158}
+# Error codes that indicate informational messages, not real errors. The set
+# is owned by ib_informational (the one IB-severity table); aliased for callers.
+IB_INFO_CODES = ib_informational.FARM_OK_CODES
 
 # Error codes that indicate connectivity/session issues (retryable after reconnect)
 IB_CONNECTIVITY_CODES = {1100, 1101, 1102, 504}
@@ -64,6 +66,9 @@ class IBHistoryWorker():
         self.ib_server_port = ib_server_port
         self.ib_client_id = ib_client_id
         self.ib_client: IB = IB()
+        # __handle_error logs every errorEvent message itself (classified), so
+        # ib_async's raw "Error <code>, reqId ..." line would be a duplicate.
+        ib_informational.quiet_handled_errors(self.ib_client)
 
         self.error_code: int = 0
         self.error_string: str = ''
@@ -93,10 +98,9 @@ class IBHistoryWorker():
         if errorCode in IB_CONNECTIVITY_CODES:
             self.connected = False
 
-        logging.error('ib error reqId: {} errorCode {} errorString {} contract {}'.format(reqId,
-                                                                                          errorCode,
-                                                                                          errorString,
-                                                                                          contract))
+        logging.log(ib_informational.ib_log_level(errorCode, errorString),
+                    'ib error reqId: %s errorCode %s errorString %s contract %s',
+                    reqId, errorCode, errorString, contract)
 
     @backoff.on_exception(backoff.expo, exception=ValueError, max_tries=3)
     def connect(self):
