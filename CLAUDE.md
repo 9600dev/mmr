@@ -438,6 +438,8 @@ history list --bar_size "1 day"  # Filter by bar size
 history massive --symbol AAPL --bar_size "1 day" --prev_days 30
 history massive --universe portfolio --bar_size "1 day" --prev_days 30
 history ib --symbol AAPL --universe portfolio --bar_size "1 min" --prev_days 5
+# --json: {success, source, symbols, enqueued, completed, failed, rows_written, errors, tasks[]}.
+# One task per contiguous MISSING date range per symbol, so one symbol can enqueue several.
 stream AAPL MSFT AMD         # Stream from Massive.com
 stream AAPL --trades         # Stream trades instead of aggs
 stream EURUSD GBPUSD --feed forex           # Forex 1-min aggs

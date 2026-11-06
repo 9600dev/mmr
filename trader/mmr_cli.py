@@ -11455,8 +11455,12 @@ def _handle_history(mmr: MMR, args: argparse.Namespace):
     symbols = [args.symbol] if args.symbol else None
     universe = args.universe
 
+    def _progress(text: str) -> None:
+        if not _json_mode:
+            console.print(f'[dim]{text}[/dim]')
+
     if action == 'massive':
-        console.print('[dim]Pulling Massive history via data_service...[/dim]')
+        _progress('Pulling Massive history via data_service...')
         result = mmr.pull_massive(
             symbols=symbols,
             universe=universe,
@@ -11464,7 +11468,7 @@ def _handle_history(mmr: MMR, args: argparse.Namespace):
             prev_days=args.prev_days,
         )
     elif action in ('twelvedata', 'td'):
-        console.print('[dim]Pulling TwelveData history via data_service...[/dim]')
+        _progress('Pulling TwelveData history via data_service...')
         result = mmr.pull_twelvedata(
             symbols=symbols,
             universe=universe,
@@ -11472,7 +11476,7 @@ def _handle_history(mmr: MMR, args: argparse.Namespace):
             prev_days=args.prev_days,
         )
     elif action == 'ib':
-        console.print('[dim]Pulling IB history via data_service...[/dim]')
+        _progress('Pulling IB history via data_service...')
         result = mmr.pull_ib(
             symbols=symbols,
             universe=universe,
@@ -11484,15 +11488,56 @@ def _handle_history(mmr: MMR, args: argparse.Namespace):
         console.print(f'[yellow]Unknown history action: {action}[/yellow]')
         return
 
+    summary = _history_pull_summary(action, args, result)
+    if _json_mode:
+        print(_json_dumps(summary))
+        return
+
     if result.get('errors'):
         for err in result['errors']:
             console.print(f'[red]  {err}[/red]')
+    for task in summary['tasks']:
+        if task.get('start') is not None:
+            state = 'ok' if task.get('ok') else 'FAILED'
+            console.print(f"[dim]  {task.get('symbol')} {task.get('start')} → {task.get('end')}: "
+                          f"{task.get('rows', 0)} rows written ({state})[/dim]")
 
     console.print(
         f'[green]Done: {result["enqueued"]} enqueued, '
         f'{result["completed"]} completed, '
         f'{result["failed"]} failed[/green]'
     )
+
+
+def _history_pull_summary(action: str, args, result: dict) -> Dict[str, Any]:
+    """The machine-readable outcome of `history massive|twelvedata|ib`.
+
+    ``enqueued`` counts download TASKS, one per contiguous missing date range
+    per symbol — so one symbol can enqueue several; ``tasks`` lists each with
+    its range so the count explains itself. success is false when any task
+    failed or nothing could be attempted for a reason (e.g. no securities
+    resolved, missing API key).
+    """
+    source = {'td': 'twelvedata'}.get(action, action)
+    errors = list(result.get('errors') or [])
+    failed = int(result.get('failed') or 0)
+    return {
+        'success': failed == 0 and not errors,
+        'source': source,
+        'bar_size': getattr(args, 'bar_size', None),
+        'prev_days': getattr(args, 'prev_days', None),
+        'requested': {'symbol': getattr(args, 'symbol', None),
+                      'universe': getattr(args, 'universe', None)},
+        'symbols': list(result.get('symbols') or []),
+        'enqueued': int(result.get('enqueued') or 0),
+        'completed': int(result.get('completed') or 0),
+        'failed': failed,
+        'rows_written': sum(int(t.get('rows') or 0) for t in (result.get('tasks') or [])
+                            if isinstance(t, dict)),
+        'errors': errors,
+        'tasks': list(result.get('tasks') or []),
+        **({'message': '; '.join(errors)} if errors else {}),
+    }
 
 
 def _fmt_financial_value(val) -> str:

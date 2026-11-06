@@ -5,7 +5,7 @@ Can run in two modes:
 2. Persistent: start_server() runs a ZMQ RPC server on port 42003
 """
 
-from trader.common.helpers import dateify, pdt, timezoneify
+from trader.common.helpers import dateify, pdt
 from trader.common.logging_helper import setup_logging
 from trader.container import Container, default_config_path
 from trader.data.data_access import SecurityDefinition, TickData, TickStorage
@@ -37,6 +37,13 @@ def _try_get_exchange_calendar(security: SecurityDefinition):
             return exchange_calendars.get_calendar(security.exchange)
         except Exception:
             return None
+
+
+def _task_label(security: SecurityDefinition, date_range: DateRange) -> dict:
+    def _iso(value):
+        return value.isoformat() if hasattr(value, 'isoformat') else str(value)
+    return {'symbol': security.symbol, 'conId': security.conId,
+            'start': _iso(date_range.start), 'end': _iso(date_range.end)}
 
 
 class DataService:
@@ -125,16 +132,16 @@ class DataService:
                     timezone=security.timeZoneId if security.timeZoneId else 'US/Eastern',
                 )
 
-                if len(df) > 0:
-                    tick_data.write(security, df)
-                    logging.debug('wrote {} rows for {}'.format(len(df), security.symbol))
+                written = tick_data.write(security, df) if len(df) > 0 else 0
+                logging.debug('wrote {} of {} rows for {}'.format(written, len(df), security.symbol))
 
                 self._completed_count += 1
-                return {'symbol': security.symbol, 'rows': len(df), 'ok': True}
+                return {**_task_label(security, date_range), 'fetched': len(df),
+                        'rows': written, 'ok': True}
             except Exception as ex:
                 self._failed_count += 1
                 logging.error('massive download failed for {}: {}'.format(security.symbol, ex))
-                return {'symbol': security.symbol, 'error': str(ex), 'ok': False}
+                return {**_task_label(security, date_range), 'error': str(ex), 'ok': False}
             finally:
                 self._running_count -= 1
 
@@ -163,16 +170,16 @@ class DataService:
                     timezone=security.timeZoneId if security.timeZoneId else 'US/Eastern',
                 )
 
-                if len(df) > 0:
-                    tick_data.write(security, df)
-                    logging.debug('wrote {} rows for {}'.format(len(df), security.symbol))
+                written = tick_data.write(security, df) if len(df) > 0 else 0
+                logging.debug('wrote {} of {} rows for {}'.format(written, len(df), security.symbol))
 
                 self._completed_count += 1
-                return {'symbol': security.symbol, 'rows': len(df), 'ok': True}
+                return {**_task_label(security, date_range), 'fetched': len(df),
+                        'rows': written, 'ok': True}
             except Exception as ex:
                 self._failed_count += 1
                 logging.error('twelvedata download failed for {}: {}'.format(security.symbol, ex))
-                return {'symbol': security.symbol, 'error': str(ex), 'ok': False}
+                return {**_task_label(security, date_range), 'error': str(ex), 'ok': False}
             finally:
                 self._running_count -= 1
 
@@ -223,18 +230,106 @@ class DataService:
 
                 df = await asyncio.to_thread(_ib_work)
 
-                if len(df) > 0:
-                    tick_data.write(security, df)
-                    logging.debug('wrote {} rows for {}'.format(len(df), security.symbol))
+                written = tick_data.write(security, df) if len(df) > 0 else 0
+                logging.debug('wrote {} of {} rows for {}'.format(written, len(df), security.symbol))
 
                 self._completed_count += 1
-                return {'symbol': security.symbol, 'rows': len(df), 'ok': True}
+                return {**_task_label(security, date_range), 'fetched': len(df),
+                        'rows': written, 'ok': True}
             except Exception as ex:
                 self._failed_count += 1
                 logging.error('ib download failed for {}: {}'.format(security.symbol, ex))
-                return {'symbol': security.symbol, 'error': str(ex), 'ok': False}
+                return {**_task_label(security, date_range), 'error': str(ex), 'ok': False}
             finally:
                 self._running_count -= 1
+
+    def _plan_downloads(
+        self,
+        securities: List[SecurityDefinition],
+        tick_data: TickData,
+        prev_days: int,
+        now: Optional[dt.datetime] = None,
+    ) -> List[tuple]:
+        """(security, DateRange) for every missing range in each security's window.
+
+        One task per CONTIGUOUS missing range, so one symbol can legitimately
+        enqueue several: `history ib --symbol AAPL` reporting "2 enqueued" is
+        two disjoint gaps in AAPL's stored window, not a duplicate job.
+
+        The window is [today - prev_days - 1, yesterday] dated in the
+        SECURITY's timezone. It used to be computed from the HOST's naive
+        local clock and then converted, so on a host west of the venue (a
+        Pacific host and a US listing) "yesterday 23:59:59" local landed on
+        TODAY in New York, missing() asked for today's session, and the
+        still-forming daily bar was downloaded and stored as complete.
+        """
+        current = now or dt.datetime.now(dt.timezone.utc)
+        if current.tzinfo is None:
+            raise ValueError('now must be timezone-aware')
+        plan: List[tuple] = []
+        for security in securities:
+            tz = security.timeZoneId or 'US/Eastern'
+            tz_start = dateify(current - dt.timedelta(days=prev_days + 1), timezone=tz, make_sod=True)
+            tz_end = dateify(current - dt.timedelta(days=1), timezone=tz, make_eod=True)
+
+            exchange_calendar = _try_get_exchange_calendar(security)
+            try:
+                if exchange_calendar:
+                    date_ranges = tick_data.missing(
+                        security,
+                        exchange_calendar,
+                        date_range=DateRange(start=tz_start, end=tz_end),
+                    )
+                else:
+                    date_ranges = [DateRange(start=tz_start, end=tz_end)]
+            except Exception as ex:
+                logging.warning('missing() failed for {}: {}, downloading full range'.format(
+                    security.symbol, ex))
+                date_ranges = [DateRange(start=tz_start, end=tz_end)]
+            plan.extend((security, dr) for dr in date_ranges)
+        return plan
+
+    @staticmethod
+    def _summarize(securities: List[SecurityDefinition], results: list) -> dict:
+        errors = []
+        completed = 0
+        failed = 0
+        tasks = []
+        for r in results:
+            if isinstance(r, BaseException):
+                failed += 1
+                errors.append(str(r))
+                tasks.append({'ok': False, 'error': str(r)})
+                continue
+            tasks.append(r)
+            if isinstance(r, dict) and r.get('ok'):
+                completed += 1
+            else:
+                failed += 1
+                if isinstance(r, dict):
+                    errors.append(r.get('error', 'unknown error'))
+        return {'enqueued': len(results), 'completed': completed, 'failed': failed,
+                'errors': errors, 'symbols': [s.symbol for s in securities], 'tasks': tasks}
+
+    async def _pull(self, source: str, symbols, universe, bar_size: str, prev_days: int,
+                    max_concurrent: int, make_task) -> dict:
+        securities = self._resolve_symbols(symbols, universe)
+        if not securities:
+            return {'enqueued': 0, 'completed': 0, 'failed': 0,
+                    'errors': ['no securities resolved'], 'symbols': [], 'tasks': []}
+
+        bs = BarSize.parse_str(bar_size)
+        tick_data = TickStorage(self.history_duckdb_path).get_tickdata(bar_size=bs)
+        plan = self._plan_downloads(securities, tick_data, prev_days)
+        if not plan:
+            return self._summarize(securities, [])
+
+        sem = asyncio.Semaphore(max_concurrent)
+        tasks = [make_task(i, sem, security, dr, bs, tick_data)
+                 for i, (security, dr) in enumerate(plan)]
+        logging.info('enqueued {} {} download tasks'.format(len(tasks), source))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return self._summarize(securities, list(results))
 
     async def pull_massive(
         self,
@@ -246,71 +341,15 @@ class DataService:
     ) -> dict:
         """Find missing date ranges, download from Massive concurrently, write to DuckDB.
 
-        Returns {'enqueued': N, 'completed': N, 'failed': N, 'errors': [...]}
+        Returns {'enqueued', 'completed', 'failed', 'errors', 'symbols', 'tasks'}
+        where each task names its symbol and date range.
         """
         if not self.massive_api_key:
             return {'enqueued': 0, 'completed': 0, 'failed': 0,
-                    'errors': ['massive_api_key not configured']}
-
-        securities = self._resolve_symbols(symbols, universe)
-        if not securities:
-            return {'enqueued': 0, 'completed': 0, 'failed': 0,
-                    'errors': ['no securities resolved']}
-
-        bs = BarSize.parse_str(bar_size)
-        tick_data = TickStorage(self.history_duckdb_path).get_tickdata(bar_size=bs)
-
-        start_date = dateify(dt.datetime.now() - dt.timedelta(days=prev_days + 1), make_sod=True)
-        end_date = dateify(dt.datetime.now() - dt.timedelta(days=1), make_eod=True)
-
-        sem = asyncio.Semaphore(max_concurrent)
-        tasks = []
-
-        for security in securities:
-            tz_start = timezoneify(start_date, timezone=security.timeZoneId)
-            tz_end = timezoneify(end_date, timezone=security.timeZoneId)
-
-            exchange_calendar = _try_get_exchange_calendar(security)
-
-            try:
-                if exchange_calendar:
-                    date_ranges = tick_data.missing(
-                        security,
-                        exchange_calendar,
-                        date_range=DateRange(start=tz_start, end=tz_end),
-                    )
-                else:
-                    date_ranges = [DateRange(start=tz_start, end=tz_end)]
-            except Exception as ex:
-                logging.warning('missing() failed for {}: {}, downloading full range'.format(
-                    security.symbol, ex))
-                date_ranges = [DateRange(start=tz_start, end=tz_end)]
-
-            for dr in date_ranges:
-                tasks.append(self._download_massive_one(sem, security, dr, bs, tick_data))
-
-        enqueued = len(tasks)
-        if enqueued == 0:
-            return {'enqueued': 0, 'completed': 0, 'failed': 0, 'errors': []}
-
-        logging.info('enqueued {} massive download tasks'.format(enqueued))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        errors = []
-        completed = 0
-        failed = 0
-        for r in results:
-            if isinstance(r, Exception):
-                failed += 1
-                errors.append(str(r))
-            elif isinstance(r, dict) and r.get('ok'):
-                completed += 1
-            else:
-                failed += 1
-                if isinstance(r, dict):
-                    errors.append(r.get('error', 'unknown error'))
-
-        return {'enqueued': enqueued, 'completed': completed, 'failed': failed, 'errors': errors}
+                    'errors': ['massive_api_key not configured'], 'symbols': [], 'tasks': []}
+        return await self._pull(
+            'massive', symbols, universe, bar_size, prev_days, max_concurrent,
+            lambda i, sem, sec, dr, bs, td: self._download_massive_one(sem, sec, dr, bs, td))
 
     async def pull_twelvedata(
         self,
@@ -322,71 +361,14 @@ class DataService:
     ) -> dict:
         """Find missing date ranges, download from TwelveData concurrently, write to DuckDB.
 
-        Returns {'enqueued': N, 'completed': N, 'failed': N, 'errors': [...]}
+        Returns {'enqueued', 'completed', 'failed', 'errors', 'symbols', 'tasks'}.
         """
         if not self.twelvedata_api_key:
             return {'enqueued': 0, 'completed': 0, 'failed': 0,
-                    'errors': ['twelvedata_api_key not configured']}
-
-        securities = self._resolve_symbols(symbols, universe)
-        if not securities:
-            return {'enqueued': 0, 'completed': 0, 'failed': 0,
-                    'errors': ['no securities resolved']}
-
-        bs = BarSize.parse_str(bar_size)
-        tick_data = TickStorage(self.history_duckdb_path).get_tickdata(bar_size=bs)
-
-        start_date = dateify(dt.datetime.now() - dt.timedelta(days=prev_days + 1), make_sod=True)
-        end_date = dateify(dt.datetime.now() - dt.timedelta(days=1), make_eod=True)
-
-        sem = asyncio.Semaphore(max_concurrent)
-        tasks = []
-
-        for security in securities:
-            tz_start = timezoneify(start_date, timezone=security.timeZoneId)
-            tz_end = timezoneify(end_date, timezone=security.timeZoneId)
-
-            exchange_calendar = _try_get_exchange_calendar(security)
-
-            try:
-                if exchange_calendar:
-                    date_ranges = tick_data.missing(
-                        security,
-                        exchange_calendar,
-                        date_range=DateRange(start=tz_start, end=tz_end),
-                    )
-                else:
-                    date_ranges = [DateRange(start=tz_start, end=tz_end)]
-            except Exception as ex:
-                logging.warning('missing() failed for {}: {}, downloading full range'.format(
-                    security.symbol, ex))
-                date_ranges = [DateRange(start=tz_start, end=tz_end)]
-
-            for dr in date_ranges:
-                tasks.append(self._download_twelvedata_one(sem, security, dr, bs, tick_data))
-
-        enqueued = len(tasks)
-        if enqueued == 0:
-            return {'enqueued': 0, 'completed': 0, 'failed': 0, 'errors': []}
-
-        logging.info('enqueued {} twelvedata download tasks'.format(enqueued))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        errors = []
-        completed = 0
-        failed = 0
-        for r in results:
-            if isinstance(r, Exception):
-                failed += 1
-                errors.append(str(r))
-            elif isinstance(r, dict) and r.get('ok'):
-                completed += 1
-            else:
-                failed += 1
-                if isinstance(r, dict):
-                    errors.append(r.get('error', 'unknown error'))
-
-        return {'enqueued': enqueued, 'completed': completed, 'failed': failed, 'errors': errors}
+                    'errors': ['twelvedata_api_key not configured'], 'symbols': [], 'tasks': []}
+        return await self._pull(
+            'twelvedata', symbols, universe, bar_size, prev_days, max_concurrent,
+            lambda i, sem, sec, dr, bs, td: self._download_twelvedata_one(sem, sec, dr, bs, td))
 
     async def pull_ib(
         self,
@@ -399,71 +381,13 @@ class DataService:
     ) -> dict:
         """Find missing date ranges, download from IB concurrently, write to DuckDB.
 
-        Returns {'enqueued': N, 'completed': N, 'failed': N, 'errors': [...]}
+        Returns {'enqueued', 'completed', 'failed', 'errors', 'symbols', 'tasks'}.
+        Each IB task gets its own client id (ib_client_id + task index).
         """
-        securities = self._resolve_symbols(symbols, universe)
-        if not securities:
-            return {'enqueued': 0, 'completed': 0, 'failed': 0,
-                    'errors': ['no securities resolved']}
-
-        bs = BarSize.parse_str(bar_size)
-        tick_data = TickStorage(self.history_duckdb_path).get_tickdata(bar_size=bs)
-
-        start_date = dateify(dt.datetime.now() - dt.timedelta(days=prev_days + 1), make_sod=True)
-        end_date = dateify(dt.datetime.now() - dt.timedelta(days=1), make_eod=True)
-
-        sem = asyncio.Semaphore(max_concurrent)
-        tasks = []
-        task_index = 0
-
-        for security in securities:
-            tz_start = timezoneify(start_date, timezone=security.timeZoneId)
-            tz_end = timezoneify(end_date, timezone=security.timeZoneId)
-
-            exchange_calendar = _try_get_exchange_calendar(security)
-
-            try:
-                if exchange_calendar:
-                    date_ranges = tick_data.missing(
-                        security,
-                        exchange_calendar,
-                        date_range=DateRange(start=tz_start, end=tz_end),
-                    )
-                else:
-                    date_ranges = [DateRange(start=tz_start, end=tz_end)]
-            except Exception as ex:
-                logging.warning('missing() failed for {}: {}, downloading full range'.format(
-                    security.symbol, ex))
-                date_ranges = [DateRange(start=tz_start, end=tz_end)]
-
-            for dr in date_ranges:
-                # Each IB task needs a unique client_id
-                client_id = ib_client_id + task_index
-                tasks.append(self._download_ib_one(sem, security, dr, bs, tick_data, client_id))
-                task_index += 1
-
-        enqueued = len(tasks)
-        if enqueued == 0:
-            return {'enqueued': 0, 'completed': 0, 'failed': 0, 'errors': []}
-
-        logging.info('enqueued {} ib download tasks'.format(enqueued))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        errors = []
-        completed = 0
-        failed = 0
-        for r in results:
-            if isinstance(r, Exception):
-                failed += 1
-                errors.append(str(r))
-            elif isinstance(r, dict) and r.get('ok'):
-                completed += 1
-            else:
-                failed += 1
-                if isinstance(r, dict):
-                    errors.append(r.get('error', 'unknown error'))
-
-        return {'enqueued': enqueued, 'completed': completed, 'failed': failed, 'errors': errors}
+        return await self._pull(
+            'ib', symbols, universe, bar_size, prev_days, max_concurrent,
+            lambda i, sem, sec, dr, bs, td: self._download_ib_one(
+                sem, sec, dr, bs, td, ib_client_id + i))
 
     async def status(self) -> dict:
         """Return current state: running jobs, completed count, etc."""
