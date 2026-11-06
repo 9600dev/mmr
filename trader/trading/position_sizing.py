@@ -297,6 +297,46 @@ class SizingResult:
     capped_by: str = ''                   # which limit capped it, if any
 
 
+def discount_own_quotes(
+    bid: float, ask: float, last: float,
+    own_limits: list,
+    tolerance: float = 0.005,
+) -> tuple:
+    """Drop a top-of-book side that is just our own resting limit order.
+
+    On IB paper (and thin books) our own working BUY LMT can BE the best bid:
+    a resting BUY 10 on F made the snapshot report bid=10 against an NBBO of
+    12.39, and sizing then applied a 19% spread penalty to a liquid name.
+
+    ``own_limits`` is ``[(action, limit_price), ...]`` for our working orders
+    on this contract. A side is discarded (set to 0 = unknown, which disables
+    the spread penalty rather than inventing a spread) when it equals one of
+    our limits and sits more than ``tolerance`` away from ``last``.
+
+    Returns ``(bid, ask, notes)``.
+    """
+    notes: list = []
+
+    def _matches(px: float, side: str) -> bool:
+        for action, lmt in own_limits or []:
+            try:
+                lmt_f = float(lmt)
+            except (TypeError, ValueError):
+                continue
+            if str(action).upper() == side and lmt_f > 0 and abs(lmt_f - px) <= 1e-9 + 1e-6 * px:
+                return True
+        return False
+
+    away = (lambda px: last > 0 and px > 0 and abs(px - last) / last > tolerance)
+    if bid > 0 and _matches(bid, 'BUY') and away(bid):
+        notes.append(f'bid {bid:g} is our own resting BUY limit — ignored for spread')
+        bid = 0.0
+    if ask > 0 and _matches(ask, 'SELL') and away(ask):
+        notes.append(f'ask {ask:g} is our own resting SELL limit — ignored for spread')
+        ask = 0.0
+    return bid, ask, notes
+
+
 class PositionSizer:
     """Stateless sizing algorithm. Takes config + state -> SizingResult."""
 

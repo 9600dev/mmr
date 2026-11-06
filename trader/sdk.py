@@ -663,6 +663,22 @@ class MMR:
     # Order Book
     # ------------------------------------------------------------------
 
+    def _own_working_limits(self, symbol: str) -> list:
+        """``[(action, lmtPrice), ...]`` for our working LMT orders on ``symbol``."""
+        trades_raw = self._rpc.rpc(return_type=dict[int, list[Trade]]).get_trades() or {}
+        _terminal = {'Cancelled', 'Filled', 'Inactive', 'ApiCancelled'}
+        out = []
+        for tl in trades_raw.values():
+            if not tl:
+                continue
+            t = tl[0]
+            if t.orderStatus.status in _terminal or getattr(t.contract, 'symbol', '') != symbol:
+                continue
+            lmt = getattr(t.order, 'lmtPrice', 0) or 0
+            if lmt and lmt < 1e300:            # IB uses DBL_MAX for "unset"
+                out.append((t.order.action, float(lmt)))
+        return out
+
     def orders(self) -> pd.DataFrame:
         """Open orders with full detail (symbol, name, prices, account %)."""
         trades_raw: dict[int, list[Trade]] = self._rpc.rpc(
@@ -1460,6 +1476,16 @@ class MMR:
                         if isinstance(_last, float) and math.isnan(_last): _last = 0
                         if isinstance(_bid_sz, float) and math.isnan(_bid_sz): _bid_sz = 0
                         if isinstance(_ask_sz, float) and math.isnan(_ask_sz): _ask_sz = 0
+                        _own_quote_notes: list = []
+                        try:
+                            from trader.trading.position_sizing import discount_own_quotes
+                            _bid, _ask, _own_quote_notes = discount_own_quotes(
+                                float(_bid), float(_ask), float(_last),
+                                self._own_working_limits(symbol))
+                            for _n in _own_quote_notes:
+                                logger.info('sizing %s: %s', symbol, _n)
+                        except Exception as _ex:
+                            logger.debug('own-quote check skipped for %s: %s', symbol, _ex)
                         liq = LiquidityInfo(
                             bid=_bid, ask=_ask, last=_last,
                             bid_size=_bid_sz, ask_size=_ask_sz,
