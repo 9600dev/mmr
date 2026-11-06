@@ -55,6 +55,27 @@ class IBNoDataError(Exception):
 
 
 
+def missing_session_days(index, start: dt.datetime, end: dt.datetime, tz_info: str) -> pd.DatetimeIndex:
+    """Calendar days in [start, end] (exchange tz) with NO bar at all, as midnight stamps.
+
+    These get an all-NULL marker row so the gap finder doesn't re-request a
+    weekend / no-trade day forever. The old code built the candidate range
+    with ``pd.date_range(start, end)``, which steps a day at a time at
+    ``start``'s TIME OF DAY: right for daily bars (midnight), wrong for
+    intraday — a 1-min window starting 04:00 ET produced a 04:00 candidate
+    every day, and any day without a bar at exactly 04:00:00 got a NULL bar
+    injected beside its real bars.
+    """
+    def _day(ts):
+        t = pd.Timestamp(ts)
+        t = t.tz_localize(tz_info) if t.tzinfo is None else t.tz_convert(tz_info)
+        return t.normalize()
+
+    present = {_day(ts) for ts in index} if len(index) else set()
+    days = pd.date_range(start=_day(start), end=_day(end), freq='D')
+    return pd.DatetimeIndex([d for d in days if d not in present])
+
+
 _STEP_DAYS = {'S': 1 / 86400, 'D': 1, 'W': 7, 'M': 31, 'Y': 365}
 
 
@@ -361,7 +382,7 @@ class IBHistoryWorker():
             # ib doesn't have a way of differentiating between a weekend where there is no data,
             # and a trading day, where there were no trades.
             # inject null rows to cover these cases
-            missing_dates = pd.date_range(start=earliest_date, end=current_date).difference(df_result.index)
+            missing_dates = missing_session_days(df_result.index, earliest_date, current_date, tz_info)
             for d in missing_dates:
                 local_date = d.to_pydatetime().replace(tzinfo=None)
                 null_row = {
