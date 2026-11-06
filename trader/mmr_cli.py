@@ -2146,14 +2146,30 @@ def _role_allows(cmd: Optional[str], args: argparse.Namespace) -> Optional[str]:
 # ------------------------------------------------------------------
 
 def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
-    """Execute a parsed command.  Returns True to continue the REPL, False to exit."""
-    global _json_mode
-    _json_mode = getattr(args, 'json', False)
+    """Execute a parsed command.  Returns True to continue the REPL, False to exit.
+
+    The --json stderr routing of ``console`` is scoped to this one command:
+    a REPL session or an in-process caller (tests) must not inherit it.
+    """
+    prev_file, prev_stderr = console._file, console.stderr
     # --json contract: stdout carries ONLY the JSON payload. Human-oriented
     # console output (progress, hints, "Using expiration: ...") goes to stderr
     # so `mmr --json ... | jq` never sees a stray line (2026-11-05: options
-    # implied prefixed its JSON with a Rich status line).
-    console.file = sys.stderr if _json_mode else sys.stdout
+    # implied prefixed its JSON with a Rich status line). Routed via Rich's
+    # dynamic `stderr` flag, not by pinning `console.file`: a pinned stream
+    # outlives a pytest capture / redirected stdout ("I/O operation on closed
+    # file").
+    console._file = None
+    console.stderr = bool(getattr(args, 'json', False))
+    try:
+        return _dispatch(mmr, args)
+    finally:
+        console._file, console.stderr = prev_file, prev_stderr
+
+
+def _dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
+    global _json_mode
+    _json_mode = getattr(args, 'json', False)
     cmd = args.command
 
     if cmd in ('exit', 'quit', 'q'):

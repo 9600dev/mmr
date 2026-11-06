@@ -68,12 +68,25 @@ def test_usage_error_exits_2(monkeypatch):
 
 def test_json_mode_routes_console_to_stderr(capsys, monkeypatch):
     import argparse
-    monkeypatch.setattr(cli, '_json_mode', False)
-    args = argparse.Namespace(json=True, command='exit')
-    cli.dispatch(None, args)          # 'exit' returns before touching mmr
-    cli.console.print('[dim]Using expiration: 2027-02-19[/dim]')
+
+    def fake_dispatch(mmr, args):
+        cli.console.print('[dim]Using expiration: 2027-02-19[/dim]')
+        print('{"ok": true}')
+        return True
+
+    monkeypatch.setattr(cli, '_dispatch', fake_dispatch)
+    cli.dispatch(None, argparse.Namespace(json=True, command='options'))
     out = capsys.readouterr()
-    assert 'Using expiration' not in out.out
+    assert out.out.strip() == '{"ok": true}'
     assert 'Using expiration' in out.err
-    cli.dispatch(None, argparse.Namespace(json=False, command='exit'))
-    assert cli.console.file is sys.stdout
+
+
+def test_json_routing_does_not_leak_past_the_command(capsys, monkeypatch):
+    """A --json command must not leave the shared console on stderr for the
+    next REPL command / in-process caller."""
+    import argparse
+    monkeypatch.setattr(cli, '_dispatch', lambda mmr, args: True)
+    cli.dispatch(None, argparse.Namespace(json=True, command='options'))
+    assert cli.console.stderr is False
+    cli.console.print('after')
+    assert 'after' in capsys.readouterr().out
