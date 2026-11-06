@@ -22,8 +22,41 @@ import yaml
 
 log = logging.getLogger('pycron')
 
+
+class ZonedCronTab(CronTab):
+    """CronTab whose schedule is evaluated in a fixed IANA timezone.
+
+    Plain CronTab evaluates against the host's local clock, so a schedule
+    written in ET silently shifts when the container runs in PT. With a zone
+    set, ``next()`` (called without ``now``) measures from the current time in
+    that zone, so "0 9 * * 1-5" means 09:00 in that zone, DST included.
+    ``tz=None`` keeps the legacy local-time behaviour.
+    """
+
+    def __init__(self, spec: str, tz: Optional[str] = None):
+        super().__init__(spec)
+        self.tz_name = tz or None
+        self.tz = resolve_timezone(tz)
+
+    def next(self, now=None, *args, **kwargs):  # type: ignore[override]
+        if now is None and self.tz is not None:
+            now = dt.datetime.now(self.tz)
+        return super().next(now, *args, **kwargs)
+
+
+def resolve_timezone(tz: Optional[str]):
+    """Return a ZoneInfo for ``tz`` (None/'' -> None). Unknown zones raise ValueError."""
+    if not tz:
+        return None
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    try:
+        return ZoneInfo(str(tz))
+    except (ZoneInfoNotFoundError, ValueError) as ex:
+        raise ValueError(f'pycron: unknown timezone {tz!r}') from ex
+
+
 class Job():
-    def __init__(self, dictionary: Optional[Dict[str, str]]):
+    def __init__(self, dictionary: Optional[Dict[str, str]], default_timezone: Optional[str] = None):
         self.name: str = ''
         self.description: str = ''
         self.command: str = ''
@@ -48,15 +81,18 @@ class Job():
         self.delay: int = 0
         self.eval_running: Optional[List[str]] = None
         self.eval_running_result: Optional[List[bool]] = None
+        # IANA zone the start/stop expressions are written in. None = the
+        # process's local time (legacy behaviour).
+        self.timezone: Optional[str] = default_timezone or None
 
         if dictionary:
             for k, v in dictionary.items():
                 setattr(self, k, v)
 
-        self.crontab_start = CronTab(self.start)
+        self.crontab_start = ZonedCronTab(self.start, self.timezone)
         self.crontab_stop: Optional[CronTab] = None
         if self.stop:
-            self.crontab_stop = CronTab(self.stop)
+            self.crontab_stop = ZonedCronTab(self.stop, self.timezone)
 
     def __str__(self):
         return '{} {} {} {} {}: {} {}'.format(
@@ -78,6 +114,7 @@ class Job():
             'working_directory': self.working_directory,
             'start': self.start,
             'stop': self.stop,
+            'timezone': self.timezone,
             'trying_to_start': self.trying_to_start,
             'start_on_pycron_start': self.start_on_pycron_start,
             'running': self.running,
@@ -469,9 +506,15 @@ def main(config_file: str, only_list: List[str], except_list: List[str], no_heal
 
     conf_file.close()
 
+    # Optional file-level default zone for every job's start/stop expressions;
+    # a job's own `timezone:` key overrides it. Validated up front so a typo
+    # fails at load rather than silently running on local time.
+    default_timezone = config.get('timezone') or None
+    resolve_timezone(default_timezone)
+
     jobs: List[Job] = []
     for j in config['jobs']:
-        job = Job(j)
+        job = Job(j, default_timezone=default_timezone)
         if only_list and job.name not in only_list:
             continue
         if except_list and job.name in except_list:

@@ -5,6 +5,10 @@
 # that ship with the repo for fresh installs only.
 root_directory: .
 port: 7425
+# Zone every job's start/stop cron expression is written in (IANA name).
+# A job may override it with its own `timezone:` key. Omit it entirely to
+# fall back to the process's local time (legacy behaviour).
+timezone: America/New_York
 env: TRADER_CHECK=False
 health_check_eval:
   - "exec('from trader.tools.trader_check import health_check') or health_check('~/.config/mmr/trader.yaml')"
@@ -55,14 +59,10 @@ jobs:
     # data_refresh.yaml. Failures in one cron entry don't take down
     # pycron or the other entries.
     #
-    # IMPORTANT: cron expressions are interpreted in the CONTAINER's
-    # local TZ (set via docker-compose's TZ env var, which defaults to
-    # America/New_York but is overridden by the TIME_ZONE variable in
-    # .env). Examples below ANCHOR to NY time — if your container runs
-    # in another TZ, edit ~/.config/mmr/pycron.yaml accordingly. Common
-    # adjustments:
-    #   - Container in PT? subtract 3 hours from the NY times below
-    #   - Container in UTC? add 4 (EDT/summer) or 5 (EST/winter) hours
+    # Cron expressions below are written in NY time and are evaluated in
+    # the top-level `timezone:` (America/New_York), independent of the
+    # container's TZ — no hand-shifting for PT/UTC hosts. If you delete
+    # that key, expressions fall back to the container's local TZ.
     - name: data_refresh_us
       description: refresh US universes (TwelveData) — after US after-hours close
       command: python3
