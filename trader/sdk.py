@@ -1112,7 +1112,11 @@ class MMR:
             gs = None
 
         report = analyzer.analyze(positions, net_liq, group_store=gs)
-        return report.to_dict()
+        out = report.to_dict()
+        # Values in the report are account-base-currency (positions are FX-
+        # converted before analysis); say which currency that is.
+        out['currency'] = str(((acct_vals or {}).get('NetLiquidation', {}) or {}).get('currency', '') or '')
+        return out
 
     def portfolio_snapshot(self) -> dict:
         """Compact portfolio snapshot for LLM loop monitoring.
@@ -1129,46 +1133,70 @@ class MMR:
                     'exposure_pct': 0, 'movers': [], 'timestamp': str(dt.datetime.now())}
 
         acct_vals = consume(self._rpc.rpc(return_type=dict).get_account_values())
-        net_liq = float(acct_vals.get('NetLiquidation', {}).get('value', 0)) if acct_vals else 0.0
+        nl = (acct_vals or {}).get('NetLiquidation', {}) or {}
+        net_liq = float(nl.get('value', 0) or 0)
+        base_ccy = str(nl.get('currency', '') or '')
 
-        total_value = 0.0
-        daily_pnl = 0.0
-        movers = []
+        # Positions are valued in their own currency (USD stocks in a CAD
+        # account); totals and exposure must be in the account base currency
+        # or they are meaningless (2026-11-05: exposure 13.7% vs the true
+        # 19.2%). Missing FX makes the totals unavailable, never "rate 1".
+        warnings: list = []
+        try:
+            fx = self._fx_rates()
+        except Exception as ex:
+            fx = {}
+            warnings.append(f'FX rates unavailable ({ex}); base-currency totals omitted')
+
+        total_value: Optional[float] = 0.0
+        daily_pnl: Optional[float] = 0.0
+        movers: List[Dict[str, Any]] = []
         for _, row in portfolio_df.iterrows():
             mv = float(row.get('marketValue', 0) or 0)
             dp = float(row.get('dailyPNL', 0) or 0)
-            price = float(row.get('mktPrice', 0) or 0)
-            avg = float(row.get('avgCost', 0) or 0)
+            ccy = str(row.get('currency', '') or '')
             if isinstance(mv, float) and math.isnan(mv):
                 mv = 0.0
             if isinstance(dp, float) and math.isnan(dp):
                 dp = 0.0
-            total_value += abs(mv)
-            daily_pnl += dp
+            if total_value is not None and daily_pnl is not None:
+                try:
+                    total_value += abs(self._to_base(mv, ccy, fx))
+                    daily_pnl += self._to_base(dp, ccy, fx)
+                except ValueError as ex:
+                    warnings.append(f'{row.get("symbol", "?")}: {ex}; base-currency totals omitted')
+                    total_value = daily_pnl = None
 
-            # Compute daily change % from dailyPNL / marketValue
-            change_pct = (dp / abs(mv)) if abs(mv) > 0 else 0.0
+            # Daily % move relative to the PRIOR value (value - today's P&L);
+            # dividing by today's value overstated losses (ONDS -16.5% vs -14.1%).
+            prior = abs(mv - dp)
+            change_pct = (dp / prior) if prior > 0 else 0.0
             movers.append({
                 'symbol': row.get('symbol', ''),
                 'change_pct': round(change_pct, 4),
                 'daily_pnl': round(dp, 2),
                 'value': round(abs(mv), 2),
+                'currency': ccy,
             })
 
         # Sort by absolute change — biggest movers first
         movers.sort(key=lambda m: abs(m['change_pct']), reverse=True)
 
-        exposure_pct = total_value / net_liq if net_liq > 0 else 0.0
+        exposure_pct = (total_value / net_liq) if (total_value is not None and net_liq > 0) else None
 
-        return {
-            'total_value': round(total_value, 2),
+        out = {
+            'currency': base_ccy,
+            'total_value': round(total_value, 2) if total_value is not None else None,
             'net_liquidation': round(net_liq, 2),
-            'daily_pnl': round(daily_pnl, 2),
+            'daily_pnl': round(daily_pnl, 2) if daily_pnl is not None else None,
             'position_count': len(portfolio_df),
-            'exposure_pct': round(exposure_pct, 4),
-            'movers': movers[:10],  # top 10 by absolute change
+            'exposure_pct': round(exposure_pct, 4) if exposure_pct is not None else None,
+            'movers': movers[:10],  # top 10 by absolute change; value/daily_pnl in each row's currency
             'timestamp': str(dt.datetime.now()),
         }
+        if warnings:
+            out['warnings'] = sorted(set(warnings))
+        return out
 
     def portfolio_diff(self) -> dict:
         """Compare current portfolio to the last stored snapshot.
