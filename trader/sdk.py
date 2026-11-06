@@ -1690,13 +1690,41 @@ class MMR:
         return detail
 
     def reject(self, proposal_id: int, reason: str = '') -> bool:
-        """Reject a proposal. No trader_service needed."""
-        p = self._proposal_store().get(proposal_id)
+        """Reject a proposal. No trader_service needed for PENDING rows.
+
+        A stale APPROVED row (a claimed approval that never reached a terminal
+        state — e.g. #74, APPROVED since 2026-07-27) can be retired too, but
+        only with NO broker evidence: no recorded order ids and no working IB
+        order whose orderRef names this proposal. That check needs
+        trader_service; without it, or with evidence, this refuses (raises
+        ValueError) — reconcile against the broker first.
+        """
+        store = self._proposal_store()
+        p = store.get(proposal_id)
         if not p:
             return False
+        if p.status == 'APPROVED':
+            if p.order_ids:
+                raise ValueError(f'proposal #{proposal_id} is APPROVED with broker order ids '
+                                 f'{p.order_ids} — reconcile (`mmr orders`, `mmr reconcile`) instead')
+            try:
+                trades = consume(self._rpc.rpc(return_type=dict[int, list[Trade]]).get_trades()) or {}
+            except Exception as ex:
+                raise ValueError(f'proposal #{proposal_id} is APPROVED; cannot verify there is no '
+                                 f'working broker order without trader_service ({ex})') from ex
+            marker = f'proposal:{proposal_id}'
+            for trade_list in trades.values():
+                for t in trade_list or []:
+                    ref = str(getattr(getattr(t, 'order', None), 'orderRef', '') or '')
+                    status = str(getattr(getattr(t, 'orderStatus', None), 'status', '') or '')
+                    if marker in ref and status not in ('Cancelled', 'ApiCancelled', 'Inactive', 'Filled'):
+                        raise ValueError(f'proposal #{proposal_id} has a working broker order '
+                                         f'{t.order.orderId} ({status}) — cancel or reconcile it first')
+            why = reason or 'operator: stale APPROVED claim with no broker evidence'
+            return store.try_transition(proposal_id, 'APPROVED', 'FAILED', rejection_reason=why)
         # Atomic CAS so a concurrent approve/reject race resolves cleanly instead
         # of raising on a same-status no-op.
-        return self._proposal_store().try_transition(
+        return store.try_transition(
             proposal_id, 'PENDING', 'REJECTED', rejection_reason=reason)
 
     def approve(self, proposal_id: int, approver_key: Optional[str] = None,

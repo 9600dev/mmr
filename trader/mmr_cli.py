@@ -3191,11 +3191,15 @@ def _handle_reject(mmr: MMR, args: argparse.Namespace):
         print_status('Specify a proposal ID or use --all', success=False)
         return
 
+    before = mmr._proposal_store().get(args.proposal_id)
     success = mmr.reject(args.proposal_id, reason=args.reason)
-    if success:
+    if success and before is not None and before.status == 'APPROVED':
+        print_status(f'Proposal #{args.proposal_id} (stale APPROVED, no broker evidence) marked FAILED')
+    elif success:
         print_status(f'Proposal #{args.proposal_id} rejected')
     else:
-        print_status(f'Reject failed: proposal #{args.proposal_id} not found or not PENDING', success=False)
+        print_status(f'Reject failed: proposal #{args.proposal_id} not found or not PENDING/APPROVED',
+                     success=False)
 
 
 def _handle_group(mmr: MMR, args: argparse.Namespace):
@@ -13472,7 +13476,7 @@ def main():
         # reports live portfolio capacity. Connect opportunistically for those
         # (still degrading gracefully if the service is down) — otherwise their
         # sizing silently falls back to the fixed base with no volatility/FX.
-        _enrich = cmd in ('propose', 'session')
+        _enrich = cmd in ('propose', 'session', 'reject')
         if not is_local or _enrich:
             try:
                 mmr.connect(probe=True)

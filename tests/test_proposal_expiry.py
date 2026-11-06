@@ -221,3 +221,66 @@ def test_trader_sweep_expires_and_reports(tmp_path):
     _backdate(store, apr, 3 * DAY, 'updated_at')
     res = t.sweep_stale_proposals()
     assert res == {'expired': [old], 'stale_approved': [apr]}
+
+
+# --- reject: retiring a stale APPROVED claim (#74, APPROVED since 2026-07-27) ---
+
+class TestRejectStaleApproved:
+    def _mmr(self, tmp_duckdb_path, trades=None):
+        from test_propose_approve_integration import _make_mmr, _StubRPCClient
+        from trader.common.reactivex import SuccessFail
+        rpc = _StubRPCClient(SuccessFail.success(obj=[]))
+        orig = rpc.rpc
+
+        def rpc_with_trades(return_type=None):
+            chain = orig(return_type)
+
+            class _W:
+                def __getattr__(self, name):
+                    if name == 'get_trades':
+                        return lambda *a, **k: trades or {}
+                    return getattr(chain, name)
+            return _W()
+        rpc.rpc = rpc_with_trades
+        return _make_mmr(tmp_duckdb_path, rpc)
+
+    def _approved(self, store):
+        pid = _add(store, 'QBTS', age=100 * DAY)
+        store.try_transition(pid, 'PENDING', 'APPROVED')
+        return pid
+
+    def test_no_broker_evidence_marks_failed(self, tmp_duckdb_path):
+        mmr = self._mmr(tmp_duckdb_path)
+        store = mmr._proposal_store()
+        pid = self._approved(store)
+        assert mmr.reject(pid) is True
+        assert store.get(pid).status == 'FAILED'
+        assert 'no broker evidence' in store.get(pid).rejection_reason
+
+    def test_working_broker_order_refuses(self, tmp_duckdb_path):
+        from types import SimpleNamespace
+        mmr = self._mmr(tmp_duckdb_path)
+        store = mmr._proposal_store()
+        pid = self._approved(store)
+        t = SimpleNamespace(order=SimpleNamespace(orderId=9, orderRef=f'proposal|mmr:proposal:{pid}'),
+                            orderStatus=SimpleNamespace(status='Submitted'))
+        mmr2 = self._mmr(tmp_duckdb_path, trades={9: [t]})
+        with pytest.raises(ValueError, match='working broker order'):
+            mmr2.reject(pid)
+        assert store.get(pid).status == 'APPROVED'
+
+    def test_order_ids_recorded_refuses(self, tmp_duckdb_path):
+        mmr = self._mmr(tmp_duckdb_path)
+        store = mmr._proposal_store()
+        pid = self._approved(store)
+        store.db.execute("UPDATE trade_proposals SET order_ids = '[123]' WHERE id = ?", [pid], fetch='none')
+        with pytest.raises(ValueError, match='order ids'):
+            mmr.reject(pid)
+
+    def test_without_service_refuses(self, tmp_duckdb_path):
+        mmr = self._mmr(tmp_duckdb_path)
+        mmr._client = None
+        store = mmr._proposal_store()
+        pid = self._approved(store)
+        with pytest.raises(ValueError, match='trader_service'):
+            mmr.reject(pid)
