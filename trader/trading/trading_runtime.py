@@ -3058,6 +3058,14 @@ class Trader():
         if spec.tif == 'GTD' and spec.good_till_date:
             common['goodTillDate'] = spec.good_till_date
 
+        # Protective child legs (stop-loss, trailing stop, take-profit) must
+        # outlive the session: inheriting a DAY entry's TIF let the stop expire
+        # at the close and left the filled position unprotected from the next
+        # session on (2026-11-05, `propose --stop-loss`). A child of an entry
+        # that never fills is cancelled with its parent, so GTC can't strand.
+        _leg_tif = spec.tif if spec.tif in ('GTC', 'GTD') else 'GTC'
+        _leg_gtd: str = (spec.good_till_date or '') if _leg_tif == 'GTD' else ''
+
         def _build_entry(**common) -> Order:
             if spec.order_type == 'MARKET':
                 return MarketOrder(**common)
@@ -3336,7 +3344,8 @@ class Trader():
                     parentId=parent_id,
                     transmit=False,
                     account=self.ib_account,
-                    tif=spec.tif,
+                    tif=_leg_tif,
+                    goodTillDate=_leg_gtd,
                     outsideRth=spec.outside_rth,
                 )
                 tp_trade = await _place_and_wait(contract, tp, leg_is_exit=True)
@@ -3360,7 +3369,8 @@ class Trader():
                     parentId=parent_id,
                     transmit=True,
                     account=self.ib_account,
-                    tif=spec.tif,
+                    tif=_leg_tif,
+                    goodTillDate=_leg_gtd,
                     outsideRth=spec.outside_rth,
                 )
                 sl_trade = await _place_and_wait(contract, sl, leg_is_exit=True)
@@ -3395,7 +3405,8 @@ class Trader():
                     parentId=parent_id,
                     transmit=True,
                     account=self.ib_account,
-                    tif=spec.tif,
+                    tif=_leg_tif,
+                    goodTillDate=_leg_gtd,
                     outsideRth=spec.outside_rth,
                 )
                 if spec.trailing_stop_percent:
@@ -3437,7 +3448,8 @@ class Trader():
                     parentId=parent_id,
                     transmit=True,
                     account=self.ib_account,
-                    tif=spec.tif,
+                    tif=_leg_tif,
+                    goodTillDate=_leg_gtd,
                     outsideRth=spec.outside_rth,
                 )
 
@@ -3709,15 +3721,69 @@ class Trader():
                         exit_reason=ExitReason.VALIDATED_STANDALONE))
             observable.pipe(ops.take(1)).subscribe(Observer(on_next=on_next, on_error=on_error, on_completed=lambda: None))
             await task.wait()
+            displaced = self.executioner.pop_displaced() if hasattr(self.executioner, 'pop_displaced') else []
 
-            if result_trade:
-                return SuccessFail.success(obj=result_trade)
-            else:
+            if not result_trade:
                 return SuccessFail.fail(error=str(errors[0]) if errors else 'Failed to place standalone order')
+
+            # A receipt is not acceptance: wait for IB's verdict before
+            # claiming the position is protected (trader.trading.order_acceptance).
+            from trader.trading.order_acceptance import REJECTED, await_acceptance
+            verdict, detail = await await_acceptance(
+                result_trade, timeout=getattr(self, 'ACCEPTANCE_TIMEOUT_S', 4.0))
+            if verdict != REJECTED:
+                return SuccessFail.success(obj=result_trade)
+
+            symbol = getattr(contract, 'symbol', '?')
+            msg = (f'IB REJECTED protective {order_type} {action} {quantity:g} {symbol} '
+                   f'(order {result_trade.order.orderId}): {detail}.')
+            if displaced:
+                restored, lost = await self._restore_displaced(displaced)
+                if restored:
+                    msg += f' Previous protective order(s) re-placed as {restored}.'
+                if lost:
+                    msg += (f' PREVIOUS PROTECTION {lost} WAS CANCELLED AND COULD NOT BE '
+                            f'RESTORED — {symbol} IS UNPROTECTED.')
+            logging.error(msg)
+            return SuccessFail.fail(error=msg)
 
         except Exception as ex:
             logging.error(f'place_standalone_order error: {ex}')
             return SuccessFail.fail(exception=ex)
+
+    async def _restore_displaced(self, displaced: list) -> tuple:
+        """Re-place protective orders that coordination cancelled for a
+        replacement the broker then rejected. Returns (restored_ids, lost_ids)."""
+        from trader.trading.order_acceptance import ACCEPTED, UNCONFIRMED, await_acceptance
+        restored, lost = [], []
+        for d_contract, d_order, remaining in displaced:
+            old_id = getattr(d_order, 'orderId', '?')
+            try:
+                clone = copy.copy(d_order)
+                clone.orderId = 0
+                clone.permId = 0
+                clone.clientId = 0
+                clone.parentId = 0
+                clone.ocaGroup = ''
+                clone.transmit = True
+                # Keep the owner (attribution) but drop the old intent's broker
+                # reference; the current intent stamps its own on reservation.
+                clone.orderRef = split_order_reference(getattr(d_order, 'orderRef', ''))[0]
+                if remaining and remaining > 0:
+                    clone.totalQuantity = remaining
+                obs = await self.executioner.subscribe_place_order_direct(
+                    mint_approved_order(d_contract, clone, is_exit=True,
+                                        exit_reason=ExitReason.VALIDATED_STANDALONE))
+                trade = await asyncio.wait_for(obs.pipe(ops.take(1)), timeout=8.0)
+                verdict, _ = await await_acceptance(trade, timeout=getattr(self, 'ACCEPTANCE_TIMEOUT_S', 4.0))
+                if verdict in (ACCEPTED, UNCONFIRMED):
+                    restored.append(trade.order.orderId)
+                else:
+                    lost.append(old_id)
+            except Exception as ex:
+                logging.error('could not restore displaced protective order %s: %s', old_id, ex)
+                lost.append(old_id)
+        return restored, lost
 
     @log_method
     async def place_order_simple(

@@ -306,6 +306,11 @@ class TradeExecutioner():
                 if time.monotonic() >= deadline:
                     raise RuntimeError('UNKNOWN: competing reduction cancellation not confirmed')
                 await asyncio.sleep(0.05)
+            if trade.orderStatus.status != 'Filled':
+                # Remember what protection we displaced, so a replacement the
+                # broker then rejects can put it back (see pop_displaced).
+                self.__dict__.setdefault('_displaced', []).append(
+                    (trade.contract, trade.order, float(trade.orderStatus.remaining or 0.0)))
         # Own reductions have been cancelled above, so from here an unreadable
         # broker view is UNKNOWN (the book has been touched), not DEFERRED.
         unobserved = await self.trader.unobserved_reduction_quantity(contract, order.action)
@@ -323,6 +328,17 @@ class TradeExecutioner():
                 'reduction %s %g clamped to %g: %g reserved by other working reductions or unconfirmed sends',
                 order.action, float(order.totalQuantity), available, remaining)
         order.totalQuantity = min(float(order.totalQuantity), available)
+
+    def pop_displaced(self) -> list:
+        """Orders cancelled by the most recent reduction coordination.
+
+        Returns ``[(contract, order, remaining_qty), ...]`` and clears the
+        record. Orders are serialized (``serialized_orders``), so the record
+        belongs to the placement the caller just made.
+        """
+        displaced = self.__dict__.get('_displaced', [])
+        self._displaced = []
+        return displaced
 
     def _unobserved_reservation_hint(self) -> str:
         """The identities behind the last unobserved-capacity evaluation, plus
@@ -373,6 +389,31 @@ class TradeExecutioner():
         # malformed order is not a working exit — a SELL of NaN shares reduces
         # nothing. IB would reject it from the far side of the wire; refusing it
         # here names the reason instead.
+        # Routing: an IB portfolio/position contract carries primaryExchange
+        # but a BLANK exchange. Sent as-is, IB rejects it (321 "Missing order
+        # exchange") AFTER the receipt — and for an exit, after any competing
+        # protective order was already cancelled to make room (2026-11-05:
+        # `mmr protect` left a position naked this way). Route such stock /
+        # option contracts SMART; refuse anything else unroutable here, before
+        # coordination can touch the book.
+        if not str(getattr(contract, 'exchange', '') or '').strip():
+            primary = str(getattr(contract, 'primaryExchange', '') or '').strip().upper()
+            if getattr(contract, 'secType', '') in ('STK', 'OPT') and primary:
+                # US listings route SMART. Elsewhere SMART is a per-listing
+                # capability (some SEHK names reject it), but the primary
+                # listing exchange is always a valid direct route.
+                us_venues = {'NYSE', 'NASDAQ', 'AMEX', 'ARCA', 'BATS', 'IEX', 'ISLAND', 'NYSEARCA'}
+                route = 'SMART' if (primary in us_venues or getattr(contract, 'currency', '') == 'USD') else primary
+                logging.info('routing %s (conId %s) via %s: contract had no exchange (primaryExchange %s)',
+                             getattr(contract, 'symbol', '?'), getattr(contract, 'conId', '?'),
+                             route, primary)
+                contract.exchange = route
+            else:
+                return rx.throw(ValueError(
+                    f'placement refused: contract {getattr(contract, "symbol", "?")} '
+                    f'(conId {getattr(contract, "conId", "?")}, {getattr(contract, "secType", "?")}) '
+                    f'has no routing exchange — resolve it with --exchange'))
+
         structural_reason = rejection_for_order(order)
         if structural_reason is not None:
             logging.error(
@@ -476,6 +517,7 @@ class TradeExecutioner():
                 f'!= configured ib_account {configured!r}'))
 
         submission_started = False
+        self._displaced = []
         try:
             if is_exit and approved.exit_reason != ExitReason.PROTECTIVE_CHILD:
                 await self._coordinate_reduction(

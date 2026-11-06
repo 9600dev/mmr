@@ -1,5 +1,6 @@
 # the fundamentals of asyncio: https://www.integralist.co.uk/posts/python-asyncio/
 
+from trader.listeners import ib_informational
 from ib_async.client import Client
 from ib_async.contract import Contract, ContractDescription, ContractDetails
 from ib_async.ib import IB
@@ -174,6 +175,7 @@ class IBAIORx():
         self.read_only = read_only
 
         self.ib = IB()
+        ib_informational.install(self.ib)
 
         def mapper(tickers: Set[Ticker]) -> Observable[Ticker]:
             # warning: for whatever reason, we can get either a Set of tickers or a single ticker.
@@ -380,6 +382,7 @@ class IBAIORx():
 
         # Create a fresh IB instance to avoid stale socket state
         self.ib = IB()
+        ib_informational.install(self.ib)
         _restore_event_handlers(self.ib, preserved)
 
         self._shutdown = False
@@ -446,6 +449,7 @@ class IBAIORx():
             pass
         preserved = _snapshot_event_handlers(self.ib)
         self.ib = IB()
+        ib_informational.install(self.ib)
         _restore_event_handlers(self.ib, preserved)
 
         self._shutdown = False
