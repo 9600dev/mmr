@@ -262,6 +262,66 @@ class ProposalStore:
         rows = self.db.execute_atomic(_cas)
         return bool(rows)
 
+    def expire_stale(self, ttl: Optional[dt.timedelta], now: Optional[dt.datetime] = None,
+                     dry_run: bool = False) -> List[TradeProposal]:
+        """Move every PENDING proposal older than ``ttl`` to EXPIRED.
+
+        Each move is a compare-and-swap (PENDING -> EXPIRED), so a proposal an
+        approver claims concurrently is simply skipped rather than clobbered.
+        Returns the proposals that were (or, with ``dry_run``, would be)
+        expired. ``ttl`` None (expiry disabled) is a no-op. Only PENDING rows
+        are touched — see trader.data.proposal_expiry for why APPROVED rows are
+        reported, never aged out.
+        """
+        from trader.data.proposal_expiry import describe_ttl, is_expired
+        if ttl is None:
+            return []
+        now = now or dt.datetime.now()
+        rows = self.db.execute(
+            "SELECT * FROM trade_proposals WHERE status = 'PENDING' ORDER BY id",
+            [], fetch='all',
+        )
+        stale = [p for p in self._rows_to_proposals(rows or [])
+                 if is_expired(p.created_at, now, ttl)]
+        if dry_run:
+            return stale
+        expired: List[TradeProposal] = []
+        for p in stale:
+            if p.id is None:
+                continue
+            reason = (f'expired: PENDING longer than proposal_ttl_hours '
+                      f'({describe_ttl(ttl)}); created {p.created_at:%Y-%m-%d %H:%M}'
+                      if p.created_at else
+                      f'expired: PENDING with no created_at (ttl {describe_ttl(ttl)})')
+            if self.try_transition(p.id, 'PENDING', 'EXPIRED', rejection_reason=reason):
+                p.status = 'EXPIRED'
+                p.rejection_reason = reason
+                expired.append(p)
+        if expired:
+            logging.info('expired %d stale PENDING proposal(s): %s',
+                         len(expired), [p.id for p in expired])
+        return expired
+
+    def stale_approved(self, ttl: Optional[dt.timedelta],
+                       now: Optional[dt.datetime] = None) -> List[TradeProposal]:
+        """APPROVED proposals untouched for longer than ``ttl`` (report-only).
+
+        An APPROVED row is a claimed approval whose placement never reached a
+        terminal state — usually an interrupted approve. It may have an order
+        at the broker, so it is never changed automatically; resolve it with
+        ``approve --resume`` or by marking it FAILED/REJECTED after checking IB.
+        """
+        from trader.data.proposal_expiry import is_expired
+        if ttl is None:
+            return []
+        now = now or dt.datetime.now()
+        rows = self.db.execute(
+            "SELECT * FROM trade_proposals WHERE status = 'APPROVED' ORDER BY id",
+            [], fetch='all',
+        )
+        return [p for p in self._rows_to_proposals(rows or [])
+                if is_expired(p.updated_at or p.created_at, now, ttl)]
+
     def get(self, id: int) -> Optional[TradeProposal]:
         rows = self.db.execute(
             "SELECT * FROM trade_proposals WHERE id = ?", [id], fetch='all',

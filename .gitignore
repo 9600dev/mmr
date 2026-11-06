@@ -42,3 +42,6 @@ mutants/
 # 9600dev/mmr is PUBLIC and this file is the book's alpha plus its open risk.
 # Kept on disk as the working reference; see docs/OPERATIONAL_STATE.README.md.
 docs/OPERATIONAL_STATE.md
+
+# Local smoke-test reports (contain account/positions; repo is public)
+docs/SMOKE_TEST_*.md

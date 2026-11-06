@@ -959,6 +959,31 @@ class MMR:
             self._prop_store = ProposalStore(duckdb_path)
         return self._prop_store
 
+    def _proposal_ttl(self):
+        """PENDING-proposal TTL from trader.yaml ``proposal_ttl_hours`` (default 24h; <=0 disables)."""
+        from trader.data.proposal_expiry import proposal_ttl_from_config
+        return proposal_ttl_from_config(self._container.config())
+
+    def expire_stale_proposals(self, older_than_hours: Optional[float] = None,
+                               dry_run: bool = False) -> dict:
+        """Expire PENDING proposals older than the TTL (or ``older_than_hours``).
+
+        Returns ``{'ttl', 'expired': [...], 'stale_approved': [...], 'dry_run'}``;
+        each entry is ``{id, symbol, action, created}``. Stale APPROVED rows are
+        reported only — they may have a live order at the broker.
+        """
+        from trader.data.proposal_expiry import describe_ttl, proposal_ttl
+        ttl = proposal_ttl(older_than_hours) if older_than_hours is not None else self._proposal_ttl()
+        store = self._proposal_store()
+
+        def _row(p):
+            return {'id': p.id, 'symbol': p.symbol, 'action': p.action,
+                    'created': str(p.created_at), 'status': p.status}
+        expired = store.expire_stale(ttl, dry_run=dry_run)
+        return {'ttl': describe_ttl(ttl), 'dry_run': dry_run,
+                'expired': [_row(p) for p in expired],
+                'stale_approved': [_row(p) for p in store.stale_approved(ttl)]}
+
     def _get_portfolio_state(self):
         """Build a PortfolioState snapshot. Gracefully degrades if trader_service unavailable.
 
@@ -1456,7 +1481,15 @@ class MMR:
         return proposal_id, leverage_info, snapshot_info
 
     def proposals(self, status: Optional[str] = None, limit: int = 50) -> pd.DataFrame:
-        """List proposals. No trader_service needed."""
+        """List proposals. No trader_service needed.
+
+        Stale PENDING rows are expired first, so a listing never offers a
+        proposal that approve would refuse.
+        """
+        try:
+            self._proposal_store().expire_stale(self._proposal_ttl())
+        except Exception as ex:
+            logging.warning('proposal expiry sweep failed: %s', ex)
         props = self._proposal_store().query(status=status, limit=limit)
         if not props:
             return pd.DataFrame()
@@ -1492,9 +1525,8 @@ class MMR:
                 'created': created,
                 'reasoning': p.reasoning or '',
             }
-            # Include status column only when showing mixed statuses (--all)
-            if status is None:
-                row['status'] = p.status
+            # Always present so the JSON schema doesn't depend on the filter.
+            row['status'] = p.status
             # Include leverage warning if available
             leverage = p.metadata.get('leverage_estimate')
             if leverage and leverage.get('uses_margin'):
@@ -1627,6 +1659,18 @@ class MMR:
         resuming = proposal.status == 'APPROVED' and resume
         if proposal.status != 'PENDING' and not resuming:
             return SuccessFail.fail(error=f'Proposal #{proposal_id} is {proposal.status}, not PENDING')
+
+        # Expiry: a PENDING proposal past proposal_ttl_hours carries stale
+        # prices/sizing. Expire it (CAS, so a racing approver is unaffected)
+        # and refuse; the server re-checks the same rule before opening.
+        from trader.data.proposal_expiry import describe_ttl, is_expired
+        _ttl = self._proposal_ttl()
+        if not resuming and is_expired(proposal.created_at, dt.datetime.now(), _ttl):
+            store.expire_stale(_ttl)
+            return SuccessFail.fail(
+                error=(f'Proposal #{proposal_id} expired: created {proposal.created_at:%Y-%m-%d %H:%M}, '
+                       f'older than proposal_ttl_hours ({describe_ttl(_ttl)}). '
+                       f'Re-propose with current prices.'))
 
         # Atomically claim the proposal. This is a compare-and-swap on the DB row
         # (UPDATE ... WHERE status='PENDING'), so if a second process — the LLM

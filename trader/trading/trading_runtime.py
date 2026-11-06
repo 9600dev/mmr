@@ -131,7 +131,8 @@ class Trader():
                  simulation: bool = False,
                  require_proposal_approval: bool = False,
                  approver_required_above_usd: float = 0.0,
-                 approver_key: str = ''):
+                 approver_key: str = '',
+                 proposal_ttl_hours: float = 24.0):
         self.ib_server_address = ib_server_address
         self.ib_server_port = ib_server_port
         self.trading_runtime_ib_client_id = trading_runtime_ib_client_id
@@ -166,6 +167,13 @@ class Trader():
         self.approver_required_above_usd: float = approver_required_above_usd
         _env_key = os.environ.get('MMR_APPROVER_KEY')
         self.approver_key: str = _env_key if _env_key is not None else (approver_key or '')
+        # PENDING-proposal time-to-live (trader.data.proposal_expiry). The
+        # authorization in place_expressive_order refuses to OPEN on a proposal
+        # older than this, and the pulse sweeps stale PENDING rows to EXPIRED.
+        # A malformed value raises here: a typo must not silently disable it.
+        from trader.data.proposal_expiry import proposal_ttl
+        self.proposal_ttl = proposal_ttl(proposal_ttl_hours)
+        self._proposal_sweep_counter = 0
         self.zmq_pubsub_server_address = zmq_pubsub_server_address
         self.zmq_pubsub_server_port = zmq_pubsub_server_port
         self.zmq_rpc_server_address = zmq_rpc_server_address
@@ -3937,6 +3945,38 @@ class Trader():
             )
         except Exception as ex:
             logging.warning('pulse failed: %s', ex)
+        # Every 10th pulse (~5 min): expire stale PENDING proposals so the
+        # store, `mmr proposals` and the dashboard never offer an approvable
+        # proposal whose prices are days old. Off the event loop (DuckDB I/O).
+        self._proposal_sweep_counter = getattr(self, '_proposal_sweep_counter', 0) + 1
+        if self._proposal_sweep_counter % 10 == 1:
+            try:
+                asyncio.get_event_loop().run_in_executor(None, self.sweep_stale_proposals)
+            except RuntimeError:
+                pass
+
+    def sweep_stale_proposals(self) -> dict:
+        """Expire stale PENDING proposals; report (never change) stale APPROVED ones."""
+        result: dict = {'expired': [], 'stale_approved': []}
+        ttl = getattr(self, 'proposal_ttl', None)
+        if ttl is None or not isinstance(getattr(self, 'duckdb_path', None), str):
+            return result
+        try:
+            from trader.data.proposal_store import ProposalStore
+            store = ProposalStore(self.duckdb_path)
+            result['expired'] = [p.id for p in store.expire_stale(ttl)]
+            result['stale_approved'] = [p.id for p in store.stale_approved(ttl)]
+            warned = self.__dict__.setdefault('_stale_approved_warned', set())
+            fresh = [i for i in result['stale_approved'] if i not in warned]
+            if fresh:
+                warned.update(fresh)
+                logging.warning(
+                    'stale APPROVED proposal(s) %s: claimed but never reached a terminal '
+                    'state — check IB (`mmr orders`, `mmr reconcile`), then `approve --resume` '
+                    'or mark FAILED', fresh)
+        except Exception as ex:
+            logging.warning('proposal expiry sweep failed: %s', ex)
+        return result
 
     async def ping_ib(self) -> dict:
         """Live IB socket round-trip (reqCurrentTime with a 5s deadline).

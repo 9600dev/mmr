@@ -16,6 +16,7 @@ from trader.trading.strategy import StrategyConfig, StrategyState
 from typing import List, Optional, Tuple, Union
 
 import asyncio
+import datetime as dt
 import math
 import reactivex.operators as ops
 import time
@@ -492,6 +493,16 @@ class TraderServiceApi(RPCHandler):
                             matches = False
                     allow_open = matches
                     reason = 'proposal is not APPROVED or does not match the exact submitted contract, quantity and execution'
+                    if matches and proposal is not None:
+                        # A proposal's prices and sizing describe the moment it
+                        # was written; past proposal_ttl_hours it may not OPEN.
+                        from trader.data.proposal_expiry import describe_ttl, is_expired
+                        ttl = getattr(self.trader, 'proposal_ttl', None)
+                        if is_expired(proposal.created_at, dt.datetime.now(), ttl):
+                            allow_open = False
+                            reason = (f'proposal #{proposal_id} is older than proposal_ttl_hours '
+                                      f'({describe_ttl(ttl)}; created {proposal.created_at}) — '
+                                      f're-propose with current prices')
                 except Exception as ex:
                     reason = f'approved proposal could not be verified: {ex}'
             if not allow_open:

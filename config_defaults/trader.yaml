@@ -25,6 +25,11 @@ trading_mode: paper
 # Strongly recommended for live trading with any autonomous agent in
 # the loop. Off by default so paper / manual workflows aren't disturbed.
 require_proposal_approval: false
+# PENDING-proposal time-to-live in hours. A proposal older than this is moved
+# to EXPIRED (trader_service sweeps every ~5 min; `mmr proposals` and
+# `mmr approve` also check) and the server refuses to OPEN on it — its prices
+# and sizing are stale. Re-propose instead. 0 disables expiry (not advised).
+proposal_ttl_hours: 24
 
 # Server-side notional tier (Phase 2 proposer/approver split).
 # When approver_required_above_usd > 0, an exposure-INCREASING order whose

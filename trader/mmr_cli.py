@@ -1362,11 +1362,19 @@ def build_parser() -> argparse.ArgumentParser:
                                          '  proposals                    # List pending proposals\n'
                                          '  proposals --all              # All statuses\n'
                                          '  proposals --status EXECUTED  # Filter by status\n'
-                                         '  proposals show 3             # Full detail for proposal #3',
+                                         '  proposals show 3             # Full detail for proposal #3\n'
+                                         '  proposals expire --dry-run   # What would expire (TTL: proposal_ttl_hours)\n'
+                                         '  proposals expire --older-than 1  # Expire PENDING older than 1h',
                                   formatter_class=fmt)
     proposals_sub = proposals_p.add_subparsers(dest='proposals_action')
     proposals_show_p = proposals_sub.add_parser('show', help='Show full proposal detail')
     proposals_show_p.add_argument('proposal_id', type=int, help='Proposal ID')
+    proposals_expire_p = proposals_sub.add_parser(
+        'expire', help='Expire stale PENDING proposals (older than proposal_ttl_hours, default 24h)')
+    proposals_expire_p.add_argument('--older-than', type=float, default=None, metavar='HOURS',
+                                    help='Override the TTL for this sweep (hours)')
+    proposals_expire_p.add_argument('--dry-run', action='store_true', default=False,
+                                    help='List what would expire without changing anything')
     proposals_p.add_argument('--status', default=None, help='Filter by status (PENDING, APPROVED, EXECUTED, etc.)')
     proposals_p.add_argument('--all', action='store_true', default=False, help='Show all statuses')
     proposals_p.add_argument('--limit', type=int, default=50, help='Max results (default: 50)')
@@ -2960,13 +2968,32 @@ def _handle_proposals(mmr: MMR, args: argparse.Namespace):
             print_status(f'Proposal #{args.proposal_id} not found', success=False)
         return
 
+    if action == 'expire':
+        res = mmr.expire_stale_proposals(older_than_hours=args.older_than, dry_run=args.dry_run)
+        if _json_mode:
+            print_dict(res, title='Proposal expiry')
+            return
+        verb = 'Would expire' if res['dry_run'] else 'Expired'
+        console.print(f'[bold]{verb} {len(res["expired"])} PENDING proposal(s)[/bold] (ttl {res["ttl"]})')
+        for r in res['expired']:
+            console.print(f'  #{r["id"]:<5} {r["action"]:<4} {r["symbol"]:<8} created {r["created"]}')
+        if res['stale_approved']:
+            console.print(f'[yellow]{len(res["stale_approved"])} stale APPROVED proposal(s) — '
+                          f'NOT changed (may have a live order; check `mmr orders` / `mmr reconcile`):[/yellow]')
+            for r in res['stale_approved']:
+                console.print(f'  #{r["id"]:<5} {r["action"]:<4} {r["symbol"]:<8} created {r["created"]}')
+        return
+
     # List proposals
     status_filter = None
     if not args.all:
         status_filter = args.status or 'PENDING'
 
-    from trader.data.proposal_store import ProposalStore
     store = mmr._proposal_store()
+    try:
+        store.expire_stale(mmr._proposal_ttl())
+    except Exception as ex:
+        console.print(f'[yellow]proposal expiry sweep failed: {ex}[/yellow]')
     props = store.query(status=status_filter, limit=args.limit)
 
     if _json_mode:
