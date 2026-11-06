@@ -167,7 +167,7 @@ def _score_momentum(c: Dict) -> tuple:
     # Change contribution (0-30 points)
     score += min(abs(c.get('change_pct', 0)), 15) * 2
     # Relative volume (0-25 points)
-    score += min(c.get('rel_vol', 0), 5) * 5
+    score += min((c.get('rel_vol') or 0), 5) * 5
     # RSI headroom: higher RSI = less room but shows momentum
     rsi = c.get('rsi')
     if rsi is not None:
@@ -188,10 +188,10 @@ def _score_gap_up(c: Dict) -> tuple:
     """Score based on gap size and relative volume."""
     score = 0.0
     # Gap contribution (0-40 points)
-    gap = abs(c.get('gap_pct', 0))
+    gap = abs((c.get('gap_pct') or 0))
     score += min(gap, 20) * 2
     # Relative volume (0-30 points)
-    score += min(c.get('rel_vol', 0), 6) * 5
+    score += min((c.get('rel_vol') or 0), 6) * 5
     # Change contribution (0-20 points)
     score += min(abs(c.get('change_pct', 0)), 10) * 2
     # RSI — not too overbought
@@ -207,7 +207,7 @@ def _score_gap_down(c: Dict) -> tuple:
     """Score based on gap size, RSI oversold level, and SMA distance."""
     score = 0.0
     # Gap size (0-40 points)
-    gap = abs(c.get('gap_pct', 0))
+    gap = abs((c.get('gap_pct') or 0))
     score += min(gap, 20) * 2
     # RSI oversold bonus (0-30 points)
     rsi = c.get('rsi')
@@ -219,7 +219,7 @@ def _score_gap_down(c: Dict) -> tuple:
         distance_pct = ((sma_20 - c['price']) / sma_20) * 100
         score += min(distance_pct, 10) * 2
     # Relative volume
-    score += min(c.get('rel_vol', 0), 4) * 2.5
+    score += min((c.get('rel_vol') or 0), 4) * 2.5
 
     signal = 'SELL' if score >= 40 else 'WATCH'
     return (min(score, 100), signal)
@@ -249,7 +249,7 @@ def _score_mean_reversion(c: Dict) -> tuple:
         score += min(distance_pct, 10) * 2.5
 
     # Relative volume (0-20 points)
-    score += min(c.get('rel_vol', 0), 4) * 5
+    score += min((c.get('rel_vol') or 0), 4) * 5
 
     signal = 'BUY' if score >= 35 else 'WATCH'
     return (min(score, 100), signal)
@@ -261,7 +261,7 @@ def _score_breakout(c: Dict) -> tuple:
     price = c['price']
 
     # Price above VWAP (0-15 points)
-    vwap = c.get('vwap', 0)
+    vwap = (c.get('vwap') or 0)
     if vwap > 0 and price > vwap:
         score += 15
 
@@ -277,7 +277,7 @@ def _score_breakout(c: Dict) -> tuple:
             score += 10
 
     # Relative volume (0-30 points)
-    score += min(c.get('rel_vol', 0), 6) * 5
+    score += min((c.get('rel_vol') or 0), 6) * 5
 
     # Change contribution (0-15 points)
     score += min(abs(c.get('change_pct', 0)), 5) * 3
@@ -292,7 +292,7 @@ def _score_volatile(c: Dict) -> tuple:
     # Range % (0-40 points)
     score += min(c.get('range_pct', 0), 20) * 2
     # Relative volume (0-25 points)
-    score += min(c.get('rel_vol', 0), 5) * 5
+    score += min((c.get('rel_vol') or 0), 5) * 5
     # Absolute change % (0-25 points)
     score += min(abs(c.get('change_pct', 0)), 10) * 2.5
     # RSI extremes bonus
@@ -346,9 +346,11 @@ def apply_filters(candidates: List[Dict], filters: ScanFilter,
             continue
         if filters.max_change_pct is not None and c['change_pct'] > filters.max_change_pct:
             continue
-        if c['rel_vol'] < filters.min_relative_volume:
+        # Unknown (None) rel_vol fails a positive minimum, as 0.0 did before;
+        # unknown spread can't be shown to exceed the cap, so it passes.
+        if (c.get('rel_vol') or 0) < filters.min_relative_volume:
             continue
-        if c.get('spread_pct', 0) > filters.max_spread_pct > 0:
+        if (c.get('spread_pct') or 0) > filters.max_spread_pct > 0:
             continue
         result.append(c)
     return result
@@ -1753,10 +1755,12 @@ class TwelveDataIdeaScanner:
             avg_volume = _i('average_volume')
 
             change_pct = _f('percent_change')
-            gap_pct = 0.0
+            # Unavailable inputs are None (null), not 0.0 — a zero gap or zero
+            # relative volume is a real (and scorable) value, unknown is not.
+            gap_pct: Optional[float] = None
             if prev_close > 0 and day_open > 0:
                 gap_pct = ((day_open - prev_close) / prev_close) * 100.0
-            rel_vol = 0.0
+            rel_vol: Optional[float] = None
             if avg_volume > 0 and volume > 0:
                 rel_vol = volume / avg_volume
             range_pct = 0.0
@@ -1769,11 +1773,11 @@ class TwelveDataIdeaScanner:
                 'price': round(price, 2),
                 'change_pct': round(change_pct, 2),
                 'volume': volume,
-                'gap_pct': round(gap_pct, 2),
-                'rel_vol': round(rel_vol, 2),
+                'gap_pct': round(gap_pct, 2) if gap_pct is not None else None,
+                'rel_vol': round(rel_vol, 2) if rel_vol is not None else None,
                 'range_pct': round(range_pct, 2),
-                'spread_pct': 0.0,  # not in TD quote
-                'vwap': 0.0,
+                'spread_pct': None,  # not in TD quote
+                'vwap': None,        # not in TD quote
             })
         return candidates
 

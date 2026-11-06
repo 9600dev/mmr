@@ -372,6 +372,18 @@ def _src_default(choices, fallback):
     return _DEFAULT_DATA_SOURCE if _DEFAULT_DATA_SOURCE in choices else fallback
 
 
+def _effective_snapshot_source(args) -> str:
+    """Snapshot source: explicit --source wins; an exchange/currency hint
+    means IB (twelvedata picks its own listing — `snap BHP --exchange ASX`
+    returned the NYSE ADR); otherwise the configured default."""
+    src = getattr(args, 'source', None)
+    if src:
+        return src
+    if getattr(args, 'exchange', '') or getattr(args, 'currency', ''):
+        return 'ib'
+    return _src_default(['ib', 'twelvedata'], 'ib')
+
+
 def _load_equity_decimation() -> str:
     import os
     val = os.environ.get('MMR_EQUITY_DECIMATION')
@@ -482,10 +494,11 @@ def build_parser() -> argparse.ArgumentParser:
     snap_p.add_argument('--delayed', action='store_true', default=False, help='Use delayed market data')
     snap_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
     snap_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
-    snap_p.add_argument('--source', choices=['ib', 'twelvedata'],
-                        default=_src_default(['ib', 'twelvedata'], 'ib'),
-                        help='Data source (default: ib). twelvedata uses REST /quote — '
-                             'no bid/ask, but no trader_service or IB connection required.')
+    snap_p.add_argument('--source', choices=['ib', 'twelvedata'], default=None,
+                        help=f'Data source (default: {_src_default(["ib", "twelvedata"], "ib")} from '
+                             f'trader.yaml default_data_source; --exchange/--currency imply ib). '
+                             f'twelvedata uses REST /quote — no bid/ask, but no trader_service or '
+                             f'IB connection required.')
 
     # snapshot-batch
     snap_batch_p = sub.add_parser('snapshot-batch', help='Batch price snapshots (JSON)',
@@ -496,10 +509,12 @@ def build_parser() -> argparse.ArgumentParser:
     snap_batch_p.add_argument('symbols', nargs='+', help='Symbols to snapshot')
     snap_batch_p.add_argument('--exchange', default='', help='Exchange hint (e.g. ASX, TSE, SEHK)')
     snap_batch_p.add_argument('--currency', default='', help='Currency hint (e.g. AUD, JPY, HKD)')
-    snap_batch_p.add_argument('--source', choices=['ib', 'twelvedata'],
-                              default=_src_default(['ib', 'twelvedata'], 'ib'),
-                              help='Data source (default: ib). twelvedata batches up to '
-                                   '120 symbols per /quote call.')
+    snap_batch_p.add_argument('--source', choices=['ib', 'twelvedata'], default=None,
+                              help=f'Data source (default: {_src_default(["ib", "twelvedata"], "ib")} '
+                                   f'from trader.yaml; --exchange/--currency imply ib). twelvedata '
+                                   f'batches up to 120 symbols per /quote call.')
+    snap_batch_p.add_argument('--delayed', action='store_true', default=False,
+                              help='Use delayed market data (IB)')
 
     # depth
     depth_p = sub.add_parser('depth', help='Market depth (Level 2 order book)',
@@ -841,7 +856,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help='Universe name to dashboard (alternative to positional symbols)')
     watch_p.add_argument('--source', choices=['massive', 'twelvedata'],
                          default=_src_default(['massive', 'twelvedata'], 'massive'),
-                         help='Streaming data source for ticker dashboard mode (default: massive). '
+                         help='Streaming data source for ticker dashboard mode (default: %(default)s). '
                               'massive = Polygon WebSocket, supports stocks/forex/crypto/indices/options/futures. '
                               'twelvedata = TD WebSocket, supports stocks + forex + crypto (uses BASE/QUOTE form). '
                               'TD WebSocket access requires a TD Pro plan or higher.')
@@ -1060,7 +1075,7 @@ def build_parser() -> argparse.ArgumentParser:
                                help='Timeframe (default: quarterly)')
     fin_balance_p.add_argument('--source', choices=['massive', 'twelvedata'],
                                default=_src_default(['massive', 'twelvedata'], 'massive'),
-                               help='Data source (default: massive)')
+                               help='Data source (default: %(default)s)')
 
     fin_income_p = fin_sub.add_parser('income', help='Income statement')
     fin_income_p.add_argument('symbol', help='Stock ticker (e.g. AAPL)')
@@ -1069,7 +1084,7 @@ def build_parser() -> argparse.ArgumentParser:
                               help='Timeframe (default: quarterly)')
     fin_income_p.add_argument('--source', choices=['massive', 'twelvedata'],
                               default=_src_default(['massive', 'twelvedata'], 'massive'),
-                              help='Data source (default: massive)')
+                              help='Data source (default: %(default)s)')
 
     fin_cashflow_p = fin_sub.add_parser('cashflow', help='Cash flow statement')
     fin_cashflow_p.add_argument('symbol', help='Stock ticker (e.g. AAPL)')
@@ -1078,13 +1093,13 @@ def build_parser() -> argparse.ArgumentParser:
                                 help='Timeframe (default: quarterly)')
     fin_cashflow_p.add_argument('--source', choices=['massive', 'twelvedata'],
                                 default=_src_default(['massive', 'twelvedata'], 'massive'),
-                                help='Data source (default: massive)')
+                                help='Data source (default: %(default)s)')
 
     fin_ratios_p = fin_sub.add_parser('ratios', help='Financial ratios (TTM)')
     fin_ratios_p.add_argument('symbol', help='Stock ticker (e.g. AAPL)')
     fin_ratios_p.add_argument('--source', choices=['massive', 'twelvedata'],
                               default=_src_default(['massive', 'twelvedata'], 'massive'),
-                              help='Data source (default: massive)')
+                              help='Data source (default: %(default)s)')
 
     fin_filing_p = fin_sub.add_parser('filing', help='10-K filing sections (business, risk_factors)')
     fin_filing_p.add_argument('symbol', help='Stock ticker (e.g. AAPL)')
@@ -1257,7 +1272,7 @@ def build_parser() -> argparse.ArgumentParser:
     fx_snap_p.add_argument('pair', help='Currency pair (e.g. EURUSD)')
     fx_snap_p.add_argument('--source', choices=['ib', 'massive', 'twelvedata'],
                            default=_src_default(['ib', 'massive', 'twelvedata'], 'ib'),
-                            help='Data source (default: ib)')
+                            help='Data source (default: %(default)s)')
 
     fx_sub.add_parser('snapshot-all', help='All forex pair snapshots (Massive only)')
 
@@ -1269,7 +1284,7 @@ def build_parser() -> argparse.ArgumentParser:
     fx_quote_p.add_argument('to_currency', help='To currency (e.g. USD)')
     fx_quote_p.add_argument('--source', choices=['ib', 'massive', 'twelvedata'],
                             default=_src_default(['ib', 'massive', 'twelvedata'], 'ib'),
-                             help='Data source (default: ib)')
+                             help='Data source (default: %(default)s)')
 
     fx_convert_p = fx_sub.add_parser('convert', help='Currency conversion (Massive only)')
     fx_convert_p.add_argument('from_currency', help='From currency (e.g. EUR)')
@@ -1277,7 +1292,7 @@ def build_parser() -> argparse.ArgumentParser:
     fx_convert_p.add_argument('amount', type=float, help='Amount to convert')
     fx_convert_p.add_argument('--source', choices=['massive', 'twelvedata'],
                               default=_src_default(['massive', 'twelvedata'], 'massive'),
-                              help='Data source (default: massive). twelvedata uses TD\'s '
+                              help='Data source (default: %(default)s). twelvedata uses TD\'s '
                                    '/currency_conversion endpoint.')
 
     # movers
@@ -1293,7 +1308,7 @@ def build_parser() -> argparse.ArgumentParser:
                            help='Number of results (default: 20)')
     movers_p.add_argument('--source', choices=['massive', 'twelvedata'],
                           default=_src_default(['massive', 'twelvedata'], 'massive'),
-                           help='Data source (default: massive)')
+                           help='Data source (default: %(default)s)')
 
     # scan
     scan_p = sub.add_parser('scan', help='IB market scanner',
@@ -1377,7 +1392,7 @@ def build_parser() -> argparse.ArgumentParser:
                           help='IB market location (e.g. STK.AU.ASX, STK.CA, STK.HK.SEHK)')
     ideas_p.add_argument('--source', choices=['massive', 'twelvedata'],
                          default=_src_default(['massive', 'twelvedata'], 'massive'),
-                          help='Data source for US equities (default: massive). '
+                          help='Data source for US equities (default: %(default)s). '
                                'Ignored when --location is set (IB path).')
 
     # propose
@@ -1932,7 +1947,7 @@ def build_parser() -> argparse.ArgumentParser:
         '--source',
         choices=['massive', 'twelvedata', 'ib'],
         default=_src_default(['massive', 'twelvedata', 'ib'], 'massive'),
-        help='Data source (default: massive). Use `ib` for international '
+        help='Data source (default: %(default)s). Use `ib` for international '
              'exchanges (ASX, SEHK, TSE, EU) where massive/twelvedata do '
              'not have coverage — requires trader_service / IB Gateway.',
     )
@@ -2176,7 +2191,7 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
     # need the IB upstream — they hit a REST endpoint directly. Same for watch
     # in dashboard mode, which the gate around `is_local` handles separately.
     _bypass_ib_check = False
-    if cmd in ('snapshot', 'snap', 'snapshot-batch') and getattr(args, 'source', 'ib') != 'ib':
+    if cmd in ('snapshot', 'snap', 'snapshot-batch') and _effective_snapshot_source(args) != 'ib':
         _bypass_ib_check = True
 
     if cmd in _ib_commands and not _bypass_ib_check:
@@ -2344,7 +2359,7 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
             print_df(mmr.trades(), title='Trades')
 
         elif cmd in ('snapshot', 'snap'):
-            source = getattr(args, 'source', 'ib')
+            source = _effective_snapshot_source(args)
             result = mmr.snapshot(args.symbol, delayed=args.delayed,
                                   exchange=args.exchange, currency=args.currency,
                                   source=source)
@@ -2352,9 +2367,10 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
             print_dict(result, title=title)
 
         elif cmd == 'snapshot-batch':
-            source = getattr(args, 'source', 'ib')
+            source = _effective_snapshot_source(args)
             results = mmr.snapshot_batch(args.symbols, exchange=args.exchange,
-                                          currency=args.currency, source=source)
+                                          currency=args.currency, source=source,
+                                          delayed=getattr(args, 'delayed', False))
             title = 'Snapshots' + (f' ({source})' if source != 'ib' else '')
             print(_json_dumps({"data": results, "title": title}))
 
@@ -13456,7 +13472,7 @@ def main():
                 is_local = True
         # Snapshot commands routed via TwelveData (or any non-ib source) skip
         # trader_service entirely — they hit a REST endpoint directly.
-        if cmd in ('snapshot', 'snap', 'snapshot-batch') and getattr(args, 'source', 'ib') != 'ib':
+        if cmd in ('snapshot', 'snap', 'snapshot-batch') and _effective_snapshot_source(args) != 'ib':
             is_local = True
         # Forex commands routed via twelvedata (or massive REST) don't need IB.
         if cmd == 'forex':

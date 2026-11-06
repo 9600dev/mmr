@@ -128,6 +128,51 @@ def compute_resize_deltas(
     return scale_factor, adjustments
 
 
+
+def normalize_ib_quote(q: dict) -> dict:
+    """Common snapshot schema for IB quotes (see MMR.snapshot).
+
+    IB reports "no data" as -1 (and 0) prices with 0 sizes — e.g. a closed
+    ASX name came back bid=-1/ask=-1 (2026-11-05). Those become NaN (null in
+    JSON). ``close`` is IB's previous-session close; it is also exposed as
+    ``previous_close`` with derived ``change``/``change_pct`` so IB and
+    twelvedata snapshots share field meanings.
+    """
+    import math as _m
+
+    def _num(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return float('nan')
+        return f if _m.isfinite(f) else float('nan')
+
+    for price_key, size_key in (('bid', 'bidSize'), ('ask', 'askSize'), ('last', 'lastSize'),
+                                ('open', None), ('high', None), ('low', None), ('close', None)):
+        if price_key not in q:
+            continue
+        p = _num(q.get(price_key))
+        if not (p > 0):
+            q[price_key] = float('nan')
+            if size_key and size_key in q:
+                q[size_key] = float('nan')
+        else:
+            q[price_key] = p
+    if 'volume' in q:
+        v = _num(q.get('volume'))
+        q['volume'] = v if v >= 0 else float('nan')
+    prev = q.get('close', float('nan'))
+    last = q.get('last', float('nan'))
+    q['previous_close'] = prev
+    if isinstance(prev, float) and isinstance(last, float) and prev > 0 and last > 0:
+        q['change'] = round(last - prev, 6)
+        q['change_pct'] = round((last - prev) / prev * 100.0, 5)
+    else:
+        q.setdefault('change', float('nan'))
+        q.setdefault('change_pct', float('nan'))
+    q['source'] = 'ib'
+    return q
+
 class MMR:
     """Synchronous Python SDK for the MMR trader_service.
 
@@ -2317,6 +2362,12 @@ class MMR:
             ``watch --source twelvedata`` for streaming bid/ask).
         """
         if source == 'twelvedata':
+            if exchange or currency:
+                # TD's /quote resolves a bare ticker to its own choice of
+                # listing: `snapshot BHP --exchange ASX` silently returned the
+                # NYSE ADR in USD (2026-11-05). Refuse rather than mislead.
+                raise ValueError('twelvedata snapshots cannot honour --exchange/--currency '
+                                 '(it picks its own listing); use --source ib')
             td_symbol = str(symbol).upper()
             payload = self._twelvedata_client.quote(symbol=td_symbol).as_json()
             def _f(k):
@@ -2340,7 +2391,10 @@ class MMR:
                 'open': _f('open'),
                 'high': _f('high'),
                 'low': _f('low'),
-                'close': _f('close'),
+                # `close` is the PREVIOUS session close for every source (IB's
+                # ticker.close semantics). TD's own `close` is the latest
+                # price, which is reported as `last`.
+                'close': _f('previous_close'),
                 'volume': _f('volume'),
                 'previous_close': _f('previous_close'),
                 'change': _f('change'),
@@ -2349,6 +2403,7 @@ class MMR:
                 'exchange': payload.get('exchange', ''),
                 'currency': payload.get('currency', ''),
                 'name': payload.get('name', ''),
+                'source': 'twelvedata',
             }
         contract = self._resolve_contract(symbol, exchange=exchange, currency=currency)
         ticker = consume(
@@ -2367,7 +2422,7 @@ class MMR:
                 sym = tc.symbol
                 con_id = tc.conId
 
-        return {
+        return normalize_ib_quote({
             'symbol': sym,
             'conId': con_id,
             'time': getattr(ticker, 'time', None),
@@ -2381,11 +2436,15 @@ class MMR:
             'high': getattr(ticker, 'high', float('nan')),
             'low': getattr(ticker, 'low', float('nan')),
             'close': getattr(ticker, 'close', float('nan')),
+            'volume': getattr(ticker, 'volume', float('nan')),
             'halted': getattr(ticker, 'halted', float('nan')),
-        }
+            'exchange': getattr(contract, 'primaryExchange', '') or getattr(contract, 'exchange', ''),
+            'currency': getattr(contract, 'currency', ''),
+        })
 
     def snapshot_batch(self, symbols: list[str], exchange: str = '',
-                       currency: str = '', source: str = 'ib') -> list[dict]:
+                       currency: str = '', source: str = 'ib',
+                       delayed: bool = False) -> list[dict]:
         """Get price snapshots for multiple *symbols* in one batch.
 
         Parameters
@@ -2398,6 +2457,9 @@ class MMR:
             level-1 sides.
         """
         if source == 'twelvedata':
+            if exchange or currency:
+                raise ValueError('twelvedata snapshots cannot honour --exchange/--currency '
+                                 '(it picks its own listing); use --source ib')
             results: list[dict] = []
             chunk_size = 120
             for i in range(0, len(symbols), chunk_size):
@@ -2432,13 +2494,14 @@ class MMR:
                         'open': _f('open'),
                         'high': _f('high'),
                         'low': _f('low'),
-                        'close': _f('close'),
+                        'close': _f('previous_close'),   # previous session close, as for IB
                         'volume': _f('volume'),
                         'previous_close': _f('previous_close'),
                         'change': _f('change'),
                         'change_pct': _f('percent_change'),
                         'exchange': payload.get('exchange', ''),
                         'currency': payload.get('currency', ''),
+                        'source': 'twelvedata',
                     })
             return results
 
@@ -2446,9 +2509,12 @@ class MMR:
         for sym in symbols:
             contract = self._resolve_contract(sym, exchange=exchange, currency=currency)
             contracts.append(contract)
-        return consume(
-            self._rpc.rpc(return_type=list[dict]).get_snapshots_batch(contracts, True)
+        # Live quotes unless asked otherwise — this was hard-coded delayed=True,
+        # silently serving 15-minute-old prices from `snapshot-batch`.
+        rows = consume(
+            self._rpc.rpc(return_type=list[dict]).get_snapshots_batch(contracts, delayed)
         ) or []
+        return [normalize_ib_quote(dict(r)) for r in rows]
 
     def depth(self, symbol: Union[str, int], num_rows: int = 5,
               exchange: str = '', currency: str = '',
