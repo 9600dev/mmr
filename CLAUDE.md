@@ -797,6 +797,8 @@ JSON output always follows the structure `{"data": ..., "title": ...}` for data 
 ```bash
 mmr --json data summary                                    # What data is in local DuckDB
 mmr --json data query AAPL --bar-size "1 day" --days 30    # Read OHLCV from local store
+#   each row carries `date` (ISO 8601 with offset); all-NULL placeholder rows are dropped
+#   (count in `placeholders_dropped`) unless --include-placeholders
 mmr data status                                            # Freshness per (universe, bar_size) job from data_refresh.yaml
 ```
 

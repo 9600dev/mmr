@@ -1920,6 +1920,8 @@ def build_parser() -> argparse.ArgumentParser:
     data_query_p.add_argument('--bar-size', default='1 day', help='Bar size (default: "1 day")')
     data_query_p.add_argument('--days', type=int, default=30, help='Days of history (default: 30)')
     data_query_p.add_argument('--tail', type=int, default=None, help='Show only last N rows')
+    data_query_p.add_argument('--include-placeholders', action='store_true', default=False,
+                              help='Keep all-NULL placeholder rows (weekends / empty sessions)')
 
     data_dl_p = data_sub.add_parser(
         'download',
@@ -9803,14 +9805,64 @@ def _handle_data_query(args: argparse.Namespace):
     )
 
     df = tickdata.read(storage_key, date_range=date_range)
-    if df.empty:
-        print_df(pd.DataFrame(), title=f'Data: {symbol} ({bar_size})')
-        return
-
+    title = f'Data: {symbol} ({bar_size})'
+    out, dropped = _query_output_frame(
+        df, include_placeholders=bool(getattr(args, 'include_placeholders', False)))
     if args.tail:
-        df = df.tail(args.tail)
+        out = out.tail(args.tail)
 
-    print_df(df, title=f'Data: {symbol} ({bar_size})')
+    if _json_mode:
+        records = json.loads(out.to_json(orient='records')) if not out.empty else []
+        print(_json_dumps({'data': records, 'title': title,
+                           'placeholders_dropped': dropped}))
+        return
+    print_df(out, title=title)
+    if dropped:
+        console.print(f'[dim]{dropped} placeholder row(s) with no OHLC hidden '
+                      f'(--include-placeholders to show)[/dim]')
+
+
+def _what_to_show_name(value):
+    """WhatToShow int -> enum name; None for a missing value; an int the enum
+    does not know is shown as UNKNOWN(n) rather than passed off as valid."""
+    import math
+    from trader.objects import WhatToShow
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    try:
+        return WhatToShow(int(value)).name
+    except (ValueError, TypeError):
+        return f'UNKNOWN({value})'
+
+
+def _query_output_frame(df, include_placeholders: bool = False):
+    """Shape a TickData read for `data query` output. Returns (frame, dropped).
+
+    * The bar timestamp becomes the first column, ``date``, as an ISO 8601
+      string WITH its offset. It lived only in the index, which
+      ``to_json(orient='records')`` drops, so `--json` rows carried no time at
+      all and nobody could tell which day a close belonged to.
+    * Rows whose open/high/low/close are ALL null are placeholders the IB
+      worker writes for weekends and empty sessions. They are dropped unless
+      ``include_placeholders``; the count is returned so the caller can say so.
+    * ``what_to_show`` is rendered as its WhatToShow name.
+    """
+    import pandas as pd
+
+    if df is None or df.empty:
+        return pd.DataFrame(), 0
+    ohlc = [c for c in ('open', 'high', 'low', 'close') if c in df.columns]
+    dropped = 0
+    if ohlc and not include_placeholders:
+        placeholder = df[ohlc].isna().all(axis=1)
+        dropped = int(placeholder.sum())
+        df = df[~placeholder]
+    out = df.copy()
+    out.insert(0, 'date', [pd.Timestamp(ts).isoformat() for ts in out.index])
+    out = out.reset_index(drop=True)
+    if 'what_to_show' in out.columns:
+        out['what_to_show'] = [_what_to_show_name(v) for v in out['what_to_show']]
+    return out, dropped
 
 
 def _try_get_exchange_calendar_for(security):
