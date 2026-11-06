@@ -27,7 +27,6 @@ from typing import Any, cast, Dict, List, Optional
 import asyncio
 import backoff
 import datetime as dt
-import exchange_calendars
 import importlib
 import importlib.util
 import inspect
@@ -2088,6 +2087,10 @@ class StrategyRuntime():
         """
         if not security:
             return None
+        # Imported here (outside the try, so a missing package raises rather
+        # than reading as "no calendar"): this module is on the
+        # `import trader.mmr_cli` path and exchange_calendars is costly.
+        import exchange_calendars
         try:
             return exchange_calendars.get_calendar(security.primaryExchange)
         except Exception:

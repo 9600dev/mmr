@@ -1033,4 +1033,4 @@ All local file/YAML operations.
 | Single test file | ~1-2s |
 
 #### Python Import Overhead
-All commands have ~1s baseline overhead for Python startup + importing trader modules (pandas, numpy, duckdb, etc.). This is unavoidable and included in all timings above.
+Every one-shot `mmr` command pays Python startup + `import trader.mmr_cli`. That import was ~0.85-1.1s until 2026-11-05, mostly scipy.stats (~400ms, from two rarely-used helpers in `trader/common/helpers.py`) and exchange_calendars (~200ms); both are now imported inside the functions that use them and the import measures ~0.35s (median of 7, `python -c 'import time;t=time.perf_counter();import trader.mmr_cli;...'`). The remainder is pandas/pyarrow/duckdb/ib_async, which the sdk needs at module level. `tests/test_cli_import_time.py` fails if scipy, exchange_calendars, bs4, plotille or pypager reappear on that path — keep heavy, rarely-needed imports function-local in any module the CLI imports (`python -X importtime -c 'import trader.mmr_cli'` shows what's costing).

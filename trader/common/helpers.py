@@ -1,20 +1,19 @@
-from bs4 import BeautifulSoup
+# Import-time budget: this module sits on the `import trader.mmr_cli` path
+# (sdk -> data_access -> helpers), so every one-shot CLI invocation pays for
+# its top-level imports. scipy.stats (~400ms), exchange_calendars (~200ms),
+# bs4, pypager, plotille and rich are imported INSIDE the functions that use
+# them, never at module level — tests/test_cli_import_time.py pins this.
+from __future__ import annotations
+
 from collections import deque
 from dateutil.tz import gettz, tzlocal
 from dateutil.tz.tz import tzfile
-from exchange_calendars import ExchangeCalendar
 from ib_async.contract import Contract
 from pandas import Timestamp
-from pypager.pager import Pager
-from pypager.source import GeneratorSource
-from rich.console import Console
-from rich.table import Table
-from scipy.stats import truncnorm
-from typing import Any, Callable, cast, Dict, Generic, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Callable, cast, Dict, Generic, List, Optional, Tuple, TypeVar, Union, TYPE_CHECKING
 
 import collections
 import datetime as dt
-import exchange_calendars as ec
 import io
 import json
 import locale
@@ -22,12 +21,13 @@ import logging
 import numpy as np
 import os
 import pandas as pd
-import plotille as plt
 import pytz
-import scipy.stats as st
 import socket
 import tempfile
 import warnings
+
+if TYPE_CHECKING:
+    from exchange_calendars import ExchangeCalendar
 
 
 def flatten_dict(d, parent_key='', sep='_'):
@@ -191,6 +191,7 @@ def parse_fundamentals(xml: str) -> Dict:
         for k, value in elem.attrs.items():  # type: ignore
             result[key + '_' + k] = value
 
+    from bs4 import BeautifulSoup
     soup = BeautifulSoup(xml, features='lxml')
 
     result = {}
@@ -255,6 +256,7 @@ def rich_tablify(df, financial: bool = False, financial_columns: List[str] = [],
     if financial:
         locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
+    from rich.table import Table
     cols: List[str] = list(df.columns)
     table = Table()
     for column in df.columns:
@@ -298,6 +300,7 @@ def rich_table(
             print(df.to_csv(index=False))
         return
 
+    from rich.console import Console
     table = rich_tablify(df, financial, financial_columns, include_index)
 
     console = Console()
@@ -305,6 +308,8 @@ def rich_table(
 
 
 def rich_dict(d: Dict):
+    from rich.console import Console
+    from rich.table import Table
     table = Table()
     table.add_column('key')
     table.add_column('value')
@@ -326,6 +331,8 @@ def paginate(content: str):
         for line in io.StringIO(content).readlines():
             yield [('', line)]
 
+    from pypager.pager import Pager
+    from pypager.source import GeneratorSource
     p = Pager()
     p.add_source(GeneratorSource(generate_content(content)))  # type: ignore
     p.run()
@@ -451,6 +458,7 @@ def get_exchange_calendar(contract: Contract) -> ExchangeCalendar:
         exchange = 'NYSE'
     if contract.exchange and 'SMART' in contract.exchange:
         exchange = 'NASDAQ'
+    import exchange_calendars as ec
     return ec.get_calendar(exchange)
 
 
@@ -466,10 +474,12 @@ def contracts(contract_file_name: str = '',
 
 
 def hist(X):
+    import plotille as plt
     print(plt.hist(X))
 
 
 def scatter(Y):
+    import plotille as plt
     X = list(range(1, len(Y) + 1))
     fig = plt.Figure()
     fig.width = 100
@@ -480,6 +490,7 @@ def scatter(Y):
 
 
 def line(Y):
+    import plotille as plt
     X = list(range(1, len(Y) + 1))
     fig = plt.Figure()
     fig.width = 100
@@ -512,7 +523,7 @@ def pdt(date_time: dt.datetime) -> str:
 
 def date_range(start_date: dt.datetime,
                end_date: dt.datetime = dt.datetime.now(),
-               exchange_calendar: Optional[ec.ExchangeCalendar] = None):
+               exchange_calendar: Optional[ExchangeCalendar] = None):
     current = dateify(end_date)
     while current >= dateify(start_date):
         if exchange_calendar and exchange_calendar.is_session(current):
@@ -624,6 +635,7 @@ def fit_distribution(data, distribution_function, bins=200):
 def best_fit_distribution(data, bins=200, ax=None):
     """Model data by finding best fit distribution to data"""
     # Get histogram of original data
+    import scipy.stats as st
     y, x = np.histogram(data, bins=bins, density=True)
     x = (x + np.roll(x, -1))[:-1] / 2.0
 
@@ -687,5 +699,6 @@ def best_fit_distribution(data, bins=200, ax=None):
 
 
 def get_truncated_normal(mean=0.0, sd=1.0, low=0.0, upp=10.0):
+    from scipy.stats import truncnorm
     return truncnorm(
         (low - mean) / sd, (upp - mean) / sd, loc=mean, scale=sd)

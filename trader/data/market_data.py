@@ -11,7 +11,6 @@ from trader.listeners.ibreactive import IBAIORx
 from typing import Optional
 
 import datetime as dt
-import exchange_calendars
 import math
 import numpy as np
 import pandas as pd
@@ -274,6 +273,7 @@ class MarketData():
             history_worker = IBHistoryWorker(self.client.ib)
             # todo we need to use the ib_history batch infrastructure here and have it
             # notify via events, but for now we'll just grab the data ourselves.
+            import exchange_calendars  # lazy: keeps it off the CLI import path
             calendar = exchange_calendars.get_calendar(security.primaryExchange)
             date_ranges = self.data.missing(
                 contract=security,
