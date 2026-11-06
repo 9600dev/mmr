@@ -54,6 +54,30 @@ class IBNoDataError(Exception):
     pass
 
 
+
+_STEP_DAYS = {'S': 1 / 86400, 'D': 1, 'W': 7, 'M': 31, 'Y': 365}
+
+
+def window_duration(step: str, start: dt.datetime, end: dt.datetime, margin_days: int = 2) -> str:
+    """IB ``durationStr`` for one request: the chunk ``step``, or the window if smaller.
+
+    ``step`` is the per-bar-size chunk (e.g. '10 Y', '1 W', '86400 S'). When
+    the requested window (plus ``margin_days`` for weekends / exchange-tz
+    edges) is shorter, return it in days. IB caps 'D' durations at 365, so
+    longer windows keep the chunk. Unparseable steps are returned unchanged.
+    """
+    import math
+    try:
+        n_s, unit = step.split()
+        step_days = float(n_s) * _STEP_DAYS[unit.upper()]
+    except (ValueError, KeyError):
+        return step
+    window_days = math.ceil(max((end - start).total_seconds(), 0) / 86400) + margin_days
+    if window_days < step_days and window_days <= 365 and window_days >= 1:
+        return f'{window_days} D'
+    return step
+
+
 class IBHistoryWorker():
     def __init__(
         self,
@@ -237,6 +261,12 @@ class IBHistoryWorker():
 
         current_date = end_date_offset
         local_tz = dt.datetime.now(dt.timezone.utc).astimezone().tzinfo
+
+        # Don't ask IB for 10 years of daily bars to fill a 15-day gap: size
+        # the request to the window when it is smaller than the chunk (the
+        # loop below steps back from the earliest bar, so later chunks are
+        # only requested if the window really is larger).
+        duration_step_size = window_duration(duration_step_size, start_date, end_date_offset)
 
         logging.info('get_contract_history {} {} {} {}'.format(
             contract.conId,
