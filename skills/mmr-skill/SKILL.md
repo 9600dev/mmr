@@ -310,6 +310,8 @@ Presets: `momentum`, `gap-up`, `gap-down`, `mean-reversion`, `breakout`, `volati
 
 `source="twelvedata"` notes: `news=True` is silently empty (TD has no news endpoint); fundamentals enrichment costs ~100 credits per enriched ticker on a Grow plan.
 
+**ETP filter**: `ideas` drops leveraged/inverse ETPs (UVXY, UVIX, SQQQ, 2x single-stock products...) by default, judged from the data source's instrument metadata plus a curated safety-net list; the JSON payload's `etp_filter` lists every exclusion with its reason (and `metadata_error` if the lookup failed). Pass `--include-etp` to keep them or `--exclude-all-etp` to drop every ETF/ETN/ETP. `scan` likewise drops rights/warrants/units by default (`--include-all` keeps them) and now returns `last`/`change_pct`/`volume` per row (null when IB has no value) plus `excluded`/`unclassified`/`warnings`.
+
 **Fail-loudly behaviour**: `ideas()` with `location=` raises / returns an error instead of an empty list when the IB scanner returns nothing for that location or when every supplied ticker fails to resolve. This is intentional — those two cases used to be indistinguishable from "no matches", and the usual cause is either a missing market-data subscription (→ use `--tickers`) or a typo. The CLI returns the error in the JSON payload; check for `result.get("error")` and surface the message rather than treating an empty DataFrame as "nothing found."
 
 ### Financial Statements

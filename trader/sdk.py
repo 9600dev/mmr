@@ -4303,6 +4303,7 @@ class MMR:
         names: bool = False,
         location: Optional[str] = None,
         data_source: str = 'massive',
+        etp_mode: str = 'leveraged',
     ) -> pd.DataFrame:
         """Scan for trading ideas using preset-based scoring.
 
@@ -4327,7 +4328,16 @@ class MMR:
         location : str, optional
             IB market location code (e.g. STK.AU.ASX, STK.CA). When set, uses
             IB scanner API instead of Massive.com (for international markets).
+        etp_mode : str
+            'leveraged' (default): drop leveraged/inverse ETPs (UVXY, SQQQ ...);
+            'all': drop every ETF/ETN/ETP; 'none': keep them. Uses the data
+            source's instrument metadata (TwelveData ETF list / Massive type /
+            IB stockType) with a curated ticker list as a safety net. What was
+            excluded and why is in ``df.attrs['etp_filter']``.
         """
+        from trader.tools.instrument_filters import ETP_MODES
+        if etp_mode not in ETP_MODES:
+            raise ValueError(f'etp_mode must be one of {ETP_MODES}, got {etp_mode!r}')
         # Build custom filter overrides
         custom_filters = {}
         if min_price is not None:
@@ -4370,6 +4380,7 @@ class MMR:
                 news=news,
                 tickers=tickers if source == 'tickers' else None,
                 universe_symbols=ib_universe_symbols,
+                etp_mode=etp_mode,
             )
 
         # Resolve universe to symbol list (shared by both US data sources)
@@ -4401,6 +4412,7 @@ class MMR:
                 fundamentals=fundamentals,
                 news=news,  # silently a no-op — TD client has no news endpoint
                 names=names,
+                etp_mode=etp_mode,
             )
 
         # Massive path (default): US markets
@@ -4416,6 +4428,7 @@ class MMR:
             fundamentals=fundamentals,
             news=news,
             names=names,
+            etp_mode=etp_mode,
         )
 
     def scan(

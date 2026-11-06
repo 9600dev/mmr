@@ -491,6 +491,7 @@ ideas momentum --universe sp500              # Scan a universe
 ideas gap-up --min-price 10                  # Override preset filter
 ideas volatile --num 25                      # Top 25 results
 ideas --presets                              # List all presets
+ideas momentum --include-etp                 # Keep leveraged/inverse ETPs (UVXY, SQQQ...), excluded by default; --exclude-all-etp drops every ETF/ETN/ETP. Exclusions + reasons are in JSON `etp_filter` / a yellow Rich line
 ideas momentum --detail                      # Show all columns incl. indicators
 ideas momentum --fundamentals                # Enrich with financial ratios (PE, D/E, ROE, etc.)
 ideas momentum --news                        # Enrich with latest news headline + sentiment
@@ -566,6 +567,10 @@ IB scanner / resolve_contract  →  get_snapshot (sequential)  →  reqHistorica
 - Indicators computed locally from history bars (pure pandas) — `compute_rsi()`, `compute_ema()`, `compute_sma()`
 - Fundamentals from `reqFundamentalData` (ReportSnapshot XML), news from `reqHistoricalNews` (no sentiment)
 - IB news headlines include metadata prefixes like `{A:800015:L:en}...` which are stripped before display
+
+### ETP filter (all three backends)
+
+`mmr ideas` drops leveraged/inverse ETPs by default (2026-11-05: UVXY/UVIX led a crash-day momentum BUY list). ETP-ness comes from the data source's own metadata — TwelveData `GET /etfs?country=United States` (one cached call, ~11.5k US ETPs incl. ETNs/ETVs), Massive ticker-details `type` (ETF/ETN/ETV/ETS), IB `ContractDetails.stockType` (ETF/ETN/ETP/ETC; scanner rows now carry it). Leverage/inversion is read from the ETP's name (`2x`, `-1x`, ProShares `Ultra`/`UltraPro`/`UltraShort`/`Short`, `Bear`, `Inverse`, `Leveraged`) only for instruments the metadata says are ETPs, so "Ultra Clean Holdings" or "JPMorgan Ultra-Short Income" are not caught. `instrument_filters.KNOWN_LEVERAGED_INVERSE` is a curated secondary safety net (also used when the metadata call fails, which is reported as `metadata_error`). Rules and the regex rationale: `trader/tools/instrument_filters.py`.
 
 ### Shared module-level functions (used by both scanners)
 

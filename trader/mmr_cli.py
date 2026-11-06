@@ -1397,6 +1397,16 @@ def build_parser() -> argparse.ArgumentParser:
                          default=_src_default(['massive', 'twelvedata'], 'massive'),
                           help='Data source for US equities (default: %(default)s). '
                                'Ignored when --location is set (IB path).')
+    _etp_grp = ideas_p.add_mutually_exclusive_group()
+    _etp_grp.add_argument('--include-etp', dest='etp_mode', action='store_const',
+                          const='none', default='leveraged',
+                          help='Keep leveraged/inverse ETPs (UVXY, SQQQ, ...), which are '
+                               'excluded by default. ETP-ness comes from the data '
+                               "source's instrument metadata (TwelveData ETF list, Massive "
+                               'type, IB stockType) plus a curated safety-net list')
+    _etp_grp.add_argument('--exclude-all-etp', dest='etp_mode', action='store_const',
+                          const='all',
+                          help='Exclude EVERY ETF/ETN/ETP, not just leveraged/inverse ones')
 
     # propose
     propose_p = sub.add_parser('propose', help='Create a trade proposal',
@@ -12872,7 +12882,9 @@ def _handle_ideas(mmr: MMR, args: argparse.Namespace):
         names=use_names,
         location=args.location,
         data_source=data_source,
+        etp_mode=getattr(args, 'etp_mode', 'leveraged'),
     )
+    etp_summary = (getattr(df, 'attrs', {}) or {}).get('etp_filter')
 
     location_label = f' [{args.location}]' if args.location else ''
     source_label = ' — TwelveData' if data_source == 'twelvedata' and not args.location else ''
@@ -12932,10 +12944,38 @@ def _handle_ideas(mmr: MMR, args: argparse.Namespace):
                 )
 
     if _json_mode:
-        print_df(df, title=title)
+        records = ([] if df is None or df.empty
+                   else json.loads(df.to_json(orient='records', date_format='iso')))
+        payload = {'data': records, 'title': title}
+        if etp_summary is not None:
+            payload['etp_filter'] = etp_summary
+        print(_json_dumps(payload))
         return
 
+    def _print_etp_summary():
+        if not etp_summary:
+            return
+        mode = etp_summary.get('mode')
+        excluded = etp_summary.get('excluded') or []
+        what = {'leveraged': 'leveraged/inverse ETPs', 'all': 'all ETPs'}.get(mode)
+        if mode == 'none':
+            console.print('[dim]ETP filter off (--include-etp)[/dim]')
+        elif excluded:
+            console.print(f'[yellow]ETP filter excluded {len(excluded)} ({what}; '
+                          f'--include-etp to keep):[/yellow]')
+            for e in excluded:
+                console.print(f"[yellow]  {escape(str(e.get('ticker')))}: "
+                              f"{escape(str(e.get('reason')))}[/yellow]")
+        else:
+            console.print(f'[dim]ETP filter: no {what} among candidates '
+                          f'({etp_summary.get("source")})[/dim]')
+        if etp_summary.get('metadata_error'):
+            console.print(f"[yellow]Warning: ETP metadata unavailable — "
+                          f"{escape(str(etp_summary['metadata_error']))}; only the curated "
+                          f"leveraged/inverse list was applied.[/yellow]")
+
     if df.empty:
+        _print_etp_summary()
         if args.location:
             console.print(
                 '[dim]No ideas found.[/dim]\n'
@@ -12948,7 +12988,9 @@ def _handle_ideas(mmr: MMR, args: argparse.Namespace):
             console.print('[dim]No ideas found[/dim]')
         return
 
-    console.print(f'[bold]{title}[/bold]  ({len(df)} results)\n')
+    console.print(f'[bold]{title}[/bold]  ({len(df)} results)')
+    _print_etp_summary()
+    console.print()
 
     for _, row in df.iterrows():
         ticker = row.get('ticker', '')
