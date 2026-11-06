@@ -4140,7 +4140,11 @@ def _handle_session(mmr: MMR, args: argparse.Namespace):
         config_table.add_row('Base Position', f'${cfg["effective_base_usd"]:,.0f} ({cfg["base_position_pct"]:.1%} of net liq)')
     else:
         config_table.add_row('Base Position', f'${cfg["base_position_usd"]:,.0f} (fixed)')
-    config_table.add_row('Daily Loss Limit', f'${cfg["daily_loss_limit_usd"]:,.0f}')
+    _eff_loss = cfg.get('effective_daily_loss_limit_usd', cfg['daily_loss_limit_usd'])
+    if _eff_loss != cfg['daily_loss_limit_usd']:
+        config_table.add_row('Daily Loss Limit', f'${_eff_loss:,.0f} (risk gate; sizing config ${cfg["daily_loss_limit_usd"]:,.0f})')
+    else:
+        config_table.add_row('Daily Loss Limit', f'${cfg["daily_loss_limit_usd"]:,.0f}')
     config_table.add_row('Min Position', f'${cfg["min_position_usd"]:,.0f}')
     config_table.add_row('Max Position', f'${cfg["max_position_usd"]:,.0f}')
     config_table.add_row('Max Position %', f'{cfg["max_position_pct"]:.0%} of net liq')

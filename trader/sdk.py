@@ -129,6 +129,20 @@ def compute_resize_deltas(
 
 
 
+def _gate_daily_loss_limit() -> Optional[float]:
+    """The risk gate's ``max_daily_loss`` from trader.yaml, or None if unreadable.
+
+    Passed to PositionSizer so sizing never advertises a looser daily-loss
+    limit than the gate that actually blocks orders.
+    """
+    try:
+        from trader.trading.risk_gate import RiskLimits
+        return float(RiskLimits.load().max_daily_loss)
+    except Exception as ex:  # sizing must not fail because the gate config is odd
+        logger.warning('could not read risk_limits.max_daily_loss: %s', ex)
+        return None
+
+
 def normalize_ib_quote(q: dict) -> dict:
     """Common snapshot schema for IB quotes (see MMR.snapshot).
 
@@ -1115,7 +1129,7 @@ class MMR:
         from trader.trading.position_sizing import PositionSizingConfig, PositionSizer
         config = PositionSizingConfig.load()
         state = self._get_portfolio_state()
-        return PositionSizer(config).session_summary(state)
+        return PositionSizer(config, _gate_daily_loss_limit()).session_summary(state)
 
     def reconcile(self) -> dict:
         """Report-only broker-truth reconciliation. Requires trader_service.
@@ -1426,7 +1440,7 @@ class MMR:
                 )
                 config = PositionSizingConfig.load()
                 state = self._get_portfolio_state()
-                sizer = PositionSizer(config)
+                sizer = PositionSizer(config, _gate_daily_loss_limit())
 
                 # Build liquidity info from snapshot (gracefully degrades)
                 liq = None

@@ -300,8 +300,33 @@ class SizingResult:
 class PositionSizer:
     """Stateless sizing algorithm. Takes config + state -> SizingResult."""
 
-    def __init__(self, config: PositionSizingConfig):
+    def __init__(self, config: PositionSizingConfig,
+                 gate_daily_loss_limit: Optional[float] = None):
+        """``gate_daily_loss_limit`` is the risk gate's ``max_daily_loss``.
+
+        The gate is what actually blocks orders, so a sizing limit looser than
+        it never fires (sizing said $2000 while orders stopped at $1000). When
+        given, sizing enforces the STRICTER of the two; ``None`` keeps the
+        sizing-only behaviour.
+        """
         self.config = config
+        self.gate_daily_loss_limit = gate_daily_loss_limit
+
+    @property
+    def effective_daily_loss_limit(self) -> float:
+        """The daily-loss limit actually in force: min(sizing, risk gate)."""
+        cfg_limit = float(self.config.daily_loss_limit_usd)
+        gate = self.gate_daily_loss_limit
+        if gate is not None and gate > 0 and gate < cfg_limit:
+            return float(gate)
+        return cfg_limit
+
+    def daily_loss_limit_source(self) -> str:
+        """Which config the effective daily-loss limit comes from."""
+        gate = self.gate_daily_loss_limit
+        if gate is not None and gate > 0 and gate < float(self.config.daily_loss_limit_usd):
+            return 'risk_gate.max_daily_loss'
+        return 'position_sizing.daily_loss_limit_usd'
 
     def compute(
         self,
@@ -426,18 +451,19 @@ class PositionSizer:
                 f'At position limit ({state.position_count}/{cfg.max_positions})'
             )
 
-        # 5. Daily loss limit
-        if state.daily_pnl < 0 and abs(state.daily_pnl) >= cfg.daily_loss_limit_usd:
+        # 5. Daily loss limit (the stricter of sizing's and the risk gate's)
+        loss_limit = self.effective_daily_loss_limit
+        if state.daily_pnl < 0 and abs(state.daily_pnl) >= loss_limit:
             sized = 0.0
             capped_by = 'daily_loss_limit'
             warnings.append(
                 f'Daily loss ${abs(state.daily_pnl):,.0f} '
-                f'exceeds limit ${cfg.daily_loss_limit_usd:,.0f}'
+                f'exceeds limit ${loss_limit:,.0f}'
             )
-        elif state.daily_pnl < 0 and abs(state.daily_pnl) >= cfg.daily_loss_limit_usd * 0.8:
+        elif state.daily_pnl < 0 and abs(state.daily_pnl) >= loss_limit * 0.8:
             warnings.append(
                 f'Daily loss ${abs(state.daily_pnl):,.0f} '
-                f'approaching limit ${cfg.daily_loss_limit_usd:,.0f}'
+                f'approaching limit ${loss_limit:,.0f}'
             )
 
         # 6. Liquidity constraints
@@ -550,6 +576,12 @@ class PositionSizer:
 
         # Collect all warnings
         all_warnings = list(set(high.warnings + medium.warnings + low.warnings))
+        gate = self.gate_daily_loss_limit
+        if gate is not None and gate > 0 and abs(gate - float(cfg.daily_loss_limit_usd)) > 1e-9:
+            all_warnings.append(
+                f'Daily loss limits disagree: position_sizing ${cfg.daily_loss_limit_usd:,.0f} '
+                f'vs risk gate ${gate:,.0f} — enforcing ${self.effective_daily_loss_limit:,.0f}'
+            )
 
         # Surface RPC fetch failures loudly. When get_account_values or
         # ib.portfolio() raise, _get_portfolio_state returns zeros — without
@@ -592,7 +624,7 @@ class PositionSizer:
         else:
             effective_base = cfg.base_position_usd
 
-        return {
+        summary = {
             'config': {
                 'min_position_usd': cfg.min_position_usd,
                 'max_position_usd': cfg.max_position_usd,
@@ -646,3 +678,10 @@ class PositionSizer:
             },
             'warnings': all_warnings,
         }
+        if self.gate_daily_loss_limit is not None:
+            summary['config'].update({
+                'risk_gate_max_daily_loss': self.gate_daily_loss_limit,
+                'effective_daily_loss_limit_usd': self.effective_daily_loss_limit,
+                'daily_loss_limit_source': self.daily_loss_limit_source(),
+            })
+        return summary
