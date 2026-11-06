@@ -1165,8 +1165,14 @@ class MMR:
         """
         return consume(self._rpc.rpc(return_type=dict).reconcile_with_broker())
 
-    def risk_report(self) -> dict:
-        """Generate a portfolio risk report. Requires trader_service for portfolio data."""
+    def risk_report(self, history_cache=None) -> dict:
+        """Generate a portfolio risk report. Requires trader_service for portfolio data.
+
+        ``history_cache``: optional ``portfolio_risk.CorrelationHistoryCache``
+        shared across calls by long-lived callers (the web dashboard) so the
+        daily-close history behind correlation clustering is not re-read from
+        DuckDB on every call. Default None reads fresh, as before.
+        """
         from trader.trading.portfolio_risk import PortfolioRiskAnalyzer
         cfg = self._container.config()
         duckdb_path = cfg.get('duckdb_path', '')
@@ -1189,7 +1195,8 @@ class MMR:
         acct_vals = consume(self._rpc.rpc(return_type=dict).get_account_values())
         net_liq = float(acct_vals.get('NetLiquidation', {}).get('value', 0)) if acct_vals else 0.0
 
-        analyzer = PortfolioRiskAnalyzer(duckdb_path, history_duckdb_path)
+        analyzer = PortfolioRiskAnalyzer(duckdb_path, history_duckdb_path,
+                                         history_cache=history_cache)
         try:
             gs = self._group_store()
         except Exception:

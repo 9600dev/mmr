@@ -1,10 +1,12 @@
 """Portfolio risk analysis — concentration, correlation, group budgets, and warnings."""
 
 from dataclasses import asdict, dataclass, field
-from typing import Dict, List, Optional, TypedDict  # noqa: F401
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypedDict  # noqa: F401
 
 import logging
 import math
+import threading
+import time
 
 
 class _PosRecord(TypedDict):
@@ -39,15 +41,94 @@ class RiskReport:
         return asdict(self)
 
 
+class CorrelationHistoryCache:
+    """Opt-in TTL cache for the slow-changing inputs of correlation clustering.
+
+    Correlation clusters are computed from ~60 DAILY closes per position plus
+    the universe symbol → conId map. Both change at most a few times a day,
+    yet a long-lived caller (the web dashboard refreshes every 15s) re-read
+    them from DuckDB on every request. This caches exactly those two inputs
+    for ``ttl_seconds``; everything derived from live positions (weights,
+    exposure, cluster weights, warnings) is still recomputed per call.
+
+    Entries are per history-DB key, so a portfolio that gains a position only
+    reads the new symbol. A symbol with no history is cached as "no data" for
+    the same TTL. Thread-safe; loads happen under the lock, so concurrent
+    requests do not stampede the database. Not used unless passed explicitly
+    to :class:`PortfolioRiskAnalyzer` — the CLI/SDK default stays uncached.
+    """
+
+    def __init__(self, ttl_seconds: float = 300.0, clock: Optional[Callable[[], float]] = None):
+        if not (ttl_seconds >= 0 and math.isfinite(ttl_seconds)):
+            raise ValueError(f'ttl_seconds must be a finite number >= 0, got {ttl_seconds!r}')
+        self.ttl_seconds = float(ttl_seconds)
+        self._clock: Callable[[], float] = clock or time.monotonic
+        self._lock = threading.Lock()
+        self._conid_maps: Dict[str, Tuple[float, Dict[str, int]]] = {}
+        self._closes: Dict[Tuple[str, str], Tuple[float, Any]] = {}
+
+    def _fresh(self, loaded_at: float, now: float) -> bool:
+        return (now - loaded_at) < self.ttl_seconds
+
+    def symbol_to_conid(self, duckdb_path: str, loader: Callable[[], Dict[str, int]]) -> Dict[str, int]:
+        with self._lock:
+            now = self._clock()
+            hit = self._conid_maps.get(duckdb_path)
+            if hit is not None and self._fresh(hit[0], now):
+                return hit[1]
+            mapping = loader()
+            self._conid_maps[duckdb_path] = (now, mapping)
+            return mapping
+
+    def closes(
+        self,
+        history_path: str,
+        keys: List[str],
+        loader: Callable[[List[str]], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Close series (or None = no data) per key, loading only stale/missing keys."""
+        with self._lock:
+            now = self._clock()
+            out: Dict[str, Any] = {}
+            missing: List[str] = []
+            for k in keys:
+                hit = self._closes.get((history_path, k))
+                if hit is not None and self._fresh(hit[0], now):
+                    out[k] = hit[1]
+                else:
+                    missing.append(k)
+            if missing:
+                loaded = loader(missing)
+                for k in missing:
+                    value = loaded.get(k)
+                    self._closes[(history_path, k)] = (now, value)
+                    out[k] = value
+            return out
+
+    def clear(self) -> None:
+        with self._lock:
+            self._conid_maps.clear()
+            self._closes.clear()
+
+
 class PortfolioRiskAnalyzer:
     """Analyzes portfolio risk: concentration, correlation, group budgets."""
 
-    def __init__(self, duckdb_path: str = '', history_duckdb_path: str = ''):
+    def __init__(
+        self,
+        duckdb_path: str = '',
+        history_duckdb_path: str = '',
+        history_cache: Optional['CorrelationHistoryCache'] = None,
+    ):
         # duckdb_path holds universes (symbol → conId); OHLCV bars live in a
         # SEPARATE history DB. Reading correlation history from the trading DB
         # returned nothing. Default history to the trading DB for back-compat.
         self._duckdb_path = duckdb_path
         self._history_duckdb_path = history_duckdb_path or duckdb_path
+        # Opt-in (None = read fresh every call, the default): long-lived
+        # callers such as the web dashboard pass a shared cache so the
+        # daily-close history is not re-read on every page refresh.
+        self._history_cache = history_cache
 
     def analyze(
         self,
@@ -240,12 +321,10 @@ class PortfolioRiskAnalyzer:
 
         try:
             import pandas as pd
-            from trader.data.duckdb_store import DuckDBDataStore, DuckDBConnection
+            from trader.data.duckdb_store import DuckDBDataStore
             from trader.data.universe import UniverseAccessor
 
             import datetime as _dt
-
-            ds = DuckDBDataStore(self._history_duckdb_path)
 
             # Look up conIds for each symbol from the universe definitions. The
             # OHLCV store is keyed by conId-as-string (falling back to ticker),
@@ -254,24 +333,55 @@ class PortfolioRiskAnalyzer:
             #  all_definitions() method that doesn't exist, plus a ds.read()
             #  call with a bogus `count=` kwarg — all three raised and were
             #  swallowed, so cluster warnings never fired.)
-            accessor = UniverseAccessor(self._duckdb_path, '')
-            symbol_to_conid = {}
-            for u in accessor.get_all():
-                for sd in getattr(u, 'security_definitions', []) or []:
-                    sym = getattr(sd, 'symbol', None)
-                    conid = getattr(sd, 'conId', None)
-                    if sym and conid:
-                        symbol_to_conid.setdefault(sym, conid)
+            def _load_symbol_to_conid() -> Dict[str, int]:
+                accessor = UniverseAccessor(self._duckdb_path, '')
+                mapping: Dict[str, int] = {}
+                for u in accessor.get_all():
+                    for sd in getattr(u, 'security_definitions', []) or []:
+                        sym = getattr(sd, 'symbol', None)
+                        conid = getattr(sd, 'conId', None)
+                        if sym and conid:
+                            mapping.setdefault(sym, conid)
+                return mapping
 
-            # Read ~60 trading days of daily closes for each symbol.
-            start = _dt.datetime.now() - _dt.timedelta(days=90)
-            close_series = {}
+            # Read ~60 trading days of daily closes for every position in ONE
+            # query (read_many). The per-symbol read() this replaced paid a
+            # DuckDB connect + scan per position: 15 positions = ~1.6s, which
+            # was most of the dashboard's page time.
+            def _load_closes(keys: List[str]) -> Dict[str, Optional['pd.Series']]:
+                ds = DuckDBDataStore(self._history_duckdb_path)
+                start = _dt.datetime.now() - _dt.timedelta(days=90)
+                frames = ds.read_many(keys, start=start, bar_size='1 day')
+                loaded: Dict[str, Optional['pd.Series']] = {}
+                for k in keys:
+                    hist = frames.get(k)
+                    if hist is not None and not hist.empty and 'close' in hist.columns:
+                        loaded[k] = hist['close'].tail(60)
+                    else:
+                        loaded[k] = None
+                return loaded
+
+            cache = self._history_cache
+            if cache is not None:
+                symbol_to_conid = cache.symbol_to_conid(self._duckdb_path, _load_symbol_to_conid)
+            else:
+                symbol_to_conid = _load_symbol_to_conid()
+
+            key_for: Dict[str, str] = {}
             for sym in symbols:
                 con_id = symbol_to_conid.get(sym)
-                key = str(con_id) if con_id is not None else sym
-                hist = ds.read(key, start=start, bar_size='1 day')
-                if hist is not None and not hist.empty and 'close' in hist.columns:
-                    close_series[sym] = hist['close'].tail(60)
+                key_for[sym] = str(con_id) if con_id is not None else sym
+            keys = list(dict.fromkeys(key_for.values()))
+            if cache is not None:
+                closes_by_key = cache.closes(self._history_duckdb_path, keys, _load_closes)
+            else:
+                closes_by_key = _load_closes(keys)
+
+            close_series = {}
+            for sym in symbols:
+                series = closes_by_key.get(key_for[sym])
+                if series is not None:
+                    close_series[sym] = series
 
             data_coverage = len(close_series)
             if data_coverage < 2:

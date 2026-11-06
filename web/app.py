@@ -19,15 +19,22 @@ Design notes:
 - Each dashboard section fetches independently and degrades to an error banner
   if trader_service is unreachable, so a service blip never blanks the page.
   Proposals are local DuckDB and keep working even when trader_service is down.
+- Speed (2026-11-05: page was ~2s / 135KB on every 15s refresh): the risk
+  section's correlation history (daily closes + universe conIds) is cached for
+  ``MMR_WEB_RISK_HISTORY_TTL`` seconds (default 300, 0 = off) while exposure is
+  still computed live; reasoning markdown is memoised; responses are gzipped;
+  each section's cost is reported in the ``Server-Timing`` response header.
 """
 from __future__ import annotations
 
+import functools
 import html as _html
 import logging
 import os
 import re
 import secrets
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import quote
@@ -35,6 +42,7 @@ from urllib.parse import quote
 import markdown as _markdown
 import pandas as pd
 from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -73,22 +81,37 @@ def _neutralize_bad_hrefs(html: str) -> str:
     return _ANCHOR_RE.sub(repl, html)
 
 
+# The shared Markdown instance is stateful (reset()/convert()) and route
+# handlers run concurrently in FastAPI's threadpool, so conversions are
+# serialised.
+_MD_LOCK = threading.Lock()
+
+
 def _render_md(text: Any) -> str:
     if not text:
         return ''
-    if _nh3 is not None:
-        _MD.reset()
-        raw = _MD.convert(str(text))
-        html = _nh3.clean(
-            raw,
-            link_rel='noopener noreferrer nofollow',
-        )
-    else:
-        # Escape first so raw HTML tags can never be emitted; markdown syntax
-        # (*, _, [](), `) survives escaping untouched.
-        _MD.reset()
-        html = _MD.convert(_html.escape(str(text), quote=False))
-        html = _neutralize_bad_hrefs(html)
+    return _render_md_cached(str(text))
+
+
+# Rendering is a pure function of the text, and the page re-renders the same
+# ~100 proposals' reasoning every 15s auto-refresh — memoise it. Bounded so a
+# long-running process cannot grow without limit.
+@functools.lru_cache(maxsize=1024)
+def _render_md_cached(text: str) -> str:
+    with _MD_LOCK:
+        if _nh3 is not None:
+            _MD.reset()
+            raw = _MD.convert(text)
+            html = _nh3.clean(
+                raw,
+                link_rel='noopener noreferrer nofollow',
+            )
+        else:
+            # Escape first so raw HTML tags can never be emitted; markdown syntax
+            # (*, _, [](), `) survives escaping untouched.
+            _MD.reset()
+            html = _MD.convert(_html.escape(text, quote=False))
+            html = _neutralize_bad_hrefs(html)
     # Reasoning links point at external references — open them in a new tab.
     return html.replace('<a href=', '<a target="_blank" rel="noopener noreferrer" href=')
 
@@ -99,6 +122,9 @@ def _preview(text: Any, n: int = 90) -> str:
     return (s[: n - 1] + '…') if len(s) > n else s
 
 app = FastAPI(title='MMR Dashboard')
+# The page is ~135KB of highly repetitive HTML (mostly proposal reasoning
+# popups) re-fetched every 15s; gzip shrinks it several-fold losslessly.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 _TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / 'templates'))
 
 # CSRF: a per-process token embedded as a hidden field in every approve/reject
@@ -202,8 +228,32 @@ def fetch_status() -> Optional[dict]:
     return _call(lambda m: m.status())
 
 
+def _risk_history_ttl() -> float:
+    raw = os.environ.get('MMR_WEB_RISK_HISTORY_TTL', '300')
+    try:
+        ttl = float(raw)
+    except ValueError:
+        raise ValueError(
+            f'MMR_WEB_RISK_HISTORY_TTL must be a number of seconds, got {raw!r}') from None
+    return ttl
+
+
+# Correlation clustering in the risk report reads ~60 DAILY closes per
+# position plus the universe symbol→conId map from DuckDB — ~1.6s per page
+# load for 15 positions, re-read on every 15s refresh although daily bars
+# change at most a few times a day. Cache just those inputs (default 5 min,
+# MMR_WEB_RISK_HISTORY_TTL; 0 disables). Exposure, weights, cluster weights and
+# warnings are still computed from live positions on every request.
+def _make_risk_history_cache():
+    from trader.trading.portfolio_risk import CorrelationHistoryCache
+    return CorrelationHistoryCache(ttl_seconds=_risk_history_ttl())
+
+
+_RISK_HISTORY_CACHE = _make_risk_history_cache()
+
+
 def fetch_risk() -> Optional[dict]:
-    return _call(lambda m: m.risk_report())
+    return _call(lambda m: m.risk_report(history_cache=_RISK_HISTORY_CACHE))
 
 
 def fetch_risk_limits() -> Optional[dict]:
@@ -258,16 +308,20 @@ def dashboard(request: Request, flash: str = ''):
         'strategies': fetch_strategies,
         'proposals': fetch_proposals,
     }
+    timings: dict[str, float] = {}
     for key, fn in fetchers.items():
+        t0 = time.perf_counter()
         try:
             sections[key] = fn()
         except Exception as exc:  # noqa: BLE001 - surface, don't crash the page
             logger.warning('dashboard section %s failed: %s', key, exc)
             sections[key] = None
             errors[key] = f'{type(exc).__name__}: {exc}'
+        timings[key] = (time.perf_counter() - t0) * 1000.0
 
     strategies = sections.get('strategies') or []
-    return _TEMPLATES.TemplateResponse(request, 'dashboard.html', {
+    t0 = time.perf_counter()
+    response = _TEMPLATES.TemplateResponse(request, 'dashboard.html', {
         'cash': sections.get('cash'),
         'snapshot': sections.get('snapshot'),
         'status': sections.get('status'),
@@ -281,6 +335,13 @@ def dashboard(request: Request, flash: str = ''):
         'flash': flash,
         'csrf_token': _CSRF_TOKEN,
     })
+    timings['render'] = (time.perf_counter() - t0) * 1000.0
+    # Per-section cost, visible in browser devtools / `curl -D-` — this is how
+    # the 2.3s page was diagnosed; keep it observable.
+    response.headers['Server-Timing'] = ', '.join(
+        f'{k};dur={v:.1f}' for k, v in timings.items())
+    logger.debug('dashboard timings (ms): %s', timings)
+    return response
 
 
 @app.post('/proposals/{pid}/approve')
