@@ -1,5 +1,6 @@
 from asyncio import AbstractEventLoop
-from trader.common.logging_helper import LogLevels, set_all_log_level, setup_logging
+from trader.common.logging_helper import LogLevels, prune_old_logs, set_all_log_level, setup_logging
+from trader.common.loop_health import configure_event_loop
 from trader.container import Container, default_config_path
 from trader.strategy.strategy_runtime import StrategyRuntime
 
@@ -19,11 +20,17 @@ RESTART_DELAY_BASE = 5
 @click.option('--simulation', required=False, default=False, help='load with historical data')
 @click.option('--config', required=False, default='',
               help='trader.yaml config file location')
+@click.option('--debug', is_flag=True, default=False,
+              help='enable asyncio debug mode (same as MMR_ASYNCIO_DEBUG=1)')
 def main(simulation: bool,
-         config: str):
+         config: str,
+         debug: bool = False):
 
     if not config:
         config = default_config_path()
+
+    # Session log retention (MMR_LOG_RETENTION_DAYS, default 14; 0 = off).
+    prune_old_logs(logger=logging)
 
     is_stopping = False
     loop = asyncio.new_event_loop()
@@ -50,10 +57,12 @@ def main(simulation: bool,
         raise ValueError('simulation not implemented yet')
 
     try:
+        # TRADER_NODEBUG is a LOG-LEVEL switch only (historical name). asyncio
+        # debug mode is opt-in via --debug / MMR_ASYNCIO_DEBUG and is no
+        # longer implied by its absence — see trader/common/loop_health.py.
         if os.environ.get('TRADER_NODEBUG'):
             set_all_log_level(LogLevels.CRITICAL)
-        else:
-            loop.set_debug(enabled=True)
+        configure_event_loop(loop, logging, cli_debug=debug)
 
         loop.add_signal_handler(signal.SIGINT, stop_loop, loop)
         loop.add_signal_handler(signal.SIGTERM, stop_loop, loop)

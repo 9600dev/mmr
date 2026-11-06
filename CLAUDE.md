@@ -623,6 +623,65 @@ uid split that made it unwritable. Note: EVERY process that loads the logging
 config (each CLI run) creates its own session-stamped file set — the monitor
 scripts resolve the newest *non-empty* file for this reason.
 
+**Why one start leaves several timestamps / files per service.** The stamp is
+taken once per *process* at `logging_helper` import, and a start launches
+data_service, trader_service and strategy_service seconds apart — so three
+stamps. Each process writes its own service file plus root's
+`trader_<ts>.log` (INFO+ catch-all, including loggers with no file of their
+own) and `errors_<ts>.log`; that much is by design. Two parts were accidental
+and are fixed (2026-11-05): (1) every ERROR was written to `errors_<ts>.log`
+**twice** — service loggers listed `error_file_handler` and also propagated to
+root, which lists it too; `setup_logging` now strips any handler a logger also
+reaches by propagation (`_dedupe_propagated_handlers`, so older
+`~/.config/mmr/logging.yaml` copies are fixed without editing them) and the
+template no longer lists it; (2) service-file handlers are routed by *logger*
+name, and the shared `ib_history` logger made strategy_service create a
+`data_service_<its ts>.log`. `trader_service_handler` /
+`strategy_service_handler` / `data_service_handler` now drop records in a
+process positively identified as a *different* service (`ServiceRoleFilter`,
+role from `python -m trader.<service>`); a process of unknown role (CLI,
+pytest) keeps the old routing, so a service started some other way never loses
+its own file.
+
+**Retention.** Each service (`trader_service`, `strategy_service`,
+`data_service`) prunes session-stamped logs at startup (`prune_old_logs`):
+`<name>_<YYYY-MM-DD_HH-MM-SS>.log` and its `.log.N` rotations, decided per
+session (all files sharing a stamp) by the session's NEWEST mtime, so a
+long-running service that still writes its pulse keeps its rarely-written
+`errors_<ts>.log` (deleting a file another live process holds open would send
+its future lines to an unlinked inode). Never deleted: the current process's
+session, any file a handler in the process has open, and unstamped files
+(`debug.log*`, `pycron_cron.log`, watchdog logs rotate in place under their own
+bounds). `MMR_LOG_RETENTION_DAYS` (default **14**; `0` disables; a non-integer
+or negative value refuses to start). A file that can't be deleted is a WARNING,
+not a crash. The first start after this landed removes everything idle > 14
+days (~4,000 files / ~1.3GB on the 2026-11-05 host).
+
+**IB message levels — one table, one line.** IB sends status chatter,
+warnings and failures through the same `error()` callback.
+`trader/listeners/ib_informational.py::ib_log_level(code, message)` is the
+only place severity is decided (used by `IBAIORx` and `IBHistoryWorker`):
+DEBUG for farm-OK (2104/2106/2107/2158) and 202 cancel confirmations; INFO for
+farm status (2103/2105/2108/2119/2157, still logged as `ibrx farm status:`),
+2109 (outside-RTH attribute ignored), 10349 (TIF set by preset), 162 *"API
+scanner subscription cancelled"* and 365 *"No scanner subscription found"*;
+WARNING for user-actionable 10089/310 (depth/market data without a
+subscription) and the rest of IB's 2100-2199 warning range (e.g. 2150, 2110);
+ERROR for everything else (including other 162 texts, e.g. "Market Scanner is
+not configured"). Each IB message is logged once by MMR: ib_async's own
+`Error <code>, reqId ...` line is muted on IB instances whose `errorEvent` MMR
+handles (`quiet_handled_errors`; other wrapper log lines pass through). A
+reconnect used to re-attach the name-mangled `__handle_error` as an UNBOUND
+function (eventkit then logged a TypeError on every IB error); event-handler
+snapshot/restore now rebinds it.
+
+**TRACE (level 5).** Per-event chatter that would otherwise dominate the
+service logs at their default DEBUG level — every portfolio mark
+(`__update_portfolio`, `updating portfolio universe with PortfolioItem(...)`)
+— is logged at `logging_helper.TRACE`, which nothing emits by default. To see
+it, set the logger's level to `TRACE` in `~/.config/mmr/logging.yaml` (e.g.
+`trading_runtime: {level: TRACE, ...}`). The 30s INFO pulse is unaffected.
+
 **`MMR_LOG_DIR` overrides the log directory** (default
 `~/.local/share/mmr/logs`). `tests/conftest.py` sets it to
 `$TMPDIR/mmr-pytest-logs` so a host `pytest` run cannot write into the live
@@ -636,6 +695,21 @@ otherwise redirect nothing. It must be set **before** any `trader` import (the
 constant is read at `logging_helper` import time). The container never sets it,
 so its behaviour is unchanged. Note this is NOT `AUDIT_ROADMAP` G7 (tests
 dialling the live RPC port), which is a separate, more serious issue.
+
+**asyncio debug mode is opt-in** (`trader/common/loop_health.py`). Set
+`MMR_ASYNCIO_DEBUG=1` (or pass `--debug` to `trader_service` /
+`strategy_service`; on `trader_service` `--debug` also turns on verbose
+ib_async logging) to get asyncio's per-callback tracking and its
+`Executing <Handle ...> took N seconds` slow-callback lines. An unrecognised
+value raises at startup. Until 2026-11-05 both services enabled debug mode
+whenever `TRADER_NODEBUG` was unset — i.e. always in production, at a cost on
+every callback. **`TRADER_NODEBUG` is now a log-level switch only** (set: all
+loggers to CRITICAL — its historical behaviour, kept for compatibility); it
+has no bearing on asyncio. In every mode a cheap `LoopLagMonitor` (one timer
+per second) logs `WARNING event loop lag N.NNNs (threshold ...)` when the loop
+runs a timer later than `MMR_LOOP_LAG_WARN_S` (default 0.5s): that is the
+"something blocked the loop" signal; re-run with `MMR_ASYNCIO_DEBUG=1` to name
+the slow callback.
 
 A handler whose file can't be opened is now **dropped individually**
 (`_drop_unwritable_handlers`) instead of taking the whole config down to
@@ -1033,4 +1107,4 @@ All local file/YAML operations.
 | Single test file | ~1-2s |
 
 #### Python Import Overhead
-All commands have ~1s baseline overhead for Python startup + importing trader modules (pandas, numpy, duckdb, etc.). This is unavoidable and included in all timings above.
+Every one-shot `mmr` command pays Python startup + `import trader.mmr_cli`. That import was ~0.85-1.1s until 2026-11-05, mostly scipy.stats (~400ms, from two rarely-used helpers in `trader/common/helpers.py`) and exchange_calendars (~200ms); both are now imported inside the functions that use them and the import measures ~0.35s (median of 7, `python -c 'import time;t=time.perf_counter();import trader.mmr_cli;...'`). The remainder is pandas/pyarrow/duckdb/ib_async, which the sdk needs at module level. `tests/test_cli_import_time.py` fails if scipy, exchange_calendars, bs4, plotille or pypager reappear on that path — keep heavy, rarely-needed imports function-local in any module the CLI imports (`python -X importtime -c 'import trader.mmr_cli'` shows what's costing).

@@ -6,7 +6,7 @@ Can run in two modes:
 """
 
 from trader.common.helpers import dateify, pdt, timezoneify
-from trader.common.logging_helper import setup_logging
+from trader.common.logging_helper import prune_old_logs, setup_logging
 from trader.container import Container, default_config_path
 from trader.data.data_access import SecurityDefinition, TickData, TickStorage
 from trader.data.store import DateRange
@@ -531,6 +531,9 @@ def main():
     parser = argparse.ArgumentParser(prog='data-service', description='MMR Data Service')
     parser.add_argument('--config', default='', help='trader.yaml config file location')
     args = parser.parse_args()
+
+    # Session log retention (MMR_LOG_RETENTION_DAYS, default 14; 0 = off).
+    prune_old_logs(logger=logging)
 
     config_file = args.config or default_config_path()
     container = Container.create(config_file)

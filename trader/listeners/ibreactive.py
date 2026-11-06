@@ -21,6 +21,7 @@ from typing import cast, Dict, Iterator, List, Optional, Set, TypeVar, Union
 
 import asyncio
 import backoff
+import types
 import datetime
 import datetime as dt
 import pandas as pd
@@ -117,9 +118,23 @@ def _snapshot_event_handlers(ib):
                 if bound_to is None:
                     bound_to = getattr(slot, 'obj', None)
                 if bound_to is not None:
+                    # Rebind the slot's function to its owner directly.
+                    # ``getattr(bound_to, func.__name__)`` failed for every
+                    # name-mangled private handler (``self.__handle_error`` is
+                    # stored as ``_IBAIORx__handle_error`` but its __name__ is
+                    # ``__handle_error``) and fell back to the UNBOUND
+                    # function: after each reconnect errorEvent held an extra
+                    # unbound slot that raised TypeError (logged by eventkit)
+                    # on every IB error, next to the re-added bound handler.
                     try:
-                        handler = getattr(bound_to, func.__name__)
+                        candidate = getattr(bound_to, func.__name__)
                     except Exception:
+                        candidate = None
+                    if candidate is not None and getattr(candidate, '__func__', candidate) is func:
+                        handler = candidate
+                    elif isinstance(func, types.FunctionType):
+                        handler = types.MethodType(func, bound_to)
+                    else:
                         handler = func
                 else:
                     handler = func
@@ -176,6 +191,7 @@ class IBAIORx():
 
         self.ib = IB()
         ib_informational.install(self.ib)
+        ib_informational.quiet_handled_errors(self.ib)
 
         def mapper(tickers: Set[Ticker]) -> Observable[Ticker]:
             # warning: for whatever reason, we can get either a Set of tickers or a single ticker.
@@ -317,9 +333,16 @@ class IBAIORx():
                 pass
 
     async def __handle_error(self, reqId, errorCode, errorString, contract):
-        global error_code
+        # Severity comes from ONE table (ib_informational.ib_log_level); this
+        # handler is the single place an IB errorEvent message is logged by
+        # MMR (ib_async's own raw line is muted via quiet_handled_errors).
+        level = ib_informational.ib_log_level(errorCode, errorString)
 
-        if errorCode in (2104, 2106, 2107, 2158):
+        if errorCode in ib_informational.FARM_OK_CODES:
+            # "farm connection is OK" chatter: logged at DEBUG, never forwarded
+            # to error_subject (it signals nothing to a caller).
+            logging.log(level, 'ibrx farm status: reqId: %s errorCode: %s errorString: %s',
+                        reqId, errorCode, errorString)
             return
 
         if errorCode == 10197:
@@ -329,28 +352,17 @@ class IBAIORx():
             self._md_lost_at = time.time()
             self._ensure_md_retry_task()
 
-        if errorCode == 202:
-            # for whatever reason, order cancellations are considered errors
-            # we don't want to log these
-            logging.debug(
-                'ibrx reqId: {} errorCode: {} errorString: {} contract: {}'.format(
-                    reqId, errorCode, errorString, contract
-                ))
-        elif errorCode in (2103, 2105, 2119):
+        if errorCode in ib_informational.FARM_STATUS_CODES:
             # G2: transient farm-status codes (farm disconnected / connecting)
             # during the nightly gateway restart are status, not errors — at
             # ERROR they false-match every `grep -i error` health scan. They
             # still flow to error_subject below, which is what drives the
             # upstream-connectivity tracking.
-            logging.info(
-                'ibrx farm status: reqId: {} errorCode: {} errorString: {}'.format(
-                    reqId, errorCode, errorString
-                ))
+            logging.log(level, 'ibrx farm status: reqId: %s errorCode: %s errorString: %s',
+                        reqId, errorCode, errorString)
         else:
-            logging.error(
-                'ibrx reqId: {} errorCode: {} errorString: {} contract: {}'.format(
-                    reqId, errorCode, errorString, contract
-                ))
+            logging.log(level, 'ibrx reqId: %s errorCode: %s errorString: %s contract: %s',
+                        reqId, errorCode, errorString, contract)
         self.error_subject.on_next(IBAIORxError(reqId, errorCode, errorString, contract))
 
     @backoff.on_exception(backoff.expo, Exception, max_tries=5, max_time=60)
@@ -383,6 +395,7 @@ class IBAIORx():
         # Create a fresh IB instance to avoid stale socket state
         self.ib = IB()
         ib_informational.install(self.ib)
+        ib_informational.quiet_handled_errors(self.ib)
         _restore_event_handlers(self.ib, preserved)
 
         self._shutdown = False
@@ -450,6 +463,7 @@ class IBAIORx():
         preserved = _snapshot_event_handlers(self.ib)
         self.ib = IB()
         ib_informational.install(self.ib)
+        ib_informational.quiet_handled_errors(self.ib)
         _restore_event_handlers(self.ib, preserved)
 
         self._shutdown = False

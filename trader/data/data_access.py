@@ -3,7 +3,6 @@ from decimal import Decimal, InvalidOperation
 from dateutil.tz import gettz
 from dateutil.tz.tz import tzfile
 from durations import Duration
-from exchange_calendars import ExchangeCalendar
 from ib_async.contract import Contract, ContractDetails
 from pandas.core.base import PandasObject
 from trader.common.helpers import daily_close, daily_open, dateify, market_hours, symbol_to_contract
@@ -12,10 +11,15 @@ from trader.data.bar_quality import impossible_mask
 from trader.data.store import DateRange
 from trader.data.duckdb_store import DuckDBDataStore, DuckDBObjectStore, _default_db_path
 from trader.objects import BarSize
-from typing import cast, Generic, List, NamedTuple, Optional, Set, Tuple, TypeVar, Union
+from typing import cast, Generic, List, NamedTuple, Optional, Set, Tuple, TypeVar, Union, TYPE_CHECKING
 
 import datetime as dt
 import pandas as pd
+
+if TYPE_CHECKING:
+    # exchange_calendars costs ~200ms at import and this module is on the
+    # `import trader.mmr_cli` path; it is only needed for the annotation.
+    from exchange_calendars import ExchangeCalendar
 
 
 logging = setup_logging(module_name='data')
@@ -677,7 +681,7 @@ class TickData(Data):
 
     def missing(self,
                 contract: Union[Contract, SecurityDefinition, int],
-                exchange_calendar: ExchangeCalendar,
+                exchange_calendar: 'ExchangeCalendar',
                 pd_offset: Optional[str] = None,
                 period: Optional[str] = None,
                 date_range: Optional[DateRange] = None) -> List[DateRange]:
