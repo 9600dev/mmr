@@ -11976,10 +11976,8 @@ def _handle_news(mmr: MMR, args: argparse.Namespace):
             for a in articles:
                 tickers_str = ', '.join(a.get('tickers', []))
                 console.print(f'\n[bold]{a["title"]}[/bold]')
-                console.print(
-                    f'[dim]{a["published"]}  |  {a["author"]}'
-                    f'{"  |  " + tickers_str if tickers_str else ""}[/dim]'
-                )
+                _meta = [str(x) for x in (a.get('published'), a.get('author'), tickers_str) if x]
+                console.print(f'[dim]{"  |  ".join(_meta)}[/dim]')
                 desc = a.get('description') or a.get('teaser', '')
                 if desc:
                     console.print(desc)

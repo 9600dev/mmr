@@ -143,6 +143,15 @@ def _gate_daily_loss_limit() -> Optional[float]:
         return None
 
 
+_PLACEHOLDER_AUTHORS = {'na', 'n/a', 'n.a.', 'none', 'null', 'unknown', 'nan', '-'}
+
+
+def _clean_author(author: Any) -> str:
+    """News feeds send 'Na'/'Unknown' for a missing byline; report that as ''."""
+    s = str(author or '').strip()
+    return '' if s.lower() in _PLACEHOLDER_AUTHORS else s
+
+
 def normalize_ib_quote(q: dict) -> dict:
     """Common snapshot schema for IB quotes (see MMR.snapshot).
 
@@ -4521,7 +4530,7 @@ class MMR:
                     'published': a.published or '',
                     'title': a.title or '',
                     'tickers': ', '.join(a.tickers) if a.tickers else '',
-                    'author': a.author or '',
+                    'author': _clean_author(a.author),
                     'url': a.url or '',
                     'teaser': a.teaser or '',
                 })
@@ -4541,7 +4550,7 @@ class MMR:
                     'title': a.title or '',
                     'tickers': ', '.join(a.tickers) if a.tickers else '',
                     'sentiment': sentiment,
-                    'author': a.author or '',
+                    'author': _clean_author(a.author),
                     'url': a.article_url or '',
                 })
                 if len(rows) >= limit:
@@ -4574,7 +4583,7 @@ class MMR:
                 results.append({
                     'title': a.title or '',
                     'published': a.published or '',
-                    'author': a.author or '',
+                    'author': _clean_author(a.author),
                     'tickers': a.tickers or [],
                     'tags': a.tags or [],
                     'url': a.url or '',
@@ -4598,7 +4607,7 @@ class MMR:
                 results.append({
                     'title': a.title or '',
                     'published': (a.published_utc or '')[:19],
-                    'author': a.author or '',
+                    'author': _clean_author(a.author),
                     'tickers': a.tickers or [],
                     'description': a.description or '',
                     'insights': insights,
