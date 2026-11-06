@@ -1292,8 +1292,30 @@ class IBAIORx():
             sub.marketCapAbove = market_cap_above
 
         results = await self.ib.reqScannerDataAsync(sub, [], [])
+        scans = list(results or [])
+
+        # IB's scanner message carries only conId/symbol/secType/localSymbol/
+        # tradingClass/marketName (see ib_async decoder.scannerData) — NOT
+        # ContractDetails.stockType, which is the authoritative instrument
+        # class ('COMMON', 'ETF', 'RIGHT', 'UNIT', 'PREFERRED', 'ADR', ...).
+        # A right such as 'NMZ RT' (stockType RIGHT) is secType STK like any
+        # common share, so callers that must tell them apart need stockType.
+        # One concurrent reqContractDetails per row; a failed lookup yields
+        # stockType None (unknown), never a guess.
+        async def _details(c: Contract):
+            try:
+                cds = await self.ib.reqContractDetailsAsync(Contract(conId=c.conId))
+            except Exception as ex:
+                logging.warning('scanner: contract details failed for %s (conId %s): %s',
+                                c.symbol, c.conId, ex)
+                return None
+            return cds[0] if cds else None
+
+        details = await asyncio.gather(
+            *(_details(s.contractDetails.contract) for s in scans))
+
         rows = []
-        for scan in (results or []):
+        for scan, det in zip(scans, details):
             cd = scan.contractDetails
             c = cd.contract
             rows.append({
@@ -1303,6 +1325,10 @@ class IBAIORx():
                 'exchange': c.primaryExchange or c.exchange,
                 'currency': c.currency,
                 'conId': c.conId,
+                'localSymbol': c.localSymbol,
+                'tradingClass': c.tradingClass,
+                'stockType': (det.stockType or None) if det is not None else None,
+                'longName': (det.longName or None) if det is not None else None,
             })
         return rows
 

@@ -1337,6 +1337,9 @@ def build_parser() -> argparse.ArgumentParser:
                          help='Min volume filter')
     scan_p.add_argument('--market-cap-above', type=float, default=0.0,
                          help='Min market cap filter')
+    scan_p.add_argument('--include-all', dest='include_all', action='store_true', default=False,
+                         help='Keep rights, warrants and units (IB stockType RIGHT/WARRANT/'
+                              'UNIT, e.g. "NMZ RT"); excluded by default')
     scan_p.add_argument('--list-locations', action='store_true', default=False,
                          help='Diagnostic: list every scanner location code this '
                               'account is authorised for, then exit. Use when '
@@ -1394,6 +1397,16 @@ def build_parser() -> argparse.ArgumentParser:
                          default=_src_default(['massive', 'twelvedata'], 'massive'),
                           help='Data source for US equities (default: %(default)s). '
                                'Ignored when --location is set (IB path).')
+    _etp_grp = ideas_p.add_mutually_exclusive_group()
+    _etp_grp.add_argument('--include-etp', dest='etp_mode', action='store_const',
+                          const='none', default='leveraged',
+                          help='Keep leveraged/inverse ETPs (UVXY, SQQQ, ...), which are '
+                               'excluded by default. ETP-ness comes from the data '
+                               "source's instrument metadata (TwelveData ETF list, Massive "
+                               'type, IB stockType) plus a curated safety-net list')
+    _etp_grp.add_argument('--exclude-all-etp', dest='etp_mode', action='store_const',
+                          const='all',
+                          help='Exclude EVERY ETF/ETN/ETP, not just leveraged/inverse ones')
 
     # propose
     propose_p = sub.add_parser('propose', help='Create a trade proposal',
@@ -4250,7 +4263,10 @@ def _handle_strategies(mmr: MMR, args: argparse.Namespace):
             return
         result = mmr.enable_strategy(args.name)
         if result.is_success():
-            print_status(f'Enabled: {args.name}')
+            # Allowed by the gate; surface whether the PASS that allowed it
+            # carries any statistical edge (record-only S4/S5).
+            suffix = _gauntlet_edge_suffix(_gauntlet_edge_for_name(args.name))
+            print_status(f'Enabled: {args.name}{suffix}')
         else:
             print_status(f'Enable failed: {result.error}', success=False)
     elif action == 'disable':
@@ -4341,6 +4357,15 @@ def _handle_strategies_list(mmr: MMR):
         _handle_strategies_from_config()
         return
 
+    # Statistical-edge assessment of each strategy's authorizing gauntlet
+    # PASS: S4/S5 are record-only, so a deployed strategy can hold a PASS
+    # with DSR 0.09. Additive columns; never blocks the listing.
+    edges = {str(n): _gauntlet_edge_for_name(str(n)) for n in df['name']}
+    df = df.copy()
+    df['edge_credible'] = [(edges[str(n)] or {}).get('edge_credible') for n in df['name']]
+    df['edge_warnings'] = [list((edges[str(n)] or {}).get('warnings') or [])
+                           for n in df['name']]
+
     if _json_mode:
         print_df(df, title='Strategies (live from strategy_service)')
         return
@@ -4357,6 +4382,7 @@ def _handle_strategies_list(mmr: MMR):
     table.add_column('auto', justify='center', no_wrap=True)
     table.add_column('bar', no_wrap=True)
     table.add_column('hist', justify='right', no_wrap=True)
+    table.add_column('edge', justify='center', no_wrap=True)
     table.add_column('symbols', no_wrap=False, ratio=2)
     table.add_column('params', no_wrap=False, ratio=2)
 
@@ -4403,6 +4429,15 @@ def _handle_strategies_list(mmr: MMR):
             params_disp = '[dim]-[/dim]'
 
         auto_disp = '[bold red]AUTO[/bold red]' if row.get('auto_execute') else '[dim]-[/dim]'
+        edge = edges.get(str(row.get('name', '')))
+        if edge is None:
+            edge_disp = '[dim]-[/dim]'          # no PASS for current hash / not in YAML
+        elif edge.get('edge_credible') is True:
+            edge_disp = '[green]credible[/green]'
+        elif edge.get('edge_credible') is False:
+            edge_disp = '[bold yellow]NOT credible[/bold yellow]'
+        else:
+            edge_disp = '[yellow]not evaluated[/yellow]'
 
         table.add_row(
             str(row.get('name', '?')),
@@ -4410,11 +4445,19 @@ def _handle_strategies_list(mmr: MMR):
             auto_disp,
             str(row.get('bar_size', '?')),
             str(row.get('hist_days_prior', '?')),
+            edge_disp,
             symbols_disp,
             params_disp,
         )
 
     console.print(table)
+    flagged = [(n, e) for n, e in edges.items()
+               if e is not None and e.get('edge_credible') is False]
+    for n, e in flagged:
+        console.print(f'[bold yellow]WARNING: {escape(n)} — gauntlet PASS has NO '
+                      f'statistically credible edge[/bold yellow]')
+        for w in e.get('warnings') or []:
+            console.print(f'[yellow]  - {escape(str(w))}[/yellow]')
 
 
 def _handle_strategies_inspect(args: argparse.Namespace):
@@ -4770,6 +4813,7 @@ def _handle_strategies_from_config():
         return
 
     rows = []
+    edges_cfg: Dict[str, Any] = {}
     for s in strategies:
         row = {
             'name': s.get('name', ''),
@@ -4782,8 +4826,22 @@ def _handle_strategies_from_config():
         params = s.get('params', {})
         if params:
             row['params'] = ', '.join(f'{k}={v}' for k, v in params.items())
+        edges_cfg[str(row['name'])] = _gauntlet_edge_for_name(str(row['name']))
+        if _json_mode:
+            # Additive JSON fields; the Rich table stays narrow (warnings are
+            # printed under it instead).
+            edge = edges_cfg[str(row['name'])]
+            row['edge_credible'] = edge.get('edge_credible') if edge else None
+            row['edge_warnings'] = list(edge.get('warnings') or []) if edge else []
         rows.append(row)
     print_df(pd.DataFrame(rows), title='Strategies (from config)')
+    if not _json_mode:
+        for n, e in edges_cfg.items():
+            if e is not None and e.get('edge_credible') is False:
+                console.print(f'[bold yellow]WARNING: {escape(n)} — gauntlet PASS has NO '
+                              f'statistically credible edge[/bold yellow]')
+                for w in e.get('warnings') or []:
+                    console.print(f'[yellow]  - {escape(str(w))}[/yellow]')
 
 
 def _handle_strategy_create(args: argparse.Namespace):
@@ -5411,11 +5469,66 @@ def _gauntlet_run(module_file: Path, class_name: str, duckdb_path: str,
         and checks['s2_lookahead']['status'] in ('pass', 'not_evaluable')
         and all(checks[k]['status'] != 'fail' for k in _CAN_FAIL_VERDICT)
     )
+    # The verdict above is the gate and is untouched. The statistical stages
+    # are record-only by default, so a PASS can carry DSR 0.09 — the edge
+    # assessment says so explicitly instead of letting PASS imply an edge.
+    from trader.data.gauntlet_store import assess_statistical_edge
+    edge = assess_statistical_edge(checks)
     return {
         'code_hash': code_hash,
         'verdict': 'PASS' if passed else 'FAIL',
         'checks': checks,
+        'edge_credible': edge['edge_credible'],
+        'warnings': edge['warnings'],
     }
+
+
+def _gauntlet_edge_for(module_file: Path, class_name: str) -> Optional[Dict[str, Any]]:
+    """Statistical-edge assessment of the PASS record that authorizes
+    ``module_file``'s CURRENT hash for ``class_name``.
+
+    Returns ``{'edge_credible', 'warnings', 'run_id'}``, or None when there
+    is no such PASS (the refusal path already reports that). Never raises:
+    a store error is returned as an unknown edge with the error as the
+    warning, because this only ever ADDS a warning to a path that has
+    already been allowed — it must not turn into a second gate."""
+    from trader.data.backtest_store import compute_strategy_hash
+    from trader.data.gauntlet_store import GauntletStore, assess_statistical_edge
+    try:
+        code_hash = compute_strategy_hash(str(module_file))
+        duckdb_path = _gauntlet_db_path()
+        if not code_hash or not duckdb_path:
+            return None
+        rec = GauntletStore(duckdb_path).latest_pass_for_hash(code_hash, class_name)
+    except Exception as ex:                               # noqa: BLE001
+        return {'edge_credible': None, 'run_id': None,
+                'warnings': [f'could not read the gauntlet record to assess the '
+                             f'statistical edge: {type(ex).__name__}: {ex}']}
+    if rec is None:
+        return None
+    edge = assess_statistical_edge(rec.checks)
+    edge['run_id'] = rec.id
+    return edge
+
+
+def _gauntlet_edge_suffix(edge: Optional[Dict[str, Any]]) -> str:
+    """Print the edge warnings (yellow, console → stderr in --json mode) and
+    return a short suffix for the final status message so JSON consumers
+    see it too. Empty when the edge is credible or there is no record."""
+    if not edge or edge.get('edge_credible') is True:
+        return ''
+    run = f" (gauntlet #{edge['run_id']})" if edge.get('run_id') is not None else ''
+    if edge.get('edge_credible') is False:
+        console.print(f'[bold yellow]WARNING: gauntlet PASS{run} has NO statistically '
+                      f'credible edge (edge_credible: false)[/bold yellow]')
+        label = 'edge_credible: false'
+    else:
+        console.print(f'[yellow]WARNING: gauntlet PASS{run} carries no statistical '
+                      f'evidence of an edge (edge_credible: null)[/yellow]')
+        label = 'edge_credible: null'
+    for w in edge.get('warnings') or []:
+        console.print(f'[yellow]  - {escape(str(w))}[/yellow]')
+    return f' — WARNING: {label}: ' + ' | '.join(str(w) for w in edge.get('warnings') or [])
 
 
 def _gauntlet_pass_refusal(module_file: Path, class_name: str,
@@ -5492,6 +5605,35 @@ def _gauntlet_enable_refusal(name: str) -> Optional[str]:
     return f'enable refused: {refusal}'
 
 
+def _gauntlet_edge_for_name(name: str) -> Optional[Dict[str, Any]]:
+    """:func:`_gauntlet_edge_for` for a deployed strategy NAME, resolved
+    through strategy_runtime.yaml exactly like the enable gate does. None
+    when the entry/module can't be found or has no PASS for its current
+    hash (those cases are reported by the gate itself)."""
+    import yaml
+    try:
+        config_path = _strategy_config_path()
+        if not config_path.exists():
+            return None
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f) or {}
+        entry = next((s for s in config.get('strategies', [])
+                      if s.get('name') == name), None)
+        if entry is None:
+            return None
+        module_path = entry.get('module') or f'strategies/{name}.py'
+        class_name = entry.get('class_name') or ''.join(
+            word.capitalize() for word in name.split('_'))
+        resolved = Path(_resolve_strategy_path(module_path))
+        if not resolved.exists():
+            return None
+    except Exception as ex:                               # noqa: BLE001
+        return {'edge_credible': None, 'run_id': None,
+                'warnings': [f'could not resolve {name!r} to assess its gauntlet '
+                             f'edge: {type(ex).__name__}: {ex}']}
+    return _gauntlet_edge_for(resolved, class_name)
+
+
 def _handle_strategies_gauntlet(args: argparse.Namespace):
     """Run the gauntlet stages, persist the verdict keyed by source hash,
     and render the per-stage results."""
@@ -5524,6 +5666,7 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
         code_hash=result['code_hash'],
         verdict=result['verdict'],
         checks=result['checks'],
+        notes='; '.join(result.get('warnings') or []),
     ))
 
     if _json_mode:
@@ -5531,6 +5674,8 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
             'data': {
                 'run_id': run_id,
                 'verdict': result['verdict'],
+                'edge_credible': result.get('edge_credible'),
+                'warnings': result.get('warnings') or [],
                 'code_hash': result['code_hash'],
                 'checks': result['checks'],
             },
@@ -5550,6 +5695,8 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
         'not_evaluable': '[yellow]not_evaluable[/yellow]',
         'not_evaluated': '[yellow]not_evaluated[/yellow]',
     }
+    below_stages = {w.split(':', 1)[0] for w in (result.get('warnings') or [])
+                    if w.startswith(('s4_psr:', 's5_dsr:'))}
     for stage, check in result['checks'].items():
         status = check.get('status', '?')
         detail_parts = []
@@ -5567,11 +5714,33 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
                     detail_parts.append(f"{fname}: {fres.get('detail', '')}")
         if stage == 's4_psr' and check.get('psr') is not None:
             detail_parts.append(f"psr={check['psr']:.4f}")
-        tbl.add_row(stage, _status_style.get(status, status), '; '.join(detail_parts) or '—')
+        status_cell = _status_style.get(status, status)
+        if stage in below_stages and status == 'pass':
+            # record-only stage that computed a value under its bar: the row
+            # must not read as a clean green pass.
+            status_cell = '[yellow]pass (record-only, below bar)[/yellow]'
+        tbl.add_row(stage, status_cell, '; '.join(detail_parts) or '—')
     console.print(tbl)
+    edge_credible = result.get('edge_credible')
+    warnings = result.get('warnings') or []
+    if warnings:
+        from rich.panel import Panel as _RPanel
+        head = ('Statistical edge NOT credible (edge_credible: false)'
+                if edge_credible is False else
+                'Statistical edge not evaluated (edge_credible: null)')
+        body = '\n'.join(f'- {escape(str(w))}' for w in warnings)
+        console.print(_RPanel(body, title=f'[bold yellow]{head}[/bold yellow]',
+                              border_style='yellow', expand=False))
     if result['verdict'] == 'PASS':
-        print_status(f'Gauntlet PASS — hash {result["code_hash"][:12]}… may now be '
-                     f'deployed/enabled')
+        if edge_credible is True:
+            print_status(f'Gauntlet PASS — hash {result["code_hash"][:12]}… may now be '
+                         f'deployed/enabled')
+        else:
+            console.print(
+                f'[bold yellow]Gauntlet PASS (safety stages only) — hash '
+                f'{result["code_hash"][:12]}… may now be deployed/enabled, but '
+                f'it has {"NO credible" if edge_credible is False else "no evaluated"} '
+                f'statistical edge[/bold yellow]')
     else:
         print_status('Gauntlet FAIL — this source hash cannot be deployed or enabled',
                      success=False)
@@ -5867,8 +6036,11 @@ def _handle_strategy_deploy(args: argparse.Namespace, mmr=None):
         return
 
     param_note = f' with params={params_dict}' if params_dict else ''
+    # The PASS that let this deploy through may have been earned on the
+    # safety stages alone — say so (record-only S4/S5 below their bars).
+    edge_note = _gauntlet_edge_suffix(_gauntlet_edge_for(strategy_file, class_name))
     print_status(
-        f'Deployed strategy: {name} -> {module_path}::{class_name}{param_note}'
+        f'Deployed strategy: {name} -> {module_path}::{class_name}{param_note}{edge_note}'
     )
 
 
@@ -12620,7 +12792,37 @@ def _handle_scan(mmr: MMR, args: argparse.Namespace):
         above_price=args.above_price,
         above_volume=args.above_volume,
         market_cap_above=args.market_cap_above,
+        include_all=getattr(args, 'include_all', False),
     )
+    attrs = dict(getattr(df, 'attrs', {}) or {}) if df is not None else {}
+    excluded = list(attrs.get('excluded') or [])
+    scan_warnings = list(attrs.get('warnings') or [])
+    unclassified = int(attrs.get('unclassified') or 0)
+    title = f'IB Scanner: {scan_code}'
+
+    if _json_mode:
+        records = ([] if df is None or df.empty
+                   else json.loads(df.to_json(orient='records', date_format='iso')))
+        print(_json_dumps({
+            'data': records,
+            'title': title,
+            'excluded': excluded,
+            'unclassified': unclassified,
+            'warnings': scan_warnings,
+        }))
+        return
+
+    def _print_scan_notes():
+        if excluded:
+            parts = ', '.join(f"{e.get('symbol')} ({e.get('reason')})" for e in excluded)
+            console.print(f'[yellow]Excluded {len(excluded)} non-common instrument(s): '
+                          f'{escape(parts)}[/yellow] [dim](--include-all to keep)[/dim]')
+        if unclassified:
+            console.print(f'[dim]{unclassified} row(s) have no IB stockType (older '
+                          f'trader_service or a failed lookup); only the symbol-suffix '
+                          f'fallback was applied to them.[/dim]')
+        for w in scan_warnings:
+            console.print(f'[yellow]Warning: {escape(str(w))}[/yellow]')
 
     # IB returns an empty DataFrame when the scanner isn't configured for
     # the caller's account × chosen location (error 162 in the underlying
@@ -12635,9 +12837,11 @@ def _handle_scan(mmr: MMR, args: argparse.Namespace):
             f'[dim]Try: [/dim][bold]ideas {args.preset or "gainers"} '
             f'--location {args.location} --tickers SYM1 SYM2 SYM3[/bold]'
         )
+        _print_scan_notes()
         return
 
-    print_df(df, title=f'IB Scanner: {scan_code}')
+    print_df(df, title=title)
+    _print_scan_notes()
 
 
 def _handle_ideas(mmr: MMR, args: argparse.Namespace):
@@ -12696,7 +12900,9 @@ def _handle_ideas(mmr: MMR, args: argparse.Namespace):
         names=use_names,
         location=args.location,
         data_source=data_source,
+        etp_mode=getattr(args, 'etp_mode', 'leveraged'),
     )
+    etp_summary = (getattr(df, 'attrs', {}) or {}).get('etp_filter')
 
     location_label = f' [{args.location}]' if args.location else ''
     source_label = ' — TwelveData' if data_source == 'twelvedata' and not args.location else ''
@@ -12756,10 +12962,38 @@ def _handle_ideas(mmr: MMR, args: argparse.Namespace):
                 )
 
     if _json_mode:
-        print_df(df, title=title)
+        records = ([] if df is None or df.empty
+                   else json.loads(df.to_json(orient='records', date_format='iso')))
+        payload = {'data': records, 'title': title}
+        if etp_summary is not None:
+            payload['etp_filter'] = etp_summary
+        print(_json_dumps(payload))
         return
 
+    def _print_etp_summary():
+        if not etp_summary:
+            return
+        mode = etp_summary.get('mode')
+        excluded = etp_summary.get('excluded') or []
+        what = {'leveraged': 'leveraged/inverse ETPs', 'all': 'all ETPs'}.get(mode)
+        if mode == 'none':
+            console.print('[dim]ETP filter off (--include-etp)[/dim]')
+        elif excluded:
+            console.print(f'[yellow]ETP filter excluded {len(excluded)} ({what}; '
+                          f'--include-etp to keep):[/yellow]')
+            for e in excluded:
+                console.print(f"[yellow]  {escape(str(e.get('ticker')))}: "
+                              f"{escape(str(e.get('reason')))}[/yellow]")
+        else:
+            console.print(f'[dim]ETP filter: no {what} among candidates '
+                          f'({etp_summary.get("source")})[/dim]')
+        if etp_summary.get('metadata_error'):
+            console.print(f"[yellow]Warning: ETP metadata unavailable — "
+                          f"{escape(str(etp_summary['metadata_error']))}; only the curated "
+                          f"leveraged/inverse list was applied.[/yellow]")
+
     if df.empty:
+        _print_etp_summary()
         if args.location:
             console.print(
                 '[dim]No ideas found.[/dim]\n'
@@ -12772,7 +13006,9 @@ def _handle_ideas(mmr: MMR, args: argparse.Namespace):
             console.print('[dim]No ideas found[/dim]')
         return
 
-    console.print(f'[bold]{title}[/bold]  ({len(df)} results)\n')
+    console.print(f'[bold]{title}[/bold]  ({len(df)} results)')
+    _print_etp_summary()
+    console.print()
 
     for _, row in df.iterrows():
         ticker = row.get('ticker', '')

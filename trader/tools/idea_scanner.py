@@ -25,6 +25,63 @@ class IdeaScannerError(RuntimeError):
 
 
 # ------------------------------------------------------------------
+# ETP filter plumbing (see trader.tools.instrument_filters for the rules)
+# ------------------------------------------------------------------
+
+def _with_etp_summary(df: pd.DataFrame, summary: Optional[Dict[str, Any]]) -> pd.DataFrame:
+    """Attach the ETP-filter summary to a result frame (``df.attrs``) so the
+    CLI can say how many ETPs were excluded and why."""
+    if summary is not None:
+        df.attrs['etp_filter'] = summary
+    return df
+
+
+def _filter_etps(candidates: List[Dict[str, Any]], etp_mode: str,
+                 metadata_fn: Callable[[List[str]], tuple],
+                 source: str) -> tuple:
+    """Run the ETP filter over ``candidates`` with metadata from
+    ``metadata_fn(tickers) -> (meta_by_ticker, error_or_None)``. Mode
+    'none' skips the metadata fetch entirely."""
+    from trader.tools.instrument_filters import apply_etp_filter
+    if etp_mode == 'none' or not candidates:
+        return apply_etp_filter(candidates, {}, etp_mode, source=source)
+    meta, err = metadata_fn([c['ticker'] for c in candidates])
+    return apply_etp_filter(candidates, meta, etp_mode, source=source, metadata_error=err)
+
+
+# TwelveData US ETF list: one ~1.4s call returning ~11.5k rows, so it is
+# cached per process (long-lived SDK users, repeated scans in one session).
+_TD_ETP_TTL_S = 6 * 3600.0
+_td_etp_cache: Dict[str, Any] = {'at': 0.0, 'index': None}
+
+
+def _td_us_etp_index(td_client) -> Dict[str, str]:
+    """``{symbol: name}`` of every US-listed ETP TwelveData knows
+    (GET /etfs?country=United States — includes ETNs and ETVs). Raises on
+    API failure; the caller reports it."""
+    import time as _time
+    now = _time.monotonic()
+    cached = _td_etp_cache.get('index')
+    if cached is not None and now - float(_td_etp_cache.get('at') or 0.0) < _TD_ETP_TTL_S:
+        return cached
+    payload = td_client.get_etf_list(country='United States').as_json()
+    rows = payload if isinstance(payload, (list, tuple)) else (payload or {}).get('data', [])
+    index: Dict[str, str] = {}
+    for row in rows or []:
+        sym = (row or {}).get('symbol')
+        if sym:
+            # Several venue rows per symbol (CBOE, IEX); keep every distinct
+            # name so a mislabelled duplicate cannot hide a leveraged one.
+            name = str(row.get('name') or '')
+            prev = index.get(sym)
+            index[sym] = name if not prev or name in prev else f'{prev} | {name}'
+    if not index:
+        raise IdeaScannerError('TwelveData /etfs returned no US ETPs')
+    _td_etp_cache.update({'at': now, 'index': index})
+    return index
+
+
+# ------------------------------------------------------------------
 # Dataclasses
 # ------------------------------------------------------------------
 
@@ -471,6 +528,7 @@ class IdeaScanner:
         fundamentals: bool = False,
         news: bool = False,
         names: bool = False,
+        etp_mode: str = 'leveraged',
     ) -> pd.DataFrame:
         """Run the full scan pipeline.
 
@@ -492,12 +550,18 @@ class IdeaScanner:
             If True, enrich results with financial ratios (PE, D/E, ROE, etc.).
         news : bool
             If True, enrich results with latest news headline and sentiment.
+        etp_mode : str
+            'leveraged' (default) drops leveraged/inverse ETPs, 'all' drops
+            every ETP, 'none' keeps them. ETP-ness from Massive ticker
+            details ``type`` (ETF/ETN/ETV/ETS); see
+            :mod:`trader.tools.instrument_filters`.
 
         Returns
         -------
         pd.DataFrame
             Ranked ideas with columns: ticker, price, change_pct, volume,
             gap_pct, rel_vol, range_pct, score, signal, plus indicator columns.
+            ``df.attrs['etp_filter']`` says which ETPs were excluded and why.
         """
         scan_preset = PRESETS.get(preset)
         if not scan_preset:
@@ -538,6 +602,13 @@ class IdeaScanner:
         if len(candidates) > indicator_cap:
             candidates.sort(key=lambda c: c['_pre_score'], reverse=True)
             candidates = candidates[:indicator_cap]
+
+        # 4b. ETP filter on the capped pool (one ticker-details call per
+        # survivor, so after the cap rather than over a 10k-name market scan).
+        candidates, etp_summary = _filter_etps(
+            candidates, etp_mode, self._etp_metadata, 'massive ticker details')
+        if not candidates:
+            return _with_etp_summary(pd.DataFrame(), etp_summary)
 
         # 5. Fetch indicators for survivors
         ticker_list = [c['ticker'] for c in candidates]
@@ -580,7 +651,37 @@ class IdeaScanner:
                 if c['ticker'] in news_data:
                     c.update(news_data[c['ticker']])
 
-        return self._to_dataframe(candidates, fundamentals=fundamentals, news=news)
+        return _with_etp_summary(
+            self._to_dataframe(candidates, fundamentals=fundamentals, news=news), etp_summary)
+
+    def _etp_metadata(self, tickers: List[str]) -> tuple:
+        """``({ticker: meta}, error)`` from Massive ticker details (``type``
+        + ``name``), fetched in parallel. A ticker whose lookup fails is
+        omitted (unknown); if EVERY lookup fails the error is returned."""
+        from trader.tools.instrument_filters import MASSIVE_ETP_TYPES
+        meta: Dict[str, Dict[str, Any]] = {}
+        errors: List[str] = []
+
+        def fetch_one(ticker: str) -> tuple:
+            try:
+                d = self._client.get_ticker_details(ticker)
+                return ticker, getattr(d, 'type', None), getattr(d, 'name', None), None
+            except Exception as ex:
+                return ticker, None, None, f'{type(ex).__name__}: {ex}'
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for ticker, typ, name, err in pool.map(fetch_one, tickers):
+                if err is not None or not typ:
+                    errors.append(f'{ticker}: {err or "no type"}')
+                    continue
+                meta[ticker] = {'is_etp': str(typ).upper() in MASSIVE_ETP_TYPES,
+                                'type': str(typ), 'name': name, 'source': 'massive'}
+        if tickers and not meta:
+            return {}, f'Massive ticker details unavailable ({errors[0]})'
+        if errors:
+            logger.warning('massive ticker details missing for %d ticker(s): %s',
+                           len(errors), '; '.join(errors[:5]))
+        return meta, None
 
     # ------------------------------------------------------------------
     # Discovery
@@ -1021,6 +1122,7 @@ class IBIdeaScanner:
         news: bool = False,
         tickers: Optional[List[str]] = None,
         universe_symbols: Optional[List[str]] = None,
+        etp_mode: str = 'leveraged',
     ) -> pd.DataFrame:
         """Run the IB-backed scan pipeline.
 
@@ -1042,7 +1144,13 @@ class IBIdeaScanner:
             Explicit ticker list. Resolved via IB (bypasses scanner).
         universe_symbols : list of str, optional
             Symbol list from a universe. Resolved via IB (bypasses scanner).
+        etp_mode : str
+            'leveraged' (default) / 'all' / 'none' — ETP filter driven by IB
+            ContractDetails.stockType (+ longName for leverage); summary in
+            ``df.attrs['etp_filter']``.
         """
+        # symbol -> {'is_etp', 'type', 'name', 'source'} from IB stockType.
+        self._instrument_meta: Dict[str, Dict[str, Any]] = {}
         # Check location against trading filters before doing any work
         from trader.trading.trading_filter import TradingFilter
         tf = TradingFilter.load()
@@ -1129,6 +1237,7 @@ class IBIdeaScanner:
                 )
                 contracts.append(c)
                 conid_map[r['symbol']] = r['conId']
+                self._record_ib_meta(r['symbol'], r.get('stockType'), r.get('longName'))
 
         # 3. Get snapshots via RPC → IB
         snapshots = consume(
@@ -1191,6 +1300,12 @@ class IBIdeaScanner:
         if not candidates:
             return pd.DataFrame()
 
+        # 6b. ETP filter (IB stockType gathered during discovery/resolution).
+        candidates, etp_summary = _filter_etps(
+            candidates, etp_mode, self._etp_metadata, 'ib stockType')
+        if not candidates:
+            return _with_etp_summary(pd.DataFrame(), etp_summary)
+
         # 7. Compute indicators locally from history bars
         for c in candidates:
             symbol = c['ticker']
@@ -1235,7 +1350,27 @@ class IBIdeaScanner:
                 if c['ticker'] in news_data:
                     c.update(news_data[c['ticker']])
 
-        return to_dataframe(candidates, fundamentals=fundamentals, news=news)
+        return _with_etp_summary(
+            to_dataframe(candidates, fundamentals=fundamentals, news=news), etp_summary)
+
+    def _record_ib_meta(self, symbol: str, stock_type, long_name) -> None:
+        """Remember IB's instrument class for ``symbol`` (no-op without a
+        stockType — an older trader_service's scanner rows lack it)."""
+        from trader.tools.instrument_filters import IB_ETP_STOCK_TYPES
+        if not hasattr(self, '_instrument_meta'):
+            self._instrument_meta = {}
+        st = str(stock_type or '').strip().upper()
+        if symbol and st:
+            self._instrument_meta[symbol] = {
+                'is_etp': st in IB_ETP_STOCK_TYPES, 'type': st,
+                'name': long_name or None, 'source': 'ib'}
+
+    def _etp_metadata(self, tickers: List[str]) -> tuple:
+        meta = {t: m for t, m in getattr(self, '_instrument_meta', {}).items() if t in tickers}
+        if tickers and not meta:
+            return {}, ('IB stockType unavailable for every candidate (trader_service '
+                        'predates scanner stockType, or contract details failed)')
+        return meta, None
 
     # ------------------------------------------------------------------
     # Symbol resolution (alternative to scanner discovery)
@@ -1309,6 +1444,11 @@ class IBIdeaScanner:
                     reason = _mismatch(cur or '', pri or '')
                     if not reason:
                         chosen = (conid, dsym, pri or resolution_exchange, cur or expected_currency)
+                        if hasattr(d, 'conId'):
+                            st, ln = getattr(d, 'stockType', None), getattr(d, 'longName', None)
+                        else:
+                            st, ln = d.get('stockType'), d.get('longName')
+                        self._record_ib_meta(dsym, st, ln)
                         break
                 if chosen is None:
                     # Every candidate failed validation — refuse rather than feed
@@ -1546,7 +1686,11 @@ class TwelveDataIdeaScanner:
         fundamentals: bool = False,
         news: bool = False,
         names: bool = False,
+        etp_mode: str = 'leveraged',
     ) -> pd.DataFrame:
+        """See :meth:`IdeaScanner.scan`. ``etp_mode`` ('leveraged' default,
+        'all', 'none') filters ETPs using TwelveData's US ETF list; the
+        summary is in ``df.attrs['etp_filter']``."""
         scan_preset = PRESETS.get(preset)
         if not scan_preset:
             raise ValueError(f'Unknown preset: {preset}. Available: {", ".join(PRESETS.keys())}')
@@ -1571,6 +1715,13 @@ class TwelveDataIdeaScanner:
         )
         if not candidates:
             return pd.DataFrame()
+
+        # 3b. ETP filter — before the indicator cap (the lookup is one cached
+        # list call), so excluded products don't eat result slots.
+        candidates, etp_summary = _filter_etps(
+            candidates, etp_mode, self._etp_metadata, 'twelvedata /etfs')
+        if not candidates:
+            return _with_etp_summary(pd.DataFrame(), etp_summary)
 
         # 4. Pre-score to cap the indicator fetch.
         score_fn = _SCORE_FUNCTIONS[scan_preset.score_fn]
@@ -1611,7 +1762,26 @@ class TwelveDataIdeaScanner:
 
         # 10. News is a known gap on TwelveData — silently skip even if
         # requested. The caller's --news flag still controls column output.
-        return to_dataframe(candidates, fundamentals=fundamentals, news=news)
+        return _with_etp_summary(
+            to_dataframe(candidates, fundamentals=fundamentals, news=news), etp_summary)
+
+    def _etp_metadata(self, tickers: List[str]) -> tuple:
+        """``({ticker: meta}, error)`` from TwelveData's US ETF list. On API
+        failure every ticker is unknown and the error is returned for the
+        caller to surface (the curated list still applies)."""
+        try:
+            index = _td_us_etp_index(self._client)
+        except Exception as ex:
+            logger.warning('td ETF list fetch failed: %s', ex)
+            return {}, f'TwelveData ETF list unavailable ({type(ex).__name__}: {ex})'
+        meta = {}
+        for t in tickers:
+            if t in index:
+                meta[t] = {'is_etp': True, 'type': 'ETF list', 'name': index[t],
+                           'source': 'twelvedata'}
+            else:
+                meta[t] = {'is_etp': False, 'source': 'twelvedata'}
+        return meta, None
 
     # ------------------------------------------------------------------
     # Discovery

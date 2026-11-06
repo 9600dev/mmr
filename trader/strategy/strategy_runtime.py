@@ -1659,6 +1659,7 @@ class StrategyRuntime():
                 try:
                     store = GauntletStore(duckdb_path)
                     if store.has_pass(code_hash, class_name):
+                        self._warn_gauntlet_edge(name, store, code_hash, class_name)
                         return True
                     latest = store.latest_pass_for_class(class_name)
                     last_pass_hash = latest.code_hash if latest else None
@@ -1678,6 +1679,26 @@ class StrategyRuntime():
             'auto_execute strategy %s has no gauntlet PASS: %s (%s) — arming '
             'anyway (MMR_GAUNTLET_ENFORCE unset); %s', name, problem, hash_pair, hint)
         return True
+
+    @staticmethod
+    def _warn_gauntlet_edge(name: str, store, code_hash: str, class_name: str) -> None:
+        """Log (never gate) when the PASS that arms ``name`` has no credible
+        statistical edge — S4/S5 are record-only, so a PASS can carry DSR
+        0.09. Purely additive: any error here is logged and swallowed so it
+        can never change the arming decision already made by ``has_pass``."""
+        try:
+            from trader.data.gauntlet_store import assess_statistical_edge
+            rec = store.latest_pass_for_hash(code_hash, class_name)
+            if rec is None:
+                return
+            edge = assess_statistical_edge(rec.checks)
+            if edge['edge_credible'] is False:
+                logging.warning(
+                    'auto_execute strategy %s is armed on gauntlet PASS #%s with NO '
+                    'statistically credible edge (edge_credible=false): %s',
+                    name, rec.id, ' | '.join(edge['warnings']))
+        except Exception as ex:                           # noqa: BLE001
+            logging.warning('could not assess gauntlet edge for %s: %s', name, ex)
 
     @_serialized_deployment
     def load_strategy(

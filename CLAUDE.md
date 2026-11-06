@@ -390,6 +390,7 @@ strategies reload            # Reload strategies from YAML + re-subscribe (immed
 strategies inspect           # AST scan: class name, mode (precompute/on_prices), tunable params with defaults
 strategies gauntlet strategies/orb.py --class OpeningRangeBreakout  # Pre-deploy gauntlet: import allowlist, lookahead, nasty-market battery, PSR (records PASS/FAIL by source hash)
 strategies gauntlet strategies/orb.py --class OpeningRangeBreakout --min-psr 0.7  # Also enforce PSR from the latest backtest of this exact hash
+strategies gauntlet strategies/orb.py --class OpeningRangeBreakout --min-dsr 0.95 # Make DSR a gate (S4/S5 are record-only by default; a PASS then carries edge_credible:false + warnings when PSR/DSR < 0.95)
 strategies intents [--strategy NAME] [--conid N] [--all]   # Executor intent journal: what blocks opens/exits per (strategy, conId) and why
 strategies resolve-intent ID --reason "..." --attest        # Operator resolution of an intent with NO broker order (refused if IB shows one)
 reservations                 # Server-side physical order reservations (capacity held by working/unconfirmed sends)
@@ -478,6 +479,7 @@ scan hot-volume                  # Hot by volume change
 scan --scan-code HIGH_OPT_VOLUME # Raw IB scanner code
 scan gainers --above-price 10 --num 30  # Filtered
 scan --instrument ETF --location STK.US  # ETFs
+scan --include-all                # Keep rights/warrants/units (IB stockType RIGHT/WARRANT/UNIT, e.g. 'NMZ RT'); excluded by default. Rows carry last/change_pct/volume from ONE snapshot batch (null when IB has no value)
 ideas                                        # Momentum scan (default, US/Massive)
 ideas gap-up                                 # Gap-up preset
 ideas mean-reversion                         # Mean-reversion preset
@@ -489,6 +491,7 @@ ideas momentum --universe sp500              # Scan a universe
 ideas gap-up --min-price 10                  # Override preset filter
 ideas volatile --num 25                      # Top 25 results
 ideas --presets                              # List all presets
+ideas momentum --include-etp                 # Keep leveraged/inverse ETPs (UVXY, SQQQ...), excluded by default; --exclude-all-etp drops every ETF/ETN/ETP. Exclusions + reasons are in JSON `etp_filter` / a yellow Rich line
 ideas momentum --detail                      # Show all columns incl. indicators
 ideas momentum --fundamentals                # Enrich with financial ratios (PE, D/E, ROE, etc.)
 ideas momentum --news                        # Enrich with latest news headline + sentiment
@@ -564,6 +567,10 @@ IB scanner / resolve_contract  →  get_snapshot (sequential)  →  reqHistorica
 - Indicators computed locally from history bars (pure pandas) — `compute_rsi()`, `compute_ema()`, `compute_sma()`
 - Fundamentals from `reqFundamentalData` (ReportSnapshot XML), news from `reqHistoricalNews` (no sentiment)
 - IB news headlines include metadata prefixes like `{A:800015:L:en}...` which are stripped before display
+
+### ETP filter (all three backends)
+
+`mmr ideas` drops leveraged/inverse ETPs by default (2026-11-05: UVXY/UVIX led a crash-day momentum BUY list). ETP-ness comes from the data source's own metadata — TwelveData `GET /etfs?country=United States` (one cached call, ~11.5k US ETPs incl. ETNs/ETVs), Massive ticker-details `type` (ETF/ETN/ETV/ETS), IB `ContractDetails.stockType` (ETF/ETN/ETP/ETC; scanner rows now carry it). Leverage/inversion is read from the ETP's name (`2x`, `-1x`, ProShares `Ultra`/`UltraPro`/`UltraShort`/`Short`, `Bear`, `Inverse`, `Leveraged`) only for instruments the metadata says are ETPs, so "Ultra Clean Holdings" or "JPMorgan Ultra-Short Income" are not caught. `instrument_filters.KNOWN_LEVERAGED_INVERSE` is a curated secondary safety net (also used when the metadata call fails, which is reported as `metadata_error`). Rules and the regex rationale: `trader/tools/instrument_filters.py`.
 
 ### Shared module-level functions (used by both scanners)
 
