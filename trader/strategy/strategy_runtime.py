@@ -1255,13 +1255,24 @@ class StrategyRuntime():
             elif signal.action == Action.SELL:
                 logging.info('SELL signal from %s', strategy.name)
 
-            # Persist signal to event store
+            # Persist signal to event store — with the symbol and the bar
+            # close the strategy acted on (both were stored empty/0).
+            price = 0.0
+            try:
+                close = (last_bar.get('close') if hasattr(last_bar, 'get')
+                         else getattr(last_bar, 'close', None))
+                if close is not None and float(close) == float(close):
+                    price = float(close)
+            except (TypeError, ValueError):
+                price = 0.0
             event = TradingEvent(
                 event_type=EventType.SIGNAL,
                 timestamp=dt.datetime.now(),
                 strategy_name=signal.source_name,
                 conid=conId,
+                symbol=getattr(self, '_conid_symbols', {}).get(int(conId), ''),
                 action=str(signal.action),
+                price=price,
                 signal_probability=signal.probability,
                 signal_risk=signal.risk,
             )
@@ -2118,6 +2129,8 @@ class StrategyRuntime():
                                 reconnect and retry.
         """
         contract = SecurityDefinition.to_contract(security)
+        # conId -> symbol for signal audit rows (they were stored symbol='').
+        self.__dict__.setdefault('_conid_symbols', {})[int(security.conId)] = str(security.symbol)
         what_to_show = _whattoshow_for_contract(contract)
 
         tick_data = self.storage.get_tickdata(bar_size=bar_size)

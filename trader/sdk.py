@@ -2582,11 +2582,21 @@ class MMR:
             self._rpc.rpc(return_type=SuccessFail[list[StrategyConfig]]).get_strategies()
         )
         if result.is_success() and result.obj:
+            from trader.trading.strategy import StrategyState
             rows = []
             for s in result.obj:
+                # str() of an IntEnum is its number on py3.11+ ('3'); consumers
+                # (dashboard, LLM loop) need the name — the dashboard marked
+                # every strategy disabled because '3' != 'RUNNING'.
+                try:
+                    state_code = int(s.state)
+                    state_name = StrategyState(state_code).name
+                except (TypeError, ValueError):
+                    state_code, state_name = None, str(s.state)
                 row = {
                     'name': s.name,
-                    'state': str(s.state),
+                    'state': state_name,
+                    'state_code': state_code,
                     'bar_size': str(s.bar_size),
                     'conids': s.conids or [],
                     'hist_days_prior': s.historical_days_prior,

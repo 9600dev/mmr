@@ -4331,13 +4331,14 @@ def _handle_strategies_list(mmr: MMR):
 
     for _, row in df.iterrows():
         state_raw = str(row.get('state', '?'))
-        # state comes back as enum-like: '1' / 'StrategyEnabled.ENABLED' etc.
-        if state_raw in ('1', 'StrategyEnabled.ENABLED'):
-            state_disp = '[green]ON[/green]'
-        elif state_raw in ('0', 'StrategyEnabled.DISABLED'):
-            state_disp = '[red]off[/red]'
-        else:
-            state_disp = state_raw
+        state_disp = {
+            'RUNNING': '[green]RUNNING[/green]',
+            'INSTALLED': '[cyan]INSTALLED[/cyan]',
+            'WAITING_HISTORICAL_DATA': '[yellow]WAITING_DATA[/yellow]',
+            'DISABLED': '[dim]disabled[/dim]',
+            'ERROR': '[bold red]ERROR[/bold red]',
+            'NOT_INSTALLED': '[dim]not installed[/dim]',
+        }.get(state_raw, state_raw)
 
         conids = row.get('conids') or []
         if not conids:
@@ -6678,6 +6679,9 @@ def _handle_backtests(args: argparse.Namespace):
             stats, stats_reason = _compute_bt_stats(r)
             stats_data = {
                 'n_trades':              stats.n_trades,
+                # n_trades counts ROUND TRIPS (entry..exit P&L); the run's
+                # total_trades counts every fill/leg incl. pyramid adds.
+                'n_round_trips':         stats.n_trades,
                 'n_bar_returns':         stats.n_bar_returns,
                 'probabilistic_sharpe':  stats.psr,
                 't_stat':                stats.t_stat,
@@ -7149,6 +7153,29 @@ def _parse_backtest_param_args(
     return merged
 
 
+def _curve_periods_per_year(curve) -> Optional[float]:
+    """Periods/year implied by a stored equity curve's timestamp spacing.
+
+    Median spacing of ~a day or more => daily points (252/yr). Finer spacing
+    => None (the caller keeps the bar-size annualisation). Unreadable => None.
+    """
+    import pandas as pd
+    try:
+        ts = pd.to_datetime([p['timestamp'] for p in curve], utc=True, errors='coerce')
+    except (KeyError, TypeError):
+        return None
+    ts = ts.dropna()
+    if len(ts) < 3:
+        return None
+    deltas = pd.Series(ts).diff().dt.total_seconds().dropna()
+    deltas = deltas[deltas > 0]
+    if deltas.empty:
+        return None
+    if float(deltas.median()) >= 20 * 3600:
+        return 252.0
+    return None
+
+
 def _compute_bt_stats(record):
     """Compute the statistical-confidence bundle for a stored backtest
     run. Returns ``(stats, reason)`` where ``stats`` is the
@@ -7169,12 +7196,14 @@ def _compute_bt_stats(record):
             trades = None
 
     bar_returns = None
+    curve_periods_per_year = None
     if record.equity_curve_json:
         try:
             curve = json.loads(record.equity_curve_json)
             values = np.array([float(p['value']) for p in curve], dtype=float)
             if len(values) >= 2:
                 bar_returns = np.diff(values) / values[:-1]
+            curve_periods_per_year = _curve_periods_per_year(curve)
         except (ValueError, TypeError, KeyError):
             bar_returns = None
 
@@ -7189,6 +7218,13 @@ def _compute_bt_stats(record):
         bars_per_year = Backtester._bars_per_year(bar_size_enum)
     except Exception:
         bars_per_year = 252.0
+    # The stored equity curve is usually DECIMATED (equity_decimation: daily),
+    # so its returns are per-day even for a 1-min run. Annualising daily
+    # returns by sqrt(1-min bars/yr) inflated the Sharpe CI ~20x
+    # (run 2946: [-9.8, 62.4] around a 1.39 headline). Use the curve's own
+    # spacing when it can be read.
+    if curve_periods_per_year is not None:
+        bars_per_year = curve_periods_per_year
 
     stats = compute_all(trades, bar_returns, bars_per_year=bars_per_year)
 
