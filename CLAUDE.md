@@ -479,6 +479,7 @@ scan hot-volume                  # Hot by volume change
 scan --scan-code HIGH_OPT_VOLUME # Raw IB scanner code
 scan gainers --above-price 10 --num 30  # Filtered
 scan --instrument ETF --location STK.US  # ETFs
+scan --include-all                # Keep rights/warrants/units (IB stockType RIGHT/WARRANT/UNIT, e.g. 'NMZ RT'); excluded by default. Rows carry last/change_pct/volume from ONE snapshot batch (null when IB has no value)
 ideas                                        # Momentum scan (default, US/Massive)
 ideas gap-up                                 # Gap-up preset
 ideas mean-reversion                         # Mean-reversion preset

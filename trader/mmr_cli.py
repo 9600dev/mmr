@@ -1337,6 +1337,9 @@ def build_parser() -> argparse.ArgumentParser:
                          help='Min volume filter')
     scan_p.add_argument('--market-cap-above', type=float, default=0.0,
                          help='Min market cap filter')
+    scan_p.add_argument('--include-all', dest='include_all', action='store_true', default=False,
+                         help='Keep rights, warrants and units (IB stockType RIGHT/WARRANT/'
+                              'UNIT, e.g. "NMZ RT"); excluded by default')
     scan_p.add_argument('--list-locations', action='store_true', default=False,
                          help='Diagnostic: list every scanner location code this '
                               'account is authorised for, then exit. Use when '
@@ -12761,7 +12764,37 @@ def _handle_scan(mmr: MMR, args: argparse.Namespace):
         above_price=args.above_price,
         above_volume=args.above_volume,
         market_cap_above=args.market_cap_above,
+        include_all=getattr(args, 'include_all', False),
     )
+    attrs = dict(getattr(df, 'attrs', {}) or {}) if df is not None else {}
+    excluded = list(attrs.get('excluded') or [])
+    scan_warnings = list(attrs.get('warnings') or [])
+    unclassified = int(attrs.get('unclassified') or 0)
+    title = f'IB Scanner: {scan_code}'
+
+    if _json_mode:
+        records = ([] if df is None or df.empty
+                   else json.loads(df.to_json(orient='records', date_format='iso')))
+        print(_json_dumps({
+            'data': records,
+            'title': title,
+            'excluded': excluded,
+            'unclassified': unclassified,
+            'warnings': scan_warnings,
+        }))
+        return
+
+    def _print_scan_notes():
+        if excluded:
+            parts = ', '.join(f"{e.get('symbol')} ({e.get('reason')})" for e in excluded)
+            console.print(f'[yellow]Excluded {len(excluded)} non-common instrument(s): '
+                          f'{escape(parts)}[/yellow] [dim](--include-all to keep)[/dim]')
+        if unclassified:
+            console.print(f'[dim]{unclassified} row(s) have no IB stockType (older '
+                          f'trader_service or a failed lookup); only the symbol-suffix '
+                          f'fallback was applied to them.[/dim]')
+        for w in scan_warnings:
+            console.print(f'[yellow]Warning: {escape(str(w))}[/yellow]')
 
     # IB returns an empty DataFrame when the scanner isn't configured for
     # the caller's account × chosen location (error 162 in the underlying
@@ -12776,9 +12809,11 @@ def _handle_scan(mmr: MMR, args: argparse.Namespace):
             f'[dim]Try: [/dim][bold]ideas {args.preset or "gainers"} '
             f'--location {args.location} --tickers SYM1 SYM2 SYM3[/bold]'
         )
+        _print_scan_notes()
         return
 
-    print_df(df, title=f'IB Scanner: {scan_code}')
+    print_df(df, title=title)
+    _print_scan_notes()
 
 
 def _handle_ideas(mmr: MMR, args: argparse.Namespace):

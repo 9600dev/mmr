@@ -4427,8 +4427,20 @@ class MMR:
         above_price: float = 0.0,
         above_volume: int = 0,
         market_cap_above: float = 0.0,
+        include_all: bool = False,
     ) -> pd.DataFrame:
-        """Run an IB market scanner."""
+        """Run an IB market scanner, enriched with last / change_pct / volume.
+
+        Rights, warrants and units (IB ``stockType`` RIGHT/WARRANT/UNIT, or
+        secType WAR/IOPT — see :mod:`trader.tools.instrument_filters`) are
+        excluded unless ``include_all``. Prices come from ONE
+        ``get_snapshots_batch`` call for the surviving rows; a value IB did
+        not provide is NaN (null in JSON), never 0.
+
+        Returns a DataFrame whose ``attrs`` carry ``excluded`` (list of
+        {symbol, conId, stockType, reason}), ``unclassified`` (rows with no
+        stockType, kept) and ``warnings`` (e.g. enrichment failure).
+        """
         # Check location against trading filters
         from trader.trading.trading_filter import TradingFilter
         tf = TradingFilter.load()
@@ -4447,7 +4459,93 @@ class MMR:
                 market_cap_above=market_cap_above,
             )
         )
-        return pd.DataFrame(results) if results else pd.DataFrame()
+        if not results:
+            return pd.DataFrame()
+        return self._enrich_scan_rows(list(results), include_all=include_all)
+
+    def _enrich_scan_rows(self, results: list, include_all: bool = False) -> pd.DataFrame:
+        """Classify, filter and price-enrich raw ``scanner_data`` rows (see
+        :meth:`scan`). Split out so it is testable without the RPC layer."""
+        import math as _m
+
+        from ib_async import Contract as _Contract
+
+        from trader.tools.instrument_filters import (is_unclassified,
+                                                     scan_exclusion_reason)
+
+        kept: list = []
+        excluded: list = []
+        for row in results:
+            row = dict(row)
+            reason = None if include_all else scan_exclusion_reason(row)
+            if reason:
+                excluded.append({'symbol': row.get('symbol'), 'conId': row.get('conId'),
+                                 'stockType': row.get('stockType'), 'reason': reason})
+            else:
+                kept.append(row)
+
+        warnings: list = []
+        quotes: dict = {}
+        if kept:
+            contracts = []
+            for row in kept:
+                exch = row.get('exchange') or ''
+                contracts.append(_Contract(
+                    conId=int(row['conId']), symbol=row.get('symbol', ''),
+                    secType=row.get('secType') or 'STK', exchange='SMART',
+                    primaryExchange='' if exch == 'SMART' else exch,
+                    currency=row.get('currency', '')))
+            try:
+                snaps = consume(
+                    self._rpc.rpc(return_type=list[dict]).get_snapshots_batch(contracts, False)
+                ) or []
+            except Exception as ex:
+                snaps = []
+                warnings.append(f'price enrichment failed ({type(ex).__name__}: {ex}) - '
+                                f'last/change_pct/volume are null')
+            for s in snaps:
+                try:
+                    quotes[int(s.get('conId'))] = normalize_ib_quote(dict(s))
+                except (TypeError, ValueError):
+                    continue
+            missing = [r.get('symbol') for r in kept if int(r['conId']) not in quotes]
+            if snaps and missing:
+                warnings.append(f'no snapshot for {len(missing)} row(s): '
+                                f'{", ".join(str(m) for m in missing)}')
+
+        def _val(q, key):
+            if not q:
+                return float('nan')
+            v = q.get(key)
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                return float('nan')
+            return f if _m.isfinite(f) else float('nan')
+
+        out = []
+        for row in kept:
+            q = quotes.get(int(row['conId']))
+            out.append({
+                'rank': row.get('rank'),
+                'symbol': row.get('symbol'),
+                'last': _val(q, 'last'),
+                'change_pct': _val(q, 'change_pct'),
+                'volume': _val(q, 'volume'),
+                'stockType': row.get('stockType'),
+                'secType': row.get('secType'),
+                'exchange': row.get('exchange'),
+                'currency': row.get('currency'),
+                'conId': row.get('conId'),
+            })
+        df = pd.DataFrame(out, columns=['rank', 'symbol', 'last', 'change_pct', 'volume',
+                                        'stockType', 'secType', 'exchange', 'currency',
+                                        'conId'])
+        df.attrs['excluded'] = excluded
+        df.attrs['unclassified'] = sum(1 for r in kept if is_unclassified(r))
+        df.attrs['warnings'] = warnings
+        df.attrs['include_all'] = include_all
+        return df
 
     def forex_convert(
         self,
