@@ -4318,8 +4318,23 @@ class Trader():
         except Exception as ex:
             logging.warning('reconcile: proposal query failed: %s', ex)
 
-        report = reconcile(proposals, open_orders, executions, positions)
+        # Rebalance-sleeve members hold without stops by design.
+        sleeve_symbols: set = set()
+        try:
+            from trader.data.position_groups import PositionGroupStore
+            groups = PositionGroupStore(self.duckdb_path)
+            for g in groups.list_groups():
+                if str(getattr(g, 'name', '')).startswith('sleeve_'):
+                    sleeve_symbols.update(groups.get_members(g.name))
+        except Exception as ex:
+            logging.warning('reconcile: position-group query failed: %s', ex)
+
+        report = reconcile(proposals, open_orders, executions, positions,
+                           unprotected_by_design=sleeve_symbols)
         for f in report.findings:
+            if f.severity == 'info':
+                logging.info('reconcile [info] %s: %s', f.symbol, f.detail)
+                continue
             level = logging.error if f.severity == 'critical' else logging.warning
             level('reconcile [%s] %s (proposal=%s): %s',
                   f.severity, f.symbol, f.proposal_id, f.detail)

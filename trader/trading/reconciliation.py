@@ -86,13 +86,18 @@ def reconcile(
     executions: List[Dict[str, Any]],
     positions: List[Dict[str, Any]],
     now: Optional[dt.datetime] = None,
+    unprotected_by_design: Optional[set] = None,
 ) -> ReconciliationReport:
     """Pure reconciliation core.
 
     ``proposals`` are TradeProposal-like objects (need: status, order_ids, symbol,
     action, quantity, id, updated_at). ``open_orders`` / ``executions`` /
     ``positions`` are normalised dicts (see the live wrapper for the shape).
+    ``unprotected_by_design`` names symbols that deliberately hold without a
+    protective order (e.g. members of a monthly rebalance sleeve); a missing
+    stop on those is reported at ``info`` severity, not as a warning.
     """
+    unprotected_by_design = set(unprotected_by_design or ())
     now = now or dt.datetime.now()
     report = ReconciliationReport(
         ib_open_orders=len(open_orders),
@@ -126,7 +131,11 @@ def reconcile(
         status = getattr(p, 'status', '')
         if status not in ('EXECUTED', 'APPROVED'):
             continue
-        if not _is_recent(getattr(p, 'updated_at', None), now):
+        # EXECUTED rows are checked only while IB still reports their fills.
+        # APPROVED rows are checked at ANY age: a claim that never reached a
+        # terminal state is exactly what reconcile exists to surface (#74 sat
+        # APPROVED from 2026-07-27 to 2026-11-05 with checked_proposals=0).
+        if status == 'EXECUTED' and not _is_recent(getattr(p, 'updated_at', None), now):
             continue
         report.checked_proposals += 1
         pid = getattr(p, 'id', None)
@@ -191,10 +200,17 @@ def reconcile(
             and str(o.get('orderType', '')).upper() in _PROTECTIVE_TYPES
         ]
         if not protective:
-            report.findings.append(ReconciliationFinding(
-                kind='unprotected_position', severity='warning',
-                symbol=symbol,
-                detail=(f'position {qty:g} {symbol} has no protective '
-                        f'({exit_action}) stop/limit order at IB')))
+            if symbol in unprotected_by_design:
+                report.findings.append(ReconciliationFinding(
+                    kind='unprotected_by_design', severity='info',
+                    symbol=symbol,
+                    detail=(f'position {qty:g} {symbol} has no protective order — '
+                            f'expected: it belongs to a rebalance sleeve')))
+            else:
+                report.findings.append(ReconciliationFinding(
+                    kind='unprotected_position', severity='warning',
+                    symbol=symbol,
+                    detail=(f'position {qty:g} {symbol} has no protective '
+                            f'({exit_action}) stop/limit order at IB')))
 
     return report
