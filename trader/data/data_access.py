@@ -425,8 +425,19 @@ class Data():
 
     def write(self,
               contract: Union[Contract, SecurityDefinition, int],
-              data_frame: pd.DataFrame):
+              data_frame: pd.DataFrame,
+              exchange_calendar: Optional[ExchangeCalendar] = None,
+              now: Optional[dt.datetime] = None) -> int:
         """Persist bars, refusing any that cannot describe a real market.
+
+        Also refuses daily-or-larger bars for a session that has not CLOSED
+        (trader/data/session_guard.py): a still-forming session stored as a
+        complete bar is permanent, because missing() then treats the day as
+        covered. Found 2026-11-05 — AAPL's 14:30 ET partial bar (9.8M shares)
+        stored as the day's bar. The calendar is ``exchange_calendar`` when
+        given, else resolved from a SecurityDefinition/Contract's exchange;
+        with neither the check fails closed (see session_guard). ``now`` is
+        injectable for tests. Returns the number of rows actually persisted.
 
         This is the lowest chokepoint every writer passes through: the download
         service, the strategy runtime's history priming, and
@@ -450,7 +461,7 @@ class Data():
         if data_frame is None:
             raise ValueError('OHLCV frame must not be None')
         if data_frame.empty:
-            return
+            return 0
         # Validation is part of committing data, not a best-effort diagnostic.
         # Missing columns and validator failures must leave the old data intact.
         missing = [c for c in ('open', 'high', 'low', 'close', 'volume')
@@ -470,8 +481,36 @@ class Data():
                             n_bad, symbol, rejected.head(1).to_dict('records'))
             data_frame = cast(pd.DataFrame, data_frame[~bad])
             if data_frame.empty:
-                return
+                return 0
+        data_frame = self._drop_unclosed_sessions(
+            symbol, contract, data_frame, exchange_calendar, now)
+        if data_frame.empty:
+            return 0
         self.library.write(symbol, data_frame)
+        return len(data_frame)
+
+    def _drop_unclosed_sessions(self, symbol: str, contract, data_frame: pd.DataFrame,
+                                exchange_calendar: Optional[ExchangeCalendar],
+                                now: Optional[dt.datetime]) -> pd.DataFrame:
+        from trader.data.session_guard import calendar_for, unclosed_session_mask
+        default_bar_size = self.library_name if self.library_name in BarSize.bar_sizes() else ''
+        calendar = exchange_calendar
+        if calendar is None and isinstance(contract, (SecurityDefinition, Contract)):
+            calendar = calendar_for(contract)
+        unclosed = unclosed_session_mask(data_frame, default_bar_size, calendar, now)
+        n = int(unclosed.sum())
+        if not n:
+            return data_frame
+        skipped = cast(pd.DataFrame, data_frame[unclosed])
+        dates = [str(ts) for ts in (skipped['date'] if 'date' in skipped.columns else skipped.index)]
+        if calendar is not None:
+            logging.info('SKIPPED %d bar(s) for %s: session not closed yet on %s (%s)',
+                         n, symbol, getattr(calendar, 'name', calendar), dates)
+        else:
+            logging.warning('SKIPPED %d bar(s) for %s: no exchange calendar to prove the '
+                            'session closed, so a period reaching today is refused (%s)',
+                            n, symbol, dates)
+        return cast(pd.DataFrame, data_frame[~unclosed])
 
     def delete(self,
                contract: Union[Contract, SecurityDefinition, int]):
@@ -589,7 +628,8 @@ class TickData(Data):
     def write_resolve_overlap(
         self,
         contract: Union[Contract, SecurityDefinition, int],
-        data_frame: pd.DataFrame
+        data_frame: pd.DataFrame,
+        exchange_calendar: Optional[ExchangeCalendar] = None,
     ):
         # The store atomically replaces incoming timestamp/bar-size keys.
         # Reading all existing history here created lost updates and turned a
@@ -598,7 +638,7 @@ class TickData(Data):
             raise ValueError('OHLCV frame must not be None')
         if 'close' in data_frame.columns:
             data_frame = cast(pd.DataFrame, data_frame[data_frame['close'].notna()])
-        self.write(contract, data_frame)
+        return self.write(contract, data_frame, exchange_calendar=exchange_calendar)
 
     def read(self,
              contract: Union[Contract, SecurityDefinition, int],

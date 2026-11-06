@@ -10159,8 +10159,13 @@ def _handle_data_download(args: argparse.Namespace):
                     )
                 if not df.empty:
                     storage_key = conid if conid else symbol
-                    tickdata.write_resolve_overlap(storage_key, df)
-                    symbol_rows += len(df)
+                    # The calendar lets the write chokepoint prove a session
+                    # has closed; keyed by conId it could not find one itself
+                    # and would refuse today's bar even after the close.
+                    write_calendar = (_try_get_exchange_calendar_for(sec_def)
+                                      if sec_def is not None else None)
+                    symbol_rows += tickdata.write_resolve_overlap(
+                        storage_key, df, exchange_calendar=write_calendar)
             except Exception as e:
                 # "No data for this window" is an EMPTY RESULT, not a failure,
                 # even when the vendor delivers it as an HTTP 400. The
