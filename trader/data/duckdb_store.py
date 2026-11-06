@@ -306,6 +306,67 @@ class DuckDBDataStore(DataStore):
 
         return df
 
+    def read_many(
+        self,
+        symbols: list[str],
+        start: Optional[dt.datetime] = None,
+        end: Optional[dt.datetime] = None,
+        bar_size: Optional[str] = None,
+    ) -> dict[str, pd.DataFrame]:
+        """Batched :meth:`read`: one connection and one query for many symbols.
+
+        Every connection to a large history DB costs tens of milliseconds, so
+        reading N symbols with N ``read()`` calls (the portfolio-risk
+        correlation pass did this per position) is N connects + N scans.
+
+        Returns ``{symbol: frame}`` where each frame has the same filter
+        semantics, columns, ordering (by date) and UTC ``date`` index as
+        ``read(symbol, start, end, bar_size)``. Symbols with no matching rows
+        are ABSENT from the result (``read`` returns an empty frame for them).
+        Non-NULL values are identical; only a column's dtype (and how a NULL
+        is represented, NaN vs None) can differ, where it is all-NULL (or has
+        NULLs) for one symbol but not for another in the same batch, because
+        DuckDB types the whole result set at once.
+        """
+        unique = list(dict.fromkeys(symbols))
+        if not unique:
+            return {}
+        conditions = [f"symbol IN ({', '.join('?' for _ in unique)})"]
+        params: list[Any] = list(unique)
+        if start is not None:
+            conditions.append("date >= ?")
+            params.append(start)
+        if end is not None:
+            conditions.append("date <= ?")
+            params.append(end)
+        if bar_size is not None:
+            conditions.append("(bar_size = ? OR bar_size IS NULL)")
+            params.append(bar_size)
+
+        where = " AND ".join(conditions)
+        query = f"""
+            SELECT symbol, date, open, high, low, close, volume, average,
+                   bar_count, bar_size, what_to_show
+            FROM {self.TABLE_NAME}
+            WHERE {where}
+            ORDER BY symbol, date
+        """
+
+        def _read(conn):
+            return conn.execute(query, params).fetchdf()
+
+        df = self._db.execute_atomic(_read)
+        if df.empty:
+            return {}
+
+        df['date'] = pd.to_datetime(df['date'], utc=True)
+        out: dict[str, pd.DataFrame] = {}
+        for sym, group in df.groupby('symbol', sort=False):
+            frame = group.drop(columns=['symbol']).set_index('date')
+            frame.index.name = 'date'
+            out[str(sym)] = frame
+        return out
+
 
     def quarantine(self, symbol: str, df: pd.DataFrame, reason: str) -> int:
         """Persist rejected bars with the reason they were rejected.
