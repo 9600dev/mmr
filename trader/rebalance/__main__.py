@@ -132,6 +132,21 @@ def main(argv: Optional[list[str]] = None, *, gateway_factory: Optional[GatewayF
          limits: Optional[PositionLimits] = None, out=None) -> int:
     out = out or sys.stdout
     args = build_parser().parse_args(argv)
+    # Library DEBUG/INFO chatter (e.g. "trying RPCClient.connect()") must not
+    # interleave with the plan / --json output on stdout. MMR_REBALANCE_DEBUG=1
+    # restores it. The previous global level is restored on return.
+    import logging as _logging
+    import os as _os
+    previous = _logging.root.manager.disable
+    if _os.environ.get('MMR_REBALANCE_DEBUG') != '1':
+        _logging.disable(_logging.INFO)
+    try:
+        return _run(args, gateway_factory=gateway_factory, limits=limits, out=out)
+    finally:
+        _logging.disable(previous)
+
+
+def _run(args, *, gateway_factory: Optional[GatewayFactory], limits: Optional[PositionLimits], out) -> int:
     gateway: Gateway | None = None
     try:
         factory = gateway_factory or (lambda: _default_gateway(args.config))

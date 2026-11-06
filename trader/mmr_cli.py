@@ -2147,6 +2147,11 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
     """Execute a parsed command.  Returns True to continue the REPL, False to exit."""
     global _json_mode
     _json_mode = getattr(args, 'json', False)
+    # --json contract: stdout carries ONLY the JSON payload. Human-oriented
+    # console output (progress, hints, "Using expiration: ...") goes to stderr
+    # so `mmr --json ... | jq` never sees a stray line (2026-11-05: options
+    # implied prefixed its JSON with a Rich status line).
+    console.file = sys.stderr if _json_mode else sys.stdout
     cmd = args.command
 
     if cmd in ('exit', 'quit', 'q'):
@@ -6048,8 +6053,20 @@ def _handle_verify(args: argparse.Namespace) -> bool:
     if _json_mode:
         print_dict({'ok': ok, 'checks': checks}, title='Verify')
     else:
-        import pandas as _pd
-        print_df(_pd.DataFrame(checks), title='Stack verification')
+        # A dedicated table: the generic print_df gave every column equal
+        # weight, and at 80 columns the long detail text squeezed the STATUS
+        # column to zero width — the one column this table exists to show.
+        from rich.table import Table as _RTable
+        table = _RTable(title='Stack verification')
+        table.add_column('check', no_wrap=True, style='bold')
+        table.add_column('status', no_wrap=True, min_width=4)
+        table.add_column('detail', overflow='fold', ratio=1)
+        colour = {'PASS': 'green', 'FAIL': 'bold red', 'WARN': 'yellow', 'SKIP': 'dim'}
+        for c in checks:
+            st = str(c.get('status', ''))
+            table.add_row(str(c.get('check', '')), f'[{colour.get(st, "white")}]{st}[/]',
+                          str(c.get('detail', '')))
+        console.print(table)
         if ok and not warned:
             print_status('VERIFY PASS — stack is trade-ready', success=True)
         elif ok:

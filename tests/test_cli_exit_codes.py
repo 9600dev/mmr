@@ -64,3 +64,16 @@ def test_usage_error_exits_2(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         cli.main()
     assert exc.value.code == 2
+
+
+def test_json_mode_routes_console_to_stderr(capsys, monkeypatch):
+    import argparse
+    monkeypatch.setattr(cli, '_json_mode', False)
+    args = argparse.Namespace(json=True, command='exit')
+    cli.dispatch(None, args)          # 'exit' returns before touching mmr
+    cli.console.print('[dim]Using expiration: 2027-02-19[/dim]')
+    out = capsys.readouterr()
+    assert 'Using expiration' not in out.out
+    assert 'Using expiration' in out.err
+    cli.dispatch(None, argparse.Namespace(json=False, command='exit'))
+    assert cli.console.file is sys.stdout
