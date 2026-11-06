@@ -672,6 +672,60 @@ class MMR:
     # Order Book
     # ------------------------------------------------------------------
 
+    def _strip_own_quotes(self, quotes: list) -> list:
+        """Null a bid/ask that is merely our own resting limit order.
+
+        IB paper reports our own working LMT as the market's best bid/ask
+        (a BUY LMT 1.00 on F showed bid=1.0 against a 12.55 market). Applied
+        to normalized IB quotes in place; a changed side becomes NaN and the
+        quote gets ``quote_notes``. One get_trades RPC for the whole list;
+        if it fails the quotes are returned untouched (and say so in the log).
+        """
+        if not quotes:
+            return quotes
+        try:
+            by_symbol: dict = {}
+            for sym in {str(q.get('symbol') or '') for q in quotes}:
+                if sym:
+                    by_symbol[sym] = []
+            if not by_symbol:
+                return quotes
+            trades_raw = self._rpc.rpc(return_type=dict[int, list[Trade]]).get_trades() or {}
+            _terminal = {'Cancelled', 'Filled', 'Inactive', 'ApiCancelled'}
+            for tl in trades_raw.values():
+                if not tl:
+                    continue
+                t = tl[0]
+                sym = getattr(t.contract, 'symbol', '')
+                lmt = getattr(t.order, 'lmtPrice', 0) or 0
+                if sym in by_symbol and t.orderStatus.status not in _terminal and lmt and lmt < 1e300:
+                    by_symbol[sym].append((t.order.action, float(lmt)))
+        except Exception as ex:
+            logger.warning('own-order quote check skipped: %s', ex)
+            return quotes
+        from trader.trading.position_sizing import discount_own_quotes
+
+        def _num(v):
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                return 0.0
+            return f if math.isfinite(f) else 0.0
+
+        for q in quotes:
+            own = by_symbol.get(str(q.get('symbol') or ''))
+            if not own:
+                continue
+            bid, ask, notes = discount_own_quotes(_num(q.get('bid')), _num(q.get('ask')),
+                                                  _num(q.get('last')), own)
+            if notes:
+                if bid == 0.0:
+                    q['bid'], q['bidSize'] = float('nan'), float('nan')
+                if ask == 0.0:
+                    q['ask'], q['askSize'] = float('nan'), float('nan')
+                q['quote_notes'] = notes
+        return quotes
+
     def _own_working_limits(self, symbol: str) -> list:
         """``[(action, lmtPrice), ...]`` for our working LMT orders on ``symbol``."""
         trades_raw = self._rpc.rpc(return_type=dict[int, list[Trade]]).get_trades() or {}
@@ -734,17 +788,33 @@ class MMR:
 
         if order_contracts:
             try:
+                # Live quotes (was hard-coded delayed=True: 15-minute-old
+                # bid/ask beside a working order).
                 batch_snaps = consume(
                     self._rpc.rpc(return_type=list[dict]).get_snapshots_batch(
-                        order_contracts, True
+                        order_contracts, False
                     )
                 )
+                from trader.trading.position_sizing import discount_own_quotes
+                own_by_sym: dict = {}
+                for tl in trades_raw.values():
+                    _o = tl[0].order
+                    _l = _o.lmtPrice if _o.lmtPrice and _o.lmtPrice < 1e300 else 0
+                    if _l:
+                        own_by_sym.setdefault(tl[0].contract.symbol, []).append((_o.action, float(_l)))
                 for i, snap_dict in enumerate(batch_snaps or []):
                     sym = sym_order[i]
+                    q = normalize_ib_quote(dict(snap_dict))
+                    _b, _a, _notes = discount_own_quotes(
+                        q['bid'] if q.get('bid') == q.get('bid') and q.get('bid') else 0.0,
+                        q['ask'] if q.get('ask') == q.get('ask') and q.get('ask') else 0.0,
+                        q['last'] if q.get('last') == q.get('last') and q.get('last') else 0.0,
+                        own_by_sym.get(sym, []))
                     snap_cache[sym] = {
-                        'bid': snap_dict.get('bid'),
-                        'ask': snap_dict.get('ask'),
-                        'last': snap_dict.get('last'),
+                        # our own resting order is not the market: report it as unknown
+                        'bid': (_b or None) if _notes else q.get('bid'),
+                        'ask': (_a or None) if _notes else q.get('ask'),
+                        'last': q.get('last'),
                     }
             except Exception:
                 pass
@@ -2524,7 +2594,7 @@ class MMR:
                 sym = tc.symbol
                 con_id = tc.conId
 
-        return normalize_ib_quote({
+        return self._strip_own_quotes([normalize_ib_quote({
             'symbol': sym,
             'conId': con_id,
             'time': getattr(ticker, 'time', None),
@@ -2542,7 +2612,7 @@ class MMR:
             'halted': getattr(ticker, 'halted', float('nan')),
             'exchange': getattr(contract, 'primaryExchange', '') or getattr(contract, 'exchange', ''),
             'currency': getattr(contract, 'currency', ''),
-        })
+        })])[0]
 
     def snapshot_batch(self, symbols: list[str], exchange: str = '',
                        currency: str = '', source: str = 'ib',
@@ -2616,7 +2686,7 @@ class MMR:
         rows = consume(
             self._rpc.rpc(return_type=list[dict]).get_snapshots_batch(contracts, delayed)
         ) or []
-        return [normalize_ib_quote(dict(r)) for r in rows]
+        return self._strip_own_quotes([normalize_ib_quote(dict(r)) for r in rows])
 
     def depth(self, symbol: Union[str, int], num_rows: int = 5,
               exchange: str = '', currency: str = '',
