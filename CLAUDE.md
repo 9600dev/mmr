@@ -637,6 +637,21 @@ constant is read at `logging_helper` import time). The container never sets it,
 so its behaviour is unchanged. Note this is NOT `AUDIT_ROADMAP` G7 (tests
 dialling the live RPC port), which is a separate, more serious issue.
 
+**asyncio debug mode is opt-in** (`trader/common/loop_health.py`). Set
+`MMR_ASYNCIO_DEBUG=1` (or pass `--debug` to `trader_service` /
+`strategy_service`; on `trader_service` `--debug` also turns on verbose
+ib_async logging) to get asyncio's per-callback tracking and its
+`Executing <Handle ...> took N seconds` slow-callback lines. An unrecognised
+value raises at startup. Until 2026-11-05 both services enabled debug mode
+whenever `TRADER_NODEBUG` was unset — i.e. always in production, at a cost on
+every callback. **`TRADER_NODEBUG` is now a log-level switch only** (set: all
+loggers to CRITICAL — its historical behaviour, kept for compatibility); it
+has no bearing on asyncio. In every mode a cheap `LoopLagMonitor` (one timer
+per second) logs `WARNING event loop lag N.NNNs (threshold ...)` when the loop
+runs a timer later than `MMR_LOOP_LAG_WARN_S` (default 0.5s): that is the
+"something blocked the loop" signal; re-run with `MMR_ASYNCIO_DEBUG=1` to name
+the slow callback.
+
 A handler whose file can't be opened is now **dropped individually**
 (`_drop_unwritable_handlers`) instead of taking the whole config down to
 `logging.basicConfig` — one unwritable path used to silently cost you the
