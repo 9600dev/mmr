@@ -1,6 +1,6 @@
 from asyncio import AbstractEventLoop
 from trader.common.helpers import get_network_ip
-from trader.common.logging_helper import LogLevels, set_all_log_level, setup_logging
+from trader.common.logging_helper import LogLevels, prune_old_logs, set_all_log_level, setup_logging
 from trader.common.loop_health import configure_event_loop
 from trader.container import Container, default_config_path
 from trader.trading.trading_runtime import Trader
@@ -28,6 +28,9 @@ def main(simulation: bool,
 
     if not config:
         config = default_config_path()
+
+    # Session log retention (MMR_LOG_RETENTION_DAYS, default 14; 0 = off).
+    prune_old_logs(logger=logging)
 
     is_stopping = False
     loop = asyncio.new_event_loop()

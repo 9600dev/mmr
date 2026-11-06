@@ -14,7 +14,7 @@ from trader.common.contract_sink import ContractSink
 from trader.common.dataclass_cache import DataClassCache, DataClassEvent, UpdateEvent
 from trader.common.exceptions import trader_exception, TraderConnectionException, TraderException
 from trader.common.helpers import ListHelper
-from trader.common.logging_helper import get_callstack, log_method, setup_logging
+from trader.common.logging_helper import get_callstack, log_method, setup_logging, TRACE
 from trader.common.reactivex import AnonymousObserver, SuccessFail
 
 from trader.data.data_access import PortfolioSummary, SecurityDefinition, TickStorage
@@ -507,7 +507,9 @@ class Trader():
                 self.portfolio.add_position(position)
 
     def __update_portfolio(self, portfolio_item: PortfolioItem):
-        logging.debug('__update_portfolio')
+        # TRACE, not DEBUG: this fires on every portfolio mark (thousands per
+        # session) and at DEBUG it dominated trader_service_<ts>.log.
+        logging.log(TRACE, '__update_portfolio')
         self.portfolio.add_portfolio_item(portfolio_item=portfolio_item)
         # Schedule the async universe update onto the trader's main loop even
         # when this callback fires on an IB/eventkit thread. The old code fell
@@ -1212,7 +1214,9 @@ class Trader():
             SecurityDefinition.from_contract_details(contract_details[0])
         )
         self._known_portfolio_conids.add(conid)
-        logging.debug('updating portfolio universe with %s', portfolio_item)
+        # Full PortfolioItem repr only at TRACE (it is ~600 bytes and this
+        # path re-fires during the connect burst).
+        logging.log(TRACE, 'updating portfolio universe with %s', portfolio_item)
 
         # Thread the write — dill.dumps on the universe + DuckDB INSERT
         # can be tens of ms; no reason to run on the loop.
@@ -1232,7 +1236,7 @@ class Trader():
                     SecurityDefinition.from_contract_details(contract_details[0])
                 )
 
-            logging.debug('updating portfolio universe with {}'.format(portfolio_item))
+            logging.log(TRACE, 'updating portfolio universe with %s', portfolio_item)
             self.universe_accessor.update(universe)
 
     # Trader.place_order used to sit here: a direct call into
