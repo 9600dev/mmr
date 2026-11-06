@@ -249,6 +249,7 @@ class DataService:
         tick_data: TickData,
         prev_days: int,
         now: Optional[dt.datetime] = None,
+        force: bool = False,
     ) -> List[tuple]:
         """(security, DateRange) for every missing range in each security's window.
 
@@ -262,6 +263,10 @@ class DataService:
         Pacific host and a US listing) "yesterday 23:59:59" local landed on
         TODAY in New York, missing() asked for today's session, and the
         still-forming daily bar was downloaded and stored as complete.
+
+        ``force`` re-downloads the WHOLE window even where bars exist (the
+        store replaces matching keys), the only way to repair a bad stored bar
+        — e.g. a partial session written before the unclosed-session guard.
         """
         current = now or dt.datetime.now(dt.timezone.utc)
         if current.tzinfo is None:
@@ -273,6 +278,9 @@ class DataService:
             tz_end = dateify(current - dt.timedelta(days=1), timezone=tz, make_eod=True)
 
             exchange_calendar = _try_get_exchange_calendar(security)
+            if force:
+                plan.append((security, DateRange(start=tz_start, end=tz_end)))
+                continue
             try:
                 if exchange_calendar:
                     date_ranges = tick_data.missing(
@@ -312,7 +320,7 @@ class DataService:
                 'errors': errors, 'symbols': [s.symbol for s in securities], 'tasks': tasks}
 
     async def _pull(self, source: str, symbols, universe, bar_size: str, prev_days: int,
-                    max_concurrent: int, make_task) -> dict:
+                    max_concurrent: int, make_task, force: bool = False) -> dict:
         securities = self._resolve_symbols(symbols, universe)
         if not securities:
             return {'enqueued': 0, 'completed': 0, 'failed': 0,
@@ -320,7 +328,7 @@ class DataService:
 
         bs = BarSize.parse_str(bar_size)
         tick_data = TickStorage(self.history_duckdb_path).get_tickdata(bar_size=bs)
-        plan = self._plan_downloads(securities, tick_data, prev_days)
+        plan = self._plan_downloads(securities, tick_data, prev_days, force=force)
         if not plan:
             return self._summarize(securities, [])
 
@@ -338,6 +346,7 @@ class DataService:
         bar_size: str = '1 day',
         prev_days: int = 30,
         max_concurrent: int = 5,
+        force: bool = False,
     ) -> dict:
         """Find missing date ranges, download from Massive concurrently, write to DuckDB.
 
@@ -349,6 +358,7 @@ class DataService:
                     'errors': ['massive_api_key not configured'], 'symbols': [], 'tasks': []}
         return await self._pull(
             'massive', symbols, universe, bar_size, prev_days, max_concurrent,
+            force=force, make_task=
             lambda i, sem, sec, dr, bs, td: self._download_massive_one(sem, sec, dr, bs, td))
 
     async def pull_twelvedata(
@@ -358,6 +368,7 @@ class DataService:
         bar_size: str = '1 day',
         prev_days: int = 30,
         max_concurrent: int = 5,
+        force: bool = False,
     ) -> dict:
         """Find missing date ranges, download from TwelveData concurrently, write to DuckDB.
 
@@ -368,6 +379,7 @@ class DataService:
                     'errors': ['twelvedata_api_key not configured'], 'symbols': [], 'tasks': []}
         return await self._pull(
             'twelvedata', symbols, universe, bar_size, prev_days, max_concurrent,
+            force=force, make_task=
             lambda i, sem, sec, dr, bs, td: self._download_twelvedata_one(sem, sec, dr, bs, td))
 
     async def pull_ib(
@@ -378,6 +390,7 @@ class DataService:
         prev_days: int = 5,
         ib_client_id: int = 10,
         max_concurrent: int = 1,
+        force: bool = False,
     ) -> dict:
         """Find missing date ranges, download from IB concurrently, write to DuckDB.
 
@@ -386,6 +399,7 @@ class DataService:
         """
         return await self._pull(
             'ib', symbols, universe, bar_size, prev_days, max_concurrent,
+            force=force, make_task=
             lambda i, sem, sec, dr, bs, td: self._download_ib_one(
                 sem, sec, dr, bs, td, ib_client_id + i))
 

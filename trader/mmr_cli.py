@@ -1042,18 +1042,21 @@ def build_parser() -> argparse.ArgumentParser:
     hist_massive_p.add_argument('--universe', default=None, help='Universe name to download')
     hist_massive_p.add_argument('--bar_size', default='1 day', help='Bar size (default: "1 day")')
     hist_massive_p.add_argument('--prev_days', type=int, default=30, help='Days of history (default: 30)')
+    hist_massive_p.add_argument('--force', action='store_true', help='Re-download the whole window even where bars exist (overwrites them) — repairs a bad stored bar, e.g. a partial session')
 
     hist_td_p = hist_sub.add_parser('twelvedata', aliases=['td'], help='Download history from TwelveData')
     hist_td_p.add_argument('--symbol', default=None, help='Single symbol to download')
     hist_td_p.add_argument('--universe', default=None, help='Universe name to download')
     hist_td_p.add_argument('--bar_size', default='1 day', help='Bar size (default: "1 day")')
     hist_td_p.add_argument('--prev_days', type=int, default=30, help='Days of history (default: 30)')
+    hist_td_p.add_argument('--force', action='store_true', help='Re-download the whole window even where bars exist (overwrites them) — repairs a bad stored bar, e.g. a partial session')
 
     hist_ib_p = hist_sub.add_parser('ib', help='Download history from Interactive Brokers')
     hist_ib_p.add_argument('--symbol', default=None, help='Single symbol to download')
     hist_ib_p.add_argument('--universe', default=None, help='Universe name to download')
     hist_ib_p.add_argument('--bar_size', default='1 min', help='Bar size (default: "1 min")')
     hist_ib_p.add_argument('--prev_days', type=int, default=5, help='Days of history (default: 5)')
+    hist_ib_p.add_argument('--force', action='store_true', help='Re-download the whole window even where bars exist (overwrites them) — repairs a bad stored bar, e.g. a partial session')
     hist_ib_p.add_argument('--ib_client_id', type=int, default=10, help='IB client ID (default: 10)')
 
     # financials
@@ -11745,6 +11748,7 @@ def _handle_history(mmr: MMR, args: argparse.Namespace):
             universe=universe,
             bar_size=args.bar_size,
             prev_days=args.prev_days,
+            force=getattr(args, 'force', False),
         )
     elif action in ('twelvedata', 'td'):
         _progress('Pulling TwelveData history via data_service...')
@@ -11753,6 +11757,7 @@ def _handle_history(mmr: MMR, args: argparse.Namespace):
             universe=universe,
             bar_size=args.bar_size,
             prev_days=args.prev_days,
+            force=getattr(args, 'force', False),
         )
     elif action == 'ib':
         _progress('Pulling IB history via data_service...')
@@ -11762,6 +11767,7 @@ def _handle_history(mmr: MMR, args: argparse.Namespace):
             bar_size=args.bar_size,
             prev_days=args.prev_days,
             ib_client_id=args.ib_client_id,
+            force=getattr(args, 'force', False),
         )
     else:
         console.print(f'[yellow]Unknown history action: {action}[/yellow]')

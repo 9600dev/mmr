@@ -2882,11 +2882,13 @@ class MMR:
         universe: Optional[str] = None,
         bar_size: str = '1 day',
         prev_days: int = 30,
+        force: bool = False,
     ) -> dict:
         """Download historical data from Massive.com via the data_service."""
         return consume(
             self._data_rpc.rpc(return_type=dict).pull_massive(
                 symbols=symbols, universe=universe, bar_size=bar_size, prev_days=prev_days,
+                force=force,
             )
         )
 
@@ -2896,11 +2898,13 @@ class MMR:
         universe: Optional[str] = None,
         bar_size: str = '1 day',
         prev_days: int = 30,
+        force: bool = False,
     ) -> dict:
         """Download historical data from TwelveData via the data_service."""
         return consume(
             self._data_rpc.rpc(return_type=dict).pull_twelvedata(
                 symbols=symbols, universe=universe, bar_size=bar_size, prev_days=prev_days,
+                force=force,
             )
         )
 
@@ -2911,12 +2915,13 @@ class MMR:
         bar_size: str = '1 min',
         prev_days: int = 5,
         ib_client_id: int = 10,
+        force: bool = False,
     ) -> dict:
         """Download historical data from IB via the data_service."""
         return consume(
             self._data_rpc.rpc(return_type=dict).pull_ib(
                 symbols=symbols, universe=universe, bar_size=bar_size,
-                prev_days=prev_days, ib_client_id=ib_client_id,
+                prev_days=prev_days, ib_client_id=ib_client_id, force=force,
             )
         )
 

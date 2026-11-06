@@ -79,6 +79,29 @@ class TestPlanning:
         monkeypatch.delenv('TZ')
         time.tzset()
 
+    def test_force_replans_the_whole_window_even_when_complete(self, svc):
+        """--force is the repair path for a bad stored bar (e.g. a partial session)."""
+        service, path = svc
+        td = TickStorage(path).get_tickdata(BarSize.Days1)
+        sessions = [d.date().isoformat() for d in pd.bdate_range('2026-10-19', '2026-11-04')]
+        td.write(_definition(), _daily(sessions), now=DURING)
+        assert service._plan_downloads([_definition()], td, prev_days=5, now=DURING) == []
+        plan = service._plan_downloads([_definition()], td, prev_days=5, now=DURING, force=True)
+        assert len(plan) == 1
+        _, dr = plan[0]
+        assert str(dr.end)[:10] == '2026-11-04'      # still never today
+
+    def test_force_overwrites_a_stored_partial_bar(self, svc):
+        service, path = svc
+        td = TickStorage(path).get_tickdata(BarSize.Days1)
+        bad = _daily(['2026-11-04']).assign(open=350.0, high=355.0, low=340.0, close=344.94, volume=9_777_048.0)
+        td.write(_definition(), bad, now=dt.datetime(2026, 11, 6, 15, tzinfo=UTC))
+        good = _daily(['2026-11-04']).assign(open=350.0, high=355.38, low=342.06, close=344.17, volume=48_000_000.0)
+        td.write(_definition(), good, now=dt.datetime(2026, 11, 6, 15, tzinfo=UTC))
+        got = td.read(_definition())
+        got = got[got['close'].notna()]
+        assert list(got['close']) == [344.17] and list(got['volume']) == [48_000_000.0]
+
     def test_the_old_host_local_window_did_reach_today_on_a_pacific_host(self, monkeypatch):
         """Root cause pin: the expression pull_* used before."""
         monkeypatch.setenv('TZ', 'America/Vancouver')
@@ -108,7 +131,7 @@ def test_pull_reports_symbols_and_per_task_ranges(svc, monkeypatch):
         return {'symbol': security.symbol, 'start': str(dr.start), 'end': str(dr.end),
                 'rows': 2, 'ok': True, 'client_id': client_id}
     monkeypatch.setattr(service, '_download_ib_one', fake_one)
-    monkeypatch.setattr(service, '_plan_downloads', lambda secs, td, days, now=None: [
+    monkeypatch.setattr(service, '_plan_downloads', lambda secs, td, days, now=None, force=False: [
         (secs[0], SimpleNamespace(start=dt.date(2026, 10, 26), end=dt.date(2026, 10, 27))),
         (secs[0], SimpleNamespace(start=dt.date(2026, 11, 3), end=dt.date(2026, 11, 4)))])
     result = asyncio.run(service.pull_ib(symbols=['AAPL'], bar_size='1 day', prev_days=15,
