@@ -23,6 +23,38 @@ import yaml
 log = logging.getLogger('pycron')
 
 
+TAIL_LINES = 200
+TAIL_LINE_BYTES = 4096
+
+
+async def drain_tail(stream: Optional[asyncio.StreamReader],
+                     max_lines: int = TAIL_LINES, max_line_bytes: int = TAIL_LINE_BYTES) -> str:
+    """Read ``stream`` to EOF keeping only the last ``max_lines`` lines.
+
+    Memory is bounded by ``max_lines * max_line_bytes`` no matter how much the
+    child writes; over-long lines are truncated (the pipe is still drained so
+    the child never blocks on a full pipe).
+    """
+    import collections
+    if stream is None:
+        return ''
+    tail: collections.deque = collections.deque(maxlen=max_lines)
+    dropped = 0
+    while True:
+        try:
+            line = await stream.readline()
+        except ValueError:
+            # Line longer than the reader's limit: consume what's buffered.
+            line = await stream.read(max_line_bytes)
+        if not line:
+            break
+        if len(tail) == max_lines:
+            dropped += 1
+        tail.append(line[:max_line_bytes].decode(errors='replace').rstrip('\n'))
+    prefix = f'[... {dropped} earlier lines dropped ...]\n' if dropped else ''
+    return prefix + '\n'.join(tail)
+
+
 class ZonedCronTab(CronTab):
     """CronTab whose schedule is evaluated in a fixed IANA timezone.
 
@@ -229,8 +261,15 @@ class JobScheduler():
             stopping_debug = 'stopping job in {} secs'.format(job.crontab_stop.next(default_utc=False))
         log.info('started job: {} {} {} {}'.format(job.command, job.arguments, str(process.pid), stopping_debug))
 
-        stdout, stderr = await process.communicate()
-        result = stdout.decode().strip()
+        # Stream both pipes into bounded tails instead of communicate():
+        # communicate() buffers a long-running service's ENTIRE output in
+        # memory until it exits (days, for trader_service), so pycron's RSS
+        # grew without bound. Only the tail is ever reported.
+        out_tail, err_tail = await asyncio.gather(
+            drain_tail(process.stdout), drain_tail(process.stderr))
+        await process.wait()
+        result = out_tail.strip()
+        stderr_text = err_tail.strip()
 
         job.return_code = process.returncode
         job.running = False
@@ -242,7 +281,7 @@ class JobScheduler():
         log.info('job finished ret: [{}] {} stdout: {} stderr: {}'.format(job.return_code,
                                                                           job.command,
                                                                           result,
-                                                                          stderr.decode().strip()))
+                                                                          stderr_text))
         return result
 
     # todo make this better
