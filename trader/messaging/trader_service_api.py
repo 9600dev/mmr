@@ -93,6 +93,9 @@ class TraderServiceApi(RPCHandler):
         approver_key: str = '',
         client_intent_id: str = '',
     ) -> SuccessFail[Trade]:
+        # Position records carry exchange=''; IB rejects market-data and order
+        # requests on that shape (321). Supply the routing venue at the boundary.
+        contract = self.trader.routable_contract(contract) if isinstance(contract, Contract) else contract
         # todo: we'll have to make the cli async so we can subscribe to the trade
         # changes as orders get hit etc
         logging.debug('place_order_simple returns a submission receipt; executions require reconciliation')
@@ -251,10 +254,16 @@ class TraderServiceApi(RPCHandler):
 
     @rpcmethod
     async def get_snapshot(self, contract: Contract, delayed: bool) -> Ticker:
+        # Position records carry exchange=''; IB rejects market-data and order
+        # requests on that shape (321). Supply the routing venue at the boundary.
+        contract = self.trader.routable_contract(contract) if isinstance(contract, Contract) else contract
         return await self.trader.client.get_snapshot(contract=contract, delayed=delayed)
 
     @rpcmethod
     async def get_market_depth(self, contract: Contract, num_rows: int = 5, is_smart_depth: bool = False) -> dict:
+        # Position records carry exchange=''; IB rejects market-data and order
+        # requests on that shape (321). Supply the routing venue at the boundary.
+        contract = self.trader.routable_contract(contract) if isinstance(contract, Contract) else contract
         return await self.trader.get_market_depth(contract, num_rows, is_smart_depth)
 
     @rpcmethod
@@ -420,6 +429,8 @@ class TraderServiceApi(RPCHandler):
 
     @rpcmethod
     async def get_snapshots_batch(self, contracts: list, delayed: bool = False) -> list[dict]:
+        contracts = [self.trader.routable_contract(c) if isinstance(c, Contract) else c
+                     for c in (contracts or [])]
         return await self.trader.get_snapshots_batch(contracts, delayed)
 
     @rpcmethod
@@ -448,6 +459,9 @@ class TraderServiceApi(RPCHandler):
         proposal_id: Optional[int] = None,
     ) -> SuccessFail[list[Trade]]:
         """Place an order with full execution specification (brackets, trailing stops, etc.)."""
+        # Position records carry exchange=''; IB rejects market-data and order
+        # requests on that shape (321). Supply the routing venue at the boundary.
+        contract = self.trader.routable_contract(contract) if isinstance(contract, Contract) else contract
         allow_open = True
         if getattr(self.trader, 'require_proposal_approval', False):
             # Passing an execution-spec dict is not evidence of review. The
@@ -529,6 +543,9 @@ class TraderServiceApi(RPCHandler):
     @rpcmethod
     async def resize_position(self, contract: Contract, target_quantity: float,
                               client_intent_id: str = '') -> SuccessFail:
+        # Position records carry exchange=''; IB rejects market-data and order
+        # requests on that shape (321). Supply the routing venue at the boundary.
+        contract = self.trader.routable_contract(contract) if isinstance(contract, Contract) else contract
         return await self.trader.resize_position(contract, target_quantity, client_intent_id)
 
     @rpcmethod
@@ -566,6 +583,9 @@ class TraderServiceApi(RPCHandler):
         client_intent_id: str = '',
     ) -> SuccessFail[Trade]:
         """Place a standalone protective order (stop, trailing stop, limit)."""
+        # Position records carry exchange=''; IB rejects market-data and order
+        # requests on that shape (321). Supply the routing venue at the boundary.
+        contract = self.trader.routable_contract(contract) if isinstance(contract, Contract) else contract
         return await self.trader.place_standalone_order(
             contract=contract,
             action=action,
@@ -587,6 +607,9 @@ class TraderServiceApi(RPCHandler):
         order: Order,
     ) -> dict:
         """Simulate order to get margin impact without placing it."""
+        # Position records carry exchange=''; IB rejects market-data and order
+        # requests on that shape (321). Supply the routing venue at the boundary.
+        contract = self.trader.routable_contract(contract) if isinstance(contract, Contract) else contract
         return await self.trader.check_order_margin(contract, order)
 
     @rpcmethod
