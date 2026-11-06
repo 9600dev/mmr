@@ -749,10 +749,7 @@ class TickStorage():
     ):
         self.duckdb_path = duckdb_path
 
-    def list_libraries(self) -> List[str]:
-        # In the DuckDB world, "libraries" are just bar_size strings that have
-        # been used as prefixes.  We look for symbols in the tick_data table
-        # that have an associated bar_size value.
+    def _store(self) -> DuckDBDataStore:
         if self.duckdb_path and (
             self.duckdb_path.endswith('.duckdb')
             or self.duckdb_path.startswith('/')
@@ -761,7 +758,33 @@ class TickStorage():
             db_path = self.duckdb_path
         else:
             db_path = _default_db_path()
-        store = DuckDBDataStore(db_path)
+        return DuckDBDataStore(db_path)
+
+    def series_summary(self) -> pd.DataFrame:
+        """One row per stored (symbol, bar_size) series, from a single query.
+
+        Columns: symbol, bar_size, start, end, rows, bars (see
+        DuckDBDataStore.series_summary). Series whose bar_size is NULL or not a
+        known BarSize are excluded — the same rule list_libraries() applies —
+        but the excluded row count is LOGGED, never dropped silently.
+        """
+        df = self._store().series_summary()
+        if df.empty:
+            return df
+        known = df['bar_size'].isin(BarSize.bar_sizes())
+        if not bool(known.all()):
+            excluded = df[~known]
+            logging.warning(
+                'series_summary: excluded %d series (%d rows) whose bar_size is NULL '
+                'or unknown: %s', len(excluded), int(excluded['rows'].sum()),
+                sorted({str(b) for b in excluded['bar_size'].tolist()}))
+        return cast(pd.DataFrame, df[known]).reset_index(drop=True)
+
+    def list_libraries(self) -> List[str]:
+        # In the DuckDB world, "libraries" are just bar_size strings that have
+        # been used as prefixes.  We look for symbols in the tick_data table
+        # that have an associated bar_size value.
+        store = self._store()
         rows = store._db.execute(
             f"SELECT DISTINCT bar_size FROM {store.TABLE_NAME} "
             f"WHERE bar_size IS NOT NULL ORDER BY bar_size",

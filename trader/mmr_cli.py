@@ -9655,8 +9655,75 @@ def _handle_data(args: argparse.Namespace):
         console.print(f'[yellow]Unknown data action: {action}[/yellow]')
 
 
+_SUMMARY_DISPLAY_TZ = 'America/New_York'
+
+
+def _conid_symbol_map(accessor) -> Dict[int, str]:
+    """conId -> ticker for every definition in every local universe.
+
+    Built from ONE pass over the catalogue. Per-conId
+    ``resolve_symbol(conid, first_only=True)`` re-read every universe on each
+    cache miss, which over ~1,000 series is most of a minute by itself. The
+    preference order is the one resolve_universe applies: universes in
+    list_universes() order, then a stable sort on the accessor's secType
+    ranking, first wins.
+    """
+    candidates: Dict[int, list] = {}
+    for universe in accessor.get_all():
+        for definition in universe.security_definitions:
+            candidates.setdefault(int(definition.conId), []).append(definition)
+    ranking = list(accessor.sorted_types)
+
+    def _rank(definition) -> int:
+        return ranking.index(definition.secType) if definition.secType in ranking else len(ranking)
+
+    return {cid: sorted(defs, key=_rank)[0].symbol for cid, defs in candidates.items()}
+
+
+def _data_summary_frame(storage, accessor):
+    """The `data summary` table: one row per stored (symbol, bar_size).
+
+    Columns: conId, symbol, bar_size, start, end, rows, placeholders. start/end
+    are tz-aware Timestamps (America/New_York) spanning REAL bars; ``rows`` is
+    every stored row and ``placeholders`` the all-NULL markers among them.
+
+    Storage keys can be conIds (ints stored as strings) or raw ticker strings —
+    the latter from `data download` runs for a symbol not yet in the local
+    universe. A numeric key is resolved back to a ticker when the catalogue
+    knows it and shown as-is otherwise; a ticker key gets an empty conId so it
+    still shows up instead of silently disappearing.
+    """
+    import pandas as pd
+
+    columns = ['conId', 'symbol', 'bar_size', 'start', 'end', 'rows', 'placeholders']
+    inventory = storage.series_summary()
+    if inventory.empty:
+        return pd.DataFrame(columns=columns)
+    names = _conid_symbol_map(accessor)
+
+    rows = []
+    for rec in inventory.itertuples(index=False):
+        key = str(rec.symbol)
+        try:
+            con_id: Optional[int] = int(key)
+        except (TypeError, ValueError):
+            con_id = None
+        start = rec.start.tz_convert(_SUMMARY_DISPLAY_TZ) if pd.notna(rec.start) else None
+        end = rec.end.tz_convert(_SUMMARY_DISPLAY_TZ) if pd.notna(rec.end) else None
+        rows.append({
+            'conId': key if con_id is not None else '',
+            'symbol': names.get(con_id, key) if con_id is not None else key,
+            'bar_size': rec.bar_size,
+            'start': start,
+            'end': end,
+            'rows': int(rec.rows),
+            'placeholders': int(rec.rows) - int(rec.bars),
+        })
+    return pd.DataFrame(rows, columns=columns)
+
+
 def _handle_data_summary():
-    """Show summary of all local historical data."""
+    """Show summary of all local historical data (one grouped query)."""
     import pandas as pd
     from trader.container import Container
     from trader.data.data_access import TickStorage
@@ -9674,55 +9741,17 @@ def _handle_data_summary():
     storage = TickStorage(history_path)
     accessor = UniverseAccessor(duckdb_path, cfg.get('universe_library', 'Universes'))
 
-    bar_sizes = storage.list_libraries()
-    if not bar_sizes:
-        print_df(pd.DataFrame(), title='Data Summary')
-        return
-
-    rows = []
-    for bs_str in bar_sizes:
-        from trader.objects import BarSize
-        bs = BarSize.parse_str(bs_str)
-        tickdata = storage.get_tickdata(bs)
-        symbols = tickdata.list_symbols()
-        for sym in symbols:
-            # Storage keys can be either conIds (ints stored as strings) or
-            # raw ticker strings — the latter happens when `data download`
-            # runs for a symbol that isn't in the local universe yet. Try
-            # conId-first and fall back to passing the key through as-is,
-            # so tickers-only downloads still show up in the summary
-            # instead of silently disappearing.
-            name = sym
-            con_id = None
-            try:
-                con_id = int(sym)
-                storage_key = con_id
-            except (TypeError, ValueError):
-                storage_key = sym
-
-            try:
-                min_date, max_date = tickdata.date_summary(storage_key)
-            except Exception:
-                continue
-
-            if con_id is not None:
-                # Try to resolve conId back to a human symbol name.
-                try:
-                    results = accessor.resolve_symbol(con_id, first_only=True)
-                    if results:
-                        name = results[0].symbol
-                except Exception:
-                    pass
-
-            rows.append({
-                'conId': sym if con_id is not None else '',
-                'symbol': name,
-                'bar_size': bs_str,
-                'start': str(min_date)[:19],
-                'end': str(max_date)[:19],
-            })
-
-    print_df(pd.DataFrame(rows), title='Data Summary')
+    df = _data_summary_frame(storage, accessor)
+    if not df.empty:
+        # JSON keeps the offset (ISO 8601) so a consumer cannot mistake the
+        # New York wall clock for UTC; the table shows the wall clock.
+        if _json_mode:
+            fmt = lambda ts: ts.isoformat() if ts is not None else None  # noqa: E731
+        else:
+            fmt = lambda ts: str(ts)[:19] if ts is not None else ''  # noqa: E731
+        df['start'] = [fmt(ts) for ts in df['start']]
+        df['end'] = [fmt(ts) for ts in df['end']]
+    print_df(df, title='Data Summary')
 
 
 def _handle_data_query(args: argparse.Namespace):
@@ -11066,15 +11095,14 @@ def _handle_data_audit(args: argparse.Namespace):
             sys.exit(1)
 
 
-def _handle_data_status():
+def _handle_data_status(now=None):
     """Show freshness of every (universe, bar_size) combination referenced
     in data_refresh.yaml. Surfaces what's stale before deciding whether to
     fire a manual refresh."""
     import datetime as dt
     from trader.container import Container
-    from trader.data.bar_staleness import sessions_behind
     from trader.data.universe import UniverseAccessor
-    from trader.data.duckdb_store import DuckDBConnection
+    from trader.data.duckdb_store import DuckDBDataStore
 
     try:
         cfg = _load_data_refresh_yaml()
@@ -11089,8 +11117,9 @@ def _handle_data_status():
         container_cfg.get('duckdb_path', ''),
         container_cfg.get('universe_library', 'Universes'),
     )
-    db = DuckDBConnection.get_instance(history_path)
-    now = dt.datetime.now(dt.timezone.utc)
+    store = DuckDBDataStore(history_path)
+    now = now or dt.datetime.now(dt.timezone.utc)
+    calendars: Dict[tuple, Any] = {}
 
     rows = []
     for job_name, spec in cfg['jobs'].items():
@@ -11098,49 +11127,10 @@ def _handle_data_status():
         bar_size = spec.get('bar_size', '1 day')
         uni = accessor.get(universe_name) if universe_name else None
         sec_defs = uni.security_definitions if uni else []
-        if not sec_defs:
-            rows.append({'job': job_name, 'universe': universe_name or '—',
-                         'bar_size': bar_size, 'covered': 0, 'total': 0,
-                         'last_bar': None, 'stale_days': None})
-            continue
-
-        cids = [str(sd.conId) for sd in sec_defs]
-        placeholders = ','.join('?' * len(cids))
-        # Per-symbol latest-bar lookup
-        per_sym = db.execute(
-            f"SELECT symbol, MAX(date) FROM tick_data "
-            f"WHERE bar_size = ? AND symbol IN ({placeholders}) GROUP BY symbol",
-            ['1 day' if bar_size == '1 day' else bar_size, *cids],
-            fetch='all',
-        ) or []
-        per_sym_map = {r[0]: r[1] for r in per_sym}
-        latest_bars = [v for v in per_sym_map.values() if v is not None]
-        if latest_bars:
-            latest = max(latest_bars)
-            # Weekday sessions behind, with the offset CONVERTED rather than
-            # dropped. `.replace(tzinfo=None)` on a tz-aware bar keeps the wall
-            # clock and moves the instant, and counting calendar days made a
-            # series current through Friday read as three days stale every
-            # Monday. See trader/data/bar_staleness.py.
-            stale_days = sessions_behind(latest, now)
-        else:
-            latest = None
-            stale_days = None
-        rows.append({
-            'job': job_name,
-            'universe': universe_name,
-            'bar_size': bar_size,
-            'covered': len(per_sym_map),
-            'total': len(cids),
-            # In UTC, so the date shown agrees with the session it names and
-            # with the staleness count beside it. Rendered in the stored local
-            # offset, Monday's session reads as "2026-07-26" (a Sunday), which
-            # is how a perfectly current series comes to look wrong.
-            'last_bar': (latest.astimezone(dt.timezone.utc).isoformat()
-                         if latest and latest.tzinfo else
-                         latest.isoformat() if latest else None),
-            'stale_days': stale_days,
-        })
+        last_bars = store.last_bars([str(sd.conId) for sd in sec_defs], bar_size)
+        row = _job_freshness(sec_defs, last_bars, bar_size, now,
+                             calendar_for=lambda sd: _cached_calendar_for(sd, calendars))
+        rows.append({'job': job_name, 'universe': universe_name or '—', **row})
 
     if _json_mode:
         print(_json_dumps({'data': rows, 'title': 'Data Refresh Status'}))
@@ -11151,18 +11141,114 @@ def _handle_data_status():
     table.add_column('universe')
     table.add_column('bar_size')
     table.add_column('coverage', justify='right')
-    table.add_column('last bar', justify='right')
-    table.add_column('stale (d)', justify='right')
+    table.add_column('newest bar', justify='right')
+    table.add_column('stalest bar', justify='right')
+    table.add_column('behind (sess)', justify='right')
+    table.add_column('stale', justify='right')
     for r in rows:
         cov = f"{r['covered']}/{r['total']}"
-        last = r['last_bar'][:10] if r['last_bar'] else '—'
-        stale = '—' if r['stale_days'] is None else str(r['stale_days'])
-        style = ('red' if r['stale_days'] is not None and r['stale_days'] > 3
-                 else 'yellow' if r['stale_days'] is not None and r['stale_days'] > 1
+        newest = r['last_bar_newest'][:10] if r['last_bar_newest'] else '—'
+        oldest = r['last_bar_oldest'][:10] if r['last_bar_oldest'] else '—'
+        behind = '—' if r['stale_days_max'] is None else str(r['stale_days_max'])
+        stale = f"{r['stale_count']} (>{r['stale_threshold_sessions']})"
+        style = ('red' if r['stale_count'] > 0 or r['covered'] == 0
+                 else 'yellow' if r['uncovered'] > 0
                  else 'green')
-        table.add_row(r['job'], r['universe'] or '—', r['bar_size'],
-                      cov, last, f'[{style}]{stale}[/{style}]')
+        table.add_row(r['job'], r['universe'] or '—', r['bar_size'], cov,
+                      newest, f'[{style}]{oldest}[/{style}]',
+                      f'[{style}]{behind}[/{style}]', f'[{style}]{stale}[/{style}]')
     console.print(table)
+
+
+def _staleness_threshold_sessions(bar_size: str) -> int:
+    """Sessions a series may trail `now` before `data status` calls it stale.
+
+    One session for anything up to a daily bar: a session's bars are final only
+    after its close and the refresh crons run after it, so trailing by exactly
+    the in-progress (or just-closed, not yet refreshed) session is the steady
+    state, and trailing by two means a refresh was missed. A weekly bar may
+    trail by a week of sessions and a monthly one by a month.
+    """
+    if bar_size == '1 week':
+        return 5
+    if bar_size == '1 month':
+        return 23
+    return 1
+
+
+def _cached_calendar_for(sec_def, cache: Dict[tuple, Any]):
+    key = (getattr(sec_def, 'primaryExchange', ''), getattr(sec_def, 'exchange', ''))
+    if key not in cache:
+        cache[key] = _try_get_exchange_calendar_for(sec_def)
+    return cache[key]
+
+
+def _job_freshness(sec_defs, last_bars: Dict[str, Any], bar_size: str, now,
+                   calendar_for=lambda sd: None) -> Dict[str, Any]:
+    """Freshness of one refresh job, computed PER MEMBER.
+
+    The previous status reported max(last bar) across the universe, so one
+    fresh member made the whole job read current: live on 2026-11-05 it showed
+    a 1-min job as "514/514, last bar today, stale 0d" while 469 of those
+    members had ended on 2026-10-22. The job is as stale as its stalest member,
+    so that is what this leads with; the newest is kept beside it because the
+    gap between the two is itself the signal.
+
+    ``last_bars`` maps conId string -> latest REAL bar (placeholders excluded).
+    Sessions behind are counted on each member's exchange calendar when one
+    resolves (holidays are not missed sessions) and by weekdays otherwise.
+    Dates are rendered in UTC ISO 8601, as before, so the date shown agrees
+    with the staleness count beside it.
+    """
+    import datetime as dt
+    from trader.data.bar_staleness import sessions_behind
+
+    threshold = _staleness_threshold_sessions(bar_size)
+    members = []
+    uncovered = []
+    for sd in sec_defs:
+        last = last_bars.get(str(sd.conId))
+        if last is None:
+            uncovered.append({'conId': sd.conId, 'symbol': sd.symbol})
+            continue
+        behind = sessions_behind(last, now, calendar=calendar_for(sd))
+        members.append({
+            'conId': sd.conId,
+            'symbol': sd.symbol,
+            'last_bar': last,
+            'sessions_behind': behind,
+        })
+
+    def _iso(ts):
+        if ts is None:
+            return None
+        return (ts.astimezone(dt.timezone.utc) if ts.tzinfo else ts).isoformat()
+
+    newest = max(members, key=lambda m: m['last_bar']) if members else None
+    oldest = min(members, key=lambda m: m['last_bar']) if members else None
+    # An unknown count (None) is not "fresh": it is counted stale.
+    stale = sorted(
+        (m for m in members
+         if m['sessions_behind'] is None or m['sessions_behind'] > threshold),
+        key=lambda m: m['last_bar'])
+    return {
+        'bar_size': bar_size,
+        'total': len(sec_defs),
+        'covered': len(members),
+        'uncovered': len(uncovered),
+        'last_bar_newest': _iso(newest['last_bar']) if newest else None,
+        'last_bar_oldest': _iso(oldest['last_bar']) if oldest else None,
+        'stalest_symbol': oldest['symbol'] if oldest else None,
+        'stale_days_newest': newest['sessions_behind'] if newest else None,
+        # The largest per-member count, which on a mixed-venue universe need
+        # not belong to the member with the oldest timestamp.
+        'stale_days_max': max(counts) if (counts := [
+            m['sessions_behind'] for m in members if m['sessions_behind'] is not None]) else None,
+        'stale_threshold_sessions': threshold,
+        'stale_count': len(stale),
+        'stale_members': [{**m, 'last_bar': _iso(m['last_bar'])} for m in stale],
+        'uncovered_members': uncovered,
+    }
 
 
 def _handle_depth(mmr: MMR, args: argparse.Namespace):

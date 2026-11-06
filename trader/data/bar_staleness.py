@@ -60,8 +60,42 @@ def _as_utc(value) -> Optional[dt.datetime]:
     return value.astimezone(dt.timezone.utc)
 
 
-def sessions_behind(last_bar, now=None) -> Optional[int]:
+def _calendar_sessions_after(last: dt.datetime, current: dt.datetime, calendar) -> Optional[int]:
+    """Sessions of ``calendar`` dated strictly after ``last`` up to and
+    including ``current``'s date, both dated in the venue's timezone. None when
+    the calendar cannot answer for this span."""
+    import pandas as pd
+
+    tz = getattr(calendar, 'tz', None)
+    if tz is None:
+        return None
+    start = last.astimezone(tz).date()
+    end = current.astimezone(tz).date()
+    if end <= start:
+        return 0
+    first = (pd.Timestamp(start) + pd.Timedelta(days=1))
+    last_day = pd.Timestamp(end)
+    try:
+        lo = max(first, pd.Timestamp(calendar.first_session).tz_localize(None))
+        hi = min(last_day, pd.Timestamp(calendar.last_session).tz_localize(None))
+        if lo != first or hi != last_day:
+            return None          # span leaves the calendar: don't half-answer
+        return int(len(calendar.sessions_in_range(lo, hi)))
+    except Exception:
+        return None
+
+
+def sessions_behind(last_bar, now=None, calendar=None) -> Optional[int]:
     """Weekday sessions between ``last_bar`` and ``now``, or None if unknown.
+
+    With an ``exchange_calendars`` ``calendar`` the count is of that venue's
+    real sessions, with both instants converted to the VENUE's timezone before
+    taking their dates. That removes both limitations recorded above: holidays
+    stop counting as missed sessions (the Friday after Thanksgiving no longer
+    reads every US series as stale), and an ASX bar stamped at Sydney midnight
+    is dated by its own session rather than the previous UTC day. When the
+    calendar cannot answer (a date outside its bounds) this falls back to the
+    weekday count rather than guessing.
 
     ``0`` means "current": the most recent bar is from today, or from the most
     recent weekday when today is a weekend. A series that stops on Friday reads
@@ -79,6 +113,11 @@ def sessions_behind(last_bar, now=None) -> Optional[int]:
     current = _as_utc(now) if now is not None else dt.datetime.now(dt.timezone.utc)
     if current is None:
         return None
+
+    if calendar is not None:
+        counted = _calendar_sessions_after(last, current, calendar)
+        if counted is not None:
+            return counted
 
     start, end = last.date(), current.date()
     if end <= start:
