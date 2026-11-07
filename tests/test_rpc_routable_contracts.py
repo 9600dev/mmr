@@ -38,9 +38,16 @@ def test_batch_routes_each_contract_and_keeps_explicit_venue():
     assert [c.exchange for c in sent] == ['SMART', 'ASX']
 
 
+def test_already_routable_contract_keeps_identity():
+    api, trader = _api()
+    c = Contract(secType='STK', conId=265598, symbol='AAPL', exchange='SMART', currency='USD')
+    asyncio.run(api.get_snapshot(c, False))
+    assert trader.client.get_snapshot.call_args.kwargs['contract'] is c
+
+
 def test_every_order_and_quote_entry_normalises():
     for name in ('place_order_simple', 'place_expressive_order', 'resize_position',
                  'place_standalone_order', 'check_order_margin', 'get_snapshot',
                  'get_market_depth', 'get_snapshots_batch'):
         src = inspect.getsource(getattr(TraderServiceApi, name))
-        assert 'routable_contract' in src, name
+        assert '_routed(self.trader' in src, name

@@ -14,8 +14,10 @@ class DataServiceApi(RPCHandler):
         bar_size: str = '1 day',
         prev_days: int = 30,
         max_concurrent: int = 5,
+        force: bool = False,
     ) -> dict:
-        return await self.service.pull_massive(symbols, universe, bar_size, prev_days, max_concurrent)
+        return await self.service.pull_massive(symbols, universe, bar_size, prev_days, max_concurrent,
+                                               force=force)
 
     @rpcmethod
     async def pull_twelvedata(
@@ -25,8 +27,10 @@ class DataServiceApi(RPCHandler):
         bar_size: str = '1 day',
         prev_days: int = 30,
         max_concurrent: int = 5,
+        force: bool = False,
     ) -> dict:
-        return await self.service.pull_twelvedata(symbols, universe, bar_size, prev_days, max_concurrent)
+        return await self.service.pull_twelvedata(symbols, universe, bar_size, prev_days, max_concurrent,
+                                                  force=force)
 
     @rpcmethod
     async def pull_ib(
@@ -37,8 +41,10 @@ class DataServiceApi(RPCHandler):
         prev_days: int = 5,
         ib_client_id: int = 10,
         max_concurrent: int = 1,
+        force: bool = False,
     ) -> dict:
-        return await self.service.pull_ib(symbols, universe, bar_size, prev_days, ib_client_id, max_concurrent)
+        return await self.service.pull_ib(symbols, universe, bar_size, prev_days, ib_client_id, max_concurrent,
+                                          force=force)
 
     @rpcmethod
     async def status(self) -> dict:
