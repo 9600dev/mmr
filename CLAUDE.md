@@ -128,6 +128,25 @@ The reason PubSub and MessageBus are separate (despite overlap) is efficiency: Z
 
 **Competing-session recovery (error 10197)**: when the same IB login opens another session (TWS, IBKR mobile, web), IB revokes this session's market data; every `reqMktData` subscription goes silent and nothing re-requests it. `IBAIORx` now marks the loss on 10197 and a retry loop re-issues `reqMktData` for every cached contract every 60s until ticks flow again (`market data RECOVERED` in the trader log). ib_async keys tickers by contract, so re-requests feed the same Ticker objects and every downstream pipeline resumes without re-subscription. Note: closing the IBKR mobile app does NOT end its session immediately. Observed 2026-07-27: 22 dark minutes mid-session, manual restart to recover — now self-healing.
 
+**10197 log policy (2026-11-06)**: IB sends one 10197 *per subscription* (about 30 ERROR lines in 30 ms on 2026-11-06, again on every resubscribe pass). `IBAIORx.__handle_error` logs the FIRST 10197 of an outage at ERROR (that is the alert that reaches `errors.log`) and the per-contract repeats at WARNING while the outage is ongoing (a loss is recorded and no tick has arrived since). Ticks flowing, or the retry loop's `RECOVERED` line, closes the outage; the next 10197 is ERROR again. Every 10197 still reaches `error_subject`. `ib_informational.ib_log_level` keeps 10197 at ERROR (pinned by `tests/test_ib_error_logging.py`); the downgrade lives only in the handler (`tests/test_ib_10197_log_once.py`).
+
+**IB market-data semantics (learned live, 2026-11-06)**: the non-obvious IB behaviors that shape the data layer:
+- **Daily close = regular session.** `ib_history_worker.use_rth_for()`: `1 day` / `1 week` / `1 month` bars for `STK`/`IND` request `useRTH=True`, so the close is the official close (matches TwelveData/Massive). With `useRTH=False` IB folds pre/post-market prints into the daily bar: AAPL 2026-11-05 stored 343.25 (post-market last) against the official 344.17. Intraday bars stay extended-hours (session gating and the ORB/VWAP strategies rely on pre/post minutes), and FUT/CASH/CRYPTO keep their full session.
+- **Stored daily IB history is MIXED.** Bars downloaded before 2026-11-06 are extended-hours; only re-downloaded ones are RTH. To make a symbol consistent: `mmr --json history ib --symbol X --bar_size "1 day" --prev_days N --force` (rewrites the window). This is not yet done for the universe because IB pacing makes it slow. Treat old-vs-new daily closes as possibly differing by the after-hours move.
+- **IB daily volume is not consolidated volume.** RTH daily bars carry noticeably less volume than TwelveData's consolidated figure (AAPL 2026-11-05: 13.4M RTH vs 24.0M extended-hours from IB). Not root-caused; do not compare IB daily volume against other sources' volume thresholds.
+- **No-data markers are whole days.** `missing_session_days()` writes all-NULL placeholder rows only for calendar days with no bar at all, at exchange-tz midnight. The old code stepped `pd.date_range` at the first bar's time of day and injected 1-min NULL rows beside real bars (the nightly `data audit` went 278 → 681 empty 1-min bars; 261 such rows were deleted from the live DB).
+- **Snapshot completion is two-stage.** `__get_single_mrkt_data` completes when last/bid/ask are present (IB's `-1` "no quote" sentinel counts as present), then waits up to `EXTRAS_GRACE` (2s) more for previous close + volume, on both the full and the partial (`PARTIAL_WAIT`, 4s) path. Cold-ticker timings measured directly against the gateway: `last` arrives first (0.25-1.5s), while bid/close/volume arrive together about 3-3.5s after the request when 12+ snapshots run concurrently. Without the grace a cold 19-row `mmr scan` returned 13 rows with null change/volume. Warm tickers (an existing subscription) take the fast path at about 0.7s.
+- **After-hours `volume: 0` is real IB output** for many cold small caps (verified with a raw `ib_async` client), not a race. High/low can also be absent after hours.
+- **Our own resting orders pollute quotes.** A resting LMT of ours is often the NBBO on thin names. `sdk._strip_own_quotes()` nulls a bid/ask equal to our working order on that side and adds `quote_notes` in `snapshot`, `snapshot_batch` and `orders()`. `orders()` now uses live, not delayed, quotes.
+- **Blank-exchange contracts get IB 321.** Positions and orders can come back with `exchange=''`; every order/quote RPC entry routes them through `_routed()` (fills SMART + primaryExchange, keeps object identity for already-routable contracts). `mmr close <symbol>` had always failed with 321 before this.
+- **Known unfixed noise:** after a 1100/1102 upstream reconnect, `ib_async`'s decoder raises `KeyError` in `contractDetails` for reqIds issued before the drop (16 tracebacks on 2026-11-05 22:15). It is stale replies arriving for requests that no longer exist; harmless so far, not yet suppressed.
+
+**Order and runtime behaviors added 2026-11-06**:
+- `protect` / `close` report the working exits they cancelled during reduction coordination (exits may never exceed the position, so a second `protect` replaces the first stop). This is `executioner.describe_displaced()` → `SuccessFail.warnings`, the CLI `replaced` key and `protect` JSON `replaced`. Two simultaneous `protect`s still leave only the last stop; `orders` shows the truth.
+- Reconcile: an EXECUTED proposal that IB no longer reports is resolved from the order journal (`fill_outcome`: `filled` / `cancelled_unfilled` / ...). The `executed_outcome_known` finding is info-level, logged at DEBUG, not a perpetual warning.
+- A strategy that loads DISABLED gets **no callback-worker process** (13 → 5 workers, about 1.1GB freed); `enable_strategy` starts the worker from the stored `_deployment_config`.
+- `history massive|twelvedata|ib --force` re-downloads the whole window and overwrites existing bars (normal runs only fill MISSING ranges).
+
 **IB upstream connectivity detection**: The trader_service tracks IB Gateway's upstream connection to IBKR servers via IB error codes (1100/2103/2105/2157 = lost, 1102/2104/2106/2158 = restored). The `get_status()` RPC exposes `ib_upstream_connected` and `ib_upstream_error`. The CLI checks this before any IB-dependent command (portfolio, orders, buy/sell, snapshot, etc.) and shows a clear error with VNC/restart instructions instead of silently timing out. The `status` command also shows upstream connectivity and a warning when it's down.
 
 **Reactive streams (RxPY)**: `IBAIORx` converts IB events into RxPY Subjects/Observables. RxPY is the **ingress only**: the ZMQ ticker subscription lands in `StrategyRuntime.on_ticker_next`, which builds the shared per-(conId, bar_size) bar frame in-process; the strategy's `on_prices` itself runs in a **spawned child process** (`trader/strategy/callback_worker.py`, `strategy_isolate_callbacks: true` by default) that receives a copy of the frame and returns a `Signal` the parent validates against the current deployment generation before acting on it.
@@ -441,6 +460,7 @@ history massive --universe portfolio --bar_size "1 day" --prev_days 30
 history ib --symbol AAPL --universe portfolio --bar_size "1 min" --prev_days 5
 # --json: {success, source, symbols, enqueued, completed, failed, rows_written, errors, tasks[]}.
 # One task per contiguous MISSING date range per symbol, so one symbol can enqueue several.
+history ib --symbol AAPL --bar_size "1 day" --prev_days 5 --force  # Re-download the WHOLE window and overwrite bars (repair partial / stale bars)
 stream AAPL MSFT AMD         # Stream from Massive.com
 stream AAPL --trades         # Stream trades instead of aggs
 stream EURUSD GBPUSD --feed forex           # Forex 1-min aggs
@@ -781,13 +801,15 @@ Any change under `trader/trading/` (risk gate, order construction, sizing, the p
 
 ## Testing
 
-Tests use pytest with shared fixtures in `tests/conftest.py`. All tests are unit tests that use temporary DuckDB databases (no IB connection required). The full suite runs in about five minutes with zero failures. Run it in the uv venv (a bare system interpreter lacks `twelvedata` and errors at collection):
+Tests use pytest with shared fixtures in `tests/conftest.py`. All tests are unit tests that use temporary DuckDB databases (no IB connection required). The full suite (~6100 tests) runs in about eight minutes with zero failures. Run it in the uv venv (a bare system interpreter lacks `twelvedata` and errors at collection):
 
 ```bash
 uv run python -m pytest tests/ --timeout=60 -q --ignore=tests/test_ibrx_async.py
 ```
 
 Known flake: `test_bar_size_filtering.py::TestNewStrategies::test_vbt_macd_bb_strategy` occasionally fails in the full run (numba/vectorbt ordering interaction) but passes in isolation and on re-run.
+
+**Driving uv from another Python environment (agent harnesses):** if the calling process has `VIRTUAL_ENV`, `UV_PROJECT_ENVIRONMENT`, `UV_RUN_RECURSION_DEPTH` or `CONDA_PREFIX` set (llmvm, a conda shell), `uv run` targets THAT environment: on 2026-11-06 it replaced 36 packages in the harness's venv with mmr's pins and the run failed for lack of pytest. Strip those variables (`env -u VIRTUAL_ENV -u UV_PROJECT_ENVIRONMENT -u UV_RUN_RECURSION_DEPTH -u CONDA_PREFIX uv run ...`) so uv uses `mmr/.venv`. For the host CLI without uv, call `.venv/bin/python -m trader.mmr_cli` directly with stdin from `/dev/null`.
 
 `test_ibrx_async.py` is excluded because it spins up long-lived asyncio tasks that interact with a mocked ib_async event loop; it works in isolation but flakes in the full suite.
 
@@ -1008,7 +1030,7 @@ mmr reject 42 --reason "Group over budget"  # Reject with reason
 - `group list`, `group create`, `group delete`, `group show`, `group add`, `group remove`, `group set`
 - `session`
 
-**Host vs container (important if you run `mmr` from the host):** `trader.yaml` has ONE `duckdb_path` (`~/.local/share/mmr/data/mmr.duckdb`), and that config file is bind-mounted — but compose overlays `data/` with the `mmr_db_data` volume, so the same path string resolves to a **different file** on the host than in the container. RPC-backed commands (`status`, `portfolio`, `orders`, `verify`, `buy`/`sell`, `approve`, `snapshot`) work correctly from the host because the ZMQ ports are mapped to 127.0.0.1. DuckDB-backed commands (`backtests`, `sweep`, `data *`, `proposals`, `universe`, `group`, `session`) would read a host-side stub — and DuckDB *creates* it on open, so they used to return `{"data": []}` rather than failing. `docker.sh up()` now writes a `.db_in_container_volume` marker into the host data dir (invisible inside the container, since the volume covers it) and `DuckDBConnection.__init__` raises `ShadowedDatabaseError` when it opens a DB next to that marker. Run DB-backed commands in the container (`./docker.sh -e`), or set `MMR_ALLOW_HOST_DB=1` to deliberately use a separate host-side database. `status` degrades gracefully (it drops the `pending_proposals` field rather than reporting it from the wrong DB). Note the errors render as messages and still exit 0, per CLI convention — `verify` is the one command that asserts with a non-zero exit.
+**Host vs container (important if you run `mmr` from the host):** `trader.yaml` has ONE `duckdb_path` (`~/.local/share/mmr/data/mmr.duckdb`), and that config file is bind-mounted — but compose overlays `data/` with the `mmr_db_data` volume, so the same path string resolves to a **different file** on the host than in the container. RPC-backed commands (`status`, `portfolio`, `orders`, `verify`, `buy`/`sell`, `approve`, `snapshot`) work correctly from the host because the ZMQ ports are mapped to 127.0.0.1. DuckDB-backed commands (`backtests`, `sweep`, `data *`, `proposals`, `universe`, `group`, `session`) would read a host-side stub — and DuckDB *creates* it on open, so they used to return `{"data": []}` rather than failing. `docker.sh up()` now writes a `.db_in_container_volume` marker into the host data dir (invisible inside the container, since the volume covers it) and `DuckDBConnection.__init__` raises `ShadowedDatabaseError` when it opens a DB next to that marker. **Since 2026-11-05 the host CLI proxies DB-backed commands into the container automatically** (`mmr_cli._maybe_proxy_to_container`: when the host DB is shadowed and `mmr-mmr-1` is running it runs `docker exec -u trader ... mmr <argv>`, interactively with a pty when attached to a terminal), so `mmr proposals` / `mmr data query` from the host read the live DB. It is a no-op inside the container, for non-DB commands, with `MMR_NO_CONTAINER_PROXY=1`, or when docker / the container is unavailable (the store then refuses loudly as described). Set `MMR_ALLOW_HOST_DB=1` to deliberately use a separate host-side database instead. `status` degrades gracefully (it drops the `pending_proposals` field rather than reporting it from the wrong DB). Note the errors render as messages and still exit 0, per CLI convention — `verify` is the one command that asserts with a non-zero exit.
 
 **Requires trader_service**:
 - `portfolio`, `positions`, `orders`, `trades`, `account`, `status`
@@ -1115,8 +1137,18 @@ All local file/YAML operations.
 #### Test Suite
 | Operation | Time |
 |-----------|------|
-| Full working suite (483 tests) | ~20s |
+| Full suite (`tests/`, ~6100 tests, `--ignore=tests/test_ibrx_async.py`) | ~8 min |
 | Single test file | ~1-2s |
+
+#### Live stack (host CLI → container, measured 2026-11-06, paper)
+| Operation | Time |
+|-----------|------|
+| Most RPC/DB commands (`status`, `orders`, `strategies`, `reservations`, `proposals`) | ~0.55s |
+| `snapshot X --source ib` (warm ticker / cold ticker) | ~0.7s / ~1-2.5s |
+| `scan --num 20` (cold, 19 concurrent IB snapshots incl. close/volume grace) | ~7.8s |
+| `data summary` | ~1.8s |
+| 16 concurrent mixed commands | ~4s wall, no errors |
+| Dashboard: 1 request / 20 concurrent | ~0.1s / ~2.6s each (single-threaded; fine for one operator) |
 
 #### Python Import Overhead
 Every one-shot `mmr` command pays Python startup + `import trader.mmr_cli`. That import was ~0.85-1.1s until 2026-11-05, mostly scipy.stats (~400ms, from two rarely-used helpers in `trader/common/helpers.py`) and exchange_calendars (~200ms); both are now imported inside the functions that use them and the import measures ~0.35s (median of 7, `python -c 'import time;t=time.perf_counter();import trader.mmr_cli;...'`). The remainder is pandas/pyarrow/duckdb/ib_async, which the sdk needs at module level. `tests/test_cli_import_time.py` fails if scipy, exchange_calendars, bs4, plotille or pypager reappear on that path — keep heavy, rarely-needed imports function-local in any module the CLI imports (`python -X importtime -c 'import trader.mmr_cli'` shows what's costing).

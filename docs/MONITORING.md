@@ -81,6 +81,7 @@ follow the newest session file and switch automatically after a restart.
 | trader pulse (`pulse ib_connected=…`) | `trader_service_<ts>.log` |
 | all ERROR+ from any named logger | `errors.log` (plus the service file) |
 | ib_async internals (incl. G5's harmless `KeyError: 81` decoder noise) | console + `logs/debug.log` only |
+| 10197 competing live session: first per outage at ERROR, per-contract repeats at WARNING, then `market data still dark ... re-requested N` / `RECOVERED` | `trader_service_<ts>.log` (`ibreactivex`); only the first reaches `errors.log` |
 | everything, all levels, one cross-session file | `logs/debug.log` (not session-stamped; rotates in place) |
 
 ## The pulse (why silence is a signal)
@@ -235,3 +236,29 @@ arrives after the competing session is genuinely gone (~5+ min).
 - Deploy windows: don't `./docker.sh -d` with an auto-exec position open or
   an order working — check `mmr orders` and the `auto_exec_open=` pulse field
   first.
+- **10197 means a human logged in.** TWS, IBKR mobile or web on the same
+  username takes the market-data entitlement. Since 2026-11-06 an outage is
+  ONE ERROR line in `errors.log`, not one per subscription, so a single
+  10197 ERROR is the whole alert. The fix is closing the other session (mobile
+  sessions linger after the app closes); the retry loop self-heals within 60s.
+- **Tracebacks right after a 1100/1102 reconnect** (`ib_async` decoder
+  `KeyError` in `contractDetails` on reqIds 1024+) are stale replies for
+  requests issued before the drop. Harmless and not yet suppressed (16 on
+  2026-11-05 22:15). Don't escalate them unless they persist after the
+  reconnect settles.
+- **`data audit` REGRESSED on `1 min empty_bar`** after an IB history pull
+  used to mean NULL markers injected beside real bars (fixed 2026-11-06,
+  `missing_session_days`). If it recurs, count all-NULL 1-min rows on days
+  that also have real bars; those are the bug and are safe to delete.
+- **Daily close mismatches vs TwelveData/Massive**: IB daily bars stored
+  before 2026-11-06 include extended hours (close = post-market last).
+  Repair a symbol with `mmr history ib --symbol X --bar_size "1 day"
+  --prev_days N --force`. IB daily volume also runs below consolidated
+  volume. See CLAUDE.md "IB market-data semantics".
+- **Null `change_pct`/`volume` in `mmr scan`** on a cold run was a
+  snapshot race (fixed 2026-11-06, 2s close/volume grace). After hours,
+  `volume: 0` for small caps is what IB reports, not a bug.
+- **Driving the stack from an agent harness**: strip `VIRTUAL_ENV`,
+  `UV_PROJECT_ENVIRONMENT`, `UV_RUN_RECURSION_DEPTH` and `CONDA_PREFIX`
+  before `uv run` in this repo, or uv syncs mmr's pins into the harness's
+  environment (see CLAUDE.md "Testing").
