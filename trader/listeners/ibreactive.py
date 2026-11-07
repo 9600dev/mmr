@@ -873,7 +873,7 @@ class IBAIORx():
         # close/volume at 3.0s); returning without them blanked
         # change_pct/volume in a cold `mmr scan`. Warm tickers already have
         # them, so the grace costs nothing there.
-        EXTRAS_GRACE = 1.5
+        EXTRAS_GRACE = 2.0
 
         _first_event: asyncio.Event = asyncio.Event()
         _complete_event: asyncio.Event = asyncio.Event()
@@ -938,11 +938,6 @@ class IBAIORx():
         #             caller sees a clear error instead of a silent hang.
         try:
             await asyncio.wait_for(_complete_event.wait(), timeout=PARTIAL_WAIT)
-            if not _extras_event.is_set():
-                try:
-                    await asyncio.wait_for(_extras_event.wait(), timeout=EXTRAS_GRACE)
-                except asyncio.TimeoutError:
-                    pass  # no prior close / volume for this name — return as is
         except asyncio.TimeoutError:
             # Didn't get the full bid/ask/last triple in time; accept
             # whatever we have if at least one tick arrived.
@@ -963,6 +958,15 @@ class IBAIORx():
                     f'(2) symbol qualifies on the chosen exchange, '
                     f'(3) market is open or pass delayed=True for frozen data.'
                 )
+        # Both paths (full quote, or partial after PARTIAL_WAIT): a bounded
+        # extra wait for close + volume. Under a concurrent batch (a 19-row
+        # `mmr scan`) IB delivers them ~3.5s+ after the request — right at
+        # the PARTIAL_WAIT edge — so the partial path needs it most.
+        if not _extras_event.is_set():
+            try:
+                await asyncio.wait_for(_extras_event.wait(), timeout=EXTRAS_GRACE)
+            except asyncio.TimeoutError:
+                pass  # no prior close / volume for this name — return as is
         observer.on_completed()
         subscription.dispose()
         await asyncio.sleep(0.1)

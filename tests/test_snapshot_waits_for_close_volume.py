@@ -52,4 +52,15 @@ def test_no_extra_wait_when_everything_arrives_together():
 def test_grace_is_bounded_when_close_never_comes():
     ticker, secs = _run([(0.05, _tick(last=1.0, bid=0.99, ask=1.01))])
     assert math.isnan(ticker.close)
-    assert secs < 2.5   # EXTRAS_GRACE (1.5s) + settle, not the 15s hard timeout
+    assert secs < 3.0   # EXTRAS_GRACE (2s) + settle, not the 15s hard timeout
+
+
+def test_partial_path_also_waits_for_close_and_volume():
+    # Concurrent cold batch: only `last` before PARTIAL_WAIT (4s); bid/close/
+    # volume land just after it (live 19-row scan, 2026-11-06).
+    ticker, secs = _run([
+        (0.05, _tick(last=1.0)),
+        (4.4, _tick(last=1.0, bid=-1, ask=-1, close=0.9, volume=77.0)),
+    ])
+    assert ticker.close == 0.9 and ticker.volume == 77.0
+    assert secs < 5.5
