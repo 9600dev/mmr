@@ -76,6 +76,25 @@ def missing_session_days(index, start: dt.datetime, end: dt.datetime, tz_info: s
     return pd.DatetimeIndex([d for d in days if d not in present])
 
 
+_DAILY_OR_LONGER = {'1 day', '1 week', '1 month'}
+_RTH_SEC_TYPES = {'STK', 'IND'}
+
+
+def use_rth_for(bar_size, sec_type: Optional[str]) -> bool:
+    """``useRTH`` for an IB history request.
+
+    Daily-and-longer bars for exchange-listed stocks/ETFs/indices use the
+    REGULAR session, so the daily close is the official close (matching
+    TwelveData / Massive). With ``useRTH=False`` IB folds pre/post-market
+    trades into the daily bar: AAPL 2026-11-05 closed 343.25 (post-market
+    last) vs the official 344.17. Intraday bars keep extended hours (the
+    ORB / VWAP strategies and session_guard rely on pre/post bars), and
+    futures / FX / crypto keep the full session — RTH is not their natural
+    day there.
+    """
+    return str(bar_size) in _DAILY_OR_LONGER and (sec_type or '').upper() in _RTH_SEC_TYPES
+
+
 _STEP_DAYS = {'S': 1 / 86400, 'D': 1, 'W': 7, 'M': 31, 'Y': 365}
 
 
@@ -312,7 +331,7 @@ class IBHistoryWorker():
                 durationStr=duration_step_size,
                 barSizeSetting=str(bar_size),
                 whatToShow=str(what_to_show),
-                useRTH=False,
+                useRTH=use_rth_for(bar_size, getattr(contract, 'secType', None)),
                 formatDate=2,
                 keepUpToDate=False,
             )

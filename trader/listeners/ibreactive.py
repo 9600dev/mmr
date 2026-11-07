@@ -30,6 +30,7 @@ import reactivex as rx
 
 
 logging = setup_logging(module_name="ibreactivex")
+_WARNING = 30  # stdlib logging.WARNING (`logging` here is this module's Logger)
 
 TAny = TypeVar('TAny')
 TKey = TypeVar('TKey')
@@ -349,6 +350,17 @@ class IBAIORx():
             # Competing live session took the market-data entitlement. Mark the
             # loss and make sure the recovery loop is running; it re-requests
             # every subscription until ticks flow again.
+            #
+            # IB sends one 10197 PER SUBSCRIPTION (2026-11-06: ~30 ERROR lines
+            # in 30 ms, and again on every resubscribe pass). The first of an
+            # outage stays ERROR (that is the alert); the per-contract repeats
+            # while the outage is ongoing drop to WARNING. "Ongoing" = a loss is
+            # recorded and no tick has flowed since; the retry loop's
+            # RECOVERED line closes the outage.
+            ongoing = (self._md_lost_at is not None
+                       and self._md_last_tick_at <= self._md_lost_at)
+            if ongoing and level > _WARNING:
+                level = _WARNING
             self._md_lost_at = time.time()
             self._ensure_md_retry_task()
 
@@ -855,8 +867,17 @@ class IBAIORx():
         # latency painful for human use.
         PARTIAL_WAIT = 4.0
 
+        # Once bid/ask/last are in, give the price server up to
+        # EXTRAS_GRACE for previous close + volume. They ride a different
+        # tick batch than last (cold probe 2026-11-06: last at 0.4s,
+        # close/volume at 3.0s); returning without them blanked
+        # change_pct/volume in a cold `mmr scan`. Warm tickers already have
+        # them, so the grace costs nothing there.
+        EXTRAS_GRACE = 1.5
+
         _first_event: asyncio.Event = asyncio.Event()
         _complete_event: asyncio.Event = asyncio.Event()
+        _extras_event: asyncio.Event = asyncio.Event()
         populated_ticker: Optional[Ticker] = None
         thrown_exception: Optional[Exception] = None
 
@@ -878,12 +899,15 @@ class IBAIORx():
                     and _is_populated(ticker.bid)
                     and _is_populated(ticker.ask)):
                 _complete_event.set()
+            if _is_populated(ticker.close) and _is_populated(ticker.volume):
+                _extras_event.set()
 
         def on_error(ex: Exception):
             nonlocal thrown_exception
             thrown_exception = ex
             _first_event.set()
             _complete_event.set()
+            _extras_event.set()
 
         def on_completed():
             logging.debug('get_snapshot() aclose')
@@ -914,6 +938,11 @@ class IBAIORx():
         #             caller sees a clear error instead of a silent hang.
         try:
             await asyncio.wait_for(_complete_event.wait(), timeout=PARTIAL_WAIT)
+            if not _extras_event.is_set():
+                try:
+                    await asyncio.wait_for(_extras_event.wait(), timeout=EXTRAS_GRACE)
+                except asyncio.TimeoutError:
+                    pass  # no prior close / volume for this name — return as is
         except asyncio.TimeoutError:
             # Didn't get the full bid/ask/last triple in time; accept
             # whatever we have if at least one tick arrived.
