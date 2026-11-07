@@ -68,6 +68,9 @@ class SuccessFail(Generic[TSource]):
         self.exception = exception
         self.obj: Optional[TSource] = obj
         self.disposable = disposable
+        # Non-fatal facts about a SUCCESS the caller must see (e.g. working
+        # exits a placement cancelled to stay within the position).
+        self.warnings: list = []
 
     @staticmethod
     def success(obj: Optional[TSource] = None):

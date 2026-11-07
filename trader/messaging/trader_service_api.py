@@ -244,7 +244,16 @@ class TraderServiceApi(RPCHandler):
                     '`mmr execution-snapshot` and `mmr reservations`'
                     + (f' (intent {client_intent_id})' if client_intent_id else '')))
         disposable.dispose()
+        displaced = []
+        executioner = getattr(self.trader, 'executioner', None)
+        if executioner is not None and hasattr(executioner, 'pop_displaced'):
+            displaced = executioner.pop_displaced()
         if result is not None:
+            if displaced and result.is_success():
+                from trader.trading.executioner import describe_displaced
+                result.warnings = describe_displaced(displaced)
+                for line in result.warnings:
+                    logging.warning('place_order_simple: %s', line)
             result.client_intent_id = getattr(observable, 'client_intent_id', client_intent_id)
             outcome = getattr(observable, 'execution_outcome', None)
             if outcome is not None:

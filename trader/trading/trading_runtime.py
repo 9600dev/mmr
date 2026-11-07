@@ -3749,7 +3749,13 @@ class Trader():
             verdict, detail = await await_acceptance(
                 result_trade, timeout=getattr(self, 'ACCEPTANCE_TIMEOUT_S', 4.0))
             if verdict != REJECTED:
-                return SuccessFail.success(obj=result_trade)
+                ok = SuccessFail.success(obj=result_trade)
+                if displaced:
+                    from trader.trading.executioner import describe_displaced
+                    ok.warnings = describe_displaced(displaced)
+                    for line in ok.warnings:
+                        logging.warning('place_standalone_order: %s', line)
+                return ok
 
             symbol = getattr(contract, 'symbol', '?')
             msg = (f'IB REJECTED protective {order_type} {action} {quantity:g} {symbol} '

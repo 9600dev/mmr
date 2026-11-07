@@ -62,6 +62,30 @@ def _price_or_none(value):
     return price
 
 
+
+def describe_displaced(displaced: list) -> list:
+    """Human/LLM-readable lines for orders a reduction coordination cancelled.
+
+    ``displaced`` is ``pop_displaced()``'s ``[(contract, order, remaining_qty), ...]``.
+    Reducing orders never exceed the position, so placing a new exit (close,
+    stop, trim) CANCELS working exits that would over-reduce. That is the
+    safe choice, but the caller must be told: a `protect` after a `close`
+    cancels the pending close.
+    """
+    lines = []
+    for item in displaced or []:
+        try:
+            contract, order, remaining = item
+        except (TypeError, ValueError):
+            continue
+        aux = getattr(order, 'auxPrice', 0) or 0
+        lmt = getattr(order, 'lmtPrice', 0) or 0
+        px = (f' stop {aux:g}' if aux and aux < 1e300 else '') + (f' limit {lmt:g}' if lmt and lmt < 1e300 else '')
+        lines.append(f"cancelled working {getattr(order, 'orderType', '?')} {getattr(order, 'action', '?')} "
+                     f"{float(remaining or 0):g} {getattr(contract, 'symbol', '?')}{px} "
+                     f"(order {getattr(order, 'orderId', '?')}) — reducing orders may not exceed the position")
+    return lines
+
 class WorkingOrdersUnreadableError(RuntimeError):
     """The broker's working-order set could not be read.
 

@@ -3620,7 +3620,11 @@ def _trade_summary(result) -> dict:
     order = getattr(trade, 'order', None)
     status = getattr(trade, 'orderStatus', None)
     return {'order_id': getattr(order, 'orderId', None),
-            'broker_status': getattr(status, 'status', None)}
+            'broker_status': getattr(status, 'status', None),
+            # Working exits this placement CANCELLED to stay within the
+            # position (e.g. a close cancels the stop; a protect cancels a
+            # pending close). Always present so callers can rely on the key.
+            'replaced': list(getattr(result, 'warnings', None) or [])}
 
 
 def _handle_close(mmr: MMR, args: argparse.Namespace):
@@ -3698,6 +3702,8 @@ def _handle_close(mmr: MMR, args: argparse.Namespace):
         else:
             console.print(f'[green]Close {symbol} {close_qty:g}: submitted — order '
                           f'{info["order_id"]}, {info["broker_status"]}[/green]')
+            for line in info['replaced']:
+                console.print(f'[yellow]  ! {line}[/yellow]')
     else:
         print_status(f'Close {symbol}: failed — {result.error}', success=False)
 
@@ -3816,15 +3822,19 @@ def _handle_protect(mmr: MMR, args: argparse.Namespace):
     trade = getattr(result, 'obj', None) if ok else None
     order_id = getattr(getattr(trade, 'order', None), 'orderId', None)
     broker_status = getattr(getattr(trade, 'orderStatus', None), 'status', None)
+    replaced = list(getattr(result, 'warnings', None) or []) if ok else []
     if _json_mode:
         print(_json_dumps({'success': ok,
                           'order_id': order_id,
                           'broker_status': broker_status,
+                          'replaced': replaced,
                           'message': (f'{args.action} {order_type} ({desc}) for {qty:g} {symbol}'
                                       if ok else getattr(result, 'error', 'failed'))}))
     elif ok:
         console.print(f'[green]Protective {args.action} {order_type} placed: {desc} '
                       f'for {qty:g} {symbol} ({args.tif}) — order {order_id}, {broker_status}[/green]')
+        for line in replaced:
+            console.print(f'[yellow]  ! {line}[/yellow]')
     else:
         console.print(f'[red]Failed to place protective order: {getattr(result, "error", "unknown")}[/red]')
     if not ok:
