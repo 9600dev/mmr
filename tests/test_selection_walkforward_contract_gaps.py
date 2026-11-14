@@ -401,6 +401,80 @@ def test_missing_heldout_metrics_remain_an_empty_metrics_mapping():
     assert result == [FoldResult(fold, {"lookback": 5}, 2.0, {})]
 
 
+def test_runner_receives_each_window_start_when_asked_to_measure_it():
+    # Audit 2026-11-14 B4.1: data starts before the window whenever there is
+    # warm-up, and a runner told only where DATA starts reports the warm-up.
+    # (This file is in the mutation oracle; walk_forward.py is in its scope.)
+    fold = _fold()
+    cells = [{"lookback": 5}, {"lookback": 10}]
+    calls, notifications = [], []
+    heldout = {"return": 0.5, "trades": 1}
+
+    def run(cell, start, end, measure_start):
+        calls.append((dict(cell), start, end, measure_start))
+        if end == fold.train_end:
+            return {"score": float(cell["lookback"])}
+        return heldout
+
+    results = run_walk_forward([fold], cells, run, lambda metrics: metrics["score"],
+                               on_fold=notifications.append, pass_measure_start=True)
+
+    assert results == [FoldResult(fold, cells[1], 10.0, heldout)]
+    assert notifications == results
+    assert calls == [
+        (cells[0], fold.train_data_start, fold.train_end, fold.train_start),
+        (cells[1], fold.train_data_start, fold.train_end, fold.train_start),
+        (cells[1], fold.test_data_start, fold.test_end, fold.test_start),
+    ]
+
+
+def test_window_start_is_not_passed_unless_requested():
+    fold = _fold()
+    calls = []
+
+    def run(*args):
+        calls.append(len(args))
+        return {"score": 1.0}
+
+    run_walk_forward([fold], [{"lookback": 5}], run, lambda metrics: metrics["score"])
+    run_walk_forward([fold], [{"lookback": 5}], run, lambda metrics: metrics["score"],
+                     pass_measure_start=False)
+
+    assert calls == [3, 3, 3, 3]
+
+
+def test_unmeasured_fold_runs_no_heldout_backtest_when_measuring_the_window():
+    fold = _fold()
+    calls = []
+
+    def run(cell, start, end, measure_start):
+        calls.append((cell, start, end, measure_start))
+        return None
+
+    def score(_metrics):
+        raise AssertionError("absent metrics must not receive a made-up score")
+
+    result = run_walk_forward([fold], [{"lookback": 5}], run, score,
+                              pass_measure_start=True)
+
+    assert result == [FoldResult(fold, None, None, {})]
+    assert calls == [({"lookback": 5}, fold.train_data_start, fold.train_end,
+                      fold.train_start)]
+
+
+def test_missing_heldout_metrics_stay_empty_when_measuring_the_window():
+    fold = _fold()
+
+    def run(_cell, start, end, measure_start):
+        return {"score": 2.0} if end == fold.train_end else None
+
+    result = run_walk_forward([fold], [{"lookback": 5}], run,
+                              lambda metrics: metrics["score"],
+                              pass_measure_start=True)
+
+    assert result == [FoldResult(fold, {"lookback": 5}, 2.0, {})]
+
+
 def test_direct_selection_maximises_by_default_and_minimum_ties_keep_grid_order():
     first, second, third = {"lookback": 5}, {"lookback": 10}, {"lookback": 20}
 

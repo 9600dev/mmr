@@ -1217,3 +1217,193 @@ class TestDailyOpenNotionalAccumulation:
         total, _, unvaluable, _ = gate._daily_open_notional()
         assert unvaluable == 0, 'the fill should have valued it'
         assert total > 0.0
+
+
+# --------------------------------------------------------------------------
+# Limit coercion and whatIf margin fields (added 2026-11-14). These tests are
+# here, in the mutation oracle, because the regressions in
+# tests/test_audit_2026_11_14.py are not part of it: the first mutation pass
+# after the change left every boundary and message below unpinned.
+# --------------------------------------------------------------------------
+
+class TestCoerceLimit:
+    def test_unknown_key_names_itself_and_the_known_keys(self):
+        from trader.trading.risk_gate import coerce_limit
+        with pytest.raises(ValueError) as refusal:
+            coerce_limit('max_daily_lose', 100)
+        text = str(refusal.value)
+        assert "'max_daily_lose'" in text and 'max_daily_loss' in text and 'max_open_orders' in text
+
+    @pytest.mark.parametrize('value', [True, False])
+    def test_a_boolean_is_not_a_number_and_the_refusal_says_which(self, value):
+        from trader.trading.risk_gate import coerce_limit
+        with pytest.raises(ValueError) as refusal:
+            coerce_limit('max_open_orders', value)
+        assert 'max_open_orders must be a number' in str(refusal.value) and repr(value) in str(refusal.value)
+
+    @pytest.mark.parametrize('value', [float('nan'), float('inf'), float('-inf'), 'nan'])
+    def test_a_non_finite_limit_is_refused_by_name(self, value):
+        from trader.trading.risk_gate import coerce_limit
+        with pytest.raises(ValueError) as refusal:
+            coerce_limit('max_daily_loss', value)
+        assert 'max_daily_loss must be finite' in str(refusal.value) and repr(value) in str(refusal.value)
+
+    def test_a_negative_limit_is_refused_by_name(self):
+        from trader.trading.risk_gate import coerce_limit
+        with pytest.raises(ValueError) as refusal:
+            coerce_limit('max_daily_loss', -0.01)
+        assert 'max_daily_loss must not be negative' in str(refusal.value) and '-0.01' in str(refusal.value)
+
+    def test_zero_and_small_values_are_limits_not_errors(self):
+        """Zero is how a cap is switched off; a value below one is ordinary."""
+        from trader.trading.risk_gate import coerce_limit
+        assert coerce_limit('max_daily_open_notional', 0) == 0.0
+        assert coerce_limit('max_open_orders', 0) == 0
+        assert coerce_limit('max_daily_loss', 0.5) == 0.5
+        assert coerce_limit('min_margin_cushion', 0.05) == 0.05
+
+    def test_a_fraction_limit_may_be_exactly_one_and_no_more(self):
+        from trader.trading.risk_gate import coerce_limit
+        assert coerce_limit('max_position_size_pct', 1) == 1.0
+        assert coerce_limit('min_margin_cushion', 1.0) == 1.0
+        for key, value in (('max_position_size_pct', 1.5), ('min_margin_cushion', 1.0000001),
+                           ('max_position_size_pct', 10)):
+            with pytest.raises(ValueError) as refusal:
+                coerce_limit(key, value)
+            assert f'{key} is a fraction of the account' in str(refusal.value)
+            assert repr(value) in str(refusal.value)
+
+    def test_only_fraction_limits_are_capped_at_one(self):
+        from trader.trading.risk_gate import coerce_limit
+        assert coerce_limit('max_leverage', 2.5) == 2.5
+        assert coerce_limit('max_daily_loss', 1500) == 1500.0
+
+    def test_integer_limits_come_back_as_int_and_refuse_fractions(self):
+        from trader.trading.risk_gate import coerce_limit
+        value = coerce_limit('max_open_orders', '20')
+        assert value == 20 and type(value) is int
+        assert type(coerce_limit('max_signals_per_hour', 30.0)) is int
+        with pytest.raises(ValueError) as refusal:
+            coerce_limit('max_open_orders', 2.5)
+        assert 'max_open_orders must be a whole number' in str(refusal.value) and '2.5' in str(refusal.value)
+
+    def test_float_limits_come_back_as_float(self):
+        from trader.trading.risk_gate import coerce_limit
+        value = coerce_limit('max_daily_loss', '750')
+        assert value == 750.0 and type(value) is float
+
+
+class TestMarginNumber:
+    """IB's "unset" margin field arrives as None, as 1.797e308, or as text."""
+
+    @staticmethod
+    def read(value):
+        from trader.trading.risk_gate import _margin_number
+        return _margin_number({'initMarginAfter': value}, 'initMarginAfter')
+
+    def test_a_real_figure_is_returned_as_a_float(self):
+        assert self.read('1234.5') == 1234.5
+        assert self.read(0) == 0.0
+        assert self.read(-250.0) == -250.0
+
+    def test_an_absent_or_unset_field_is_nan_not_an_exception(self):
+        import math
+        from trader.trading.risk_gate import _margin_number
+        assert math.isnan(_margin_number({}, 'initMarginAfter'))
+        assert math.isnan(self.read(None))
+
+    @pytest.mark.parametrize('value', ['', 'n/a', object(), [1.0]])
+    def test_an_unreadable_field_is_nan_not_an_exception(self, value):
+        import math
+        assert math.isnan(self.read(value))
+
+    def test_the_wire_sentinel_and_anything_as_large_is_nan(self):
+        import math
+        import sys
+        assert math.isnan(self.read(sys.float_info.max))        # IB's UNSET_DOUBLE: finite, and not a margin
+        assert math.isnan(self.read(1e300))                     # the bound itself
+        assert math.isnan(self.read(-1e300))
+        assert math.isnan(self.read(float('inf')))
+        assert math.isnan(self.read(float('nan')))
+        assert self.read(9.99e299) == 9.99e299                  # just inside it is a number
+
+
+class TestCheckLeverageZeroIsNotMargin:
+    """A missing margin field used to default to 0 and was caught by the
+    `<= 0` guard. Since 2026-11-14 a missing field is NaN (caught by the
+    finite check), so an explicit ZERO is the only thing that still reaches
+    the `<= 0` boundary — and nothing pinned it any more."""
+
+    @staticmethod
+    def _gate(event_store):
+        return RiskGate(limits=RiskLimits(max_leverage=2.0, min_margin_cushion=0.1), event_store=event_store)
+
+    @pytest.mark.parametrize('zero', [0, 0.0, '0'])
+    def test_a_zero_init_margin_refuses_like_a_missing_one(self, event_store, zero):
+        result = self._gate(event_store).check_leverage(
+            {'initMarginAfter': zero, 'equityWithLoanAfter': 500_000.0}, net_liquidation=1_000_000.0)
+        assert result.approved is False
+        assert 'initMarginAfter' in result.reason
+        assert result.checks['leverage'] == 'unevaluable:margin-data'
+
+    @pytest.mark.parametrize('zero', [0, 0.0, '0'])
+    def test_a_zero_equity_refuses_like_a_missing_one(self, event_store, zero):
+        result = self._gate(event_store).check_leverage(
+            {'initMarginAfter': 100_000.0, 'equityWithLoanAfter': zero}, net_liquidation=1_000_000.0)
+        assert result.approved is False
+        assert 'equityWithLoanAfter' in result.reason
+        assert result.checks['leverage'] == 'pass'
+
+    @pytest.mark.parametrize('unset', [None, 1.7976931348623157e308, 'nan', ''])
+    def test_ibs_unset_margin_is_a_recorded_refusal_not_a_crash(self, event_store, unset):
+        """ib_async reports IB's unset field as None; `math.isfinite(None)`
+        raised TypeError — still a refusal, but an anonymous crash with no
+        tri-state record."""
+        result = self._gate(event_store).check_leverage(
+            {'initMarginAfter': unset, 'equityWithLoanAfter': 500_000.0}, net_liquidation=1_000_000.0)
+        assert result.approved is False
+        assert 'initMarginAfter' in result.reason
+        assert result.checks['leverage'] == 'unevaluable:margin-data'
+
+    def test_readable_margin_still_passes(self, event_store):
+        result = self._gate(event_store).check_leverage(
+            {'initMarginAfter': '100000', 'equityWithLoanAfter': 900_000.0}, net_liquidation=1_000_000.0)
+        assert result.approved is True
+        assert result.checks['leverage'] == 'pass'
+
+
+def test_the_legacy_turnover_warning_says_how_many_and_that_the_figure_is_a_lower_bound(event_store, caplog):
+    """Proceeding on history that predates notional recording is only safe if
+    it is said: how many submissions, what was counted, and that the figure is
+    a LOWER bound which clears at the day boundary. Nothing checked the
+    warning was more than a line of some text."""
+    import logging
+    import sys
+
+    helper = TestDailyTurnoverCap()
+    gate = helper._gate(event_store, max_daily_open_notional=100_000.0)
+    helper._submit_legacy(event_store, 'test_strat', sys.float_info.max, 1.0)    # a market order: no price to value
+    helper._submit_legacy(event_store, 'test_strat', 100.0, 99.0)                # a limit order: $9,900
+    with caplog.at_level(logging.WARNING):
+        result = helper._evaluate(gate, position_value=1_000.0)
+    assert result.approved is True, result.reason
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    text = ' '.join(warnings)
+    assert "daily turnover: 1 of today's opening submissions predate order-notional recording" in text, warnings
+    assert "today's turnover (>= $9,900) is a LOWER BOUND. Proceeding on it" in text
+    assert 'this clears at the day boundary.' in text
+
+
+def test_an_order_that_was_valued_reaches_the_turnover_cap_as_valued(event_store):
+    """`evaluate` hands the turnover check whether the order's own value could
+    be read. Passing "unknown" for a valued order refused nothing in any test,
+    so the hand-off itself was unpinned."""
+    helper = TestDailyTurnoverCap()
+    gate = helper._gate(event_store, max_daily_open_notional=10_000.0)
+    helper._submit(event_store, 'test_strat', 4_000.0)
+    under = helper._evaluate(gate, position_value=5_000.0, position_value_evaluable=True)
+    assert under.approved is True and under.checks['daily_turnover'] == 'pass'
+    over = helper._evaluate(gate, position_value=6_500.0, position_value_evaluable=True)
+    assert over.approved is False and over.checks['daily_turnover'] == 'fail'
+    unknown = helper._evaluate(gate, position_value=0.0, position_value_evaluable=False)
+    assert unknown.approved is False

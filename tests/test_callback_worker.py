@@ -190,6 +190,45 @@ def test_saturation_fails_loudly_instead_of_skipping_a_stateful_bar(worker_facto
     assert results.empty() and second_results.empty()
 
 
+_SLOW_STRATEGY = '''
+    import time
+    from trader.trading.strategy import Strategy
+    class Isolated(Strategy):
+        def on_prices(self, prices):
+            time.sleep(.3)
+'''
+
+
+def test_submit_resizes_the_bound_to_the_callers_current_subscription_count(worker_factory):
+    """Audit 2026-11-14 B3.6: the bound was fixed at construction, i.e. at the
+    universe's size when the worker started. Four instruments completing a bar
+    together against a worker started with one overflowed it for good."""
+    worker, _ = worker_factory(_SLOW_STRATEGY, callback_timeout_s=10, max_pending=1)
+    worker.wait_ready()
+    results, errors = queue.Queue(), queue.Queue()
+    frame = _frame()
+    accepted = [worker.submit(conid, frame, frame.index[-1], 'generation-1', results.put, errors.put,
+                              max_pending=4) for conid in (1, 2, 3, 4)]
+    assert accepted == [True, True, True, True]
+    assert worker.max_pending == 4
+    assert [results.get(timeout=10).conid for _ in range(4)] == [1, 2, 3, 4], 'in order, none skipped'
+    assert errors.empty() and not worker.failed
+
+
+def test_resized_bound_is_still_a_bound(worker_factory):
+    worker, _ = worker_factory(_SLOW_STRATEGY, callback_timeout_s=10, max_pending=1)
+    worker.wait_ready()
+    results, errors = queue.Queue(), queue.Queue()
+    frame = _frame()
+    accepted = [worker.submit(conid, frame, frame.index[-1], 'generation-1', results.put, errors.put,
+                              max_pending=2) for conid in (1, 2, 3)]
+    assert accepted == [True, True, False]
+    assert errors.get(timeout=2).error_type == 'CallbackQueueFull'
+    assert worker.failed
+    with pytest.raises(ValueError, match='max_pending'):
+        worker.submit(1, frame, frame.index[-1], 'generation-1', results.put, errors.put, max_pending=0)
+
+
 @pytest.mark.parametrize('expression, message', [
     ('self.strategy_runtime.subscribe(self, None)', 'strategy_runtime.subscribe'),
     ('self.storage.write(123, prices)', 'storage.write'),

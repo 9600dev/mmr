@@ -633,6 +633,9 @@ def build_parser() -> argparse.ArgumentParser:
     protect_p.add_argument('--action', default='SELL', choices=['SELL', 'BUY'],
                            help='SELL protects a long (default); BUY protects a short')
     protect_p.add_argument('--tif', default='GTC', help='Time in force (default GTC)')
+    protect_p.add_argument('--force', action='store_true',
+                           help='Place the order even though its trigger is on the wrong side of the '
+                                'market (it will execute immediately) or the market price is unknown')
     protect_p.add_argument('--exchange', default='', help='Exchange hint for resolution (e.g. ASX)')
     protect_p.add_argument('--currency', default='', help='Currency hint for resolution (e.g. AUD)')
 
@@ -747,6 +750,13 @@ def build_parser() -> argparse.ArgumentParser:
                                        'source hash (default: record-only, never fails on absence)')
     strat_gauntlet_p.add_argument('--name', default=None,
                                   help='Deployment name to record (default: class name)')
+    strat_gauntlet_p.add_argument(
+        '--bar-size', dest='bar_size', default=None,
+        help='Bar size the strategy runs on (e.g. "1 min", "1 day"). Selects the '
+             'frames the lookahead check and the battery use: 1-minute sessions '
+             'stamped with the strategy\'s SESSION_TZ / RTH_OPEN_MIN / RTH_CLOSE_MIN '
+             '(default 09:30-16:00 America/New_York) for intraday sizes, daily bars '
+             'for "1 day" and longer. Default: both.')
 
     # strategies create
     strat_create_p = strat_sub.add_parser('create', help='Create a strategy template file')
@@ -2032,6 +2042,21 @@ def build_parser() -> argparse.ArgumentParser:
                      help='Milestone name — a named backup that is never auto-pruned '
                           '(e.g. before_upgrade). Omit for a rotating timestamped snapshot.')
 
+    _cp = data_sub.add_parser(
+        'compact',
+        help='Report how much of each DuckDB file is dead space; --apply rebuilds '
+             'the files compact (verified, old file kept). Run it while no market '
+             'is in session: writers wait while a file is rebuilt.',
+    )
+    _cp.add_argument('--apply', action='store_true',
+                     help='Rebuild and swap in the compact files (default: report only)')
+    _cp.add_argument('--discard-old', action='store_true',
+                     help='Delete each replaced file once its rebuild has verified '
+                          '(default: keep it beside the new one as *.pre_compact_<stamp>)')
+    _cp.add_argument('--db', action='append', default=None, metavar='NAME',
+                     help='Only this database file name (repeatable); default: every '
+                          '*.duckdb in the data directory')
+
     data_refresh_p = data_sub.add_parser(
         'refresh',
         help='Run declarative refresh jobs from ~/.config/mmr/data_refresh.yaml. '
@@ -2177,6 +2202,10 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
     # file").
     console._file = None
     console.stderr = bool(getattr(args, 'json', False))
+    # Every symbol typed here is text, so `4391` cannot say whether it means
+    # the ticker or the conId: have the SDK refuse the ambiguous case.
+    if mmr is not None:
+        mmr.numeric_symbol_guard = True
     try:
         return _dispatch(mmr, args)
     finally:
@@ -2417,8 +2446,8 @@ def _dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
             _handle_depth(mmr, args)
 
         elif cmd == 'resolve':
-            defs = mmr.resolve(args.symbol, sec_type=args.sectype,
-                               exchange=args.exchange, currency=args.currency)
+            defs = _distinct_listings(mmr.resolve(args.symbol, sec_type=args.sectype,
+                                                  exchange=args.exchange, currency=args.currency))
             if not defs:
                 # No match at all — empty local DB, empty IB discovery.
                 if _json_mode:
@@ -2879,8 +2908,9 @@ def _handle_propose(mmr: MMR, args: argparse.Namespace):
 
     errors = spec.validate()
     if errors:
-        for e in errors:
-            print_status(e, success=False)
+        # One status, not one per error: under --json each print_status is a
+        # separate JSON document, and two of them on stdout is not parseable.
+        print_status('; '.join(errors), success=False)
         return
 
     # Optional: enrich --reasoning with top news articles for the symbol
@@ -3662,6 +3692,11 @@ def _handle_close(mmr: MMR, args: argparse.Namespace):
             match = frame[frame['conId'].astype('int64') == int(con_id)]
         else:
             match = frame[frame['symbol'] == symbol]
+            if 'conId' in frame.columns and match['conId'].nunique() > 1:
+                # Two listings share this ticker. Picking the first row closes
+                # one of them at market on a coin toss.
+                print_status(MMR._ambiguous_position_error(str(symbol), match), success=False)
+                return
         if not match.empty:
             row0 = match.iloc[0]
             pos_size = float(row0['position'])
@@ -3780,6 +3815,7 @@ def _handle_protect(mmr: MMR, args: argparse.Namespace):
     # Resolve quantity + conId + currency from the live position.
     pos_size = None
     con_id = None
+    mark = None
     currency = args.currency
     df = mmr.portfolio()
     if not df.empty and 'symbol' in df.columns:
@@ -3790,6 +3826,11 @@ def _handle_protect(mmr: MMR, args: argparse.Namespace):
                 con_id = int(match.iloc[0]['conId'])
             if not currency and 'currency' in df.columns:
                 currency = str(match.iloc[0].get('currency') or '')
+            if 'mktPrice' in df.columns:
+                try:
+                    mark = float(match.iloc[0].get('mktPrice'))
+                except (TypeError, ValueError):
+                    mark = None
 
     qty = abs(args.quantity) if args.quantity else (abs(pos_size) if pos_size else None)
     if not qty:
@@ -3806,6 +3847,24 @@ def _handle_protect(mmr: MMR, args: argparse.Namespace):
         else:
             console.print(f'[yellow]{msg}[/yellow]')
         return
+
+    # A stop (or take-profit) on the wrong side of the market is not protection:
+    # it is marketable the instant it is live and exits the position at the
+    # next print. `protect IOVA --stop 50` on a 7.72 stock was accepted before
+    # this check (paper, 2026-11-14). Judged against IB's own mark for the
+    # position; --force places it anyway.
+    if not getattr(args, 'force', False):
+        from trader.trading.proposal import protective_trigger_error
+        reason = protective_trigger_error(args.action, order_type, value, mark)
+        if reason:
+            msg = (f'{symbol}: refused — {reason}. Nothing was placed or cancelled. '
+                   f'To exit now use `mmr close {symbol}`; --force places this order as given.')
+            if _json_mode:
+                print(_json_dumps({'success': False, 'message': msg}))
+            else:
+                console.print(f'[red]{msg}[/red]')
+            _set_exit_code(1)
+            return
 
     aux_price = value if order_type == 'STP' else 0.0
     limit_price = value if order_type == 'LMT' else 0.0
@@ -5149,12 +5208,169 @@ def _gauntlet_new_instance(cls, frame=None):
     return instance
 
 
-def _gauntlet_check_lookahead(cls) -> Dict[str, Any]:
-    """S2: walk-forward consistency over the trending + choppy series.
-    Vacuous for on_prices-only strategies — recorded as not_evaluable,
-    which counts as pass-with-note, NOT fail."""
-    from trader.simulation import synthetic_markets
-    from trader.simulation.lookahead_check import LookaheadDetected, assert_no_lookahead
+# S2 and S3 learn nothing from a frame the strategy does not act on. Until
+# 2026-11-14 every intraday frame they used started 09:30 UTC — 04:30 New York
+# — so an opening-range or VWAP strategy saw no session bar, every array it
+# computed was NaN, "unchanged under truncation" held because NaN equals NaN,
+# and the battery ran clean by emitting nothing. A strategy whose breakout
+# level was the whole day's high passed S2 (docs/AUDIT_2026-11-14.md B4.3).
+# Two things follow, and both are needed: the frames are stamped with the
+# strategy's own session, and a stage that examined nothing says so and FAILS.
+
+_GAUNTLET_DEFAULT_SESSION = ('America/New_York', 9 * 60 + 30, 16 * 60)
+
+_GAUNTLET_VACUITY_HINT = (
+    'If the strategy trades another session, declare SESSION_TZ / RTH_OPEN_MIN '
+    '/ RTH_CLOSE_MIN on the class; if it runs on daily bars, pass --bar-size.')
+
+
+def _gauntlet_session_spec(cls) -> Dict[str, Any]:
+    """The session the intraday frames are stamped with: the strategy's own
+    ``SESSION_TZ`` / ``RTH_OPEN_MIN`` / ``RTH_CLOSE_MIN`` class attributes
+    where it declares usable ones, else 09:30-16:00 America/New_York.
+
+    An unusable declaration (unknown zone, open not before close) falls back
+    to the default rather than raising here: the strategy reads the same
+    attribute and fails on it in its own words, or ignores it and is then
+    exercised on the default session."""
+    import zoneinfo
+
+    tz, open_minute, close_minute = _GAUNTLET_DEFAULT_SESSION
+    declared_tz = getattr(cls, 'SESSION_TZ', None)
+    if isinstance(declared_tz, str) and declared_tz:
+        try:
+            zoneinfo.ZoneInfo(declared_tz)
+            tz = declared_tz
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _minute(value: Any, default: int) -> int:
+        usable = (isinstance(value, int) and not isinstance(value, bool)
+                  and 0 <= value <= 24 * 60)
+        return value if usable else default
+
+    declared_open = _minute(getattr(cls, 'RTH_OPEN_MIN', None), open_minute)
+    declared_close = _minute(getattr(cls, 'RTH_CLOSE_MIN', None), close_minute)
+    if declared_open < declared_close:
+        open_minute, close_minute = declared_open, declared_close
+    return {'tz': tz, 'open_minute': open_minute, 'close_minute': close_minute}
+
+
+def _gauntlet_session_label(session: Dict[str, Any]) -> str:
+    o, c = session['open_minute'], session['close_minute']
+    return f"{session['tz']} {o // 60:02d}:{o % 60:02d}-{c // 60:02d}:{c % 60:02d}"
+
+
+def _gauntlet_frame_families(bar_size: Optional[str]) -> tuple[bool, bool]:
+    """``(intraday, daily)`` — which frame families a strategy of this bar
+    size is run on. Unknown (None) means both: it costs time, never
+    coverage, and the vacuity rules are judged over everything that ran."""
+    if bar_size is None:
+        return True, True
+    from trader.objects import BarSize
+    if bar_size not in BarSize.bar_sizes():
+        raise ValueError(f'unknown bar size {bar_size!r} — expected one of: '
+                         f'{", ".join(BarSize.bar_sizes())}')
+    daily = BarSize.parse_str(bar_size) >= BarSize.Days1
+    return (not daily, daily)
+
+
+def _gauntlet_frames(session: Dict[str, Any], bar_size: Optional[str],
+                     battery: bool) -> Dict[str, Any]:
+    """Frames for S3 (``battery=True``) or S2. The original UTC-stamped
+    frames always run; the session-stamped and daily families are added
+    according to the bar size."""
+    from trader.simulation import synthetic_markets as sm
+
+    intraday, daily = _gauntlet_frame_families(bar_size)
+    spec = dict(session_tz=session['tz'], open_minute=session['open_minute'],
+                close_minute=session['close_minute'])
+    if battery:
+        frames = dict(sm.battery())
+        if intraday:
+            frames.update(sm.session_battery(**spec))
+    else:
+        frames = {'trending': sm.ohlcv_trending(), 'choppy': sm.ohlcv_choppy()}
+        if intraday:
+            frames.update({
+                'session_trending': sm.session_trending(**spec),
+                'session_choppy': sm.session_choppy(**spec),
+                'session_extended': sm.session_extended(**spec),
+            })
+    if daily:
+        frames.update(sm.daily_battery())
+    return frames
+
+
+def _gauntlet_lookahead_coverage(reports: Dict[str, Any]) -> Dict[str, Any]:
+    """PURE. What S2 examined across its frames, and — when that is not
+    enough to vouch for the strategy — why.
+
+    ``reports`` maps frame name to its ``LookaheadReport``, or None where
+    precompute returned empty state. ``vacuous`` is the reason S2 must not
+    pass, or None:
+
+    * no frame produced state — nothing was compared at all;
+    * no array was both re-derived on a truncated frame and non-degenerate
+      (all-NaN or constant) — every truncation "agreed" because there was
+      nothing in the arrays to disagree about;
+    * some array was all-NaN on EVERY frame — it was never computed, so the
+      check is silent about it, and it is usually the one that matters (the
+      opening range, not the close that sits beside it).
+
+    An array that is constant but not NaN everywhere is reported
+    (``constant_keys``) without failing: a mask that never fires on these
+    frames is suspicious, a broadcast parameter is not, and the two cannot be
+    told apart from here.
+    """
+    stateful = {name: r for name, r in reports.items() if r is not None}
+    keys: List[str] = []
+    uncheckable: List[str] = []
+    for report in stateful.values():
+        keys.extend(k for k in report.keys if k not in keys)
+        uncheckable.extend(k for k in report.uncheckable if k not in uncheckable)
+
+    exercised = [k for k in keys
+                 if any(k in r.exercised for r in stateful.values())]
+    never_computed = [k for k in keys
+                      if all(r.keys[k].all_nan for r in stateful.values() if k in r.keys)]
+    constant = [k for k in keys if k not in exercised and k not in never_computed]
+
+    def _names(names: List[str]) -> str:
+        return ', '.join(f'state[{n!r}]' for n in names)
+
+    vacuous = None
+    if not stateful:
+        vacuous = 'precompute returned empty state on every frame'
+    elif not keys:
+        vacuous = (f'precompute state holds no 1-D array to compare '
+                   f'(not comparable: {_names(uncheckable)})')
+    elif not exercised:
+        vacuous = (f'every state array was all-NaN, constant, or never re-derived '
+                   f'on a truncated frame ({_names(keys)})')
+    elif never_computed:
+        vacuous = f'{_names(never_computed)} all-NaN on every frame'
+    return {
+        'exercised_keys': exercised,
+        'unexercised_keys': never_computed,
+        'constant_keys': constant,
+        'uncheckable_keys': uncheckable,
+        'vacuous': vacuous,
+    }
+
+
+def _gauntlet_check_lookahead(cls, bar_size: Optional[str] = None) -> Dict[str, Any]:
+    """S2: walk-forward consistency of ``precompute`` — the series is cut at
+    the end AND at interior points (day boundaries, inside and after the
+    opening range, mid-session, the close) and past values must not move.
+
+    Not evaluable for on_prices-only strategies (there is no precompute to
+    leak) — recorded as not_evaluable, which counts as pass-with-note. A
+    strategy that HAS a precompute and gave the check nothing to examine is
+    a different case and FAILS: see ``_gauntlet_lookahead_coverage``."""
+    from trader.simulation.lookahead_check import (LookaheadDetected,
+                                                   interior_cut_points,
+                                                   lookahead_report)
     from trader.trading.strategy import Strategy
 
     if cls.precompute is Strategy.precompute:
@@ -5164,52 +5380,68 @@ def _gauntlet_check_lookahead(cls) -> Dict[str, Any]:
                     'lookahead check is vacuous',
         }
 
-    any_state = False
-    for frame_name, frame in (
-        ('trending', synthetic_markets.ohlcv_trending()),
-        ('choppy', synthetic_markets.ohlcv_choppy()),
-    ):
+    session = _gauntlet_session_spec(cls)
+    frames = _gauntlet_frames(session, bar_size, battery=False)
+    result: Dict[str, Any] = {'frames': list(frames), 'session': session,
+                              'bar_size': bar_size}
+    reports: Dict[str, Any] = {}
+    for frame_name, frame in frames.items():
         instance = _gauntlet_new_instance(cls, frame)
         try:
             state = instance.precompute(frame)
         except Exception as ex:
-            return {
-                'status': 'fail',
-                'frame': frame_name,
-                'detail': f'precompute raised {type(ex).__name__}: {ex}',
-            }
+            return {**result, 'status': 'fail', 'frame': frame_name,
+                    'detail': f'precompute raised {type(ex).__name__}: {ex}'}
         if not state:
+            reports[frame_name] = None
             continue
-        any_state = True
         try:
-            assert_no_lookahead(instance, frame)
+            reports[frame_name] = lookahead_report(
+                instance, frame,
+                cut_points=interior_cut_points(
+                    frame.index, session_tz=session['tz'],
+                    open_minute=session['open_minute'],
+                    close_minute=session['close_minute']))
         except LookaheadDetected as ex:
-            return {'status': 'fail', 'frame': frame_name, 'detail': str(ex)}
+            return {**result, 'status': 'fail', 'frame': frame_name, 'detail': str(ex)}
         except Exception as ex:
-            return {
-                'status': 'fail',
-                'frame': frame_name,
-                'detail': f'lookahead check raised {type(ex).__name__}: {ex}',
-            }
+            return {**result, 'status': 'fail', 'frame': frame_name,
+                    'detail': f'lookahead check raised {type(ex).__name__}: {ex}'}
 
-    if not any_state:
-        return {
-            'status': 'not_evaluable',
-            'note': 'precompute returned empty state on both series — '
-                    'nothing to audit',
-        }
-    return {'status': 'pass', 'frames': ['trending', 'choppy']}
+    coverage = _gauntlet_lookahead_coverage(reports)
+    vacuous = coverage.pop('vacuous')
+    result.update(coverage)
+    result['truncations'] = {name: len(r.truncations)
+                             for name, r in reports.items() if r is not None}
+    if vacuous:
+        return {**result, 'status': 'fail', 'vacuous': True,
+                'detail': f'S2 compared nothing it can vouch for: {vacuous} '
+                          f'({len(frames)} frames: {", ".join(frames)}; session '
+                          f'{_gauntlet_session_label(session)}). A value that is '
+                          f'never computed is unchanged by every truncation whether '
+                          f'or not it leaks. {_GAUNTLET_VACUITY_HINT}'}
+
+    note = (f'{len(coverage["exercised_keys"])} state arrays compared over '
+            f'{sum(result["truncations"].values())} truncations of '
+            f'{len(result["truncations"])} frames')
+    if coverage['constant_keys']:
+        note += ('; constant on every frame, so not exercised: '
+                 + ', '.join(coverage['constant_keys']))
+    return {**result, 'status': 'pass', 'note': note}
 
 
-def _gauntlet_run_battery(cls) -> Dict[str, Any]:
+def _gauntlet_run_battery(cls, bar_size: Optional[str] = None) -> Dict[str, Any]:
     """S3: run the strategy over every synthetic frame through the same
     dispatch the backtester uses (precompute once, then on_bar per index —
     the default on_bar falls back to on_prices over expanding windows).
-    Any exception or malformed Signal fails the stage."""
+    Any exception or malformed Signal fails the stage — and so does a
+    battery in which the strategy never emitted a signal on ANY frame,
+    because a run with no signals has shown nothing about its signals. The
+    rule is over the whole battery: a strategy is free to be silent on any
+    one frame."""
     import numpy as np
 
     from trader.objects import Action
-    from trader.simulation import synthetic_markets
     from trader.trading.strategy import Signal, Strategy
 
     fast_path = (cls.on_bar is not Strategy.on_bar
@@ -5228,13 +5460,9 @@ def _gauntlet_run_battery(cls) -> Dict[str, Any]:
             return f'malformed Signal: probability {sig.probability!r} outside [0, 1]'
         return None
 
-    frames_result: Dict[str, Dict[str, Any]] = {}
-    total_signals = 0
-    failed = False
-
-    for frame_name, frame in synthetic_markets.battery().items():
+    def _run_frame(frame, every_bar: bool) -> Dict[str, Any]:
         n = len(frame)
-        if fast_path:
+        if every_bar:
             indices = range(n)
         else:
             # on_prices fallback is O(N²) — sample indices for cost, always
@@ -5244,34 +5472,61 @@ def _gauntlet_run_battery(cls) -> Dict[str, Any]:
             instance = _gauntlet_new_instance(cls, frame)
             state = instance.precompute(frame) or {}
             signals = 0
-            problem = None
             for idx in indices:
                 sig = instance.on_bar(frame, state, int(idx))
                 if sig is None:
                     continue
                 problem = _signal_problem(sig)
                 if problem:
-                    problem = f'bar {idx}: {problem}'
-                    break
+                    return {'status': 'fail', 'detail': f'bar {idx}: {problem}'}
                 signals += 1
-            if problem:
-                frames_result[frame_name] = {'status': 'fail', 'detail': problem}
-                failed = True
-            else:
-                frames_result[frame_name] = {'status': 'pass', 'signals': signals}
-                total_signals += signals
+            return {'status': 'pass', 'signals': signals, 'bars': n}
         except Exception as ex:
-            frames_result[frame_name] = {
-                'status': 'fail',
-                'detail': f'{type(ex).__name__}: {ex}',
-            }
-            failed = True
+            return {'status': 'fail', 'detail': f'{type(ex).__name__}: {ex}'}
 
-    return {
-        'status': 'fail' if failed else 'pass',
+    session = _gauntlet_session_spec(cls)
+    frames = _gauntlet_frames(session, bar_size, battery=True)
+    frames_result = {name: _run_frame(frame, fast_path) for name, frame in frames.items()}
+
+    def _failed() -> bool:
+        return any(r['status'] == 'fail' for r in frames_result.values())
+
+    def _signals() -> int:
+        return sum(r.get('signals', 0) for r in frames_result.values())
+
+    if not fast_path and not _failed() and _signals() == 0:
+        # Forty sampled bars per frame can miss every signal of a strategy
+        # that fires on a crossing. Before calling it silent, walk every bar
+        # — cheapest frame first, stopping at the first that signals.
+        for name in sorted(frames, key=lambda k: len(frames[k])):
+            frames_result[name] = {**_run_frame(frames[name], True), 'every_bar': True}
+            if frames_result[name]['status'] == 'fail' or frames_result[name]['signals']:
+                break
+
+    result: Dict[str, Any] = {
+        'status': 'pass',
         'frames': frames_result,
-        'signals': total_signals,
+        'signals': _signals(),
+        'session': session,
+        'bar_size': bar_size,
     }
+    if _failed():
+        result['status'] = 'fail'
+    elif result['signals'] == 0:
+        result.update({
+            'status': 'fail',
+            'vacuous': True,
+            'detail': f'S3 evaluated nothing: no signal on any of the {len(frames)} '
+                      f'frames ({sum(len(f) for f in frames.values())} bars; session '
+                      f'frames stamped {_gauntlet_session_label(session)}). A battery '
+                      f'that never sees a signal cannot vouch for the signals this '
+                      f'strategy will send. {_GAUNTLET_VACUITY_HINT}',
+        })
+    else:
+        signalling = sum(1 for r in frames_result.values() if r.get('signals'))
+        result['note'] = (f'{result["signals"]} signals; {signalling} of '
+                          f'{len(frames)} frames signalled')
+    return result
 
 
 def _gauntlet_check_psr(code_hash: str, duckdb_path: str,
@@ -5428,12 +5683,17 @@ def _gauntlet_check_dsr(code_hash: str, duckdb_path: str,
 
 def _gauntlet_run(module_file: Path, class_name: str, duckdb_path: str,
                   min_psr: Optional[float] = None,
-                  min_dsr: Optional[float] = None) -> Dict[str, Any]:
+                  min_dsr: Optional[float] = None,
+                  bar_size: Optional[str] = None) -> Dict[str, Any]:
     """Run all gauntlet stages against ``module_file`` and return
     ``{'code_hash', 'verdict', 'checks'}``. Does not persist — the caller
-    records the result."""
+    records the result.
+
+    ``bar_size`` (e.g. ``'1 min'``, ``'1 day'``) selects the frames S2/S3
+    run on; None runs both the intraday-session and the daily families."""
     from trader.data.backtest_store import compute_strategy_hash
 
+    _gauntlet_frame_families(bar_size)      # an unknown bar size refuses here
     code_hash = compute_strategy_hash(str(module_file))
     if not code_hash:
         raise ValueError(
@@ -5457,8 +5717,8 @@ def _gauntlet_run(module_file: Path, class_name: str, duckdb_path: str,
             checks['s2_lookahead'] = {'status': 'fail', 'detail': err}
             checks['s3_battery'] = {'status': 'fail', 'detail': err}
         else:
-            checks['s2_lookahead'] = _gauntlet_check_lookahead(cls)
-            checks['s3_battery'] = _gauntlet_run_battery(cls)
+            checks['s2_lookahead'] = _gauntlet_check_lookahead(cls, bar_size)
+            checks['s3_battery'] = _gauntlet_run_battery(cls, bar_size)
 
     checks['s4_psr'] = _gauntlet_check_psr(code_hash, duckdb_path, min_psr)
     checks['s5_dsr'] = _gauntlet_check_dsr(code_hash, duckdb_path, min_dsr)
@@ -5666,7 +5926,8 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
     try:
         result = _gauntlet_run(resolved, args.class_name, duckdb_path,
                                min_psr=getattr(args, 'min_psr', None),
-        min_dsr=getattr(args, 'min_dsr', None))
+                               min_dsr=getattr(args, 'min_dsr', None),
+                               bar_size=getattr(args, 'bar_size', None))
     except ValueError as ex:
         print_status(str(ex), success=False)
         return
@@ -9186,7 +9447,43 @@ def _handle_sweep_watch(args: argparse.Namespace):
         )
 
 
-def _handle_walk_forward(args: argparse.Namespace):
+def _stamp_execution_params(params: Dict[str, Any], config) -> Dict[str, Any]:
+    """Record the execution semantics a run used, in its persisted params.
+
+    Runs under different semantics are not comparable (``live`` is single-lot
+    fixed-notional, ``accumulate`` pyramids and compounds), so every path that
+    persists or reports a run stamps the mode through this ONE helper. It was
+    inline in ``_handle_backtest`` only: ``bt-sweep --live-semantics`` wrote
+    rows with no ``_execution_mode``, indistinguishable in ``backtests show``
+    from the accumulate rows beside them (audit 2026-11-14, B4.7a).
+
+    ``accumulate`` (the legacy default) stays unstamped, as before, so
+    existing rows and their param-equality comparisons are unchanged. Returns
+    ``params`` (mutated) for chaining.
+    """
+    if config.execution_mode != 'accumulate':
+        params['_execution_mode'] = config.execution_mode
+        params['_trade_notional'] = (
+            config.trade_notional or config.initial_capital * 0.02)
+        if config.pyramid_max_adds is not None:
+            params['_pyramid_max_adds'] = config.pyramid_max_adds
+    return params
+
+
+def _walk_forward_evaluated(metrics: Optional[Dict[str, Any]]) -> bool:
+    """Did a walk-forward window actually test anything?
+
+    A fill inside the window, OR a position carried into it. The second half
+    matters once only the window is measured: a slow book opened during
+    warm-up and held through a window with no rebalance has no fills there,
+    yet its return in that window is exactly what the fold is for. Counting
+    fills alone would drop that fold from the compounded result without
+    saying so.
+    """
+    return bool(metrics) and bool(metrics.get('trades') or metrics.get('exposed'))
+
+
+def _handle_walk_forward(args: argparse.Namespace, now=None):
     """Fit on the past, judge on the future, report what the RULE earned.
 
     A sweep answers "which cell was best over this period", and the answer is
@@ -9198,6 +9495,16 @@ def _handle_walk_forward(args: argparse.Namespace):
     The reported number is out-of-sample by construction, so there is nothing
     to deflate — the trial count is one, the procedure, however many cells it
     considered along the way.
+
+    "By construction" holds only if each run REPORTS its window and nothing
+    else. A run starts ``warmup`` days before its window so indicators (and
+    the book) are warm; until 2026-11-14 the whole run was then reported, so
+    every "out-of-sample" figure included trading inside the training window
+    the cell had just been chosen on, and consecutive test runs overlapped by
+    the warm-up before being compounded (audit B4.1). Each run now measures
+    ``[window_start, window_end)`` only — see ``BacktestConfig.measure_from``.
+
+    ``now`` pins the period end for tests.
     """
     import datetime as dt
     import itertools
@@ -9229,7 +9536,8 @@ def _handle_walk_forward(args: argparse.Namespace):
             f'question.', success=False)
         return
 
-    period_start = (dt.datetime.now() - dt.timedelta(days=args.days)).date()
+    period_start = ((now or dt.datetime.now())
+                    - dt.timedelta(days=args.days)).date()
     # Warm-up in CALENDAR days, from the largest lookback the grid can select.
     # Without it a strategy needing 252 bars in a 252-bar test window never
     # reaches its first tradeable index, and the fold silently reports 0.00%
@@ -9240,15 +9548,16 @@ def _handle_walk_forward(args: argparse.Namespace):
     warmup = int(max(lookbacks) * 1.45) + 10 if lookbacks else 0
     folds = resolve_folds(period_start, offsets, warmup_days=warmup)
     if warmup and not _json_mode:
-        console.print(f'  warm-up: {warmup} calendar days before each window, '
-                      f'from the largest LOOKBACK in the grid')
+        console.print(f'  warm-up: {warmup} calendar days before each window '
+                      f'(traded, not measured), from the largest LOOKBACK in '
+                      f'the grid')
 
     cfg = Container.instance().config()
     storage = TickStorage(cfg.get('history_duckdb_path', '')
                           or cfg.get('duckdb_path', ''))
     bar_size = BarSize.parse_str(args.bar_size)
 
-    def run_backtest(cell, start, end):
+    def _config(start, end, measure_start):
         config = BacktestConfig(
             start_date=dt.datetime.combine(start, dt.time.min),
             end_date=dt.datetime.combine(end, dt.time.min),
@@ -9256,12 +9565,23 @@ def _handle_walk_forward(args: argparse.Namespace):
             bar_size=bar_size,
             slippage_bps=args.slippage_bps,
             execution_mode='live' if args.live_semantics else 'accumulate',
+            # DATA from ``start`` (warm-up included); REPORT the fold's own
+            # half-open window and nothing else. ``measure_to`` is what makes
+            # it half-open: the store read is inclusive of ``end``, so a daily
+            # bar stamped at the boundary would otherwise close one test
+            # window and open the next.
+            measure_from=dt.datetime.combine(measure_start, dt.time.min),
+            measure_to=dt.datetime.combine(end, dt.time.min),
         )
         if args.live_semantics and args.trade_notional:
             config.trade_notional = args.trade_notional
         if getattr(args, 'panel', False):
             config.panel_no_trade_band = args.no_trade_band
             config.short_borrow_bps_annual = args.borrow_bps
+        return config
+
+    def run_backtest(cell, start, end, measure_start):
+        config = _config(start, end, measure_start)
         try:
             r = Backtester(storage, config).run_from_module(
                 args.strategy, args.class_name, args.conids, params=dict(cell),
@@ -9270,18 +9590,25 @@ def _handle_walk_forward(args: argparse.Namespace):
             logging.warning('walk-forward: %s %s..%s failed: %s',
                             cell, start, end, exc)
             return None
+        diag = r.diagnostics or {}
         return {
             'sharpe': r.sharpe_ratio, 'sortino': r.sortino_ratio,
             'profit_factor': r.profit_factor, 'total_return': r.total_return,
             'expectancy_bps': r.expectancy_bps, 'trades': r.total_trades,
             'win_rate': r.win_rate, 'max_drawdown': r.max_drawdown,
+            # A position held inside the window (possibly opened in warm-up).
+            'exposed': bool(diag.get('window_bars_in_market')),
+            # Fills before the window: executed, never counted.
+            'warmup_fills': diag.get('warmup_fills', 0),
         }
 
     def score(metrics):
         v = metrics.get(args.metric) if metrics else None
-        # A cell with no trades has not been evaluated. Letting its 0.0 or
-        # None compete would deploy a configuration nothing was learned about.
-        if v is None or not math.isfinite(v) or not metrics.get('trades'):
+        # A cell that neither traded nor held anything in the window has not
+        # been evaluated. Letting its 0.0 or None compete would deploy a
+        # configuration nothing was learned about.
+        if (v is None or not math.isfinite(v)
+                or not _walk_forward_evaluated(metrics)):
             return None
         return float(v)
 
@@ -9315,9 +9642,9 @@ def _handle_walk_forward(args: argparse.Namespace):
             f'  ({m.get("trades", 0)} trades)')
 
     results = run_walk_forward(folds, cells, run_backtest, score,
-                               on_fold=_progress)
+                               on_fold=_progress, pass_measure_start=True)
 
-    tested = [r for r in results if r.test_metrics.get('trades')]
+    tested = [r for r in results if _walk_forward_evaluated(r.test_metrics)]
     oos_returns = [r.test_metrics['total_return'] for r in tested
                    if r.test_metrics.get('total_return') is not None]
     compounded = 1.0
@@ -9331,6 +9658,12 @@ def _handle_walk_forward(args: argparse.Namespace):
         'folds': len(folds), 'cells': len(cells), 'metric': args.metric,
         'mode': 'anchored' if args.anchored else 'rolling',
         'train_days': args.train_days, 'test_days': args.test_days,
+        'warmup_days': warmup,
+        # The stamp a persisted run carries, so a walk-forward report says
+        # which execution semantics produced it (the default named too).
+        'execution': _stamp_execution_params(
+            {'_execution_mode': 'accumulate'},
+            _config(period_start, period_start, period_start)),
         'oos_compounded_return': compounded,
         'oos_folds_profitable': sum(1 for x in oos_returns if x > 0),
         'oos_folds_tested': len(oos_returns),
@@ -9497,7 +9830,10 @@ def _handle_backtest_sweep(args: argparse.Namespace):
             fill_policy=config.fill_policy,
             slippage_bps=args.slippage_bps,
             commission_per_share=config.commission_per_share,
-            params=dict(getattr(result, 'applied_params', {}) or {}),
+            # Stamped like a single `backtest` run: a --live-semantics sweep
+            # row must not read as an accumulate one in `backtests show`.
+            params=_stamp_execution_params(
+                dict(getattr(result, 'applied_params', {}) or {}), config),
             code_hash=code_hash,
             total_trades=result.total_trades,
             total_return=result.total_return,
@@ -9789,12 +10125,7 @@ def _handle_backtest(args: argparse.Namespace):
             params: Dict[str, Any] = dict(getattr(result, 'applied_params', {}) or {})
             # Runs under different execution semantics are not comparable —
             # stamp the mode (and notional) so `backtests show` surfaces it.
-            if config.execution_mode != 'accumulate':
-                params['_execution_mode'] = config.execution_mode
-                params['_trade_notional'] = (
-                    config.trade_notional or config.initial_capital * 0.02)
-                if config.pyramid_max_adds is not None:
-                    params['_pyramid_max_adds'] = config.pyramid_max_adds
+            _stamp_execution_params(params, config)
 
             record = BacktestRecord(
                 strategy_path=args.strategy,
@@ -9937,6 +10268,8 @@ def _handle_data(args: argparse.Namespace):
         _handle_data_dedup_daily(args)
     elif action == 'backup':
         _handle_data_backup(args)
+    elif action == 'compact':
+        _handle_data_compact(args)
     elif action == 'refresh':
         _handle_data_refresh(args)
     elif action == 'status':
@@ -10158,19 +10491,122 @@ def _query_output_frame(df, include_placeholders: bool = False):
 
 
 def _try_get_exchange_calendar_for(security):
-    """Best-effort exchange calendar lookup for a SecurityDefinition — mirrors
-    DataService._try_get_exchange_calendar. Returns None if neither
-    primaryExchange nor exchange resolves."""
-    import exchange_calendars
-    for attr in ('primaryExchange', 'exchange'):
-        name = getattr(security, attr, None)
-        if not name:
-            continue
-        try:
-            return exchange_calendars.get_calendar(name)
-        except Exception:
-            continue
-    return None
+    """Exchange calendar for a SecurityDefinition, or None when neither
+    primaryExchange nor exchange maps to one. One shared lookup
+    (session_guard.calendar_for) so every caller agrees."""
+    from trader.data.session_guard import calendar_for
+    return calendar_for(security)
+
+
+def _is_us_listing(security) -> bool:
+    from trader.data.listing_guard import is_us_listing
+    return is_us_listing(security)
+
+
+def _listing_source_mismatch(security, source: str) -> str:
+    """Why this instrument must not be filled from ``source``, or '' (one
+    shared rule — see trader/data/listing_guard.py)."""
+    from trader.data.listing_guard import listing_source_mismatch
+    return listing_source_mismatch(security, source)
+
+
+_US_TICKER_SOURCES = frozenset({'twelvedata', 'massive'})
+
+
+def _distinct_listings(definitions):
+    """One entry per conId, first occurrence kept, order preserved.
+
+    A local resolve returns one record per UNIVERSE the instrument is in, and
+    those records can differ only in routing (AIG: ``exchange='SMART'`` from
+    the portfolio universe, ``'NYSE'`` from another). That is one instrument,
+    and `mmr resolve AIG` reported it as "2 listings (ambiguous)" — which
+    sends a caller looking for a disambiguator that does not exist. A record
+    with no conId cannot be shown to be a duplicate and is always kept.
+    """
+    seen: set = set()
+    distinct = []
+    for definition in definitions or []:
+        con_id = getattr(definition, 'conId', None)
+        if con_id:
+            if con_id in seen:
+                continue
+            seen.add(con_id)
+        distinct.append(definition)
+    return distinct
+
+
+def _resolve_download_listing(symbol: str, source: str, accessor, rpc_mmr,
+                              exchange: str = '', currency: str = ''):
+    """``(security_definition | None, refusal, registered)`` for an ad-hoc download.
+
+    The name must come down to EXACTLY ONE listing in the market the source
+    serves. This used to take the first local match across every universe and,
+    failing that, the first row IB returned — which is how a US ticker became
+    a Mexican or Australian conId (see ``_listing_source_mismatch``). Several
+    candidates is an ambiguity the operator resolves; it is never a pick.
+    """
+    def wanted(definition) -> bool:
+        if exchange and exchange.upper() not in {
+                str(getattr(definition, name, '') or '').upper()
+                for name in ('primaryExchange', 'exchange')}:
+            return False
+        if currency and str(getattr(definition, 'currency', '') or '').upper() != currency.upper():
+            return False
+        if source in _US_TICKER_SOURCES and not (exchange or currency):
+            return _is_us_listing(definition)
+        return True
+
+    def unique(definitions) -> list:
+        by_conid = {}
+        for definition in definitions or []:
+            if wanted(definition) and int(getattr(definition, 'conId', 0) or 0) > 0:
+                by_conid.setdefault(int(definition.conId), definition)
+        return list(by_conid.values())
+
+    def describe(definitions) -> str:
+        return ', '.join(
+            f'{d.conId} ({getattr(d, "primaryExchange", "") or getattr(d, "exchange", "")}/'
+            f'{getattr(d, "currency", "")})' for d in definitions)
+
+    local = unique(accessor.resolve_symbol(symbol))
+    if len(local) == 1:
+        return local[0], '', False
+    if len(local) > 1:
+        return None, (f'{symbol!r} is ambiguous in the local universes: {describe(local)}. '
+                      f'Pass --exchange/--currency to choose one.'), False
+
+    if rpc_mmr is None:
+        return None, (f'could not resolve to a conId (not in a local universe, and '
+                      f'trader_service is unreachable). Add it first: '
+                      f'`mmr universe add downloads {symbol}`'), False
+    hint_currency = currency or ('USD' if source in _US_TICKER_SOURCES else '')
+    try:
+        discovered = unique(rpc_mmr.discover_listings(
+            symbol, exchange=exchange, currency=hint_currency))
+    except Exception as ex:
+        return None, f'resolve via trader_service failed: {ex}', False
+    if not discovered:
+        market = 'a US listing' if source in _US_TICKER_SOURCES and not (exchange or currency) else 'a listing'
+        return None, (f'could not resolve to {market} conId. Add it first: '
+                      f'`mmr universe add downloads {symbol}`'), False
+    if len(discovered) > 1:
+        return None, (f'{symbol!r} is ambiguous at IB: {describe(discovered)}. '
+                      f'Pass --exchange/--currency to choose one.'), False
+
+    # Persist into a "downloads" universe so the resolution sticks for future
+    # runs — matches the auto-register behaviour of `propose --group`.
+    sec_def = discovered[0]
+    try:
+        universe = accessor.get('downloads')
+    except Exception:
+        universe = None
+    if universe is None:
+        from trader.data.universe import Universe
+        universe = Universe(name='downloads', security_definitions=[sec_def])
+    elif not any(sd.conId == sec_def.conId for sd in universe.security_definitions):
+        universe.security_definitions.append(sec_def)
+    accessor.update(universe)
+    return sec_def, '', True
 
 
 def _handle_data_download(args: argparse.Namespace):
@@ -10184,7 +10620,7 @@ def _handle_data_download(args: argparse.Namespace):
     """
     import datetime as dt
     from trader.container import Container
-    from trader.data.data_access import TickStorage
+    from trader.data.data_access import session_fetch_window, TickStorage
     from trader.data.store import DateRange
     from trader.data.universe import UniverseAccessor
     from trader.objects import BarSize
@@ -10300,8 +10736,11 @@ def _handle_data_download(args: argparse.Namespace):
             except Exception: pass
         rpc_mmr = None
 
-    end_date = dt.datetime.now()
-    start_date = end_date - dt.timedelta(days=args.days)
+    # One instant for the whole run, in UTC; each symbol's window is expressed in
+    # ITS venue's timezone below. This used to be the container's naive local
+    # clock handed to vendors that read it as exchange time (a Pacific host cut
+    # the window three hours short for a US listing).
+    now_utc = dt.datetime.now(dt.timezone.utc)
     completed = 0
     no_data = 0
     failed = 0
@@ -10309,43 +10748,35 @@ def _handle_data_download(args: argparse.Namespace):
     total_rows_written = 0
     tickdata = storage.get_tickdata(bar_size)
 
-    for symbol in args.symbols:
-        # Resolve to conId for storage key: local universe first, then
-        # trader_service RPC if available. Registering a new resolution in
-        # the universe means subsequent downloads (and anything else that
-        # calls resolve_symbol locally) won't need to hit IB again.
+    # Refresh jobs hand over the universe's exact instruments; an ad-hoc
+    # `data download SYMBOL` resolves each name itself (see _resolve_download_listing).
+    # One work item per INSTRUMENT, not per name: a universe can hold two
+    # listings of one ticker, and keying by symbol downloaded one of them
+    # twice and the other never.
+    exact_definitions = list(getattr(args, 'security_definitions', None) or [])
+    work = ([(str(getattr(sd, 'symbol', '')), sd) for sd in exact_definitions]
+            if exact_definitions else [(symbol, None) for symbol in args.symbols])
+    exchange_hint = str(getattr(args, 'exchange', '') or '')
+    currency_hint = str(getattr(args, 'currency', '') or '')
+
+    for symbol, sec_def in work:
         conid = None
-        sec_def = None
-        results = accessor.resolve_symbol(symbol, first_only=True)
-        if results:
-            sec_def = results[0]
+        refusal = ''
+        if sec_def is None:
+            sec_def, refusal, registered = _resolve_download_listing(
+                symbol, source, accessor, rpc_mmr,
+                exchange=exchange_hint, currency=currency_hint)
+            if registered and not _json_mode:
+                console.print(f'[dim]  registered {symbol} → conId {sec_def.conId} in universe "downloads"[/dim]')
+        if sec_def is not None and not refusal:
+            refusal = _listing_source_mismatch(sec_def, source)
+        if refusal:
+            failed += 1
+            if not _json_mode:
+                console.print(f'[yellow]  {symbol}: refused - {refusal}[/yellow]')
+            continue
+        if sec_def is not None:
             conid = sec_def.conId
-        elif rpc_mmr is not None:
-            try:
-                resolved = rpc_mmr.resolve(symbol)  # List[SecurityDefinition]
-                if resolved:
-                    sec_def = resolved[0]
-                    conid = sec_def.conId
-                    # Persist into a "downloads" universe so the resolution
-                    # sticks for future runs — matches the auto-register
-                    # behaviour of `propose --group`.
-                    universe_name = 'downloads'
-                    try:
-                        u = accessor.get(universe_name)
-                    except Exception:
-                        u = None
-                    if u is None:
-                        from trader.data.universe import Universe
-                        u = Universe(name=universe_name, security_definitions=[sec_def])
-                    else:
-                        if not any(sd.conId == sec_def.conId for sd in u.security_definitions):
-                            u.security_definitions.append(sec_def)
-                    accessor.update(u)
-                    if not _json_mode:
-                        console.print(f'[dim]  registered {symbol} → conId {conid} in universe "downloads"[/dim]')
-            except Exception as ex:
-                if not _json_mode:
-                    console.print(f'[dim]  resolve via trader_service failed for {symbol}: {ex}[/dim]')
 
         # A symbol that would not resolve is REFUSED, not stored under its
         # ticker. This used to fall back to a ticker-keyed write, which
@@ -10382,6 +10813,13 @@ def _handle_data_download(args: argparse.Namespace):
         # calendar lookup — otherwise fall back to full-range download.
         # --force bypasses the guard (needed when re-fetching existing days to
         # add coverage, e.g. toggling TwelveData extended-hours bars on).
+        from dateutil.tz import gettz
+        venue_tz = str(getattr(sec_def, 'timeZoneId', '') or '') or 'US/Eastern'
+        if gettz(venue_tz) is None:
+            venue_tz = 'US/Eastern'
+        end_date = now_utc.astimezone(gettz(venue_tz))
+        start_date = end_date - dt.timedelta(days=args.days)
+
         missing_ranges = None
         if not getattr(args, 'force', False) and sec_def is not None:
             calendar = _try_get_exchange_calendar_for(sec_def)
@@ -10396,6 +10834,13 @@ def _handle_data_download(args: argparse.Namespace):
                     if not _json_mode:
                         console.print(f'[dim]  missing() failed for {symbol}: {ex} — full-range fetch[/dim]')
                     missing_ranges = None
+            elif not _json_mode:
+                # Say so: without a calendar every run re-downloads the whole
+                # window, and that used to be invisible.
+                console.print(
+                    f'[yellow]  {symbol}: no exchange calendar for '
+                    f'{getattr(sec_def, "primaryExchange", "") or getattr(sec_def, "exchange", "")!r} '
+                    f'— fetching the full window[/yellow]')
 
         if missing_ranges is not None and len(missing_ranges) == 0:
             skipped_up_to_date += 1
@@ -10409,6 +10854,10 @@ def _handle_data_download(args: argparse.Namespace):
         symbol_failed = False
         symbol_empty_windows = 0
         for dr in fetch_ranges:
+            # missing() answers in inclusive session DATES; a vendor reads a
+            # bare end date as that day's midnight and never returns the last
+            # session. Widen to start-of-day .. end-of-day in the venue's tz.
+            fetch_start, fetch_end = session_fetch_window(dr, venue_tz, now=now_utc)
             try:
                 if not _json_mode:
                     console.print(
@@ -10427,27 +10876,20 @@ def _handle_data_download(args: argparse.Namespace):
                             f'universe or trader_service is reachable for resolution)'
                         )
                     from trader.objects import WhatToShow
-                    # tickdata.missing() returns DateRange objects with
-                    # dt.date start/end; IBHistoryWorker requires
-                    # dt.datetime with tzinfo. Promote here.
-                    def _to_dt(x):
-                        if isinstance(x, dt.datetime):
-                            return x if x.tzinfo else x.replace(tzinfo=dt.timezone.utc)
-                        # dt.date or anything else with year/month/day
-                        return dt.datetime(x.year, x.month, x.day, tzinfo=dt.timezone.utc)
                     df = _ib_loop.run_until_complete(worker.get_contract_history(
                         security=sec_def,
                         what_to_show=WhatToShow.TRADES,
                         bar_size=bar_size,
-                        start_date=_to_dt(dr.start),
-                        end_date=_to_dt(dr.end),
+                        start_date=fetch_start,
+                        end_date=fetch_end,
                     ))
                 else:
                     df = worker.get_history(
                         ticker=symbol,
                         bar_size=bar_size,
-                        start_date=dr.start,
-                        end_date=dr.end,
+                        start_date=fetch_start,
+                        end_date=fetch_end,
+                        timezone=venue_tz,
                     )
                 if not df.empty:
                     storage_key = conid if conid else symbol
@@ -10585,6 +11027,129 @@ def _handle_data_backup(args: argparse.Namespace):
     if summary['pruned']:
         console.print(f'\n[dim]pruned {len(summary["pruned"])} old snapshot(s), keeping newest {keep}[/dim]')
     console.print(f'[dim]latest → {backup_dir}/latest[/dim]')
+
+
+#: A file is worth rebuilding when most of what it stores is dead, or when it
+#: still carries an index the store no longer wants. Below this, say nothing.
+_COMPACT_WORTHWHILE_DEAD_FRACTION = 0.5
+
+
+def _compaction_plan() -> tuple:
+    """``(order_by, drop_indexes)`` for a rebuild: what the store itself says
+    about its tables, so the command carries no table knowledge of its own."""
+    from trader.data.duckdb_store import DuckDBDataStore
+    return ({DuckDBDataStore.TABLE_NAME: list(DuckDBDataStore.COMPACT_ORDER)},
+            list(DuckDBDataStore.LEGACY_INDEXES))
+
+
+def _usage_row(usage: dict, legacy_indexes) -> dict:
+    """One report row per database file, with the reason (if any) to rebuild it."""
+    import os as _os
+    carried = sorted(item['index'] for item in usage['indexes'] if item['index'] in set(legacy_indexes))
+    worst = usage['tables'][0] if usage['tables'] else None
+    reasons = []
+    if usage['dead_fraction'] >= _COMPACT_WORTHWHILE_DEAD_FRACTION:
+        reasons.append(f"{usage['dead_fraction']:.0%} of stored rows are dead")
+    if carried:
+        reasons.append(f"carries unused index {', '.join(carried)}")
+    return {
+        'db': _os.path.basename(usage['path']),
+        'file_mb': round(usage['file_bytes'] / 1e6, 1),
+        'used_mb': round(usage['used_blocks'] * usage['block_size'] / 1e6, 1),
+        'free_mb': round(usage['free_blocks'] * usage['block_size'] / 1e6, 1),
+        'live_rows': usage['live_rows'],
+        'stored_rows': usage['stored_rows'],
+        'dead_pct': round(usage['dead_fraction'] * 100, 1),
+        'largest_waste': (f"{worst['table']} ({worst['dead_rows']:,} dead)"
+                          if worst and worst['dead_rows'] else ''),
+        'legacy_indexes': carried,
+        'worth_compacting': bool(reasons),
+        'reason': '; '.join(reasons),
+    }
+
+
+def _handle_data_compact(args: argparse.Namespace):
+    """Report dead space in the DuckDB files; with --apply, rebuild them.
+
+    The live history database was 28.6 GiB for 5 GB of content on 2026-11-14
+    (see trader/data/db_compact.py). The rebuild holds each file's lock for
+    about as long as the nightly backup does, verifies every table before the
+    swap, and keeps the replaced file unless told to discard it.
+    """
+    import os as _os
+    from pathlib import Path as _Path
+    from trader.container import Container
+    from trader.data.db_compact import compact_database, database_usage
+
+    cfg = Container.instance().config()
+    duckdb_path = _os.path.expanduser(cfg.get('duckdb_path', '') or '')
+    if not duckdb_path:
+        print_status('duckdb_path not configured — nothing to compact', success=False)
+        return
+    data_dir = _Path(duckdb_path).parent
+    wanted = set(getattr(args, 'db', None) or [])
+    files = sorted(path for path in data_dir.iterdir() if path.is_file() and path.suffix == '.duckdb')
+    unknown = sorted(wanted - {path.name for path in files})
+    if unknown:
+        print_status(f'no such database in {data_dir}: {", ".join(unknown)} '
+                     f'(have: {", ".join(path.name for path in files) or "none"})', success=False)
+        return
+    if wanted:
+        files = [path for path in files if path.name in wanted]
+
+    order_by, legacy_indexes = _compaction_plan()
+    apply = bool(getattr(args, 'apply', False))
+    report, failures = [], []
+    for path in files:
+        try:
+            row = _usage_row(database_usage(path), legacy_indexes)
+        except Exception as ex:
+            failures.append(f'{path.name}: {type(ex).__name__}: {ex}')
+            continue
+        if apply and row['worth_compacting']:
+            try:
+                done = compact_database(path, order_by=order_by, drop_indexes=legacy_indexes,
+                                        keep_old=not getattr(args, 'discard_old', False))
+            except Exception as ex:
+                failures.append(f'{path.name}: {type(ex).__name__}: {ex}')
+                row['compacted'] = False
+            else:
+                row.update(compacted=True, file_mb_after=round(done['bytes_after'] / 1e6, 1),
+                           lock_seconds=done['lock_seconds'], old_file=done['old_file'],
+                           dropped_indexes=done['dropped_indexes'],
+                           rows_verified=sum(item['rows'] for item in done['tables']))
+        elif apply:
+            row['compacted'] = False
+        report.append(row)
+
+    kept = [row['old_file'] for row in report if row.get('old_file')]
+    if _json_mode:
+        print(_json_dumps({
+            'success': not failures, 'data': report, 'title': 'DB Compaction' if apply else 'DB Usage',
+            'applied': apply, 'errors': failures, 'kept_old_files': kept}))
+        if failures:
+            _set_exit_code(1)
+        return
+
+    import pandas as _pd
+    columns = ['db', 'file_mb', 'used_mb', 'live_rows', 'stored_rows', 'dead_pct', 'largest_waste']
+    if apply:
+        columns += ['compacted', 'file_mb_after', 'lock_seconds']
+    frame = _pd.DataFrame([{column: row.get(column, '') for column in columns} for row in report])
+    print_df(frame, title='DB Compaction' if apply else 'DB Usage')
+    for row in report:
+        if row['worth_compacting'] and not apply:
+            console.print(f"[yellow]{row['db']}: {row['reason']}[/yellow]")
+    if not apply and any(row['worth_compacting'] for row in report):
+        console.print('[dim]`mmr data compact --apply` rebuilds these files (verified before the swap; the '
+                      'old file is kept). Writers wait while a file is rebuilt, so run it while no market '
+                      'is in session.[/dim]')
+    for path in kept:
+        console.print(f'[dim]kept the replaced file: {path} — delete it once you are satisfied[/dim]')
+    for failure in failures:
+        print_status(failure, success=False)
+    if failures:
+        _set_exit_code(1)
 
 
 def _handle_data_dedup_daily(args: argparse.Namespace):
@@ -11080,6 +11645,11 @@ def _handle_data_refresh(args: argparse.Namespace):
             days=days,
             source=source,
             force=force,
+            # The universe's EXACT instruments. Passing only their symbols made
+            # the download re-resolve each name across every universe and take
+            # the first match — so a job could fill a different listing than
+            # the one its universe names.
+            security_definitions=list(uni.security_definitions),
         )
         try:
             # _handle_data_download() prints JSON to stdout when _json_mode is
@@ -11315,6 +11885,69 @@ def _handle_data_audit(args: argparse.Namespace):
     tally: Counter = Counter()
     worst: dict = {}
     scanned = 0
+    # Under --json everything this run has to say goes into ONE document;
+    # side remarks are collected here instead of printed as their own.
+    notes: list = []
+
+    def _note(message: str) -> None:
+        notes.append(message)
+        _set_exit_code(1)
+        if not _json_mode:
+            console.print(f'[red]{message}[/red]')
+    # Not findings, but worth showing: no-data markers on days the venue was
+    # CLOSED. They are the documented representation of "nothing traded"
+    # (CLAUDE.md, "No-data markers are whole days") and one is written for
+    # every weekend and holiday of every IB-sourced series — so counted as
+    # `empty_bar` they grew every week by construction and the gate could
+    # never be green against a recorded baseline (it had been failing nightly
+    # for weeks, 534 vs 278, with nothing wrong). An empty bar on a SESSION
+    # day is still a finding: that is data that should exist and does not.
+    info: Counter = Counter()
+    # The most recent findings per key, so "the number moved" comes with WHICH
+    # series and dates — reviewing a regression used to mean re-deriving them.
+    recent: dict = {}
+
+    from trader.data.session_guard import calendar_for
+    from trader.data.universe import UniverseAccessor
+    definitions: dict = {}
+    try:
+        accessor = UniverseAccessor(cfg.get('duckdb_path', ''), cfg.get('universe_library', 'Universes'))
+        for universe in accessor.get_all():
+            for sd in universe.security_definitions:
+                definitions.setdefault(str(int(sd.conId)), sd)
+    except Exception as ex:
+        _note(f'universes unreadable ({ex}); closed-day markers cannot be told '
+              f'from missing sessions on this run')
+    calendars: dict = {}
+
+    def _closed_day(symbol: str, stamp) -> bool:
+        """True only when this series' venue is KNOWN to have been closed."""
+        if symbol not in calendars:
+            definition = definitions.get(symbol)
+            calendars[symbol] = calendar_for(definition) if definition is not None else None
+        calendar = calendars[symbol]
+        if calendar is None:
+            return False
+        try:
+            day = stamp.astimezone(calendar.tz).date() if stamp.tzinfo else stamp.date()
+            return not calendar.is_session(day.isoformat())
+        except Exception:
+            return False
+
+    def _venue_time(symbol: str, stamp) -> str:
+        """The bar's time as the VENUE writes it — a daily bar is keyed at
+        venue midnight, which is the previous evening on a host further west."""
+        import datetime as _dt
+        calendar = calendars.get(symbol)
+        try:
+            zone = calendar.tz if calendar is not None else _dt.timezone.utc
+            return (stamp.astimezone(zone) if stamp.tzinfo else stamp).isoformat()
+        except Exception:
+            return str(stamp)
+
+    def _label(symbol: str) -> str:
+        definition = definitions.get(symbol)
+        return f'{definition.symbol} ({symbol})' if definition is not None else symbol
 
     # Split classification is best-effort reference data, not a precondition:
     # without the table every jump stays `large_jump` (the status quo), but say
@@ -11324,8 +11957,8 @@ def _handle_data_audit(args: argparse.Namespace):
         have_splits = True
     except Exception:
         have_splits = False
-        print_status('corporate_splits table not found — large jumps reported '
-                     'unclassified (run scripts/fetch_splits.py)', success=False)
+        _note('corporate_splits table not found — large jumps reported '
+              'unclassified (run scripts/fetch_splits.py)')
 
     # A series keyed by its TICKER rather than its conId. Not a bar defect, so
     # no per-bar rule can find it - but it is a store defect with the same
@@ -11385,8 +12018,19 @@ def _handle_data_audit(args: argparse.Namespace):
                         jumps, bars, [r[0].date() for r in rows], srows)
                 findings += jumps
             for f in findings:
+                stamp = rows[f.index][0] if f.index is not None and 0 <= f.index < len(rows) else None
+                if f.rule == 'empty_bar' and stamp is not None and _closed_day(sym, stamp):
+                    info[f'{bar_size}|closed_day_marker'] += 1
+                    continue
                 key = f'{bar_size}|{f.rule}'
                 tally[key] += 1
+                if stamp is not None:
+                    bucket = recent.setdefault(key, [])
+                    _closed_day(sym, stamp)      # resolves this series' calendar once
+                    bucket.append((stamp, _label(sym), f.detail, _venue_time(sym, stamp)))
+                    if len(bucket) > 400:
+                        bucket.sort(key=lambda item: item[0], reverse=True)
+                        del bucket[40:]
                 if tally[key] > worst.get(key, (0, ''))[0]:
                     pass
                 worst.setdefault(key, (0, sym))
@@ -11416,12 +12060,33 @@ def _handle_data_audit(args: argparse.Namespace):
 
     regressions = {k: (v, baseline.get(k, 0)) for k, v in current.items()
                    if v > baseline.get(k, 0)}
+    examples = {}
+    for key, bucket in recent.items():
+        bucket.sort(key=lambda item: item[0], reverse=True)
+        examples[key] = [{'date': when, 'series': label, 'detail': detail}
+                         for _stamp, label, detail, when in bucket[:12]]
+
+    # Advisory, never a failure: how much of the store's file is dead space.
+    # The history database reached 28.6 GiB for 5 GB of content without any
+    # check noticing (2026-11-14); this run is nightly, so it says so here.
+    store = _store_usage_advisory(history)
 
     if _json_mode:
-        print(_json_dumps({'data': {'counts': current, 'baseline': baseline,
+        # ONE document. The per-regression status lines used to follow as
+        # separate JSON objects, which no parser accepts.
+        print(_json_dumps({'success': not regressions,
+                           'data': {'counts': current, 'baseline': baseline,
                                     'regressions': regressions,
+                                    'info': dict(sorted(info.items())),
+                                    'recent': {k: v for k, v in examples.items()
+                                               if k in regressions},
+                                    'notes': notes,
+                                    'store': store,
                                     'series_scanned': scanned},
                            'title': 'Data Quality Audit'}))
+        if regressions and len(sys.argv) > 1:
+            sys.exit(1)
+        return
     else:
         table = Table(title=f'Data Quality Audit ({scanned} series)')
         table.add_column('bar_size'); table.add_column('rule')
@@ -11435,13 +12100,33 @@ def _handle_data_audit(args: argparse.Namespace):
         console.print(table)
         if not current:
             console.print('[green]no findings[/green]')
+        for k, v in sorted(info.items()):
+            console.print(f'[dim]{k}: {v} (no-data markers on days the venue was closed — '
+                          f'expected, not counted)[/dim]')
+        if store.get('worth_compacting'):
+            console.print(f"[yellow]store: {store['db']} is {store['file_mb']:,.0f} MB and "
+                          f"{store['reason']} — `mmr data compact` (not a finding)[/yellow]")
 
     if regressions:
         for k, (now, was) in sorted(regressions.items()):
             print_status(f'data quality REGRESSED [{k}]: {now} > accepted {was}',
                          success=False)
+            for item in examples.get(k, [])[:max(now - was, 3)]:
+                console.print(f"[dim]    {item['date']}  {item['series']}: {item['detail']}[/dim]")
         if len(sys.argv) > 1:
             sys.exit(1)
+
+
+def _store_usage_advisory(history_path: str) -> dict:
+    """The history database's dead-space report for the audit, or the reason
+    it could not be read. Never raises and never fails the audit: bloat costs
+    speed and disk, not correctness."""
+    try:
+        from trader.data.db_compact import database_usage
+        _order, legacy_indexes = _compaction_plan()
+        return _usage_row(database_usage(history_path), legacy_indexes)
+    except Exception as ex:
+        return {'error': f'{type(ex).__name__}: {ex}', 'worth_compacting': False}
 
 
 def _handle_data_status(now=None):

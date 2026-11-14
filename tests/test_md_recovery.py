@@ -12,6 +12,8 @@ session released the entitlement — which is exactly what the retry loop automa
 import asyncio
 import time
 
+from types import SimpleNamespace
+
 from ib_async import Contract
 
 from trader.listeners.ibreactive import IBAIORx
@@ -153,3 +155,49 @@ class TestRecoveredAnnouncementCountsLiveTickers:
         assert recovered, 'the clear branch never announced'
         assert '3 subscriptions' in recovered[0]
         assert rx._md_lost_at is None
+
+
+class TestOnlyStreamsAreResubscribed:
+    """ib.tickers() is never pruned: it also holds every snapshot, scan row and
+    depth ticker since connect. Each recovery pass re-requested ALL of them as
+    streams and cancelled nothing, so one competing-session episode turned
+    every symbol ever scanned into a permanent stream (IB allows ~100 lines)."""
+
+    def _requests(self, rx):
+        made = []
+        rx.ib.reqMktData = lambda **kwargs: made.append(kwargs['contract'].conId)
+        return made
+
+    def test_recorded_streams_are_used_instead_of_every_ticker(self):
+        rx = _rx()
+        made = self._requests(rx)
+        stream = Contract(conId=1)
+        rx._streaming_contracts[hash(stream)] = stream
+        rx.ib.tickers = lambda: [SimpleNamespace(contract=Contract(conId=i)) for i in (1, 2, 3, 4)]
+        assert rx._resubscribe_market_data() == 1
+        assert made == [1]
+
+    def test_the_previous_request_is_cancelled_first(self):
+        rx = _rx()
+        calls = []
+        stream = Contract(conId=1)
+        ticker = SimpleNamespace(contract=stream)
+        rx._streaming_contracts[hash(stream)] = stream
+        rx.ib.ticker = lambda contract: ticker
+        active = type('Active', (), {'__contains__': lambda self, item: item is ticker})()
+        rx.ib.wrapper = SimpleNamespace(ticker2ReqId={'mktData': active})
+        rx.ib.cancelMktData = lambda contract: calls.append(('cancel', contract.conId))
+        rx.ib.reqMktData = lambda **kwargs: calls.append(('request', kwargs['contract'].conId))
+        rx._resubscribe_market_data()
+        assert calls == [('cancel', 1), ('request', 1)]
+
+    def test_nothing_is_cancelled_when_there_is_no_active_request(self):
+        rx = _rx()
+        calls = []
+        stream = Contract(conId=1)
+        rx._streaming_contracts[hash(stream)] = stream
+        rx.ib.ticker = lambda contract: None
+        rx.ib.cancelMktData = lambda contract: calls.append('cancel')
+        rx.ib.reqMktData = lambda **kwargs: calls.append('request')
+        rx._resubscribe_market_data()
+        assert calls == ['request']

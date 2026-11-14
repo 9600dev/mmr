@@ -21,6 +21,7 @@ from trader.messaging.clientserver import (
 from trader.objects import Action, BarSize, WhatToShow
 from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.strategy.auto_executor import AutoExecutor, SignalWork
+from trader.strategy.parameters import session_bar_ts
 from trader.trading.strategy import Signal, Strategy, StrategyConfig, StrategyContext, StrategyState
 from typing import Any, cast, Dict, List, Optional
 
@@ -60,6 +61,19 @@ error_table = {
 # its YAML entry or source changes. Unbounded retries would spawn a child
 # process every 30s forever for a genuinely broken strategy.
 _MAX_LOAD_ATTEMPTS = 3
+
+# Same shape for the history backfill: an instrument whose backfill failed is
+# retried by the reconcile loop, at most this many attempts in total (the
+# startup attempt included), then left alone with a clear ERROR.
+_MAX_BACKFILL_ATTEMPTS = 3
+
+# Callback work (queued + in flight) one strategy's worker may hold: one bar
+# per conId the strategy is subscribed to NOW, never fewer than the floor. The
+# floor is the slack for a burst — ticks released together after a stalled
+# feed can complete several bars of ONE instrument back to back. The ceiling
+# bounds memory: every queued item owns a copy of its price frame.
+_MIN_CALLBACK_PENDING = 8
+_MAX_CALLBACK_PENDING = 256
 
 # Contract defaults for the isolated callback worker (STRATEGY_EXECUTION_CONTRACT
 # "Identity and supported deployment"): 60s init, 5s per callback, 32 MiB per
@@ -223,21 +237,20 @@ def _session_bar_ts(last_bar, params: Optional[dict],
     """Convert a live (UTC) bar timestamp to the strategy's SESSION timezone
     for time-of-day comparisons (``close_by_time``).
 
-    The backtester's frames are session-tz-aware (US history is ET-keyed,
-    ASX Sydney-keyed), so ``bar_ts.time()`` compares in session wall time
-    there. Live frames are UTC — without this conversion a 15:45 ET flatten
-    fires at 15:45 UTC = 11:45 ET, 4h15m early (happened live 2026-07-20 on
-    the first-ever live time-exit). SESSION_TZ param wins (the ASX strategies
-    set Australia/Sydney); default matches US history storage. Any failure
-    falls back to the raw bar (the old behavior) rather than blocking exits.
+    Live frames are UTC — without this conversion a 15:45 ET flatten fires at
+    15:45 UTC = 11:45 ET, 4h15m early (happened live 2026-07-20 on the
+    first-ever live time-exit). SESSION_TZ param wins (the ASX strategies set
+    Australia/Sydney); default matches US history storage. Any failure falls
+    back to the raw bar (the old behavior) rather than blocking exits.
+
+    The conversion itself is ``parameters.session_bar_ts``, shared with the
+    backtester. This docstring used to say the backtester did not need it
+    because its frames were "session-tz-aware (US history ET-keyed, ASX
+    Sydney-keyed)"; they are not — stored history is ET-indexed for every
+    venue — so an ASX ``close_by_time`` was validated against New York wall
+    time and deployed against Sydney's (audit 2026-11-14, B4.2).
     """
-    try:
-        session_tz = (params or {}).get('SESSION_TZ') or default_tz
-        ts = pd.Timestamp(last_bar)
-        ts = ts.tz_localize('UTC') if ts.tzinfo is None else ts
-        return ts.tz_convert(session_tz)
-    except Exception:
-        return last_bar
+    return session_bar_ts(last_bar, params, default_tz=default_tz, naive_is_utc=True)
 
 
 def _count_recent(index, now_utc: pd.Timestamp, seconds: int) -> int:
@@ -546,6 +559,21 @@ class StrategyRuntime():
         self._loading_strategies: Dict[str, Strategy] = {}
         # Bounded retry of failed strategy loads (see ``_note_load_failure``).
         self._load_failures: Dict[str, dict] = {}
+        # History backfill per (conId, bar_size). ``_backfill_pending``: the
+        # first attempt has not finished. ``_backfill_failures``: an attempt
+        # failed and the reconcile loop owns the bounded retry. ``_backfill_done``:
+        # primed in this process. See ``get_historical_data`` and
+        # ``_backfill_due`` (the dispatch hold).
+        self._backfill_pending: set = set()
+        self._backfill_failures: Dict[tuple, dict] = {}
+        self._backfill_done: set = set()
+        # (conId, strategy name) -> (bar timestamp, close) of the bar last
+        # dispatched, so a signal's audit row carries the price it acted on.
+        self._dispatched_closes: Dict[tuple, tuple] = {}
+        # Set for real in ``_run_services`` BEFORE the config load and the
+        # history backfill: a reload RPC can arrive while the backfill is
+        # still running, and ``_reconcile_sync`` reads it.
+        self._config_mtime: float = 0.0
         self._history_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='strategy-history')
         self._history_jobs: Dict[tuple, Any] = {}
         self._history_retry_at: Dict[tuple, float] = {}
@@ -789,6 +817,7 @@ class StrategyRuntime():
             # Snapshot: enable/disable mutate this dict from a worker thread.
             for name, worker in list(getattr(self, '_callback_workers', {}).items())
         }
+        status['history_backfill'] = self._backfill_status()
         status['event_loop_lag_seconds'] = getattr(self, '_event_loop_lag_seconds', 0.0)
         status['signal_audit_pending'] = len(getattr(self, '_signal_audit_tasks', ()))
         status['signal_audit_overflow'] = getattr(self, '_signal_audit_overflow', 0)
@@ -835,6 +864,7 @@ class StrategyRuntime():
             self._history_versions[key] = self._history_versions.get(key, 0) + 1
             self._history_retry_at.pop(key, None)
         self._hist_bars.pop((conId, bar_size), None)
+        self.__dict__.get('_hist_primed_at', {}).pop((conId, bar_size), None)
         getattr(self, '_frame_cache', {}).pop((conId, bar_size), None)
 
     def _primed_days(self) -> Dict[tuple, int]:
@@ -887,12 +917,42 @@ class StrategyRuntime():
                          getattr(strategy, 'name', '?'), declared, conId, bar_size, primed)
             self._invalidate_history(conId, bar_size)
 
+    #: How old the history half of a shared frame may get before it is read
+    #: again. It used to be read ONCE, while live bars are kept for
+    #: ``_tick_retention_days``: a service up for longer than that served a
+    #: frame with a hole between the day it started and the retained live bars
+    #: (AUDIT_2026-11-14 B3.4) — invisible to a strategy that only reads today,
+    #: silently wrong for any indicator spanning more than two days.
+    HISTORY_SNAPSHOT_MAX_AGE_S = 6 * 3600.0
+    HISTORY_SNAPSHOT_RETRY_S = 60.0
+
+    def _refresh_history_snapshot_if_due(self, conId: int, bar_size: BarSize) -> None:
+        """Re-read a primed history snapshot that has aged out. The current
+        snapshot keeps being served until the new one is in place."""
+        key = (conId, bar_size)
+        primed_at = self.__dict__.get('_hist_primed_at', {}).get(key)
+        now = time.monotonic()
+        if primed_at is None or now - primed_at < self.HISTORY_SNAPSHOT_MAX_AGE_S:
+            return
+        retry_at = self.__dict__.setdefault('_hist_refresh_retry_at', {})
+        if now < retry_at.get(key, 0.0):
+            return
+        retry_at[key] = now + self.HISTORY_SNAPSHOT_RETRY_S
+        if hasattr(self, '_history_pool'):
+            job = self._history_jobs.get(key)
+            if job is None or job.done():
+                self._history_jobs[key] = self._history_pool.submit(self._prime_hist_bars, conId, bar_size)
+        else:
+            self._prime_hist_bars(conId, bar_size)
+
     def _prime_hist_bars(self, conId: int, bar_size: BarSize) -> None:
         """Only successful reads populate the cache; failed reads are retryable.
 
         The window is the MAXIMUM declared lookback across every strategy
         configured for the conId (``_declared_lookback_days``); a re-prime
-        that widens the window over the previous one is logged.
+        that widens the window over the previous one is logged. A REFRESH of an
+        existing snapshot never replaces bars with nothing: an empty read over
+        a snapshot that has bars is kept out and logged.
         """
         from trader.data.duckdb_store import DuckDBDataStore
         from trader.data.market_data import normalize_historical
@@ -909,6 +969,12 @@ class StrategyRuntime():
                 norm = normalize_historical(df).dropna(subset=['close'])
                 norm.index = self._utc_index(norm.index)
             if version == getattr(self, '_history_versions', {}).get(key, 0):
+                current = self._hist_bars.get(key)
+                self.__dict__.setdefault('_hist_primed_at', {})[key] = time.monotonic()
+                if norm.empty and current is not None and not current.empty:
+                    logging.warning('history refresh for conId %s %s read NO bars where the current snapshot has '
+                                    '%d — keeping the current snapshot', conId, bar_size, len(current))
+                    return
                 self._hist_bars[key] = norm
                 previous_days = self._primed_days().get(key)
                 self._primed_days()[key] = requested_days
@@ -985,6 +1051,8 @@ class StrategyRuntime():
                     self._history_jobs[key] = self._history_pool.submit(self._prime_hist_bars, conId, bar_size)
             else:
                 self._prime_hist_bars(conId, bar_size)
+        else:
+            self._refresh_history_snapshot_if_due(conId, bar_size)
         freq = BarSize.to_pandas_freq(bar_size)
         daily = pd.Timedelta(freq) >= pd.Timedelta(days=1)
         ticks = self.streams.get(conId)
@@ -1141,6 +1209,15 @@ class StrategyRuntime():
                 if (hasattr(self, '_history_pool') and (getattr(strategy, 'historical_days_prior', 0) or 0) > 0
                         and (conId, strategy.bar_size) not in self._hist_bars):
                     continue
+                # The IB backfill for this instrument has not finished, or it
+                # failed and a retry is still due: the frame can be missing the
+                # part of today that preceded this process. Hold the bar
+                # (watermark untouched; position management above already ran)
+                # rather than hand a strategy a session that starts mid-way.
+                if ((getattr(strategy, 'historical_days_prior', 0) or 0) > 0
+                        and self._backfill_due(conId, strategy.bar_size)):
+                    self._note_backfill_hold(strategy.name or '?', conId)
+                    continue
                 dkey = (conId, strategy.name)
                 previous = self._last_dispatched_bar.get(dkey)
                 if previous is not None and last_bar <= previous:
@@ -1166,15 +1243,21 @@ class StrategyRuntime():
                     self._note_worker_pending(strategy.name or '?', conId)
                     continue
                 self._last_dispatched_bar[dkey] = last_bar
+                self._note_dispatched_close(dkey, last_bar, frame)
                 # G6: evaluate time-based exits once per new bar, whether or
                 # not the strategy emits a signal (mirrors the backtester's
                 # per-bar exit_conditions check).
                 if worker is not None:
                     getattr(self, '_worker_pending_logged', set()).discard(strategy.name)
                     generation = strategy.ctx.deployment_generation
+                    # The bound is sized from the subscriptions as they are
+                    # NOW: fixed at worker start, a universe that grew later
+                    # (or was empty at start) overflowed it — CallbackQueueFull
+                    # and a permanent ERROR for an ordinary bar.
                     worker.submit(conId, frame, last_bar, generation,
                                   lambda result, s=strategy: self._post_callback(self._callback_result, s, result),
-                                  lambda error, s=strategy: self._post_callback(self._callback_error, s, error))
+                                  lambda error, s=strategy: self._post_callback(self._callback_error, s, error),
+                                  max_pending=self._callback_pending_bound(strategy))
                     continue
                 signal = strategy.on_prices(frame)
             except Exception as ex:
@@ -1257,22 +1340,14 @@ class StrategyRuntime():
 
             # Persist signal to event store — with the symbol and the bar
             # close the strategy acted on (both were stored empty/0).
-            price = 0.0
-            try:
-                close = (last_bar.get('close') if hasattr(last_bar, 'get')
-                         else getattr(last_bar, 'close', None))
-                if close is not None and float(close) == float(close):
-                    price = float(close)
-            except (TypeError, ValueError):
-                price = 0.0
             event = TradingEvent(
                 event_type=EventType.SIGNAL,
                 timestamp=dt.datetime.now(),
                 strategy_name=signal.source_name,
                 conid=conId,
-                symbol=getattr(self, '_conid_symbols', {}).get(int(conId), ''),
+                symbol=self._symbol_for(conId),
                 action=str(signal.action),
-                price=price,
+                price=self._signal_price(strategy, conId, last_bar),
                 signal_probability=signal.probability,
                 signal_risk=signal.risk,
             )
@@ -1295,6 +1370,67 @@ class StrategyRuntime():
         except Exception:
             logging.exception('auto-execute submission failed for %s conId %s',
                               getattr(strategy, 'name', '?'), conId)
+
+    def _note_dispatched_close(self, dkey: tuple, bar_ts, frame) -> None:
+        """Remember the close of the bar just dispatched to (conId, strategy)."""
+        try:
+            close = float(frame['close'].iloc[-1])
+        except Exception:
+            return
+        closes = self.__dict__.setdefault('_dispatched_closes', {})
+        closes[dkey] = (bar_ts, close)
+
+    def _signal_price(self, strategy, conId, last_bar) -> float:
+        """Close of the bar a signal was computed on, for its audit row.
+
+        ``last_bar`` is the bar's TIMESTAMP on both dispatch paths (in-process
+        and callback worker); reading ``.close`` off it always gave 0.0. The
+        close comes from what was recorded at dispatch, else from the shared
+        frame at that timestamp; a bar ROW is still accepted. 0.0 = unknown.
+        """
+        close = None
+        try:
+            if hasattr(last_bar, 'get'):
+                close = last_bar.get('close')
+            else:
+                close = getattr(last_bar, 'close', None)
+            if close is None:
+                recorded = getattr(self, '_dispatched_closes', {}).get(
+                    (conId, getattr(strategy, 'name', None)))
+                if recorded is not None and recorded[0] == last_bar:
+                    close = recorded[1]
+            if close is None:
+                # A newer bar was dispatched before this signal came back.
+                cached = getattr(self, '_frame_cache', {}).get(
+                    (conId, getattr(strategy, 'bar_size', None)))
+                if cached is not None and last_bar in cached[1].index:
+                    close = cached[1]['close'].loc[last_bar]
+            if close is None:
+                return 0.0
+            price = float(close)
+        except Exception:
+            return 0.0
+        return price if math.isfinite(price) else 0.0
+
+    def _symbol_for(self, conId) -> str:
+        """Ticker symbol for a conId, from the contracts this runtime has seen."""
+        try:
+            symbol = getattr(self, '_conid_symbols', {}).get(int(conId))
+        except (TypeError, ValueError):
+            symbol = None
+        if not symbol:
+            contract = getattr(self, '_contracts', {}).get(conId)
+            symbol = getattr(contract, 'symbol', None)
+        return str(symbol) if symbol else ''
+
+    def _callback_pending_bound(self, strategy) -> int:
+        """Queued + in-flight callbacks ``strategy``'s worker may hold: one bar
+        per conId it is subscribed to right now, floored and capped."""
+        # list(): subscribe() adds conIds from the reconcile thread.
+        subscribed = sum(1 for subscribers in list(getattr(self, 'strategies', {}).values())
+                         if strategy in subscribers)
+        declared = len(getattr(strategy, 'conids', None) or ())
+        return max(_MIN_CALLBACK_PENDING, min(_MAX_CALLBACK_PENDING, max(subscribed, declared)))
 
     def _queue_signal_audit(self, event):
         """A busy analytics store cannot stall bars or independent exits.
@@ -1324,16 +1460,15 @@ class StrategyRuntime():
         self._stop_callback_worker(strategy)
         if not hasattr(self, '_callback_workers'):
             self._callback_workers = {}
-        conids = set(strategy.conids or [])
-        if strategy.universe:
-            universe = self.universe_accessor.get(strategy.universe)
-            conids.update(sd.conId for sd in universe.security_definitions)
         limits = getattr(self, '_worker_limits', None) or worker_limits()
         worker = StrategyCallbackWorker(
             source_path=strategy._source_path, source_hash=strategy._source_hash,
             class_name=strategy.ctx.class_name, context=strategy.ctx,
             initial_state=strategy.state,
-            max_pending=max(1, min(256, len(conids))),
+            # Initial bound only: every submit re-sizes it from the live
+            # subscription count (``_callback_pending_bound``). A universe
+            # read here fixed it at the universe's size AT WORKER START.
+            max_pending=self._callback_pending_bound(strategy),
             deployment_config=deployment_config,
             # A worker that dies with NO callback in flight (idle child exit,
             # OOM between bars) has no per-work error to report through; this
@@ -1555,6 +1690,10 @@ class StrategyRuntime():
         """
         logging.debug('strategy_runtime.subscribe() contract: {} strategy: {}'.format(contract, strategy))
         subscribers = self.strategies.setdefault(contract.conId, [])
+        if getattr(contract, 'symbol', None):
+            # conId -> symbol for signal audit rows, whether or not the IB
+            # backfill ever ran for this instrument.
+            self.__dict__.setdefault('_conid_symbols', {})[int(contract.conId)] = str(contract.symbol)
         if strategy not in subscribers:
             subscribers.append(strategy)
             self._ensure_lookback(contract.conId, strategy)
@@ -2127,17 +2266,11 @@ class StrategyRuntime():
         """
         if not security:
             return None
-        # Imported here (outside the try, so a missing package raises rather
-        # than reading as "no calendar"): this module is on the
-        # `import trader.mmr_cli` path and exchange_calendars is costly.
-        import exchange_calendars
-        try:
-            return exchange_calendars.get_calendar(security.primaryExchange)
-        except Exception:
-            try:
-                return exchange_calendars.get_calendar(security.exchange)
-            except Exception:
-                return None
+        # One shared lookup (IB venue aliases included): ARCA / AMEX / ISLAND
+        # listings and every Toronto / Tokyo / Hong Kong name used to come back
+        # None here, so priming re-pulled their whole window on every start.
+        from trader.data.session_guard import calendar_for
+        return calendar_for(security)
 
     async def _fetch_history_with_resume(
         self,
@@ -2159,6 +2292,11 @@ class StrategyRuntime():
                                 contracts genuinely have no history.
           * IBConnectivityError -> propagated; caller decides whether to
                                 reconnect and retry.
+          * a failed store     -> every range is still attempted, then
+                                RuntimeError: bars fetched but not stored
+                                leave the instrument unprimed, so the caller
+                                records it for the bounded retry (it was
+                                logged at WARNING and counted as primed).
         """
         contract = SecurityDefinition.to_contract(security)
         # conId -> symbol for signal audit rows (they were stored symbol='').
@@ -2178,8 +2316,12 @@ class StrategyRuntime():
         cal = self._try_get_exchange_calendar(security)
         if cal is not None:
             try:
-                date_ranges = tick_data.missing(
-                    security, cal,
+                # Off the loop: the coverage query costs ~0.25 s per instrument
+                # and the startup pass asks it for every one in a row — 26
+                # instruments held the loop (RPC server, tick intake, pulse)
+                # for 8.3 s on 2026-11-14.
+                date_ranges = await asyncio.to_thread(
+                    tick_data.missing, security, cal,
                     date_range=DateRange(start=window_start, end=window_end),
                 )
             except Exception as ex:
@@ -2201,6 +2343,7 @@ class StrategyRuntime():
             )
             return
 
+        store_errors: List[str] = []
         for dr in date_ranges:
             # tick_data.missing() returns DateRanges whose start/end are
             # bare dt.date objects (from exchange_calendars sessions.date)
@@ -2216,6 +2359,9 @@ class StrategyRuntime():
                     bar_size=bar_size,
                     start_date=dr_start,
                     end_date=dr_end,
+                    # `contract` is a plain Contract (no timeZoneId): without
+                    # this a non-US daily bar is keyed at New York midnight.
+                    tz_info=tz,
                 )
             except IBNoDataError as ex:
                 logging.warning(
@@ -2238,43 +2384,271 @@ class StrategyRuntime():
                         'tick_data.write() failed for %s strategy %s: %s',
                         security.symbol, strategy_name, ex,
                     )
+                    store_errors.append(f'{type(ex).__name__}: {ex}')
 
-    async def get_historical_data(self):
-        for strategy in self.strategy_implementations:
-            historical_days = strategy.historical_days_prior if strategy.historical_days_prior else 1
+        if store_errors:
+            raise RuntimeError(
+                f'{len(store_errors)} of {len(date_ranges)} fetched range(s) could not be stored: '
+                f'{store_errors[0]}')
 
-            if strategy.conids:
-                for conId in strategy.conids:
-                    security_definitions = self.trader_client.rpc().resolve_symbol(conId)
-                    if security_definitions:
-                        try:
-                            await self._fetch_history_with_resume(
-                                security=security_definitions[0],
-                                bar_size=strategy.bar_size,
-                                historical_days=historical_days,
-                                strategy_name=strategy.name or 'unknown',
-                            )
-                        except IBConnectivityError:
-                            raise
-                    else:
-                        logging.error('could not find security definition for conId {} for strategy {}'.format(conId, strategy))
+    # ---- history backfill ------------------------------------------------
 
+    def _backfill_state(self) -> 'tuple[set[tuple], Dict[tuple, Dict[str, Any]], set[tuple]]':
+        """``(pending, failures, done)`` keyed by (conId, bar_size); created on
+        demand so a runtime built without ``__init__`` behaves the same."""
+        state = self.__dict__
+        return (state.setdefault('_backfill_pending', set()),
+                state.setdefault('_backfill_failures', {}),
+                state.setdefault('_backfill_done', set()))
+
+    def _backfill_due(self, conId: int, bar_size) -> bool:
+        """True while history for (conId, bar_size) is still expected to arrive:
+        its first backfill attempt has not finished, or an attempt failed and
+        the bounded retry has attempts left.
+
+        False once it succeeded, once the retries are exhausted (the hold must
+        end: a permanently held strategy would stop trading over a history
+        problem it may not even depend on), and for an instrument this process
+        never planned a backfill for (a strategy deployed after startup).
+        """
+        key = (conId, bar_size)
+        if key in getattr(self, '_backfill_pending', ()):
+            return True
+        record = getattr(self, '_backfill_failures', {}).get(key)
+        return record is not None and record.get('attempts', 0) < _MAX_BACKFILL_ATTEMPTS
+
+    def _note_backfill_hold(self, name: str, conId: int) -> None:
+        """Say so ONCE per strategy (a universe strategy holds hundreds of conIds)."""
+        logged = self.__dict__.setdefault('_backfill_hold_logged', set())
+        if name in logged:
+            return
+        logged.add(name)
+        logging.info('holding bars for strategy %s (first: conId %s) until the history backfill of each '
+                     'instrument finishes or its retries are exhausted', name, conId)
+
+    def _backfill_status(self) -> dict:
+        pending, failures, done = self._backfill_state()
+        return {
+            'primed': len(done),
+            'pending': sorted(int(key[0]) for key in list(pending)),
+            'failed': [{
+                'conid': int(key[0]),
+                'bar_size': str(key[1]),
+                'symbol': str(record.get('symbol', '')),
+                'strategy': str(record.get('strategy', '')),
+                'attempts': int(record.get('attempts', 0)),
+                'gave_up': int(record.get('attempts', 0)) >= _MAX_BACKFILL_ATTEMPTS,
+                'error': str(record.get('error', ''))[:300],
+            } for key, record in list(failures.items())],
+        }
+
+    def _backfill_targets(self) -> List[tuple]:
+        """``(strategy, conId, SecurityDefinition | None)`` for every instrument a
+        loaded strategy is configured for. An explicit conId is resolved at
+        fetch time, inside that instrument's own error handling; a universe
+        that cannot be read costs that strategy its backfill, not the others'.
+        """
+        targets: List[tuple] = []
+        for strategy in list(self.strategy_implementations):
+            for conId in strategy.conids or []:
+                targets.append((strategy, conId, None))
             if strategy.universe:
-                # Iterate SecurityDefinitions directly so we can pass them to
-                # _fetch_history_with_resume (which needs primaryExchange,
-                # timeZoneId, etc. for calendar lookup and missing-range
-                # computation; a bare Contract(conId=...) wouldn't suffice).
-                for sd in self.universe_accessor.get(strategy.universe).security_definitions:
-                    try:
-                        await self._fetch_history_with_resume(
-                            security=sd,
-                            bar_size=strategy.bar_size,
-                            historical_days=historical_days,
-                            strategy_name=strategy.name or 'unknown',
-                        )
-                    except IBConnectivityError:
-                        raise
+                try:
+                    # SecurityDefinitions directly: _fetch_history_with_resume
+                    # needs primaryExchange / timeZoneId for the calendar
+                    # lookup; a bare Contract(conId=...) would not do.
+                    definitions = list(self.universe_accessor.get(strategy.universe).security_definitions)
+                except Exception as ex:
+                    logging.error('could not read universe %s for strategy %s; its history is not '
+                                  'backfilled: %s', strategy.universe, strategy.name, ex)
+                    continue
+                targets.extend((strategy, sd.conId, sd) for sd in definitions)
+        return targets
+
+    def _mark_backfill_pending(self) -> None:
+        """Hold every instrument the startup backfill will visit from its FIRST
+        bar, not from whenever the backfill happens to reach it. Called before
+        the first subscription."""
+        pending, failures, done = self._backfill_state()
+        for strategy, conId, _ in self._backfill_targets():
+            key = (conId, strategy.bar_size)
+            if key not in failures and key not in done:
+                pending.add(key)
+
+    def _record_backfill_failure(self, key: tuple, strategy_name: str, security, ex) -> Dict[str, Any]:
+        """Count one failed backfill attempt for ``key`` (bookkeeping only)."""
+        _, failures, _ = self._backfill_state()
+        record: Dict[str, Any] = failures.get(key) or {'attempts': 0, 'symbol': '', 'strategy': ''}
+        record['attempts'] = int(record.get('attempts') or 0) + 1
+        record['strategy'] = strategy_name or record.get('strategy', '')
+        record['symbol'] = str(getattr(security, 'symbol', '') or record.get('symbol', '') or '')
+        record['error'] = f'{type(ex).__name__}: {ex}' if isinstance(ex, BaseException) else str(ex)
+        failures[key] = record
+        return record
+
+    def _note_backfill_failure(self, key: tuple, strategy_name: str, security, ex) -> None:
+        """Record one instrument's failed backfill attempt and say whether it
+        will be retried."""
+        record = self._record_backfill_failure(key, strategy_name, security, ex)
+        attempts = int(record['attempts'])
+        conId, bar_size = key
+        if attempts >= _MAX_BACKFILL_ATTEMPTS:
+            logging.error(
+                'history backfill for %s (conId %s, %s) strategy %s failed after %d attempts — giving up '
+                'until the service restarts; its strategies now receive bars WITHOUT that history: %s',
+                record['symbol'] or '?', conId, bar_size, record['strategy'] or '?',
+                record['attempts'], record['error'])
+        else:
+            logging.error(
+                'history backfill for %s (conId %s, %s) strategy %s failed: %s — the other instruments '
+                'continue; the reconcile loop will retry (attempt %d/%d)',
+                record['symbol'] or '?', conId, bar_size, record['strategy'] or '?',
+                record['error'], record['attempts'], _MAX_BACKFILL_ATTEMPTS)
+
+    def _retryable_backfills(self) -> List[tuple]:
+        _, failures, _ = self._backfill_state()
+        return [key for key, record in list(failures.items())
+                if record.get('attempts', 0) < _MAX_BACKFILL_ATTEMPTS]
+
+    def _charge_backfill_attempt(self, keys, reason, what: str) -> None:
+        """A failure of the PASS, not of one instrument (IB unreachable, the
+        startup pass giving up, a crashed retry): one failed attempt for each
+        of ``keys``, and ONE log line however many there are.
+
+        Charging all of them is what keeps the hold bounded for every
+        instrument alike. Charging only the instrument the pass stopped on let
+        the others wait their turn — two reconcile ticks per instrument ahead
+        of them — while their strategies stayed held.
+        """
+        keys = list(keys)
+        if not keys:
+            return
+        records = [self._record_backfill_failure(key, '', None, reason) for key in keys]
+        gave_up = sum(1 for record in records if record['attempts'] >= _MAX_BACKFILL_ATTEMPTS)
+        conids = ', '.join(str(key[0]) for key in keys[:20]) + (', ...' if len(keys) > 20 else '')
+        logging.error(
+            'history backfill %s for %d instrument(s) (conIds %s): %s — %d given up until the service '
+            'restarts (their strategies now receive bars WITHOUT that history), %d left to the '
+            'reconcile loop (at most %d attempts each)',
+            what, len(keys), conids, records[0]['error'], gave_up, len(keys) - gave_up,
+            _MAX_BACKFILL_ATTEMPTS)
+
+    def _abandon_pending_backfills(self, reason: str) -> None:
+        """The startup pass ended with instruments it never primed (IB
+        unreachable through every reconnect, an unexpected error). Hand them to
+        the reconcile loop's bounded retry rather than leave them pending — and
+        their strategies held — forever."""
+        pending, _, _ = self._backfill_state()
+        self._charge_backfill_attempt(sorted(pending, key=str),
+                                      reason or 'the startup pass did not reach it',
+                                      'did not finish at startup')
+        pending.clear()
+
+    async def get_historical_data(self, retry_failed: bool = False) -> None:
+        """Backfill history for every instrument the loaded strategies use.
+
+        One instrument's failure is ITS failure: logged at ERROR with the
+        symbol and strategy, recorded for a bounded retry by the reconcile loop
+        (``_MAX_BACKFILL_ATTEMPTS`` attempts in total), and the pass moves on.
+        It used to end the pass — the first instrument raising meant no later
+        one was attempted, and nothing ever retried. ``IBConnectivityError`` /
+        ``ConnectionError`` still propagate from the startup pass
+        (``_run_services`` reconnects and re-runs it; an instrument already
+        primed is not fetched again).
+
+        ``retry_failed=True`` is the reconcile-loop pass: only instruments
+        with a recorded failure and attempts left are fetched, and a
+        connectivity error ends the pass instead of propagating — charged to
+        every instrument still waiting, since IB was unreachable for all.
+        """
+        pending, failures, done = self._backfill_state()
+        targets = self._backfill_targets()
+        # One shared frame per (conId, bar_size): fetch it once per pass, with
+        # the widest window any strategy declares for it.
+        widest: Dict[tuple, int] = {}
+        for strategy, conId, _ in targets:
+            key = (conId, strategy.bar_size)
+            widest[key] = max(widest.get(key, 0), strategy.historical_days_prior or 1)
+        if not retry_failed:
+            pending.update(key for key in widest if key not in failures and key not in done)
+
+        attempted: set = set()
+        for strategy, conId, security in targets:
+            key = (conId, strategy.bar_size)
+            if key in attempted:
+                continue
+            record = failures.get(key)
+            if retry_failed:
+                if record is None or record.get('attempts', 0) >= _MAX_BACKFILL_ATTEMPTS:
+                    continue
+            elif record is not None or key in done:
+                # Failed: the reconcile loop owns the retry (a re-run of this
+                # pass must not burn its attempts). Done: primed already.
+                continue
+            attempted.add(key)
+            name = strategy.name or 'unknown'
+            try:
+                if security is None:
+                    security_definitions = self.trader_client.rpc().resolve_symbol(conId)
+                    if not security_definitions:
+                        logging.error('could not find security definition for conId {} for strategy {}'
+                                      .format(conId, strategy))
+                        pending.discard(key)
+                        failures.pop(key, None)
+                        continue
+                    security = security_definitions[0]
+                await self._fetch_history_with_resume(
+                    security=security,
+                    bar_size=strategy.bar_size,
+                    historical_days=widest[key],
+                    strategy_name=name,
+                )
+            except (IBConnectivityError, ConnectionError) as ex:
+                if not retry_failed:
+                    raise
+                self._charge_backfill_attempt(self._retryable_backfills(), ex, 'retry could not reach IB')
+                try:
+                    await self._reconnect_historical_client()
+                except Exception as reconnect_ex:
+                    logging.error('reconnect failed: {}'.format(reconnect_ex))
+                return
+            except Exception as ex:
+                pending.discard(key)
+                self._note_backfill_failure(key, name, security, ex)
+                continue
+            pending.discard(key)
+            done.add(key)
+            if failures.pop(key, None) is not None:
+                logging.info('history backfill for %s (conId %s, %s) strategy %s succeeded on retry',
+                             getattr(security, 'symbol', '?'), conId, strategy.bar_size, name)
+
+        if retry_failed:
+            # A recorded failure no loaded strategy is configured for any more
+            # has nothing left to prime — and must not hold anything.
+            for key in [k for k, r in failures.items()
+                        if k not in widest and r.get('attempts', 0) < _MAX_BACKFILL_ATTEMPTS]:
+                failures.pop(key, None)
         logging.debug('finished get_historical_data()')
+
+    def _schedule_backfill_retry(self) -> None:
+        """Start ONE background retry pass when a failed backfill still has
+        attempts left. A task, not an await: an IB history fetch can take
+        minutes and must delay neither the next reconcile nor the pulse (a
+        pulse missing for two intervals reads as a wedged service)."""
+        if not self._retryable_backfills():
+            return
+        task = getattr(self, '_backfill_task', None)
+        if task is not None and not task.done():
+            return
+        self._backfill_task = asyncio.get_running_loop().create_task(self._retry_backfills())
+
+    async def _retry_backfills(self) -> None:
+        try:
+            await self.get_historical_data(retry_failed=True)
+        except Exception as ex:
+            # Whatever broke, the retry stays BOUNDED: charge the attempt.
+            logging.exception('history backfill retry pass failed')
+            self._charge_backfill_attempt(self._retryable_backfills(), ex, 'retry pass crashed')
 
     async def _management_loop(self):
         """Broker reconciliation/protection must not depend on signal code."""
@@ -2294,10 +2668,11 @@ class StrategyRuntime():
         try:
             await self._run_services()
         finally:
-            task = getattr(self, '_management_task', None)
-            if task is not None:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+            for task_name in ('_management_task', '_backfill_task'):
+                task = getattr(self, task_name, None)
+                if task is not None:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
             audit_tasks = list(getattr(self, '_signal_audit_tasks', ()))
             if audit_tasks:
                 _, pending = await asyncio.wait(audit_tasks, timeout=2)
@@ -2361,8 +2736,22 @@ class StrategyRuntime():
         )
         self.subscription = observable.subscribe(self.observer)
 
+        # Track config mtime for change detection. Read BEFORE the load and the
+        # history backfill: the RPC server is already serving, so a reload /
+        # deploy can run ``_reconcile_sync`` while the backfill is still in
+        # progress (it raised AttributeError when this was set afterwards), and
+        # an edit made during the backfill must still read as a change.
+        try:
+            self._config_mtime = os.path.getmtime(self.strategy_config_file)
+        except OSError:
+            self._config_mtime = 0.0
+
         logging.debug('loading {} config file'.format(self.strategy_config_file))
         await asyncio.to_thread(self.config_loader, self.strategy_config_file)
+
+        # Before any tick can be dispatched: hold every instrument whose
+        # history the backfill below is about to fetch.
+        self._mark_backfill_pending()
 
         logging.debug('subscribing to streams for all conids')
 
@@ -2393,13 +2782,16 @@ class StrategyRuntime():
             self.strategy_runtime_ib_client_id + 1,
         )
         max_retries = 5
+        backfill_error = ''
         for attempt in range(1, max_retries + 1):
             try:
                 if not self.historical_data_client.connected:
                     await self.historical_data_client.connect_async()
                 await self.get_historical_data()
+                backfill_error = ''
                 break
             except IBConnectivityError as ex:
+                backfill_error = 'IBConnectivityError: {}'.format(ex)
                 if attempt == max_retries:
                     logging.error('historical data failed after {} attempts, giving up: {}'.format(max_retries, ex))
                     break
@@ -2411,7 +2803,8 @@ class StrategyRuntime():
                 except Exception as reconnect_ex:
                     logging.error('reconnect failed: {}'.format(reconnect_ex))
                 await asyncio.sleep(wait)
-            except ConnectionError:
+            except ConnectionError as ex:
+                backfill_error = 'ConnectionError: {}'.format(ex or 'IB not connected')
                 if attempt == max_retries:
                     logging.error('IB not connected after {} attempts, giving up'.format(max_retries))
                     break
@@ -2420,14 +2813,13 @@ class StrategyRuntime():
                     attempt, max_retries, wait))
                 await asyncio.sleep(wait)
             except Exception as ex:
+                backfill_error = '{}: {}'.format(type(ex).__name__, ex)
                 logging.error('unexpected error fetching historical data: {}'.format(ex))
                 break
 
-        # Track config mtime for change detection
-        try:
-            self._config_mtime = os.path.getmtime(self.strategy_config_file)
-        except OSError:
-            self._config_mtime = 0.0
+        # Anything the startup pass never primed goes to the reconcile loop's
+        # bounded retry (it used to be dropped for the life of the process).
+        self._abandon_pending_backfills(backfill_error)
 
         # Stay alive and periodically reconcile subscriptions
         logging.info('entering reconciliation loop (30s interval)')
@@ -2437,4 +2829,8 @@ class StrategyRuntime():
                 await self._reconcile()
             except Exception as ex:
                 logging.error('reconciliation error: {}'.format(ex))
+            try:
+                self._schedule_backfill_retry()
+            except Exception as ex:
+                logging.error('could not schedule the history backfill retry: {}'.format(ex))
             self._log_pulse()

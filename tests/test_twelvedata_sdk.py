@@ -203,9 +203,17 @@ class TestTDScannerBuildCandidates:
         return TwelveDataIdeaScanner(td_client=None)
 
     def test_filters_warrants_and_rights(self):
-        quotes = [_q('AAPL'), _q('XYZW'), _q('FOO.U'), _q('BAR.R'), _q('BAZWS')]
+        quotes = [_q('AAPL'), _q('XYZAW'), _q('FOO.U'), _q('BAR.R'), _q('BAZWS')]
         got = [c['ticker'] for c in self._scanner()._build_candidates(quotes)]
         assert got == ['AAPL']
+
+    def test_a_short_ticker_ending_in_w_is_not_a_warrant(self):
+        """A bare trailing 'W' marks a warrant only on a 5+ character ticker
+        (base + W). The unconditional test dropped NOW, SNOW, LOW, PANW, SCHW...
+        from every TwelveData scan, including an explicit `--tickers NOW`."""
+        quotes = [_q('NOW'), _q('SNOW'), _q('LOW'), _q('PANW'), _q('SCHW'), _q('ITW')]
+        got = [c['ticker'] for c in self._scanner()._build_candidates(quotes)]
+        assert got == ['NOW', 'SNOW', 'LOW', 'PANW', 'SCHW', 'ITW']
 
     def test_filters_preferred_stock_by_lowercase_p(self):
         """KKRpD is KKR preferred series D. The lowercase 'p' is the marker;

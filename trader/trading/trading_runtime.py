@@ -28,7 +28,7 @@ from trader.trading.order_reference import split_order_reference
 from trader.trading.order_split import SplitPlan, split_order
 from trader.trading.order_structure import rejection_for_order
 from trader.trading.risk_gate import RiskGate, RiskGateResult, RiskInputs, RiskLimits
-from trader.listeners.ibreactive import IBAIORx, IBAIORxError
+from trader.listeners.ibreactive import IBAIORx, IBAIORxError, single_flight
 from trader.messaging.clientserver import MessageBusServer, MultithreadedTopicPubSub, RPCClient, RPCServer
 from trader.objects import Action, ContractOrderPair, ExecutorCondition
 from trader.trading.book import BookSubject
@@ -108,6 +108,22 @@ class _AccountPnLSubscription:
     value: Optional[float] = None
     request_started: bool = False
     pending: list[tuple[PnL, Optional[float]]] = field(default_factory=list)
+
+
+def _is_transient_refusal(error: Any) -> bool:
+    """A refusal that sent nothing and describes a condition that can CHANGE.
+
+    ``UNKNOWN:`` (could not evaluate) and ``DEFERRED:`` (a competing order or
+    unconfirmed reservation holds the shares right now). With no broker order
+    reserved, such an intent is journaled RETRYABLE so the SAME intent id can
+    be claimed again and the request re-evaluated. ``DEFERRED:`` used to fall
+    through to REJECTED, and a REJECTED intent replays its stored error on
+    every retry: the executor keeps one close request and one intent id, so a
+    deferred exit kept receiving the original refusal after the blocker was
+    gone — cancelling its own stop before each attempt (review 2026-11-14).
+    """
+    text = str(error or '')
+    return 'UNKNOWN:' in text or 'DEFERRED:' in text
 
 
 class Trader():
@@ -399,8 +415,10 @@ class Trader():
             self.order_tracker.set_event_store(self.event_store)
 
             # load trading filters (allowlist/denylist)
-            from trader.trading.trading_filter import TradingFilter
-            self.risk_gate.trading_filter = TradingFilter.load()
+            # Re-reads the YAML when it changes: `mmr filter deny X` must reach
+            # the order path of a RUNNING service, not only the next restart.
+            from trader.trading.trading_filter import ReloadingTradingFilter
+            self.risk_gate.trading_filter = ReloadingTradingFilter()
 
             # Server-side notional-tier startup diagnostics (Phase 2). Announce
             # the active threshold and flag the operational footgun where the
@@ -498,6 +516,28 @@ class Trader():
         self._invalidate_account_pnl()
         self.client.ib.disconnect()
 
+    def _schedule_reconnect(self) -> None:
+        """Force the reconnect path from inside an IB callback.
+
+        Not inline: closing the socket while ib_async is still dispatching the
+        event that asked for it re-enters its own handlers. An attempt already
+        in progress will resubscribe on its own.
+        """
+        if getattr(self, '_reconnecting', False):
+            return
+        try:
+            asyncio.get_running_loop().call_soon(self.reconnect)
+            return
+        except RuntimeError:
+            pass
+        # Called off the loop (an IB callback thread): hand it to the main loop.
+        # With no loop at all there is nothing to reconnect ON; say so.
+        main_loop = getattr(self, '_main_loop', None)
+        if main_loop is not None and main_loop.is_running():
+            main_loop.call_soon_threadsafe(self.reconnect)
+        else:
+            logging.warning('reconnect requested but no event loop is running; not reconnecting')
+
     def __update_positions(self, positions: Union[List[Position], Position]):
         logging.debug('__update_positions')
         if type(positions) is Position:
@@ -592,6 +632,10 @@ class Trader():
         )
 
         positions_disposable = (await self.client.subscribe_positions()).subscribe(positions_observer)
+        # subscribe_positions awaited a complete reqPositions round trip on THIS
+        # connection, so from here an empty ib.positions() means "flat", not
+        # "not loaded yet". See get_positions.
+        self._positions_synced_ib = self.client.ib
         self.disposables.append(positions_disposable)
 
         portfolio_disposable = (await self.client.subscribe_portfolio()).subscribe(AnonymousObserver(
@@ -670,7 +714,8 @@ class Trader():
         # make sure we're getting either live, or delayed data
         self.client.ib.reqMarketDataType(self.market_data)
 
-        orders = await self.client.ib.reqAllOpenOrdersAsync()
+        orders = await single_flight(
+            self.client.ib, 'openOrders', self.client.ib.reqAllOpenOrdersAsync, 30.0)
         for o in orders:
             self.book.on_next(o)
 
@@ -729,6 +774,20 @@ class Trader():
             self._ib_upstream_error = ''
             self._ensure_account_pnl_subscription()
             logging.info('IB upstream connection restored (code %d): %s', code, msg)
+            if code == 1101:
+                # 1101 is NOT 1102. "Restored — data LOST" means every market
+                # and account data subscription was dropped and must be
+                # resubmitted; the API socket never closed, so nothing here
+                # would re-request them (tickers are re-published only from
+                # connected_event, and the 10197 retry loop only runs on
+                # 10197). Treated like 1102 the service came back with every
+                # flag green and ticks, positions and PnL frozen until someone
+                # restarted it. Bounce the socket: the reconnect path
+                # resubscribes everything.
+                logging.error(
+                    'IB restored upstream connectivity with DATA LOST (1101) — forcing a '
+                    'reconnect so market data, positions and PnL are resubscribed')
+                self._schedule_reconnect()
         elif code in (2103, 2105, 2157):
             # Informational farm hiccup. Track so callers can query
             # ``_ib_farms_down`` if they really want farm-level detail,
@@ -1282,9 +1341,28 @@ class Trader():
                       'exits are exempt)')
         return margin_impact
 
+    # Upper bound on one whatIfOrder round trip. See check_order_margin.
+    WHATIF_TIMEOUT_S = 10.0
+
     async def check_order_margin(self, contract: Contract, order: Order) -> dict:
-        """Run whatIfOrder to get margin impact without placing."""
-        order_state = await self.client.ib.whatIfOrderAsync(contract, order)
+        """Run whatIfOrder to get margin impact without placing.
+
+        Bounded: ib_async resolves a whatIf only on an order state that carries
+        margins or on a non-warning error. A warning-class reply (321
+        validation, 399, a 2100-range notice) resolves neither, so the await
+        never returned — and it runs while holding the account-wide order
+        lock, so one such open wedged every later placement behind it,
+        strategy exits and protective stops included, with the pulse still
+        green. A timeout raises; the caller refuses the open (fail-closed) and
+        releases the lock.
+        """
+        try:
+            order_state = await asyncio.wait_for(
+                self.client.ib.whatIfOrderAsync(contract, order),
+                timeout=self.WHATIF_TIMEOUT_S)
+        except asyncio.TimeoutError as ex:
+            raise TimeoutError(
+                f'whatIfOrder gave no margin reply within {self.WHATIF_TIMEOUT_S:g}s') from ex
         # ib_async can hand back a LIST of order states — observed live
         # 2026-07-27 on a CASH/IDEALPRO whatIf, where `.numeric` on the list
         # raised AttributeError. Before the fail-closed flip that crash was
@@ -1534,6 +1612,46 @@ class Trader():
                 pending += _working_reduction_quantity(trade)
         return abs(held + sign * (quantity + pending)) * (order_value / quantity)
 
+    def _live_submitted_trades(self) -> list:
+        """Locally submitted trades that can still be believed.
+
+        A ``Trade`` only receives status updates from the IB session that
+        created it. Every reconnect builds a fresh ``IB()`` (nightly, on the
+        gateway's auto-restart), after which a trade captured here is frozen
+        at whatever status it had — ``PreSubmitted`` for a resting stop —
+        forever. ``working_trades`` then kept reporting it as working once the
+        real order was gone: an exit's coordinator cancelled the live stop,
+        still found the frozen copy reserving the shares, refused the close
+        (``UNKNOWN: reduction already filled or reserved``), and every retry
+        tried to cancel an object the broker no longer knows. The position was
+        left naked and unclosable through MMR until trader_service restarted
+        (found by review 2026-11-14, reproduced against the real coordinator).
+
+        So a submitted trade is kept only while it is the very object the
+        CURRENT session tracks. When the session's trade list cannot be read
+        the entries are kept (unknown is not evidence of staleness); terminal
+        ones are always dropped.
+        """
+        terminal = {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}
+        kept = [t for t in getattr(self, '_submitted_trades', [])
+                if t.orderStatus.status not in terminal]
+        try:
+            session_trades = self.client.ib.trades()
+        except Exception:
+            session_trades = None
+        if isinstance(session_trades, (list, tuple)):
+            live = {id(t) for t in session_trades}
+            stale = [t for t in kept if id(t) not in live]
+            if stale:
+                logging.warning(
+                    'dropping %d locally submitted trade(s) the current IB session does not '
+                    'track (orders %s) — captured before a reconnect, their status is frozen',
+                    len(stale), sorted({getattr(t.order, 'orderId', None) for t in stale},
+                                       key=lambda value: (value is None, value)))
+                kept = [t for t in kept if id(t) in live]
+        self._submitted_trades = kept
+        return kept
+
     def working_trades(self, contract: Contract) -> list:
         """Broker-known working orders plus locally submitted orders awaiting updates.
 
@@ -1544,9 +1662,7 @@ class Trader():
         shares and lets the concentration check under-count. Callers treat the
         raise as unevaluable: opens refuse, reductions defer.
         """
-        self._submitted_trades = [t for t in getattr(self, '_submitted_trades', [])
-                                  if t.orderStatus.status not in {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}]
-        candidates = list(self._submitted_trades)
+        candidates = list(self._live_submitted_trades())
         try:
             open_trades = self.client.ib.openTrades()
             candidates.extend(open_trades)
@@ -1670,6 +1786,29 @@ class Trader():
         can never disagree about how much of an order is new exposure.
         """
         return self.split_for_order(contract, action, quantity).open_qty
+
+    async def _marketable_price(self, contract: Contract, action: str) -> Optional[float]:
+        """A live price to value an order at — ask for a BUY, bid for a SELL,
+        then last, then close — or None when there is no usable quote."""
+        try:
+            tick = await self.client.get_snapshot(contract)
+        except Exception as ex:
+            logging.warning('risk gate: no snapshot price to value %s %s: %s',
+                            action, getattr(contract, 'symbol', '?'), ex)
+            return None
+        for candidate in (
+            tick.ask if action == 'BUY' else tick.bid,
+            getattr(tick, 'last', None),
+            getattr(tick, 'close', None),
+        ):
+            try:
+                # Defensive coercion of a possibly-None/Any tick field; the except handles non-numeric candidates.
+                price = float(candidate)  # ty: ignore[invalid-argument-type]
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(price) and price > 0:
+                return price
+        return None
 
     async def _tier_notional(
         self, contract: Contract, action: str, quantity: float,
@@ -2141,17 +2280,22 @@ class Trader():
                 status = ('UNKNOWN' if unknown_opening else 'PARTIAL' if partial else
                           'SUBMITTED' if result.is_success() else
                           'UNKNOWN' if reserved and reserved['orders'] else
-                          'RETRYABLE' if 'UNKNOWN:' in str(result.error) else 'REJECTED')
+                          'RETRYABLE' if _is_transient_refusal(result.error) else 'REJECTED')
                 await asyncio.to_thread(journal.finish, intent_id, status, str(result.error or ''), outcome)
                 result.client_intent_id = intent_id
                 if status == 'UNKNOWN':
                     result.error = f'UNKNOWN: intent {intent_id}: {result.error}'
+                elif status in ('REJECTED', 'RETRYABLE') and not (reserved and reserved['orders']):
+                    # Authoritative: this intent reserved no broker order, so
+                    # nothing was sent. Callers read the flag instead of
+                    # guessing from the wording of the refusal.
+                    result.not_submitted = True
                 return result
             except Exception as ex:
                 try:
                     reserved = await asyncio.to_thread(journal.get, intent_id)
                     status = ('UNKNOWN' if reserved and reserved['orders'] else
-                              'RETRYABLE' if 'UNKNOWN:' in str(ex) else 'REJECTED')
+                              'RETRYABLE' if _is_transient_refusal(ex) else 'REJECTED')
                     await asyncio.to_thread(journal.finish, intent_id, status, str(ex))
                 except Exception as storage_error:
                     self._journal_degraded = str(storage_error)
@@ -2268,7 +2412,7 @@ class Trader():
         session_identities: Optional[set[tuple]] = None
         try:
             identities = {(t.order.clientId, t.order.orderId) for t in self.client.ib.trades()}
-            identities |= {(t.order.clientId, t.order.orderId) for t in getattr(self, '_submitted_trades', [])}
+            identities |= {(t.order.clientId, t.order.orderId) for t in self._live_submitted_trades()}
             session_identities = identities
         except Exception:
             session_identities = None
@@ -2691,6 +2835,26 @@ class Trader():
         for row in legs:
             row['leg_count'] = 0
 
+    async def _floor_order_ids(self) -> None:
+        """Once per IB connection: never allocate an order id this client has
+        used before. See ServerOrderJournal.max_order_id. A journal that
+        cannot be read leaves IB's own counter in force — an exit must not
+        wait on this."""
+        ib = self.client.ib
+        if getattr(self, '_order_id_floor_ib', None) is ib:
+            return
+        try:
+            journal = await asyncio.to_thread(self.server_order_journal)
+            top = await asyncio.to_thread(journal.max_order_id, self.trading_runtime_ib_client_id)
+            if top > 0:
+                ib.client.updateReqId(top + 1)
+                logging.info('order ids for client %s start above %d (highest id ever reserved)',
+                             self.trading_runtime_ib_client_id, top)
+            self._order_id_floor_ib = ib
+        except Exception as ex:
+            logging.warning('could not floor order ids from the journal (%s); using the '
+                            "gateway's counter as is", ex)
+
     async def reserve_broker_order(self, order: Order, is_exit: bool = False,
                                    contract: Optional[Contract] = None) -> None:
         intent_id = _CURRENT_INTENT.get()
@@ -2712,6 +2876,7 @@ class Trader():
             if len(matches) != 1:
                 raise ValueError('foreign broker reference is not a verified same-quantity modification')
         if not order.orderId:
+            await self._floor_order_ids()
             allocated_id = self.client.ib.client.getReqId()
             # IB.placeOrder treats zero as unallocated, so never reserve it.
             if type(allocated_id) is int and allocated_id == 0:
@@ -2898,7 +3063,8 @@ class Trader():
                 or tracker is not None and tracker.health['replay_required']):
             await self._replay_broker_executions()
         try:
-            fresh_trades = await asyncio.wait_for(self.client.ib.reqOpenOrdersAsync(), 5.0)
+            fresh_trades = await single_flight(
+                self.client.ib, 'openOrders', self.client.ib.reqOpenOrdersAsync, 5.0)
             if tracker is not None:
                 for trade in fresh_trades:
                     tracker.on_trade(trade)
@@ -2906,7 +3072,8 @@ class Trader():
         except Exception as ex:
             logging.warning('open orders snapshot incomplete: %s', ex)
         try:
-            positions = [p for p in await asyncio.wait_for(self.client.ib.reqPositionsAsync(), 5.0)
+            positions = [p for p in await single_flight(
+                             self.client.ib, 'positions', self.client.ib.reqPositionsAsync, 5.0)
                          if p.account == self.ib_account]
             account_confirmed = self.ib_account in self.client.ib.managedAccounts()
             positions_complete = self.client.ib.isConnected() and account_confirmed
@@ -3062,6 +3229,11 @@ class Trader():
 
         trades: List[Trade] = []
 
+        # The children are the OPPOSITE side, so the entry side must be exact:
+        # a lowercase 'buy' made every protective leg a BUY as well.
+        action = str(action).strip().upper()
+        if action not in ('BUY', 'SELL'):
+            return SuccessFail.fail(error=f'action must be BUY or SELL, got {action!r}')
         reverse_action = 'SELL' if action == 'BUY' else 'BUY'
 
         common = dict(
@@ -3145,6 +3317,17 @@ class Trader():
         if not is_exit and not allow_open:
             return SuccessFail.fail(error='Opening exposure requires an approved proposal matching this exact order')
 
+        if not is_exit:
+            # Exit-leg geometry, for OPENING entries only: a stop on the wrong
+            # side of a limit entry, or an inverted bracket, fires the moment
+            # the entry fills. Deliberately after classification — a closing
+            # entry has its legs dropped just below and must never be refused
+            # for them.
+            geometry_errors = spec.validate(action=str(action).upper())
+            if geometry_errors:
+                return SuccessFail.fail(
+                    error=f'Invalid execution spec: {"; ".join(geometry_errors)}')
+
         # Tri-state gate record carried into the entry leg's minted token
         # (empty for exit-class entries and for protective children).
         entry_checks: dict = {}
@@ -3159,6 +3342,7 @@ class Trader():
                     instrument_result = self.risk_gate.check_instrument(
                         symbol=contract.symbol, exchange=contract.exchange or '',
                         sec_type=contract.secType or '',
+                        primary_exchange=getattr(contract, 'primaryExchange', '') or '',
                     )
                     if not instrument_result.approved:
                         logging.warning(
@@ -3177,6 +3361,7 @@ class Trader():
             # 1. Trading filter check (denylist/allowlist)
             instrument_result = self.risk_gate.check_instrument(
                 symbol=contract.symbol, exchange=contract.exchange or '', sec_type=contract.secType or '',
+                primary_exchange=getattr(contract, 'primaryExchange', '') or '',
             )
             if not instrument_result.approved:
                 return SuccessFail.fail(error=instrument_result.reason)
@@ -3212,32 +3397,30 @@ class Trader():
             # price → not evaluable → the gate refuses the open.
             position_value = 0.0
             position_value_evaluable = False
+            limit_value: Optional[float] = None
             if spec.order_type != 'MARKET' and spec.limit_price:
                 try:
-                    position_value = abs(float(quantity) * float(spec.limit_price)) * multiplier
-                    position_value_evaluable = True
+                    limit_value = float(spec.limit_price)
                 except (TypeError, ValueError):
-                    pass
+                    limit_value = None
+            if limit_value is not None and action == 'BUY':
+                # A buy limit fills at or BELOW its price: the limit bounds it.
+                position_value = abs(float(quantity) * limit_value) * multiplier
+                position_value_evaluable = True
             else:
-                try:
-                    tick = await self.client.get_snapshot(contract)
-                    for candidate in (
-                        tick.ask if action == 'BUY' else tick.bid,
-                        getattr(tick, 'last', None),
-                        getattr(tick, 'close', None),
-                    ):
-                        try:
-                            # Defensive coercion of a possibly-None/Any tick field; the except handles non-numeric candidates.
-                            price = float(candidate)  # ty: ignore[invalid-argument-type]
-                        except (TypeError, ValueError):
-                            continue
-                        if math.isfinite(price) and price > 0:
-                            position_value = abs(float(quantity)) * price * multiplier
-                            position_value_evaluable = True
-                            break
-                except Exception as ex:
-                    logging.warning(
-                        'risk gate: no snapshot price to value market order: %s', ex)
+                # MARKET orders, and a SELL that opens a short. A sell limit
+                # fills at or ABOVE its price, so the client's limit is a floor
+                # and says nothing about the size of the position: `SELL 400
+                # --limit 1` on a $50 stock was valued at $400 (well inside a
+                # 10% position cap) and filled as a $20,000 short. Value
+                # it at max(limit, live price), as the approver tier already
+                # does; with no live price it is not evaluable and the open is
+                # refused.
+                live = await self._marketable_price(contract, action)
+                if live is not None:
+                    price = max(live, limit_value) if limit_value is not None else live
+                    position_value = abs(float(quantity)) * price * multiplier
+                    position_value_evaluable = True
 
             converted = self.convert_notional(position_value, contract.currency)
             position_value_evaluable = position_value_evaluable and converted is not None
@@ -3547,8 +3730,11 @@ class Trader():
         if not math.isfinite(target_quantity) or int(contract.conId or 0) <= 0:
             return SuccessFail.fail(error='resize requires finite target and exact conId')
         try:
-            snapshot = await self.client.ib.reqOpenOrdersAsync()
-            positions = await self.client.ib.reqPositionsAsync()
+            # Bounded and single-flight: these run under the account order lock.
+            snapshot = await single_flight(
+                self.client.ib, 'openOrders', self.client.ib.reqOpenOrdersAsync, 10.0)
+            positions = await single_flight(
+                self.client.ib, 'positions', self.client.ib.reqPositionsAsync, 10.0)
         except Exception as ex:
             return SuccessFail.fail(error=f'DEFERRED: complete broker state unavailable: {ex}')
         held = sum(float(p.position) for p in positions
@@ -3594,8 +3780,10 @@ class Trader():
                                     exit_reason=ExitReason.VALIDATED_STANDALONE))
             try:
                 await asyncio.wait_for(modified.pipe(ops.take(1)), timeout=8.0)
-                confirmed = await self.client.ib.reqOpenOrdersAsync()
-                positions = await self.client.ib.reqPositionsAsync()
+                confirmed = await single_flight(
+                    self.client.ib, 'openOrders', self.client.ib.reqOpenOrdersAsync, 10.0)
+                positions = await single_flight(
+                    self.client.ib, 'positions', self.client.ib.reqPositionsAsync, 10.0)
             except Exception as ex:
                 return SuccessFail.fail(error=f'UNKNOWN: protective OCA modification requires reconciliation: {ex}')
             match = next((t for t in confirmed if t.order.orderId == edit.orderId
@@ -3741,7 +3929,14 @@ class Trader():
             displaced = self.executioner.pop_displaced() if hasattr(self.executioner, 'pop_displaced') else []
 
             if not result_trade:
-                return SuccessFail.fail(error=str(errors[0]) if errors else 'Failed to place standalone order')
+                # Coordination may already have cancelled the working stop this
+                # order was to replace. Returning the bare error left the
+                # position unprotected without saying so (AUDIT_2026-11-14 B1.9).
+                failure = str(errors[0]) if errors else 'Failed to place standalone order'
+                note = await self._account_for_displaced(
+                    displaced, getattr(contract, 'symbol', '?'),
+                    restore=not failure.startswith('UNKNOWN'))
+                return SuccessFail.fail(error=(failure.rstrip('.') + '.' + note) if note else failure)
 
             # A receipt is not acceptance: wait for IB's verdict before
             # claiming the position is protected (trader.trading.order_acceptance).
@@ -3760,19 +3955,53 @@ class Trader():
             symbol = getattr(contract, 'symbol', '?')
             msg = (f'IB REJECTED protective {order_type} {action} {quantity:g} {symbol} '
                    f'(order {result_trade.order.orderId}): {detail}.')
-            if displaced:
-                restored, lost = await self._restore_displaced(displaced)
-                if restored:
-                    msg += f' Previous protective order(s) re-placed as {restored}.'
-                if lost:
-                    msg += (f' PREVIOUS PROTECTION {lost} WAS CANCELLED AND COULD NOT BE '
-                            f'RESTORED — {symbol} IS UNPROTECTED.')
+            msg += await self._account_for_displaced(displaced, symbol, restore=True)
             logging.error(msg)
             return SuccessFail.fail(error=msg)
 
         except Exception as ex:
             logging.error(f'place_standalone_order error: {ex}')
+            # Whatever was displaced is still gone. The new order's fate is
+            # not known here (the failure can follow its placement), so say
+            # so instead of re-placing a second reduction beside it.
+            leftover: list = []
+            try:
+                leftover = self.executioner.pop_displaced() if hasattr(self.executioner, 'pop_displaced') else []
+            except Exception:
+                pass
+            note = await self._account_for_displaced(leftover, getattr(contract, 'symbol', '?'), restore=False)
+            if note:
+                return SuccessFail.fail(error=f'{type(ex).__name__}: {ex}.{note}')
             return SuccessFail.fail(exception=ex)
+
+    async def _account_for_displaced(self, displaced: list, symbol: str, *, restore: bool) -> str:
+        """Text for a FAILED placement about the working exits that reduction
+        coordination cancelled to make room for it; '' when there were none.
+
+        ``restore=True`` re-places them (the replacement provably is not
+        working: IB rejected it, or nothing was sent). ``restore=False`` only
+        reports — the replacement's outcome is unknown, and a re-placed stop
+        would cancel it if it IS working (coordination displaces the caller's
+        own reductions). Either way the caller is told; until 2026-11-14 only
+        the IB-rejection path did either.
+        """
+        if not displaced:
+            return ''
+        if not restore:
+            cancelled = [getattr(order, 'orderId', '?') for _contract, order, _remaining in displaced]
+            text = (f' Working exit order(s) {cancelled} were CANCELLED to make room for this placement and '
+                    f'were NOT re-placed because its outcome is unknown: check `mmr orders` and re-protect '
+                    f'{symbol} if it is still held.')
+            logging.error('%s%s', symbol, text)
+            return text
+        restored, lost = await self._restore_displaced(displaced)
+        text = ''
+        if restored:
+            text += f' Previous protective order(s) re-placed as {restored}.'
+        if lost:
+            text += (f' PREVIOUS PROTECTION {lost} WAS CANCELLED AND COULD NOT BE '
+                     f'RESTORED — {symbol} IS UNPROTECTED.')
+        return text
 
     async def _restore_displaced(self, displaced: list) -> tuple:
         """Re-place protective orders that coordination cancelled for a
@@ -3857,7 +4086,25 @@ class Trader():
         is on: a close must never be blocked behind a proposal, but the
         OPENING half of a position-crossing order is a new trade and has to go
         through propose → approve like any other."""
-        latest_tick: Ticker = await self.client.get_snapshot(contract)
+        # The snapshot is only NEEDED to size an amount without a limit price.
+        # A quantity-specified order (every `mmr close`, `sell --quantity`)
+        # does not use it for the order at all — yet a failed snapshot used to
+        # raise here, so with market data dark (10197 competing session, a
+        # delayed-only venue, no ticks) a manual exit could not be sent, while
+        # also holding the account order lock for the snapshot's whole wait.
+        # Now it is best-effort unless sizing depends on it. Without a price an
+        # OPEN is still refused downstream (concentration is unevaluable).
+        needs_quote = quantity is None and not limit_price
+        try:
+            latest_tick: Ticker = await self.client.get_snapshot(contract)
+        except Exception as ex:
+            if needs_quote:
+                return rx.throw(ValueError(
+                    f'Cannot size {contract.symbol} from an amount: no market data ({ex})'))
+            logging.warning(
+                'no market-data snapshot for %s (%s); placing the quantity-specified '
+                '%s without one', contract.symbol, ex, action)
+            latest_tick = Ticker(contract=contract)
 
         if quantity is None and equity_amount is not None:
             base_per_local = self.convert_notional(1.0, contract.currency)
@@ -3953,6 +4200,17 @@ class Trader():
             result_obs = rx.of(reduction)
             setattr(result_obs, 'execution_outcome', outcome)
             return result_obs
+
+        if not allow_open and plan.open_qty > 0 and plan.reduce_qty <= 0:
+            # The RPC layer classified this order against the position it read
+            # BEFORE the snapshot waits above. If the position has since gone
+            # (its stop filled, another close landed) the order is now a pure
+            # open, and `allow_open=False` was only enforced inside the flip
+            # branch — so it went on to the executioner without the approval
+            # it requires.
+            return rx.throw(ValueError(
+                'Opening exposure requires an approved proposal matching this exact order '
+                '(the position this order was to reduce is no longer held)'))
 
         return await self.executioner.place_order(
             contract_order=contract_order,
@@ -4162,6 +4420,10 @@ class Trader():
         # `mmr reservations` (list_order_reservations) says which rows block.
         status['unsettled_reservations'] = self._unsettled_reservation_count()
         status['dropped_ticks'] = getattr(self, 'zmq_pubsub_dropped_ticks', 0)
+        # Policy a client needs BEFORE it does something irreversible (e.g.
+        # cancelling an order it means to replace): the effective value in
+        # this process, env overrides included.
+        status['require_proposal_approval'] = bool(getattr(self, 'require_proposal_approval', False))
         self._status_cache = status
         self._status_cache_ts = now
         return status
@@ -4265,11 +4527,21 @@ class Trader():
         # See _get_portfolio_summary_sync for rationale — hit ib_async
         # directly rather than relying on the event-driven local cache.
         try:
-            positions = self.client.ib.positions(
+            ib = self.client.ib
+            positions = ib.positions(
                 account=self.ib_account
-            ) if self.ib_account else self.client.ib.positions()
+            ) if self.ib_account else ib.positions()
             if positions:
                 return [p for p in positions if p.account == self.ib_account]
+            # Empty. Once this connection has completed a positions sync, empty
+            # is the ANSWER: the account is flat. The cache below is never
+            # cleared, so falling back to it here reported a position that was
+            # closed while MMR was disconnected (its stop filled across a
+            # gateway restart) as still held — and a SELL against it then
+            # classified as exit-class, i.e. went out ungated and opened a
+            # short. The cache is only for the moments before the first sync.
+            if getattr(self, '_positions_synced_ib', None) is ib and ib.isConnected() is True:
+                return []
         except Exception as ex:
             logging.warning('ib.positions() failed, using cache: %s', ex)
         return [p for p in self.portfolio.get_positions() if p.account == self.ib_account]

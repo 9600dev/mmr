@@ -399,12 +399,14 @@ def dateify(
 
         # check to see if there is already a tzinfo
         if date_time.tzinfo and not timezone:
+            # Keep the datetime's own zone. This branch used to apply make_eod
+            # and then return start of day regardless, so an aware end date
+            # with no (or an EMPTY — a blank `timeZoneId`) timezone argument
+            # lost its last day.
+            date_time = date_time.replace(hour=0, minute=0, second=0, microsecond=0)
             if make_eod:
                 date_time = date_time.replace(hour=23, minute=59, second=59)
-            if make_sod:
-                date_time = date_time.replace(hour=0, minute=0, second=0)
-
-            return date_time.replace(hour=0, minute=0, second=0, microsecond=0)
+            return date_time
         else:
             # if we have an already existing timezone in the datetime
             # and the user has passed a timezone, let's convert!

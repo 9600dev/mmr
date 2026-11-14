@@ -167,3 +167,96 @@ def test_loading_and_universe_declared_conids_count_toward_the_window(tmp_path):
     rt.strategy_implementations.append(other_interval)
     assert rt._declared_lookback_days(CONID, BarSize.Mins1) == 60, 'a different bar size is a different frame'
     assert rt._declared_lookback_days(CONID, BarSize.Days1) == 400
+
+
+# --------------------------------------------------------------------------
+# AUDIT_2026-11-14 B3.4: the history half of the frame was read once. Live bars
+# are kept two days, so a service up for longer served a frame with a hole.
+# --------------------------------------------------------------------------
+
+KEY = (CONID, BarSize.Mins1)
+
+
+def _primed(tmp_path, read):
+    rt = _runtime(tmp_path)
+    strategy = _strategy('short', 5)
+    rt.strategy_implementations.append(strategy)
+    rt.subscribe(strategy, Contract(conId=CONID))
+    assert rt._strategy_frame(CONID, BarSize.Mins1) is not None
+    assert read.call_count == 1
+    return rt
+
+
+def _age(rt, seconds):
+    rt._hist_primed_at[KEY] -= seconds
+
+
+def test_a_fresh_snapshot_is_not_read_again(tmp_path, read):
+    rt = _primed(tmp_path, read)
+    _age(rt, StrategyRuntime.HISTORY_SNAPSHOT_MAX_AGE_S - 60)
+    for _ in range(5):
+        rt._strategy_frame(CONID, BarSize.Mins1)
+    assert read.call_count == 1
+
+
+def test_an_aged_snapshot_is_read_again_and_the_new_bars_are_served(tmp_path, read):
+    rt = _primed(tmp_path, read)
+    assert len(rt._hist_bars[KEY]) == 3
+    read.return_value = _history(periods=8)               # the nightly refresh has added bars since
+    _age(rt, StrategyRuntime.HISTORY_SNAPSHOT_MAX_AGE_S + 1)
+
+    frame = rt._strategy_frame(CONID, BarSize.Mins1)
+
+    assert read.call_count == 2
+    assert len(rt._hist_bars[KEY]) == 8 and len(frame) == 8
+    rt._strategy_frame(CONID, BarSize.Mins1)
+    assert read.call_count == 2, 'the refreshed snapshot is fresh again'
+
+
+def test_a_refresh_that_reads_nothing_keeps_the_bars_it_has(tmp_path, read, caplog):
+    rt = _primed(tmp_path, read)
+    kept = rt._hist_bars[KEY]
+    read.return_value = pd.DataFrame()
+    _age(rt, StrategyRuntime.HISTORY_SNAPSHOT_MAX_AGE_S + 1)
+    with caplog.at_level(logging.WARNING):
+        frame = rt._strategy_frame(CONID, BarSize.Mins1)
+    assert rt._hist_bars[KEY] is kept and len(frame) == 3
+    assert any('keeping the current snapshot' in record.getMessage() for record in caplog.records)
+    rt._strategy_frame(CONID, BarSize.Mins1)
+    assert read.call_count == 2, 'an empty answer is not asked for again on every bar'
+
+
+def test_a_refresh_that_fails_keeps_the_snapshot_and_is_not_retried_every_bar(tmp_path, read):
+    rt = _primed(tmp_path, read)
+    kept = rt._hist_bars[KEY]
+    read.side_effect = RuntimeError('database is locked')
+    _age(rt, StrategyRuntime.HISTORY_SNAPSHOT_MAX_AGE_S + 1)
+    for _ in range(4):
+        assert len(rt._strategy_frame(CONID, BarSize.Mins1)) == 3
+    assert rt._hist_bars[KEY] is kept
+    assert read.call_count == 2, 'one failed attempt, then the retry interval'
+
+    read.side_effect = None
+    read.return_value = _history(periods=6)
+    rt._hist_refresh_retry_at[KEY] = 0.0                   # the retry interval has passed
+    assert len(rt._strategy_frame(CONID, BarSize.Mins1)) == 6
+
+
+def test_an_invalidated_frame_is_primed_from_scratch_not_refreshed(tmp_path, read):
+    rt = _primed(tmp_path, read)
+    rt._invalidate_history(CONID, BarSize.Mins1)
+    assert KEY not in rt._hist_primed_at
+    rt._strategy_frame(CONID, BarSize.Mins1)
+    assert read.call_count == 2 and KEY in rt._hist_primed_at
+
+
+def test_a_snapshot_of_unknown_age_is_left_alone(tmp_path, read):
+    """Frames injected without going through the primer (tests, legacy paths)
+    have no recorded age; they must not be re-read on a guess."""
+    rt = _runtime(tmp_path)
+    rt._hist_bars[KEY] = _history()
+    strategy = _strategy('short', 5)
+    rt.strategy_implementations.append(strategy)
+    rt.subscribe(strategy, Contract(conId=CONID))
+    rt._strategy_frame(CONID, BarSize.Mins1)
+    assert read.call_count == 0

@@ -151,18 +151,51 @@ def unclosed_session_mask(frame: pd.DataFrame, default_bar_size: str = '',
     return mask
 
 
+# IB venue code -> exchange_calendars code, for the venues exchange_calendars
+# does not already know by IB's name. Without this an ARCA listing (SPY, GLD,
+# every sector ETF), an AMEX or ISLAND one, or any Toronto / Tokyo / Hong Kong
+# name had NO calendar: its daily bar was refused until the next day (the
+# no-calendar path fails closed) and every incremental download fell back to
+# re-fetching the whole window, every run. Found 2026-11-14: 37 of the 514
+# members of the nightly refresh universe, re-downloading 90 days of 1-min
+# bars each night.
+#
+# NB IB's 'TSE' is TORONTO; Tokyo is 'TSEJ'.
+_IB_VENUE_CALENDARS = {
+    'ARCA': 'XNYS', 'AMEX': 'XNYS', 'ISLAND': 'XNYS', 'IEX': 'XNYS', 'PSE': 'XNYS',
+    'PINK': 'XNYS', 'NYSENAT': 'XNYS', 'NASDAQ.NMS': 'XNYS', 'CBOE': 'XNYS',
+    'BEX': 'XNYS', 'MEMX': 'XNYS', 'EDGEA': 'XNYS', 'EDGX': 'XNYS', 'BYX': 'XNYS',
+    'TSE': 'XTSE', 'TSX': 'XTSE', 'VENTURE': 'XTSE',
+    'TSEJ': 'XTKS', 'JPX': 'XTKS',
+    'SEHK': 'XHKG',
+    'LSEETF': 'XLON',
+    'IBIS': 'XFRA', 'FWB': 'XFRA', 'SBF': 'XPAR', 'AEB': 'XAMS', 'EBS': 'XSWX',
+    'VSE': 'XWBO', 'BVME': 'XMIL', 'BM': 'XMAD', 'ENEXT.BE': 'XBRU', 'BVL': 'XLIS',
+    'SFB': 'XSTO', 'OSE': 'XOSL', 'CPH': 'XCSE', 'HEX': 'XHEL', 'WSE': 'XWAR',
+    'SGX': 'XSES', 'KSE': 'XKRX', 'NSE': 'XBOM', 'JSE': 'XJSE', 'MEXI': 'XMEX',
+    'NZE': 'XNZE',
+}
+
+
 def calendar_for(contract) -> object:
     """The exchange calendar for a SecurityDefinition / Contract, or None.
 
     primaryExchange first (SMART is a router, not a venue), then exchange.
+    Each is tried as exchange_calendars knows it and then through the IB
+    venue aliases above. This is the ONE lookup: `data download`, the data
+    service, strategy priming and the write chokepoint all resolve through it,
+    so they cannot disagree about whether a venue has a calendar.
     """
     import exchange_calendars
     for attr in ('primaryExchange', 'exchange'):
-        name = getattr(contract, attr, None)
+        name = str(getattr(contract, attr, None) or '').strip().upper()
         if not name:
             continue
-        try:
-            return exchange_calendars.get_calendar(name)
-        except Exception:
-            continue
+        for candidate in (name, _IB_VENUE_CALENDARS.get(name)):
+            if not candidate:
+                continue
+            try:
+                return exchange_calendars.get_calendar(candidate)
+            except Exception:
+                continue
     return None

@@ -247,6 +247,12 @@ class MMR:
         self._position_map: Dict[int, str] = {}
         # contract_map: symbol -> Contract object (set by portfolio, used by close_position)
         self._contract_map: Dict[str, Contract] = {}
+        # The same cache keyed by conId — the only key that names ONE listing.
+        # The symbol-keyed map above is last-writer-wins when two positions
+        # share a ticker (a stock and its ADR, an ASX name and an unrelated US
+        # one), and an exit must not be built from it in that case.
+        self._contract_by_conid: Dict[int, Contract] = {}
+        self._ambiguous_symbols: set = set()
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -357,7 +363,12 @@ class MMR:
         conId). Cross-exchange dual-listings (BHP on ASX vs NYSE) have
         *different* conIds so they survive and come back as real ambiguity
         the caller has to resolve.
+
+        A digits-only STRING is a ticker (Tokyo and Hong Kong tickers are
+        numbers) and an ``int`` is a conId; a programmatic caller states which
+        by the type it passes. Human input cannot: see ``numeric_symbol_guard``.
         """
+        self._refuse_numeric_symbol_that_is_a_conid(symbol, exchange, universe)
         result = consume(
             self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_symbol(
                 symbol, exchange, universe, sec_type
@@ -391,6 +402,66 @@ class MMR:
             self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_contract(contract)
         )
         return self._dedupe_venue_duplicates(candidates)
+
+    #: Set by an interface whose symbols are untyped text (the CLI). There a
+    #: digits-only symbol cannot say whether it is a ticker or a conId, so
+    #: ``resolve()`` refuses one that is ALSO a locally known conId. Off for
+    #: programmatic callers, who state the reading by passing ``str`` or ``int``.
+    numeric_symbol_guard: bool = False
+
+    def _refuse_numeric_symbol_that_is_a_conid(self, symbol, exchange: str, universe: str) -> None:
+        """Refuse a digits-only ticker that is also a locally known conId.
+
+        Every CLI symbol arrives as a string, so `mmr resolve 4391` asked for
+        the TICKER 4391 and answered with Logizard on the Tokyo exchange, and
+        `mmr propose 4391 BUY` pinned that listing — while 4391 is AMD's conId,
+        which is what someone pasting a number from `portfolio` means. Neither
+        reading is safe to pick: the conId rule ("an integer conId must never
+        become a ticker lookup") covers ints handed to ``resolve_symbol``, and
+        this is its counterpart for text. An explicit exchange (or universe)
+        states the ticker reading and is honoured.
+        """
+        if not getattr(self, 'numeric_symbol_guard', False):
+            return
+        if type(symbol) is not str or exchange or universe:
+            return
+        text = symbol.strip()
+        if not text.isdigit() or int(text) <= 0:
+            return
+        known = consume(
+            self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_symbol(int(text), '', '', ''))
+        named = [definition for definition in (known or [])
+                 if getattr(definition, 'conId', None) == int(text)]
+        if not named:
+            return
+        instrument = named[0]
+        venue = getattr(instrument, 'primaryExchange', '') or getattr(instrument, 'exchange', '')
+        raise ValueError(
+            f'{text!r} is ambiguous: it is the conId of {instrument.symbol} ({venue}) and could also be '
+            f'a ticker. A digits-only symbol is read as a TICKER; nothing was resolved. For '
+            f'{instrument.symbol} use its symbol; for the ticker {text} name its venue with --exchange '
+            f'(e.g. --exchange TSEJ).')
+
+    def discover_listings(
+        self,
+        symbol: str,
+        sec_type: str = 'STK',
+        exchange: str = '',
+        currency: str = '',
+    ) -> List[SecurityDefinition]:
+        """Every listing IB knows for ``symbol`` under the given hints — the
+        discovery half of ``resolve()`` WITHOUT the local-universe shortcut.
+
+        ``resolve()`` returns a local match as soon as one exists, which is
+        right for trading a name you already track and wrong for asking "which
+        listings are there": a foreign listing sitting in some universe hides
+        the US one. One row per listing (venue copies collapsed).
+        """
+        candidates = consume(
+            self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_contract(
+                Contract(symbol=str(symbol), exchange=exchange,
+                         secType=sec_type or 'STK', currency=currency)))
+        return self._dedupe_venue_duplicates(candidates or [])
 
     @staticmethod
     def _dedupe_venue_duplicates(
@@ -434,6 +505,18 @@ class MMR:
         require explicit disambiguation; venue copies of one conId collapse.
         """
         definitions = self.resolve(symbol, sec_type=sec_type, exchange=exchange, currency=currency)
+        if not definitions and type(symbol) is int and symbol > 0:
+            # An integer conId that is not in a local universe. resolve() stops
+            # there by design (an int must never become a ticker lookup), but
+            # `propose` pins conIds it found by IB discovery — so approving a
+            # proposal for any symbol outside the universes failed with "Could
+            # not resolve symbol: <conId>", and re-proposing failed the same
+            # way. Asking IB for that EXACT conId is not a fuzzy lookup: the
+            # `matches` filter below still requires conId equality, so anything
+            # else IB might return is discarded.
+            definitions = consume(
+                self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_contract(
+                    Contract(conId=int(symbol))))
         if not definitions:
             raise ValueError(f"Could not resolve symbol: {symbol}")
 
@@ -570,6 +653,7 @@ class MMR:
         ).get_portfolio_summary()
 
         rows = []
+        seen_conids: Dict[str, set] = {}
         for p in summaries:
             # PortfolioSummary is a NamedTuple; msgpack may deserialize as a plain list
             if isinstance(p, (list, tuple)) and not hasattr(p, 'account'):
@@ -596,8 +680,16 @@ class MMR:
 
             # Cache the raw contract for close_position (avoids re-resolution
             # which fails for international stocks not in the local universe).
-            self._contract_map[symbol] = self._to_contract(contract)
+            cached = self._to_contract(contract)
+            self._contract_map[symbol] = cached
+            _conid = int(getattr(cached, 'conId', 0) or 0)
+            if _conid > 0:
+                # setdefault: SDK objects built without __init__ (tests, tools)
+                # must not lose the portfolio over a missing cache attribute.
+                self.__dict__.setdefault('_contract_by_conid', {})[_conid] = cached
+                seen_conids.setdefault(symbol, set()).add(_conid)
 
+        self._ambiguous_symbols = {sym for sym, ids in seen_conids.items() if len(ids) > 1}
         df = pd.DataFrame(rows)
         if not df.empty:
             df = df.sort_values(by='dailyPNL', ascending=False).reset_index(drop=True)
@@ -606,6 +698,68 @@ class MMR:
                 i + 1: row['symbol'] for i, row in df.iterrows()
             }
         return df
+
+    def _approval_required(self) -> bool:
+        """Whether the running trader_service gates opens behind an approved
+        proposal. Asked of the service (its effective value, env overrides
+        included); if that cannot be read, the local config; and if neither
+        can be read, True — the answer that leaves a working order in place."""
+        try:
+            status = consume(self._rpc.rpc(return_type=dict).get_status())
+            if isinstance(status, dict) and isinstance(status.get('require_proposal_approval'), bool):
+                return status['require_proposal_approval']
+        except Exception as ex:
+            logging.debug('approval policy not readable from trader_service: %s', ex)
+        try:
+            configured = self._container.config().get('require_proposal_approval', False)
+        except Exception:
+            return True
+        return configured if isinstance(configured, bool) else True
+
+    def _entry_reduces_position(self, con_id: Any, action: str) -> bool:
+        """True only when the broker position for ``con_id`` is positively known
+        to be on the other side of ``action`` (a SELL against a long, a BUY
+        against a short). Unknown, unreachable or flat all answer False."""
+        try:
+            target = int(con_id or 0)
+            if target <= 0:
+                return False
+            held = 0.0
+            for position in self._rpc.rpc(return_type=list[Position]).get_positions():
+                contract = getattr(position, 'contract', None)
+                if int(getattr(contract, 'conId', 0) or 0) == target:
+                    held += float(getattr(position, 'position', 0.0) or 0.0)
+        except Exception:
+            return False
+        import math
+        if not math.isfinite(held) or held == 0:
+            return False
+        return held > 0 if str(action).upper() == 'SELL' else held < 0
+
+    @staticmethod
+    def _reference_price(snap: Optional[dict]) -> Optional[float]:
+        """A current price from a snapshot dict: last, else the bid/ask mid.
+
+        ``None`` when the snapshot carries neither (closed market, no
+        subscription) — callers must treat that as unknown, never as zero.
+        """
+        import math
+
+        def price(value: Any) -> Optional[float]:
+            if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and math.isfinite(value) and value > 0):
+                return float(value)
+            return None
+
+        if not snap:
+            return None
+        last = price(snap.get('last'))
+        if last is not None:
+            return last
+        bid, ask = price(snap.get('bid')), price(snap.get('ask'))
+        if bid is not None and ask is not None:
+            return (bid + ask) / 2.0
+        return None
 
     def _fx_rates(self) -> dict:
         """Per-currency multipliers to the account's base currency (base → 1.0).
@@ -802,8 +956,25 @@ class MMR:
                     _l = _o.lmtPrice if _o.lmtPrice and _o.lmtPrice < 1e300 else 0
                     if _l:
                         own_by_sym.setdefault(tl[0].contract.symbol, []).append((_o.action, float(_l)))
-                for i, snap_dict in enumerate(batch_snaps or []):
-                    sym = sym_order[i]
+                # Match each quote to its order by conId. The server OMITS
+                # symbols whose snapshot failed, so pairing by list position
+                # shifted every later quote onto the wrong order: order AAA
+                # showed BBB's bid/ask (and own-quote stripping compared
+                # against the wrong symbol) whenever an earlier one failed.
+                sym_by_conid = {int(getattr(con, 'conId', 0) or 0): sym
+                                for sym, con in contract_cache.items()}
+                for snap_dict in batch_snaps or []:
+                    try:
+                        sym = sym_by_conid.get(int(snap_dict.get('conId') or 0))
+                    except (TypeError, ValueError, AttributeError):
+                        sym = None
+                    if sym is None:
+                        # No conId on the row: its OWN symbol is still an
+                        # identity (list position never was).
+                        named = snap_dict.get('symbol') if isinstance(snap_dict, dict) else None
+                        sym = named if named in contract_cache else None
+                    if sym is None:
+                        continue
                     q = normalize_ib_quote(dict(snap_dict))
                     _b, _a, _notes = discount_own_quotes(
                         q['bid'] if q.get('bid') == q.get('bid') and q.get('bid') else 0.0,
@@ -1075,6 +1246,21 @@ class MMR:
             if child.order.parentId == order_id and child.order.orderType in ('STP', 'STP LMT'):
                 stop_price = child.order.auxPrice
                 break
+
+        # Will the replacement be PLACEABLE? Decide before cancelling anything.
+        # With require_proposal_approval on, an order that opens exposure needs
+        # an approved proposal matching it exactly, and a market replacement
+        # never matches the original limit proposal — so the cancel went
+        # through and the replacement was refused: the order was simply gone
+        # (and its bracket children with it). A reduction of a held position is
+        # exit-class and is not gated.
+        if not self._entry_reduces_position(getattr(contract, 'conId', 0), action):
+            if self._approval_required():
+                return SuccessFail.never_sent(error=(
+                    f'Order #{order_id} was NOT cancelled: it opens exposure and '
+                    f'require_proposal_approval is on, so a market replacement would be '
+                    f'refused. Cancel it and re-propose at market instead '
+                    f'(`mmr cancel {order_id}`, then `mmr propose ... --market`).'))
 
         # Cancel parent (IB auto-cancels bracket children) and REQUIRE the cancel
         # to be accepted before placing the market order — otherwise a cancel that
@@ -1497,7 +1683,13 @@ class MMR:
         # (2026-11-05: `propose F BUY --quantity -5` and an unresolvable symbol
         # were both stored PENDING; only approve refused them).
         import math as _math
-        if str(action).upper() not in ('BUY', 'SELL'):
+        # Normalise ONCE and store the normalised value. The check used to be
+        # case-insensitive while the stored (and later transmitted) action was
+        # raw, so an SDK caller's 'buy' passed here and reached the server,
+        # whose `'SELL' if action == 'BUY' else 'BUY'` then built the stop and
+        # take-profit children as BUYs — adding to the position they protect.
+        action = str(action).strip().upper()
+        if action not in ('BUY', 'SELL'):
             raise ValueError(f'action must be BUY or SELL, got {action!r}')
         for _name, _value in (('quantity', quantity), ('amount', amount)):
             if _value is None:
@@ -1639,6 +1831,30 @@ class MMR:
                     }
             except Exception:
                 pass  # Fall through — proposal will have no size, same as before
+
+        # Exit-leg geometry: a stop on the wrong side of the entry (or an
+        # inverted bracket) is refused here rather than stored for approval.
+        # Only for entries that OPEN exposure: an entry that reduces a held
+        # position has its legs dropped server-side, and a closing proposal
+        # must not be refused over legs that will never be placed. When the
+        # position cannot be read the entry is treated as opening — refusing a
+        # proposal costs a re-propose, storing a stop that fires on fill does not.
+        if spec.exit_type != 'NONE' and not self._entry_reduces_position(
+                metadata.get('con_id') or metadata.get('conId'), action):
+            _reference = None
+            if spec.order_type == 'MARKET':
+                # A MARKET entry has no price of its own; judge its legs against
+                # the current quote when there is one (the snapshot is reused
+                # below, so this costs nothing extra). No quote = no judgement.
+                try:
+                    if _cached_snap is None:
+                        _cached_snap = self.snapshot(symbol, exchange=exchange, currency=currency)
+                    _reference = self._reference_price(_cached_snap)
+                except Exception as ex:
+                    logging.debug('propose: no reference quote for %s exit check: %s', symbol, ex)
+            geometry_errors = spec.validate(action=str(action).upper(), reference_price=_reference)
+            if geometry_errors:
+                raise ValueError(f'Invalid execution spec: {"; ".join(geometry_errors)}')
 
         proposal = TradeProposal(
             symbol=symbol,
@@ -1952,18 +2168,48 @@ class MMR:
             if p.order_ids:
                 raise ValueError(f'proposal #{proposal_id} is APPROVED with broker order ids '
                                  f'{p.order_ids} — reconcile (`mmr orders`, `mmr reconcile`) instead')
+            # The intent this proposal was (or would have been) submitted under.
+            # approve() uses metadata['client_intent_id'] when a strategy set
+            # one; looking only for 'proposal:<id>' missed every executor
+            # proposal, and as a substring it also matched proposal:123 for #12.
+            from trader.trading.order_reference import split_order_reference
+            intent_id = str(p.metadata.get('client_intent_id') or f'proposal:{proposal_id}')
+            try:
+                # The server's durable view first: its journal survives a
+                # restart, the in-memory book below does not.
+                snapshot = self.execution_snapshot(intent_id=intent_id)
+            except Exception as ex:
+                raise ValueError(f'proposal #{proposal_id} is APPROVED; cannot verify there is no '
+                                 f'broker order without trader_service ({ex})') from ex
+            if isinstance(snapshot, dict):
+                known = [int(o.get('orderId', 0) or 0) for o in (snapshot.get('orders') or [])
+                         if isinstance(o, dict)]
+                fills = snapshot.get('executions') or []
+                if known or fills:
+                    raise ValueError(
+                        f'proposal #{proposal_id} has broker evidence under intent {intent_id!r} '
+                        f'(orders {known}, {len(fills)} execution(s)) — it was submitted; '
+                        f'reconcile it (`mmr orders`, `mmr reconcile`) instead of failing it')
             try:
                 trades = consume(self._rpc.rpc(return_type=dict[int, list[Trade]]).get_trades()) or {}
             except Exception as ex:
                 raise ValueError(f'proposal #{proposal_id} is APPROVED; cannot verify there is no '
                                  f'working broker order without trader_service ({ex})') from ex
-            marker = f'proposal:{proposal_id}'
             for trade_list in trades.values():
                 for t in trade_list or []:
                     ref = str(getattr(getattr(t, 'order', None), 'orderRef', '') or '')
                     status = str(getattr(getattr(t, 'orderStatus', None), 'status', '') or '')
-                    if marker in ref and status not in ('Cancelled', 'ApiCancelled', 'Inactive', 'Filled'):
-                        raise ValueError(f'proposal #{proposal_id} has a working broker order '
+                    try:
+                        order_intent = split_order_reference(ref)[1]
+                    except Exception:
+                        order_intent = ''
+                    # A FILLED order is the strongest evidence there is, not
+                    # the absence of it: a timed-out approve that filled could
+                    # be marked FAILED.
+                    if (order_intent == intent_id or ref == intent_id) and status not in (
+                            'Cancelled', 'ApiCancelled', 'Inactive'):
+                        kind = 'FILLED' if status == 'Filled' else 'working'
+                        raise ValueError(f'proposal #{proposal_id} has a {kind} broker order '
                                          f'{t.order.orderId} ({status}) — cancel or reconcile it first')
             why = reason or 'operator: stale APPROVED claim with no broker evidence'
             return store.try_transition(proposal_id, 'APPROVED', 'FAILED', rejection_reason=why)
@@ -2045,7 +2291,7 @@ class MMR:
                         break
                 if not price:
                     store.update_status(proposal_id, 'FAILED')
-                    return SuccessFail.fail(error='Could not determine price for quantity calculation')
+                    return SuccessFail.never_sent(error='Could not determine price for quantity calculation')
                 # Convert the instrument price to the account BASE currency before
                 # dividing, so `amount` (a base-currency notional target) yields
                 # the correct quantity for a foreign instrument. Without this, a
@@ -2069,7 +2315,7 @@ class MMR:
                         _mult)
                 except ValueError as ex:
                     store.try_transition(proposal_id, 'APPROVED', 'FAILED')
-                    return SuccessFail.fail(
+                    return SuccessFail.never_sent(
                         error=(
                             f'Proposal #{proposal_id}: amount {proposal.amount} at '
                             f'price {price} yields no valid whole-share quantity ({ex})'
@@ -2079,7 +2325,7 @@ class MMR:
 
             if qty is None or qty <= 0:
                 store.update_status(proposal_id, 'FAILED')
-                return SuccessFail.fail(error='No valid quantity or amount specified')
+                return SuccessFail.never_sent(error='No valid quantity or amount specified')
 
             # The order-placement RPC is the one call where a client-side
             # timeout is genuinely ambiguous: the request may already be
@@ -2162,7 +2408,9 @@ class MMR:
                                          order_ids=result.obj['reduction'].get('order_ids', []))
                     return result
                 store.try_transition(proposal_id, 'APPROVED', 'FAILED')
-                return SuccessFail.fail(error=result.error, exception=result.exception)
+                # The server answered, without UNKNOWN and without a reduction
+                # receipt: a clean refusal that reserved no broker order.
+                return SuccessFail.never_sent(error=result.error, exception=result.exception)
 
         except Exception as ex:
             if placement_started:
@@ -2184,7 +2432,7 @@ class MMR:
             # Pre-order failures (contract resolution, price snapshot, quantity):
             # no order was placed, so FAILED is the correct terminal state.
             store.try_transition(proposal_id, 'APPROVED', 'FAILED')
-            return SuccessFail.fail(error=str(ex))
+            return SuccessFail.never_sent(error=str(ex))
 
     # ------------------------------------------------------------------
     # Protective orders for existing positions
@@ -2226,9 +2474,9 @@ class MMR:
         ``order_ref`` stamps orderRef for fill attribution."""
         order_type = (order_type or '').upper()
         if order_type not in ('STP', 'TRAIL', 'LMT'):
-            return SuccessFail.fail(error=f"order_type must be STP/TRAIL/LMT, got {order_type!r}")
+            return SuccessFail.never_sent(error=f"order_type must be STP/TRAIL/LMT, got {order_type!r}")
         if quantity is None or quantity <= 0:
-            return SuccessFail.fail(error='quantity must be positive')
+            return SuccessFail.never_sent(error='quantity must be positive')
 
         contract = self._contract_map.get(symbol)
         if not self._cached_contract_matches(contract, sec_type, exchange, currency, con_id):
@@ -2236,7 +2484,7 @@ class MMR:
                 contract = self._resolve_contract(
                     con_id or symbol, sec_type=sec_type, exchange=exchange, currency=currency)
             except Exception as ex:
-                return SuccessFail.fail(error=f"Could not resolve symbol {symbol}: {ex}")
+                return SuccessFail.never_sent(error=f"Could not resolve symbol {symbol}: {ex}")
 
         intent_id = client_intent_id or f'protective:{uuid.uuid4().hex}'
         try:
@@ -2263,6 +2511,14 @@ class MMR:
     # Position closing
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _ambiguous_position_error(symbol: str, rows: pd.DataFrame) -> str:
+        listings = ', '.join(
+            f"conId {int(r['conId'])} ({r.get('currency', '') or '?'}, {float(r['position']):g})"
+            for _, r in rows.iterrows())
+        return (f'{symbol} names more than one open position: {listings}. '
+                f'Pass the conId (`mmr close {symbol} --conid <id>`).')
+
     def close_position(self, symbol: str, quantity: Optional[float] = None,
                        con_id: Optional[int] = None,
                        skip_risk_gate: bool = False,
@@ -2283,11 +2539,18 @@ class MMR:
             if portfolio_df.empty:
                 return SuccessFail.fail(error=f"No positions found")
 
-            match = portfolio_df[portfolio_df['symbol'] == symbol]
+            if con_id is not None and 'conId' in portfolio_df.columns:
+                match = portfolio_df[portfolio_df['conId'].astype('int64') == int(con_id)]
+            else:
+                match = portfolio_df[portfolio_df['symbol'] == symbol]
             if match.empty:
-                return SuccessFail.fail(error=f"No position for {symbol}")
+                return SuccessFail.fail(error=f"No position for {con_id or symbol}")
+            if 'conId' in match.columns and match['conId'].nunique() > 1:
+                return SuccessFail.fail(error=self._ambiguous_position_error(symbol, match))
 
             pos_size = float(match.iloc[0]['position'])
+            if con_id is None and 'conId' in match.columns and match.iloc[0].get('conId'):
+                con_id = int(match.iloc[0]['conId'])
 
         if pos_size == 0:
             return SuccessFail.fail(error=f"Position for {symbol} is zero")
@@ -2302,14 +2565,37 @@ class MMR:
             close_qty = abs(pos_size)
         action = 'SELL' if pos_size > 0 else 'BUY'
 
-        # Prefer cached contract from portfolio (works for all exchanges).
-        # Fall back to resolve only if no cached contract exists.
-        contract = self._contract_map.get(symbol)
-        if contract is None:
-            try:
-                contract = self._resolve_contract(con_id or symbol)
-            except ValueError:
-                return SuccessFail.fail(error=f"Could not resolve symbol: {symbol}")
+        # The contract must be the one for THIS position. The cache used to be
+        # read by symbol alone and con_id was never compared, so with two
+        # positions sharing a ticker (BHP on ASX and its ADR) every close —
+        # `close BHP --conid <ASX>`, each row of close-all — sold whichever
+        # listing was cached last, while the other stayed open with its stops
+        # already cancelled. Prefer the conId-keyed cache (works for all
+        # exchanges without re-resolution); a bare symbol is only trusted when
+        # exactly one position carries it.
+        if con_id is not None:
+            contract = getattr(self, '_contract_by_conid', {}).get(int(con_id))
+            if contract is None:
+                try:
+                    contract = self._resolve_contract(int(con_id))
+                except ValueError:
+                    return SuccessFail.fail(
+                        error=f"Could not resolve conId {con_id} for {symbol}")
+            if int(getattr(contract, 'conId', 0) or 0) != int(con_id):
+                return SuccessFail.fail(
+                    error=(f'refusing to close {symbol}: resolved contract conId '
+                           f'{getattr(contract, "conId", None)} is not the position conId {con_id}'))
+        else:
+            if symbol in getattr(self, '_ambiguous_symbols', ()):
+                return SuccessFail.fail(
+                    error=(f'{symbol} names more than one open position; pass con_id to '
+                           f'close a specific listing'))
+            contract = self._contract_map.get(symbol)
+            if contract is None:
+                try:
+                    contract = self._resolve_contract(symbol)
+                except ValueError:
+                    return SuccessFail.fail(error=f"Could not resolve symbol: {symbol}")
         return consume(
             self._rpc.rpc(return_type=SuccessFail[Trade]).place_order_simple(
                 contract=contract,

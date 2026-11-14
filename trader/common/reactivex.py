@@ -71,6 +71,30 @@ class SuccessFail(Generic[TSource]):
         # Non-fatal facts about a SUCCESS the caller must see (e.g. working
         # exits a placement cancelled to stay within the position).
         self.warnings: list = []
+        # A FAILURE that provably sent nothing to the broker (it failed before
+        # the placement call, or the server refused cleanly and reserved no
+        # order). Callers that must tell "refused" from "unknown" read this
+        # instead of guessing from the wording of the error.
+        self.not_submitted: bool = False
+
+    @staticmethod
+    def never_sent(error=None, exception=None) -> 'SuccessFail':
+        result = SuccessFail(SuccessFailEnum.FAIL, error=error, exception=exception)
+        result.not_submitted = True
+        return result
+
+    def __getstate__(self) -> dict:
+        # The reply crosses RPC through a restricted unpickler that refuses
+        # exception classes outside its allowlist (deal contract errors,
+        # duckdb, sqlite3, zmq, pydantic...). Shipping such an object made the
+        # client unable to decode the WHOLE reply, which it reported as a
+        # timeout — "outcome UNKNOWN" for a failure the server had stated
+        # plainly. Carry non-builtin exceptions as their text instead.
+        state = dict(self.__dict__)
+        exception = state.get('exception')
+        if isinstance(exception, BaseException) and type(exception).__module__ != 'builtins':
+            state['exception'] = RuntimeError(f'{type(exception).__name__}: {exception}')
+        return state
 
     @staticmethod
     def success(obj: Optional[TSource] = None):

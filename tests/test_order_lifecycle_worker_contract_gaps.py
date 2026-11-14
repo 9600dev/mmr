@@ -268,3 +268,48 @@ def test_selected_callback_buffer_capacity_fails_closed_at_the_next_observation(
     assert any("replay" in message.casefold() and "required" in message.casefold()
                for message in critical_messages)
     tracker.close(timeout=0.0)
+
+
+def test_a_submission_whose_journal_write_fails_is_not_left_pending(tmp_path, monkeypatch):
+    """One transient "database is locked" on the journal write left the
+    identity in the pending set for the life of the process: nothing had been
+    journaled, so nothing would ever deliver (and discard) it, ``health``
+    reported unhealthy, and every open was refused until trader_service was
+    restarted (AUDIT_2026-11-14 A3.7)."""
+    import sqlite3
+
+    tracker, event = _pending_submission(tmp_path)
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(tracker, "_outbox", locked)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            tracker.record_submission(event, timeout=0.2)
+        assert "pending-attempt" not in tracker._pending_submissions
+        assert tracker.health["pending_submissions"] == 0
+        assert tracker._pending_outbox() is False, "the failed write journaled nothing"
+    finally:
+        tracker.close(timeout=0.0)
+
+
+def test_only_the_failed_submission_is_released(tmp_path, monkeypatch):
+    """The release is by identity: another attempt still awaiting delivery
+    must stay pending when a different one fails to journal."""
+    import sqlite3
+
+    tracker, event = _pending_submission(tmp_path)
+    tracker._pending_submissions.add("an-earlier-attempt")
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(tracker, "_outbox", locked)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            tracker.record_submission(event, timeout=0.2)
+        assert tracker._pending_submissions == {"an-earlier-attempt"}
+        assert tracker.health["pending_submissions"] == 1
+    finally:
+        tracker.close(timeout=0.0)

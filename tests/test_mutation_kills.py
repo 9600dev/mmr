@@ -439,8 +439,9 @@ class TestCheckInstrumentDefaultsMutationKills:
         seen = {}
 
         class _CaptureFilter:
-            def is_allowed(self, symbol, exchange, sec_type):
-                seen.update(symbol=symbol, exchange=exchange, sec_type=sec_type)
+            def is_allowed(self, symbol, exchange, sec_type, primary_exchange=''):
+                seen.update(symbol=symbol, exchange=exchange, sec_type=sec_type,
+                            primary_exchange=primary_exchange)
                 return True, ''
 
         _gate.trading_filter = _CaptureFilter()
@@ -448,3 +449,19 @@ class TestCheckInstrumentDefaultsMutationKills:
         assert result.approved is True
         assert seen['exchange'] == ''
         assert seen['sec_type'] == ''
+        assert seen['primary_exchange'] == ''
+
+    def test_the_listing_venue_reaches_the_filter(self, _gate):
+        """Orders route SMART; the exchange rules are judged on the listing
+        venue, so it has to arrive at the filter unchanged."""
+        seen = {}
+
+        class _CaptureFilter:
+            def is_allowed(self, symbol, exchange, sec_type, primary_exchange=''):
+                seen.update(exchange=exchange, primary_exchange=primary_exchange)
+                return True, ''
+
+        _gate.trading_filter = _CaptureFilter()
+        _gate.check_instrument(symbol='BHP', exchange='SMART', sec_type='STK',
+                               primary_exchange='ASX')
+        assert seen == {'exchange': 'SMART', 'primary_exchange': 'ASX'}

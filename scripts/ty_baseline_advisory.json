@@ -3,7 +3,7 @@
   "trader/data/data_access.py\terror[invalid-method-override]": 2,
   "trader/data/data_access.py\terror[unresolved-attribute]": 1,
   "trader/data/data_access.py\twarning[redundant-cast]": 6,
-  "trader/data/data_access.py\twarning[unused-type-ignore-comment]": 3,
+  "trader/data/data_access.py\twarning[unused-type-ignore-comment]": 2,
   "trader/data/duckdb_store.py\terror[invalid-return-type]": 2,
   "trader/data/market_data.py\terror[invalid-argument-type]": 2,
   "trader/data/market_data.py\terror[missing-argument]": 1,

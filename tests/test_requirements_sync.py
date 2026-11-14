@@ -1,4 +1,7 @@
-"""requirements.txt must not drift from pyproject.toml.
+"""requirements.txt must contain every runtime dependency pyproject.toml declares.
+
+(requirements.txt is now generated from uv.lock — see scripts/lock_requirements.sh
+and tests/test_requirements_lock.py; this file keeps the original guard.)
 
 The container image installs from requirements.txt (Dockerfile line ~50, cached
 as its own layer), while `uv`/`pip install -e .` resolve from pyproject.toml.
@@ -52,11 +55,10 @@ def test_every_runtime_dependency_is_in_the_image_requirements():
     )
 
 
-def test_requirements_has_no_extras_pyproject_does_not_declare():
-    """The converse: something installed into the image but unknown to the
-    package is either a forgotten dep or dead weight in every build."""
-    extra = _requirements() - _pyproject_runtime_deps()
-    assert not extra, (
-        'these are in requirements.txt but not declared in pyproject.toml — '
-        f'add them to the project deps or drop them: {sorted(extra)}'
-    )
+# The converse ("nothing in requirements.txt that pyproject does not declare")
+# was asserted here while requirements.txt was a hand-maintained copy of the
+# dependency list. Since 2026-11-14 the file is an EXPORT of uv.lock — the full
+# pinned closure, transitive dependencies included — so that comparison no
+# longer means anything. What replaced it is stronger: every line must be a pin
+# that matches the lock exactly (tests/test_requirements_lock.py), so nothing
+# can be in the image that the tested lock does not contain.

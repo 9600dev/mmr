@@ -338,7 +338,8 @@ echo_usage() {
     echo "  Supports both docker and podman (auto-detected)."
     echo
     echo "  -b (build MMR image)"
-    echo "  -u (up: start all containers — IB Gateway + MMR)"
+    echo "  -u (up: start all containers — IB Gateway + MMR. A stack that is"
+    echo "      already running is left untouched; use -g to rebuild + recreate)"
     echo "  -i (ib-only: start only IB Gateway for local development)"
     echo "  -d (down: stop and remove all containers)"
     echo "  -c (clean: remove all images and containers — the DuckDB volume"
@@ -348,14 +349,16 @@ echo_usage() {
     echo "      — prompts for confirmation before wiping sweeps/backtests/history;"
     echo "      set MMR_FORCE_CLEAN_KEEP_DATA=1 to skip the data wipe)"
     echo "  -s (sync code to running MMR container)"
-    echo "  -a (sync all files to running MMR container)"
+    echo "  -a (sync all files to running MMR container, untracked ones included —"
+    echo "      except .env*, secrets, docs/OPERATIONAL_STATE.md, .git, .venv, caches)"
     echo "  -g (go: build, start all containers, wait for healthy, then run"
     echo "      'mmr verify' from the HOST and print the result. Exits non-zero"
     echo "      on FAIL. Does NOT shell in — use -e, or MMR_GO_SHELL=1 to land"
     echo "      in a container shell as it used to.)"
     echo "  -l (logs: tail logs from all containers)"
     echo "  -r (restart-ib: restart the IB Gateway container; the MMR container"
-    echo "      depends on it, so it is recreated too if it was running)"
+    echo "      depends on it, so it is stopped (SIGTERM, 30s) and recreated too"
+    echo "      if it was running)"
     echo "  -e (exec: shell into running MMR container)"
     echo "  -n (news: bring up the news scraper stack at \$NEWS_DIR"
     echo "      — default ~/dev/scraper; idempotent. Used by the news skill.)"
@@ -560,28 +563,92 @@ build() {
     $COMPOSE -f "$BUILDDIR/docker-compose.yml" build mmr
 }
 
+# How long a container gets between SIGTERM and SIGKILL when this script
+# stops it. start_mmr.sh's cleanup needs up to ~10s to take the services down
+# in order (strategy, trader, data) after SIGINT; a bare `rm -f` is SIGKILL
+# with no warning at all.
+STOP_GRACE_SECONDS=30
+
+# Stop gracefully, then remove. usage: _stop_and_remove <container id>...
+# `stop` on an already-stopped container returns at once; every step is
+# best-effort so a container that vanished meanwhile is not an error.
+_stop_and_remove() {
+    local cid
+    for cid in "$@"; do
+        $RUNTIME stop -t "$STOP_GRACE_SECONDS" "$cid" >/dev/null 2>&1 || true
+        $RUNTIME rm -f "$cid" >/dev/null 2>&1 || true
+    done
+}
+
+# True when the project's two containers (ib-gateway, mmr) both exist, are
+# running, and neither reports itself unhealthy. `starting` counts as fine (a
+# second `-u` during the 4-5 minute start period must not tear the stack
+# down), and so does a container with no healthcheck.
+_stack_is_up() {
+    local svc cid cids count state
+    for svc in ib-gateway mmr; do
+        cids="$($RUNTIME ps -a -q --filter "name=mmr[-_]${svc}" 2>/dev/null || true)"
+        count=0
+        for cid in $cids; do
+            count=$((count + 1))
+            state="$($RUNTIME inspect --format \
+                '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                "$cid" 2>/dev/null || echo unknown)"
+            case "$state" in
+                running/healthy|running/starting|running/none|running/) ;;
+                *) return 1 ;;
+            esac
+        done
+        # Exactly one: none means it is not up, several means leftovers from
+        # another naming scheme that the recovery path has to clear.
+        if [ "$count" -ne 1 ]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
 up() {
     check_env
     print_api_keys
-    echo "Pulling latest IB Gateway image..."
-    $COMPOSE -f "$BUILDDIR/docker-compose.yml" pull ib-gateway
-    echo ""
-    echo "Starting IB Gateway + MMR containers..."
-    echo ""
     # Ensure bind-mount directories exist on host
     mkdir -p "$HOME/.local/share/mmr/data" "$HOME/.local/share/mmr/logs" "$HOME/.local/share/mmr/tws_settings"
-    # Remove stale network to avoid label mismatch errors (podman/docker-compose compat).
-    # Must remove containers using the network first, then the network itself.
-    for cid in $($RUNTIME ps -a -q --filter network=mmr_default 2>/dev/null); do
-        $RUNTIME rm -f "$cid" 2>/dev/null || true
-    done
-    $RUNTIME network rm mmr_default 2>/dev/null || true
-    # Belt-and-suspenders: also sweep any mmr-mmr / mmr_mmr containers that
-    # somehow aren't attached to mmr_default (e.g. left over from a previous
-    # run on a different network name). Without this, `./docker.sh -g`
-    # can't recover from the stuck-dependent state described in
-    # `_remove_mmr_dependents`.
-    _remove_mmr_dependents
+    local already_up=""
+    if _stack_is_up; then
+        # `-u` is "start the containers", and is what the CLI tells people to
+        # run. It used to `rm -f` (SIGKILL) everything on the project network
+        # first, so running it against a live stack killed trader_service and
+        # strategy_service mid-session with no shutdown at all. A stack that
+        # is already up is left alone: no image pull (a newer gateway image
+        # would make compose recreate the gateway and log the session out), no
+        # removal, and the `compose up -d` below is then a no-op unless the
+        # MMR image or the compose file changed (compose then recreates that
+        # container itself, SIGTERM first).
+        already_up=1
+        echo "IB Gateway + MMR containers are already running — leaving them as they are."
+        echo "  (-g rebuilds and recreates the stack; -r restarts the gateway; -d stops it.)"
+        echo ""
+    else
+        echo "Pulling latest IB Gateway image..."
+        $COMPOSE -f "$BUILDDIR/docker-compose.yml" pull ib-gateway
+        echo ""
+        echo "Starting IB Gateway + MMR containers..."
+        echo ""
+        # Recovery path: something is missing, stopped or unhealthy. Clear
+        # what is there so compose starts from a clean slate — gracefully, and
+        # MMR before the gateway it is connected to.
+        #
+        # Sweep any mmr-mmr / mmr_mmr containers, including ones that somehow
+        # aren't attached to mmr_default (e.g. left over from a previous run
+        # on a different network name). Without this, `./docker.sh -g` can't
+        # recover from the stuck-dependent state described in
+        # `_remove_mmr_dependents`.
+        _remove_mmr_dependents
+        # Remove stale network to avoid label mismatch errors (podman/docker-compose compat).
+        # Must remove containers using the network first, then the network itself.
+        _stop_and_remove $($RUNTIME ps -a -q --filter network=mmr_default 2>/dev/null)
+        $RUNTIME network rm mmr_default 2>/dev/null || true
+    fi
     # docker-compose.yml declares the DB volume `external: true` (so `down
     # --volumes` can't destroy it), and compose refuses to CREATE an external
     # volume — so ensure it exists first or `up` fails with "external volume not
@@ -629,7 +696,11 @@ MARKER
     seed_db_if_empty
     $COMPOSE -f "$BUILDDIR/docker-compose.yml" up -d
     echo ""
-    echo "Containers started. Use './docker.sh -e' to exec in, or './docker.sh -l' for logs."
+    if [[ -n "$already_up" ]]; then
+        echo "Stack was already up. Use './docker.sh -e' to exec in, or './docker.sh -l' for logs."
+    else
+        echo "Containers started. Use './docker.sh -e' to exec in, or './docker.sh -l' for logs."
+    fi
     print_vnc_url
 }
 
@@ -637,11 +708,11 @@ MARKER
 # previous `./docker.sh -u`) still exist with `depends_on: ib-gateway` —
 # podman/docker refuse to remove ib-gateway while a dependent is around,
 # leaving the old ib-gateway stopped and nothing listening on 7497/7496.
-# Sweep dependents before recreating.
+# Sweep dependents before recreating. The MMR container may be the live
+# trading stack, so it is stopped (SIGTERM, then STOP_GRACE_SECONDS) before it
+# is removed — this was a bare `rm -f`, i.e. SIGKILL.
 _remove_mmr_dependents() {
-    for cid in $($RUNTIME ps -aq --filter "name=mmr[-_]mmr" 2>/dev/null); do
-        $RUNTIME rm -f "$cid" 2>/dev/null || true
-    done
+    _stop_and_remove $($RUNTIME ps -aq --filter "name=mmr[-_]mmr" 2>/dev/null)
 }
 
 ib_only() {
@@ -749,11 +820,13 @@ news_up() {
 
 down() {
     echo "Stopping all containers..."
-    $COMPOSE -f "$BUILDDIR/docker-compose.yml" down 2>/dev/null || true
+    # -t: compose's default is 10s between SIGTERM and SIGKILL, which is about
+    # what start_mmr.sh's cleanup needs just to wait for the services. If this
+    # compose does not take -t, the sweep below stops what is left, with the
+    # same grace.
+    $COMPOSE -f "$BUILDDIR/docker-compose.yml" down -t "$STOP_GRACE_SECONDS" 2>/dev/null || true
     # Remove stale network to avoid label mismatch errors (podman/docker-compose compat)
-    for cid in $($RUNTIME ps -a -q --filter network=mmr_default 2>/dev/null); do
-        $RUNTIME rm -f "$cid" 2>/dev/null || true
-    done
+    _stop_and_remove $($RUNTIME ps -a -q --filter network=mmr_default 2>/dev/null)
     $RUNTIME network rm mmr_default 2>/dev/null || true
 }
 
@@ -1049,8 +1122,40 @@ sync() {
     rsync -e "$RSYNC_RSH" -av --delete $BUILDDIR/ $CONTID:/home/trader/mmr/ --exclude='.git' --filter="dir-merge,- .gitignore"
 }
 
+# What `-a` must never copy into the container. `-s` skips everything in
+# .gitignore; `-a` exists to include untracked working files, and until now
+# that included .env (the IB login) and docs/OPERATIONAL_STATE.md (live
+# positions, account state). Mirrors the secrets / local-state / tooling
+# entries of .dockerignore, which keeps the same files out of the image.
+#
+# rsync semantics that matter here: the first matching rule wins, so the
+# include for the .env.example template must come before the .env.* exclude;
+# a pattern without a slash matches at any depth (a copy of .env in a
+# subdirectory is caught too); and an excluded path is also protected from
+# --delete, so nothing already in the container is removed by these rules —
+# including a .env that an earlier `-a` put there (delete that one by hand,
+# or rebuild the image).
+SYNC_ALL_FILTERS=(
+    --exclude='.git'
+    --include='.env.example'
+    --exclude='.env'
+    --exclude='.env.*'
+    --exclude='secrets.env'
+    --exclude='*.secrets'
+    --exclude='docs/OPERATIONAL_STATE.md'
+    --exclude='.venv'
+    --exclude='.cache'
+    --exclude='.mypy_cache'
+    --exclude='.pytest_cache'
+    --exclude='/mutants'
+    --exclude='.devcontainer'
+    --exclude='.vscode'
+    --exclude='.claude'
+)
+
 sync_all() {
     echo "Syncing entire mmr directory to MMR container..."
+    echo "  (never copied: .env*, secrets.env, *.secrets, docs/OPERATIONAL_STATE.md, .git, .venv, caches)"
     echo ""
     CONTID="$($RUNTIME ps -aqf name=mmr-mmr)"
     if [[ -z "$CONTID" ]]; then
@@ -1063,7 +1168,7 @@ sync_all() {
     echo "container id: $CONTID"
 
     RSYNC_RSH="$RUNTIME exec -i"
-    rsync -e "$RSYNC_RSH" -av --delete $BUILDDIR/ $CONTID:/home/trader/mmr/ --exclude='.git'
+    rsync -e "$RSYNC_RSH" -av --delete $BUILDDIR/ $CONTID:/home/trader/mmr/ "${SYNC_ALL_FILTERS[@]}"
 }
 
 echo "action: build=$b clean=$c force=$f up=$u down=$d sync=$s sync_all=$a go=$g logs=$l exec=$e ib-only=$i restart-ib=$r news=$n backup=$B${BACKUP_NAME:+($BACKUP_NAME)} | runtime: $RUNTIME"

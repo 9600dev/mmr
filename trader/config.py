@@ -184,6 +184,18 @@ class MMRConfig:
             if env_key:
                 config.twelvedata.api_key = env_key
 
+        # trading_mode decides which ACCOUNT and PORT are used, and every test
+        # below was `== 'paper'` with LIVE as the else branch: 'Paper',
+        # 'paper ' (trailing space), 'PAPER' or an empty TRADING_MODE all
+        # selected the live account and the live port. Normalise, and refuse
+        # anything that is not one of the two modes.
+        mode = str(config.trading_mode or '').strip().lower()
+        if mode not in ('paper', 'live'):
+            raise ValueError(
+                f"trading_mode must be 'paper' or 'live', got {config.trading_mode!r} — "
+                f"refusing to guess which account to trade")
+        config.trading_mode = mode
+
         # Derive paper_trading flag from trading_mode
         config.paper_trading = config.trading_mode == 'paper'
 

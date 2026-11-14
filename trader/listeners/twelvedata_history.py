@@ -151,8 +151,14 @@ class TwelveDataHistoryWorker:
         log_prefix: str = '',
     ) -> pd.DataFrame:
         if bar_size in (BarSize.Days1, BarSize.Weeks1, BarSize.Months1):
+            # TwelveData's end_date is EXCLUSIVE for a bare date: asking for
+            # 11-12..11-13 returns the 11-12 bar only, and 11-13..11-13 is a
+            # 400 "no data" (verified against the API 2026-11-14). Callers pass
+            # the last day they WANT, so send the day after. A still-forming
+            # session this lets through is refused at the write chokepoint
+            # (session_guard), which is where that rule lives.
             from_ = start_date.strftime('%Y-%m-%d')
-            to = end_date.strftime('%Y-%m-%d')
+            to = (end_date + dt.timedelta(days=1)).strftime('%Y-%m-%d')
         else:
             from_ = start_date.strftime('%Y-%m-%d %H:%M:%S')
             to = end_date.strftime('%Y-%m-%d %H:%M:%S')

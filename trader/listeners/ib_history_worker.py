@@ -15,6 +15,7 @@ import backoff
 import calendar
 import datetime as dt
 import ib_async
+import logging as _logging
 import numpy as np
 import pandas as pd
 import pytz
@@ -156,6 +157,16 @@ class IBHistoryWorker():
         self.error_contract = contract
 
         if errorCode in IB_INFO_CODES:
+            self.__clear_error()
+            return
+
+        # Status chatter and warnings (farm 2103/2105/2108/2119/2157, the rest
+        # of the 2100 range) are not failures of THIS request. Recording them
+        # as one made a download that returned its bars raise and drop them —
+        # and aborted strategy priming for every instrument after the first.
+        level = ib_informational.ib_log_level(errorCode, errorString)
+        if level < _logging.ERROR and errorCode not in IB_CONNECTIVITY_CODES:
+            logging.log(level, 'ib status reqId: %s code %s: %s', reqId, errorCode, errorString)
             self.__clear_error()
             return
 
@@ -350,6 +361,17 @@ class IBHistoryWorker():
                         raise IBConnectivityError(
                             'error_code: {}, error_string: {}'.format(code, msg))
                     if any(s in msg for s in _162_NO_DATA_SUBSTRINGS):
+                        if any(len(frame) > 0 for frame in bars):
+                            # The walk went back past the instrument's first
+                            # bar. That is the END of its history, not a failed
+                            # download: raising here threw away every chunk
+                            # already fetched, so anything listed more recently
+                            # than the window (an IPO, a spin-off, a new conId)
+                            # could never be downloaded or primed at all.
+                            logging.info(
+                                'no earlier history for %s before %s; keeping the %d chunk(s) fetched',
+                                contract.conId, current_date, len(bars))
+                            break
                         raise IBNoDataError(
                             'error_code: {}, error_string: {}'.format(code, msg))
                     # unknown 162 variant — treat as no-data to avoid crashing
@@ -439,6 +461,22 @@ class IBHistoryWorker():
             )
 
         all_data: pd.DataFrame = pd.concat(bars)
+
+        # A no-data marker says "nothing traded that day". Markers are computed
+        # per CHUNK, and a day that straddles a chunk boundary has its bars in
+        # the neighbouring chunk — so it got a marker AND real bars. Stored via
+        # priming / `history ib`, those markers pushed the nightly audit's
+        # `1 min|empty_bar` count past its baseline every night (534 vs 278 on
+        # 2026-11-14), which is why the audit job had been red for weeks. Keep
+        # a marker only when no chunk has a real bar for that venue day.
+        if len(all_data) > 0 and 'close' in all_data.columns:
+            try:
+                venue_days = all_data.index.tz_convert(tz_info).normalize()  # type: ignore
+                real = all_data['close'].notna()
+                day_has_real = real.groupby(venue_days).transform('any')
+                all_data = all_data[real | ~day_has_real]
+            except (TypeError, AttributeError) as ex:
+                logging.debug('placeholder de-duplication skipped: %s', ex)
 
         if filter_between_dates:
             all_data = all_data[(all_data.index >= start_date)  # .replace(tzinfo=gettz(tz_info)))  # type: ignore

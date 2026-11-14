@@ -72,11 +72,88 @@ _PRESERVED_IB_EVENTS = (
 )
 
 
+_REQUEST_LOCKS: Dict[tuple, asyncio.Lock] = {}
+
+
+async def single_flight(ib, key: str, call, timeout: float = 10.0):
+    """Run one fixed-key ib_async request at a time, bounded.
+
+    ib_async keeps ONE future per fixed request key: ``reqOpenOrdersAsync``
+    and ``reqAllOpenOrdersAsync`` share ``openOrders``, ``reqPositionsAsync``
+    uses ``positions``. A second request issued while the first is in flight
+    replaces that future, and the first awaiter is never resolved — not even
+    by a disconnect. Two of these awaits ran unbounded while holding the
+    account-wide order lock (protected resize), so an executor snapshot RPC
+    landing inside the round trip wedged every later placement; on reconnect
+    the same collision strands ``connected_event``. ``ping_ib`` already
+    guarded ``currentTime`` this way.
+
+    ``call`` is a zero-argument callable returning the awaitable. Locks are
+    per (IB instance, event loop, key): a fresh IB() after a reconnect, or a
+    different loop in tests, never waits on a stale one.
+    """
+    loop = asyncio.get_running_loop()
+    lock_key = (id(ib), id(loop), key)
+    lock = _REQUEST_LOCKS.get(lock_key)
+    if lock is None:
+        if len(_REQUEST_LOCKS) > 256:          # reconnects create new IB objects
+            _REQUEST_LOCKS.clear()
+        lock = _REQUEST_LOCKS[lock_key] = asyncio.Lock()
+    async with lock:
+        return await asyncio.wait_for(call(), timeout)
+
+
+class EventLayoutError(RuntimeError):
+    """An eventkit ``Event`` whose listener storage this module cannot read."""
+
+
+def _event_slots(event) -> list:
+    """``(obj, weakref, func)`` for every listener registered on ``event``.
+
+    TWO distributions install a top-level ``eventkit`` package and they store
+    listeners differently:
+
+    * ``aeventkit`` (the fork ib_async depends on): ``event._slots`` is a
+      ``Slots`` object whose ``.slots`` is a list of ``Slot(obj, weakref, func)``
+      dataclasses;
+    * ``eventkit`` 1.x (the original): ``event._slots`` is a plain list of
+      ``[obj, weakref, func]`` lists.
+
+    Both were installed side by side until 2026-11-14 (MMR listed ``eventkit``
+    itself, ib_async pulled ``aeventkit``), each overwriting the other's files,
+    so which layout a given environment had was decided by install ORDER. This
+    module only read the first layout and swallowed the AttributeError on the
+    second — every reconnect then restored zero handlers and the service ran
+    on, connected and deaf: no ticks, no order status, no error callbacks.
+    Found when a rebuilt test environment landed on the other layout.
+
+    So: read either layout, and RAISE on anything else. A reconnect that
+    cannot carry its handlers across must fail where it is visible.
+    """
+    slots = getattr(event, '_slots', None)
+    if slots is None:
+        raise EventLayoutError(
+            f'eventkit event {getattr(event, "name", lambda: "?")()!r} has no _slots attribute')
+    inner = getattr(slots, 'slots', slots)
+    out = []
+    try:
+        for slot in inner:
+            if hasattr(slot, 'func'):
+                out.append((getattr(slot, 'obj', None), getattr(slot, 'weakref', None), slot.func))
+            else:
+                obj, ref, func = slot
+                out.append((obj, ref, func))
+    except (TypeError, ValueError) as ex:
+        raise EventLayoutError(
+            f'unrecognised eventkit slot layout ({type(slots).__name__}): {ex}') from ex
+    return out
+
+
 def _snapshot_event_handlers(ib):
     """Return a dict[event_name -> list[handler]] snapshot of every
     handler currently attached to ``ib``'s known events.
 
-    eventkit's ``Slot`` is a dataclass with THREE fields:
+    An eventkit slot holds ``(obj, weakref, func)``:
       - ``obj``: usually ``None``; populated when registering a plain
         function with an explicit owner reference (rare).
       - ``weakref``: a ``weakref.ref`` to the bound-method owner; this
@@ -84,7 +161,7 @@ def _snapshot_event_handlers(ib):
         the common case for our code.
       - ``func``: the unbound function (``method.__func__``).
 
-    Previously this helper only checked ``slot.obj`` (always ``None``
+    Previously this helper only checked ``obj`` (always ``None``
     for bound-method registrations), fell through to ``handler = func``
     (the unbound function), and re-registered THAT on the fresh IB
     instance. When events fired, eventkit called the unbound function
@@ -94,6 +171,9 @@ def _snapshot_event_handlers(ib):
     ``EventSubject`` downstream ever saw a tick — so ``mmr snapshot``,
     strategy bars, and anything else built on the reactive layer
     silently stopped working after a reconnect.
+
+    Raises ``EventLayoutError`` if the listener storage cannot be read
+    (see ``_event_slots``) — never returns a silently empty snapshot.
     """
     snapshot = {}
     for name in _PRESERVED_IB_EVENTS:
@@ -101,47 +181,42 @@ def _snapshot_event_handlers(ib):
         if event is None:
             continue
         captured = []
-        try:
-            for slot in event._slots.slots:
-                func = getattr(slot, 'func', None)
-                if func is None:
-                    continue
-                # Prefer the weakref (bound-method case). Fall back to
-                # ``obj`` (explicit-owner plain function), then to the
-                # bare ``func`` if neither resolves to a live object.
-                bound_to = None
-                weak = getattr(slot, 'weakref', None)
-                if weak is not None:
-                    try:
-                        bound_to = weak()  # dereference weakref
-                    except Exception:
-                        bound_to = None
-                if bound_to is None:
-                    bound_to = getattr(slot, 'obj', None)
-                if bound_to is not None:
-                    # Rebind the slot's function to its owner directly.
-                    # ``getattr(bound_to, func.__name__)`` failed for every
-                    # name-mangled private handler (``self.__handle_error`` is
-                    # stored as ``_IBAIORx__handle_error`` but its __name__ is
-                    # ``__handle_error``) and fell back to the UNBOUND
-                    # function: after each reconnect errorEvent held an extra
-                    # unbound slot that raised TypeError (logged by eventkit)
-                    # on every IB error, next to the re-added bound handler.
-                    try:
-                        candidate = getattr(bound_to, func.__name__)
-                    except Exception:
-                        candidate = None
-                    if candidate is not None and getattr(candidate, '__func__', candidate) is func:
-                        handler = candidate
-                    elif isinstance(func, types.FunctionType):
-                        handler = types.MethodType(func, bound_to)
-                    else:
-                        handler = func
+        for _obj, weak, func in _event_slots(event):
+            if func is None:
+                continue
+            # Prefer the weakref (bound-method case). Fall back to
+            # ``obj`` (explicit-owner plain function), then to the
+            # bare ``func`` if neither resolves to a live object.
+            bound_to = None
+            if weak is not None:
+                try:
+                    bound_to = weak()  # dereference weakref
+                except Exception:
+                    bound_to = None
+            if bound_to is None:
+                bound_to = _obj
+            if bound_to is not None:
+                # Rebind the slot's function to its owner directly.
+                # ``getattr(bound_to, func.__name__)`` failed for every
+                # name-mangled private handler (``self.__handle_error`` is
+                # stored as ``_IBAIORx__handle_error`` but its __name__ is
+                # ``__handle_error``) and fell back to the UNBOUND
+                # function: after each reconnect errorEvent held an extra
+                # unbound slot that raised TypeError (logged by eventkit)
+                # on every IB error, next to the re-added bound handler.
+                try:
+                    candidate = getattr(bound_to, func.__name__)
+                except Exception:
+                    candidate = None
+                if candidate is not None and getattr(candidate, '__func__', candidate) is func:
+                    handler = candidate
+                elif isinstance(func, types.FunctionType):
+                    handler = types.MethodType(func, bound_to)
                 else:
                     handler = func
-                captured.append(handler)
-        except Exception:
-            pass
+            else:
+                handler = func
+            captured.append(handler)
         snapshot[name] = captured
     return snapshot
 
@@ -149,30 +224,24 @@ def _snapshot_event_handlers(ib):
 def _restore_event_handlers(ib, snapshot):
     """Re-attach handlers captured by ``_snapshot_event_handlers`` to a
     fresh IB instance, de-duping against what the IB() constructor already
-    wired up (errorEvent, updateEvent, etc. have internal listeners)."""
+    wired up (errorEvent, updateEvent, etc. have internal listeners).
+
+    A handler that cannot be re-attached raises: a partially wired IB
+    instance looks connected and drops whatever that handler carried.
+    """
     for name, handlers in snapshot.items():
         event = getattr(ib, name, None)
         if event is None:
             continue
-        existing_funcs = set()
-        try:
-            for slot in event._slots.slots:
-                f = getattr(slot, 'func', None)
-                if f is not None:
-                    existing_funcs.add(f)
-        except Exception:
-            pass
+        existing_funcs = {func for _obj, _weak, func in _event_slots(event) if func is not None}
         for handler in handlers:
-            try:
-                # For bound methods, `__func__` is the unbound function
-                # that ends up in the Slot. Dedupe on that.
-                fn = getattr(handler, '__func__', handler)
-                if fn in existing_funcs:
-                    continue
-                event += handler
-                existing_funcs.add(fn)
-            except Exception:
-                pass
+            # For bound methods, `__func__` is the unbound function
+            # that ends up in the slot. Dedupe on that.
+            fn = getattr(handler, '__func__', handler)
+            if fn in existing_funcs:
+                continue
+            event += handler
+            existing_funcs.add(fn)
 
 
 class IBAIORx():
@@ -237,6 +306,10 @@ class IBAIORx():
         # retry loop below re-issues reqMktData for every cached contract while
         # data is lost. See _md_retry_action for the tri-state decision.
         self._md_lost_at: Optional[float] = None
+        # Contracts with a STREAMING market-data request (snapshot=False),
+        # recorded where the request is made. What the 10197 recovery loop
+        # re-requests — see _resubscribe_market_data.
+        self._streaming_contracts: Dict[int, Contract] = {}
         self._md_last_tick_at: float = 0.0
         self._md_retry_task: Optional[asyncio.Task] = None
         self._md_retry_interval: float = 60.0
@@ -282,14 +355,27 @@ class IBAIORx():
         Detection worked; recovery re-armed nothing.
 
         Re-requests feed the SAME Ticker objects, so every downstream pipeline
-        resumes with no cache invalidation anywhere."""
-        try:
-            contracts = [t.contract for t in self.ib.tickers() if t.contract is not None]
-        except Exception:
-            contracts = []
+        resumes with no cache invalidation anywhere.
+
+        Only STREAMS are re-requested, and the previous request is cancelled
+        first. ``ib.tickers()`` is never pruned — it also holds every snapshot,
+        scan row and depth ticker since connect — and each pass used to
+        re-request ALL of them as streams without cancelling anything: after
+        one competing-session episode every symbol ever scanned became a
+        permanent stream against IB's ~100-line allowance, and each pass
+        leaked a request id that could never be cancelled. ``ib.tickers()``
+        remains the fallback when nothing recorded a stream (an unknown
+        subscription path), which is the 2026-07-27 lesson above."""
+        contracts = list(self._streaming_contracts.values())
+        if not contracts:
+            try:
+                contracts = [t.contract for t in self.ib.tickers() if t.contract is not None]
+            except Exception:
+                contracts = []
         if not contracts:
             contracts = list(self.contracts_cache.keys())
         for c in contracts:
+            self._cancel_stream_quietly(c)
             try:
                 self._contracts_source.call_event_subscriber_sync(
                     lambda c=c: self.ib.reqMktData(
@@ -300,6 +386,18 @@ class IBAIORx():
                 logging.warning('10197 resubscribe failed for %s: %s',
                                 getattr(c, 'symbol', c), ex)
         return len(contracts)
+
+    def _cancel_stream_quietly(self, contract: Contract) -> None:
+        """Cancel the contract's current streaming request, if it has one.
+        (ib.cancelMktData logs an ERROR when there is none; ask first.)"""
+        try:
+            ticker = self.ib.ticker(contract)
+            active = self.ib.wrapper.ticker2ReqId.get('mktData', {})
+            if ticker is not None and ticker in active:
+                self.ib.cancelMktData(contract)
+        except Exception as ex:
+            logging.debug('could not cancel the previous stream for %s: %s',
+                          getattr(contract, 'symbol', contract), ex)
 
     async def _market_data_retry_loop(self):
         while not self._shutdown:
@@ -587,6 +685,8 @@ class IBAIORx():
         # and starts the subscription
 
         reqId = self.ib.client._reqIdSeq
+        if not one_time_snapshot:
+            self._streaming_contracts[hash(contract)] = contract
         self._contracts_source.call_event_subscriber_sync(
             lambda: self.ib.reqMktData(
                 contract=contract,
@@ -630,6 +730,8 @@ class IBAIORx():
         # reqMktData immediately returns with an empty ticker
         # and starts the subscription
         reqId = self.ib.client._reqIdSeq
+        if not one_time_snapshot:
+            self._streaming_contracts[hash(contract)] = contract
         result = self._contracts_source.call_event_subscriber_sync(
             lambda: self.ib.reqMktData(
                 contract=contract,
@@ -691,7 +793,8 @@ class IBAIORx():
         raise ValueError('not implemented')
 
     async def subscribe_positions(self) -> Observable[List[Position]]:
-        await self.positions_subject.call_event_subscriber(self.ib.reqPositionsAsync())
+        await self.positions_subject.call_event_subscriber(
+            single_flight(self.ib, 'positions', self.ib.reqPositionsAsync, 30.0))
 
         def get_positions() -> Iterator[List[Position]]:
             yield self.ib.positions(account=self.ib_account)
@@ -784,7 +887,7 @@ class IBAIORx():
             del self.pnl_cache[contract.conId]
 
     async def get_open_orders(self) -> List[Order]:
-        return await self.ib.reqAllOpenOrdersAsync()
+        return await single_flight(self.ib, 'openOrders', self.ib.reqAllOpenOrdersAsync, 15.0)
 
     async def get_completed_orders(self) -> List[Trade]:
         return await self.ib.reqCompletedOrdersAsync(apiOnly=True)

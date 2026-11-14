@@ -222,7 +222,10 @@ class EventStore:
 
     # Fill tags that are NOT strategy names (manual/CLI order paths). Kept in
     # the aggregation output but excluded from "per-strategy" views by the CLI.
-    NON_STRATEGY_TAGS = ('', 'order', 'proposal', 'to_market')
+    # orderRef values that do not name a strategy. 'global' is the default
+    # algo_name of the direct `mmr buy` / `mmr sell` path — manual orders that
+    # used to appear in `strategies pnl` as a strategy called "global".
+    NON_STRATEGY_TAGS = ('', 'order', 'proposal', 'to_market', 'global', 'manual')
 
     def realized_pnl_by_strategy(self) -> dict:
         """Aggregate ORDER_FILLED events into per-strategy realized PnL.

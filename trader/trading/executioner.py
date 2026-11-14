@@ -630,6 +630,7 @@ class TradeExecutioner():
                         symbol=contract.symbol,
                         exchange=contract.exchange or '',
                         sec_type=contract.secType or '',
+                        primary_exchange=getattr(contract, 'primaryExchange', '') or '',
                     )
                     if not instrument_result.approved:
                         logging.warning(
@@ -658,6 +659,7 @@ class TradeExecutioner():
                 symbol=contract.symbol,
                 exchange=contract.exchange or '',
                 sec_type=contract.secType or '',
+                primary_exchange=getattr(contract, 'primaryExchange', '') or '',
             )
             if not instrument_result.approved:
                 await self._log_event(EventType.RISK_GATE_REJECTED, contract, order)
@@ -744,7 +746,11 @@ class TradeExecutioner():
 
         if condition == condition.SANITY_CHECK:
             logging.debug('sanity_check_order for {}'.format(contract_order))
-            snapshot: Ticker = await self.trader.client.get_snapshot(contract_order.contract, delayed=False)
+            # The check is purely structural (order_structure); the ticker
+            # argument is unused. A live snapshot was fetched here anyway —
+            # a second wait of up to 17 s under the order lock, and a second
+            # way for an exit to fail when market data is unavailable.
+            snapshot = Ticker(contract=contract_order.contract)
             if not self.validator.sanity_check_order(contract_order, self.trader.book, snapshot):
                 return rx.throw(
                     trader_exception(

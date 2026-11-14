@@ -15,6 +15,7 @@ import datetime
 import pytest
 
 from trader.data.bar_quality import Bar, Finding, unexplained_jumps
+import trader.mmr_cli as cli
 from trader.mmr_cli import _classify_jumps_against_splits
 
 
@@ -140,3 +141,119 @@ class TestPassThrough:
         out = _classify_jumps_against_splits(
             [f], bars, dates, [(dates[1], 4.0, 1.0)])
         assert out == [f]
+
+
+# --------------------------------------------------------------------------
+# 2026-11-14: the gate was permanently red, for weeks, with nothing wrong
+# --------------------------------------------------------------------------
+
+def _audit(tmp_path, monkeypatch, capsys, frames, baseline):
+    """Run the real handler on a temp store; return (document, exit_code)."""
+    import argparse
+    import json as _json
+    import sys as _sys
+    from types import SimpleNamespace
+
+    from test_data_status_freshness import _definition
+    from trader.container import Container
+    from trader.data.duckdb_store import DuckDBDataStore
+    from trader.data.universe import Universe, UniverseAccessor
+
+    history, main = str(tmp_path / 'history.duckdb'), str(tmp_path / 'main.duckdb')
+    store = DuckDBDataStore(history)
+    for key, frame in frames.items():
+        store.write(key, frame)
+    UniverseAccessor(main, 'Universes').update(
+        Universe('us', [_definition(int(key), f'S{key}') for key in frames]))
+    monkeypatch.setattr(Container, 'instance', classmethod(
+        lambda cls: SimpleNamespace(config=lambda: {
+            'duckdb_path': main, 'history_duckdb_path': history,
+            'universe_library': 'Universes'})))
+    recorded = tmp_path / 'baseline.json'
+    recorded.write_text(_json.dumps({'counts': baseline}))
+    monkeypatch.setattr(cli, 'DATA_QUALITY_BASELINE', recorded)
+    monkeypatch.setattr(cli, '_json_mode', True)
+    monkeypatch.setattr(_sys, 'argv', ['mmr', 'data', 'audit'])
+    code = 0
+    try:
+        cli._handle_data_audit(argparse.Namespace(bar_size=None, update_baseline=False, limit_symbols=0))
+    except SystemExit as stop:
+        code = int(stop.code or 0)
+    out = capsys.readouterr().out
+    return _json.loads(out), code            # json.loads fails on more than one document
+
+
+def _daily(days, empty=()):
+    import pandas as pd
+    index = pd.DatetimeIndex([pd.Timestamp(day, tz='America/New_York') for day in days])
+    frame = pd.DataFrame({'open': 10.0, 'high': 11.0, 'low': 9.0, 'close': 10.5, 'volume': 1000.0,
+                          'bar_size': '1 day'}, index=index)
+    for day in empty:
+        frame.loc[pd.Timestamp(day, tz='America/New_York'), ['open', 'high', 'low', 'close', 'volume']] = float('nan')
+    return frame
+
+
+class TestClosedDayMarkers:
+    def test_a_weekend_marker_is_not_a_finding(self, tmp_path, monkeypatch, capsys):
+        """One no-data marker is written for every weekend and holiday of every
+        IB-sourced series. Counted as `empty_bar` the total grew every week by
+        construction, so the gate could never pass its recorded baseline."""
+        frame = _daily(['2026-11-05', '2026-11-06', '2026-11-07', '2026-11-08', '2026-11-09'],
+                       empty=['2026-11-07', '2026-11-08'])          # Saturday, Sunday
+        document, code = _audit(tmp_path, monkeypatch, capsys, {'1': frame}, baseline={})
+        assert code == 0 and document['success'] is True
+        assert document['data']['counts'] == {}
+        assert document['data']['info'] == {'1 day|closed_day_marker': 2}
+
+    def test_an_empty_bar_on_a_session_day_is_still_a_finding(self, tmp_path, monkeypatch, capsys):
+        frame = _daily(['2026-11-05', '2026-11-06', '2026-11-09'], empty=['2026-11-06'])   # a Friday
+        document, code = _audit(tmp_path, monkeypatch, capsys, {'1': frame}, baseline={})
+        assert code == 1 and document['success'] is False
+        assert document['data']['counts'] == {'1 day|empty_bar': 1}
+        assert document['data']['regressions'] == {'1 day|empty_bar': [1, 0]}
+        (example,) = document['data']['recent']['1 day|empty_bar']
+        assert example['series'] == 'S1 (1)' and example['date'].startswith('2026-11-06')
+
+    def test_within_the_recorded_baseline_passes(self, tmp_path, monkeypatch, capsys):
+        frame = _daily(['2026-11-05', '2026-11-06', '2026-11-09'], empty=['2026-11-06'])
+        document, code = _audit(tmp_path, monkeypatch, capsys, {'1': frame},
+                                baseline={'1 day|empty_bar': 1})
+        assert code == 0 and document['data']['regressions'] == {}
+
+
+class TestStoreUsageAdvisory:
+    """The history database grew to 28.6 GiB for 5 GB of content and no check
+    said so. The nightly audit now reports dead space — as advice, never as a
+    finding: a red gate nobody can clear by fixing data gets switched off."""
+
+    def test_the_audit_reports_dead_space_without_failing(self, tmp_path, monkeypatch, capsys):
+        import duckdb
+
+        document, code = _audit(tmp_path, monkeypatch, capsys,
+                                {'101': _daily(['2026-11-09', '2026-11-10'])}, baseline={})
+        assert code == 0 and document['success'] is True
+        store = document['data']['store']
+        assert store['db'] == 'history.duckdb' and store['live_rows'] == 2
+        assert store['worth_compacting'] is False and store['legacy_indexes'] == []
+
+        con = duckdb.connect(str(tmp_path / 'history.duckdb'))
+        con.execute('CREATE INDEX idx_tick_data_symbol_date ON tick_data(symbol, date)')
+        con.close()
+        document, code = _audit(tmp_path, monkeypatch, capsys,
+                                {'101': _daily(['2026-11-09', '2026-11-10'])}, baseline={})
+        store = document['data']['store']
+        assert code == 0 and document['success'] is True               # advice, not a finding
+        assert store['worth_compacting'] is True and 'idx_tick_data_symbol_date' in store['reason']
+
+    def test_an_unreadable_store_report_never_breaks_the_audit(self, tmp_path, monkeypatch, capsys):
+        from trader.data import db_compact
+
+        def broken(path):
+            raise RuntimeError('storage report unavailable')
+
+        monkeypatch.setattr(db_compact, 'database_usage', broken)
+        document, code = _audit(tmp_path, monkeypatch, capsys,
+                                {'101': _daily(['2026-11-09', '2026-11-10'])}, baseline={})
+        assert code == 0 and document['success'] is True
+        assert document['data']['store'] == {
+            'error': 'RuntimeError: storage report unavailable', 'worth_compacting': False}

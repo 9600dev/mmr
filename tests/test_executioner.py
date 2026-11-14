@@ -125,7 +125,7 @@ class _BoomGate:
 async def test_trading_filter_rejection_blocks_order():
     """A denylist hit from the trading filter → no IB call, event logged."""
     class _Gate(_ApproveAllGate):
-        def check_instrument(self, symbol, exchange, sec_type):
+        def check_instrument(self, symbol, exchange, sec_type, primary_exchange=''):
             return RiskGateResult(approved=False, reason=f'{symbol} is blocked')
 
     ex, trader = _make_executioner_with_trader(risk_gate=_Gate())

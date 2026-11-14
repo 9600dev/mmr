@@ -19,6 +19,7 @@ mmr verify                       # non-zero exit on FAIL; --json for scripts
 
 # on-demand health read (the monitors exclude the heartbeat on purpose):
 ./scripts/last_pulse.sh          # non-zero exit if a pulse is stale/missing
+./scripts/pycron_status.py --all # scheduled jobs: last run of each; exit 1 on a failed/missed job
 
 # per-strategy scoreboard (realized needs no service; the live-vs-backtest ledger):
 mmr strategies pnl
@@ -32,6 +33,65 @@ escalation** — the stack won't trade the open without intervention.
 
 Container recreation (`./docker.sh -d && -u`, `-g`) kills exec-based monitor
 sessions — **re-arm both monitors immediately after**, then run `mmr verify`.
+`./docker.sh -u` on its own no longer recreates anything when the stack is
+already running (it used to `rm -f` both containers): it is safe to run against
+a live stack, and it is not a way to restart one — use `-d` then `-u`, or `-g`.
+
+## Scheduled jobs (pycron)
+
+pycron runs the nightly `data_refresh_*`, `data_audit`, `db_backup` and the
+`preflight_*` checks. Its own log, `pycron_cron.log`, is read by no monitor —
+`data_audit` exited non-zero 46 nights running there. What the monitors read
+instead is **`~/.local/share/mmr/logs/pycron_status.json`**, rewritten
+atomically on every poll (once a minute):
+
+- per job: `last_start`, `last_end`, `last_return_code`, `last_outcome`
+  (`success` / `failed` / `timeout` / `spawn_failed` / `interrupted` /
+  `stopped` / `unknown`), `last_success`, `consecutive_failures`,
+  `last_output_tail` (last 20 lines of stdout and stderr, credentials
+  blanked), `last_scheduled` (the latest scheduled instant accounted for),
+  `last_missed`, `missed_count`;
+- `scheduler.last_poll`: the heartbeat. If it stops advancing, nothing is
+  being scheduled, whatever `docker ps` or the port-7425 check says.
+
+The same per-job fields are on the status page (`http://<host>:7425/`).
+
+`scripts/monitor_health.sh` prints a `[monitor_health] pycron: ...` line when
+any of these change (and `pycron: scheduled jobs OK` when they clear):
+
+| Line | Meaning | Do |
+|---|---|---|
+| `<job> FAILED rc=N at … (K in a row; last success …) \| <last output line>` | the last run exited non-zero | read `last_output_tail` in the status file, then `pycron_cron.log` for the full tail |
+| `<job> TIMED OUT …` | exceeded `timeout_minutes`; its process group was killed | a hung vendor call or IB pacing; the next scheduled run starts normally |
+| `<job> COULD NOT START …` | the command could not be launched (3 attempts) | usually a bad `command` / `working_directory` in pycron.yaml |
+| `<job> INTERRUPTED …` | the scheduler stopped while the job was running (a deploy mid-refresh) | re-run it by hand if it matters: `docker exec … mmr data refresh …` |
+| `<job> MISSED its … run (not run since)` | the scheduled instant passed while the stack was down or the host asleep, and it was outside `catch_up_minutes` (or the job has none) | run it by hand, or wait for the next one |
+| `scheduler has not polled since …` | pycron is hung or dead | `docker logs mmr-mmr-1`, `pycron_cron.log` |
+| `side service pycron was stopped by the restart circuit-breaker (…)` | pycron crash-looped (typically a typo in `~/.config/mmr/pycron.yaml`); the trading services were deliberately left running | fix the cause, then restart the stack — until then **no scheduled job runs** |
+
+**A `data_audit FAILED` line is an escalation**: it means the stored bars
+regressed against the recorded baseline (or the audit itself broke), and
+backtests read those bars.
+
+The audit's JSON also carries a `store` block — how much of the history
+database file is dead space. It is advice, never a failure. When it says
+`worth_compacting: true` (most stored rows dead, or the file still carries the
+old unused index), run `mmr data compact` to see the figures and
+`mmr data compact --apply` while no market is in session: it rebuilds the file,
+verifies every table against the original before swapping, and keeps the
+replaced file beside the new one until you delete it. The live file reached
+28.6 GiB for 5 GB of content before anything reported it (2026-11-14).
+
+Catch-up: a job with `catch_up_minutes: N` in pycron.yaml whose scheduled
+instant passed unrun is run once when the scheduler is back, if the instant is
+at most N minutes old — `CATCH-UP job …` at WARNING in `pycron_cron.log`,
+`last_scheduled_action: catch_up` in the status file. Catch-up runs start five
+minutes after the scheduler does (so they do not collide with the services
+starting), one at a time, oldest first. Outside the window the job is not run
+and `MISSED job …` is logged once. The template sets 240 minutes for the
+refresh, audit and backup jobs and none for the preflights; **a live
+`~/.config/mmr/pycron.yaml` written before 2026-11-14 has neither key and
+keeps the old behaviour (never run late, no timeout) until they are added.**
 
 ## Gateway recovery
 
@@ -80,6 +140,7 @@ follow the newest session file and switch automatically after a restart.
 | IB connectivity (1100/1102/2110/2157), farm status, reconnects | `trader_service_<ts>.log` (incl. the `ibreactivex` logger) |
 | trader pulse (`pulse ib_connected=…`) | `trader_service_<ts>.log` |
 | all ERROR+ from any named logger | `errors.log` (plus the service file) |
+| scheduled jobs: last result of each, missed runs, scheduler heartbeat | `pycron_status.json` (read by `monitor_health.sh`); full output in `pycron_cron.log` |
 | ib_async internals (incl. G5's harmless `KeyError: 81` decoder noise) | console + `logs/debug.log` only |
 | 10197 competing live session: first per outage at ERROR, per-contract repeats at WARNING, then `market data still dark ... re-requested N` / `RECOVERED` | `trader_service_<ts>.log` (`ibreactivex`); only the first reaches `errors.log` |
 | everything, all levels, one cross-session file | `logs/debug.log` (not session-stamped; rotates in place) |

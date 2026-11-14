@@ -68,7 +68,11 @@ def _ib_positions() -> Dict[str, float]:
     """symbol -> quantity from trader_service (D13 reconciliation source).
     Any failure to read is raised: the caller must refuse, not guess."""
     from trader.sdk import MMR
-    df = MMR().positions()
+    # connect() is what opens the RPC socket; a bare MMR() raised
+    # "Not connected" every time, so `track`/`rebuild` always refused and the
+    # paper ledger could never be written (tests stubbed this function out).
+    with MMR() as mmr:
+        df = mmr.positions()
     out: Dict[str, float] = {}
     if df is None or len(df) == 0:
         return out

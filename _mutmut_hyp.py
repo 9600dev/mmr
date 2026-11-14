@@ -43,3 +43,19 @@ settings.register_profile(
     ],
 )
 settings.load_profile("mutmut")
+
+
+# --- pytest >= 9.2 compatibility for mutmut 3.6.0 ---------------------------
+#
+# mutmut's stats plugin reads the PRIVATE ``item._nodeid`` to map each mutated
+# function to the tests that cover it. pytest 9.2 replaced that attribute with
+# a structured ``_id`` behind the public ``nodeid`` property, so the stats pass
+# died on its first test ("'Function' object has no attribute '_nodeid'") and
+# the whole mutation gate reported every module as "not checked" — found the
+# day the libraries were upgraded (2026-11-14). mutmut is pinned to exactly
+# 3.6.0 because scripts/run_mutation.py patches its internals, so the alias
+# lives here, in the one module that is only ever loaded for a mutation run.
+import _pytest.nodes as _nodes
+
+if not hasattr(_nodes.Node, "_nodeid"):
+    _nodes.Node._nodeid = property(lambda self: self.nodeid)  # type: ignore[attr-defined]

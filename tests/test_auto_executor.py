@@ -6036,3 +6036,221 @@ def test_native_fractional_close_replay_preserves_owned_average(native_submit_ow
         assert checkpoints == {closing['intent_id']: 1.5}
     assert len(ctx.server.placed) == 2 and ctx.server.inventory == 100.5
     assert ctx.server.inventory - half['quantity'] == 100
+
+
+class TestCleanRefusalsDoNotJamTheKey:
+    """2026-11-14 audit. A refusal that provably sent nothing must not be filed
+    UNKNOWN: an UNKNOWN intent with no order id reserves the (strategy, conId)
+    key — no stop repair, no close, no open — until an operator resolves it."""
+
+    def test_a_not_submitted_protective_refusal_is_rejected_and_retried(self, executor):
+        ex, sdk = executor
+        # The trader's wording for a deferred stop: no 'reject', no 'refus'.
+        refusal = FakeResult(ok=False, error='DEFERRED: SELL 140 not placed: all 140 held are '
+                                             'reserved by working reductions owned elsewhere [41]')
+        refusal.not_submitted = True
+        sdk.protective_result = refusal
+        ex._process_signal(make_work())
+        intents = ex.intents.all(strategy='orb_test', conid=1111, kind='PROTECTIVE')
+        assert [i['status'] for i in intents] == ['REJECTED']
+        assert ex.intents.all(strategy='orb_test', conid=1111, kind='PROTECTIVE', active=True) == []
+        # ...so once the trader will take it, the very next pass places the stop.
+        sdk.protective_result = None
+        ex._process_bar(BarWork('orb_test', 1111, TS + pd.Timedelta(minutes=1), 1))
+        assert ex.state.open_position('orb_test', 1111)['protective_order_id'] == 900
+
+    def test_an_ambiguous_protective_failure_still_reserves_the_key(self, executor):
+        ex, sdk = executor
+        sdk.protective_result = FakeResult(ok=False, error='UNKNOWN: protective intent x: timeout')
+        ex._process_signal(make_work())
+        active = ex.intents.all(strategy='orb_test', conid=1111, kind='PROTECTIVE', active=True)
+        assert [i['status'] for i in active] == ['UNKNOWN']
+
+    def test_repeated_refusals_back_off(self, executor):
+        ex, sdk = executor
+        refusal = FakeResult(ok=False, error='broker rejected: no route')
+        sdk.protective_result = refusal
+        ex._process_signal(make_work())                                   # failure 1: retry is immediate
+        ex._process_bar(BarWork('orb_test', 1111, TS + pd.Timedelta(minutes=1), 1))   # failure 2
+        attempts = len(sdk.protective_calls)
+        assert attempts == 2
+        ex._process_bar(BarWork('orb_test', 1111, TS + pd.Timedelta(minutes=2), 2))   # inside the backoff
+        assert len(sdk.protective_calls) == attempts
+        assert ex._retry_blocked('protective', 'orb_test', 1111)
+        ex._retry_cleared('protective', 'orb_test', 1111)
+        assert not ex._retry_blocked('protective', 'orb_test', 1111)
+
+    def test_one_failing_holding_does_not_abort_the_management_pass(self, executor, caplog):
+        ex, _sdk = executor
+        seen = []
+
+        def boom(intent):
+            raise RuntimeError('identity no longer resolves')
+
+        ex._isolated('advance close', {'strategy': 's', 'conid': 1, 'intent_id': 'a'}, boom)
+        ex._isolated('advance close', {'strategy': 's', 'conid': 2, 'intent_id': 'b'}, seen.append)
+        assert [i['conid'] for i in seen] == [2]
+
+
+# --------------------------------------------------------------------------
+# 2026-11-14 helpers, pinned directly: the first mutation pass after they were
+# added left `_confirmed_absent` with thirteen surviving mutants and no test
+# that named it.
+# --------------------------------------------------------------------------
+
+def _bare_executor():
+    """One method under test; nothing else constructed."""
+    return AutoExecutor.__new__(AutoExecutor)
+
+
+class TestConfirmedAbsent:
+    """A holding is declared CLOSED_EXTERNALLY — attribution stripped, stop
+    cancelled — only on a FRESH, COMPLETE broker read that shows no long."""
+
+    @staticmethod
+    def _executor(snapshot, complete=True, raises=None):
+        ex = _bare_executor()
+        ex._snapshot_cache = {'stale': 'a read taken before the fill'}
+        seen = []
+
+        def read():
+            seen.append(ex._snapshot_cache)                # what the read could have reused
+            if raises is not None:
+                raise raises
+            return snapshot, complete
+
+        ex._position_snapshot = read
+        return ex, seen
+
+    def test_the_cached_snapshot_is_dropped_before_the_read(self):
+        ex, seen = self._executor({1111: 0.0})
+        assert ex._confirmed_absent(1111) is True
+        assert seen == [None], 'the read must not be answered from the per-pass cache'
+
+    @pytest.mark.parametrize('snapshot', [{}, {1111: 0.0}, {1111: -25.0}, {2222: 100.0}])
+    def test_no_long_holding_on_a_complete_read_is_absent(self, snapshot):
+        ex, _ = self._executor(snapshot)
+        assert ex._confirmed_absent(1111) is True
+
+    @pytest.mark.parametrize('held', [100.0, 1.0, 1e-9])
+    def test_any_long_holding_is_present(self, held):
+        ex, _ = self._executor({1111: held})
+        assert ex._confirmed_absent(1111) is False
+
+    def test_an_incomplete_read_confirms_nothing_even_when_it_shows_flat(self):
+        ex, _ = self._executor({}, complete=False)
+        assert ex._confirmed_absent(1111) is False
+
+    @pytest.mark.parametrize('held', [float('nan'), float('inf'), float('-inf')])
+    def test_an_unreadable_quantity_confirms_nothing(self, held):
+        ex, _ = self._executor({1111: held})
+        assert ex._confirmed_absent(1111) is False
+
+    def test_an_unavailable_broker_confirms_nothing_and_says_so(self, caplog):
+        ex, _ = self._executor({}, raises=ConnectionError('trader_service timed out'))
+        with caplog.at_level(logging.WARNING):
+            assert ex._confirmed_absent(1111) is False
+        message = '\n'.join(record.getMessage() for record in caplog.records)
+        assert '1111' in message and 'not confirmed' in message and 'trader_service timed out' in message
+
+    def test_the_instrument_is_looked_up_by_integer_conid(self):
+        ex, _ = self._executor({1111: 100.0})
+        assert ex._confirmed_absent('1111') is False        # a text conId is still that instrument
+
+
+class TestRetryBackoff:
+    """A cleanly refused close or stop is retried, but not on every pass."""
+
+    @staticmethod
+    def _clock(monkeypatch, start=1000.0):
+        from trader.strategy import auto_executor as module
+        now = {'t': start}
+        monkeypatch.setattr(module.time, 'monotonic', lambda: now['t'])
+        return now
+
+    def test_nothing_is_blocked_before_a_failure(self, monkeypatch):
+        self._clock(monkeypatch)
+        ex = _bare_executor()
+        assert ex._retry_blocked('close', 'orb', 1111) is False
+
+    def test_the_first_retry_is_immediate_then_the_delays_follow_the_table(self, monkeypatch):
+        now = self._clock(monkeypatch)
+        ex = _bare_executor()
+        assert AutoExecutor.RETRY_BACKOFF_S == (0.0, 5.0, 10.0, 20.0, 40.0, 60.0)
+        observed = []
+        for _ in range(8):
+            ex._retry_failed('close', 'orb', 1111)
+            failures, until = ex._retry_backoff[('close', 'orb', 1111)]
+            observed.append((failures, until - now['t']))
+        assert observed == [(1, 0.0), (2, 5.0), (3, 10.0), (4, 20.0), (5, 40.0), (6, 60.0),
+                            (7, 60.0), (8, 60.0)], 'capped at the last entry, never past it'
+
+    def test_blocked_until_the_delay_has_passed_and_not_after(self, monkeypatch):
+        now = self._clock(monkeypatch)
+        ex = _bare_executor()
+        ex._retry_failed('close', 'orb', 1111)                    # delay 0: not blocked
+        assert ex._retry_blocked('close', 'orb', 1111) is False
+        ex._retry_failed('close', 'orb', 1111)                    # delay 5
+        assert ex._retry_blocked('close', 'orb', 1111) is True
+        now['t'] += 4.999
+        assert ex._retry_blocked('close', 'orb', 1111) is True
+        now['t'] += 0.001
+        assert ex._retry_blocked('close', 'orb', 1111) is False, 'due exactly at the deadline'
+
+    def test_backoff_is_per_kind_strategy_and_instrument(self, monkeypatch):
+        self._clock(monkeypatch)
+        ex = _bare_executor()
+        for _ in range(2):
+            ex._retry_failed('close', 'orb', 1111)
+        assert ex._retry_blocked('close', 'orb', 1111) is True
+        assert ex._retry_blocked('protective', 'orb', 1111) is False
+        assert ex._retry_blocked('close', 'vwap', 1111) is False
+        assert ex._retry_blocked('close', 'orb', 2222) is False
+        assert ex._retry_blocked('close', 'orb', '1111') is True      # same instrument, text conId
+
+    def test_clearing_forgets_the_failures_and_only_that_key(self, monkeypatch):
+        now = self._clock(monkeypatch)
+        ex = _bare_executor()
+        for key in (('close', 'orb', 1111), ('protective', 'orb', 1111)):
+            ex._retry_failed(*key)
+            ex._retry_failed(*key)
+        ex._retry_cleared('close', 'orb', 1111)
+        assert ex._retry_blocked('close', 'orb', 1111) is False
+        assert ex._retry_blocked('protective', 'orb', 1111) is True
+        ex._retry_cleared('close', 'orb', 9999)                       # an unknown key is not an error
+        ex._retry_failed('close', 'orb', 1111)                        # and the count starts again
+        assert ex._retry_backoff[('close', 'orb', 1111)] == (1, now['t'])
+
+
+class TestIsolatedStep:
+    """One holding's exception must not end the management pass for the rest."""
+
+    def test_a_failing_step_is_logged_with_its_holding_and_does_not_raise(self, caplog):
+        ex = _bare_executor()
+        intent = {'strategy': 'orb', 'conid': 1111, 'intent_id': 'close:abc'}
+
+        def step(received):
+            assert received is intent
+            raise RuntimeError('snapshot RPC timed out')
+
+        with caplog.at_level(logging.ERROR):
+            ex._isolated('time exit', intent, step)
+        message = '\n'.join(record.getMessage() for record in caplog.records)
+        assert 'time exit failed for orb/1111' in message and 'close:abc' in message
+        assert 'other holdings continue' in message
+        assert any(record.exc_info for record in caplog.records), 'the traceback is kept'
+
+    def test_a_working_step_runs_once_with_the_intent(self):
+        ex = _bare_executor()
+        calls = []
+        ex._isolated('time exit', {'strategy': 'orb'}, calls.append)
+        assert calls == [{'strategy': 'orb'}]
+
+    def test_an_interrupt_is_not_swallowed(self):
+        ex = _bare_executor()
+
+        def step(_intent):
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            ex._isolated('time exit', {}, step)

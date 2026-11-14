@@ -1542,16 +1542,46 @@ class AutoExecutor:
         self._retry_emergency_exits()
         self._reconciled = False
         self._reconcile_once()
+        # Each holding is managed on its own: an exception while advancing ONE
+        # instrument's close (a catalogue edit that makes its identity
+        # unresolvable, a malformed stored payload) used to abort the pass, so
+        # every other position's exit and stop repair stopped with it.
         for intent in self.intents.all(kind='CLOSE', active=True):
-            self._advance_close(intent)
+            self._isolated('advance close', intent, self._advance_close)
         # Broker completion is separate from fulfilling the retained exit
         # request. A smaller old order can fill while a newer due request or
         # an unresolved opening still leaves owned inventory to reduce.
         for intent in self.intents.all(kind='CLOSE'):
-            self._finish_close_request(intent)
+            self._isolated('finish close request', intent, self._finish_close_request)
         for strategy, conid, _qty, _entry, _protective in self.state.all_open():
             self._ensure_protective(strategy, int(conid))
         self._load_open_view()
+
+    def _isolated(self, what: str, intent: dict, step: Callable[[dict], Any]) -> None:
+        try:
+            step(intent)
+        except Exception:
+            logging.exception('auto-executor: %s failed for %s/%s (intent %s); other holdings continue',
+                              what, intent.get('strategy'), intent.get('conid'), intent.get('intent_id'))
+
+    # Retry spacing after a clean refusal, per (kind, strategy, conid). A
+    # refused close or stop is retried — that is the point — but it used to be
+    # retried on EVERY management pass: a new intent, a new proposal and a
+    # cancel/replace of the stop each second for as long as the cause lasted.
+    RETRY_BACKOFF_S = (0.0, 5.0, 10.0, 20.0, 40.0, 60.0)   # first retry is immediate
+
+    def _retry_blocked(self, kind: str, strategy: str, conid: int) -> bool:
+        entry = self._volatile('_retry_backoff', dict).get((kind, strategy, int(conid)))
+        return entry is not None and time.monotonic() < entry[1]
+
+    def _retry_failed(self, kind: str, strategy: str, conid: int) -> None:
+        table = self._volatile('_retry_backoff', dict)
+        failures = table.get((kind, strategy, int(conid)), (0, 0.0))[0] + 1
+        delay = self.RETRY_BACKOFF_S[min(failures, len(self.RETRY_BACKOFF_S)) - 1]
+        table[(kind, strategy, int(conid))] = (failures, time.monotonic() + delay)
+
+    def _retry_cleared(self, kind: str, strategy: str, conid: int) -> None:
+        self._volatile('_retry_backoff', dict).pop((kind, strategy, int(conid)), None)
 
     def _claim_overflow_exits(self):
         with self._view_lock:
@@ -1603,6 +1633,12 @@ class AutoExecutor:
             if held <= 0:
                 # Pending entry fills may arrive after this position snapshot.
                 if self.intents.all(strategy=strategy, conid=int(conid), kind='OPEN', active=True):
+                    continue
+                # ...and a fill that was APPLIED after it leaves no active
+                # intent to say so. Absence is destructive (attribution is
+                # stripped and nothing restores it), so it is only believed on
+                # a read taken after the intents above were reconciled.
+                if not self._confirmed_absent(int(conid)):
                     continue
                 if not self._cancel_protective(strategy, int(conid), protective_id,
                                                'externally closed position'):
@@ -1927,6 +1963,17 @@ class AutoExecutor:
                 # An opening the trader deferred was, by contract, never sent;
                 # it is a clean refusal, not a reservation that blocks the key.
                 explicit_rejection = True
+            if getattr(result, 'not_submitted', False) is True:
+                # approve() states outright that nothing reached the broker
+                # (it failed before placement, or the server refused and
+                # reserved no order). The wording test above only recognises
+                # 'reject' / 'refus' / 'risk gate', so "post-trade leverage
+                # exceeds limit", "is on the denylist", "No valid quantity" or
+                # a failed symbol resolution were all filed UNKNOWN — which
+                # reserves the key: no later open, and for a close no retry
+                # and no stop (it was cancelled first). REJECTED lets the next
+                # pass retry the exit and re-place protection.
+                explicit_rejection = True
             self.intents.update(intent, status='REJECTED' if explicit_rejection else 'UNKNOWN', error=error)
             self.state.log_decision(intent['strategy'], intent['conid'],
                                     dt.datetime.fromisoformat(payload['bar_ts']), action,
@@ -1934,6 +1981,8 @@ class AutoExecutor:
             if explicit_rejection:
                 self._append_event(EventType.ORDER_REJECTED, intent['strategy'], intent['conid'],
                                    action, payload.get('quantity') or 0.0, error)
+                if action == 'SELL':
+                    self._retry_failed('close', intent['strategy'], intent['conid'])
             return
         obj = result.obj
         order_ids = obj.get('order_ids', []) if isinstance(obj, dict) else (obj or [])
@@ -1949,6 +1998,8 @@ class AutoExecutor:
                          payload.get('deferred_count', 0))
         self.intents.update(intent, status='WORKING', order_ids=[int(oid) for oid in order_ids],
                             receipt_observed_at=time.time(), **cleared)
+        if action == 'SELL':
+            self._retry_cleared('close', intent['strategy'], intent['conid'])
         self.state.log_decision(intent['strategy'], intent['conid'],
                                 dt.datetime.fromisoformat(payload['bar_ts']), action,
                                 'open' if action == 'BUY' else 'close', f'proposal #{proposal_id}; awaiting fills',
@@ -2323,6 +2374,10 @@ class AutoExecutor:
         # Leave this request durable until that attempt's outcome is known.
         if self.intents.all(strategy=strategy, conid=conid, kind='CLOSE', active=True):
             return
+        # The previous attempt was refused: the request stays durable and is
+        # re-attempted, but spaced out (protection is repaired in between).
+        if self._retry_blocked('close', strategy, conid):
+            return
         next_intent = self.intents.create(strategy, conid, 'CLOSE',
             dict(bar_ts=request['bar_ts'], quantity=position['quantity'], reason=request['reason'],
                  ident=self._resolve_exact(conid), policy_entry_bar_ts=request.get('policy_entry_bar_ts'),
@@ -2462,6 +2517,8 @@ class AutoExecutor:
             if not math.isfinite(broker_qty):
                 return
             qty = reducible_quantity(position['quantity'], broker_qty)
+            if qty <= 0 and not self._confirmed_absent(conid):
+                return
             if qty <= 0:
                 self.state.record_close(strategy, conid, 'CLOSED_EXTERNALLY',
                                         'complete broker snapshot confirms no reducible holding')
@@ -2776,6 +2833,31 @@ class AutoExecutor:
                     logging.error('auto-executor: emergency reduction remains pending: %s', result.error)
             except Exception:
                 logging.exception('auto-executor: emergency reduction pending; no local durability claim')
+
+    def _confirmed_absent(self, conid: int) -> bool:
+        """True only when a FRESH, complete broker read shows no long holding.
+
+        The per-pass snapshot cache is filled early in a management pass (by
+        protective adoption), before the intents are reconciled. A first fill
+        that lands in between is applied from an intent-scoped read — the OPEN
+        intent goes FILLED, the holding is recorded — while the cached global
+        snapshot still shows the instrument flat. Judged on that cache the new
+        position was marked CLOSED_EXTERNALLY: attribution stripped for good,
+        its stop cancelled, the shares left at the broker unmanaged, and the
+        next BUY doubled them (review 2026-11-14, reproduced against the real
+        executor). The extra read happens only on this destructive branch.
+        """
+        self._snapshot_cache = None
+        try:
+            broker, complete = self._position_snapshot()
+        except Exception as exc:
+            logging.warning('auto-executor: absence of %s not confirmed (broker unavailable: %s)',
+                            conid, exc)
+            return False
+        if not complete:
+            return False
+        held = broker.get(int(conid), 0.0)
+        return math.isfinite(held) and held <= 0
 
     def _execution_snapshot(self, intent=None):
         sdk = self._get_sdk()
@@ -3422,6 +3504,8 @@ class AutoExecutor:
             pos = self.state.open_position(strategy, conid)
             if not pos or self._closes_blocking_protection(strategy, conid):
                 return
+            if self._retry_blocked('protective', strategy, conid):
+                return
             snapshot = self._execution_snapshot()
             if not snapshot.get('complete', False):
                 return
@@ -3485,21 +3569,35 @@ class AutoExecutor:
             if pos.get('ownership_epoch') is None:
                 self._warn_ownership_pending(strategy, conid, 'legacy holding')
                 return
+            # Resolve BEFORE claiming the intent: a failure here used to leave a
+            # SUBMITTING intent with no order id, which nothing could resolve.
+            ident = self._resolve_exact(conid)
             intent = self.intents.create(strategy, conid, 'PROTECTIVE',
                                         dict(bar_ts=timestamp_text(pos['entry_bar_ts']), quantity=plan.quantity,
                                              stop_price=plan.stop_price, ownership_epoch=pos['ownership_epoch'],
                                              ownership_started_at=pos.get('ownership_started_at')), status='SUBMITTING')
             result = sdk.place_protective_order(
-                symbol=self._resolve_exact(conid)['symbol'], action='SELL', quantity=plan.quantity,
+                symbol=ident['symbol'], action='SELL', quantity=plan.quantity,
                 order_type='STP', aux_price=plan.stop_price, tif='GTC',
-                **{key: self._resolve_exact(conid)[key] for key in ('sec_type', 'exchange', 'currency')},
+                **{key: ident[key] for key in ('sec_type', 'exchange', 'currency')},
                 con_id=conid, order_ref=strategy, client_intent_id=intent['intent_id'])
             self._snapshot_cache = None
             if not result.is_success():
                 error = str(result.error)
                 rejected = ('reject' in error.lower() or 'refus' in error.lower()) and not any(
                     word in error.lower() for word in ('unknown', 'timeout', 'connection'))
+                # The trader states when nothing was sent (a DEFERRED stop, a
+                # quantity that exceeds the live position, an order that does
+                # not reduce it). Filed UNKNOWN with no order id, such an
+                # intent blocked the stop's own repair, every close and every
+                # open for the key until an operator resolved it by hand.
+                if getattr(result, 'not_submitted', False) is True:
+                    rejected = True
                 self.intents.update(intent, status='REJECTED' if rejected else 'UNKNOWN', error=error)
+                if rejected:
+                    self._retry_failed('protective', strategy, conid)
+                    logging.warning('auto-executor: protective stop for %s/%s refused (%s); retrying with backoff',
+                                    strategy, conid, error)
                 return
             order_id = int(getattr(getattr(result.obj, 'order', None), 'orderId', 0) or 0)
             if not order_id:
@@ -3507,6 +3605,7 @@ class AutoExecutor:
                 return
             self.intents.update(intent, status='WORKING', order_ids=[order_id])
             self.state.set_protective(strategy, conid, order_id)
+            self._retry_cleared('protective', strategy, conid)
         except Exception:
             logging.exception('auto-executor: protection repair deferred for %s conId %s', strategy, conid)
 

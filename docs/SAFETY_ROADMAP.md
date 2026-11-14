@@ -164,6 +164,25 @@ File: `trader/messaging/clientserver.py`. Tests:
   also dependency-version-dependent. The robust end state is replacing the
   dill fallback with an **explicit codec for the known wire types** (tranche
   2); until then the denylist/frozenset must be revisited on dependency bumps.
+- **2026-11-14 — the residual was real; the two bullets above describe the
+  boundary as it WAS** (`docs/AUDIT_2026-11-14.md` B2.1). A reviewer drove the
+  real `unpack()` to a file truncation (`numpy.memmap(path, 'w+')`), a file
+  write (`getattr(ndarray, 'tofile')`), an arbitrary call (`DataFrame.eval`)
+  and a `setattr` on the live `RiskLimits` class (BUILD); fixing those turned
+  up command execution through `dill._dill._create_namedtuple('Popen', (),
+  'subprocess')` — one of the "hand-audited" reconstructors — and two numpy
+  `__setstate__` segfaults. The boundary now enforces at the instruction that
+  does the work, not only at name resolution: names are an EXACT
+  `(module, qualname)` table (`_DILL_GLOBALS`; no prefixes, no pandas, four
+  numpy names), REDUCE calls only what that table resolved (by identity) and
+  only with checked arguments, dataclasses are allocated and never
+  constructed, `getattr` returns one exact `(owner, attribute)` pair, BUILD
+  writes only to an object the same payload allocated, and numpy state is
+  validated before numpy sees it. That needs the pure-Python unpickler (the C
+  one exposes only `find_class`): a Ticker decodes in 0.14 ms instead of
+  0.02 ms. The allowlist is still dependency-version-dependent, now loudly:
+  `tests/wire_corpus.py` + `TestAllowlistShape` fail the suite when a library
+  moves or adds a wire class. The explicit codec remains the end state.
 - **Poisoned payloads produce structured errors, not silent death.** An
   undeserializable RPC request gets an error *reply* (req_id recovered from
   the msgpack framing) so the client sees `DillDeserializationError` with the

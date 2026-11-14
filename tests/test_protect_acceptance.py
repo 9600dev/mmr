@@ -152,3 +152,218 @@ async def test_unroutable_contract_refused_before_cancelling_protection(tmp_path
     assert not result.is_success()
     trader.client.ib.cancelOrder.assert_not_called()
     assert trader.placed[0].orderStatus.status == 'Submitted'
+
+
+# --------------------------------------------------------------------------
+# AUDIT_2026-11-14 B1.9: the displaced stop was put back on ONE failure path
+# (IB rejecting the replacement). A replacement that failed any other way left
+# the position unprotected, and the error did not say the old stop was gone.
+# --------------------------------------------------------------------------
+
+def _fail_placement_when(trader, predicate, error):
+    """Make the fake broker raise ``error`` for orders matching predicate."""
+    original = trader.client.subscribe_place_order.side_effect
+
+    async def place(contract, order):
+        if predicate(contract, order):
+            raise error
+        return await original(contract, order)
+
+    trader.client.subscribe_place_order.side_effect = place
+
+
+def _working(trader):
+    return [t for t in trader.placed if t.orderStatus.status == 'Submitted']
+
+
+@pytest.mark.asyncio
+async def test_a_send_without_a_receipt_reports_the_cancelled_stop_and_places_nothing_beside_it(tmp_path):
+    """The broker call failed after coordination had cancelled the old stop.
+    Whether the replacement went out is unknown, so nothing is re-placed (a
+    restored stop would cancel the replacement if it IS working) — but the
+    failure used to read as a bare "UNKNOWN: ... no receipt", with no word that
+    the working stop was gone."""
+    trader = _fast(_coordinated_trader(tmp_path, held=100))
+    stop = await trader.place_standalone_order(_stock(), 'SELL', 100, 'STP', aux_price=8, order_ref='proposal')
+    assert stop.is_success(), stop.error
+    _fail_placement_when(trader, lambda c, o: o.orderType == 'TRAIL', ValueError('broker refused the request'))
+
+    result = await trader.place_standalone_order(_stock(), 'SELL', 100, 'TRAIL', trailing_percent=5)
+
+    assert not result.is_success() and 'UNKNOWN' in result.error
+    assert f'[{stop.obj.order.orderId}] were CANCELLED' in result.error and 'NOT re-placed' in result.error
+    assert 'broker refused the request. Working exit' in result.error        # one sentence each
+    assert _working(trader) == []
+
+
+@pytest.mark.asyncio
+async def test_a_replacement_that_provably_was_not_sent_restores_the_displaced_stop(tmp_path):
+    """A clean failure after the old stop was cancelled (nothing reached the
+    broker): the stop goes back, exactly as it does when IB rejects."""
+    trader = _fast(_coordinated_trader(tmp_path, held=100))
+    stop = await trader.place_standalone_order(_stock(), 'SELL', 100, 'STP', aux_price=8, order_ref='proposal')
+    assert stop.is_success(), stop.error
+    stop_trade = stop.obj
+    original = trader.executioner.subscribe_place_order_direct
+
+    async def refuse_the_replacement(approved):
+        if approved.order.orderType != 'TRAIL':
+            return await original(approved)
+        # What coordination does before a later, clean refusal of the same order.
+        stop_trade.orderStatus.status = 'Cancelled'
+        trader.order_tracker.on_trade(stop_trade)                 # the broker's cancel confirmation
+        trader.executioner._displaced = [(stop_trade.contract, stop_trade.order, 100.0)]
+        return rx.throw(RuntimeError('order journal refused the reservation'))
+
+    trader.executioner.subscribe_place_order_direct = refuse_the_replacement
+
+    result = await trader.place_standalone_order(_stock(), 'SELL', 100, 'TRAIL', trailing_percent=5)
+
+    assert not result.is_success() and 'order journal refused the reservation' in result.error
+    assert 're-placed' in result.error and 'UNPROTECTED' not in result.error and 'NOT re-placed' not in result.error
+    working = _working(trader)
+    assert [(t.order.orderType, t.order.auxPrice, t.order.totalQuantity) for t in working] == [('STP', 8, 100)]
+    assert working[0].order.orderId != stop_trade.order.orderId
+
+
+@pytest.mark.asyncio
+async def test_a_failure_with_nothing_displaced_reads_as_before(tmp_path):
+    trader = _fast(_coordinated_trader(tmp_path, held=100))
+    _fail_placement_when(trader, lambda c, o: True, ValueError('broker refused the request'))
+    result = await trader.place_standalone_order(_stock(), 'SELL', 100, 'STP', aux_price=8)
+    assert not result.is_success()
+    assert 'CANCELLED' not in result.error and 'UNPROTECTED' not in result.error and 're-placed' not in result.error
+
+
+class TestAccountForDisplaced:
+    """The reporting rule on its own: restore only when the replacement
+    provably is not working; otherwise report, never re-place."""
+
+    @staticmethod
+    def _runtime(restored=(), lost=()):
+        from types import SimpleNamespace
+        from trader.trading.trading_runtime import Trader
+
+        calls = []
+
+        async def restore(displaced):
+            calls.append(list(displaced))
+            return list(restored), list(lost)
+
+        runtime = SimpleNamespace(_restore_displaced=restore)
+        runtime._account_for_displaced = Trader._account_for_displaced.__get__(runtime)
+        return runtime, calls
+
+    @staticmethod
+    def _displaced(order_id=41):
+        from types import SimpleNamespace
+        return [(_stock(), SimpleNamespace(orderId=order_id), 100.0)]
+
+    @pytest.mark.asyncio
+    async def test_nothing_displaced_is_no_text_and_no_restore(self):
+        runtime, calls = self._runtime()
+        assert await runtime._account_for_displaced([], 'X', restore=True) == ''
+        assert await runtime._account_for_displaced([], 'X', restore=False) == ''
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_unknown_outcome_reports_and_never_replaces(self):
+        runtime, calls = self._runtime(restored=[99])
+        text = await runtime._account_for_displaced(self._displaced(41), 'X', restore=False)
+        assert calls == []
+        assert '[41]' in text and 'NOT re-placed' in text and 'mmr orders' in text and ' X ' in text
+
+    @pytest.mark.asyncio
+    async def test_restore_reports_both_what_came_back_and_what_did_not(self):
+        runtime, calls = self._runtime(restored=[99], lost=[42])
+        text = await runtime._account_for_displaced(self._displaced(41) + self._displaced(42), 'X', restore=True)
+        assert len(calls) == 1 and len(calls[0]) == 2
+        assert 're-placed as [99]' in text and '[42] WAS CANCELLED AND COULD NOT BE RESTORED' in text
+        assert 'X IS UNPROTECTED' in text
+
+
+# --------------------------------------------------------------------------
+# The manual close path (`mmr close` / `sell`): a close displaces the
+# operator's own stop. When the close then failed, the reply named the failure
+# and nothing else — position still held, stop gone, operator not told.
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_failed_manual_close_says_the_stop_it_cancelled_is_gone(tmp_path):
+    from trader.messaging.trader_service_api import TraderServiceApi
+
+    trader = _fast(_coordinated_trader(tmp_path, held=100))
+    stop = await trader.place_standalone_order(_stock(), 'SELL', 100, 'STP', aux_price=8)
+    assert stop.is_success(), stop.error
+    _fail_placement_when(trader, lambda c, o: o.orderType == 'MKT', ValueError('broker refused the request'))
+    try:
+        result = await TraderServiceApi(trader).place_order_simple(
+            _stock(), 'SELL', equity_amount=None, quantity=100, limit_price=None, market_order=True)
+    finally:
+        trader.order_tracker.close(timeout=1)
+
+    assert not result.is_success()
+    assert 'broker refused the request' in result.error
+    assert f'[{stop.obj.order.orderId}] were CANCELLED' in result.error
+    assert 'NOT re-placed' in result.error and 'mmr orders' in result.error
+    assert _working(trader) == []                # and it did not put a second reduction beside an unknown one
+
+
+@pytest.mark.asyncio
+async def test_a_successful_manual_close_still_reports_the_stop_as_a_warning(tmp_path):
+    from trader.messaging.trader_service_api import TraderServiceApi
+
+    trader = _fast(_coordinated_trader(tmp_path, held=100))
+    await trader.place_standalone_order(_stock(), 'SELL', 100, 'STP', aux_price=8)
+    try:
+        result = await TraderServiceApi(trader).place_order_simple(
+            _stock(), 'SELL', equity_amount=None, quantity=100, limit_price=None, market_order=True)
+    finally:
+        trader.order_tracker.close(timeout=1)
+
+    assert result.is_success(), result.error
+    assert result.warnings and 'cancelled working STP' in result.warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_manual_close_that_displaced_nothing_reads_as_before(tmp_path):
+    from trader.messaging.trader_service_api import TraderServiceApi
+
+    trader = _fast(_coordinated_trader(tmp_path, held=100))
+    _fail_placement_when(trader, lambda c, o: True, ValueError('broker refused the request'))
+    try:
+        result = await TraderServiceApi(trader).place_order_simple(
+            _stock(), 'SELL', equity_amount=None, quantity=100, limit_price=None, market_order=True)
+    finally:
+        trader.order_tracker.close(timeout=1)
+
+    assert not result.is_success() and 'broker refused the request' in str(result.error)
+    assert 'CANCELLED' not in str(result.error) and 're-placed' not in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_a_failure_to_account_for_displaced_exits_never_replaces_the_failure(tmp_path):
+    """The accounting is extra information on a failure reply. If it breaks,
+    the caller must still get the original failure — and be told that exits
+    were cancelled — not an exception from the RPC."""
+    from trader.messaging.trader_service_api import TraderServiceApi
+
+    trader = _fast(_coordinated_trader(tmp_path, held=100))
+    stop = await trader.place_standalone_order(_stock(), 'SELL', 100, 'STP', aux_price=8)
+    assert stop.is_success(), stop.error
+    _fail_placement_when(trader, lambda c, o: o.orderType == 'MKT', ValueError('broker refused the request'))
+
+    async def broken(displaced, symbol, *, restore):
+        raise RuntimeError('order journal unavailable')
+
+    trader._account_for_displaced = broken
+    try:
+        result = await TraderServiceApi(trader).place_order_simple(
+            _stock(), 'SELL', equity_amount=None, quantity=100, limit_price=None, market_order=True)
+    finally:
+        trader.order_tracker.close(timeout=1)
+
+    assert not result.is_success()
+    assert 'broker refused the request' in result.error
+    assert 'were CANCELLED' in result.error and 'could not be accounted for' in result.error
+    assert 'order journal unavailable' in result.error and 'mmr orders' in result.error

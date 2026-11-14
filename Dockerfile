@@ -49,9 +49,13 @@ RUN python3 -m venv $HOME/.venv
 # Copy ONLY requirements.txt first — this layer is cached unless deps change
 COPY --chown=trader:trader requirements.txt /home/trader/mmr/requirements.txt
 
-# pip install packages (cached unless requirements.txt changes)
-RUN --mount=type=cache,target=/home/trader/.cache/pip \
-    pip3 install -r /home/trader/mmr/requirements.txt
+# requirements.txt is an EXPORT of uv.lock (scripts/lock_requirements.sh):
+# exact versions plus hashes, so the image runs precisely the set the test
+# suite validated. --require-hashes refuses anything not pinned in that file
+# and --no-deps stops pip resolving its own additions. Do not hand-edit the
+# file; change pyproject.toml and re-run the script.
+RUN --mount=type=cache,target=/home/trader/.cache/pip,uid=1000,gid=1000 \
+    pip3 install --require-hashes --no-deps -r /home/trader/mmr/requirements.txt
 
 # NOW copy the rest of the source (this layer busts on every code change,
 # but everything above is cached)

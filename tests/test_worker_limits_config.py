@@ -102,7 +102,11 @@ def test_configured_values_reach_the_worker_constructor(tmp_path, monkeypatch):
     assert captured['startup_timeout_s'] == 30.0
     assert captured['max_frame_bytes'] == 1048576
     assert captured['memory_limit_bytes'] is None
-    assert captured['max_pending'] == 2
+    # The queue bound is no longer the conId count at worker start (it could
+    # not follow a universe that grew, B3.6): the initial bound is the floor and
+    # every submit re-sizes it — see tests/test_strategy_runtime_b3.py.
+    from trader.strategy.strategy_runtime import _MIN_CALLBACK_PENDING
+    assert captured['max_pending'] == _MIN_CALLBACK_PENDING >= 2
     assert callable(captured['on_fatal']), 'idle worker deaths are reported (test_worker_idle_death)'
     assert rt._callback_workers['s'].__class__ is FakeWorker
 

@@ -27,7 +27,11 @@ dependencies = [
     "dill>=0.4",
     "duckdb>=1.4",
     "durations>=0.3",
-    "eventkit>=1.0.0",
+    # The `eventkit` MODULE comes from `aeventkit`, the fork ib_async depends on.
+    # Do NOT also list the legacy `eventkit` distribution: both install the same
+    # top-level package and overwrite each other, so install order decided which
+    # slot layout a build got (see ibreactive._event_slots).
+    "aeventkit>=2.1",
     "exchange-calendars>=4.13",
     "expression>=5.6",
     "ib_async>=2.1",
@@ -331,6 +335,12 @@ pytest_add_cli_args_test_selection = [
     "tests/test_pooled_sharpe_warning_policy.py",
     "tests/test_position_sizing_contract_gaps.py",
     "tests/test_position_sizing_reporting_facts.py",
+    # Added with the code they cover on 2026-11-05/06 but never listed here, so
+    # the stricter-of-two daily loss limit, its session_summary reporting and
+    # own-quote discounting were unmeasured: 19 survivors over the floor and 74
+    # mutants no oracle test executed (found by the 2026-11-14 pass).
+    "tests/test_daily_loss_limit_effective.py",
+    "tests/test_sizing_own_quotes.py",
     "tests/test_protective_adoption_contract_gaps.py",
     "tests/test_protective_cancel_contract_gaps.py",
     "tests/test_protective_submission_outcomes.py",

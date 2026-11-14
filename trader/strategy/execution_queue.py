@@ -129,6 +129,19 @@ class ExecutionWorkQueue:
                     return self._exits.popitem(last=False)[1][1]
                 if self._operator:
                     return self._operator.popleft()[1]
+                # Management and bar/opening work are served in ARRIVAL order.
+                # Management used to pre-empt unconditionally, and it is
+                # re-armed every second: once a pass took a second or more
+                # (five holdings at ~120 ms per broker snapshot is enough) the
+                # next one was always already waiting, so queued bars — which
+                # carry the time-exit evaluation — and opens were never served
+                # (measured: 25 s without processing a due time-exit bar).
+                # Exits keep their own queue above and still go first. The
+                # management slot holds one request, so a bar waits behind at
+                # most the one pass that was requested before it arrived.
+                if (self._management is not None and self._normal
+                        and self._normal[0][0] <= self._management[0]):
+                    return self._normal.popleft()[1]
                 if self._management is not None:
                     _, item = self._management
                     self._management = None

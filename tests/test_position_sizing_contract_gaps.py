@@ -450,3 +450,23 @@ def test_session_feed_warning_requires_positive_account_material_value_and_no_po
         ),
     )
     _assert_warnings(summary["warnings"], warnings)
+
+
+@pytest.mark.parametrize('unreadable', [float('nan'), float('inf'), float('-inf')])
+def test_an_unreadable_confidence_sizes_as_no_confidence_never_as_full(unreadable):
+    """`min(1.0, nan)` is 1.0: a NaN confidence was sized as FULL confidence
+    (2026-11-14). It is sized exactly as confidence 0 — not as 1, and not by
+    raising, which would refuse a proposal instead of shrinking it."""
+    import math
+
+    from trader.trading.position_sizing import PortfolioState, PositionSizer, PositionSizingConfig
+
+    sizer = PositionSizer(PositionSizingConfig())
+    state = PortfolioState(net_liquidation=100_000.0, gross_position_value=0.0,
+                           available_funds=100_000.0, position_count=0)
+    unknown = sizer.compute(confidence=unreadable, portfolio_state=state)
+    none = sizer.compute(confidence=0.0, portfolio_state=state)
+    full = sizer.compute(confidence=1.0, portfolio_state=state)
+    assert math.isfinite(unknown.amount_usd) and unknown.amount_usd > 0
+    assert unknown.amount_usd == none.amount_usd
+    assert unknown.amount_usd < full.amount_usd

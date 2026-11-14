@@ -145,7 +145,16 @@ class Container():
             if ann is float:
                 return float(raw)
             if ann is bool:
-                return raw.lower() in ('1', 'true', 'yes', 'on')
+                # Explicit spellings only. Anything else used to become False,
+                # silently — including 'True ' with a trailing space or a CR,
+                # 'enabled' and 'y' — and an env var OVERRIDES the YAML, so
+                # REQUIRE_PROPOSAL_APPROVAL='True\r' switched the gate off.
+                text = raw.strip().lower()
+                if text in ('1', 'true', 'yes', 'on'):
+                    return True
+                if text in ('0', 'false', 'no', 'off'):
+                    return False
+                raise ValueError("expected one of 1/true/yes/on or 0/false/no/off")
         except (TypeError, ValueError) as ex:
             raise ContainerResolutionError(
                 f'env var {param.name.upper()}={raw!r} cannot be coerced to {ann.__name__}: {ex}'

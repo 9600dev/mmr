@@ -191,8 +191,11 @@ def test_operator_work_is_served_after_exits_and_before_management():
     assert queue.qsize() == 4 and queue.metrics()['queue_depth'] == 4
     assert queue.get().action == Action.SELL
     assert queue.get() is act
-    assert isinstance(queue.get(), ManagementWork)
+    # Management and opening/bar work are served in ARRIVAL order (2026-11-14:
+    # management used to pre-empt unconditionally and starved queued bars). The
+    # BUY was queued before the management request, so it goes first.
     assert queue.get().action == Action.BUY
+    assert isinstance(queue.get(), ManagementWork)
     act.run()
     assert act.wait(0) == 'done'
 
