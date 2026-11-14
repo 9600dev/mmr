@@ -28,7 +28,7 @@ from trader.trading.order_reference import split_order_reference
 from trader.trading.order_split import SplitPlan, split_order
 from trader.trading.order_structure import rejection_for_order
 from trader.trading.risk_gate import RiskGate, RiskGateResult, RiskInputs, RiskLimits
-from trader.listeners.ibreactive import IBAIORx, IBAIORxError
+from trader.listeners.ibreactive import IBAIORx, IBAIORxError, single_flight
 from trader.messaging.clientserver import MessageBusServer, MultithreadedTopicPubSub, RPCClient, RPCServer
 from trader.objects import Action, ContractOrderPair, ExecutorCondition
 from trader.trading.book import BookSubject
@@ -624,6 +624,10 @@ class Trader():
         )
 
         positions_disposable = (await self.client.subscribe_positions()).subscribe(positions_observer)
+        # subscribe_positions awaited a complete reqPositions round trip on THIS
+        # connection, so from here an empty ib.positions() means "flat", not
+        # "not loaded yet". See get_positions.
+        self._positions_synced_ib = self.client.ib
         self.disposables.append(positions_disposable)
 
         portfolio_disposable = (await self.client.subscribe_portfolio()).subscribe(AnonymousObserver(
@@ -702,7 +706,8 @@ class Trader():
         # make sure we're getting either live, or delayed data
         self.client.ib.reqMarketDataType(self.market_data)
 
-        orders = await self.client.ib.reqAllOpenOrdersAsync()
+        orders = await single_flight(
+            self.client.ib, 'openOrders', self.client.ib.reqAllOpenOrdersAsync, 30.0)
         for o in orders:
             self.book.on_next(o)
 
@@ -3027,7 +3032,8 @@ class Trader():
                 or tracker is not None and tracker.health['replay_required']):
             await self._replay_broker_executions()
         try:
-            fresh_trades = await asyncio.wait_for(self.client.ib.reqOpenOrdersAsync(), 5.0)
+            fresh_trades = await single_flight(
+                self.client.ib, 'openOrders', self.client.ib.reqOpenOrdersAsync, 5.0)
             if tracker is not None:
                 for trade in fresh_trades:
                     tracker.on_trade(trade)
@@ -3035,7 +3041,8 @@ class Trader():
         except Exception as ex:
             logging.warning('open orders snapshot incomplete: %s', ex)
         try:
-            positions = [p for p in await asyncio.wait_for(self.client.ib.reqPositionsAsync(), 5.0)
+            positions = [p for p in await single_flight(
+                             self.client.ib, 'positions', self.client.ib.reqPositionsAsync, 5.0)
                          if p.account == self.ib_account]
             account_confirmed = self.ib_account in self.client.ib.managedAccounts()
             positions_complete = self.client.ib.isConnected() and account_confirmed
@@ -3694,8 +3701,11 @@ class Trader():
         if not math.isfinite(target_quantity) or int(contract.conId or 0) <= 0:
             return SuccessFail.fail(error='resize requires finite target and exact conId')
         try:
-            snapshot = await self.client.ib.reqOpenOrdersAsync()
-            positions = await self.client.ib.reqPositionsAsync()
+            # Bounded and single-flight: these run under the account order lock.
+            snapshot = await single_flight(
+                self.client.ib, 'openOrders', self.client.ib.reqOpenOrdersAsync, 10.0)
+            positions = await single_flight(
+                self.client.ib, 'positions', self.client.ib.reqPositionsAsync, 10.0)
         except Exception as ex:
             return SuccessFail.fail(error=f'DEFERRED: complete broker state unavailable: {ex}')
         held = sum(float(p.position) for p in positions
@@ -3741,8 +3751,10 @@ class Trader():
                                     exit_reason=ExitReason.VALIDATED_STANDALONE))
             try:
                 await asyncio.wait_for(modified.pipe(ops.take(1)), timeout=8.0)
-                confirmed = await self.client.ib.reqOpenOrdersAsync()
-                positions = await self.client.ib.reqPositionsAsync()
+                confirmed = await single_flight(
+                    self.client.ib, 'openOrders', self.client.ib.reqOpenOrdersAsync, 10.0)
+                positions = await single_flight(
+                    self.client.ib, 'positions', self.client.ib.reqPositionsAsync, 10.0)
             except Exception as ex:
                 return SuccessFail.fail(error=f'UNKNOWN: protective OCA modification requires reconciliation: {ex}')
             match = next((t for t in confirmed if t.order.orderId == edit.orderId
@@ -4434,11 +4446,21 @@ class Trader():
         # See _get_portfolio_summary_sync for rationale — hit ib_async
         # directly rather than relying on the event-driven local cache.
         try:
-            positions = self.client.ib.positions(
+            ib = self.client.ib
+            positions = ib.positions(
                 account=self.ib_account
-            ) if self.ib_account else self.client.ib.positions()
+            ) if self.ib_account else ib.positions()
             if positions:
                 return [p for p in positions if p.account == self.ib_account]
+            # Empty. Once this connection has completed a positions sync, empty
+            # is the ANSWER: the account is flat. The cache below is never
+            # cleared, so falling back to it here reported a position that was
+            # closed while MMR was disconnected (its stop filled across a
+            # gateway restart) as still held — and a SELL against it then
+            # classified as exit-class, i.e. went out ungated and opened a
+            # short. The cache is only for the moments before the first sync.
+            if getattr(self, '_positions_synced_ib', None) is ib and ib.isConnected() is True:
+                return []
         except Exception as ex:
             logging.warning('ib.positions() failed, using cache: %s', ex)
         return [p for p in self.portfolio.get_positions() if p.account == self.ib_account]

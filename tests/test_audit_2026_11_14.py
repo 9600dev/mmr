@@ -705,3 +705,108 @@ class TestOrderIdFloor:
         journal.reserve_order('intent-a', 1952, 5)
         journal.reserve_order('intent-a', 9000, 7)            # another client
         assert journal.max_order_id(5) == 1952
+
+
+# --------------------------------------------------------------------------
+# Fixed-key ib_async requests: one at a time, never unbounded
+# --------------------------------------------------------------------------
+
+class TestSingleFlight:
+    """ib_async keeps one future per fixed key ('openOrders', 'positions'); a
+    second request replaces it and the first awaiter is never resolved."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_requests_for_one_key_do_not_overlap(self):
+        import asyncio
+        from trader.listeners.ibreactive import single_flight
+        ib = object()
+        in_flight, peak = 0, 0
+
+        async def request():
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.02)
+            in_flight -= 1
+            return 'orders'
+
+        results = await asyncio.gather(*(single_flight(ib, 'openOrders', request) for _ in range(4)))
+        assert results == ['orders'] * 4 and peak == 1
+
+    @pytest.mark.asyncio
+    async def test_different_keys_and_connections_do_not_wait_on_each_other(self):
+        import asyncio
+        from trader.listeners.ibreactive import single_flight
+        started = []
+
+        async def request(tag):
+            started.append(tag)
+            await asyncio.sleep(0.02)
+
+        first, second = object(), object()
+        await asyncio.gather(
+            single_flight(first, 'openOrders', lambda: request('a')),
+            single_flight(first, 'positions', lambda: request('b')),
+            single_flight(second, 'openOrders', lambda: request('c')))
+        assert sorted(started) == ['a', 'b', 'c']
+
+    @pytest.mark.asyncio
+    async def test_a_request_that_never_answers_times_out_and_frees_the_key(self):
+        import asyncio
+        from trader.listeners.ibreactive import single_flight
+        ib = object()
+
+        async def never():
+            await asyncio.Event().wait()
+
+        async def answer():
+            return 1
+
+        with pytest.raises(asyncio.TimeoutError):
+            await single_flight(ib, 'positions', never, timeout=0.05)
+        assert await single_flight(ib, 'positions', answer, timeout=0.5) == 1
+
+
+# --------------------------------------------------------------------------
+# A flat account must read as flat once positions have synced
+# --------------------------------------------------------------------------
+
+class TestFlatAccountAfterReconnect:
+    def _trader(self, live, cached, connected=True):
+        from trader.trading.trading_runtime import Trader
+        trader = object.__new__(Trader)
+        trader.ib_account = 'DU1'
+        ib = SimpleNamespace(positions=lambda account=None: list(live),
+                             isConnected=lambda: connected)
+        trader.client = SimpleNamespace(ib=ib)
+        trader.portfolio = SimpleNamespace(get_positions=lambda: list(cached))
+        return trader, ib
+
+    def _position(self, quantity):
+        return SimpleNamespace(account='DU1', contract=SimpleNamespace(conId=1), position=quantity)
+
+    def test_empty_after_a_sync_is_flat_not_the_stale_cache(self):
+        """The cache is never cleared: a position closed while disconnected kept
+        reading as held, and a SELL against it went out exit-class (ungated)."""
+        trader, ib = self._trader(live=[], cached=[self._position(100)])
+        trader._positions_synced_ib = ib
+        assert trader.get_positions() == []
+
+    def test_before_the_first_sync_the_cache_still_bridges(self):
+        trader, _ = self._trader(live=[], cached=[self._position(100)])
+        assert [p.position for p in trader.get_positions()] == [100]
+
+    def test_a_sync_on_an_older_connection_does_not_count(self):
+        trader, _ = self._trader(live=[], cached=[self._position(100)])
+        trader._positions_synced_ib = object()                 # the previous IB instance
+        assert [p.position for p in trader.get_positions()] == [100]
+
+    def test_disconnected_falls_back_to_the_cache(self):
+        trader, ib = self._trader(live=[], cached=[self._position(100)], connected=False)
+        trader._positions_synced_ib = ib
+        assert [p.position for p in trader.get_positions()] == [100]
+
+    def test_live_positions_always_win(self):
+        trader, ib = self._trader(live=[self._position(7)], cached=[self._position(100)])
+        trader._positions_synced_ib = ib
+        assert [p.position for p in trader.get_positions()] == [7]

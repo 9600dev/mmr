@@ -72,6 +72,37 @@ _PRESERVED_IB_EVENTS = (
 )
 
 
+_REQUEST_LOCKS: Dict[tuple, asyncio.Lock] = {}
+
+
+async def single_flight(ib, key: str, call, timeout: float = 10.0):
+    """Run one fixed-key ib_async request at a time, bounded.
+
+    ib_async keeps ONE future per fixed request key: ``reqOpenOrdersAsync``
+    and ``reqAllOpenOrdersAsync`` share ``openOrders``, ``reqPositionsAsync``
+    uses ``positions``. A second request issued while the first is in flight
+    replaces that future, and the first awaiter is never resolved — not even
+    by a disconnect. Two of these awaits ran unbounded while holding the
+    account-wide order lock (protected resize), so an executor snapshot RPC
+    landing inside the round trip wedged every later placement; on reconnect
+    the same collision strands ``connected_event``. ``ping_ib`` already
+    guarded ``currentTime`` this way.
+
+    ``call`` is a zero-argument callable returning the awaitable. Locks are
+    per (IB instance, event loop, key): a fresh IB() after a reconnect, or a
+    different loop in tests, never waits on a stale one.
+    """
+    loop = asyncio.get_running_loop()
+    lock_key = (id(ib), id(loop), key)
+    lock = _REQUEST_LOCKS.get(lock_key)
+    if lock is None:
+        if len(_REQUEST_LOCKS) > 256:          # reconnects create new IB objects
+            _REQUEST_LOCKS.clear()
+        lock = _REQUEST_LOCKS[lock_key] = asyncio.Lock()
+    async with lock:
+        return await asyncio.wait_for(call(), timeout)
+
+
 class EventLayoutError(RuntimeError):
     """An eventkit ``Event`` whose listener storage this module cannot read."""
 
@@ -729,7 +760,8 @@ class IBAIORx():
         raise ValueError('not implemented')
 
     async def subscribe_positions(self) -> Observable[List[Position]]:
-        await self.positions_subject.call_event_subscriber(self.ib.reqPositionsAsync())
+        await self.positions_subject.call_event_subscriber(
+            single_flight(self.ib, 'positions', self.ib.reqPositionsAsync, 30.0))
 
         def get_positions() -> Iterator[List[Position]]:
             yield self.ib.positions(account=self.ib_account)
@@ -822,7 +854,7 @@ class IBAIORx():
             del self.pnl_cache[contract.conId]
 
     async def get_open_orders(self) -> List[Order]:
-        return await self.ib.reqAllOpenOrdersAsync()
+        return await single_flight(self.ib, 'openOrders', self.ib.reqAllOpenOrdersAsync, 15.0)
 
     async def get_completed_orders(self) -> List[Trade]:
         return await self.ib.reqCompletedOrdersAsync(apiOnly=True)
