@@ -196,11 +196,17 @@ def _default_db_path() -> str:
 class DuckDBDataStore(DataStore):
     """Time-series data storage backed by DuckDB.
 
-    All tick data is stored in a single table ``tick_data`` with a composite
-    index on (symbol, date).  The ``date`` column is stored as TIMESTAMPTZ.
+    All tick data is stored in a single table ``tick_data``, unindexed (see
+    ``_create_table``).  The ``date`` column is stored as TIMESTAMPTZ.
     """
 
     TABLE_NAME = 'tick_data'
+    #: Indexes earlier versions created that a rebuild must not carry across.
+    LEGACY_INDEXES = ('idx_tick_data_symbol_date',)
+    #: Physical row order a rebuild writes. Reads are per (symbol, bar_size)
+    #: over a date range, so this order lets row-group min/max pruning skip
+    #: everything else: 2-3x faster than arrival order on the live data.
+    COMPACT_ORDER = ('symbol', 'bar_size', 'date')
 
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path or _default_db_path()
@@ -252,10 +258,15 @@ class DuckDBDataStore(DataStore):
                 what_to_show INTEGER
             )
         """)
-        conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS idx_{self.TABLE_NAME}_symbol_date
-            ON {self.TABLE_NAME} (symbol, date)
-        """)
+        # No index on (symbol, date) — deliberately. One was created here until
+        # 2026-11-14 and it was all cost: no query this store runs used it
+        # (identical plans and timings with index scans switched off; DuckDB
+        # prunes these reads by row-group min/max), it was ~70% of the file
+        # (3.7 GB of a 5.2 GB fresh copy), and DuckDB 1.x does not vacuum
+        # deleted rows out of an indexed table, so every upsert's dead rows
+        # stayed for good: 62 M live rows in 1,292 M stored, 28.6 GiB on disk.
+        # An existing database keeps its index until `mmr data compact --apply`
+        # rebuilds the file without it (LEGACY_INDEXES).
 
     # --------------------------------------------------------------------- #
     # DataStore interface
@@ -301,7 +312,7 @@ class DuckDBDataStore(DataStore):
 
         # Convert the date column to a DatetimeIndex with UTC timezone
         df['date'] = pd.to_datetime(df['date'], utc=True)
-        df.set_index('date', inplace=True)
+        df = df.set_index('date')
         df.index.name = 'date'
 
         return df

@@ -219,3 +219,41 @@ class TestClosedDayMarkers:
         document, code = _audit(tmp_path, monkeypatch, capsys, {'1': frame},
                                 baseline={'1 day|empty_bar': 1})
         assert code == 0 and document['data']['regressions'] == {}
+
+
+class TestStoreUsageAdvisory:
+    """The history database grew to 28.6 GiB for 5 GB of content and no check
+    said so. The nightly audit now reports dead space — as advice, never as a
+    finding: a red gate nobody can clear by fixing data gets switched off."""
+
+    def test_the_audit_reports_dead_space_without_failing(self, tmp_path, monkeypatch, capsys):
+        import duckdb
+
+        document, code = _audit(tmp_path, monkeypatch, capsys,
+                                {'101': _daily(['2026-11-09', '2026-11-10'])}, baseline={})
+        assert code == 0 and document['success'] is True
+        store = document['data']['store']
+        assert store['db'] == 'history.duckdb' and store['live_rows'] == 2
+        assert store['worth_compacting'] is False and store['legacy_indexes'] == []
+
+        con = duckdb.connect(str(tmp_path / 'history.duckdb'))
+        con.execute('CREATE INDEX idx_tick_data_symbol_date ON tick_data(symbol, date)')
+        con.close()
+        document, code = _audit(tmp_path, monkeypatch, capsys,
+                                {'101': _daily(['2026-11-09', '2026-11-10'])}, baseline={})
+        store = document['data']['store']
+        assert code == 0 and document['success'] is True               # advice, not a finding
+        assert store['worth_compacting'] is True and 'idx_tick_data_symbol_date' in store['reason']
+
+    def test_an_unreadable_store_report_never_breaks_the_audit(self, tmp_path, monkeypatch, capsys):
+        from trader.data import db_compact
+
+        def broken(path):
+            raise RuntimeError('storage report unavailable')
+
+        monkeypatch.setattr(db_compact, 'database_usage', broken)
+        document, code = _audit(tmp_path, monkeypatch, capsys,
+                                {'101': _daily(['2026-11-09', '2026-11-10'])}, baseline={})
+        assert code == 0 and document['success'] is True
+        assert document['data']['store'] == {
+            'error': 'RuntimeError: storage report unavailable', 'worth_compacting': False}

@@ -950,3 +950,73 @@ class TestResolveDistinctListings:
         first, second = self.listing(0, 'IDEALPRO'), self.listing(0, 'IDEALPRO')
         assert _distinct_listings([first, second]) == [first, second]
         assert _distinct_listings(None) == []
+
+
+class TestNumericSymbolIsNotGuessed:
+    """`mmr resolve 4391` answered with ticker 4391 on the Tokyo exchange while
+    4391 is AMD's conId; `propose 4391 BUY` pinned the Tokyo listing."""
+
+    @staticmethod
+    def _mmr(by_conid, by_ticker):
+        from test_sdk import _make_mmr_with_mock, _make_mock_rpc
+        client = _make_mock_rpc()
+        client.rpc.return_value.resolve_symbol.side_effect = (
+            lambda symbol, *rest: list(by_conid if type(symbol) is int else by_ticker))
+        client.rpc.return_value.resolve_contract.return_value = []
+        mmr = _make_mmr_with_mock(client)
+        mmr.numeric_symbol_guard = True            # what the CLI dispatcher sets
+        return mmr, client
+
+    def test_the_guard_is_for_untyped_input_only(self):
+        """A programmatic caller states the reading by type; only the CLI,
+        whose symbols are all text, turns the guard on."""
+        import inspect
+        from trader import mmr_cli
+        from trader.sdk import MMR
+
+        assert MMR.numeric_symbol_guard is False
+        assert 'mmr.numeric_symbol_guard = True' in inspect.getsource(mmr_cli.dispatch)
+        amd = self._definition(4391, 'AMD', 'NASDAQ')
+        tokyo = self._definition(128221987, '4391', 'TSEJ')
+        mmr, _ = self._mmr(by_conid=[amd], by_ticker=[tokyo])
+        mmr.numeric_symbol_guard = False
+        assert mmr.resolve('4391') == [tokyo]
+
+    @staticmethod
+    def _definition(con_id, symbol, venue):
+        return SimpleNamespace(conId=con_id, symbol=symbol, exchange=venue, primaryExchange=venue,
+                               secType='STK', currency='USD')
+
+    def test_a_number_that_is_a_known_conid_is_refused_naming_both_readings(self):
+        amd = self._definition(4391, 'AMD', 'NASDAQ')
+        tokyo = self._definition(128221987, '4391', 'TSEJ')
+        mmr, client = self._mmr(by_conid=[amd], by_ticker=[tokyo])
+        with pytest.raises(ValueError) as refusal:
+            mmr.resolve('4391')
+        text = str(refusal.value)
+        assert 'AMD' in text and 'conId' in text and '--exchange' in text
+        client.rpc.return_value.resolve_contract.assert_not_called()
+
+    def test_an_exchange_states_the_ticker_reading(self):
+        amd = self._definition(4391, 'AMD', 'NASDAQ')
+        tokyo = self._definition(128221987, '4391', 'TSEJ')
+        mmr, _ = self._mmr(by_conid=[amd], by_ticker=[tokyo])
+        assert mmr.resolve('4391', exchange='TSEJ') == [tokyo]
+
+    def test_a_numeric_ticker_that_is_no_known_conid_resolves_as_before(self):
+        tencent = self._definition(1101616, '700', 'SEHK')
+        mmr, _ = self._mmr(by_conid=[], by_ticker=[tencent])
+        assert mmr.resolve('700') == [tencent]
+
+    def test_an_integer_is_still_a_conid_and_an_ordinary_ticker_costs_no_extra_lookup(self):
+        amd = self._definition(4391, 'AMD', 'NASDAQ')
+        mmr, client = self._mmr(by_conid=[amd], by_ticker=[amd])
+        assert mmr.resolve(4391) == [amd]
+        assert mmr.resolve('AMD') == [amd]
+        assert client.rpc.return_value.resolve_symbol.call_count == 2
+
+    def test_a_conid_lookup_answering_with_another_instrument_does_not_refuse(self):
+        other = self._definition(999, 'ZZZ', 'NYSE')
+        tokyo = self._definition(128221987, '4391', 'TSEJ')
+        mmr, _ = self._mmr(by_conid=[other], by_ticker=[tokyo])
+        assert mmr.resolve('4391') == [tokyo]

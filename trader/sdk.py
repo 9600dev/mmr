@@ -363,7 +363,12 @@ class MMR:
         conId). Cross-exchange dual-listings (BHP on ASX vs NYSE) have
         *different* conIds so they survive and come back as real ambiguity
         the caller has to resolve.
+
+        A digits-only STRING is a ticker (Tokyo and Hong Kong tickers are
+        numbers) and an ``int`` is a conId; a programmatic caller states which
+        by the type it passes. Human input cannot: see ``numeric_symbol_guard``.
         """
+        self._refuse_numeric_symbol_that_is_a_conid(symbol, exchange, universe)
         result = consume(
             self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_symbol(
                 symbol, exchange, universe, sec_type
@@ -397,6 +402,45 @@ class MMR:
             self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_contract(contract)
         )
         return self._dedupe_venue_duplicates(candidates)
+
+    #: Set by an interface whose symbols are untyped text (the CLI). There a
+    #: digits-only symbol cannot say whether it is a ticker or a conId, so
+    #: ``resolve()`` refuses one that is ALSO a locally known conId. Off for
+    #: programmatic callers, who state the reading by passing ``str`` or ``int``.
+    numeric_symbol_guard: bool = False
+
+    def _refuse_numeric_symbol_that_is_a_conid(self, symbol, exchange: str, universe: str) -> None:
+        """Refuse a digits-only ticker that is also a locally known conId.
+
+        Every CLI symbol arrives as a string, so `mmr resolve 4391` asked for
+        the TICKER 4391 and answered with Logizard on the Tokyo exchange, and
+        `mmr propose 4391 BUY` pinned that listing — while 4391 is AMD's conId,
+        which is what someone pasting a number from `portfolio` means. Neither
+        reading is safe to pick: the conId rule ("an integer conId must never
+        become a ticker lookup") covers ints handed to ``resolve_symbol``, and
+        this is its counterpart for text. An explicit exchange (or universe)
+        states the ticker reading and is honoured.
+        """
+        if not getattr(self, 'numeric_symbol_guard', False):
+            return
+        if type(symbol) is not str or exchange or universe:
+            return
+        text = symbol.strip()
+        if not text.isdigit() or int(text) <= 0:
+            return
+        known = consume(
+            self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_symbol(int(text), '', '', ''))
+        named = [definition for definition in (known or [])
+                 if getattr(definition, 'conId', None) == int(text)]
+        if not named:
+            return
+        instrument = named[0]
+        venue = getattr(instrument, 'primaryExchange', '') or getattr(instrument, 'exchange', '')
+        raise ValueError(
+            f'{text!r} is ambiguous: it is the conId of {instrument.symbol} ({venue}) and could also be '
+            f'a ticker. A digits-only symbol is read as a TICKER; nothing was resolved. For '
+            f'{instrument.symbol} use its symbol; for the ticker {text} name its venue with --exchange '
+            f'(e.g. --exchange TSEJ).')
 
     def discover_listings(
         self,

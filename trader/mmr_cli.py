@@ -2042,6 +2042,21 @@ def build_parser() -> argparse.ArgumentParser:
                      help='Milestone name — a named backup that is never auto-pruned '
                           '(e.g. before_upgrade). Omit for a rotating timestamped snapshot.')
 
+    _cp = data_sub.add_parser(
+        'compact',
+        help='Report how much of each DuckDB file is dead space; --apply rebuilds '
+             'the files compact (verified, old file kept). Run it while no market '
+             'is in session: writers wait while a file is rebuilt.',
+    )
+    _cp.add_argument('--apply', action='store_true',
+                     help='Rebuild and swap in the compact files (default: report only)')
+    _cp.add_argument('--discard-old', action='store_true',
+                     help='Delete each replaced file once its rebuild has verified '
+                          '(default: keep it beside the new one as *.pre_compact_<stamp>)')
+    _cp.add_argument('--db', action='append', default=None, metavar='NAME',
+                     help='Only this database file name (repeatable); default: every '
+                          '*.duckdb in the data directory')
+
     data_refresh_p = data_sub.add_parser(
         'refresh',
         help='Run declarative refresh jobs from ~/.config/mmr/data_refresh.yaml. '
@@ -2187,6 +2202,10 @@ def dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
     # file").
     console._file = None
     console.stderr = bool(getattr(args, 'json', False))
+    # Every symbol typed here is text, so `4391` cannot say whether it means
+    # the ticker or the conId: have the SDK refuse the ambiguous case.
+    if mmr is not None:
+        mmr.numeric_symbol_guard = True
     try:
         return _dispatch(mmr, args)
     finally:
@@ -10249,6 +10268,8 @@ def _handle_data(args: argparse.Namespace):
         _handle_data_dedup_daily(args)
     elif action == 'backup':
         _handle_data_backup(args)
+    elif action == 'compact':
+        _handle_data_compact(args)
     elif action == 'refresh':
         _handle_data_refresh(args)
     elif action == 'status':
@@ -11006,6 +11027,129 @@ def _handle_data_backup(args: argparse.Namespace):
     if summary['pruned']:
         console.print(f'\n[dim]pruned {len(summary["pruned"])} old snapshot(s), keeping newest {keep}[/dim]')
     console.print(f'[dim]latest → {backup_dir}/latest[/dim]')
+
+
+#: A file is worth rebuilding when most of what it stores is dead, or when it
+#: still carries an index the store no longer wants. Below this, say nothing.
+_COMPACT_WORTHWHILE_DEAD_FRACTION = 0.5
+
+
+def _compaction_plan() -> tuple:
+    """``(order_by, drop_indexes)`` for a rebuild: what the store itself says
+    about its tables, so the command carries no table knowledge of its own."""
+    from trader.data.duckdb_store import DuckDBDataStore
+    return ({DuckDBDataStore.TABLE_NAME: list(DuckDBDataStore.COMPACT_ORDER)},
+            list(DuckDBDataStore.LEGACY_INDEXES))
+
+
+def _usage_row(usage: dict, legacy_indexes) -> dict:
+    """One report row per database file, with the reason (if any) to rebuild it."""
+    import os as _os
+    carried = sorted(item['index'] for item in usage['indexes'] if item['index'] in set(legacy_indexes))
+    worst = usage['tables'][0] if usage['tables'] else None
+    reasons = []
+    if usage['dead_fraction'] >= _COMPACT_WORTHWHILE_DEAD_FRACTION:
+        reasons.append(f"{usage['dead_fraction']:.0%} of stored rows are dead")
+    if carried:
+        reasons.append(f"carries unused index {', '.join(carried)}")
+    return {
+        'db': _os.path.basename(usage['path']),
+        'file_mb': round(usage['file_bytes'] / 1e6, 1),
+        'used_mb': round(usage['used_blocks'] * usage['block_size'] / 1e6, 1),
+        'free_mb': round(usage['free_blocks'] * usage['block_size'] / 1e6, 1),
+        'live_rows': usage['live_rows'],
+        'stored_rows': usage['stored_rows'],
+        'dead_pct': round(usage['dead_fraction'] * 100, 1),
+        'largest_waste': (f"{worst['table']} ({worst['dead_rows']:,} dead)"
+                          if worst and worst['dead_rows'] else ''),
+        'legacy_indexes': carried,
+        'worth_compacting': bool(reasons),
+        'reason': '; '.join(reasons),
+    }
+
+
+def _handle_data_compact(args: argparse.Namespace):
+    """Report dead space in the DuckDB files; with --apply, rebuild them.
+
+    The live history database was 28.6 GiB for 5 GB of content on 2026-11-14
+    (see trader/data/db_compact.py). The rebuild holds each file's lock for
+    about as long as the nightly backup does, verifies every table before the
+    swap, and keeps the replaced file unless told to discard it.
+    """
+    import os as _os
+    from pathlib import Path as _Path
+    from trader.container import Container
+    from trader.data.db_compact import compact_database, database_usage
+
+    cfg = Container.instance().config()
+    duckdb_path = _os.path.expanduser(cfg.get('duckdb_path', '') or '')
+    if not duckdb_path:
+        print_status('duckdb_path not configured — nothing to compact', success=False)
+        return
+    data_dir = _Path(duckdb_path).parent
+    wanted = set(getattr(args, 'db', None) or [])
+    files = sorted(path for path in data_dir.iterdir() if path.is_file() and path.suffix == '.duckdb')
+    unknown = sorted(wanted - {path.name for path in files})
+    if unknown:
+        print_status(f'no such database in {data_dir}: {", ".join(unknown)} '
+                     f'(have: {", ".join(path.name for path in files) or "none"})', success=False)
+        return
+    if wanted:
+        files = [path for path in files if path.name in wanted]
+
+    order_by, legacy_indexes = _compaction_plan()
+    apply = bool(getattr(args, 'apply', False))
+    report, failures = [], []
+    for path in files:
+        try:
+            row = _usage_row(database_usage(path), legacy_indexes)
+        except Exception as ex:
+            failures.append(f'{path.name}: {type(ex).__name__}: {ex}')
+            continue
+        if apply and row['worth_compacting']:
+            try:
+                done = compact_database(path, order_by=order_by, drop_indexes=legacy_indexes,
+                                        keep_old=not getattr(args, 'discard_old', False))
+            except Exception as ex:
+                failures.append(f'{path.name}: {type(ex).__name__}: {ex}')
+                row['compacted'] = False
+            else:
+                row.update(compacted=True, file_mb_after=round(done['bytes_after'] / 1e6, 1),
+                           lock_seconds=done['lock_seconds'], old_file=done['old_file'],
+                           dropped_indexes=done['dropped_indexes'],
+                           rows_verified=sum(item['rows'] for item in done['tables']))
+        elif apply:
+            row['compacted'] = False
+        report.append(row)
+
+    kept = [row['old_file'] for row in report if row.get('old_file')]
+    if _json_mode:
+        print(_json_dumps({
+            'success': not failures, 'data': report, 'title': 'DB Compaction' if apply else 'DB Usage',
+            'applied': apply, 'errors': failures, 'kept_old_files': kept}))
+        if failures:
+            _set_exit_code(1)
+        return
+
+    import pandas as _pd
+    columns = ['db', 'file_mb', 'used_mb', 'live_rows', 'stored_rows', 'dead_pct', 'largest_waste']
+    if apply:
+        columns += ['compacted', 'file_mb_after', 'lock_seconds']
+    frame = _pd.DataFrame([{column: row.get(column, '') for column in columns} for row in report])
+    print_df(frame, title='DB Compaction' if apply else 'DB Usage')
+    for row in report:
+        if row['worth_compacting'] and not apply:
+            console.print(f"[yellow]{row['db']}: {row['reason']}[/yellow]")
+    if not apply and any(row['worth_compacting'] for row in report):
+        console.print('[dim]`mmr data compact --apply` rebuilds these files (verified before the swap; the '
+                      'old file is kept). Writers wait while a file is rebuilt, so run it while no market '
+                      'is in session.[/dim]')
+    for path in kept:
+        console.print(f'[dim]kept the replaced file: {path} — delete it once you are satisfied[/dim]')
+    for failure in failures:
+        print_status(failure, success=False)
+    if failures:
+        _set_exit_code(1)
 
 
 def _handle_data_dedup_daily(args: argparse.Namespace):
@@ -11922,6 +12066,11 @@ def _handle_data_audit(args: argparse.Namespace):
         examples[key] = [{'date': when, 'series': label, 'detail': detail}
                          for _stamp, label, detail, when in bucket[:12]]
 
+    # Advisory, never a failure: how much of the store's file is dead space.
+    # The history database reached 28.6 GiB for 5 GB of content without any
+    # check noticing (2026-11-14); this run is nightly, so it says so here.
+    store = _store_usage_advisory(history)
+
     if _json_mode:
         # ONE document. The per-regression status lines used to follow as
         # separate JSON objects, which no parser accepts.
@@ -11932,6 +12081,7 @@ def _handle_data_audit(args: argparse.Namespace):
                                     'recent': {k: v for k, v in examples.items()
                                                if k in regressions},
                                     'notes': notes,
+                                    'store': store,
                                     'series_scanned': scanned},
                            'title': 'Data Quality Audit'}))
         if regressions and len(sys.argv) > 1:
@@ -11953,6 +12103,9 @@ def _handle_data_audit(args: argparse.Namespace):
         for k, v in sorted(info.items()):
             console.print(f'[dim]{k}: {v} (no-data markers on days the venue was closed — '
                           f'expected, not counted)[/dim]')
+        if store.get('worth_compacting'):
+            console.print(f"[yellow]store: {store['db']} is {store['file_mb']:,.0f} MB and "
+                          f"{store['reason']} — `mmr data compact` (not a finding)[/yellow]")
 
     if regressions:
         for k, (now, was) in sorted(regressions.items()):
@@ -11962,6 +12115,18 @@ def _handle_data_audit(args: argparse.Namespace):
                 console.print(f"[dim]    {item['date']}  {item['series']}: {item['detail']}[/dim]")
         if len(sys.argv) > 1:
             sys.exit(1)
+
+
+def _store_usage_advisory(history_path: str) -> dict:
+    """The history database's dead-space report for the audit, or the reason
+    it could not be read. Never raises and never fails the audit: bloat costs
+    speed and disk, not correctness."""
+    try:
+        from trader.data.db_compact import database_usage
+        _order, legacy_indexes = _compaction_plan()
+        return _usage_row(database_usage(history_path), legacy_indexes)
+    except Exception as ex:
+        return {'error': f'{type(ex).__name__}: {ex}', 'worth_compacting': False}
 
 
 def _handle_data_status(now=None):
