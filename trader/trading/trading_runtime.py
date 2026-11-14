@@ -3411,8 +3411,8 @@ class Trader():
                 # MARKET orders, and a SELL that opens a short. A sell limit
                 # fills at or ABOVE its price, so the client's limit is a floor
                 # and says nothing about the size of the position: `SELL 400
-                # --limit 1` on a $50 stock was valued at $400 (2.4% of a $17k
-                # account, passing a 10% cap) and filled as a $20k short. Value
+                # --limit 1` on a $50 stock was valued at $400 (well inside a
+                # 10% position cap) and filled as a $20,000 short. Value
                 # it at max(limit, live price), as the approver tier already
                 # does; with no live price it is not evaluable and the open is
                 # refused.
