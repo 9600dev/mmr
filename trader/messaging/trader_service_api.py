@@ -254,6 +254,17 @@ class TraderServiceApi(RPCHandler):
                 result.warnings = describe_displaced(displaced)
                 for line in result.warnings:
                     logging.warning('place_order_simple: %s', line)
+            elif displaced:
+                # The order FAILED after coordination cancelled working exits
+                # to make room for it (a `close` displaces the operator's own
+                # stop). The failure used to say nothing about them: position
+                # still held, stop gone, operator not told (AUDIT B1.9). Put
+                # them back when nothing can have been sent; otherwise say so.
+                note = await self.trader._account_for_displaced(
+                    displaced, getattr(contract, 'symbol', '?'),
+                    restore=bool(getattr(result, 'not_submitted', False)))
+                base = str(result.error or result.exception or 'order placement failed').rstrip('.')
+                result.error = f'{base}.{note}'
             result.client_intent_id = getattr(observable, 'client_intent_id', client_intent_id)
             outcome = getattr(observable, 'execution_outcome', None)
             if outcome is not None:

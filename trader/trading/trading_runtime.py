@@ -3929,7 +3929,14 @@ class Trader():
             displaced = self.executioner.pop_displaced() if hasattr(self.executioner, 'pop_displaced') else []
 
             if not result_trade:
-                return SuccessFail.fail(error=str(errors[0]) if errors else 'Failed to place standalone order')
+                # Coordination may already have cancelled the working stop this
+                # order was to replace. Returning the bare error left the
+                # position unprotected without saying so (AUDIT_2026-11-14 B1.9).
+                failure = str(errors[0]) if errors else 'Failed to place standalone order'
+                note = await self._account_for_displaced(
+                    displaced, getattr(contract, 'symbol', '?'),
+                    restore=not failure.startswith('UNKNOWN'))
+                return SuccessFail.fail(error=(failure.rstrip('.') + '.' + note) if note else failure)
 
             # A receipt is not acceptance: wait for IB's verdict before
             # claiming the position is protected (trader.trading.order_acceptance).
@@ -3948,19 +3955,53 @@ class Trader():
             symbol = getattr(contract, 'symbol', '?')
             msg = (f'IB REJECTED protective {order_type} {action} {quantity:g} {symbol} '
                    f'(order {result_trade.order.orderId}): {detail}.')
-            if displaced:
-                restored, lost = await self._restore_displaced(displaced)
-                if restored:
-                    msg += f' Previous protective order(s) re-placed as {restored}.'
-                if lost:
-                    msg += (f' PREVIOUS PROTECTION {lost} WAS CANCELLED AND COULD NOT BE '
-                            f'RESTORED — {symbol} IS UNPROTECTED.')
+            msg += await self._account_for_displaced(displaced, symbol, restore=True)
             logging.error(msg)
             return SuccessFail.fail(error=msg)
 
         except Exception as ex:
             logging.error(f'place_standalone_order error: {ex}')
+            # Whatever was displaced is still gone. The new order's fate is
+            # not known here (the failure can follow its placement), so say
+            # so instead of re-placing a second reduction beside it.
+            leftover: list = []
+            try:
+                leftover = self.executioner.pop_displaced() if hasattr(self.executioner, 'pop_displaced') else []
+            except Exception:
+                pass
+            note = await self._account_for_displaced(leftover, getattr(contract, 'symbol', '?'), restore=False)
+            if note:
+                return SuccessFail.fail(error=f'{type(ex).__name__}: {ex}.{note}')
             return SuccessFail.fail(exception=ex)
+
+    async def _account_for_displaced(self, displaced: list, symbol: str, *, restore: bool) -> str:
+        """Text for a FAILED placement about the working exits that reduction
+        coordination cancelled to make room for it; '' when there were none.
+
+        ``restore=True`` re-places them (the replacement provably is not
+        working: IB rejected it, or nothing was sent). ``restore=False`` only
+        reports — the replacement's outcome is unknown, and a re-placed stop
+        would cancel it if it IS working (coordination displaces the caller's
+        own reductions). Either way the caller is told; until 2026-11-14 only
+        the IB-rejection path did either.
+        """
+        if not displaced:
+            return ''
+        if not restore:
+            cancelled = [getattr(order, 'orderId', '?') for _contract, order, _remaining in displaced]
+            text = (f' Working exit order(s) {cancelled} were CANCELLED to make room for this placement and '
+                    f'were NOT re-placed because its outcome is unknown: check `mmr orders` and re-protect '
+                    f'{symbol} if it is still held.')
+            logging.error('%s%s', symbol, text)
+            return text
+        restored, lost = await self._restore_displaced(displaced)
+        text = ''
+        if restored:
+            text += f' Previous protective order(s) re-placed as {restored}.'
+        if lost:
+            text += (f' PREVIOUS PROTECTION {lost} WAS CANCELLED AND COULD NOT BE '
+                     f'RESTORED — {symbol} IS UNPROTECTED.')
+        return text
 
     async def _restore_displaced(self, displaced: list) -> tuple:
         """Re-place protective orders that coordination cancelled for a
