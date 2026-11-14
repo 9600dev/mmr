@@ -306,6 +306,10 @@ class IBAIORx():
         # retry loop below re-issues reqMktData for every cached contract while
         # data is lost. See _md_retry_action for the tri-state decision.
         self._md_lost_at: Optional[float] = None
+        # Contracts with a STREAMING market-data request (snapshot=False),
+        # recorded where the request is made. What the 10197 recovery loop
+        # re-requests — see _resubscribe_market_data.
+        self._streaming_contracts: Dict[int, Contract] = {}
         self._md_last_tick_at: float = 0.0
         self._md_retry_task: Optional[asyncio.Task] = None
         self._md_retry_interval: float = 60.0
@@ -351,14 +355,27 @@ class IBAIORx():
         Detection worked; recovery re-armed nothing.
 
         Re-requests feed the SAME Ticker objects, so every downstream pipeline
-        resumes with no cache invalidation anywhere."""
-        try:
-            contracts = [t.contract for t in self.ib.tickers() if t.contract is not None]
-        except Exception:
-            contracts = []
+        resumes with no cache invalidation anywhere.
+
+        Only STREAMS are re-requested, and the previous request is cancelled
+        first. ``ib.tickers()`` is never pruned — it also holds every snapshot,
+        scan row and depth ticker since connect — and each pass used to
+        re-request ALL of them as streams without cancelling anything: after
+        one competing-session episode every symbol ever scanned became a
+        permanent stream against IB's ~100-line allowance, and each pass
+        leaked a request id that could never be cancelled. ``ib.tickers()``
+        remains the fallback when nothing recorded a stream (an unknown
+        subscription path), which is the 2026-07-27 lesson above."""
+        contracts = list(self._streaming_contracts.values())
+        if not contracts:
+            try:
+                contracts = [t.contract for t in self.ib.tickers() if t.contract is not None]
+            except Exception:
+                contracts = []
         if not contracts:
             contracts = list(self.contracts_cache.keys())
         for c in contracts:
+            self._cancel_stream_quietly(c)
             try:
                 self._contracts_source.call_event_subscriber_sync(
                     lambda c=c: self.ib.reqMktData(
@@ -369,6 +386,18 @@ class IBAIORx():
                 logging.warning('10197 resubscribe failed for %s: %s',
                                 getattr(c, 'symbol', c), ex)
         return len(contracts)
+
+    def _cancel_stream_quietly(self, contract: Contract) -> None:
+        """Cancel the contract's current streaming request, if it has one.
+        (ib.cancelMktData logs an ERROR when there is none; ask first.)"""
+        try:
+            ticker = self.ib.ticker(contract)
+            active = self.ib.wrapper.ticker2ReqId.get('mktData', {})
+            if ticker is not None and ticker in active:
+                self.ib.cancelMktData(contract)
+        except Exception as ex:
+            logging.debug('could not cancel the previous stream for %s: %s',
+                          getattr(contract, 'symbol', contract), ex)
 
     async def _market_data_retry_loop(self):
         while not self._shutdown:
@@ -656,6 +685,8 @@ class IBAIORx():
         # and starts the subscription
 
         reqId = self.ib.client._reqIdSeq
+        if not one_time_snapshot:
+            self._streaming_contracts[hash(contract)] = contract
         self._contracts_source.call_event_subscriber_sync(
             lambda: self.ib.reqMktData(
                 contract=contract,
@@ -699,6 +730,8 @@ class IBAIORx():
         # reqMktData immediately returns with an empty ticker
         # and starts the subscription
         reqId = self.ib.client._reqIdSeq
+        if not one_time_snapshot:
+            self._streaming_contracts[hash(contract)] = contract
         result = self._contracts_source.call_event_subscriber_sync(
             lambda: self.ib.reqMktData(
                 contract=contract,
