@@ -3,14 +3,14 @@ from trader.common.logging_helper import setup_logging
 from trader.data.data_access import TickData, TickStorage
 from trader.data.event_store import EventType, TradingEvent
 from trader.data.market_data import normalize_historical
-from trader.strategy.parameters import _coerce_param, _coerce_loose
+from trader.strategy.parameters import _coerce_param, _coerce_loose, session_bar_ts
 from trader.data.store import DateRange
 from trader.data.universe import UniverseAccessor
 from trader.objects import Action, BarSize
 from trader.simulation.slippage import FixedBPS, SlippageModel
 from trader.trading.risk_gate import RiskGate, RiskLimits
 from trader.trading.strategy import Signal, Strategy, StrategyContext, StrategyState
-from typing import Any, Dict, FrozenSet, List, Optional
+from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Sequence
 
 from collections.abc import Iterable
 import datetime as dt
@@ -103,6 +103,22 @@ class BacktestConfig:
     # unbounded). 3 means a stack tops out at 4 lots — mirror of the live
     # executor's per-strategy ``pyramid_max_adds`` bound.
     pyramid_max_adds: Optional[int] = None
+    # Measurement window, half-open ``[measure_from, measure_to)``. Both None
+    # (the default) = the whole run is reported, as it always was.
+    #
+    # ``start_date`` is where DATA begins; a strategy that needs history must
+    # be given bars before the period it is being judged on, and those bars
+    # are not part of the judgement. With a window set the run is unchanged —
+    # the strategy still sees and trades every bar, so indicators AND the book
+    # are warm at the window start — but every reported number describes the
+    # window only: the return is measured from the last mark before it, the
+    # equity curve / fills / signals are sliced to it, and a round trip counts
+    # only when it was both opened and closed inside it. Without this,
+    # walk-forward reported each test run's warm-up — which lies inside the
+    # training window its parameters were just chosen on — as out-of-sample
+    # (audit 2026-11-14, B4.1). A naive bound is read on the frame's own clock.
+    measure_from: Optional[dt.datetime] = None
+    measure_to: Optional[dt.datetime] = None
 
 
 @dataclass
@@ -141,10 +157,51 @@ class BacktestResult:
     applied_params: Dict[str, Any] = field(default_factory=dict)
     # Execution diagnostics that are not performance metrics. run_panel
     # records how often the D06 cash guard scaled a BUY fill
-    # (``panel_scaled_buy_fills`` etc.); empty for the per-instrument path.
+    # (``panel_scaled_buy_fills`` etc.); a run with a measurement window
+    # records what the window excluded (``warmup_bars``, ``warmup_fills``,
+    # ``window_bars_in_market`` ...). Otherwise empty for the per-instrument
+    # path.
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 
+_TRADING_DAYS_PER_YEAR = 252
+
+
+def _on_clock(value: Any, index: pd.Index) -> Optional[pd.Timestamp]:
+    """``value`` as a Timestamp comparable with ``index``.
+
+    A naive bound takes the index's zone: "from 2024-03-01" means midnight on
+    the frame's own clock. An aware bound is converted. Against a naive index
+    an aware bound keeps its wall time.
+    """
+    if value is None:
+        return None
+    ts = pd.Timestamp(value)
+    if not isinstance(ts, pd.Timestamp):          # NaT: a bound that is no instant
+        raise ValueError(f'measurement bound is not a timestamp: {value!r}')
+    tz = getattr(index, 'tz', None)
+    if tz is None:
+        return ts.tz_localize(None) if ts.tzinfo is not None else ts
+    if ts.tzinfo is None:
+        return ts.tz_localize(tz, ambiguous=True, nonexistent='shift_forward')
+    return ts.tz_convert(tz)
+
+
+class _Window(NamedTuple):
+    """The part of a run that is REPORTED (``BacktestConfig.measure_from``)."""
+    lo: Optional[pd.Timestamp]
+    hi: Optional[pd.Timestamp]
+    mask: np.ndarray        # per equity point: inside [lo, hi)
+    base_equity: float      # what the window started from
+    carried: bool           # True when bars precede the window: base is a MARK, not initial capital
+    warmup_bars: int
+
+    def contains(self, ts: Any) -> bool:
+        if ts is None:
+            return False
+        t = pd.Timestamp(ts)
+        return ((self.lo is None or t >= self.lo)
+                and (self.hi is None or t < self.hi))
 
 
 class _BarTimeline:
@@ -332,6 +389,119 @@ class Backtester:
         }
         return mapping.get(bar_size, trading_days * trading_minutes)
 
+    @staticmethod
+    def _observed_bars_per_year(index: Any, bar_size: BarSize,
+                                session_tz: Optional[str] = None) -> float:
+        """Bars per year of the curve in hand, for annualising Sharpe/Sortino.
+
+        ``_bars_per_year`` answers from the bar SIZE and assumes a 6.5-hour
+        session: 98,280 one-minute bars a year. A stored US one-minute series
+        carries extended hours — 04:00-20:00, 960 bars a day — so its bar
+        returns are annualised with a factor 2.46x too small and every Sharpe
+        and Sortino comes out understated by sqrt(390/960) = 0.64 (audit
+        2026-11-14, B4.4). The number of return observations in a year is a
+        property of the series, not of its label, so it is counted: 252 x the
+        median number of bars per session day. The median, not the mean,
+        because the first and last day of a window are usually partial, half
+        days exist, and a stray weekend quote bar is one "day" of one bar.
+
+        Unchanged where the old factor was right: a curve that really has 390
+        one-minute bars a day still gets exactly 98,280, and bar sizes of a
+        day or more keep the nominal mapping (one bar per session is what it
+        already says; weeks and months cannot be counted per day at all).
+
+        ``session_tz`` groups bars by the venue's own date. Stored frames are
+        New York-indexed for every venue, and an ASX session straddles New
+        York midnight, which would split each session across two dates.
+
+        Still an approximation: 252 sessions a year is assumed, so a 7-day
+        market is understated by sqrt(365/252).
+        """
+        nominal = Backtester._bars_per_year(bar_size)
+        if nominal <= _TRADING_DAYS_PER_YEAR:
+            return nominal
+        if not isinstance(index, pd.DatetimeIndex) or len(index) == 0:
+            return nominal
+        try:
+            local = (index.tz_convert(session_tz)
+                     if session_tz and index.tz is not None else index)
+            _, counts = np.unique(local.normalize().asi8, return_counts=True)
+        except Exception:
+            return nominal
+        per_session = float(np.median(counts))
+        if not per_session > 0:
+            return nominal
+        return float(_TRADING_DAYS_PER_YEAR * per_session)
+
+    def _window(self, full_curve: pd.Series) -> Optional[_Window]:
+        """Resolve ``measure_from`` / ``measure_to`` against a finished curve."""
+        if self.config.measure_from is None and self.config.measure_to is None:
+            return None
+        index = full_curve.index
+        lo = _on_clock(self.config.measure_from, index)
+        hi = _on_clock(self.config.measure_to, index)
+        mask = np.ones(len(index), dtype=bool)
+        before = np.zeros(len(index), dtype=bool)
+        if lo is not None:
+            before = np.asarray(index < lo)
+            mask &= ~before
+        if hi is not None:
+            mask &= np.asarray(index < hi)
+        n_before = int(np.count_nonzero(before))
+        # The window starts from the last mark BEFORE it, so its first bar's
+        # move is measured. With nothing before it, it starts from the capital
+        # the run started with — the same convention as an unwindowed run.
+        base = (float(full_curve.to_numpy(dtype=float)[before][-1]) if n_before
+                else float(self.config.initial_capital))
+        return _Window(lo, hi, mask, base, bool(n_before), n_before)
+
+    @staticmethod
+    def _bar_returns(full_curve: pd.Series, window: Optional[_Window]) -> pd.Series:
+        """Bar-to-bar returns of the reported part of the curve.
+
+        Differenced on the FULL curve and then sliced, so the first bar inside
+        a window is measured against the last warm-up mark rather than dropped.
+        """
+        returns = full_curve.pct_change()
+        if window is not None:
+            returns = returns[window.mask]
+        return returns.dropna()
+
+    @staticmethod
+    def _downside_deviation(returns: pd.Series) -> float:
+        """Sortino's denominator: RMS of ``min(r, 0)`` over ALL returns.
+
+        Target 0, N = every observation. One definition for both execution
+        paths: the panel path used the standard deviation of the negative
+        returns alone — it subtracts the negatives' own mean (wrong target)
+        and divides by their count (wrong N) — so the same return series
+        scored a different Sortino depending on which loop produced it
+        (audit 2026-11-14, B4.7c).
+        """
+        if len(returns) == 0:
+            return 0.0
+        downside = returns.clip(upper=0.0)
+        return float(np.sqrt((downside ** 2).mean()))
+
+    @staticmethod
+    def _window_diagnostics(window: _Window, trades: List[BacktestTrade],
+                            in_market: Sequence[bool]) -> Dict[str, Any]:
+        """What a measurement window excluded, so a windowed result says so."""
+        flags = np.asarray(in_market, dtype=bool)
+        held = (int(np.count_nonzero(flags[window.mask]))
+                if len(flags) == len(window.mask) else None)
+        return {
+            'measure_from': None if window.lo is None else str(window.lo),
+            'measure_to': None if window.hi is None else str(window.hi),
+            'window_bars': int(np.count_nonzero(window.mask)),
+            'window_bars_in_market': held,           # bars inside the window with a position open
+            'window_base_equity': window.base_equity,
+            'warmup_bars': window.warmup_bars,
+            'warmup_fills': sum(1 for t in trades
+                                if window.lo is not None
+                                and pd.Timestamp(t.timestamp) < window.lo),
+        }
+
     def run(
         self,
         strategy: Strategy,
@@ -418,9 +588,16 @@ class Backtester:
         # Pending signals: list of (signal, conid, signal_timestamp)
         pending_signals: List[tuple] = []
 
-        # Track how many bars we held at least one open position. Populated
-        # inside the main loop; used at the end to compute time_in_market_pct.
-        bars_in_market = 0
+        # Per bar: was at least one position open? Populated inside the main
+        # loop; used at the end to compute time_in_market_pct (a list rather
+        # than a count so a measurement window can count its own bars).
+        in_market: List[bool] = []
+
+        # The strategy's runtime params, for the session clock that
+        # ``close_by_time`` is compared on (SESSION_TZ; default New York).
+        session_params = getattr(strategy, 'params', None)
+        if not isinstance(session_params, dict):
+            session_params = None
 
         # Precompute hook — strategies that override ``precompute`` get their
         # indicator work done ONCE per conid here instead of on every bar.
@@ -612,8 +789,17 @@ class Backtester:
                         triggered = True
                         reason = f'max_hold_bars={cond["max_hold_bars"]}'
                 if not triggered and cond.get('close_by_time') is not None:
+                    # ``close_by_time`` is session wall time. The bar stamp is
+                    # NOT: stored frames come back New York-indexed for every
+                    # venue, so an ASX 15:45 flatten used to fire at 15:45 New
+                    # York — one bar after a Sydney-morning entry — while the
+                    # live runtime converts to SESSION_TZ first. Same
+                    # conversion here, or the backtest validates a different
+                    # strategy from the one deployed (audit 2026-11-14, B4.2).
+                    session_ts = session_bar_ts(
+                        bar_ts_here, session_params, naive_is_utc=False)
                     t_of_day = (
-                        bar_ts_here.time() if hasattr(bar_ts_here, 'time')
+                        session_ts.time() if hasattr(session_ts, 'time')
                         else None
                     )
                     if t_of_day is not None and t_of_day >= cond['close_by_time']:
@@ -674,31 +860,54 @@ class Backtester:
                 timestamp if isinstance(timestamp, dt.datetime) else dt.datetime.now()
             )
 
-            # Time-in-market: count bars where at least one position is open.
-            if positions:
-                bars_in_market += 1
+            # Time-in-market: bars where at least one position is open.
+            in_market.append(bool(positions))
 
         # Build equity curve
-        equity_curve = pd.Series(equity_values, index=equity_timestamps)
+        full_curve = pd.Series(equity_values, index=equity_timestamps)
+
+        # What is REPORTED. By default the whole run; with a measurement
+        # window (``measure_from`` / ``measure_to``) only the window — the
+        # run above is identical either way, so the book and the indicators
+        # are warm at the window start, but nothing before it is counted.
+        window = self._window(full_curve)
+        equity_curve = full_curve
+        base_equity = self.config.initial_capital
+        all_trades = trades
+        if window is not None:
+            equity_curve = full_curve[window.mask]
+            base_equity = window.base_equity
+            trades = [t for t in all_trades if window.contains(t.timestamp)]
+            signals = [s for s in signals if window.contains(s.timestamp)]
+            bars_in_market = int(np.count_nonzero(
+                np.asarray(in_market, dtype=bool)[window.mask]))
+        else:
+            bars_in_market = sum(in_market)
 
         # Calculate performance metrics
-        total_return = (equity_curve.iloc[-1] / self.config.initial_capital - 1) if len(equity_curve) > 0 else 0.0
+        total_return = (equity_curve.iloc[-1] / base_equity - 1) if len(equity_curve) > 0 else 0.0
 
-        # Sharpe ratio (annualized) — scale factor depends on bar size
-        if len(equity_curve) > 1:
-            returns = equity_curve.pct_change().dropna()
-            if len(returns) > 0 and returns.std() > 0:
-                bars_per_year = self._bars_per_year(self.config.bar_size)
-                sharpe_ratio = (returns.mean() / returns.std()) * np.sqrt(bars_per_year)
-            else:
-                sharpe_ratio = 0.0
+        # Sharpe ratio (annualized) — scaled by the number of bars a year of
+        # THIS curve holds, not by what the bar size would imply for a
+        # 6.5-hour session (see _observed_bars_per_year).
+        returns = self._bar_returns(full_curve, window)
+        bars_per_year = self._observed_bars_per_year(
+            equity_curve.index, self.config.bar_size,
+            (session_params or {}).get('SESSION_TZ'))
+        if len(returns) > 0 and returns.std() > 0:
+            sharpe_ratio = (returns.mean() / returns.std()) * np.sqrt(bars_per_year)
         else:
             sharpe_ratio = 0.0
 
-        # Max drawdown
+        # Max drawdown. Inside a window it is measured from the mark the
+        # window started at, so a fall on its first bar counts.
         if len(equity_curve) > 0:
-            running_max = equity_curve.cummax()
-            drawdown = (equity_curve - running_max) / running_max
+            dd_curve = equity_curve
+            if window is not None and window.carried:
+                dd_curve = pd.Series(
+                    np.r_[base_equity, equity_curve.to_numpy(dtype=float)])
+            running_max = dd_curve.cummax()
+            drawdown = (dd_curve - running_max) / running_max
             max_drawdown = float(drawdown.min())
         else:
             max_drawdown = 0.0
@@ -710,42 +919,56 @@ class Backtester:
         avg_entry: Dict[int, float] = {}   # conid -> weighted avg entry price
         avg_qty: Dict[int, float] = {}     # conid -> total held quantity
         avg_buy_comm: Dict[int, float] = {}  # conid -> weighted buy commission PER SHARE
+        opened_at: Dict[int, Any] = {}     # conid -> stamp of the BUY that opened the position from flat
         winning_trades = 0
         sell_trades = 0
         round_trip_pnl: List[float] = []           # dollar P&L per SELL
         round_trip_return_pct: List[float] = []    # P&L / notional per SELL
-        for trade in trades:
+        # Pairing walks EVERY fill, warm-up included — a SELL can only be
+        # priced against the entry it closes — but a round trip is COUNTED
+        # only when the position was opened inside the measurement window and
+        # closed inside it. One opened during warm-up was opened on bars the
+        # window does not judge; its mark-to-market inside the window is in
+        # the equity curve, where it belongs, and nowhere else.
+        for trade in all_trades:
             if trade.action == Action.BUY:
                 prev_qty = avg_qty.get(trade.conid, 0.0)
                 prev_cost = avg_entry.get(trade.conid, 0.0) * prev_qty
                 prev_comm = avg_buy_comm.get(trade.conid, 0.0) * prev_qty
                 new_qty = prev_qty + trade.quantity
                 if new_qty > 0:
+                    if trade.conid not in avg_qty:
+                        opened_at[trade.conid] = trade.timestamp
                     avg_entry[trade.conid] = (prev_cost + trade.price * trade.quantity) / new_qty
                     avg_qty[trade.conid] = new_qty
                     # Carry buy-side commission as a per-share figure so a later
                     # partial sell can attribute its share of entry cost.
                     avg_buy_comm[trade.conid] = (prev_comm + trade.commission) / new_qty
             elif trade.action == Action.SELL:
-                sell_trades += 1
+                counted = window is None or (
+                    window.contains(trade.timestamp)
+                    and window.contains(opened_at.get(trade.conid)))
                 entry_price = avg_entry.get(trade.conid, 0.0)
-                # Round-trip P&L: subtract BOTH sides' commissions. The old code
-                # only netted the sell-side commission, overstating expectancy,
-                # profit factor and win rate (the buy-side fee was ignored).
-                buy_comm_alloc = avg_buy_comm.get(trade.conid, 0.0) * trade.quantity
-                pnl = (trade.price - entry_price) * trade.quantity - trade.commission - buy_comm_alloc
-                round_trip_pnl.append(pnl)
-                if entry_price > 0:
-                    notional = entry_price * trade.quantity
-                    round_trip_return_pct.append(pnl / notional if notional > 0 else 0.0)
-                if entry_price > 0 and trade.price > entry_price:
-                    winning_trades += 1
+                if counted:
+                    sell_trades += 1
+                    # Round-trip P&L: subtract BOTH sides' commissions. The old code
+                    # only netted the sell-side commission, overstating expectancy,
+                    # profit factor and win rate (the buy-side fee was ignored).
+                    buy_comm_alloc = avg_buy_comm.get(trade.conid, 0.0) * trade.quantity
+                    pnl = (trade.price - entry_price) * trade.quantity - trade.commission - buy_comm_alloc
+                    round_trip_pnl.append(pnl)
+                    if entry_price > 0:
+                        notional = entry_price * trade.quantity
+                        round_trip_return_pct.append(pnl / notional if notional > 0 else 0.0)
+                    if entry_price > 0 and trade.price > entry_price:
+                        winning_trades += 1
                 # Reduce tracked quantity
                 remaining = avg_qty.get(trade.conid, 0.0) - trade.quantity
                 if remaining <= 0:
                     avg_entry.pop(trade.conid, None)
                     avg_qty.pop(trade.conid, None)
                     avg_buy_comm.pop(trade.conid, None)
+                    opened_at.pop(trade.conid, None)
                 else:
                     avg_qty[trade.conid] = remaining
 
@@ -756,16 +979,13 @@ class Backtester:
         # Sortino: like Sharpe but only penalizes downside volatility. A
         # large number is less deceiving on asymmetric P&L than Sharpe.
         sortino_ratio = 0.0
-        if len(equity_curve) > 1:
-            returns = equity_curve.pct_change().dropna()
+        if len(returns) > 0:
             # Proper downside deviation: RMS of min(r, 0) over ALL returns
             # (target = 0). The old code used the std of only the negative
             # subsample — which subtracts the negatives' own mean (wrong target)
             # and divides by the count of negatives (wrong N), inflating Sortino.
-            downside = returns.clip(upper=0.0)
-            downside_dev = float(np.sqrt((downside ** 2).mean())) if len(returns) > 0 else 0.0
+            downside_dev = self._downside_deviation(returns)
             if downside_dev > 0:
-                bars_per_year = self._bars_per_year(self.config.bar_size)
                 sortino_ratio = float((returns.mean() / downside_dev) * np.sqrt(bars_per_year))
 
         # Calmar: raw total_return / |max_drawdown|. Not annualized — raw
@@ -820,6 +1040,9 @@ class Backtester:
             start_date=self.config.start_date,
             end_date=self.config.end_date,
         )
+        if window is not None:
+            result.diagnostics.update(
+                self._window_diagnostics(window, all_trades, in_market))
 
         logging.info(
             f'backtest complete: {len(trades)} trades, '
@@ -844,6 +1067,7 @@ class Backtester:
         trades: List[BacktestTrade],
         signals: List[TradingEvent],
         positions: Dict[int, float],
+        in_market: Sequence[bool] = (),
     ) -> BacktestResult:
         """Metrics from an equity curve plus a trade log.
 
@@ -851,38 +1075,64 @@ class Backtester:
         FIFO round-trip pairing rather than counting legs: in a rebalanced book
         a single "trade" is a partial adjustment, and calling each leg a win or
         a loss would score a trim of a winner as a separate winning trade.
+
+        Honours the measurement window exactly as ``run`` does: the curve and
+        the fills are sliced to it, the return starts from the last mark
+        before it, and a lot counts only when it was opened and closed inside.
         """
         import numpy as np
-        from trader.simulation.backtest_stats import round_trip_pnls
+        from trader.simulation.backtest_stats import round_trip_lots
 
         cap = self.config.initial_capital
+        full_curve, all_trades = equity_curve, trades
+        window = self._window(full_curve)
+        base = cap
+        if window is not None:
+            equity_curve = full_curve[window.mask]
+            base = window.base_equity
+            trades = [t for t in all_trades if window.contains(t.timestamp)]
         if len(equity_curve) == 0:
-            return BacktestResult([], trades, equity_curve, 0.0, 0.0, 0.0,
-                                  0.0, 0)
+            empty = BacktestResult([], trades, equity_curve, 0.0, 0.0, 0.0,
+                                   0.0, 0)
+            if window is not None:
+                empty.diagnostics.update(
+                    self._window_diagnostics(window, all_trades, in_market))
+            return empty
 
-        total_return = float(equity_curve.iloc[-1] / cap - 1.0)
-        rets = equity_curve.pct_change().dropna()
-        bars_per_year = self._bars_per_year(self.config.bar_size)
+        total_return = float(equity_curve.iloc[-1] / base - 1.0)
+        rets = self._bar_returns(full_curve, window)
+        bars_per_year = self._observed_bars_per_year(
+            equity_curve.index, self.config.bar_size)
         ann = math.sqrt(bars_per_year)
 
         sharpe = sortino = 0.0
         if len(rets) > 1 and rets.std(ddof=1) > 0:
             sharpe = float(rets.mean() / rets.std(ddof=1) * ann)
-        downside = rets[rets < 0]
-        if len(downside) > 1 and downside.std(ddof=1) > 0:
-            sortino = float(rets.mean() / downside.std(ddof=1) * ann)
+        # Same Sortino as ``run`` — see _downside_deviation.
+        downside_dev = self._downside_deviation(rets)
+        if downside_dev > 0:
+            sortino = float(rets.mean() / downside_dev * ann)
 
-        running_max = equity_curve.cummax()
-        dd = (equity_curve - running_max) / running_max
+        dd_curve = equity_curve
+        if window is not None and window.carried:
+            dd_curve = pd.Series(np.r_[base, equity_curve.to_numpy(dtype=float)])
+        running_max = dd_curve.cummax()
+        dd = (dd_curve - running_max) / running_max
         max_dd = float(dd.min()) if len(dd) else 0.0
         years = max(len(equity_curve) / bars_per_year, 1e-9)
         calmar = float((total_return / years) / abs(max_dd)) if max_dd < 0 else 0.0
 
-        pnls = round_trip_pnls([{
+        # Pairing walks every fill, warm-up included; ``_ts`` rides along so a
+        # lot can be kept or dropped by when it was opened and closed.
+        lots = round_trip_lots([{
             'timestamp': str(t.timestamp), 'conid': t.conid,
             'quantity': t.quantity, 'price': t.price,
             'commission': t.commission, 'action': str(t.action),
-        } for t in trades])
+            '_ts': t.timestamp,
+        } for t in all_trades])
+        pnls = [pnl for pnl, opened, closed in lots
+                if window is None or (window.contains(opened['_ts'])
+                                      and window.contains(closed['_ts']))]
         wins = [p for p in pnls if p > 0]
         losses = [p for p in pnls if p < 0]
         win_rate = (len(wins) / len(pnls)) if pnls else 0.0
@@ -891,7 +1141,7 @@ class Backtester:
             float('inf') if gross_win > 0 else 0.0)
         expectancy_bps = ((float(np.mean(pnls)) / cap) * 10_000.0) if pnls else 0.0
 
-        return BacktestResult(
+        result = BacktestResult(
             signals=signals, trades=trades, equity_curve=equity_curve,
             total_return=total_return, sharpe_ratio=sharpe,
             max_drawdown=max_dd, win_rate=win_rate, total_trades=len(pnls),
@@ -900,6 +1150,10 @@ class Backtester:
             time_in_market_pct=1.0 if positions else 0.0,
             start_date=self.config.start_date, end_date=self.config.end_date,
         )
+        if window is not None:
+            result.diagnostics.update(
+                self._window_diagnostics(window, all_trades, in_market))
+        return result
 
     def run_panel(
         self,
@@ -988,6 +1242,7 @@ class Backtester:
         trades: List[BacktestTrade] = []
         equity_values: List[float] = []
         equity_timestamps: List[Any] = []
+        in_market: List[bool] = []       # per bar: was any position open at the mark?
         commission = self.config.commission_per_share
         slip = self.config.slippage_bps / 10_000.0
         borrow_per_period = (
@@ -1125,6 +1380,7 @@ class Backtester:
                     mark += qty * px
             equity_values.append(mark)
             equity_timestamps.append(ts)
+            in_market.append(bool(positions))
 
             if i >= n - 1:
                 break                    # nothing left to fill into
@@ -1144,7 +1400,7 @@ class Backtester:
             pending = orders or None
 
         equity_curve = pd.Series(equity_values, index=pd.Index(equity_timestamps))
-        result = self._summarise(equity_curve, trades, [], positions)
+        result = self._summarise(equity_curve, trades, [], positions, in_market)
         result.diagnostics.update({
             'panel_scaled_buy_fills': scaled_buy_fills,      # BUY fills reduced by the D06 cash guard
             'panel_dropped_buy_fills': dropped_buy_fills,    # ... of which reduced to nothing

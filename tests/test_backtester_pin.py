@@ -16,6 +16,28 @@ pinned too), the legacy ``on_prices`` fallback, and the real DuckDB read path.
 If a pin changes because results were *meant* to change, re-record it — and
 say why in the commit message. A pin that changes during a pure performance
 refactor is a bug in the refactor.
+
+Re-recorded 2026-11-14 (audit B4.2 + B4.4, docs/AUDIT_2026-11-14.md). Two
+intended changes moved these pins, and nothing else did:
+
+* **B4.4 — Sharpe and Sortino, every scenario, by exactly sqrt(bars per
+  day / 390).** These fixtures have a 08:00-17:30 session, 570 one-minute bars
+  a day, and the old factor assumed 390 (98,280 a year). Annualisation now
+  counts the curve's own bars, so both ratios rise by sqrt(570/390) = 1.208941
+  (``orb_multi_live``: 1.206818, its gappy two-instrument timeline has a
+  median of 568 bars a day). No trade, signal, equity point or other metric
+  moved in ``orb_single``, ``orb_fixed_bps``, ``orb_pyramid``,
+  ``legacy_fallback`` and ``duckdb_path``.
+* **B4.2 — the trades of the three scenarios that use ``close_by_time`` on
+  UTC-indexed frames** (``orb_multi_live`` and ``orb_same_close`` via
+  ``EOD_FLATTEN``; ``dupes_every_bar`` via ``close_by_time=20:00``).
+  ``FrameStorage`` hands the backtester the raw UTC index, so their time exits
+  used to fire on UTC wall time — ORB's 15:45 flatten at 10:45 New York. The
+  exit is now compared on the strategy's session clock (default New York),
+  as the live runtime does, so positions are held to 15:45 New York and the
+  20:00 rule never fires inside a session that ends at 17:30. With that one
+  conversion switched off these three scenarios reproduce their old trades,
+  signals and equity exactly, differing only by the B4.4 factor above.
 """
 import datetime as dt
 import hashlib
@@ -216,40 +238,41 @@ SCENARIOS = {
 }
 
 # --------------------------------------------------------------------------
-# Pins (recorded against the pre-optimisation loop at 5fd7948)
+# Pins (recorded against the pre-optimisation loop at 5fd7948; the values the
+# 2026-11-14 audit fixes moved were re-recorded — see the module docstring)
 # --------------------------------------------------------------------------
 
 PINS: dict = {'duckdb_path': {'bars_sha': '8fb0c3a6750558b57d9805ffd7294f9108c53433da8f957843a5cd1fcac505c9',
                  'equity_sha': 'f48e6ad503c0a4340482d92dc27992227cd5bc6f2dca78170250aeeefbfb68e5',
                  'final_equity': '100064.40145029772',
-                 'metrics': '0.0006440145029771305|13.81108495988631|-0.00012117556011932124|1.0|56.62580967317477|5.314722724144796|inf|64.44314422579795|0.007017543859649123',
+                 'metrics': '0.0006440145029771305|16.69678754826522|-0.00012117556011932124|1.0|68.45726578379427|5.314722724144796|inf|64.44314422579795|0.007017543859649123',
                  'n_equity': 2850,
                  'n_signals': 2,
                  'n_trades': 2,
                  'signals_sha': '23290a9b4d21737ff64b0acb2dbd600a08ce958873510e5fe48d974f2b1ef4f8',
                  'trades_sha': '995aca4b600fc756f863a19bdfef1e82cab9036af134eb6e8fa9430ee4768c86'},
- 'dupes_every_bar': {'next_open': {'bars_sha': '29a5846b4e1198294985ffc3443f954d995277c8a34d83d5dea432612cdd4e4b',
-                                   'equity_sha': 'a74e4e33de7688609aedd5389dce1d00bb4856e649c811fa26fe7262a4ec074d',
-                                   'final_equity': '99984.27685064577',
-                                   'metrics': '-0.00015723149354229804|-22.702633804148878|-0.00017905268963191027|0.4748201438848921|-29.744807863378416|-0.8781297497710232|0.6889698450378908|-5.728629411956583|0.643859649122807',
+ 'dupes_every_bar': {'next_open': {'bars_sha': '2d6bab3c59399506c666cc0af8cbfe47d484d6ae6beffbbdf7e212a48880c221',
+                                   'equity_sha': '8fbe9ddace362b9b7220c8b599c3d9391861936f3540242ebc3e403a069ae9a5',
+                                   'final_equity': '99987.50171909451',
+                                   'metrics': '-0.00012498280905492987|-21.230393979242926|-0.00016614228809032258|0.5072463768115942|-28.207436179902835|-0.7522636800751382|0.7591529979500097|-4.679609873725168|0.6824561403508772',
                                    'n_equity': 570,
-                                   'n_signals': 295,
-                                   'n_trades': 278,
-                                   'signals_sha': '6e52f0a8653797c0af3b8bcae258f4c0fb9eac75289e4707250a6d9348ce8309',
-                                   'trades_sha': '3a44d82e051beabd239331566760112a9d8b7724fb984ce677283b1240127b43'},
-                     'same_close': {'bars_sha': '704b0b3923f6dd0f5f40793447453c70fe39288059f23bfd21209171e5839080',
-                                    'equity_sha': '2b1b40d73390e3d06be14bd229b31c30299d1968f77e2619b1a911dad38b1644',
-                                    'final_equity': '99988.24410972808',
-                                    'metrics': '-0.00011755890271913927|-16.952471189786372|-0.00014303759651877924|0.4748201438848921|-23.071204615690302|-0.8218741476385553|0.746359568202549|-3.300720519337728|0.643859649122807',
+                                   'n_signals': 277,
+                                   'n_trades': 277,
+                                   'signals_sha': 'b07b12724741ff27ca4b4e78e869153d106b9aa5f6f1da0c9774dad53b7b13b8',
+                                   'trades_sha': 'c43169301c8b49cb35cbc8790fddfc46744a19cf56cc7338b50ebee7190cebd8'},
+                     'same_close': {'bars_sha': '433303a309c55edccaa5ffd4800c73d83b82948382e6a026449b482909f138df',
+                                    'equity_sha': '0f486711f21376ea97315f95fd7dc4580e285b9512060cb6a90245016c7d2f8d',
+                                    'final_equity': '99990.05317462294',
+                                    'metrics': '-9.946825377060708e-05|-16.97892114017041|-0.00014113627638374958|0.4927536231884058|-23.316769725934435|-0.7047674511417098|0.7930721071915465|-3.3306205142581207|0.6789473684210526',
                                     'n_equity': 570,
-                                    'n_signals': 296,
-                                    'n_trades': 279,
-                                    'signals_sha': 'bf463b34feef534a7902798f00c2183e4883c6ea60c6da7b103921ea530a4f19',
-                                    'trades_sha': '241a75a9798d6a3438e82e0b6c24aeb4ec9a27d57461426511219b52a1e3ccba'}},
+                                    'n_signals': 278,
+                                    'n_trades': 278,
+                                    'signals_sha': '0ffbdf68bfbcf2be9d23f7a63f77b3b625bf9d7d2a9a585c28419e32af3e6389',
+                                    'trades_sha': 'f19090070f8bf65c5d7e5455bd7169a37e33f33393cf47043d8faa69f4ecb15b'}},
  'legacy_fallback': {'next_open': {'bars_sha': '15f6c1f7ec3ea943a3d0879060dcfac2487b7907cab28fdb63e947cb29033c69',
                                    'equity_sha': '8a7194e4f54891414558ffddc3a878b1ce18f61dab8fdef469dba294fad55ff7',
                                    'final_equity': '99102.65634107003',
-                                   'metrics': '-0.008973436589299721|-13.718604597087177|-0.013356276576079254|0.35294117647058826|-18.45875634432741|-0.6718516600181007|0.5666194336601684|-18.310637986802696|0.5692982456140351',
+                                   'metrics': '-0.008973436589299721|-16.584984241390455|-0.013356276576079254|0.35294117647058826|-22.315548270218194|-0.6718516600181007|0.5666194336601684|-18.310637986802696|0.5692982456140351',
                                    'n_equity': 1140,
                                    'n_signals': 112,
                                    'n_trades': 102,
@@ -258,7 +281,7 @@ PINS: dict = {'duckdb_path': {'bars_sha': '8fb0c3a6750558b57d9805ffd7294f9108c53
                      'same_close': {'bars_sha': '19a6d0b9187dd782c9e6c7d7e448df4e63a3e5c9c42a1775c51d3e3a5263d695',
                                     'equity_sha': 'cc8b5c64e82b7c84a8dd56d1b966c20d94142e130abeddd6b10f4e4ef792a07b',
                                     'final_equity': '99205.53496574677',
-                                    'metrics': '-0.007944650342532222|-12.09047458321812|-0.01219462671535558|0.39215686274509803|-16.45462060471131|-0.6514877845771407|0.5993732005059028|-16.19940824552909|0.5684210526315789',
+                                    'metrics': '-0.007944650342532222|-14.616671033450451|-0.01219462671535558|0.39215686274509803|-19.892666305517658|-0.6514877845771407|0.5993732005059028|-16.19940824552909|0.5684210526315789',
                                     'n_equity': 1140,
                                     'n_signals': 113,
                                     'n_trades': 103,
@@ -266,43 +289,43 @@ PINS: dict = {'duckdb_path': {'bars_sha': '8fb0c3a6750558b57d9805ffd7294f9108c53
                                     'trades_sha': '6e015310dc2064359c090a53e1538810558852b08c78889d90d70d2f64d4d55b'}},
  'orb_fixed_bps': {'equity_sha': 'f3a0b01c0b3dc619149c868a2b7dcaa6a3a962d40a14847e17f33a48f0d69fde',
                    'final_equity': '99573.56206171992',
-                   'metrics': '-0.004264379382800887|-8.943353149974337|-0.004411390357206914|0.0|-11.79492496580812|-0.966674684736105|0.0|-214.54313194195365|0.07090643274853801',
+                   'metrics': '-0.004264379382800887|-10.811986744556183|-0.004411390357206914|0.0|-14.259368968753973|-0.966674684736105|0.0|-214.54313194195365|0.07090643274853801',
                    'n_equity': 6840,
                    'n_signals': 6,
                    'n_trades': 4,
                    'signals_sha': 'f7da72439d5dad76594780269a1c576870f98c56034507c90d6b73d52bcba8f7',
                    'trades_sha': '1ae2d083cc2b538f31ecc952462348879e7bf83d7c7ac375819fdf4670d5672d'},
- 'orb_multi_live': {'bars_sha': '96b7454d37a908645d7eddd9b5ce798673edb619b863303825029fee0a39087a',
-                    'equity_sha': '3353acd385faedc4c3f7fb22980d8804136f3ad36dc1658913446fb64a7186f3',
-                    'final_equity': '99999.23189834361',
-                    'metrics': '-7.681016563898524e-06|-0.9790839829821683|-2.472804194704761e-05|0.4|-1.3265452953979426|-0.31061968352959685|0.7536853130232212|-0.8283157591427323|0.0012332628611698379',
+ 'orb_multi_live': {'bars_sha': '159e1afc61e865c871a6f8315cb573228a7519b88f1680ba96317fcd70994630',
+                    'equity_sha': 'b67846c3f06de463bfd76a624c04ac416f7f8d5211e843276f11a4a3f52e44a2',
+                    'final_equity': '99957.86212261002',
+                    'metrics': '-0.0004213787738998054|-4.6582051180018516|-0.0007671941952461388|0.4|-6.151168833128382|-0.5492465617060808|0.4200681084639955|-42.934043155269144|0.03400281888653982',
                     'n_equity': 5676,
                     'n_signals': 14,
                     'n_trades': 10,
-                    'signals_sha': 'a14420c19ca57694a2a4734dba469fe74d4d561b3d3fd485050ed06a258156b5',
-                    'trades_sha': '098e59e6d9508e93b33f06087a7c2fb60003cac9c514d918ee80a66b9c2c60e9'},
+                    'signals_sha': '358cfdc9068820a120d9695ce45173866f40598fcdde81b74c60a5afa2cd98ce',
+                    'trades_sha': '5057b677d244628d9dfefbe72bb601de8d8cbe8aba0acd733381135cf33f5d5d'},
  'orb_pyramid': {'bars_sha': '987a6ad87221030aee6f5e08f8f61b704a096a11a9c0d449b6c8bf9600833339',
                  'equity_sha': '9d1134f96644bc7390d3ffef297dcfb3db3cda48ba165fed5414e5dc9e8b39bb',
                  'final_equity': '100031.9721883236',
-                 'metrics': '0.0003197218832360349|1.8893702139723552|-0.0006672768301040254|1.0|2.7651771520672894|0.47914429036325407|inf|80.97490335154592|0.08105263157894736',
+                 'metrics': '0.0003197218832360349|2.2841372096646992|-0.0006672768301040254|1.0|3.342936168699425|0.47914429036325407|inf|80.97490335154592|0.08105263157894736',
                  'n_equity': 5700,
                  'n_signals': 5,
                  'n_trades': 3,
                  'signals_sha': 'd299a38cf75ed40c6860a9d8842ec01d0fca793bd288021cb3e89e3927e91bfb',
                  'trades_sha': '01870408a0b4f1929b8e65f04afcf84791e8a5e4d01d735b2fa055b9c0af4e2c'},
- 'orb_same_close': {'bars_sha': '8c13f9746fb0053e665a1ceb3673a007c7dc079658c4ecc92d6597024a497f74',
-                    'equity_sha': '228b90961bf4a7e64fef7628922830897d6beb84b816e88c6c6442ff3c393887',
-                    'final_equity': '99893.57437985961',
-                    'metrics': '-0.0010642562014039347|-6.132130101087781|-0.001406508200361968|0.0|-7.146900142572641|-0.7566654791845835|0.0|-18.103643876928505|0.007236842105263158',
+ 'orb_same_close': {'bars_sha': 'c7bcb38171fe506f99fa67368fc6096c494454be1ea50f9ba4d40fcfab1a24b0',
+                    'equity_sha': '34e697b35453346815cc2558a3cfed8ee7dc6991ec861e613ab5bf75f18a73e7',
+                    'final_equity': '99872.86060506744',
+                    'metrics': '-0.0012713939493256277|-5.094289344832152|-0.001938078219197092|0.3333333333333333|-6.267190093756423|-0.6560075526014328|0.33958282990087485|-23.380075449799502|0.03859649122807018',
                     'n_equity': 4560,
                     'n_signals': 12,
                     'n_trades': 12,
-                    'signals_sha': 'cba614c8dd0ab614f70236651a5b8c8c175b0cf3f85ea3741a82f63342743e59',
-                    'trades_sha': '03f4002dafa3ea38dbdbd4b1142cc76370015ce1c2d026d19e4fc8ef368b67ac'},
+                    'signals_sha': '010acbe29afdfaf13d54925c9e9989b2076039bdfd6a5a6c08e08411a77c2659',
+                    'trades_sha': 'bbc8fb054126adb3528c230074b7babc0e3fbe85555d99aad868275fb6166daf'},
  'orb_single': {'bars_sha': '4640a6f67d494b9448d451c6e28d3be10d370b20d4dafb052a02489ce3a45d44',
                 'equity_sha': 'ec46117ba50a81199f289f66d2ada426c86a00bf30f2478617d7076d878ba4c9',
                 'final_equity': '104815.9287632487',
-                'metrics': '0.048159287632487|11.415794865897793|-0.07218377096973869|0.5|16.640574839238486|0.6671761115483511|57.186935873658534|556.7527688767885|0.7599415204678363',
+                'metrics': '0.048159287632487|13.801023027812967|-0.07218377096973869|0.5|20.117474012994546|0.6671761115483511|57.186935873658534|556.7527688767885|0.7599415204678363',
                 'n_equity': 6840,
                 'n_signals': 8,
                 'n_trades': 8,

@@ -87,8 +87,20 @@ def round_trip_pnls(trades: List[dict]) -> List[float]:
     ``'Action.SELL'`` — the persisted JSON uses whichever ``str()`` of the
     Action enum produces at write time.
     """
-    lots: dict = {}  # conid -> deque of [qty_remaining, buy_price, buy_comm_per_share]
-    pnls: List[float] = []
+    return [pnl for pnl, _, _ in round_trip_lots(trades)]
+
+
+def round_trip_lots(trades: List[dict]) -> List[Tuple[float, dict, dict]]:
+    """The pairing behind ``round_trip_pnls``, with each lot's provenance.
+
+    One entry per matched lot: ``(realized P&L, the BUY fill that opened it,
+    the SELL fill that closed it)`` — the two dicts are the caller's own, so
+    any extra key it put on a fill comes back. That is what lets a caller
+    measuring a WINDOW of a longer run keep only the lots opened inside it
+    without a second copy of the FIFO rule (``Backtester._summarise``).
+    """
+    lots: dict = {}  # conid -> deque of [qty_remaining, buy_price, buy_comm_per_share, buy fill]
+    out: List[Tuple[float, dict, dict]] = []
     for t in sorted(trades, key=lambda x: x.get('timestamp', '')):
         try:
             conid = int(t.get('conid', 0))
@@ -103,7 +115,7 @@ def round_trip_pnls(trades: List[dict]) -> List[float]:
         is_buy = 'BUY' in action_raw
         comm_per_share = comm / qty
         if is_buy:
-            lots.setdefault(conid, deque()).append([qty, price, comm_per_share])
+            lots.setdefault(conid, deque()).append([qty, price, comm_per_share, t])
         elif 'SELL' in action_raw:
             remaining = qty
             while remaining > 0 and lots.get(conid):
@@ -114,12 +126,12 @@ def round_trip_pnls(trades: List[dict]) -> List[float]:
                     - matched * lot[2]       # buy-side commission
                     - matched * comm_per_share   # sell-side commission
                 )
-                pnls.append(realized)
+                out.append((realized, lot[3], t))
                 lot[0] -= matched
                 remaining -= matched
                 if lot[0] <= 1e-12:
                     lots[conid].popleft()
-    return pnls
+    return out
 
 
 def probabilistic_sharpe(

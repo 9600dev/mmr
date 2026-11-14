@@ -21,6 +21,7 @@ from trader.messaging.clientserver import (
 from trader.objects import Action, BarSize, WhatToShow
 from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.strategy.auto_executor import AutoExecutor, SignalWork
+from trader.strategy.parameters import session_bar_ts
 from trader.trading.strategy import Signal, Strategy, StrategyConfig, StrategyContext, StrategyState
 from typing import Any, cast, Dict, List, Optional
 
@@ -223,21 +224,20 @@ def _session_bar_ts(last_bar, params: Optional[dict],
     """Convert a live (UTC) bar timestamp to the strategy's SESSION timezone
     for time-of-day comparisons (``close_by_time``).
 
-    The backtester's frames are session-tz-aware (US history is ET-keyed,
-    ASX Sydney-keyed), so ``bar_ts.time()`` compares in session wall time
-    there. Live frames are UTC — without this conversion a 15:45 ET flatten
-    fires at 15:45 UTC = 11:45 ET, 4h15m early (happened live 2026-07-20 on
-    the first-ever live time-exit). SESSION_TZ param wins (the ASX strategies
-    set Australia/Sydney); default matches US history storage. Any failure
-    falls back to the raw bar (the old behavior) rather than blocking exits.
+    Live frames are UTC — without this conversion a 15:45 ET flatten fires at
+    15:45 UTC = 11:45 ET, 4h15m early (happened live 2026-07-20 on the
+    first-ever live time-exit). SESSION_TZ param wins (the ASX strategies set
+    Australia/Sydney); default matches US history storage. Any failure falls
+    back to the raw bar (the old behavior) rather than blocking exits.
+
+    The conversion itself is ``parameters.session_bar_ts``, shared with the
+    backtester. This docstring used to say the backtester did not need it
+    because its frames were "session-tz-aware (US history ET-keyed, ASX
+    Sydney-keyed)"; they are not — stored history is ET-indexed for every
+    venue — so an ASX ``close_by_time`` was validated against New York wall
+    time and deployed against Sydney's (audit 2026-11-14, B4.2).
     """
-    try:
-        session_tz = (params or {}).get('SESSION_TZ') or default_tz
-        ts = pd.Timestamp(last_bar)
-        ts = ts.tz_localize('UTC') if ts.tzinfo is None else ts
-        return ts.tz_convert(session_tz)
-    except Exception:
-        return last_bar
+    return session_bar_ts(last_bar, params, default_tz=default_tz, naive_is_utc=True)
 
 
 def _count_recent(index, now_utc: pd.Timestamp, seconds: int) -> int:
