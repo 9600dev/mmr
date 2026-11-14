@@ -527,8 +527,16 @@ class Trader():
             return
         try:
             asyncio.get_running_loop().call_soon(self.reconnect)
+            return
         except RuntimeError:
-            self.reconnect()
+            pass
+        # Called off the loop (an IB callback thread): hand it to the main loop.
+        # With no loop at all there is nothing to reconnect ON; say so.
+        main_loop = getattr(self, '_main_loop', None)
+        if main_loop is not None and main_loop.is_running():
+            main_loop.call_soon_threadsafe(self.reconnect)
+        else:
+            logging.warning('reconnect requested but no event loop is running; not reconnecting')
 
     def __update_positions(self, positions: Union[List[Position], Position]):
         logging.debug('__update_positions')

@@ -567,23 +567,38 @@ class TestUpstreamDataLost:
         trader._ib_upstream_error = 'lost'
         return trader
 
-    def test_1101_forces_a_resubscribing_reconnect(self):
+    @pytest.mark.asyncio
+    async def test_1101_forces_a_resubscribing_reconnect(self):
         """After 1101 every subscription must be resubmitted and the socket never
         dropped, so nothing re-requested them: green flags over frozen data."""
+        import asyncio
         trader = self._trader()
         trader._on_ib_error(SimpleNamespace(errorCode=1101, errorString='restored - data lost'))
         assert trader._ib_upstream_connected is True
+        assert trader.reconnects == 0             # scheduled, never inline in the IB callback
+        await asyncio.sleep(0)
         assert trader.reconnects == 1
 
-    def test_1102_does_not_bounce_the_socket(self):
+    @pytest.mark.asyncio
+    async def test_1102_does_not_bounce_the_socket(self):
+        import asyncio
         trader = self._trader()
         trader._on_ib_error(SimpleNamespace(errorCode=1102, errorString='restored - data maintained'))
+        await asyncio.sleep(0)
         assert trader._ib_upstream_connected is True
         assert trader.reconnects == 0
 
-    def test_a_reconnect_already_in_progress_is_not_doubled(self):
+    @pytest.mark.asyncio
+    async def test_a_reconnect_already_in_progress_is_not_doubled(self):
+        import asyncio
         trader = self._trader()
         trader._reconnecting = True
+        trader._on_ib_error(SimpleNamespace(errorCode=1101, errorString='restored - data lost'))
+        await asyncio.sleep(0)
+        assert trader.reconnects == 0
+
+    def test_without_an_event_loop_nothing_is_run_inline(self):
+        trader = self._trader()
         trader._on_ib_error(SimpleNamespace(errorCode=1101, errorString='restored - data lost'))
         assert trader.reconnects == 0
 

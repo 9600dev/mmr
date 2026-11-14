@@ -925,6 +925,11 @@ class MMR:
                     except (TypeError, ValueError, AttributeError):
                         sym = None
                     if sym is None:
+                        # No conId on the row: its OWN symbol is still an
+                        # identity (list position never was).
+                        named = snap_dict.get('symbol') if isinstance(snap_dict, dict) else None
+                        sym = named if named in contract_cache else None
+                    if sym is None:
                         continue
                     q = normalize_ib_quote(dict(snap_dict))
                     _b, _a, _notes = discount_own_quotes(
