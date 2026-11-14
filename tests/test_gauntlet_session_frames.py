@@ -701,7 +701,9 @@ class TestQuietStrategiesStillEvaluable:
     def test_orb_on_daily_frames_is_vacuous_not_passed(self):
         s2 = _gauntlet_check_lookahead(OpeningRangeBreakout, '1 day')
         assert s2['status'] == 'fail' and s2['vacuous'] is True
-        assert set(s2['unexercised_keys']) == {'orb_high', 'orb_low'}
+        # every range-derived array is NaN on daily bars (exit_low was added with the
+        # partial-session guard, B3.1)
+        assert set(s2['unexercised_keys']) == {'orb_high', 'orb_low', 'exit_low'}
         assert '--bar-size' in s2['detail']
 
 
