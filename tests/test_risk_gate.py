@@ -1370,3 +1370,40 @@ class TestCheckLeverageZeroIsNotMargin:
             {'initMarginAfter': '100000', 'equityWithLoanAfter': 900_000.0}, net_liquidation=1_000_000.0)
         assert result.approved is True
         assert result.checks['leverage'] == 'pass'
+
+
+def test_the_legacy_turnover_warning_says_how_many_and_that_the_figure_is_a_lower_bound(event_store, caplog):
+    """Proceeding on history that predates notional recording is only safe if
+    it is said: how many submissions, what was counted, and that the figure is
+    a LOWER bound which clears at the day boundary. Nothing checked the
+    warning was more than a line of some text."""
+    import logging
+    import sys
+
+    helper = TestDailyTurnoverCap()
+    gate = helper._gate(event_store, max_daily_open_notional=100_000.0)
+    helper._submit_legacy(event_store, 'test_strat', sys.float_info.max, 1.0)    # a market order: no price to value
+    helper._submit_legacy(event_store, 'test_strat', 100.0, 99.0)                # a limit order: $9,900
+    with caplog.at_level(logging.WARNING):
+        result = helper._evaluate(gate, position_value=1_000.0)
+    assert result.approved is True, result.reason
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    text = ' '.join(warnings)
+    assert "daily turnover: 1 of today's opening submissions predate order-notional recording" in text, warnings
+    assert "today's turnover (>= $9,900) is a LOWER BOUND. Proceeding on it" in text
+    assert 'this clears at the day boundary.' in text
+
+
+def test_an_order_that_was_valued_reaches_the_turnover_cap_as_valued(event_store):
+    """`evaluate` hands the turnover check whether the order's own value could
+    be read. Passing "unknown" for a valued order refused nothing in any test,
+    so the hand-off itself was unpinned."""
+    helper = TestDailyTurnoverCap()
+    gate = helper._gate(event_store, max_daily_open_notional=10_000.0)
+    helper._submit(event_store, 'test_strat', 4_000.0)
+    under = helper._evaluate(gate, position_value=5_000.0, position_value_evaluable=True)
+    assert under.approved is True and under.checks['daily_turnover'] == 'pass'
+    over = helper._evaluate(gate, position_value=6_500.0, position_value_evaluable=True)
+    assert over.approved is False and over.checks['daily_turnover'] == 'fail'
+    unknown = helper._evaluate(gate, position_value=0.0, position_value_evaluable=False)
+    assert unknown.approved is False
