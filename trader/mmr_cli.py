@@ -2427,8 +2427,8 @@ def _dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
             _handle_depth(mmr, args)
 
         elif cmd == 'resolve':
-            defs = mmr.resolve(args.symbol, sec_type=args.sectype,
-                               exchange=args.exchange, currency=args.currency)
+            defs = _distinct_listings(mmr.resolve(args.symbol, sec_type=args.sectype,
+                                                  exchange=args.exchange, currency=args.currency))
             if not defs:
                 # No match at all — empty local DB, empty IB discovery.
                 if _json_mode:
@@ -10490,6 +10490,28 @@ def _listing_source_mismatch(security, source: str) -> str:
 
 
 _US_TICKER_SOURCES = frozenset({'twelvedata', 'massive'})
+
+
+def _distinct_listings(definitions):
+    """One entry per conId, first occurrence kept, order preserved.
+
+    A local resolve returns one record per UNIVERSE the instrument is in, and
+    those records can differ only in routing (AIG: ``exchange='SMART'`` from
+    the portfolio universe, ``'NYSE'`` from another). That is one instrument,
+    and `mmr resolve AIG` reported it as "2 listings (ambiguous)" — which
+    sends a caller looking for a disambiguator that does not exist. A record
+    with no conId cannot be shown to be a duplicate and is always kept.
+    """
+    seen: set = set()
+    distinct = []
+    for definition in definitions or []:
+        con_id = getattr(definition, 'conId', None)
+        if con_id:
+            if con_id in seen:
+                continue
+            seen.add(con_id)
+        distinct.append(definition)
+    return distinct
 
 
 def _resolve_download_listing(symbol: str, source: str, accessor, rpc_mmr,

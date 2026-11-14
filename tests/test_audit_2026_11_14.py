@@ -922,3 +922,31 @@ async def test_direct_path_refuses_a_pure_open_when_opening_is_not_allowed():
         assert trader.placed == []
     finally:
         trader.order_tracker.close(timeout=1)
+
+
+class TestResolveDistinctListings:
+    """`mmr resolve AIG` said "2 listings (ambiguous)" for ONE instrument that
+    is a member of two universes with different routing records."""
+
+    @staticmethod
+    def listing(con_id, exchange, primary='NYSE'):
+        return SimpleNamespace(conId=con_id, symbol='AIG', exchange=exchange, primaryExchange=primary)
+
+    def test_same_conid_in_two_universes_is_one_listing(self):
+        from trader.mmr_cli import _distinct_listings
+
+        smart, direct = self.listing(61319701, 'SMART'), self.listing(61319701, 'NYSE')
+        assert _distinct_listings([smart, direct]) == [smart]
+
+    def test_different_conids_stay_ambiguous_in_order(self):
+        from trader.mmr_cli import _distinct_listings
+
+        us, mexico = self.listing(61319701, 'SMART'), self.listing(38708990, 'MEXI', 'MEXI')
+        assert _distinct_listings([us, mexico, us]) == [us, mexico]
+
+    def test_records_without_a_conid_are_never_collapsed(self):
+        from trader.mmr_cli import _distinct_listings
+
+        first, second = self.listing(0, 'IDEALPRO'), self.listing(0, 'IDEALPRO')
+        assert _distinct_listings([first, second]) == [first, second]
+        assert _distinct_listings(None) == []

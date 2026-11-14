@@ -2277,8 +2277,12 @@ class StrategyRuntime():
         cal = self._try_get_exchange_calendar(security)
         if cal is not None:
             try:
-                date_ranges = tick_data.missing(
-                    security, cal,
+                # Off the loop: the coverage query costs ~0.25 s per instrument
+                # and the startup pass asks it for every one in a row — 26
+                # instruments held the loop (RPC server, tick intake, pulse)
+                # for 8.3 s on 2026-11-14.
+                date_ranges = await asyncio.to_thread(
+                    tick_data.missing, security, cal,
                     date_range=DateRange(start=window_start, end=window_end),
                 )
             except Exception as ex:
