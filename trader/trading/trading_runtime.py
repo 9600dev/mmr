@@ -2799,6 +2799,26 @@ class Trader():
         for row in legs:
             row['leg_count'] = 0
 
+    async def _floor_order_ids(self) -> None:
+        """Once per IB connection: never allocate an order id this client has
+        used before. See ServerOrderJournal.max_order_id. A journal that
+        cannot be read leaves IB's own counter in force — an exit must not
+        wait on this."""
+        ib = self.client.ib
+        if getattr(self, '_order_id_floor_ib', None) is ib:
+            return
+        try:
+            journal = await asyncio.to_thread(self.server_order_journal)
+            top = await asyncio.to_thread(journal.max_order_id, self.trading_runtime_ib_client_id)
+            if top > 0:
+                ib.client.updateReqId(top + 1)
+                logging.info('order ids for client %s start above %d (highest id ever reserved)',
+                             self.trading_runtime_ib_client_id, top)
+            self._order_id_floor_ib = ib
+        except Exception as ex:
+            logging.warning('could not floor order ids from the journal (%s); using the '
+                            "gateway's counter as is", ex)
+
     async def reserve_broker_order(self, order: Order, is_exit: bool = False,
                                    contract: Optional[Contract] = None) -> None:
         intent_id = _CURRENT_INTENT.get()
@@ -2820,6 +2840,7 @@ class Trader():
             if len(matches) != 1:
                 raise ValueError('foreign broker reference is not a verified same-quantity modification')
         if not order.orderId:
+            await self._floor_order_ids()
             allocated_id = self.client.ib.client.getReqId()
             # IB.placeOrder treats zero as unallocated, so never reserve it.
             if type(allocated_id) is int and allocated_id == 0:

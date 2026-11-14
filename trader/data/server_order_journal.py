@@ -179,6 +179,20 @@ class ServerOrderJournal:
             result['outcome'] = json.loads(result['outcome']) if result['outcome'] else None
             return result
 
+    def max_order_id(self, client_id: int) -> int:
+        """Highest broker order id ever reserved for ``client_id`` (0 if none).
+
+        IB hands out the next order id from the gateway's own counter, and a
+        recreated gateway can restart that counter: ids 1946 and 1950-1952
+        were issued twice on 2026-11-14, before and after a redeploy. The
+        journals key physical orders by (client, order id), so the allocator
+        floors new ids above everything recorded here.
+        """
+        with self.journal.transaction() as conn:
+            row = conn.execute('SELECT max(order_id) AS top FROM server_order_reservations WHERE client_id=?',
+                               (int(client_id),)).fetchone()
+        return int(row['top'] or 0) if row is not None else 0
+
     def get_many(self, intent_ids: list[str]) -> dict[str, dict]:
         """Read exact claim provenance and reserved broker IDs in one transaction."""
         if any(not isinstance(value, str) or not value for value in intent_ids):

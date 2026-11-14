@@ -631,3 +631,77 @@ class TestPinnedConIdResolution:
         mmr, client = self._mmr([self._definition(555001)])
         assert mmr.resolve(555001) == []
         client.rpc.return_value.resolve_contract.assert_not_called()
+
+
+# --------------------------------------------------------------------------
+# Order ids are never reused across gateway restarts
+# --------------------------------------------------------------------------
+
+class TestOrderIdFloor:
+    """A recreated gateway restarted its id counter: 1946 and 1950-1952 were
+    issued twice in one day, and journals key physical orders by (client, id)."""
+
+    def _trader(self, top, next_id=1946):
+        from trader.trading.trading_runtime import Trader
+        trader = object.__new__(Trader)
+        state = {'seq': next_id}
+
+        def update(minimum):
+            state['seq'] = max(state['seq'], minimum)
+
+        def get():
+            state['seq'] += 1
+            return state['seq'] - 1
+
+        ib = SimpleNamespace(client=SimpleNamespace(updateReqId=update, getReqId=get))
+        trader.client = SimpleNamespace(ib=ib)
+        trader.trading_runtime_ib_client_id = 5
+        trader.reads = 0
+
+        def journal():
+            trader.reads += 1
+            if isinstance(top, Exception):
+                raise top
+            return SimpleNamespace(max_order_id=lambda client_id: top)
+
+        trader.server_order_journal = journal
+        return trader, ib
+
+    @pytest.mark.asyncio
+    async def test_new_ids_start_above_every_id_ever_reserved(self):
+        trader, ib = self._trader(top=1959)
+        await trader._floor_order_ids()
+        assert ib.client.getReqId() == 1960
+
+    @pytest.mark.asyncio
+    async def test_a_higher_gateway_counter_is_left_alone(self):
+        trader, ib = self._trader(top=100, next_id=5000)
+        await trader._floor_order_ids()
+        assert ib.client.getReqId() == 5000
+
+    @pytest.mark.asyncio
+    async def test_the_journal_is_read_once_per_connection(self):
+        trader, _ = self._trader(top=1959)
+        await trader._floor_order_ids()
+        await trader._floor_order_ids()
+        assert trader.reads == 1
+        trader.client = SimpleNamespace(ib=SimpleNamespace(
+            client=SimpleNamespace(updateReqId=lambda minimum: None, getReqId=lambda: 1)))
+        await trader._floor_order_ids()                       # a new IB connection
+        assert trader.reads == 2
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_journal_does_not_block_allocation(self):
+        trader, ib = self._trader(top=RuntimeError('database is locked'))
+        await trader._floor_order_ids()
+        assert ib.client.getReqId() == 1946
+
+    def test_max_order_id_reads_the_reservations(self, tmp_path):
+        from trader.data.server_order_journal import ServerOrderJournal
+        journal = ServerOrderJournal(str(tmp_path / 'mmr.duckdb'))
+        assert journal.max_order_id(5) == 0
+        journal.claim('intent-a', 'fp', 'DU1')
+        journal.reserve_order('intent-a', 1946, 5)
+        journal.reserve_order('intent-a', 1952, 5)
+        journal.reserve_order('intent-a', 9000, 7)            # another client
+        assert journal.max_order_id(5) == 1952
