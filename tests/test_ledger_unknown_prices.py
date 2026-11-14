@@ -155,3 +155,8 @@ def test_cli_fill_listing_displays_unknown_price(ledger_cli, monkeypatch, json_m
     row = rendered[0]['fills'][0] if json_mode else rendered[0][0]
     assert row['price'] == (None if json_mode else '-')
     assert row['qty'] == 10
+
+
+def test_manual_orders_are_not_a_strategy():
+    from trader.data.event_store import EventStore
+    assert 'global' in EventStore.NON_STRATEGY_TAGS and 'manual' in EventStore.NON_STRATEGY_TAGS

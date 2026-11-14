@@ -11440,6 +11440,69 @@ def _handle_data_audit(args: argparse.Namespace):
     tally: Counter = Counter()
     worst: dict = {}
     scanned = 0
+    # Under --json everything this run has to say goes into ONE document;
+    # side remarks are collected here instead of printed as their own.
+    notes: list = []
+
+    def _note(message: str) -> None:
+        notes.append(message)
+        _set_exit_code(1)
+        if not _json_mode:
+            console.print(f'[red]{message}[/red]')
+    # Not findings, but worth showing: no-data markers on days the venue was
+    # CLOSED. They are the documented representation of "nothing traded"
+    # (CLAUDE.md, "No-data markers are whole days") and one is written for
+    # every weekend and holiday of every IB-sourced series — so counted as
+    # `empty_bar` they grew every week by construction and the gate could
+    # never be green against a recorded baseline (it had been failing nightly
+    # for weeks, 534 vs 278, with nothing wrong). An empty bar on a SESSION
+    # day is still a finding: that is data that should exist and does not.
+    info: Counter = Counter()
+    # The most recent findings per key, so "the number moved" comes with WHICH
+    # series and dates — reviewing a regression used to mean re-deriving them.
+    recent: dict = {}
+
+    from trader.data.session_guard import calendar_for
+    from trader.data.universe import UniverseAccessor
+    definitions: dict = {}
+    try:
+        accessor = UniverseAccessor(cfg.get('duckdb_path', ''), cfg.get('universe_library', 'Universes'))
+        for universe in accessor.get_all():
+            for sd in universe.security_definitions:
+                definitions.setdefault(str(int(sd.conId)), sd)
+    except Exception as ex:
+        _note(f'universes unreadable ({ex}); closed-day markers cannot be told '
+              f'from missing sessions on this run')
+    calendars: dict = {}
+
+    def _closed_day(symbol: str, stamp) -> bool:
+        """True only when this series' venue is KNOWN to have been closed."""
+        if symbol not in calendars:
+            definition = definitions.get(symbol)
+            calendars[symbol] = calendar_for(definition) if definition is not None else None
+        calendar = calendars[symbol]
+        if calendar is None:
+            return False
+        try:
+            day = stamp.astimezone(calendar.tz).date() if stamp.tzinfo else stamp.date()
+            return not calendar.is_session(day.isoformat())
+        except Exception:
+            return False
+
+    def _venue_time(symbol: str, stamp) -> str:
+        """The bar's time as the VENUE writes it — a daily bar is keyed at
+        venue midnight, which is the previous evening on a host further west."""
+        import datetime as _dt
+        calendar = calendars.get(symbol)
+        try:
+            zone = calendar.tz if calendar is not None else _dt.timezone.utc
+            return (stamp.astimezone(zone) if stamp.tzinfo else stamp).isoformat()
+        except Exception:
+            return str(stamp)
+
+    def _label(symbol: str) -> str:
+        definition = definitions.get(symbol)
+        return f'{definition.symbol} ({symbol})' if definition is not None else symbol
 
     # Split classification is best-effort reference data, not a precondition:
     # without the table every jump stays `large_jump` (the status quo), but say
@@ -11449,8 +11512,8 @@ def _handle_data_audit(args: argparse.Namespace):
         have_splits = True
     except Exception:
         have_splits = False
-        print_status('corporate_splits table not found — large jumps reported '
-                     'unclassified (run scripts/fetch_splits.py)', success=False)
+        _note('corporate_splits table not found — large jumps reported '
+              'unclassified (run scripts/fetch_splits.py)')
 
     # A series keyed by its TICKER rather than its conId. Not a bar defect, so
     # no per-bar rule can find it - but it is a store defect with the same
@@ -11510,8 +11573,19 @@ def _handle_data_audit(args: argparse.Namespace):
                         jumps, bars, [r[0].date() for r in rows], srows)
                 findings += jumps
             for f in findings:
+                stamp = rows[f.index][0] if f.index is not None and 0 <= f.index < len(rows) else None
+                if f.rule == 'empty_bar' and stamp is not None and _closed_day(sym, stamp):
+                    info[f'{bar_size}|closed_day_marker'] += 1
+                    continue
                 key = f'{bar_size}|{f.rule}'
                 tally[key] += 1
+                if stamp is not None:
+                    bucket = recent.setdefault(key, [])
+                    _closed_day(sym, stamp)      # resolves this series' calendar once
+                    bucket.append((stamp, _label(sym), f.detail, _venue_time(sym, stamp)))
+                    if len(bucket) > 400:
+                        bucket.sort(key=lambda item: item[0], reverse=True)
+                        del bucket[40:]
                 if tally[key] > worst.get(key, (0, ''))[0]:
                     pass
                 worst.setdefault(key, (0, sym))
@@ -11541,12 +11615,27 @@ def _handle_data_audit(args: argparse.Namespace):
 
     regressions = {k: (v, baseline.get(k, 0)) for k, v in current.items()
                    if v > baseline.get(k, 0)}
+    examples = {}
+    for key, bucket in recent.items():
+        bucket.sort(key=lambda item: item[0], reverse=True)
+        examples[key] = [{'date': when, 'series': label, 'detail': detail}
+                         for _stamp, label, detail, when in bucket[:12]]
 
     if _json_mode:
-        print(_json_dumps({'data': {'counts': current, 'baseline': baseline,
+        # ONE document. The per-regression status lines used to follow as
+        # separate JSON objects, which no parser accepts.
+        print(_json_dumps({'success': not regressions,
+                           'data': {'counts': current, 'baseline': baseline,
                                     'regressions': regressions,
+                                    'info': dict(sorted(info.items())),
+                                    'recent': {k: v for k, v in examples.items()
+                                               if k in regressions},
+                                    'notes': notes,
                                     'series_scanned': scanned},
                            'title': 'Data Quality Audit'}))
+        if regressions and len(sys.argv) > 1:
+            sys.exit(1)
+        return
     else:
         table = Table(title=f'Data Quality Audit ({scanned} series)')
         table.add_column('bar_size'); table.add_column('rule')
@@ -11560,11 +11649,16 @@ def _handle_data_audit(args: argparse.Namespace):
         console.print(table)
         if not current:
             console.print('[green]no findings[/green]')
+        for k, v in sorted(info.items()):
+            console.print(f'[dim]{k}: {v} (no-data markers on days the venue was closed — '
+                          f'expected, not counted)[/dim]')
 
     if regressions:
         for k, (now, was) in sorted(regressions.items()):
             print_status(f'data quality REGRESSED [{k}]: {now} > accepted {was}',
                          success=False)
+            for item in examples.get(k, [])[:max(now - was, 3)]:
+                console.print(f"[dim]    {item['date']}  {item['series']}: {item['detail']}[/dim]")
         if len(sys.argv) > 1:
             sys.exit(1)
 
