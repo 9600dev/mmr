@@ -57,6 +57,18 @@ def test_365_after_cancel_is_info():
     assert ib_log_level(365, 'something else') == logging.ERROR
 
 
+def test_an_order_held_until_the_venue_opens_is_a_warning_not_an_error():
+    """Found 2026-11-14: a bracket placed on a Saturday wrote an ERROR line (and
+    an errors_<ts>.log entry) for IB's notice that the order waits for the open.
+    The order was accepted. Other 399 texts are not known to be benign."""
+    held = ('Order Message:\nBUY 1 AIG NYSE\nWarning: Your order will not be placed at the '
+            'exchange until 2026-11-16 04:00:00 US/Eastern')
+    assert ib_log_level(399, held) == logging.WARNING
+    assert ib_log_level(399, 'Order Message: something IB has never been seen to say') == logging.ERROR
+    assert ib_log_level(399, '') == logging.ERROR
+    assert ib_log_level(201, held) == logging.ERROR            # the text alone never downgrades a rejection
+
+
 def test_rest_of_ib_warning_range_is_warning():
     assert ib_log_level(2150, 'Invalid position trade derived value') == logging.WARNING
     assert ib_log_level(2110, 'Connectivity between TWS and server is broken') == logging.WARNING

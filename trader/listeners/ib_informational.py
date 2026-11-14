@@ -94,6 +94,17 @@ _INFO_MESSAGES = (
     (365, 'No scanner subscription found'),
 )
 
+# Same idea at WARNING: worth seeing, not a failure.
+_WARNING_MESSAGES = (
+    # 399 is IB's generic "order message". This text is its notice that an
+    # order sent outside trading hours is HELD until the venue opens — it was
+    # accepted and is not yet working. Every out-of-hours placement produced an
+    # ERROR line (and an errors_<ts>.log entry the health monitor escalates);
+    # found 2026-11-14 placing a bracket on a Saturday. Other 399 texts stay
+    # ERROR. It stays visible because a held EXIT is not protection.
+    (399, 'will not be placed at the exchange until'),
+)
+
 
 def ib_log_level(code: int, message: str = '') -> int:
     """Return the ``logging`` level MMR uses for an IB errorEvent message.
@@ -106,7 +117,8 @@ def ib_log_level(code: int, message: str = '') -> int:
         ``logging.DEBUG`` / ``INFO`` / ``WARNING`` / ``ERROR``. Anything not
         classified here is a real failure: ERROR — except the rest of IB's
         documented 2100-2199 warning range, which is WARNING (ib_async treats
-        that range as warnings too).
+        that range as warnings too), and 399's "held until the venue opens"
+        notice (``_WARNING_MESSAGES``).
     """
     if code in FARM_OK_CODES or code in DEBUG_CODES:
         return logging.DEBUG
@@ -117,6 +129,9 @@ def ib_log_level(code: int, message: str = '') -> int:
             return logging.INFO
     if code in WARNING_CODES or 2100 <= code < 2200:
         return logging.WARNING
+    for warning_code, needle in _WARNING_MESSAGES:
+        if code == warning_code and needle in (message or ''):
+            return logging.WARNING
     return logging.ERROR
 
 
