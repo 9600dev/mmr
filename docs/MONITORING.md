@@ -73,6 +73,15 @@ any of these change (and `pycron: scheduled jobs OK` when they clear):
 regressed against the recorded baseline (or the audit itself broke), and
 backtests read those bars.
 
+The audit's JSON also carries a `store` block — how much of the history
+database file is dead space. It is advice, never a failure. When it says
+`worth_compacting: true` (most stored rows dead, or the file still carries the
+old unused index), run `mmr data compact` to see the figures and
+`mmr data compact --apply` while no market is in session: it rebuilds the file,
+verifies every table against the original before swapping, and keeps the
+replaced file beside the new one until you delete it. The live file reached
+28.6 GiB for 5 GB of content before anything reported it (2026-11-14).
+
 Catch-up: a job with `catch_up_minutes: N` in pycron.yaml whose scheduled
 instant passed unrun is run once when the scheduler is back, if the instant is
 at most N minutes old — `CATCH-UP job …` at WARNING in `pycron_cron.log`,
