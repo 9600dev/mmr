@@ -1,7 +1,48 @@
 """One parameter-construction contract for research and deployed strategies."""
 
+import math
+
 from typing import Any, Callable, Dict, Optional
+
+import pandas as pd
+
 from trader.trading.strategy import Strategy
+
+
+DEFAULT_SESSION_TZ = 'America/New_York'
+
+
+def session_bar_ts(bar_ts: Any, params: Optional[Dict[str, Any]],
+                   default_tz: str = DEFAULT_SESSION_TZ,
+                   naive_is_utc: bool = True) -> Any:
+    """``bar_ts`` on the strategy's SESSION clock, for time-of-day rules
+    (``close_by_time``).
+
+    ONE conversion for the live runtime and the backtester, because the two
+    disagreeing is the bug: a stored frame comes back America/New_York-indexed
+    for EVERY venue (``TickData`` converts on read) and a live frame is UTC, so
+    a rule written as "15:45" means 15:45 in whatever zone the frame happens to
+    carry unless it is converted first. ``params['SESSION_TZ']`` wins (the ASX
+    strategies set Australia/Sydney); the default matches US history.
+
+    ``naive_is_utc``: the live path's frames are UTC and may be naive, so a
+    naive stamp is UTC there. The backtester passes False — a naive frame is a
+    caller-supplied fixture already in session wall time, and shifting it would
+    invent an offset nobody stated.
+
+    Any failure returns the raw value (the pre-conversion behaviour) rather
+    than blocking an exit.
+    """
+    try:
+        session_tz = (params or {}).get('SESSION_TZ') or default_tz
+        ts = pd.Timestamp(bar_ts)
+        if ts.tzinfo is None:
+            if not naive_is_utc:
+                return bar_ts
+            ts = ts.tz_localize('UTC')
+        return ts.tz_convert(session_tz)
+    except Exception:
+        return bar_ts
 
 
 def _validate_session_tz(raw: Any, key: str) -> str:
@@ -45,10 +86,27 @@ def _coerce_param(raw: Any, current: Any, key: str) -> Any:
 
     Rejects malformed inputs with a clear ``ValueError`` naming the key
     rather than failing deep inside the strategy's indicator math.
+
+    Two inputs are REFUSED rather than coerced, because the coercion changed
+    which strategy ran without saying so:
+
+    * a non-integral float for an int-typed attribute. ``int(1.5)`` is ``1``,
+      so a grid ``BB_ALPHA=[1.5, 2.0, 2.5]`` over a class default of ``2``
+      ran as ``[1, 2, 2]`` — three cells, two distinct strategies, every row
+      labelled with a value that was never used. An integral float (``2.0``)
+      is the same number and is accepted. If fractional values are intended,
+      declare the class default as a float (``BB_ALPHA = 2.0``).
+    * ``None`` for an attribute whose default is not ``None``. It used to pass
+      straight through and surface as a ``TypeError`` inside indicator math,
+      or as a silently different code path.
     """
-    # Already native type — fast path.
-    if type(current) is type(raw) or raw is None:
+    # Already native type — fast path. (None over a None default lands here.)
+    if type(current) is type(raw):
         return raw
+    if raw is None:
+        raise ValueError(
+            f"param {key!r} expects {type(current).__name__}; got None"
+        )
     if isinstance(current, bool):
         if isinstance(raw, bool):
             return raw
@@ -63,6 +121,14 @@ def _coerce_param(raw: Any, current: Any, key: str) -> Any:
             )
         return bool(raw)
     if isinstance(current, int):
+        if isinstance(raw, float) and not (math.isfinite(raw) and raw == int(raw)):
+            detail = (f'which would be truncated to {int(raw)}'
+                      if math.isfinite(raw) else 'which no int can represent')
+            raise ValueError(
+                f"param {key!r} expects int (class default {current!r}); got "
+                f"{raw!r}, {detail} — declare the class default as a float if "
+                f"fractional values are intended"
+            )
         try:
             return int(raw)
         except (TypeError, ValueError):

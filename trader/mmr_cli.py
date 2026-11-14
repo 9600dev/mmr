@@ -9219,7 +9219,43 @@ def _handle_sweep_watch(args: argparse.Namespace):
         )
 
 
-def _handle_walk_forward(args: argparse.Namespace):
+def _stamp_execution_params(params: Dict[str, Any], config) -> Dict[str, Any]:
+    """Record the execution semantics a run used, in its persisted params.
+
+    Runs under different semantics are not comparable (``live`` is single-lot
+    fixed-notional, ``accumulate`` pyramids and compounds), so every path that
+    persists or reports a run stamps the mode through this ONE helper. It was
+    inline in ``_handle_backtest`` only: ``bt-sweep --live-semantics`` wrote
+    rows with no ``_execution_mode``, indistinguishable in ``backtests show``
+    from the accumulate rows beside them (audit 2026-11-14, B4.7a).
+
+    ``accumulate`` (the legacy default) stays unstamped, as before, so
+    existing rows and their param-equality comparisons are unchanged. Returns
+    ``params`` (mutated) for chaining.
+    """
+    if config.execution_mode != 'accumulate':
+        params['_execution_mode'] = config.execution_mode
+        params['_trade_notional'] = (
+            config.trade_notional or config.initial_capital * 0.02)
+        if config.pyramid_max_adds is not None:
+            params['_pyramid_max_adds'] = config.pyramid_max_adds
+    return params
+
+
+def _walk_forward_evaluated(metrics: Optional[Dict[str, Any]]) -> bool:
+    """Did a walk-forward window actually test anything?
+
+    A fill inside the window, OR a position carried into it. The second half
+    matters once only the window is measured: a slow book opened during
+    warm-up and held through a window with no rebalance has no fills there,
+    yet its return in that window is exactly what the fold is for. Counting
+    fills alone would drop that fold from the compounded result without
+    saying so.
+    """
+    return bool(metrics) and bool(metrics.get('trades') or metrics.get('exposed'))
+
+
+def _handle_walk_forward(args: argparse.Namespace, now=None):
     """Fit on the past, judge on the future, report what the RULE earned.
 
     A sweep answers "which cell was best over this period", and the answer is
@@ -9231,6 +9267,16 @@ def _handle_walk_forward(args: argparse.Namespace):
     The reported number is out-of-sample by construction, so there is nothing
     to deflate — the trial count is one, the procedure, however many cells it
     considered along the way.
+
+    "By construction" holds only if each run REPORTS its window and nothing
+    else. A run starts ``warmup`` days before its window so indicators (and
+    the book) are warm; until 2026-11-14 the whole run was then reported, so
+    every "out-of-sample" figure included trading inside the training window
+    the cell had just been chosen on, and consecutive test runs overlapped by
+    the warm-up before being compounded (audit B4.1). Each run now measures
+    ``[window_start, window_end)`` only — see ``BacktestConfig.measure_from``.
+
+    ``now`` pins the period end for tests.
     """
     import datetime as dt
     import itertools
@@ -9262,7 +9308,8 @@ def _handle_walk_forward(args: argparse.Namespace):
             f'question.', success=False)
         return
 
-    period_start = (dt.datetime.now() - dt.timedelta(days=args.days)).date()
+    period_start = ((now or dt.datetime.now())
+                    - dt.timedelta(days=args.days)).date()
     # Warm-up in CALENDAR days, from the largest lookback the grid can select.
     # Without it a strategy needing 252 bars in a 252-bar test window never
     # reaches its first tradeable index, and the fold silently reports 0.00%
@@ -9273,15 +9320,16 @@ def _handle_walk_forward(args: argparse.Namespace):
     warmup = int(max(lookbacks) * 1.45) + 10 if lookbacks else 0
     folds = resolve_folds(period_start, offsets, warmup_days=warmup)
     if warmup and not _json_mode:
-        console.print(f'  warm-up: {warmup} calendar days before each window, '
-                      f'from the largest LOOKBACK in the grid')
+        console.print(f'  warm-up: {warmup} calendar days before each window '
+                      f'(traded, not measured), from the largest LOOKBACK in '
+                      f'the grid')
 
     cfg = Container.instance().config()
     storage = TickStorage(cfg.get('history_duckdb_path', '')
                           or cfg.get('duckdb_path', ''))
     bar_size = BarSize.parse_str(args.bar_size)
 
-    def run_backtest(cell, start, end):
+    def _config(start, end, measure_start):
         config = BacktestConfig(
             start_date=dt.datetime.combine(start, dt.time.min),
             end_date=dt.datetime.combine(end, dt.time.min),
@@ -9289,12 +9337,23 @@ def _handle_walk_forward(args: argparse.Namespace):
             bar_size=bar_size,
             slippage_bps=args.slippage_bps,
             execution_mode='live' if args.live_semantics else 'accumulate',
+            # DATA from ``start`` (warm-up included); REPORT the fold's own
+            # half-open window and nothing else. ``measure_to`` is what makes
+            # it half-open: the store read is inclusive of ``end``, so a daily
+            # bar stamped at the boundary would otherwise close one test
+            # window and open the next.
+            measure_from=dt.datetime.combine(measure_start, dt.time.min),
+            measure_to=dt.datetime.combine(end, dt.time.min),
         )
         if args.live_semantics and args.trade_notional:
             config.trade_notional = args.trade_notional
         if getattr(args, 'panel', False):
             config.panel_no_trade_band = args.no_trade_band
             config.short_borrow_bps_annual = args.borrow_bps
+        return config
+
+    def run_backtest(cell, start, end, measure_start):
+        config = _config(start, end, measure_start)
         try:
             r = Backtester(storage, config).run_from_module(
                 args.strategy, args.class_name, args.conids, params=dict(cell),
@@ -9303,18 +9362,25 @@ def _handle_walk_forward(args: argparse.Namespace):
             logging.warning('walk-forward: %s %s..%s failed: %s',
                             cell, start, end, exc)
             return None
+        diag = r.diagnostics or {}
         return {
             'sharpe': r.sharpe_ratio, 'sortino': r.sortino_ratio,
             'profit_factor': r.profit_factor, 'total_return': r.total_return,
             'expectancy_bps': r.expectancy_bps, 'trades': r.total_trades,
             'win_rate': r.win_rate, 'max_drawdown': r.max_drawdown,
+            # A position held inside the window (possibly opened in warm-up).
+            'exposed': bool(diag.get('window_bars_in_market')),
+            # Fills before the window: executed, never counted.
+            'warmup_fills': diag.get('warmup_fills', 0),
         }
 
     def score(metrics):
         v = metrics.get(args.metric) if metrics else None
-        # A cell with no trades has not been evaluated. Letting its 0.0 or
-        # None compete would deploy a configuration nothing was learned about.
-        if v is None or not math.isfinite(v) or not metrics.get('trades'):
+        # A cell that neither traded nor held anything in the window has not
+        # been evaluated. Letting its 0.0 or None compete would deploy a
+        # configuration nothing was learned about.
+        if (v is None or not math.isfinite(v)
+                or not _walk_forward_evaluated(metrics)):
             return None
         return float(v)
 
@@ -9348,9 +9414,9 @@ def _handle_walk_forward(args: argparse.Namespace):
             f'  ({m.get("trades", 0)} trades)')
 
     results = run_walk_forward(folds, cells, run_backtest, score,
-                               on_fold=_progress)
+                               on_fold=_progress, pass_measure_start=True)
 
-    tested = [r for r in results if r.test_metrics.get('trades')]
+    tested = [r for r in results if _walk_forward_evaluated(r.test_metrics)]
     oos_returns = [r.test_metrics['total_return'] for r in tested
                    if r.test_metrics.get('total_return') is not None]
     compounded = 1.0
@@ -9364,6 +9430,12 @@ def _handle_walk_forward(args: argparse.Namespace):
         'folds': len(folds), 'cells': len(cells), 'metric': args.metric,
         'mode': 'anchored' if args.anchored else 'rolling',
         'train_days': args.train_days, 'test_days': args.test_days,
+        'warmup_days': warmup,
+        # The stamp a persisted run carries, so a walk-forward report says
+        # which execution semantics produced it (the default named too).
+        'execution': _stamp_execution_params(
+            {'_execution_mode': 'accumulate'},
+            _config(period_start, period_start, period_start)),
         'oos_compounded_return': compounded,
         'oos_folds_profitable': sum(1 for x in oos_returns if x > 0),
         'oos_folds_tested': len(oos_returns),
@@ -9530,7 +9602,10 @@ def _handle_backtest_sweep(args: argparse.Namespace):
             fill_policy=config.fill_policy,
             slippage_bps=args.slippage_bps,
             commission_per_share=config.commission_per_share,
-            params=dict(getattr(result, 'applied_params', {}) or {}),
+            # Stamped like a single `backtest` run: a --live-semantics sweep
+            # row must not read as an accumulate one in `backtests show`.
+            params=_stamp_execution_params(
+                dict(getattr(result, 'applied_params', {}) or {}), config),
             code_hash=code_hash,
             total_trades=result.total_trades,
             total_return=result.total_return,
@@ -9822,12 +9897,7 @@ def _handle_backtest(args: argparse.Namespace):
             params: Dict[str, Any] = dict(getattr(result, 'applied_params', {}) or {})
             # Runs under different execution semantics are not comparable —
             # stamp the mode (and notional) so `backtests show` surfaces it.
-            if config.execution_mode != 'accumulate':
-                params['_execution_mode'] = config.execution_mode
-                params['_trade_notional'] = (
-                    config.trade_notional or config.initial_capital * 0.02)
-                if config.pyramid_max_adds is not None:
-                    params['_pyramid_max_adds'] = config.pyramid_max_adds
+            _stamp_execution_params(params, config)
 
             record = BacktestRecord(
                 strategy_path=args.strategy,

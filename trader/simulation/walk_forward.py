@@ -74,6 +74,17 @@ class Fold(NamedTuple):
     The measured window is unchanged by warm-up. That separation is the whole
     point - a warm-up that shifted ``test_start`` would quietly change what is
     being reported on.
+
+    It is also only half of the separation, and the other half was missing
+    until 2026-11-14 (audit B4.1). Loading from ``test_data_start`` is right;
+    REPORTING from it is not. The runner was handed ``(data_start, end)`` and
+    nothing else, so it reported the whole run - the warm-up, which lies
+    inside the training window the cell was just chosen on, was counted as
+    out-of-sample, and consecutive "test" runs overlapped by the warm-up
+    before being compounded (+166.8% reported against +76.9% inside the test
+    windows in the reproduction). ``run_walk_forward(...,
+    pass_measure_start=True)`` now hands the runner the window start as well,
+    and the runner must measure ``[window_start, end)`` only.
     """
     index: int
     train_start: dt.date
@@ -206,6 +217,7 @@ def run_walk_forward(
     score,
     higher_is_better: bool = True,
     on_fold=None,
+    pass_measure_start: bool = False,
 ) -> List[FoldResult]:
     """Drive the procedure: fit on each train window, judge on the next test one.
 
@@ -213,6 +225,15 @@ def run_walk_forward(
     maps that dict to a comparable number or None. Both are injected rather
     than imported so this sequencing — the part where a leak would hide — can
     be tested without a Backtester, a store, or any market data.
+
+    ``start`` is where DATA begins, which is earlier than the window whenever
+    there is warm-up. A runner that reports everything it was handed therefore
+    reports the warm-up too. With ``pass_measure_start=True`` the runner is
+    called as ``run_backtest(cell, start, end, measure_start)`` — the fold's
+    ``train_start`` for a fit, its ``test_start`` for the held-out run — and
+    must report ``[measure_start, end)`` only. Use it whenever folds carry a
+    warm-up; the three-argument form is kept for runners that have none (or
+    that derive the window themselves).
 
     The one rule enforced here beyond the planner's arithmetic: the winning
     cell is chosen from TRAIN results only, and the test window is run
@@ -225,7 +246,11 @@ def run_walk_forward(
         for cell in cells:
             # Data from train_data_start so the strategy can warm up; the
             # window being fitted is still [train_start, train_end).
-            metrics = run_backtest(cell, fold.train_data_start, fold.train_end)
+            if pass_measure_start:
+                metrics = run_backtest(cell, fold.train_data_start,
+                                       fold.train_end, fold.train_start)
+            else:
+                metrics = run_backtest(cell, fold.train_data_start, fold.train_end)
             scored.append((cell, score(metrics) if metrics else None))
         chosen = pick_best(scored, higher_is_better=higher_is_better)
 
@@ -237,8 +262,13 @@ def run_walk_forward(
 
         test_metrics: Dict[str, Any] = {}
         if chosen is not None:
-            test_metrics = run_backtest(
-                chosen, fold.test_data_start, fold.test_end) or {}
+            if pass_measure_start:
+                test_metrics = run_backtest(
+                    chosen, fold.test_data_start, fold.test_end,
+                    fold.test_start) or {}
+            else:
+                test_metrics = run_backtest(
+                    chosen, fold.test_data_start, fold.test_end) or {}
 
         result = FoldResult(fold, chosen, train_score, test_metrics)
         out.append(result)
