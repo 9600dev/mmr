@@ -1604,6 +1604,12 @@ class AutoExecutor:
                 # Pending entry fills may arrive after this position snapshot.
                 if self.intents.all(strategy=strategy, conid=int(conid), kind='OPEN', active=True):
                     continue
+                # ...and a fill that was APPLIED after it leaves no active
+                # intent to say so. Absence is destructive (attribution is
+                # stripped and nothing restores it), so it is only believed on
+                # a read taken after the intents above were reconciled.
+                if not self._confirmed_absent(int(conid)):
+                    continue
                 if not self._cancel_protective(strategy, int(conid), protective_id,
                                                'externally closed position'):
                     continue
@@ -1926,6 +1932,17 @@ class AutoExecutor:
             if deferral is not None:
                 # An opening the trader deferred was, by contract, never sent;
                 # it is a clean refusal, not a reservation that blocks the key.
+                explicit_rejection = True
+            if getattr(result, 'not_submitted', False) is True:
+                # approve() states outright that nothing reached the broker
+                # (it failed before placement, or the server refused and
+                # reserved no order). The wording test above only recognises
+                # 'reject' / 'refus' / 'risk gate', so "post-trade leverage
+                # exceeds limit", "is on the denylist", "No valid quantity" or
+                # a failed symbol resolution were all filed UNKNOWN — which
+                # reserves the key: no later open, and for a close no retry
+                # and no stop (it was cancelled first). REJECTED lets the next
+                # pass retry the exit and re-place protection.
                 explicit_rejection = True
             self.intents.update(intent, status='REJECTED' if explicit_rejection else 'UNKNOWN', error=error)
             self.state.log_decision(intent['strategy'], intent['conid'],
@@ -2462,6 +2479,8 @@ class AutoExecutor:
             if not math.isfinite(broker_qty):
                 return
             qty = reducible_quantity(position['quantity'], broker_qty)
+            if qty <= 0 and not self._confirmed_absent(conid):
+                return
             if qty <= 0:
                 self.state.record_close(strategy, conid, 'CLOSED_EXTERNALLY',
                                         'complete broker snapshot confirms no reducible holding')
@@ -2776,6 +2795,31 @@ class AutoExecutor:
                     logging.error('auto-executor: emergency reduction remains pending: %s', result.error)
             except Exception:
                 logging.exception('auto-executor: emergency reduction pending; no local durability claim')
+
+    def _confirmed_absent(self, conid: int) -> bool:
+        """True only when a FRESH, complete broker read shows no long holding.
+
+        The per-pass snapshot cache is filled early in a management pass (by
+        protective adoption), before the intents are reconciled. A first fill
+        that lands in between is applied from an intent-scoped read — the OPEN
+        intent goes FILLED, the holding is recorded — while the cached global
+        snapshot still shows the instrument flat. Judged on that cache the new
+        position was marked CLOSED_EXTERNALLY: attribution stripped for good,
+        its stop cancelled, the shares left at the broker unmanaged, and the
+        next BUY doubled them (review 2026-11-14, reproduced against the real
+        executor). The extra read happens only on this destructive branch.
+        """
+        self._snapshot_cache = None
+        try:
+            broker, complete = self._position_snapshot()
+        except Exception as exc:
+            logging.warning('auto-executor: absence of %s not confirmed (broker unavailable: %s)',
+                            conid, exc)
+            return False
+        if not complete:
+            return False
+        held = broker.get(int(conid), 0.0)
+        return math.isfinite(held) and held <= 0
 
     def _execution_snapshot(self, intent=None):
         sdk = self._get_sdk()

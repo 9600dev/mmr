@@ -30,13 +30,8 @@ logging = setup_logging(module_name='data_service')
 
 
 def _try_get_exchange_calendar(security: SecurityDefinition):
-    try:
-        return exchange_calendars.get_calendar(security.primaryExchange)
-    except exchange_calendars.exchange_calendar.errors.InvalidCalendarName:
-        try:
-            return exchange_calendars.get_calendar(security.exchange)
-        except Exception:
-            return None
+    from trader.data.session_guard import calendar_for
+    return calendar_for(security)
 
 
 def _task_label(security: SecurityDefinition, date_range: DateRange) -> dict:
@@ -121,6 +116,13 @@ class DataService:
                 logging.info('downloading massive {} from {} to {}'.format(
                     security.symbol, pdt(date_range.start), pdt(date_range.end)
                 ))
+                # Same rule as `data download`: a US-ticker vendor must not fill
+                # a non-US listing's conId (with --force it REPLACED the real
+                # bars in place, key for key, with another company's prices).
+                from trader.data.listing_guard import listing_source_mismatch
+                mismatch = listing_source_mismatch(security, 'massive')
+                if mismatch:
+                    raise ValueError(mismatch)
 
                 worker = MassiveHistoryWorker(self.massive_api_key)
                 df = await asyncio.to_thread(
@@ -159,6 +161,13 @@ class DataService:
                 logging.info('downloading twelvedata {} from {} to {}'.format(
                     security.symbol, pdt(date_range.start), pdt(date_range.end)
                 ))
+                # Same rule as `data download`: a US-ticker vendor must not fill
+                # a non-US listing's conId (with --force it REPLACED the real
+                # bars in place, key for key, with another company's prices).
+                from trader.data.listing_guard import listing_source_mismatch
+                mismatch = listing_source_mismatch(security, 'twelvedata')
+                if mismatch:
+                    raise ValueError(mismatch)
 
                 worker = TwelveDataHistoryWorker(self.twelvedata_api_key)
                 df = await asyncio.to_thread(
@@ -217,6 +226,11 @@ class DataService:
                             await worker.connect_async()
                             return await worker.get_contract_history(
                                 security=Universe.to_contract(security),
+                                # A plain Contract carries no timeZoneId, so the
+                                # worker fell back to US/Eastern and keyed a
+                                # non-US DAILY bar at New York midnight: every
+                                # ASX session then existed under two keys.
+                                tz_info=security.timeZoneId or 'US/Eastern',
                                 what_to_show=WhatToShow.TRADES,
                                 start_date=dateify(date_range.start, timezone=security.timeZoneId, make_sod=True),
                                 end_date=dateify(date_range.end, timezone=security.timeZoneId, make_eod=True),

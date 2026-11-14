@@ -633,6 +633,9 @@ def build_parser() -> argparse.ArgumentParser:
     protect_p.add_argument('--action', default='SELL', choices=['SELL', 'BUY'],
                            help='SELL protects a long (default); BUY protects a short')
     protect_p.add_argument('--tif', default='GTC', help='Time in force (default GTC)')
+    protect_p.add_argument('--force', action='store_true',
+                           help='Place the order even though its trigger is on the wrong side of the '
+                                'market (it will execute immediately) or the market price is unknown')
     protect_p.add_argument('--exchange', default='', help='Exchange hint for resolution (e.g. ASX)')
     protect_p.add_argument('--currency', default='', help='Currency hint for resolution (e.g. AUD)')
 
@@ -2879,8 +2882,9 @@ def _handle_propose(mmr: MMR, args: argparse.Namespace):
 
     errors = spec.validate()
     if errors:
-        for e in errors:
-            print_status(e, success=False)
+        # One status, not one per error: under --json each print_status is a
+        # separate JSON document, and two of them on stdout is not parseable.
+        print_status('; '.join(errors), success=False)
         return
 
     # Optional: enrich --reasoning with top news articles for the symbol
@@ -3662,6 +3666,11 @@ def _handle_close(mmr: MMR, args: argparse.Namespace):
             match = frame[frame['conId'].astype('int64') == int(con_id)]
         else:
             match = frame[frame['symbol'] == symbol]
+            if 'conId' in frame.columns and match['conId'].nunique() > 1:
+                # Two listings share this ticker. Picking the first row closes
+                # one of them at market on a coin toss.
+                print_status(MMR._ambiguous_position_error(str(symbol), match), success=False)
+                return
         if not match.empty:
             row0 = match.iloc[0]
             pos_size = float(row0['position'])
@@ -3780,6 +3789,7 @@ def _handle_protect(mmr: MMR, args: argparse.Namespace):
     # Resolve quantity + conId + currency from the live position.
     pos_size = None
     con_id = None
+    mark = None
     currency = args.currency
     df = mmr.portfolio()
     if not df.empty and 'symbol' in df.columns:
@@ -3790,6 +3800,11 @@ def _handle_protect(mmr: MMR, args: argparse.Namespace):
                 con_id = int(match.iloc[0]['conId'])
             if not currency and 'currency' in df.columns:
                 currency = str(match.iloc[0].get('currency') or '')
+            if 'mktPrice' in df.columns:
+                try:
+                    mark = float(match.iloc[0].get('mktPrice'))
+                except (TypeError, ValueError):
+                    mark = None
 
     qty = abs(args.quantity) if args.quantity else (abs(pos_size) if pos_size else None)
     if not qty:
@@ -3806,6 +3821,24 @@ def _handle_protect(mmr: MMR, args: argparse.Namespace):
         else:
             console.print(f'[yellow]{msg}[/yellow]')
         return
+
+    # A stop (or take-profit) on the wrong side of the market is not protection:
+    # it is marketable the instant it is live and exits the position at the
+    # next print. `protect IOVA --stop 50` on a 7.72 stock was accepted before
+    # this check (paper, 2026-11-14). Judged against IB's own mark for the
+    # position; --force places it anyway.
+    if not getattr(args, 'force', False):
+        from trader.trading.proposal import protective_trigger_error
+        reason = protective_trigger_error(args.action, order_type, value, mark)
+        if reason:
+            msg = (f'{symbol}: refused — {reason}. Nothing was placed or cancelled. '
+                   f'To exit now use `mmr close {symbol}`; --force places this order as given.')
+            if _json_mode:
+                print(_json_dumps({'success': False, 'message': msg}))
+            else:
+                console.print(f'[red]{msg}[/red]')
+            _set_exit_code(1)
+            return
 
     aux_price = value if order_type == 'STP' else 0.0
     limit_price = value if order_type == 'LMT' else 0.0
@@ -10158,19 +10191,100 @@ def _query_output_frame(df, include_placeholders: bool = False):
 
 
 def _try_get_exchange_calendar_for(security):
-    """Best-effort exchange calendar lookup for a SecurityDefinition — mirrors
-    DataService._try_get_exchange_calendar. Returns None if neither
-    primaryExchange nor exchange resolves."""
-    import exchange_calendars
-    for attr in ('primaryExchange', 'exchange'):
-        name = getattr(security, attr, None)
-        if not name:
-            continue
-        try:
-            return exchange_calendars.get_calendar(name)
-        except Exception:
-            continue
-    return None
+    """Exchange calendar for a SecurityDefinition, or None when neither
+    primaryExchange nor exchange maps to one. One shared lookup
+    (session_guard.calendar_for) so every caller agrees."""
+    from trader.data.session_guard import calendar_for
+    return calendar_for(security)
+
+
+def _is_us_listing(security) -> bool:
+    from trader.data.listing_guard import is_us_listing
+    return is_us_listing(security)
+
+
+def _listing_source_mismatch(security, source: str) -> str:
+    """Why this instrument must not be filled from ``source``, or '' (one
+    shared rule — see trader/data/listing_guard.py)."""
+    from trader.data.listing_guard import listing_source_mismatch
+    return listing_source_mismatch(security, source)
+
+
+_US_TICKER_SOURCES = frozenset({'twelvedata', 'massive'})
+
+
+def _resolve_download_listing(symbol: str, source: str, accessor, rpc_mmr,
+                              exchange: str = '', currency: str = ''):
+    """``(security_definition | None, refusal, registered)`` for an ad-hoc download.
+
+    The name must come down to EXACTLY ONE listing in the market the source
+    serves. This used to take the first local match across every universe and,
+    failing that, the first row IB returned — which is how a US ticker became
+    a Mexican or Australian conId (see ``_listing_source_mismatch``). Several
+    candidates is an ambiguity the operator resolves; it is never a pick.
+    """
+    def wanted(definition) -> bool:
+        if exchange and exchange.upper() not in {
+                str(getattr(definition, name, '') or '').upper()
+                for name in ('primaryExchange', 'exchange')}:
+            return False
+        if currency and str(getattr(definition, 'currency', '') or '').upper() != currency.upper():
+            return False
+        if source in _US_TICKER_SOURCES and not (exchange or currency):
+            return _is_us_listing(definition)
+        return True
+
+    def unique(definitions) -> list:
+        by_conid = {}
+        for definition in definitions or []:
+            if wanted(definition) and int(getattr(definition, 'conId', 0) or 0) > 0:
+                by_conid.setdefault(int(definition.conId), definition)
+        return list(by_conid.values())
+
+    def describe(definitions) -> str:
+        return ', '.join(
+            f'{d.conId} ({getattr(d, "primaryExchange", "") or getattr(d, "exchange", "")}/'
+            f'{getattr(d, "currency", "")})' for d in definitions)
+
+    local = unique(accessor.resolve_symbol(symbol))
+    if len(local) == 1:
+        return local[0], '', False
+    if len(local) > 1:
+        return None, (f'{symbol!r} is ambiguous in the local universes: {describe(local)}. '
+                      f'Pass --exchange/--currency to choose one.'), False
+
+    if rpc_mmr is None:
+        return None, (f'could not resolve to a conId (not in a local universe, and '
+                      f'trader_service is unreachable). Add it first: '
+                      f'`mmr universe add downloads {symbol}`'), False
+    hint_currency = currency or ('USD' if source in _US_TICKER_SOURCES else '')
+    try:
+        discovered = unique(rpc_mmr.discover_listings(
+            symbol, exchange=exchange, currency=hint_currency))
+    except Exception as ex:
+        return None, f'resolve via trader_service failed: {ex}', False
+    if not discovered:
+        market = 'a US listing' if source in _US_TICKER_SOURCES and not (exchange or currency) else 'a listing'
+        return None, (f'could not resolve to {market} conId. Add it first: '
+                      f'`mmr universe add downloads {symbol}`'), False
+    if len(discovered) > 1:
+        return None, (f'{symbol!r} is ambiguous at IB: {describe(discovered)}. '
+                      f'Pass --exchange/--currency to choose one.'), False
+
+    # Persist into a "downloads" universe so the resolution sticks for future
+    # runs — matches the auto-register behaviour of `propose --group`.
+    sec_def = discovered[0]
+    try:
+        universe = accessor.get('downloads')
+    except Exception:
+        universe = None
+    if universe is None:
+        from trader.data.universe import Universe
+        universe = Universe(name='downloads', security_definitions=[sec_def])
+    elif not any(sd.conId == sec_def.conId for sd in universe.security_definitions):
+        universe.security_definitions.append(sec_def)
+    accessor.update(universe)
+    return sec_def, '', True
 
 
 def _handle_data_download(args: argparse.Namespace):
@@ -10184,7 +10298,7 @@ def _handle_data_download(args: argparse.Namespace):
     """
     import datetime as dt
     from trader.container import Container
-    from trader.data.data_access import TickStorage
+    from trader.data.data_access import session_fetch_window, TickStorage
     from trader.data.store import DateRange
     from trader.data.universe import UniverseAccessor
     from trader.objects import BarSize
@@ -10300,8 +10414,11 @@ def _handle_data_download(args: argparse.Namespace):
             except Exception: pass
         rpc_mmr = None
 
-    end_date = dt.datetime.now()
-    start_date = end_date - dt.timedelta(days=args.days)
+    # One instant for the whole run, in UTC; each symbol's window is expressed in
+    # ITS venue's timezone below. This used to be the container's naive local
+    # clock handed to vendors that read it as exchange time (a Pacific host cut
+    # the window three hours short for a US listing).
+    now_utc = dt.datetime.now(dt.timezone.utc)
     completed = 0
     no_data = 0
     failed = 0
@@ -10309,43 +10426,35 @@ def _handle_data_download(args: argparse.Namespace):
     total_rows_written = 0
     tickdata = storage.get_tickdata(bar_size)
 
-    for symbol in args.symbols:
-        # Resolve to conId for storage key: local universe first, then
-        # trader_service RPC if available. Registering a new resolution in
-        # the universe means subsequent downloads (and anything else that
-        # calls resolve_symbol locally) won't need to hit IB again.
+    # Refresh jobs hand over the universe's exact instruments; an ad-hoc
+    # `data download SYMBOL` resolves each name itself (see _resolve_download_listing).
+    # One work item per INSTRUMENT, not per name: a universe can hold two
+    # listings of one ticker, and keying by symbol downloaded one of them
+    # twice and the other never.
+    exact_definitions = list(getattr(args, 'security_definitions', None) or [])
+    work = ([(str(getattr(sd, 'symbol', '')), sd) for sd in exact_definitions]
+            if exact_definitions else [(symbol, None) for symbol in args.symbols])
+    exchange_hint = str(getattr(args, 'exchange', '') or '')
+    currency_hint = str(getattr(args, 'currency', '') or '')
+
+    for symbol, sec_def in work:
         conid = None
-        sec_def = None
-        results = accessor.resolve_symbol(symbol, first_only=True)
-        if results:
-            sec_def = results[0]
+        refusal = ''
+        if sec_def is None:
+            sec_def, refusal, registered = _resolve_download_listing(
+                symbol, source, accessor, rpc_mmr,
+                exchange=exchange_hint, currency=currency_hint)
+            if registered and not _json_mode:
+                console.print(f'[dim]  registered {symbol} → conId {sec_def.conId} in universe "downloads"[/dim]')
+        if sec_def is not None and not refusal:
+            refusal = _listing_source_mismatch(sec_def, source)
+        if refusal:
+            failed += 1
+            if not _json_mode:
+                console.print(f'[yellow]  {symbol}: refused - {refusal}[/yellow]')
+            continue
+        if sec_def is not None:
             conid = sec_def.conId
-        elif rpc_mmr is not None:
-            try:
-                resolved = rpc_mmr.resolve(symbol)  # List[SecurityDefinition]
-                if resolved:
-                    sec_def = resolved[0]
-                    conid = sec_def.conId
-                    # Persist into a "downloads" universe so the resolution
-                    # sticks for future runs — matches the auto-register
-                    # behaviour of `propose --group`.
-                    universe_name = 'downloads'
-                    try:
-                        u = accessor.get(universe_name)
-                    except Exception:
-                        u = None
-                    if u is None:
-                        from trader.data.universe import Universe
-                        u = Universe(name=universe_name, security_definitions=[sec_def])
-                    else:
-                        if not any(sd.conId == sec_def.conId for sd in u.security_definitions):
-                            u.security_definitions.append(sec_def)
-                    accessor.update(u)
-                    if not _json_mode:
-                        console.print(f'[dim]  registered {symbol} → conId {conid} in universe "downloads"[/dim]')
-            except Exception as ex:
-                if not _json_mode:
-                    console.print(f'[dim]  resolve via trader_service failed for {symbol}: {ex}[/dim]')
 
         # A symbol that would not resolve is REFUSED, not stored under its
         # ticker. This used to fall back to a ticker-keyed write, which
@@ -10382,6 +10491,13 @@ def _handle_data_download(args: argparse.Namespace):
         # calendar lookup — otherwise fall back to full-range download.
         # --force bypasses the guard (needed when re-fetching existing days to
         # add coverage, e.g. toggling TwelveData extended-hours bars on).
+        from dateutil.tz import gettz
+        venue_tz = str(getattr(sec_def, 'timeZoneId', '') or '') or 'US/Eastern'
+        if gettz(venue_tz) is None:
+            venue_tz = 'US/Eastern'
+        end_date = now_utc.astimezone(gettz(venue_tz))
+        start_date = end_date - dt.timedelta(days=args.days)
+
         missing_ranges = None
         if not getattr(args, 'force', False) and sec_def is not None:
             calendar = _try_get_exchange_calendar_for(sec_def)
@@ -10396,6 +10512,13 @@ def _handle_data_download(args: argparse.Namespace):
                     if not _json_mode:
                         console.print(f'[dim]  missing() failed for {symbol}: {ex} — full-range fetch[/dim]')
                     missing_ranges = None
+            elif not _json_mode:
+                # Say so: without a calendar every run re-downloads the whole
+                # window, and that used to be invisible.
+                console.print(
+                    f'[yellow]  {symbol}: no exchange calendar for '
+                    f'{getattr(sec_def, "primaryExchange", "") or getattr(sec_def, "exchange", "")!r} '
+                    f'— fetching the full window[/yellow]')
 
         if missing_ranges is not None and len(missing_ranges) == 0:
             skipped_up_to_date += 1
@@ -10409,6 +10532,10 @@ def _handle_data_download(args: argparse.Namespace):
         symbol_failed = False
         symbol_empty_windows = 0
         for dr in fetch_ranges:
+            # missing() answers in inclusive session DATES; a vendor reads a
+            # bare end date as that day's midnight and never returns the last
+            # session. Widen to start-of-day .. end-of-day in the venue's tz.
+            fetch_start, fetch_end = session_fetch_window(dr, venue_tz, now=now_utc)
             try:
                 if not _json_mode:
                     console.print(
@@ -10427,27 +10554,20 @@ def _handle_data_download(args: argparse.Namespace):
                             f'universe or trader_service is reachable for resolution)'
                         )
                     from trader.objects import WhatToShow
-                    # tickdata.missing() returns DateRange objects with
-                    # dt.date start/end; IBHistoryWorker requires
-                    # dt.datetime with tzinfo. Promote here.
-                    def _to_dt(x):
-                        if isinstance(x, dt.datetime):
-                            return x if x.tzinfo else x.replace(tzinfo=dt.timezone.utc)
-                        # dt.date or anything else with year/month/day
-                        return dt.datetime(x.year, x.month, x.day, tzinfo=dt.timezone.utc)
                     df = _ib_loop.run_until_complete(worker.get_contract_history(
                         security=sec_def,
                         what_to_show=WhatToShow.TRADES,
                         bar_size=bar_size,
-                        start_date=_to_dt(dr.start),
-                        end_date=_to_dt(dr.end),
+                        start_date=fetch_start,
+                        end_date=fetch_end,
                     ))
                 else:
                     df = worker.get_history(
                         ticker=symbol,
                         bar_size=bar_size,
-                        start_date=dr.start,
-                        end_date=dr.end,
+                        start_date=fetch_start,
+                        end_date=fetch_end,
+                        timezone=venue_tz,
                     )
                 if not df.empty:
                     storage_key = conid if conid else symbol
@@ -11080,6 +11200,11 @@ def _handle_data_refresh(args: argparse.Namespace):
             days=days,
             source=source,
             force=force,
+            # The universe's EXACT instruments. Passing only their symbols made
+            # the download re-resolve each name across every universe and take
+            # the first match — so a job could fill a different listing than
+            # the one its universe names.
+            security_definitions=list(uni.security_definitions),
         )
         try:
             # _handle_data_download() prints JSON to stdout when _json_mode is

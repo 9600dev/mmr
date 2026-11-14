@@ -11,7 +11,7 @@ from trader.data.bar_quality import impossible_mask
 from trader.data.store import DateRange
 from trader.data.duckdb_store import DuckDBDataStore, DuckDBObjectStore, _default_db_path
 from trader.objects import BarSize
-from typing import cast, Generic, List, NamedTuple, Optional, Set, Tuple, TypeVar, Union, TYPE_CHECKING
+from typing import Any, cast, Dict, Generic, List, NamedTuple, Optional, Set, Tuple, TypeVar, Union, TYPE_CHECKING
 
 import datetime as dt
 import pandas as pd
@@ -367,6 +367,41 @@ class IBSLBFee(NamedTuple):
     toAcct: str
 
 
+def session_fetch_window(
+    date_range: DateRange,
+    timezone: str,
+    now: Optional[dt.datetime] = None,
+) -> Tuple[dt.datetime, dt.datetime]:
+    """The tz-aware ``[start, end]`` to FETCH for a range of session dates.
+
+    ``TickData.missing()`` answers in inclusive session DATES. Handing those
+    straight to a vendor reads the end date as that day's MIDNIGHT — the start
+    of the last missing session rather than its end — so the newest session was
+    never fetched: a one-session gap produced an empty request, and a longer one
+    lost its final day. The nightly refresh therefore ran one session behind,
+    every night (found 2026-11-14: Friday's bars absent after Friday night's
+    run, which reported success). The IB path had the same shape and stored
+    only the first hour of the last ASX session.
+
+    Dates are widened to start-of-day .. end-of-day in the venue's timezone;
+    datetimes pass through (made aware in that timezone if naive). ``end`` is
+    capped at ``now`` — nothing useful is requested from the future.
+    """
+    from dateutil.tz import gettz
+    zone = gettz(timezone) or dt.timezone.utc
+    current = (now or dt.datetime.now(dt.timezone.utc)).astimezone(zone)
+
+    def widen(value: Any, end_of_day: bool) -> dt.datetime:
+        if isinstance(value, dt.datetime):
+            return value.astimezone(zone) if value.tzinfo is not None else value.replace(tzinfo=zone)
+        clock = dt.time(23, 59, 59) if end_of_day else dt.time(0, 0, 0)
+        return dt.datetime.combine(value, clock, tzinfo=zone)
+
+    start = widen(date_range.start, end_of_day=False)
+    end = min(widen(date_range.end, end_of_day=True), current)
+    return start, end
+
+
 T = TypeVar('T')
 
 
@@ -701,7 +736,7 @@ class TickData(Data):
         df = self._fix_df_timezone(result)
 
         if pd_offset:
-            return df.resample(pd_offset).last()  # type: ignore
+            return df.resample(pd_offset).last()
         else:
             return df
 
@@ -719,12 +754,81 @@ class TickData(Data):
         result = self.get_data(contract, date_range=date_range)
         return len(result) > 0
 
+    # How many of the newest stored sessions are re-checked for intraday
+    # completeness. Bounded so an illiquid name whose last print is routinely
+    # well before the close costs a few re-fetched sessions, not a whole window.
+    _COMPLETENESS_SESSIONS = 5
+
+    def _intraday_bar_seconds(self) -> Optional[int]:
+        """This library's bar length in seconds when it is 30 minutes or less,
+        else ``None`` (hourly-and-up bars say too little about where a session
+        stopped for the completeness rule below to mean anything)."""
+        parts = str(self.library_name or '').split()
+        if len(parts) != 2 or not parts[0].isdigit():
+            return None
+        unit = parts[1].lower()
+        scale = 1 if unit.startswith('sec') else 60 if unit.startswith('min') else None
+        if scale is None:
+            return None
+        seconds = int(parts[0]) * scale
+        return seconds if 0 < seconds <= 1800 else None
+
+    def _incomplete_sessions(self, sessions: List[dt.date], last_bar: Dict[dt.date, Any],
+                             exchange_calendar: 'ExchangeCalendar') -> Set[dt.date]:
+        """Recent sessions whose stored intraday bars stop well short of the close.
+
+        Anything that writes a session while it is still trading leaves it
+        truncated: strategy priming on a mid-session restart, or a download
+        run before the close. The day then HAS bars, so date-level coverage
+        called it present and nothing ever fetched the rest. Found 2026-11-14
+        in the live store: PLTR and CAT (the symbols the strategies trade)
+        ended at 14:29, 15:07 and 11:12 ET on the three days strategy_service
+        had been restarted during the session, permanently.
+        """
+        seconds = self._intraday_bar_seconds()
+        if seconds is None or not last_bar:
+            return set()
+        tolerance = max(dt.timedelta(minutes=30), dt.timedelta(seconds=2 * seconds))
+        # US intraday series carry the post-market (to 20:00 ET; 4h after the
+        # regular close on a half day too). A fetch at 15:40 or 16:30 passes
+        # the regular-close test and still leaves the evening missing, so the
+        # NEWEST stored session — the only one a pre-close fetch can have left
+        # short without an earlier run noticing — must reach the extended
+        # close. A name with no late prints simply has that one session
+        # re-fetched each run.
+        extended = (dt.timedelta(hours=4)
+                    if getattr(exchange_calendar, 'name', '') == 'XNYS' else dt.timedelta(0))
+        incomplete: Set[dt.date] = set()
+        recent = [d for d in sessions if d in last_bar][-self._COMPLETENESS_SESSIONS:]
+        for day in recent:
+            try:
+                close = pd.Timestamp(exchange_calendar.session_close(day.isoformat()))
+                last = pd.Timestamp(last_bar[day])
+            except Exception:
+                continue
+            if last.tzinfo is None:
+                continue
+            if close.tzinfo is None:
+                close = close.tz_localize('UTC')
+            if day == recent[-1] and extended:
+                if last < close + extended - dt.timedelta(minutes=60):
+                    incomplete.add(day)
+            elif last < close - tolerance:
+                incomplete.add(day)
+        return incomplete
+
     def missing(self,
                 contract: Union[Contract, SecurityDefinition, int],
                 exchange_calendar: 'ExchangeCalendar',
                 pd_offset: Optional[str] = None,
                 period: Optional[str] = None,
                 date_range: Optional[DateRange] = None) -> List[DateRange]:
+        """Contiguous runs of exchange sessions with no (complete) stored data.
+
+        Each returned DateRange holds INCLUSIVE session DATES (``dt.date``), in
+        the exchange's own timezone — callers must widen ``end`` to the end of
+        that day before fetching (see ``session_fetch_window``).
+        """
         if not pd_offset and not period and not date_range:
             try:
                 date_range = DateRange(dateify(self.library.min_date(symbol=self._to_symbol(contract))),
@@ -732,16 +836,25 @@ class TickData(Data):
             except ValueError:
                 return []
 
-        df = self.get_data(contract, pd_offset, period, date_range)
-
-        no_data_dates: List[dt.date] = []
+        # Read from the START of the window's first day. A daily bar is keyed
+        # at venue midnight, so a window that begins mid-day ("365 days before
+        # now") excluded its own first session's bar from the read, called that
+        # session missing, and re-requested it on every run — one wasted vendor
+        # call per symbol per night, forever, since the bar was already stored.
+        actual_range = self.get_date_range(period, date_range)
+        calendar_tz = getattr(exchange_calendar, 'tz', None)
+        read_start = actual_range.start
+        if isinstance(read_start, dt.datetime):
+            if read_start.tzinfo is not None and calendar_tz is not None:
+                read_start = read_start.astimezone(calendar_tz)
+            read_start = read_start.replace(hour=0, minute=0, second=0, microsecond=0)
+        df = self.get_data(contract, pd_offset,
+                           date_range=DateRange(start=read_start, end=actual_range.end))
 
         dates: List[dt.date] = []
-        sessions = exchange_calendar.sessions.date  # type: ignore
-        # no data case
-        if len(df) == 0:
-            dates = no_data_dates
-        else:
+        last_bar: Dict[dt.date, Any] = {}
+        sessions = exchange_calendar.sessions.date
+        if len(df) > 0:
             # Count only days that actually carry a (non-NaN) observation.
             # The old `df.resample('D').first().index.date` fabricated an index
             # entry for EVERY calendar day between min and max — so an interior
@@ -751,19 +864,32 @@ class TickData(Data):
                 valid = df[df['close'].notna()]
             else:
                 valid = df
-            dates = sorted(set(valid.index.date))  # type: ignore
-            dates = list(dates) + no_data_dates
+            # Bucket bars by the EXCHANGE's calendar date, not the frame's.
+            # Frames come back in America/New_York for every venue, and a
+            # session is a local-date concept: an ASX daily bar is keyed at
+            # Sydney midnight, which is the PREVIOUS day in New York, so every
+            # ASX session looked like its predecessor and the newest one
+            # looked missing on every run.
+            index = valid.index
+            if calendar_tz is not None and getattr(index, 'tz', None) is not None:
+                index = index.tz_convert(calendar_tz)  # type: ignore
+            local_dates = index.date  # type: ignore
+            dates = sorted(set(local_dates))
+            if len(index) > 0 and self._intraday_bar_seconds() is not None:
+                last_bar = pd.Series(index, index=local_dates).groupby(level=0).max().to_dict()
 
         # filter
-        actual_range = self.get_date_range(period, date_range)
-        dates = [d for d in dates if d >= actual_range.start.date() and d <= actual_range.end.date()]
-        sessions = [d for d in sessions if d >= actual_range.start.date() and d <= actual_range.end.date()]
+        range_start = self._as_date(actual_range.start)
+        range_end = self._as_date(actual_range.end)
+        sessions = [d for d in sessions if range_start <= d <= range_end]
+        present = {d for d in dates if range_start <= d <= range_end}
+        present -= self._incomplete_sessions(sessions, last_bar, exchange_calendar)
 
         ranges: List[DateRange] = []
         start_date = None
         end_date = None
         for d in sessions:
-            if d not in dates:
+            if d not in present:
                 if not start_date:
                     start_date = d
                 end_date = d
@@ -776,6 +902,10 @@ class TickData(Data):
             ranges.append(DateRange(start=start_date, end=end_date))
 
         return ranges
+
+    @staticmethod
+    def _as_date(value: Any) -> dt.date:
+        return value.date() if isinstance(value, dt.datetime) else value
 
     def dump(self, csv_file_location: str):
         for symbol in self.library.list_symbols():

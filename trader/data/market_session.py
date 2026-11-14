@@ -72,12 +72,15 @@ _EXCHANGE_CALENDARS: Dict[str, str] = {
     # Australia — ASX (pmc's 'ASX' closes 16:10, i.e. it includes the auction)
     'ASX': 'ASX',
     # Rest of the venues the scanners/universes can reach
-    'TSE': 'XTKS', 'TSEJ': 'XTKS', 'JPX': 'JPX',
+    # IB's 'TSE' is TORONTO; Tokyo is 'TSEJ'. 'TSE' was mapped to Tokyo here,
+    # which is not a fail-open gap but a wrong answer: a Toronto listing's bars
+    # were judged against Tokyo's session and suppressed all day.
+    'TSEJ': 'XTKS', 'JPX': 'JPX',
     'SEHK': 'HKEX', 'HKFE': 'HKEX',
     'LSE': 'LSE', 'LSEETF': 'LSE',
     'IBIS': 'XFRA', 'FWB': 'XFRA', 'SBF': 'XPAR', 'AEB': 'XAMS',
     'EBS': 'SIX', 'VSE': 'XWBO', 'BVME': 'XMIL', 'BM': 'XMAD',
-    'TSX': 'TSX', 'VENTURE': 'TSXV',
+    'TSE': 'TSX', 'TSX': 'TSX', 'VENTURE': 'TSXV',
     'SGX': 'XSES', 'NSE': 'NSE', 'BSE': 'XBOM',
     'KSE': 'XKRX', 'TASE': 'TASE', 'JSE': 'XJSE',
 }

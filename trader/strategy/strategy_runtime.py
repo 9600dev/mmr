@@ -2127,17 +2127,11 @@ class StrategyRuntime():
         """
         if not security:
             return None
-        # Imported here (outside the try, so a missing package raises rather
-        # than reading as "no calendar"): this module is on the
-        # `import trader.mmr_cli` path and exchange_calendars is costly.
-        import exchange_calendars
-        try:
-            return exchange_calendars.get_calendar(security.primaryExchange)
-        except Exception:
-            try:
-                return exchange_calendars.get_calendar(security.exchange)
-            except Exception:
-                return None
+        # One shared lookup (IB venue aliases included): ARCA / AMEX / ISLAND
+        # listings and every Toronto / Tokyo / Hong Kong name used to come back
+        # None here, so priming re-pulled their whole window on every start.
+        from trader.data.session_guard import calendar_for
+        return calendar_for(security)
 
     async def _fetch_history_with_resume(
         self,
@@ -2216,6 +2210,9 @@ class StrategyRuntime():
                     bar_size=bar_size,
                     start_date=dr_start,
                     end_date=dr_end,
+                    # `contract` is a plain Contract (no timeZoneId): without
+                    # this a non-US daily bar is keyed at New York midnight.
+                    tz_info=tz,
                 )
             except IBNoDataError as ex:
                 logging.warning(

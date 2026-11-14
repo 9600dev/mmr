@@ -421,7 +421,10 @@ class PositionSizer:
             base = cfg.base_position_usd
         raw = base * risk_mult
 
-        # 2. Scale by confidence
+        # 2. Scale by confidence. NaN must not size: min(1.0, nan) is 1.0, so
+        # an unreadable confidence was sized as FULL confidence.
+        if not math.isfinite(confidence):
+            confidence = 0.0
         confidence = max(0.0, min(1.0, confidence))
         scale = _confidence_scale(cfg.min_confidence_scale, confidence)
         sized = raw * scale

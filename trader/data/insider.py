@@ -131,7 +131,7 @@ def nyse_sessions(start: Any, end: Any) -> np.ndarray:
     s = cast(pd.Timestamp, pd.Timestamp(start)).normalize()
     e = cast(pd.Timestamp, pd.Timestamp(end)).normalize()
     cal = xcals.get_calendar('XNYS', start=s, end=e)
-    return cast(np.ndarray, cal.sessions.values.astype('datetime64[D]'))
+    return cal.sessions.values.astype('datetime64[D]')
 
 
 def usable_from_sessions(filing_dates: pd.Series, sessions: np.ndarray) -> pd.Series:

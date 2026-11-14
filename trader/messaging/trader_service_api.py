@@ -643,10 +643,18 @@ class TraderServiceApi(RPCHandler):
     def set_risk_limits(self, **kwargs) -> dict:
         """Update risk gate limits. Only provided fields are changed."""
         from dataclasses import asdict
+        from trader.trading.risk_gate import coerce_limit
         limits = self.trader.risk_gate.limits
-        for key, value in kwargs.items():
-            if hasattr(limits, key):
-                setattr(limits, key, type(getattr(limits, key))(value))
+        # Validate EVERYTHING before changing anything: a NaN used to convert
+        # cleanly and switch the check off (every comparison with NaN is False).
+        changes = {key: coerce_limit(key, value) for key, value in kwargs.items()}
+        before = asdict(limits)
+        for key, value in changes.items():
+            setattr(limits, key, value)
+        if changes:
+            logging.warning(
+                'risk limits changed at runtime (NOT persisted — trader.yaml wins on the '
+                'next restart): %s', {k: (before[k], v) for k, v in changes.items()})
         return asdict(limits)
 
     @rpcmethod

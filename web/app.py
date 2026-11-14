@@ -351,8 +351,10 @@ def approve(pid: int, request: Request, csrf_token: str = Form('')):
     _check_csrf(csrf_token)
     try:
         result = _call(lambda m: m.approve(pid), retry=False)
-        ok = getattr(result, 'success', None)
-        if ok is False:
+        # SuccessFail.success is a (static) constructor, not a flag: reading it
+        # as one made `ok is False` never true, so a risk-gate refusal, an
+        # expired proposal and an IB rejection all flashed "approved".
+        if not result.is_success():
             msg = f'#{pid} approve failed: {getattr(result, "error", "unknown error")}'
         else:
             msg = f'#{pid} approved & submitted'

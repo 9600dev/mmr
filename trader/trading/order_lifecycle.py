@@ -298,10 +298,19 @@ class OrderLifecycleTracker:
             self._pending_submissions.add(identity)
         # The callback lock must never cover SQLite's lock wait: on_trade and
         # on_execution take it on the broker loop to update their snapshots.
-        with self._journal.transaction() as conn:
-            self._outbox(conn, identity, event)
-            delivered = conn.execute('SELECT delivered FROM broker_event_outbox WHERE identity=?',
-                                     [identity]).fetchone()[0]
+        try:
+            with self._journal.transaction() as conn:
+                self._outbox(conn, identity, event)
+                delivered = conn.execute('SELECT delivered FROM broker_event_outbox WHERE identity=?',
+                                         [identity]).fetchone()[0]
+        except BaseException:
+            # Nothing was journaled, so nothing will ever deliver (and discard)
+            # this identity. Left in the pending set it made health() report
+            # unhealthy for the life of the process — one transient "database
+            # is locked" refused every open until trader_service restarted.
+            with self._lock:
+                self._pending_submissions.discard(identity)
+            raise
         if delivered:
             with self._lock:
                 self._pending_submissions.discard(identity)

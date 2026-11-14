@@ -7,11 +7,15 @@ IB_SERVER_ADDRESS="${IB_SERVER_ADDRESS:-ib-gateway}"
 
 # Set the API port based on trading mode
 # IB Gateway internal ports: 4003 = live, 4004 = paper
-if [ "${TRADING_MODE:-paper}" = "paper" ]; then
-    IB_SERVER_PORT="${IB_SERVER_PORT:-4004}"
-else
-    IB_SERVER_PORT="${IB_SERVER_PORT:-4003}"
-fi
+# Exactly "paper" or "live" (case/whitespace-insensitive). The test used to be
+# `= "paper"` with LIVE as the else branch, so "Paper" or "paper " selected the
+# live port. Anything else refuses to start.
+TRADING_MODE="$(printf '%s' "${TRADING_MODE:-paper}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+case "$TRADING_MODE" in
+    paper) IB_SERVER_PORT="${IB_SERVER_PORT:-4004}" ;;
+    live)  IB_SERVER_PORT="${IB_SERVER_PORT:-4003}" ;;
+    *) echo "FATAL: TRADING_MODE must be 'paper' or 'live', got '${TRADING_MODE}'" >&2; exit 64 ;;
+esac
 
 echo "MMR starting: IB_SERVER_ADDRESS=$IB_SERVER_ADDRESS IB_SERVER_PORT=$IB_SERVER_PORT TRADING_MODE=${TRADING_MODE:-paper}"
 

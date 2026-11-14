@@ -4,7 +4,7 @@ from trader.common.logging_helper import setup_logging
 from trader.data.event_store import EventStore, EventType
 from trader.trading.order_math import order_notional
 from trader.trading.strategy import Signal
-from typing import Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, Optional, Tuple, TYPE_CHECKING, Union
 
 import datetime as dt
 import math
@@ -12,7 +12,7 @@ import os
 import yaml
 
 if TYPE_CHECKING:
-    from trader.trading.trading_filter import TradingFilter
+    from trader.trading.trading_filter import ReloadingTradingFilter, TradingFilter
 
 
 logging = setup_logging(module_name='risk_gate')
@@ -86,13 +86,65 @@ class RiskLimits:
                     'known keys: %s', filepath, key, sorted(known))
                 continue
             try:
-                kwargs[key] = type(known[key])(value)
+                kwargs[key] = coerce_limit(key, value)
             except (TypeError, ValueError) as ex:
                 logging.error(
                     '%s: risk_limits.%s has malformed value %r (%s) — using default %r',
                     filepath, key, value, ex, known[key])
         # **kwargs is dynamically built from validated RiskLimits fields; ty can't track the dict-value types through the unpack.
         return RiskLimits(**kwargs)  # ty: ignore[invalid-argument-type]
+
+
+def coerce_limit(key: str, value) -> Union[int, float]:
+    """``value`` as the type of ``RiskLimits.<key>``, refusing nonsense.
+
+    Raises ``ValueError`` for an unknown key, a non-finite value, a negative
+    one, or a fraction outside its range. NaN is the dangerous case: it
+    converts cleanly to float and every comparison against it is False, so
+    ``max_daily_loss: .nan`` (or ``mmr risk --max-daily-loss nan``) silently
+    switched the daily-loss, concentration, leverage and cushion checks OFF —
+    each "is the limit breached?" answered no. One coercion for YAML and for
+    the live ``set_risk_limits`` RPC, so the two cannot disagree.
+    """
+    defaults = {f.name: f.default for f in fields(RiskLimits)}
+    if key not in defaults:
+        raise ValueError(f'unknown risk limit {key!r}; known: {sorted(defaults)}')
+    if isinstance(value, bool):
+        raise ValueError(f'{key} must be a number, got {value!r}')
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f'{key} must be finite, got {value!r}')
+    if number < 0:
+        raise ValueError(f'{key} must not be negative, got {value!r}')
+    if key in _FRACTION_LIMITS and number > 1:
+        raise ValueError(
+            f'{key} is a fraction of the account (0.1 = 10%), got {value!r}')
+    if isinstance(defaults[key], int):
+        if number != int(number):
+            raise ValueError(f'{key} must be a whole number, got {value!r}')
+        return int(number)
+    return number
+
+
+# Limits expressed as a fraction of net liquidation.
+_FRACTION_LIMITS = frozenset({'max_position_size_pct', 'min_margin_cushion'})
+
+
+def _margin_number(margin_impact: dict, key: str) -> float:
+    """A whatIf margin field as a float, NaN when it is absent or unset.
+
+    ib_async reports IB's "unset" as ``None`` (and the raw wire value is
+    1.797e308); ``math.isfinite(None)`` raised TypeError, so an open was still
+    refused but as an anonymous crash with no tri-state record.
+    """
+    value = margin_impact.get(key)
+    if value is None:
+        return float('nan')
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float('nan')
+    return number if math.isfinite(number) and abs(number) < 1e300 else float('nan')
 
 
 @dataclass(frozen=True)
@@ -134,7 +186,9 @@ class RiskGate:
     def __init__(self, limits: RiskLimits, event_store: EventStore):
         self.limits = limits
         self.event_store = event_store
-        self.trading_filter: Optional['TradingFilter'] = None
+        # The live service installs a ReloadingTradingFilter (re-reads the YAML
+        # when it changes); both expose is_allowed().
+        self.trading_filter: Optional[Union['TradingFilter', 'ReloadingTradingFilter']] = None
 
     def evaluate(
         self,
@@ -451,11 +505,13 @@ class RiskGate:
         symbol: str,
         exchange: str = '',
         sec_type: str = '',
+        primary_exchange: str = '',
     ) -> RiskGateResult:
         """Check if an instrument is allowed by trading filters."""
         if not self.trading_filter:
             return RiskGateResult(approved=True)
-        allowed, reason = self.trading_filter.is_allowed(symbol, exchange, sec_type)
+        allowed, reason = self.trading_filter.is_allowed(
+            symbol, exchange, sec_type, primary_exchange=primary_exchange)
         if not allowed:
             return RiskGateResult(approved=False, reason=f'trading filter: {reason}')
         return RiskGateResult(approved=True)
@@ -485,8 +541,8 @@ class RiskGate:
         matching the documented behaviour of the other gates.
         """
         checks: Dict[str, str] = {}
-        init_margin_after = margin_impact.get('initMarginAfter', 0)
-        equity_after = margin_impact.get('equityWithLoanAfter', 0)
+        init_margin_after = _margin_number(margin_impact, 'initMarginAfter')
+        equity_after = _margin_number(margin_impact, 'equityWithLoanAfter')
 
         if not math.isfinite(net_liquidation) or net_liquidation <= 0:
             checks['leverage'] = 'unevaluable:net-liq'

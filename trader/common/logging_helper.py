@@ -477,13 +477,25 @@ def log_callstack_debug(frames: int = 0, module_filter: str = ''):
         result = ' <- '.join(callstack)
         logging.debug(result)
 
+def _secret_argument_name(name: str) -> bool:
+    lowered = str(name).lower()
+    return any(marker in lowered for marker in ('key', 'secret', 'password', 'token', 'credential'))
+
+
 def log_method(func):
     global logging
 
     @wraps(func)
     def wrapper(*args, **kwargs):
         func_args = inspect.signature(func).bind(*args, **kwargs).arguments
-        func_args_str = ", ".join(map("{0[0]} = {0[1]!r}".format, [item for item in func_args.items() if item[0] != 'self']))
+        # Secret-looking arguments are logged as present/absent, never by value:
+        # place_order_simple carries `approver_key`, and this line lands in
+        # debug.log on the shared bind mount — exactly where the context the
+        # key is withheld from can read it.
+        func_args_str = ", ".join(
+            f"{name} = {'<redacted>' if value else '<empty>'}" if _secret_argument_name(name)
+            else f"{name} = {value!r}"
+            for name, value in func_args.items() if name != 'self')
         logging.debug(f"{func.__module__}.{func.__qualname__}({func_args_str})")
         return func(*args, **kwargs)
 

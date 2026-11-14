@@ -502,12 +502,17 @@ class MainHandler(RequestHandler):
             self.write(json.dumps({'result': 'failed'}))
 
     def get(self):
-        # restart job
+        # READ-ONLY. `?restart=<job>` used to SIGKILL and relaunch the job on a
+        # plain GET, and this port is published on every host interface: any
+        # LAN host — or an <img> tag in a page the operator opened — could
+        # restart db_backup until its --keep window rotated every snapshot out.
+        # Restarting a job is an operator act: `docker exec` and re-run it.
         if len(self.get_query_arguments('restart')) > 0:
-            self.restart()
-        # get info
-        else:
-            self.write(json.dumps([ob.__dict__() for ob in self.job_scheduler.jobs]))
+            self.set_status(405)
+            self.write(json.dumps({'result': 'refused',
+                                   'reason': 'job restart over HTTP is disabled; this page is read-only'}))
+            return
+        self.write(json.dumps([ob.__dict__() for ob in self.job_scheduler.jobs]))
 
 
 def main(config_file: str, only_list: List[str], except_list: List[str], no_health_check: bool = False):

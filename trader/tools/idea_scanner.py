@@ -1894,7 +1894,11 @@ class TwelveDataIdeaScanner:
             # which tickers get surfaced (e.g. KKRpD is preferred stock;
             # 'p' lowercase inside an otherwise-uppercase ticker is the
             # convention across data providers).
-            if any(ticker.endswith(s) for s in ('W', 'WS', '.U', '.R')):
+            # A bare trailing 'W' is only a warrant on a 5+ character ticker
+            # (base + W). The unconditional test dropped NOW, PANW, SNOW, LOW,
+            # SCHW, ITW, GLW, TROW, CDW, EW... from every TwelveData scan —
+            # the default source — including explicit `--tickers NOW`.
+            if ticker.endswith(('.WS', 'WS', '.U', '.R')) or (len(ticker) >= 5 and ticker.endswith('W')):
                 continue
             if 'p' in ticker and ticker != ticker.upper():
                 continue

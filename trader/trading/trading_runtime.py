@@ -110,6 +110,22 @@ class _AccountPnLSubscription:
     pending: list[tuple[PnL, Optional[float]]] = field(default_factory=list)
 
 
+def _is_transient_refusal(error: Any) -> bool:
+    """A refusal that sent nothing and describes a condition that can CHANGE.
+
+    ``UNKNOWN:`` (could not evaluate) and ``DEFERRED:`` (a competing order or
+    unconfirmed reservation holds the shares right now). With no broker order
+    reserved, such an intent is journaled RETRYABLE so the SAME intent id can
+    be claimed again and the request re-evaluated. ``DEFERRED:`` used to fall
+    through to REJECTED, and a REJECTED intent replays its stored error on
+    every retry: the executor keeps one close request and one intent id, so a
+    deferred exit kept receiving the original refusal after the blocker was
+    gone — cancelling its own stop before each attempt (review 2026-11-14).
+    """
+    text = str(error or '')
+    return 'UNKNOWN:' in text or 'DEFERRED:' in text
+
+
 class Trader():
     def __init__(self,
                  ib_server_address: str,
@@ -399,8 +415,10 @@ class Trader():
             self.order_tracker.set_event_store(self.event_store)
 
             # load trading filters (allowlist/denylist)
-            from trader.trading.trading_filter import TradingFilter
-            self.risk_gate.trading_filter = TradingFilter.load()
+            # Re-reads the YAML when it changes: `mmr filter deny X` must reach
+            # the order path of a RUNNING service, not only the next restart.
+            from trader.trading.trading_filter import ReloadingTradingFilter
+            self.risk_gate.trading_filter = ReloadingTradingFilter()
 
             # Server-side notional-tier startup diagnostics (Phase 2). Announce
             # the active threshold and flag the operational footgun where the
@@ -1282,9 +1300,28 @@ class Trader():
                       'exits are exempt)')
         return margin_impact
 
+    # Upper bound on one whatIfOrder round trip. See check_order_margin.
+    WHATIF_TIMEOUT_S = 10.0
+
     async def check_order_margin(self, contract: Contract, order: Order) -> dict:
-        """Run whatIfOrder to get margin impact without placing."""
-        order_state = await self.client.ib.whatIfOrderAsync(contract, order)
+        """Run whatIfOrder to get margin impact without placing.
+
+        Bounded: ib_async resolves a whatIf only on an order state that carries
+        margins or on a non-warning error. A warning-class reply (321
+        validation, 399, a 2100-range notice) resolves neither, so the await
+        never returned — and it runs while holding the account-wide order
+        lock, so one such open wedged every later placement behind it,
+        strategy exits and protective stops included, with the pulse still
+        green. A timeout raises; the caller refuses the open (fail-closed) and
+        releases the lock.
+        """
+        try:
+            order_state = await asyncio.wait_for(
+                self.client.ib.whatIfOrderAsync(contract, order),
+                timeout=self.WHATIF_TIMEOUT_S)
+        except asyncio.TimeoutError as ex:
+            raise TimeoutError(
+                f'whatIfOrder gave no margin reply within {self.WHATIF_TIMEOUT_S:g}s') from ex
         # ib_async can hand back a LIST of order states — observed live
         # 2026-07-27 on a CASH/IDEALPRO whatIf, where `.numeric` on the list
         # raised AttributeError. Before the fail-closed flip that crash was
@@ -1534,6 +1571,46 @@ class Trader():
                 pending += _working_reduction_quantity(trade)
         return abs(held + sign * (quantity + pending)) * (order_value / quantity)
 
+    def _live_submitted_trades(self) -> list:
+        """Locally submitted trades that can still be believed.
+
+        A ``Trade`` only receives status updates from the IB session that
+        created it. Every reconnect builds a fresh ``IB()`` (nightly, on the
+        gateway's auto-restart), after which a trade captured here is frozen
+        at whatever status it had — ``PreSubmitted`` for a resting stop —
+        forever. ``working_trades`` then kept reporting it as working once the
+        real order was gone: an exit's coordinator cancelled the live stop,
+        still found the frozen copy reserving the shares, refused the close
+        (``UNKNOWN: reduction already filled or reserved``), and every retry
+        tried to cancel an object the broker no longer knows. The position was
+        left naked and unclosable through MMR until trader_service restarted
+        (found by review 2026-11-14, reproduced against the real coordinator).
+
+        So a submitted trade is kept only while it is the very object the
+        CURRENT session tracks. When the session's trade list cannot be read
+        the entries are kept (unknown is not evidence of staleness); terminal
+        ones are always dropped.
+        """
+        terminal = {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}
+        kept = [t for t in getattr(self, '_submitted_trades', [])
+                if t.orderStatus.status not in terminal]
+        try:
+            session_trades = self.client.ib.trades()
+        except Exception:
+            session_trades = None
+        if isinstance(session_trades, (list, tuple)):
+            live = {id(t) for t in session_trades}
+            stale = [t for t in kept if id(t) not in live]
+            if stale:
+                logging.warning(
+                    'dropping %d locally submitted trade(s) the current IB session does not '
+                    'track (orders %s) — captured before a reconnect, their status is frozen',
+                    len(stale), sorted({getattr(t.order, 'orderId', None) for t in stale},
+                                       key=lambda value: (value is None, value)))
+                kept = [t for t in kept if id(t) in live]
+        self._submitted_trades = kept
+        return kept
+
     def working_trades(self, contract: Contract) -> list:
         """Broker-known working orders plus locally submitted orders awaiting updates.
 
@@ -1544,9 +1621,7 @@ class Trader():
         shares and lets the concentration check under-count. Callers treat the
         raise as unevaluable: opens refuse, reductions defer.
         """
-        self._submitted_trades = [t for t in getattr(self, '_submitted_trades', [])
-                                  if t.orderStatus.status not in {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}]
-        candidates = list(self._submitted_trades)
+        candidates = list(self._live_submitted_trades())
         try:
             open_trades = self.client.ib.openTrades()
             candidates.extend(open_trades)
@@ -2141,7 +2216,7 @@ class Trader():
                 status = ('UNKNOWN' if unknown_opening else 'PARTIAL' if partial else
                           'SUBMITTED' if result.is_success() else
                           'UNKNOWN' if reserved and reserved['orders'] else
-                          'RETRYABLE' if 'UNKNOWN:' in str(result.error) else 'REJECTED')
+                          'RETRYABLE' if _is_transient_refusal(result.error) else 'REJECTED')
                 await asyncio.to_thread(journal.finish, intent_id, status, str(result.error or ''), outcome)
                 result.client_intent_id = intent_id
                 if status == 'UNKNOWN':
@@ -2151,7 +2226,7 @@ class Trader():
                 try:
                     reserved = await asyncio.to_thread(journal.get, intent_id)
                     status = ('UNKNOWN' if reserved and reserved['orders'] else
-                              'RETRYABLE' if 'UNKNOWN:' in str(ex) else 'REJECTED')
+                              'RETRYABLE' if _is_transient_refusal(ex) else 'REJECTED')
                     await asyncio.to_thread(journal.finish, intent_id, status, str(ex))
                 except Exception as storage_error:
                     self._journal_degraded = str(storage_error)
@@ -2268,7 +2343,7 @@ class Trader():
         session_identities: Optional[set[tuple]] = None
         try:
             identities = {(t.order.clientId, t.order.orderId) for t in self.client.ib.trades()}
-            identities |= {(t.order.clientId, t.order.orderId) for t in getattr(self, '_submitted_trades', [])}
+            identities |= {(t.order.clientId, t.order.orderId) for t in self._live_submitted_trades()}
             session_identities = identities
         except Exception:
             session_identities = None
@@ -3062,6 +3137,11 @@ class Trader():
 
         trades: List[Trade] = []
 
+        # The children are the OPPOSITE side, so the entry side must be exact:
+        # a lowercase 'buy' made every protective leg a BUY as well.
+        action = str(action).strip().upper()
+        if action not in ('BUY', 'SELL'):
+            return SuccessFail.fail(error=f'action must be BUY or SELL, got {action!r}')
         reverse_action = 'SELL' if action == 'BUY' else 'BUY'
 
         common = dict(
@@ -3145,6 +3225,17 @@ class Trader():
         if not is_exit and not allow_open:
             return SuccessFail.fail(error='Opening exposure requires an approved proposal matching this exact order')
 
+        if not is_exit:
+            # Exit-leg geometry, for OPENING entries only: a stop on the wrong
+            # side of a limit entry, or an inverted bracket, fires the moment
+            # the entry fills. Deliberately after classification — a closing
+            # entry has its legs dropped just below and must never be refused
+            # for them.
+            geometry_errors = spec.validate(action=str(action).upper())
+            if geometry_errors:
+                return SuccessFail.fail(
+                    error=f'Invalid execution spec: {"; ".join(geometry_errors)}')
+
         # Tri-state gate record carried into the entry leg's minted token
         # (empty for exit-class entries and for protective children).
         entry_checks: dict = {}
@@ -3159,6 +3250,7 @@ class Trader():
                     instrument_result = self.risk_gate.check_instrument(
                         symbol=contract.symbol, exchange=contract.exchange or '',
                         sec_type=contract.secType or '',
+                        primary_exchange=getattr(contract, 'primaryExchange', '') or '',
                     )
                     if not instrument_result.approved:
                         logging.warning(
@@ -3177,6 +3269,7 @@ class Trader():
             # 1. Trading filter check (denylist/allowlist)
             instrument_result = self.risk_gate.check_instrument(
                 symbol=contract.symbol, exchange=contract.exchange or '', sec_type=contract.secType or '',
+                primary_exchange=getattr(contract, 'primaryExchange', '') or '',
             )
             if not instrument_result.approved:
                 return SuccessFail.fail(error=instrument_result.reason)

@@ -630,6 +630,7 @@ class TradeExecutioner():
                         symbol=contract.symbol,
                         exchange=contract.exchange or '',
                         sec_type=contract.secType or '',
+                        primary_exchange=getattr(contract, 'primaryExchange', '') or '',
                     )
                     if not instrument_result.approved:
                         logging.warning(
@@ -658,6 +659,7 @@ class TradeExecutioner():
                 symbol=contract.symbol,
                 exchange=contract.exchange or '',
                 sec_type=contract.secType or '',
+                primary_exchange=getattr(contract, 'primaryExchange', '') or '',
             )
             if not instrument_result.approved:
                 await self._log_event(EventType.RISK_GATE_REJECTED, contract, order)
