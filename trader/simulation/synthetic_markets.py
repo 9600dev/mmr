@@ -244,7 +244,13 @@ def driftless_session_bars(
 
 
 def battery() -> Dict[str, pd.DataFrame]:
-    """Every synthetic frame, keyed by name — the gauntlet's S3 input set."""
+    """The original nasty-shape frames, keyed by name.
+
+    NOTE what these are NOT: every intraday frame here starts 09:30 **UTC**
+    (04:30 New York) and is at most 240 bars long, so none of them contains a
+    single regular-session bar. A strategy that only acts inside its session
+    sees nothing on them — see ``session_battery`` for frames it can act on.
+    """
     return {
         "with_gaps": ohlcv_with_gaps(),
         "high_volatility": ohlcv_high_volatility(),
@@ -253,4 +259,254 @@ def battery() -> Dict[str, pd.DataFrame]:
         "nan_rows": ohlcv_nan_rows(),
         "trending": ohlcv_trending(),
         "choppy": ohlcv_choppy(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Session-stamped frames
+# ---------------------------------------------------------------------------
+#
+# The frames above were written to break indicator maths, and for that the
+# timestamp did not matter. It matters for a session-gated strategy: an
+# opening-range breakout needs an opening range, and a frame stamped 04:30-08:29
+# New York has none, so every one of its arrays is NaN and every check on it
+# passes by having nothing to look at (docs/AUDIT_2026-11-14.md B4.3).
+#
+# These generators produce consecutive WEEKDAY sessions of 1-minute bars whose
+# wall-clock times are the caller's session (default 09:30-16:00
+# America/New_York), on the module's usual UTC index. Unlike
+# ``driftless_session_bars`` they are not a null: they carry trends, gaps,
+# reversion and volume bursts on purpose, because their job is to make a
+# strategy DO something so that what it does can be inspected.
+
+SESSION_TZ = 'America/New_York'
+SESSION_OPEN_MINUTE = 9 * 60 + 30
+SESSION_CLOSE_MINUTE = 16 * 60
+
+# A Wednesday in January: five sessions then span a weekend (Wed, Thu, Fri,
+# Mon, Tue), and no zone changes its clocks inside the window.
+_SESSION_START_DATE = '2024-01-03'
+
+
+def _session_grid(days: int, session_tz: str, open_minute: int, close_minute: int,
+                  pre_minutes: int, post_minutes: int, start_date: str):
+    """``(index, session_no, since_open)`` for ``days`` weekday sessions.
+
+    ``since_open`` is each bar's minute offset from its session open: negative
+    before the open, ``>= close_minute - open_minute`` after the close.
+    """
+    if days < 1:
+        raise ValueError(f'days must be >= 1, got {days}')
+    if not 0 <= open_minute < close_minute <= 24 * 60:
+        raise ValueError(
+            f'session minutes must satisfy 0 <= open < close <= 1440, got '
+            f'open={open_minute} close={close_minute}')
+    # Extended hours never spill past the session's own calendar day.
+    pre = min(max(int(pre_minutes), 0), open_minute)
+    post = min(max(int(post_minutes), 0), 24 * 60 - close_minute)
+    per_day = pre + (close_minute - open_minute) + post
+
+    # Built as naive wall-clock minutes and localized once, so 09:30 means
+    # 09:30 in the session's zone whatever its UTC offset is that day.
+    wall = pd.DatetimeIndex(np.concatenate([
+        pd.date_range(day + pd.Timedelta(minutes=open_minute - pre),
+                      periods=per_day, freq='1min').to_numpy()
+        for day in pd.bdate_range(start=start_date, periods=days)
+    ]))
+    index = wall.tz_localize(session_tz).tz_convert('UTC')
+    since_open = np.tile(np.arange(-pre, per_day - pre), days)
+    session_no = np.repeat(np.arange(days), per_day)
+    return index, session_no, since_open
+
+
+def _coherent_ohlcv(index, close: np.ndarray, volume: np.ndarray, wick: np.ndarray,
+                    rng, start_price: float) -> pd.DataFrame:
+    """OHLCV whose every bar is structurally possible: open is the prior
+    close, and high/low straddle the open-close body."""
+    n = len(close)
+    open_ = np.empty(n)
+    open_[0] = start_price
+    open_[1:] = close[:-1]
+    high = np.maximum(open_, close) + np.abs(rng.normal(0.0, 1.0, n)) * wick * close
+    low = np.minimum(open_, close) - np.abs(rng.normal(0.0, 1.0, n)) * wick * close
+    return _finish(pd.DataFrame({
+        'open': open_, 'high': high, 'low': np.maximum(low, 1e-6),
+        'close': close, 'volume': volume,
+    }, index=index))
+
+
+def _session_volume(rng, since_open: np.ndarray, session_len: int,
+                    steps: np.ndarray, sigma: float) -> np.ndarray:
+    """U-shaped intraday volume that bursts on large moves (so a volume-
+    confirmed breakout can exist), thin and often zero outside the session."""
+    in_session = (since_open >= 0) & (since_open < session_len)
+    frac = np.clip(since_open / max(session_len - 1, 1), 0.0, 1.0)
+    profile = 0.6 + 1.6 * (2.0 * frac - 1.0) ** 2
+    burst = 1.0 + np.minimum(np.abs(steps) / sigma, 4.0)
+    volume = 4000.0 * profile * burst * rng.lognormal(0.0, 0.5, len(steps))
+    thin = rng.integers(0, 400, len(steps)).astype(float)
+    thin[rng.random(len(steps)) < 0.5] = 0.0
+    return np.where(in_session, volume, thin).round()
+
+
+def session_trending(days: int = 5, seed: int = 303, *,
+                     session_tz: str = SESSION_TZ,
+                     open_minute: int = SESSION_OPEN_MINUTE,
+                     close_minute: int = SESSION_CLOSE_MINUTE,
+                     pre_minutes: int = 0, post_minutes: int = 0,
+                     start_date: str = _SESSION_START_DATE) -> pd.DataFrame:
+    """Sessions that each gap at the open and then trend all day, so the
+    price leaves its opening range — in both directions and by different
+    amounts: two modest up days, a down day, then a large up day and a large
+    down day (repeating). The uneven sizes are deliberate: a "range
+    expansion" or "trend day" rule compares today with the days before it and
+    never fires when every day looks alike. The session-stamped counterpart
+    of ``ohlcv_trending``."""
+    rng = np.random.default_rng(seed)
+    index, session_no, since_open = _session_grid(
+        days, session_tz, open_minute, close_minute, pre_minutes, post_minutes, start_date)
+    session_len = close_minute - open_minute
+    in_session = (since_open >= 0) & (since_open < session_len)
+    sigma = 0.0006
+    # Each session's total drift, as a log move from open to close.
+    session_move = np.array([0.010, 0.006, -0.010, 0.035, -0.025])[session_no % 5]
+
+    steps = rng.normal(0.0, sigma, len(index))
+    steps = np.where(in_session, steps + session_move / session_len, steps * 0.3)
+    steps[since_open == 0] += np.sign(session_move[since_open == 0]) * 0.004
+    close = 100.0 * np.exp(np.cumsum(steps))
+    volume = _session_volume(rng, since_open, session_len, steps, sigma)
+    wick = np.where(in_session, sigma, sigma * 0.3)
+    return _coherent_ohlcv(index, close, volume, wick, rng, 100.0)
+
+
+def session_choppy(days: int = 5, seed: int = 404, *,
+                   session_tz: str = SESSION_TZ,
+                   open_minute: int = SESSION_OPEN_MINUTE,
+                   close_minute: int = SESSION_CLOSE_MINUTE,
+                   pre_minutes: int = 0, post_minutes: int = 0,
+                   start_date: str = _SESSION_START_DATE) -> pd.DataFrame:
+    """Rangebound sessions: each opens away from an oscillating anchor
+    (alternately below and above it) and is pulled back, crossing it
+    repeatedly. The session-stamped counterpart of ``ohlcv_choppy``."""
+    rng = np.random.default_rng(seed)
+    index, session_no, since_open = _session_grid(
+        days, session_tz, open_minute, close_minute, pre_minutes, post_minutes, start_date)
+    session_len = close_minute - open_minute
+    in_session = (since_open >= 0) & (since_open < session_len)
+    sigma = 0.0009
+    n = len(index)
+
+    noise = rng.normal(0.0, sigma, n)
+    anchor = 0.004 * np.sin(2.0 * np.pi * np.clip(since_open, 0, session_len) / 120.0)
+    log_price = np.empty(n)
+    level = 0.0
+    for i in range(n):
+        if since_open[i] == 0:
+            # Open 0.6% away from the anchor, alternating sides by session.
+            level = anchor[i] + (-0.006 if session_no[i] % 2 == 0 else 0.006)
+        elif in_session[i]:
+            level += 0.03 * (anchor[i] - level) + noise[i]
+        else:
+            level += 0.3 * noise[i]
+        log_price[i] = level
+    steps = np.diff(log_price, prepend=0.0)
+    close = 100.0 * np.exp(log_price)
+    volume = _session_volume(rng, since_open, session_len, steps, sigma)
+    wick = np.where(in_session, sigma, sigma * 0.3)
+    return _coherent_ohlcv(index, close, volume, wick, rng, 100.0)
+
+
+def session_extended(days: int = 3, seed: int = 505, *,
+                     session_tz: str = SESSION_TZ,
+                     open_minute: int = SESSION_OPEN_MINUTE,
+                     close_minute: int = SESSION_CLOSE_MINUTE,
+                     start_date: str = _SESSION_START_DATE) -> pd.DataFrame:
+    """Choppy sessions WITH extended hours: two hours of pre-market and one
+    of post-market around each, thin and often zero-volume. This is the shape
+    the live feed and the stored history actually have, and the only frame
+    here on which an in-session mask is not constant."""
+    return session_choppy(days, seed, session_tz=session_tz, open_minute=open_minute,
+                          close_minute=close_minute, pre_minutes=120, post_minutes=60,
+                          start_date=start_date)
+
+
+def session_halts(days: int = 3, seed: int = 606, *,
+                  session_tz: str = SESSION_TZ,
+                  open_minute: int = SESSION_OPEN_MINUTE,
+                  close_minute: int = SESSION_CLOSE_MINUTE,
+                  start_date: str = _SESSION_START_DATE) -> pd.DataFrame:
+    """The nasty shapes of ``battery()``, placed INSIDE sessions where a
+    session-gated strategy will actually meet them: a mid-session run of
+    all-NaN rows, a stretch stuck at one price on zero volume, and trailing
+    all-NaN rows on the newest bars."""
+    df = session_trending(days, seed, session_tz=session_tz, open_minute=open_minute,
+                          close_minute=close_minute, start_date=start_date)
+    session_len = close_minute - open_minute
+    if session_len < 30 or len(df) < 60:
+        return df
+    # First session: a 10% slice of the session goes missing.
+    a = session_len // 4
+    df.iloc[a:a + max(session_len // 10, 3)] = np.nan
+    # Second session (or the same one when there is only one): price stuck.
+    b = (session_len if days > 1 else 0) + session_len // 2
+    c = b + max(session_len // 10, 3)
+    stuck = float(df['close'].iloc[b - 1])
+    df.iloc[b:c, df.columns.get_indexer(['open', 'high', 'low', 'close'])] = stuck
+    df.iloc[b:c, df.columns.get_loc('volume')] = 0.0
+    df.iloc[-5:] = np.nan
+    return df
+
+
+def daily_trending(n: int = 400, seed: int = 707) -> pd.DataFrame:
+    """Business-day bars with persistent trends that reverse twice (up, down,
+    up), long enough for a 200-day or 12-month indicator to warm up."""
+    rng = np.random.default_rng(seed)
+    index = pd.bdate_range(start='2022-01-03', periods=n, tz='UTC')
+    sigma = 0.012
+    phase = np.arange(n) * 3 // max(n, 1)
+    steps = rng.normal(0.0, sigma, n) + np.where(phase == 1, -0.0025, 0.0025)
+    close = 100.0 * np.exp(np.cumsum(steps))
+    volume = (2_000_000.0 * (1.0 + np.minimum(np.abs(steps) / sigma, 4.0))
+              * rng.lognormal(0.0, 0.4, n)).round()
+    return _coherent_ohlcv(index, close, volume, np.full(n, sigma * 0.5), rng, 100.0)
+
+
+def daily_choppy(n: int = 400, seed: int = 808) -> pd.DataFrame:
+    """Business-day bars oscillating around a flat level — no drift to ride."""
+    rng = np.random.default_rng(seed)
+    index = pd.bdate_range(start='2022-01-03', periods=n, tz='UTC')
+    sigma = 0.012
+    log_price = (0.06 * np.sin(np.arange(n) * 2.0 * np.pi / 40.0)
+                 + rng.normal(0.0, sigma, n))
+    steps = np.diff(log_price, prepend=0.0)
+    close = 100.0 * np.exp(log_price)
+    volume = (2_000_000.0 * (1.0 + np.minimum(np.abs(steps) / sigma, 4.0))
+              * rng.lognormal(0.0, 0.4, n)).round()
+    return _coherent_ohlcv(index, close, volume, np.full(n, sigma * 0.5), rng, 100.0)
+
+
+def session_battery(session_tz: str = SESSION_TZ,
+                    open_minute: int = SESSION_OPEN_MINUTE,
+                    close_minute: int = SESSION_CLOSE_MINUTE) -> Dict[str, pd.DataFrame]:
+    """Session-stamped 1-minute frames for a strategy that trades
+    ``open_minute``-``close_minute`` in ``session_tz``."""
+    return {
+        name: generator(session_tz=session_tz, open_minute=open_minute,
+                        close_minute=close_minute)
+        for name, generator in (
+            ("session_trending", session_trending),
+            ("session_choppy", session_choppy),
+            ("session_extended", session_extended),
+            ("session_halts", session_halts),
+        )
+    }
+
+
+def daily_battery() -> Dict[str, pd.DataFrame]:
+    """Daily frames long enough for slow indicators (``battery()`` has one
+    daily frame, 60 bars)."""
+    return {
+        "daily_trending": daily_trending(),
+        "daily_choppy": daily_choppy(),
     }

@@ -750,6 +750,13 @@ def build_parser() -> argparse.ArgumentParser:
                                        'source hash (default: record-only, never fails on absence)')
     strat_gauntlet_p.add_argument('--name', default=None,
                                   help='Deployment name to record (default: class name)')
+    strat_gauntlet_p.add_argument(
+        '--bar-size', dest='bar_size', default=None,
+        help='Bar size the strategy runs on (e.g. "1 min", "1 day"). Selects the '
+             'frames the lookahead check and the battery use: 1-minute sessions '
+             'stamped with the strategy\'s SESSION_TZ / RTH_OPEN_MIN / RTH_CLOSE_MIN '
+             '(default 09:30-16:00 America/New_York) for intraday sizes, daily bars '
+             'for "1 day" and longer. Default: both.')
 
     # strategies create
     strat_create_p = strat_sub.add_parser('create', help='Create a strategy template file')
@@ -5182,12 +5189,169 @@ def _gauntlet_new_instance(cls, frame=None):
     return instance
 
 
-def _gauntlet_check_lookahead(cls) -> Dict[str, Any]:
-    """S2: walk-forward consistency over the trending + choppy series.
-    Vacuous for on_prices-only strategies — recorded as not_evaluable,
-    which counts as pass-with-note, NOT fail."""
-    from trader.simulation import synthetic_markets
-    from trader.simulation.lookahead_check import LookaheadDetected, assert_no_lookahead
+# S2 and S3 learn nothing from a frame the strategy does not act on. Until
+# 2026-11-14 every intraday frame they used started 09:30 UTC — 04:30 New York
+# — so an opening-range or VWAP strategy saw no session bar, every array it
+# computed was NaN, "unchanged under truncation" held because NaN equals NaN,
+# and the battery ran clean by emitting nothing. A strategy whose breakout
+# level was the whole day's high passed S2 (docs/AUDIT_2026-11-14.md B4.3).
+# Two things follow, and both are needed: the frames are stamped with the
+# strategy's own session, and a stage that examined nothing says so and FAILS.
+
+_GAUNTLET_DEFAULT_SESSION = ('America/New_York', 9 * 60 + 30, 16 * 60)
+
+_GAUNTLET_VACUITY_HINT = (
+    'If the strategy trades another session, declare SESSION_TZ / RTH_OPEN_MIN '
+    '/ RTH_CLOSE_MIN on the class; if it runs on daily bars, pass --bar-size.')
+
+
+def _gauntlet_session_spec(cls) -> Dict[str, Any]:
+    """The session the intraday frames are stamped with: the strategy's own
+    ``SESSION_TZ`` / ``RTH_OPEN_MIN`` / ``RTH_CLOSE_MIN`` class attributes
+    where it declares usable ones, else 09:30-16:00 America/New_York.
+
+    An unusable declaration (unknown zone, open not before close) falls back
+    to the default rather than raising here: the strategy reads the same
+    attribute and fails on it in its own words, or ignores it and is then
+    exercised on the default session."""
+    import zoneinfo
+
+    tz, open_minute, close_minute = _GAUNTLET_DEFAULT_SESSION
+    declared_tz = getattr(cls, 'SESSION_TZ', None)
+    if isinstance(declared_tz, str) and declared_tz:
+        try:
+            zoneinfo.ZoneInfo(declared_tz)
+            tz = declared_tz
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _minute(value: Any, default: int) -> int:
+        usable = (isinstance(value, int) and not isinstance(value, bool)
+                  and 0 <= value <= 24 * 60)
+        return value if usable else default
+
+    declared_open = _minute(getattr(cls, 'RTH_OPEN_MIN', None), open_minute)
+    declared_close = _minute(getattr(cls, 'RTH_CLOSE_MIN', None), close_minute)
+    if declared_open < declared_close:
+        open_minute, close_minute = declared_open, declared_close
+    return {'tz': tz, 'open_minute': open_minute, 'close_minute': close_minute}
+
+
+def _gauntlet_session_label(session: Dict[str, Any]) -> str:
+    o, c = session['open_minute'], session['close_minute']
+    return f"{session['tz']} {o // 60:02d}:{o % 60:02d}-{c // 60:02d}:{c % 60:02d}"
+
+
+def _gauntlet_frame_families(bar_size: Optional[str]) -> tuple[bool, bool]:
+    """``(intraday, daily)`` — which frame families a strategy of this bar
+    size is run on. Unknown (None) means both: it costs time, never
+    coverage, and the vacuity rules are judged over everything that ran."""
+    if bar_size is None:
+        return True, True
+    from trader.objects import BarSize
+    if bar_size not in BarSize.bar_sizes():
+        raise ValueError(f'unknown bar size {bar_size!r} — expected one of: '
+                         f'{", ".join(BarSize.bar_sizes())}')
+    daily = BarSize.parse_str(bar_size) >= BarSize.Days1
+    return (not daily, daily)
+
+
+def _gauntlet_frames(session: Dict[str, Any], bar_size: Optional[str],
+                     battery: bool) -> Dict[str, Any]:
+    """Frames for S3 (``battery=True``) or S2. The original UTC-stamped
+    frames always run; the session-stamped and daily families are added
+    according to the bar size."""
+    from trader.simulation import synthetic_markets as sm
+
+    intraday, daily = _gauntlet_frame_families(bar_size)
+    spec = dict(session_tz=session['tz'], open_minute=session['open_minute'],
+                close_minute=session['close_minute'])
+    if battery:
+        frames = dict(sm.battery())
+        if intraday:
+            frames.update(sm.session_battery(**spec))
+    else:
+        frames = {'trending': sm.ohlcv_trending(), 'choppy': sm.ohlcv_choppy()}
+        if intraday:
+            frames.update({
+                'session_trending': sm.session_trending(**spec),
+                'session_choppy': sm.session_choppy(**spec),
+                'session_extended': sm.session_extended(**spec),
+            })
+    if daily:
+        frames.update(sm.daily_battery())
+    return frames
+
+
+def _gauntlet_lookahead_coverage(reports: Dict[str, Any]) -> Dict[str, Any]:
+    """PURE. What S2 examined across its frames, and — when that is not
+    enough to vouch for the strategy — why.
+
+    ``reports`` maps frame name to its ``LookaheadReport``, or None where
+    precompute returned empty state. ``vacuous`` is the reason S2 must not
+    pass, or None:
+
+    * no frame produced state — nothing was compared at all;
+    * no array was both re-derived on a truncated frame and non-degenerate
+      (all-NaN or constant) — every truncation "agreed" because there was
+      nothing in the arrays to disagree about;
+    * some array was all-NaN on EVERY frame — it was never computed, so the
+      check is silent about it, and it is usually the one that matters (the
+      opening range, not the close that sits beside it).
+
+    An array that is constant but not NaN everywhere is reported
+    (``constant_keys``) without failing: a mask that never fires on these
+    frames is suspicious, a broadcast parameter is not, and the two cannot be
+    told apart from here.
+    """
+    stateful = {name: r for name, r in reports.items() if r is not None}
+    keys: List[str] = []
+    uncheckable: List[str] = []
+    for report in stateful.values():
+        keys.extend(k for k in report.keys if k not in keys)
+        uncheckable.extend(k for k in report.uncheckable if k not in uncheckable)
+
+    exercised = [k for k in keys
+                 if any(k in r.exercised for r in stateful.values())]
+    never_computed = [k for k in keys
+                      if all(r.keys[k].all_nan for r in stateful.values() if k in r.keys)]
+    constant = [k for k in keys if k not in exercised and k not in never_computed]
+
+    def _names(names: List[str]) -> str:
+        return ', '.join(f'state[{n!r}]' for n in names)
+
+    vacuous = None
+    if not stateful:
+        vacuous = 'precompute returned empty state on every frame'
+    elif not keys:
+        vacuous = (f'precompute state holds no 1-D array to compare '
+                   f'(not comparable: {_names(uncheckable)})')
+    elif not exercised:
+        vacuous = (f'every state array was all-NaN, constant, or never re-derived '
+                   f'on a truncated frame ({_names(keys)})')
+    elif never_computed:
+        vacuous = f'{_names(never_computed)} all-NaN on every frame'
+    return {
+        'exercised_keys': exercised,
+        'unexercised_keys': never_computed,
+        'constant_keys': constant,
+        'uncheckable_keys': uncheckable,
+        'vacuous': vacuous,
+    }
+
+
+def _gauntlet_check_lookahead(cls, bar_size: Optional[str] = None) -> Dict[str, Any]:
+    """S2: walk-forward consistency of ``precompute`` — the series is cut at
+    the end AND at interior points (day boundaries, inside and after the
+    opening range, mid-session, the close) and past values must not move.
+
+    Not evaluable for on_prices-only strategies (there is no precompute to
+    leak) — recorded as not_evaluable, which counts as pass-with-note. A
+    strategy that HAS a precompute and gave the check nothing to examine is
+    a different case and FAILS: see ``_gauntlet_lookahead_coverage``."""
+    from trader.simulation.lookahead_check import (LookaheadDetected,
+                                                   interior_cut_points,
+                                                   lookahead_report)
     from trader.trading.strategy import Strategy
 
     if cls.precompute is Strategy.precompute:
@@ -5197,52 +5361,68 @@ def _gauntlet_check_lookahead(cls) -> Dict[str, Any]:
                     'lookahead check is vacuous',
         }
 
-    any_state = False
-    for frame_name, frame in (
-        ('trending', synthetic_markets.ohlcv_trending()),
-        ('choppy', synthetic_markets.ohlcv_choppy()),
-    ):
+    session = _gauntlet_session_spec(cls)
+    frames = _gauntlet_frames(session, bar_size, battery=False)
+    result: Dict[str, Any] = {'frames': list(frames), 'session': session,
+                              'bar_size': bar_size}
+    reports: Dict[str, Any] = {}
+    for frame_name, frame in frames.items():
         instance = _gauntlet_new_instance(cls, frame)
         try:
             state = instance.precompute(frame)
         except Exception as ex:
-            return {
-                'status': 'fail',
-                'frame': frame_name,
-                'detail': f'precompute raised {type(ex).__name__}: {ex}',
-            }
+            return {**result, 'status': 'fail', 'frame': frame_name,
+                    'detail': f'precompute raised {type(ex).__name__}: {ex}'}
         if not state:
+            reports[frame_name] = None
             continue
-        any_state = True
         try:
-            assert_no_lookahead(instance, frame)
+            reports[frame_name] = lookahead_report(
+                instance, frame,
+                cut_points=interior_cut_points(
+                    frame.index, session_tz=session['tz'],
+                    open_minute=session['open_minute'],
+                    close_minute=session['close_minute']))
         except LookaheadDetected as ex:
-            return {'status': 'fail', 'frame': frame_name, 'detail': str(ex)}
+            return {**result, 'status': 'fail', 'frame': frame_name, 'detail': str(ex)}
         except Exception as ex:
-            return {
-                'status': 'fail',
-                'frame': frame_name,
-                'detail': f'lookahead check raised {type(ex).__name__}: {ex}',
-            }
+            return {**result, 'status': 'fail', 'frame': frame_name,
+                    'detail': f'lookahead check raised {type(ex).__name__}: {ex}'}
 
-    if not any_state:
-        return {
-            'status': 'not_evaluable',
-            'note': 'precompute returned empty state on both series — '
-                    'nothing to audit',
-        }
-    return {'status': 'pass', 'frames': ['trending', 'choppy']}
+    coverage = _gauntlet_lookahead_coverage(reports)
+    vacuous = coverage.pop('vacuous')
+    result.update(coverage)
+    result['truncations'] = {name: len(r.truncations)
+                             for name, r in reports.items() if r is not None}
+    if vacuous:
+        return {**result, 'status': 'fail', 'vacuous': True,
+                'detail': f'S2 compared nothing it can vouch for: {vacuous} '
+                          f'({len(frames)} frames: {", ".join(frames)}; session '
+                          f'{_gauntlet_session_label(session)}). A value that is '
+                          f'never computed is unchanged by every truncation whether '
+                          f'or not it leaks. {_GAUNTLET_VACUITY_HINT}'}
+
+    note = (f'{len(coverage["exercised_keys"])} state arrays compared over '
+            f'{sum(result["truncations"].values())} truncations of '
+            f'{len(result["truncations"])} frames')
+    if coverage['constant_keys']:
+        note += ('; constant on every frame, so not exercised: '
+                 + ', '.join(coverage['constant_keys']))
+    return {**result, 'status': 'pass', 'note': note}
 
 
-def _gauntlet_run_battery(cls) -> Dict[str, Any]:
+def _gauntlet_run_battery(cls, bar_size: Optional[str] = None) -> Dict[str, Any]:
     """S3: run the strategy over every synthetic frame through the same
     dispatch the backtester uses (precompute once, then on_bar per index —
     the default on_bar falls back to on_prices over expanding windows).
-    Any exception or malformed Signal fails the stage."""
+    Any exception or malformed Signal fails the stage — and so does a
+    battery in which the strategy never emitted a signal on ANY frame,
+    because a run with no signals has shown nothing about its signals. The
+    rule is over the whole battery: a strategy is free to be silent on any
+    one frame."""
     import numpy as np
 
     from trader.objects import Action
-    from trader.simulation import synthetic_markets
     from trader.trading.strategy import Signal, Strategy
 
     fast_path = (cls.on_bar is not Strategy.on_bar
@@ -5261,13 +5441,9 @@ def _gauntlet_run_battery(cls) -> Dict[str, Any]:
             return f'malformed Signal: probability {sig.probability!r} outside [0, 1]'
         return None
 
-    frames_result: Dict[str, Dict[str, Any]] = {}
-    total_signals = 0
-    failed = False
-
-    for frame_name, frame in synthetic_markets.battery().items():
+    def _run_frame(frame, every_bar: bool) -> Dict[str, Any]:
         n = len(frame)
-        if fast_path:
+        if every_bar:
             indices = range(n)
         else:
             # on_prices fallback is O(N²) — sample indices for cost, always
@@ -5277,34 +5453,61 @@ def _gauntlet_run_battery(cls) -> Dict[str, Any]:
             instance = _gauntlet_new_instance(cls, frame)
             state = instance.precompute(frame) or {}
             signals = 0
-            problem = None
             for idx in indices:
                 sig = instance.on_bar(frame, state, int(idx))
                 if sig is None:
                     continue
                 problem = _signal_problem(sig)
                 if problem:
-                    problem = f'bar {idx}: {problem}'
-                    break
+                    return {'status': 'fail', 'detail': f'bar {idx}: {problem}'}
                 signals += 1
-            if problem:
-                frames_result[frame_name] = {'status': 'fail', 'detail': problem}
-                failed = True
-            else:
-                frames_result[frame_name] = {'status': 'pass', 'signals': signals}
-                total_signals += signals
+            return {'status': 'pass', 'signals': signals, 'bars': n}
         except Exception as ex:
-            frames_result[frame_name] = {
-                'status': 'fail',
-                'detail': f'{type(ex).__name__}: {ex}',
-            }
-            failed = True
+            return {'status': 'fail', 'detail': f'{type(ex).__name__}: {ex}'}
 
-    return {
-        'status': 'fail' if failed else 'pass',
+    session = _gauntlet_session_spec(cls)
+    frames = _gauntlet_frames(session, bar_size, battery=True)
+    frames_result = {name: _run_frame(frame, fast_path) for name, frame in frames.items()}
+
+    def _failed() -> bool:
+        return any(r['status'] == 'fail' for r in frames_result.values())
+
+    def _signals() -> int:
+        return sum(r.get('signals', 0) for r in frames_result.values())
+
+    if not fast_path and not _failed() and _signals() == 0:
+        # Forty sampled bars per frame can miss every signal of a strategy
+        # that fires on a crossing. Before calling it silent, walk every bar
+        # — cheapest frame first, stopping at the first that signals.
+        for name in sorted(frames, key=lambda k: len(frames[k])):
+            frames_result[name] = {**_run_frame(frames[name], True), 'every_bar': True}
+            if frames_result[name]['status'] == 'fail' or frames_result[name]['signals']:
+                break
+
+    result: Dict[str, Any] = {
+        'status': 'pass',
         'frames': frames_result,
-        'signals': total_signals,
+        'signals': _signals(),
+        'session': session,
+        'bar_size': bar_size,
     }
+    if _failed():
+        result['status'] = 'fail'
+    elif result['signals'] == 0:
+        result.update({
+            'status': 'fail',
+            'vacuous': True,
+            'detail': f'S3 evaluated nothing: no signal on any of the {len(frames)} '
+                      f'frames ({sum(len(f) for f in frames.values())} bars; session '
+                      f'frames stamped {_gauntlet_session_label(session)}). A battery '
+                      f'that never sees a signal cannot vouch for the signals this '
+                      f'strategy will send. {_GAUNTLET_VACUITY_HINT}',
+        })
+    else:
+        signalling = sum(1 for r in frames_result.values() if r.get('signals'))
+        result['note'] = (f'{result["signals"]} signals; {signalling} of '
+                          f'{len(frames)} frames signalled')
+    return result
 
 
 def _gauntlet_check_psr(code_hash: str, duckdb_path: str,
@@ -5461,12 +5664,17 @@ def _gauntlet_check_dsr(code_hash: str, duckdb_path: str,
 
 def _gauntlet_run(module_file: Path, class_name: str, duckdb_path: str,
                   min_psr: Optional[float] = None,
-                  min_dsr: Optional[float] = None) -> Dict[str, Any]:
+                  min_dsr: Optional[float] = None,
+                  bar_size: Optional[str] = None) -> Dict[str, Any]:
     """Run all gauntlet stages against ``module_file`` and return
     ``{'code_hash', 'verdict', 'checks'}``. Does not persist — the caller
-    records the result."""
+    records the result.
+
+    ``bar_size`` (e.g. ``'1 min'``, ``'1 day'``) selects the frames S2/S3
+    run on; None runs both the intraday-session and the daily families."""
     from trader.data.backtest_store import compute_strategy_hash
 
+    _gauntlet_frame_families(bar_size)      # an unknown bar size refuses here
     code_hash = compute_strategy_hash(str(module_file))
     if not code_hash:
         raise ValueError(
@@ -5490,8 +5698,8 @@ def _gauntlet_run(module_file: Path, class_name: str, duckdb_path: str,
             checks['s2_lookahead'] = {'status': 'fail', 'detail': err}
             checks['s3_battery'] = {'status': 'fail', 'detail': err}
         else:
-            checks['s2_lookahead'] = _gauntlet_check_lookahead(cls)
-            checks['s3_battery'] = _gauntlet_run_battery(cls)
+            checks['s2_lookahead'] = _gauntlet_check_lookahead(cls, bar_size)
+            checks['s3_battery'] = _gauntlet_run_battery(cls, bar_size)
 
     checks['s4_psr'] = _gauntlet_check_psr(code_hash, duckdb_path, min_psr)
     checks['s5_dsr'] = _gauntlet_check_dsr(code_hash, duckdb_path, min_dsr)
@@ -5699,7 +5907,8 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
     try:
         result = _gauntlet_run(resolved, args.class_name, duckdb_path,
                                min_psr=getattr(args, 'min_psr', None),
-        min_dsr=getattr(args, 'min_dsr', None))
+                               min_dsr=getattr(args, 'min_dsr', None),
+                               bar_size=getattr(args, 'bar_size', None))
     except ValueError as ex:
         print_status(str(ex), success=False)
         return
