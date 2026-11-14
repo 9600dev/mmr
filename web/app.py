@@ -5,8 +5,12 @@ proposals. Everything is read-only except proposal approve / reject.
 
 Runs *inside* the mmr container: it needs the proposals DuckDB (in the
 ``mmr_db_data`` named volume) plus the trader_service ZMQ RPC. Launched by
-pycron as ``python3 -m web.app``; listens on ``0.0.0.0:7424`` (mapped to the
-host as ``127.0.0.1:7424``).
+``start_mmr.sh`` as ``python3 -m web.app``. It binds ``WEB_HOST`` (default
+``127.0.0.1``) on ``WEB_PORT`` (default 7424). In the container
+``start_mmr.sh`` sets ``WEB_HOST=0.0.0.0`` so the compose port mapping
+(``127.0.0.1:7424`` on the host) can reach it; on the host (hybrid mode) it
+stays on loopback, because there is no authentication unless ``MMR_WEB_TOKEN``
+is set and the page carries the account, the positions and the approve button.
 
 Design notes:
 - The MMR SDK's RPC client uses a *synchronous* ZMQ socket guarded by its own
@@ -140,12 +144,32 @@ _CSRF_TOKEN = secrets.token_urlsafe(32)
 _ACCESS_TOKEN = os.environ.get('MMR_WEB_TOKEN', '').strip()
 
 
-def _check_access(request: Request) -> None:
+def _check_access(request: Request, form_token: str = '') -> str:
+    """Enforce the MMR_WEB_TOKEN gate; return the token to carry forward.
+
+    The token may arrive as the ``X-MMR-Token`` header, the ``?token=`` query
+    parameter, or the hidden ``token`` field of the approve/reject forms (a
+    plain HTML form can send neither a header nor, once posted, the page's
+    query string). Returns '' when the dashboard is not token-gated, so nothing
+    is added to a form or a redirect in the default configuration.
+    """
     if not _ACCESS_TOKEN:
-        return
-    supplied = request.headers.get('X-MMR-Token') or request.query_params.get('token') or ''
-    if not secrets.compare_digest(supplied, _ACCESS_TOKEN):
+        return ''
+    supplied = (request.headers.get('X-MMR-Token') or request.query_params.get('token')
+                or form_token or '')
+    # Compared as bytes: compare_digest raises on a non-ASCII str, which would
+    # turn a garbage token into a 500 instead of a 401.
+    if not secrets.compare_digest(supplied.encode('utf-8'), _ACCESS_TOKEN.encode('utf-8')):
         raise HTTPException(status_code=401, detail='unauthorized')
+    return _ACCESS_TOKEN
+
+
+def _dashboard_url(flash: str, token: str) -> str:
+    """Where approve/reject send the browser back to, still signed in."""
+    target = f'/?flash={quote(flash)}'
+    if token:
+        target += f'&token={quote(token, safe="")}'
+    return target
 
 
 def _check_csrf(token: str) -> None:
@@ -295,7 +319,7 @@ def healthz():
 
 @app.get('/')
 def dashboard(request: Request, flash: str = ''):
-    _check_access(request)
+    access_token = _check_access(request)
     sections: dict[str, Any] = {}
     errors: dict[str, str] = {}
     fetchers: dict[str, Callable[[], Any]] = {
@@ -334,6 +358,9 @@ def dashboard(request: Request, flash: str = ''):
         'errors': errors,
         'flash': flash,
         'csrf_token': _CSRF_TOKEN,
+        # Rendered into the approve/reject forms; non-empty only for a request
+        # that has just presented it.
+        'access_token': access_token,
     })
     timings['render'] = (time.perf_counter() - t0) * 1000.0
     # Per-section cost, visible in browser devtools / `curl -D-` — this is how
@@ -345,9 +372,9 @@ def dashboard(request: Request, flash: str = ''):
 
 
 @app.post('/proposals/{pid}/approve')
-def approve(pid: int, request: Request, csrf_token: str = Form('')):
+def approve(pid: int, request: Request, csrf_token: str = Form(''), token: str = Form('')):
     """Approve a proposal — this PLACES A LIVE ORDER via trader_service."""
-    _check_access(request)
+    access_token = _check_access(request, token)
     _check_csrf(csrf_token)
     try:
         result = _call(lambda m: m.approve(pid), retry=False)
@@ -361,12 +388,13 @@ def approve(pid: int, request: Request, csrf_token: str = Form('')):
     except Exception as exc:  # noqa: BLE001
         logger.warning('approve #%s failed: %s', pid, exc)
         msg = f'#{pid} approve error: {type(exc).__name__}: {exc}'
-    return RedirectResponse(url=f'/?flash={quote(msg)}', status_code=303)
+    return RedirectResponse(url=_dashboard_url(msg, access_token), status_code=303)
 
 
 @app.post('/proposals/{pid}/reject')
-def reject(pid: int, request: Request, reason: str = Form(''), csrf_token: str = Form('')):
-    _check_access(request)
+def reject(pid: int, request: Request, reason: str = Form(''), csrf_token: str = Form(''),
+           token: str = Form('')):
+    access_token = _check_access(request, token)
     _check_csrf(csrf_token)
     try:
         ok = _call(lambda m: m.reject(pid, reason), retry=False)
@@ -374,18 +402,30 @@ def reject(pid: int, request: Request, reason: str = Form(''), csrf_token: str =
     except Exception as exc:  # noqa: BLE001
         logger.warning('reject #%s failed: %s', pid, exc)
         msg = f'#{pid} reject error: {type(exc).__name__}: {exc}'
-    return RedirectResponse(url=f'/?flash={quote(msg)}', status_code=303)
+    return RedirectResponse(url=_dashboard_url(msg, access_token), status_code=303)
+
+
+def bind_host() -> str:
+    """Interface to listen on: ``WEB_HOST``, default loopback.
+
+    This was a hard-coded 0.0.0.0. That is right inside the container (compose
+    publishes the port on the host's loopback only) and wrong on the host,
+    where hybrid mode put an unauthenticated approve button on the LAN. The
+    container path (start_mmr.sh) now asks for 0.0.0.0 explicitly.
+    """
+    return os.environ.get('WEB_HOST', '').strip() or '127.0.0.1'
 
 
 def main():
     import uvicorn
     port = int(os.environ.get('WEB_PORT', '7424'))
+    host = bind_host()
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s %(levelname)s %(name)s %(message)s',
     )
-    logger.info('MMR dashboard starting on 0.0.0.0:%d', port)
-    uvicorn.run(app, host='0.0.0.0', port=port, log_level='info')
+    logger.info('MMR dashboard starting on %s:%d', host, port)
+    uvicorn.run(app, host=host, port=port, log_level='info')
 
 
 if __name__ == '__main__':

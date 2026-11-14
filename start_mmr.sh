@@ -621,7 +621,10 @@ check_tcp_port() {
 #   - 5 rapid deaths   -> circuit breaker: stop restarting and bring the
 #     whole stack down with exit code 42 so docker-compose's
 #     `restart: unless-stopped` recreates a clean container (a service that
-#     can't hold itself up needs a clean slate, not restart #6)
+#     can't hold itself up needs a clean slate, not restart #6). That is for
+#     the TRADING services (data/trader/strategy). For the side services
+#     (pycron, web_dashboard) the breaker only stops restarting that one
+#     service — see "Wait for Supervisors" at the end of this file.
 #   - deliberate shutdown (cleanup touches $SHUTDOWN_FLAG) -> no restart
 RUN_DIR="$HOME/.local/share/mmr/run"
 SHUTDOWN_FLAG="$RUN_DIR/start_mmr.shutdown"
@@ -1056,10 +1059,23 @@ sleep 3
 
 # web_dashboard — read-only view (currencies, positions, strategies, proposals)
 # on port 7424. PYTHONPATH so `web` resolves whether or not it's pip-installed.
+#
+# Bind address. The dashboard has no authentication unless MMR_WEB_TOKEN is
+# set, and it shows the account, the positions and an approve button. In the
+# container it must listen on every interface to be reachable through the
+# port mapping, which docker-compose.yml pins to the host's loopback
+# (127.0.0.1:7424). On the host (hybrid mode) the same 0.0.0.0 put it on the
+# LAN, so there it binds loopback. WEB_HOST overrides either default.
+if [ "$IN_DOCKER" = true ]; then
+    WEB_BIND_HOST="${WEB_HOST:-0.0.0.0}"
+else
+    WEB_BIND_HOST="${WEB_HOST:-127.0.0.1}"
+fi
 step "Starting web_dashboard (supervised)..."
 supervise web_dashboard env \
     PYTHONPATH="$MMR_DIR${PYTHONPATH:+:$PYTHONPATH}" \
     WEB_PORT="${WEB_PORT:-7424}" \
+    WEB_HOST="$WEB_BIND_HOST" \
     $PY -m web.app &
 WEB_SUP_PID=$!
 
@@ -1092,6 +1108,7 @@ if [ -n "$PYCRON_SUP_PID" ]; then
     kv "pycron (cron)" "PID $(_svc_pid pycron)"
 fi
 kv "supervision"      "crash -> restart w/ backoff; crash-loop -> exit 42 (container recreate)"
+kv ""                 "(web_dashboard / pycron crash-loop: that one service stays down)"
 echo ""
 info "Press Ctrl-C to stop all services"
 info "Run './start_mmr.sh --cli' in another terminal for the CLI"
@@ -1102,13 +1119,36 @@ echo ""
 # ─── Wait for Supervisors ────────────────────────────────────────────────────
 
 # Supervisors never exit on their own except (a) deliberate shutdown (flag)
-# or (b) circuit breaker. Detect (b) and bring the whole stack down with the
-# breaker's exit code so `restart: unless-stopped` recreates a clean container.
+# or (b) circuit breaker. Detect (b) and, for a trading service, bring the
+# whole stack down with the breaker's exit code so `restart: unless-stopped`
+# recreates a clean container.
 while true; do
     for pid_info in "$DATA_SUP_PID:data_service" "$TRADER_SUP_PID:trader_service" "$STRATEGY_SUP_PID:strategy_service" "$WEB_SUP_PID:web_dashboard" "$PYCRON_SUP_PID:pycron"; do
         pid="${pid_info%%:*}"
         name="${pid_info##*:}"
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            # A side service (pycron, web_dashboard) that cannot hold itself up
+            # is left DOWN and the trading services stay up. Tearing the stack
+            # down for it meant a typo in ~/.config/mmr/pycron.yaml restarted
+            # trader_service and strategy_service every ~75 s, for ever. The
+            # breaker file stays in place (scripts/monitor_health.sh reports
+            # it) until the next start clears it.
+            if [ -f "$RUN_DIR/$name.breaker" ] && { [ "$name" = "pycron" ] || [ "$name" = "web_dashboard" ]; }; then
+                echo ""
+                fail "$name hit the restart circuit-breaker ($(cat "$RUN_DIR/$name.breaker")) — NOT restarting it again"
+                fail "$name is DOWN and stays down until the stack is restarted; the trading services are left running"
+                if [ "$name" = "pycron" ]; then
+                    fail "no scheduled job will run (db_backup, data_refresh_*, data_audit, preflight_*): fix ~/.config/mmr/pycron.yaml (see logs/pycron_cron.log), then restart the stack"
+                    # Say so in pycron's own log too: that is where its last
+                    # traceback is, and where the next reader will look.
+                    echo "$(date '+%Y-%m-%d %H:%M:%S') start_mmr.sh: pycron stopped by the restart circuit-breaker ($(cat "$RUN_DIR/$name.breaker")); no scheduled job will run until the stack is restarted" \
+                        >> "$HOME/.local/share/mmr/logs/pycron_cron.log" 2>/dev/null || true
+                    PYCRON_SUP_PID=""
+                else
+                    WEB_SUP_PID=""
+                fi
+                continue
+            fi
             if [ -f "$RUN_DIR/$name.breaker" ]; then
                 echo ""
                 fail "$name hit the restart circuit-breaker ($(cat "$RUN_DIR/$name.breaker"))"

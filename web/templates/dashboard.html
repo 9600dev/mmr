@@ -275,10 +275,12 @@
               <form class="inline" method="post" action="/proposals/{{ p.id }}/approve"
                     onsubmit="return confirm('LIVE ORDER: approve proposal #{{ p.id }} ({{ p.action }} {{ p.symbol }} {{ p.size }})? This places a real order.');">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                {% if access_token %}<input type="hidden" name="token" value="{{ access_token }}" />{% endif %}
                 <button class="approve" type="submit">Approve</button>
               </form>
               <form class="inline" method="post" action="/proposals/{{ p.id }}/reject">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                {% if access_token %}<input type="hidden" name="token" value="{{ access_token }}" />{% endif %}
                 <input class="reason" name="reason" placeholder="reason" />
                 <button class="reject" type="submit">Reject</button>
               </form>

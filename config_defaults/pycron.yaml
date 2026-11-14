@@ -63,6 +63,28 @@ jobs:
     # the top-level `timezone:` (America/New_York), independent of the
     # container's TZ — no hand-shifting for PT/UTC hosts. If you delete
     # that key, expressions fall back to the container's local TZ.
+    #
+    # Two optional per-job keys (both default to 0 = off, the old behaviour):
+    #
+    #   catch_up_minutes: N   a scheduled instant that passed with the job
+    #                         not run (stack down, host asleep) is run ONCE
+    #                         when the scheduler is back, if it is at most N
+    #                         minutes old ("CATCH-UP" in pycron_cron.log);
+    #                         older than that it is logged "MISSED" and
+    #                         recorded, not run. Catch-up runs go one at a
+    #                         time, oldest instant first, and not before the
+    #                         scheduler has been up for 5 minutes (top-level
+    #                         `catch_up_settle_seconds`, default 300).
+    #   timeout_minutes: N    a run still going after N minutes has its
+    #                         process group terminated (SIGTERM, SIGKILL 10 s
+    #                         later) and is recorded as a failure. Without it
+    #                         a hung run counts as running for ever and the
+    #                         job never fires again. Never set it on the
+    #                         services above.
+    #
+    # Each job's last run (return code, failure streak, output tail, missed
+    # instants) is in ~/.local/share/mmr/logs/pycron_status.json; a non-zero
+    # exit is logged at ERROR. scripts/monitor_health.sh reports both.
     - name: data_refresh_us
       description: refresh US universes (TwelveData) — after US after-hours close
       command: python3
@@ -83,6 +105,9 @@ jobs:
       start_on_pycron_start: False
       restart_if_found: False
       restart_if_finished: False
+      catch_up_minutes: 240      # until 03:00 ET — before the next session's
+                                 # pre-market opens at 04:00
+      timeout_minutes: 90
     - name: data_audit
       description: quality-gate the stored OHLCV against the recorded baseline
       command: python3
@@ -95,6 +120,9 @@ jobs:
       start_on_pycron_start: False
       restart_if_found: False
       restart_if_finished: False
+      catch_up_minutes: 240      # caught up after the refreshes it grades
+                                 # (oldest missed instant runs first)
+      timeout_minutes: 60
     - name: data_refresh_asx
       description: refresh ASX universes (IB) — after ASX close
       command: python3
@@ -115,6 +143,9 @@ jobs:
       start_on_pycron_start: False
       restart_if_found: False
       restart_if_finished: False
+      catch_up_minutes: 240      # until 10:00 ET — hours before the next
+                                 # Sydney open
+      timeout_minutes: 90
     - name: db_backup
       description: clean DuckDB snapshot to the host-mounted backups/ dir
       command: python3
@@ -126,6 +157,9 @@ jobs:
       start_on_pycron_start: False
       restart_if_found: False
       restart_if_finished: False
+      catch_up_minutes: 240      # a snapshot up to 4 h late is still last
+                                 # night's; later than that, wait for tonight
+      timeout_minutes: 60
     # ---- pre-open readiness preflights ----
     # `mmr preflight` runs the verify checks (live IB round-trip via ping_ib,
     # armed roster RUNNING, services responsive) and appends one
@@ -141,6 +175,9 @@ jobs:
       start_on_pycron_start: False
       restart_if_found: False
       restart_if_finished: False
+      # No catch_up_minutes, deliberately: a preflight run hours late says
+      # nothing about readiness at the open. A missed one is logged MISSED.
+      timeout_minutes: 5
     - name: preflight_asx
       description: pre-open stack readiness check ~30 min before the ASX open
       command: python3
@@ -150,3 +187,4 @@ jobs:
       start_on_pycron_start: False
       restart_if_found: False
       restart_if_finished: False
+      timeout_minutes: 5         # no catch_up_minutes — see preflight_us
