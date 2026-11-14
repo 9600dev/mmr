@@ -516,6 +516,20 @@ class Trader():
         self._invalidate_account_pnl()
         self.client.ib.disconnect()
 
+    def _schedule_reconnect(self) -> None:
+        """Force the reconnect path from inside an IB callback.
+
+        Not inline: closing the socket while ib_async is still dispatching the
+        event that asked for it re-enters its own handlers. An attempt already
+        in progress will resubscribe on its own.
+        """
+        if getattr(self, '_reconnecting', False):
+            return
+        try:
+            asyncio.get_running_loop().call_soon(self.reconnect)
+        except RuntimeError:
+            self.reconnect()
+
     def __update_positions(self, positions: Union[List[Position], Position]):
         logging.debug('__update_positions')
         if type(positions) is Position:
@@ -747,6 +761,20 @@ class Trader():
             self._ib_upstream_error = ''
             self._ensure_account_pnl_subscription()
             logging.info('IB upstream connection restored (code %d): %s', code, msg)
+            if code == 1101:
+                # 1101 is NOT 1102. "Restored — data LOST" means every market
+                # and account data subscription was dropped and must be
+                # resubmitted; the API socket never closed, so nothing here
+                # would re-request them (tickers are re-published only from
+                # connected_event, and the 10197 retry loop only runs on
+                # 10197). Treated like 1102 the service came back with every
+                # flag green and ticks, positions and PnL frozen until someone
+                # restarted it. Bounce the socket: the reconnect path
+                # resubscribes everything.
+                logging.error(
+                    'IB restored upstream connectivity with DATA LOST (1101) — forcing a '
+                    'reconnect so market data, positions and PnL are resubscribed')
+                self._schedule_reconnect()
         elif code in (2103, 2105, 2157):
             # Informational farm hiccup. Track so callers can query
             # ``_ib_farms_down`` if they really want farm-level detail,
@@ -2221,6 +2249,11 @@ class Trader():
                 result.client_intent_id = intent_id
                 if status == 'UNKNOWN':
                     result.error = f'UNKNOWN: intent {intent_id}: {result.error}'
+                elif status in ('REJECTED', 'RETRYABLE') and not (reserved and reserved['orders']):
+                    # Authoritative: this intent reserved no broker order, so
+                    # nothing was sent. Callers read the flag instead of
+                    # guessing from the wording of the refusal.
+                    result.not_submitted = True
                 return result
             except Exception as ex:
                 try:
@@ -3950,7 +3983,25 @@ class Trader():
         is on: a close must never be blocked behind a proposal, but the
         OPENING half of a position-crossing order is a new trade and has to go
         through propose → approve like any other."""
-        latest_tick: Ticker = await self.client.get_snapshot(contract)
+        # The snapshot is only NEEDED to size an amount without a limit price.
+        # A quantity-specified order (every `mmr close`, `sell --quantity`)
+        # does not use it for the order at all — yet a failed snapshot used to
+        # raise here, so with market data dark (10197 competing session, a
+        # delayed-only venue, no ticks) a manual exit could not be sent, while
+        # also holding the account order lock for the snapshot's whole wait.
+        # Now it is best-effort unless sizing depends on it. Without a price an
+        # OPEN is still refused downstream (concentration is unevaluable).
+        needs_quote = quantity is None and not limit_price
+        try:
+            latest_tick: Ticker = await self.client.get_snapshot(contract)
+        except Exception as ex:
+            if needs_quote:
+                return rx.throw(ValueError(
+                    f'Cannot size {contract.symbol} from an amount: no market data ({ex})'))
+            logging.warning(
+                'no market-data snapshot for %s (%s); placing the quantity-specified '
+                '%s without one', contract.symbol, ex, action)
+            latest_tick = Ticker(contract=contract)
 
         if quantity is None and equity_amount is not None:
             base_per_local = self.convert_notional(1.0, contract.currency)
@@ -4255,6 +4306,10 @@ class Trader():
         # `mmr reservations` (list_order_reservations) says which rows block.
         status['unsettled_reservations'] = self._unsettled_reservation_count()
         status['dropped_ticks'] = getattr(self, 'zmq_pubsub_dropped_ticks', 0)
+        # Policy a client needs BEFORE it does something irreversible (e.g.
+        # cancelling an order it means to replace): the effective value in
+        # this process, env overrides included.
+        status['require_proposal_approval'] = bool(getattr(self, 'require_proposal_approval', False))
         self._status_cache = status
         self._status_cache_ts = now
         return status

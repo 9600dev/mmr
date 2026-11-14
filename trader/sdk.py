@@ -461,6 +461,18 @@ class MMR:
         require explicit disambiguation; venue copies of one conId collapse.
         """
         definitions = self.resolve(symbol, sec_type=sec_type, exchange=exchange, currency=currency)
+        if not definitions and type(symbol) is int and symbol > 0:
+            # An integer conId that is not in a local universe. resolve() stops
+            # there by design (an int must never become a ticker lookup), but
+            # `propose` pins conIds it found by IB discovery — so approving a
+            # proposal for any symbol outside the universes failed with "Could
+            # not resolve symbol: <conId>", and re-proposing failed the same
+            # way. Asking IB for that EXACT conId is not a fuzzy lookup: the
+            # `matches` filter below still requires conId equality, so anything
+            # else IB might return is discarded.
+            definitions = consume(
+                self._rpc.rpc(return_type=list[SecurityDefinition]).resolve_contract(
+                    Contract(conId=int(symbol))))
         if not definitions:
             raise ValueError(f"Could not resolve symbol: {symbol}")
 
@@ -642,6 +654,23 @@ class MMR:
                 i + 1: row['symbol'] for i, row in df.iterrows()
             }
         return df
+
+    def _approval_required(self) -> bool:
+        """Whether the running trader_service gates opens behind an approved
+        proposal. Asked of the service (its effective value, env overrides
+        included); if that cannot be read, the local config; and if neither
+        can be read, True — the answer that leaves a working order in place."""
+        try:
+            status = consume(self._rpc.rpc(return_type=dict).get_status())
+            if isinstance(status, dict) and isinstance(status.get('require_proposal_approval'), bool):
+                return status['require_proposal_approval']
+        except Exception as ex:
+            logging.debug('approval policy not readable from trader_service: %s', ex)
+        try:
+            configured = self._container.config().get('require_proposal_approval', False)
+        except Exception:
+            return True
+        return configured if isinstance(configured, bool) else True
 
     def _entry_reduces_position(self, con_id: Any, action: str) -> bool:
         """True only when the broker position for ``con_id`` is positively known
@@ -1156,6 +1185,21 @@ class MMR:
             if child.order.parentId == order_id and child.order.orderType in ('STP', 'STP LMT'):
                 stop_price = child.order.auxPrice
                 break
+
+        # Will the replacement be PLACEABLE? Decide before cancelling anything.
+        # With require_proposal_approval on, an order that opens exposure needs
+        # an approved proposal matching it exactly, and a market replacement
+        # never matches the original limit proposal — so the cancel went
+        # through and the replacement was refused: the order was simply gone
+        # (and its bracket children with it). A reduction of a held position is
+        # exit-class and is not gated.
+        if not self._entry_reduces_position(getattr(contract, 'conId', 0), action):
+            if self._approval_required():
+                return SuccessFail.never_sent(error=(
+                    f'Order #{order_id} was NOT cancelled: it opens exposure and '
+                    f'require_proposal_approval is on, so a market replacement would be '
+                    f'refused. Cancel it and re-propose at market instead '
+                    f'(`mmr cancel {order_id}`, then `mmr propose ... --market`).'))
 
         # Cancel parent (IB auto-cancels bracket children) and REQUIRE the cancel
         # to be accepted before placing the market order — otherwise a cancel that
@@ -2339,9 +2383,9 @@ class MMR:
         ``order_ref`` stamps orderRef for fill attribution."""
         order_type = (order_type or '').upper()
         if order_type not in ('STP', 'TRAIL', 'LMT'):
-            return SuccessFail.fail(error=f"order_type must be STP/TRAIL/LMT, got {order_type!r}")
+            return SuccessFail.never_sent(error=f"order_type must be STP/TRAIL/LMT, got {order_type!r}")
         if quantity is None or quantity <= 0:
-            return SuccessFail.fail(error='quantity must be positive')
+            return SuccessFail.never_sent(error='quantity must be positive')
 
         contract = self._contract_map.get(symbol)
         if not self._cached_contract_matches(contract, sec_type, exchange, currency, con_id):
@@ -2349,7 +2393,7 @@ class MMR:
                 contract = self._resolve_contract(
                     con_id or symbol, sec_type=sec_type, exchange=exchange, currency=currency)
             except Exception as ex:
-                return SuccessFail.fail(error=f"Could not resolve symbol {symbol}: {ex}")
+                return SuccessFail.never_sent(error=f"Could not resolve symbol {symbol}: {ex}")
 
         intent_id = client_intent_id or f'protective:{uuid.uuid4().hex}'
         try:

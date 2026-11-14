@@ -476,6 +476,7 @@ class TestToMarket:
         }
         mock_client.rpc.return_value.cancel_order.return_value = SuccessFail.success()
         mock_client.rpc.return_value.place_expressive_order.return_value = SuccessFail.success()
+        mock_client.rpc.return_value.get_status.return_value = {'require_proposal_approval': False}
 
         mmr = _make_mmr_with_mock(mock_client)
         result = mmr.to_market(36)
@@ -502,6 +503,7 @@ class TestToMarket:
         mock_client.rpc.return_value.get_trades.return_value = {10: [trade]}
         mock_client.rpc.return_value.cancel_order.return_value = SuccessFail.success()
         mock_client.rpc.return_value.place_expressive_order.return_value = SuccessFail.success()
+        mock_client.rpc.return_value.get_status.return_value = {'require_proposal_approval': False}
 
         mmr = _make_mmr_with_mock(mock_client)
         result = mmr.to_market(10)
@@ -511,6 +513,44 @@ class TestToMarket:
         spec = call_kwargs[1]['execution_spec']
         assert spec['order_type'] == 'MARKET'
         assert 'stop_loss_price' not in spec
+
+    def test_to_market_does_not_cancel_an_order_whose_replacement_would_be_refused(self):
+        """With require_proposal_approval on, a market replacement of an OPENING
+        order can never be authorised. The cancel used to go through first and
+        the replacement was then refused: the order (and its bracket) was gone."""
+        mock_client = _make_mock_rpc()
+        contract = FakeContract(conId=4391, symbol='AMD')
+        order = FakeOrder(orderId=10, action='BUY', orderType='LMT',
+                          lmtPrice=100.0, totalQuantity=50)
+        mock_client.rpc.return_value.get_trades.return_value = {10: [FakeTrade(contract=contract, order=order)]}
+        mock_client.rpc.return_value.get_positions.return_value = []          # flat: the BUY opens
+        mock_client.rpc.return_value.get_status.return_value = {'require_proposal_approval': True}
+
+        mmr = _make_mmr_with_mock(mock_client)
+        result = mmr.to_market(10)
+
+        assert not result.is_success()
+        assert 'NOT cancelled' in result.error
+        assert result.not_submitted is True
+        mock_client.rpc.return_value.cancel_order.assert_not_called()
+        mock_client.rpc.return_value.place_expressive_order.assert_not_called()
+
+    def test_to_market_of_a_reduction_is_not_gated_by_the_approval_policy(self):
+        mock_client = _make_mock_rpc()
+        contract = FakeContract(conId=4391, symbol='AMD')
+        order = FakeOrder(orderId=11, action='SELL', orderType='LMT',
+                          lmtPrice=100.0, totalQuantity=50)
+        mock_client.rpc.return_value.get_trades.return_value = {11: [FakeTrade(contract=contract, order=order)]}
+        from types import SimpleNamespace
+        mock_client.rpc.return_value.get_positions.return_value = [
+            SimpleNamespace(contract=contract, position=50.0)]               # long 50: the SELL closes
+        mock_client.rpc.return_value.get_status.return_value = {'require_proposal_approval': True}
+        mock_client.rpc.return_value.cancel_order.return_value = SuccessFail.success()
+        mock_client.rpc.return_value.place_expressive_order.return_value = SuccessFail.success()
+
+        mmr = _make_mmr_with_mock(mock_client)
+        assert mmr.to_market(11).is_success()
+        mock_client.rpc.return_value.cancel_order.assert_called_with(11)
 
     def test_to_market_order_not_found(self):
         mock_client = _make_mock_rpc()

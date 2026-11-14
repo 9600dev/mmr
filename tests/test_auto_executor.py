@@ -6036,3 +6036,57 @@ def test_native_fractional_close_replay_preserves_owned_average(native_submit_ow
         assert checkpoints == {closing['intent_id']: 1.5}
     assert len(ctx.server.placed) == 2 and ctx.server.inventory == 100.5
     assert ctx.server.inventory - half['quantity'] == 100
+
+
+class TestCleanRefusalsDoNotJamTheKey:
+    """2026-11-14 audit. A refusal that provably sent nothing must not be filed
+    UNKNOWN: an UNKNOWN intent with no order id reserves the (strategy, conId)
+    key — no stop repair, no close, no open — until an operator resolves it."""
+
+    def test_a_not_submitted_protective_refusal_is_rejected_and_retried(self, executor):
+        ex, sdk = executor
+        # The trader's wording for a deferred stop: no 'reject', no 'refus'.
+        refusal = FakeResult(ok=False, error='DEFERRED: SELL 140 not placed: all 140 held are '
+                                             'reserved by working reductions owned elsewhere [41]')
+        refusal.not_submitted = True
+        sdk.protective_result = refusal
+        ex._process_signal(make_work())
+        intents = ex.intents.all(strategy='orb_test', conid=1111, kind='PROTECTIVE')
+        assert [i['status'] for i in intents] == ['REJECTED']
+        assert ex.intents.all(strategy='orb_test', conid=1111, kind='PROTECTIVE', active=True) == []
+        # ...so once the trader will take it, the very next pass places the stop.
+        sdk.protective_result = None
+        ex._process_bar(BarWork('orb_test', 1111, TS + pd.Timedelta(minutes=1), 1))
+        assert ex.state.open_position('orb_test', 1111)['protective_order_id'] == 900
+
+    def test_an_ambiguous_protective_failure_still_reserves_the_key(self, executor):
+        ex, sdk = executor
+        sdk.protective_result = FakeResult(ok=False, error='UNKNOWN: protective intent x: timeout')
+        ex._process_signal(make_work())
+        active = ex.intents.all(strategy='orb_test', conid=1111, kind='PROTECTIVE', active=True)
+        assert [i['status'] for i in active] == ['UNKNOWN']
+
+    def test_repeated_refusals_back_off(self, executor):
+        ex, sdk = executor
+        refusal = FakeResult(ok=False, error='broker rejected: no route')
+        sdk.protective_result = refusal
+        ex._process_signal(make_work())                                   # failure 1: retry is immediate
+        ex._process_bar(BarWork('orb_test', 1111, TS + pd.Timedelta(minutes=1), 1))   # failure 2
+        attempts = len(sdk.protective_calls)
+        assert attempts == 2
+        ex._process_bar(BarWork('orb_test', 1111, TS + pd.Timedelta(minutes=2), 2))   # inside the backoff
+        assert len(sdk.protective_calls) == attempts
+        assert ex._retry_blocked('protective', 'orb_test', 1111)
+        ex._retry_cleared('protective', 'orb_test', 1111)
+        assert not ex._retry_blocked('protective', 'orb_test', 1111)
+
+    def test_one_failing_holding_does_not_abort_the_management_pass(self, executor, caplog):
+        ex, _sdk = executor
+        seen = []
+
+        def boom(intent):
+            raise RuntimeError('identity no longer resolves')
+
+        ex._isolated('advance close', {'strategy': 's', 'conid': 1, 'intent_id': 'a'}, boom)
+        ex._isolated('advance close', {'strategy': 's', 'conid': 2, 'intent_id': 'b'}, seen.append)
+        assert [i['conid'] for i in seen] == [2]

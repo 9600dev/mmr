@@ -489,3 +489,145 @@ def test_nan_confidence_does_not_size_as_full_confidence():
     full = sizer.compute(confidence=1.0, portfolio_state=state)
     assert math.isclose(unknown.amount_usd, none.amount_usd)
     assert unknown.amount_usd < full.amount_usd
+
+
+# --------------------------------------------------------------------------
+# Manual exits must not depend on market data
+# --------------------------------------------------------------------------
+
+class TestCloseWithoutMarketData:
+    """`mmr close` / `sell --quantity` fetched two live snapshots before sending
+    anything (one of them unused). With data dark — a competing session (10197),
+    a delayed-only venue — the exit was never sent."""
+
+    @pytest.mark.asyncio
+    async def test_quantity_specified_exit_is_sent_when_snapshots_fail(self):
+        from unittest.mock import AsyncMock
+        from review.test_review_order_contract import _stock, _trader
+        from trader.messaging.trader_service_api import TraderServiceApi
+
+        trader = _trader(held=100, gate_enabled=True)
+        trader.client.get_snapshot = AsyncMock(side_effect=Exception(
+            'reqId: 77, errorCode: 10197, errorString: No market data during competing live session'))
+        try:
+            result = await TraderServiceApi(trader).place_order_simple(
+                _stock(), 'SELL', equity_amount=None, quantity=100, limit_price=None,
+                market_order=True)
+            assert result.is_success(), result.error
+            assert len(trader.placed) == 1
+        finally:
+            trader.order_tracker.close(timeout=1)
+
+    @pytest.mark.asyncio
+    async def test_the_structural_check_fetches_no_snapshot(self):
+        from review.test_review_order_contract import _stock, _trader
+        from trader.messaging.trader_service_api import TraderServiceApi
+
+        trader = _trader(held=100, gate_enabled=True)
+        try:
+            result = await TraderServiceApi(trader).place_order_simple(
+                _stock(), 'SELL', equity_amount=None, quantity=100, limit_price=None,
+                market_order=True)
+            assert result.is_success(), result.error
+            assert trader.client.get_snapshot.await_count == 1
+        finally:
+            trader.order_tracker.close(timeout=1)
+
+    @pytest.mark.asyncio
+    async def test_sizing_from_an_amount_still_needs_a_quote(self):
+        from unittest.mock import AsyncMock
+        from review.test_review_order_contract import _stock, _trader
+        from trader.messaging.trader_service_api import TraderServiceApi
+
+        trader = _trader(held=100, gate_enabled=True)
+        trader.client.get_snapshot = AsyncMock(side_effect=Exception('no market data'))
+        try:
+            result = await TraderServiceApi(trader).place_order_simple(
+                _stock(), 'SELL', equity_amount=500.0, quantity=None, limit_price=None,
+                market_order=True)
+            assert not result.is_success()
+            assert trader.placed == []
+        finally:
+            trader.order_tracker.close(timeout=1)
+
+
+# --------------------------------------------------------------------------
+# IB 1101 ("restored, data LOST") is not 1102 ("restored, data maintained")
+# --------------------------------------------------------------------------
+
+class TestUpstreamDataLost:
+    def _trader(self):
+        from trader.trading.trading_runtime import Trader
+        trader = object.__new__(Trader)
+        trader.reconnects = 0
+        trader._invalidate_account_pnl = lambda: None
+        trader._ensure_account_pnl_subscription = lambda: None
+        trader.reconnect = lambda: setattr(trader, 'reconnects', trader.reconnects + 1)
+        trader._ib_upstream_connected = False
+        trader._ib_upstream_error = 'lost'
+        return trader
+
+    def test_1101_forces_a_resubscribing_reconnect(self):
+        """After 1101 every subscription must be resubmitted and the socket never
+        dropped, so nothing re-requested them: green flags over frozen data."""
+        trader = self._trader()
+        trader._on_ib_error(SimpleNamespace(errorCode=1101, errorString='restored - data lost'))
+        assert trader._ib_upstream_connected is True
+        assert trader.reconnects == 1
+
+    def test_1102_does_not_bounce_the_socket(self):
+        trader = self._trader()
+        trader._on_ib_error(SimpleNamespace(errorCode=1102, errorString='restored - data maintained'))
+        assert trader._ib_upstream_connected is True
+        assert trader.reconnects == 0
+
+    def test_a_reconnect_already_in_progress_is_not_doubled(self):
+        trader = self._trader()
+        trader._reconnecting = True
+        trader._on_ib_error(SimpleNamespace(errorCode=1101, errorString='restored - data lost'))
+        assert trader.reconnects == 0
+
+
+# --------------------------------------------------------------------------
+# approve() must be able to resolve the conId propose() pinned
+# --------------------------------------------------------------------------
+
+class TestPinnedConIdResolution:
+    def _definition(self, con_id):
+        from trader.data.data_access import SecurityDefinition
+        return SecurityDefinition(
+            symbol='ZETA', exchange='NYSE', conId=con_id, secType='STK', primaryExchange='NYSE',
+            currency='USD', tradingClass='', includeExpired=False, secIdType='', secId='',
+            description='', minTick=0.01, orderTypes='', validExchanges='SMART,NYSE',
+            priceMagnifier=1, longName='ZETA', category='', subcategory='', tradingHours='',
+            timeZoneId='US/Eastern', liquidHours='', stockType='', minSize=1.0,
+            sizeIncrement=1.0, suggestedSizeIncrement=1.0, bondType='', couponType='',
+            callable=False, putable=False, coupon=0.0, convertable=False, maturity='',
+            issueDate='', nextOptionDate='', nextOptionPartial=False, nextOptionType='',
+            marketRuleIds='', company_name='')
+
+    def _mmr(self, ib_answer):
+        from test_sdk import _make_mmr_with_mock, _make_mock_rpc
+        client = _make_mock_rpc()
+        client.rpc.return_value.resolve_symbol.return_value = []        # not in a local universe
+        client.rpc.return_value.resolve_contract.return_value = ib_answer
+        return _make_mmr_with_mock(client), client
+
+    def test_a_conid_outside_the_universes_is_looked_up_exactly_at_ib(self):
+        """`propose` pins a conId found by IB discovery; `approve` could only
+        resolve conIds from the local universe, so it FAILED for any other symbol."""
+        mmr, client = self._mmr([self._definition(555001)])
+        contract = mmr._resolve_contract(555001)
+        assert contract.conId == 555001
+        sent = client.rpc.return_value.resolve_contract.call_args.args[0]
+        assert sent.conId == 555001 and not sent.symbol            # an exact-conId question
+
+    def test_a_different_conid_from_ib_is_never_accepted(self):
+        mmr, _ = self._mmr([self._definition(999999)])
+        with pytest.raises(ValueError):
+            mmr._resolve_contract(555001)
+
+    def test_resolve_itself_still_never_asks_ib_about_an_integer(self):
+        mmr, client = self._mmr([self._definition(555001)])
+        assert mmr.resolve(555001) == []
+        client.rpc.return_value.resolve_contract.assert_not_called()
