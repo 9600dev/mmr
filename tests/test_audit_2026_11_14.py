@@ -1020,3 +1020,35 @@ class TestNumericSymbolIsNotGuessed:
         tokyo = self._definition(128221987, '4391', 'TSEJ')
         mmr, _ = self._mmr(by_conid=[other], by_ticker=[tokyo])
         assert mmr.resolve('4391') == [tokyo]
+
+
+class TestDateifyEndOfDay:
+    """`dateify(aware, make_eod=True)` returned START of day when no timezone
+    was given — including an empty one, which is what a blank `timeZoneId`
+    passes — so a fetch window lost its last day."""
+
+    def test_an_aware_datetime_keeps_its_zone_and_reaches_end_of_day(self):
+        from zoneinfo import ZoneInfo
+        from trader.common.helpers import dateify
+
+        sydney = ZoneInfo('Australia/Sydney')
+        when = dt.datetime(2026, 11, 13, 10, 30, tzinfo=sydney)
+        for timezone in (None, ''):
+            end = dateify(when, timezone=timezone, make_eod=True)
+            assert (end.hour, end.minute, end.second, end.microsecond) == (23, 59, 59, 0)
+            assert end.date() == dt.date(2026, 11, 13) and end.utcoffset() == when.utcoffset()
+
+    def test_start_of_day_and_the_default_are_unchanged(self):
+        from trader.common.helpers import dateify
+
+        when = dt.datetime(2026, 11, 13, 10, 30, 15, 123456, tzinfo=dt.timezone.utc)
+        midnight = dt.datetime(2026, 11, 13, tzinfo=dt.timezone.utc)
+        assert dateify(when) == midnight
+        assert dateify(when, make_sod=True) == midnight
+
+    def test_with_a_timezone_the_date_is_converted_first(self):
+        from trader.common.helpers import dateify
+
+        when = dt.datetime(2026, 11, 13, 2, 0, tzinfo=dt.timezone.utc)       # still the 12th in New York
+        end = dateify(when, timezone='America/New_York', make_eod=True)
+        assert (end.year, end.month, end.day, end.hour, end.minute, end.second) == (2026, 11, 12, 23, 59, 59)
