@@ -269,6 +269,40 @@ class TestRejectStaleApproved:
             mmr2.reject(pid)
         assert store.get(pid).status == 'APPROVED'
 
+    def _trade(self, order_id, ref, status):
+        from types import SimpleNamespace
+        return SimpleNamespace(order=SimpleNamespace(orderId=order_id, orderRef=ref),
+                               orderStatus=SimpleNamespace(status=status))
+
+    def test_a_filled_order_is_evidence_not_the_absence_of_it(self, tmp_duckdb_path):
+        """A timed-out approve that actually FILLED could be marked FAILED:
+        'Filled' was on the list of statuses that did not count."""
+        mmr = self._mmr(tmp_duckdb_path)
+        store = mmr._proposal_store()
+        pid = self._approved(store)
+        filled = self._trade(9, f'proposal|mmr:proposal:{pid}', 'Filled')
+        with pytest.raises(ValueError, match='FILLED broker order'):
+            self._mmr(tmp_duckdb_path, trades={9: [filled]}).reject(pid)
+        assert store.get(pid).status == 'APPROVED'
+
+    def test_a_strategy_proposal_is_matched_by_its_own_intent_id(self, tmp_duckdb_path):
+        mmr = self._mmr(tmp_duckdb_path)
+        store = mmr._proposal_store()
+        pid = self._approved(store)
+        store.update_metadata(pid, {'client_intent_id': 'orb_pltr:open:abc'})
+        working = self._trade(9, 'orb_pltr|mmr:orb_pltr:open:abc', 'Submitted')
+        with pytest.raises(ValueError, match='working broker order'):
+            self._mmr(tmp_duckdb_path, trades={9: [working]}).reject(pid)
+
+    def test_another_proposals_order_is_not_mistaken_for_this_one(self, tmp_duckdb_path):
+        """'proposal:12' used to match inside 'proposal:123'."""
+        mmr = self._mmr(tmp_duckdb_path)
+        store = mmr._proposal_store()
+        pid = self._approved(store)
+        other = self._trade(9, f'proposal|mmr:proposal:{pid}7', 'Submitted')
+        assert self._mmr(tmp_duckdb_path, trades={9: [other]}).reject(pid) is True
+        assert store.get(pid).status == 'FAILED'
+
     def test_order_ids_recorded_refuses(self, tmp_duckdb_path):
         mmr = self._mmr(tmp_duckdb_path)
         store = mmr._proposal_store()

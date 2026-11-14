@@ -1779,6 +1779,29 @@ class Trader():
         """
         return self.split_for_order(contract, action, quantity).open_qty
 
+    async def _marketable_price(self, contract: Contract, action: str) -> Optional[float]:
+        """A live price to value an order at — ask for a BUY, bid for a SELL,
+        then last, then close — or None when there is no usable quote."""
+        try:
+            tick = await self.client.get_snapshot(contract)
+        except Exception as ex:
+            logging.warning('risk gate: no snapshot price to value %s %s: %s',
+                            action, getattr(contract, 'symbol', '?'), ex)
+            return None
+        for candidate in (
+            tick.ask if action == 'BUY' else tick.bid,
+            getattr(tick, 'last', None),
+            getattr(tick, 'close', None),
+        ):
+            try:
+                # Defensive coercion of a possibly-None/Any tick field; the except handles non-numeric candidates.
+                price = float(candidate)  # ty: ignore[invalid-argument-type]
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(price) and price > 0:
+                return price
+        return None
+
     async def _tier_notional(
         self, contract: Contract, action: str, quantity: float,
         order_type: str, limit_price: Optional[float], target_currency: str = 'USD',
@@ -3366,32 +3389,30 @@ class Trader():
             # price → not evaluable → the gate refuses the open.
             position_value = 0.0
             position_value_evaluable = False
+            limit_value: Optional[float] = None
             if spec.order_type != 'MARKET' and spec.limit_price:
                 try:
-                    position_value = abs(float(quantity) * float(spec.limit_price)) * multiplier
-                    position_value_evaluable = True
+                    limit_value = float(spec.limit_price)
                 except (TypeError, ValueError):
-                    pass
+                    limit_value = None
+            if limit_value is not None and action == 'BUY':
+                # A buy limit fills at or BELOW its price: the limit bounds it.
+                position_value = abs(float(quantity) * limit_value) * multiplier
+                position_value_evaluable = True
             else:
-                try:
-                    tick = await self.client.get_snapshot(contract)
-                    for candidate in (
-                        tick.ask if action == 'BUY' else tick.bid,
-                        getattr(tick, 'last', None),
-                        getattr(tick, 'close', None),
-                    ):
-                        try:
-                            # Defensive coercion of a possibly-None/Any tick field; the except handles non-numeric candidates.
-                            price = float(candidate)  # ty: ignore[invalid-argument-type]
-                        except (TypeError, ValueError):
-                            continue
-                        if math.isfinite(price) and price > 0:
-                            position_value = abs(float(quantity)) * price * multiplier
-                            position_value_evaluable = True
-                            break
-                except Exception as ex:
-                    logging.warning(
-                        'risk gate: no snapshot price to value market order: %s', ex)
+                # MARKET orders, and a SELL that opens a short. A sell limit
+                # fills at or ABOVE its price, so the client's limit is a floor
+                # and says nothing about the size of the position: `SELL 400
+                # --limit 1` on a $50 stock was valued at $400 (2.4% of a $17k
+                # account, passing a 10% cap) and filled as a $20k short. Value
+                # it at max(limit, live price), as the approver tier already
+                # does; with no live price it is not evaluable and the open is
+                # refused.
+                live = await self._marketable_price(contract, action)
+                if live is not None:
+                    price = max(live, limit_value) if limit_value is not None else live
+                    position_value = abs(float(quantity)) * price * multiplier
+                    position_value_evaluable = True
 
             converted = self.convert_notional(position_value, contract.currency)
             position_value_evaluable = position_value_evaluable and converted is not None

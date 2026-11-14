@@ -810,3 +810,50 @@ class TestFlatAccountAfterReconnect:
         trader, ib = self._trader(live=[self._position(7)], cached=[self._position(100)])
         trader._positions_synced_ib = ib
         assert [p.position for p in trader.get_positions()] == [7]
+
+
+# --------------------------------------------------------------------------
+# A short-opening LIMIT order is valued at the market, not at its own limit
+# --------------------------------------------------------------------------
+
+class TestShortOpenValuation:
+    """`SELL 400 --limit 1` on a $50 stock was valued at $400 for the
+    concentration check and filled as a $20,000 short: a sell limit fills at
+    or ABOVE its price, so the client's limit is a floor, not a size."""
+
+    async def _place(self, limit, quote, portfolio_value=100_000):
+        from review.test_review_order_contract import _stock, _trader
+        trader = _trader(held=0, gate_enabled=True, portfolio_value=portfolio_value)
+        ticker = SimpleNamespace(contract=_stock(), last=quote, close=quote, ask=quote, bid=quote)
+
+        async def snapshot(contract, delayed=False):
+            if quote is None:
+                raise RuntimeError('no market data')
+            return ticker
+
+        trader.client.get_snapshot = snapshot
+        try:
+            return await trader.place_expressive_order(
+                _stock(), 'SELL', 400, {'order_type': 'LIMIT', 'limit_price': limit}), trader
+        finally:
+            trader.order_tracker.close(timeout=1)
+
+    @pytest.mark.asyncio
+    async def test_a_lowball_limit_does_not_shrink_the_position(self):
+        # 400 x $50 = $20,000 = 20% of a $100k account: over the 10% cap.
+        result, trader = await self._place(limit=1.0, quote=50.0)
+        assert not result.is_success()
+        assert 'position' in str(result.error).lower()
+        assert trader.placed == []
+
+    @pytest.mark.asyncio
+    async def test_a_genuinely_small_short_still_passes(self):
+        # 400 x $10 = $4,000 = 4%.
+        result, trader = await self._place(limit=9.5, quote=10.0)
+        assert result.is_success(), result.error
+
+    @pytest.mark.asyncio
+    async def test_without_a_quote_a_short_open_is_not_evaluable(self):
+        result, trader = await self._place(limit=1.0, quote=None)
+        assert not result.is_success()
+        assert trader.placed == []

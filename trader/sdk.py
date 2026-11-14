@@ -2107,18 +2107,48 @@ class MMR:
             if p.order_ids:
                 raise ValueError(f'proposal #{proposal_id} is APPROVED with broker order ids '
                                  f'{p.order_ids} — reconcile (`mmr orders`, `mmr reconcile`) instead')
+            # The intent this proposal was (or would have been) submitted under.
+            # approve() uses metadata['client_intent_id'] when a strategy set
+            # one; looking only for 'proposal:<id>' missed every executor
+            # proposal, and as a substring it also matched proposal:123 for #12.
+            from trader.trading.order_reference import split_order_reference
+            intent_id = str(p.metadata.get('client_intent_id') or f'proposal:{proposal_id}')
+            try:
+                # The server's durable view first: its journal survives a
+                # restart, the in-memory book below does not.
+                snapshot = self.execution_snapshot(intent_id=intent_id)
+            except Exception as ex:
+                raise ValueError(f'proposal #{proposal_id} is APPROVED; cannot verify there is no '
+                                 f'broker order without trader_service ({ex})') from ex
+            if isinstance(snapshot, dict):
+                known = [int(o.get('orderId', 0) or 0) for o in (snapshot.get('orders') or [])
+                         if isinstance(o, dict)]
+                fills = snapshot.get('executions') or []
+                if known or fills:
+                    raise ValueError(
+                        f'proposal #{proposal_id} has broker evidence under intent {intent_id!r} '
+                        f'(orders {known}, {len(fills)} execution(s)) — it was submitted; '
+                        f'reconcile it (`mmr orders`, `mmr reconcile`) instead of failing it')
             try:
                 trades = consume(self._rpc.rpc(return_type=dict[int, list[Trade]]).get_trades()) or {}
             except Exception as ex:
                 raise ValueError(f'proposal #{proposal_id} is APPROVED; cannot verify there is no '
                                  f'working broker order without trader_service ({ex})') from ex
-            marker = f'proposal:{proposal_id}'
             for trade_list in trades.values():
                 for t in trade_list or []:
                     ref = str(getattr(getattr(t, 'order', None), 'orderRef', '') or '')
                     status = str(getattr(getattr(t, 'orderStatus', None), 'status', '') or '')
-                    if marker in ref and status not in ('Cancelled', 'ApiCancelled', 'Inactive', 'Filled'):
-                        raise ValueError(f'proposal #{proposal_id} has a working broker order '
+                    try:
+                        order_intent = split_order_reference(ref)[1]
+                    except Exception:
+                        order_intent = ''
+                    # A FILLED order is the strongest evidence there is, not
+                    # the absence of it: a timed-out approve that filled could
+                    # be marked FAILED.
+                    if (order_intent == intent_id or ref == intent_id) and status not in (
+                            'Cancelled', 'ApiCancelled', 'Inactive'):
+                        kind = 'FILLED' if status == 'Filled' else 'working'
+                        raise ValueError(f'proposal #{proposal_id} has a {kind} broker order '
                                          f'{t.order.orderId} ({status}) — cancel or reconcile it first')
             why = reason or 'operator: stale APPROVED claim with no broker evidence'
             return store.try_transition(proposal_id, 'APPROVED', 'FAILED', rejection_reason=why)
