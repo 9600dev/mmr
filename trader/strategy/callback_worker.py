@@ -310,6 +310,9 @@ class StrategyCallbackWorker:
     on the supervisor thread. Refused submissions can report errors on the
     submitting thread. Always marshal both onto the parent event loop with
     ``call_soon_threadsafe``. ``max_pending`` counts queued AND in-flight work.
+    It is an INITIAL bound: ``submit(..., max_pending=n)`` re-sizes it, because
+    the right bound is the caller's live subscription count and that changes
+    after the worker starts (a universe that grows, or was empty at start).
     A process starts only on ``start`` / ``wait_ready``; construction is cheap.
     """
 
@@ -336,8 +339,12 @@ class StrategyCallbackWorker:
         self.callback_timeout_s = callback_timeout_s
         self.startup_timeout_s = startup_timeout_s
         self.max_frame_bytes = max_frame_bytes
-        self._queue: queue.Queue[_Work] = queue.Queue(maxsize=max_pending)
-        self._slots = threading.BoundedSemaphore(max_pending)
+        # The bound is a counter (queued + in flight), not the queue's own
+        # maxsize or a semaphore: both are fixed at construction, and the bound
+        # has to follow the subscription count (see ``submit``).
+        self._queue: queue.Queue[_Work] = queue.Queue()
+        self._max_pending = int(max_pending)
+        self._pending = 0
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._ready = threading.Event()
@@ -383,9 +390,34 @@ class StrategyCallbackWorker:
             raise CallbackWorkerError('strategy worker stopped before readiness')
         return dict(self.ready_metadata)
 
+    @property
+    def max_pending(self) -> int:
+        return self._max_pending
+
+    def _acquire_slot(self, max_pending: int | None) -> bool:
+        with self._lock:
+            if max_pending is not None:
+                self._max_pending = int(max_pending)
+            if self._pending >= self._max_pending:
+                return False
+            self._pending += 1
+            return True
+
+    def _release_slot(self) -> None:
+        with self._lock:
+            if self._pending > 0:
+                self._pending -= 1
+
     def submit(self, conid: int, frame: pd.DataFrame, bar_ts: Any, generation: str,
                on_result: Callable[[CallbackResult], None],
-               on_error: Callable[[CallbackFailure], None]) -> bool:
+               on_error: Callable[[CallbackFailure], None],
+               max_pending: int | None = None) -> bool:
+        """Queue one callback. ``max_pending``, when given, becomes the worker's
+        bound from this submission on (the caller's CURRENT subscription
+        count); omitted, the bound in force is unchanged."""
+        if max_pending is not None and (isinstance(max_pending, bool) or not isinstance(max_pending, int)
+                                        or max_pending < 1):
+            raise ValueError('max_pending must be a positive integer')
         work = _Work(conid, frame, bar_ts, generation, on_result, on_error)
         if not self._ready.is_set() or self._stop.is_set():
             error = self._error
@@ -394,7 +426,7 @@ class StrategyCallbackWorker:
                 error.error_type if error else 'CallbackWorkerError',
                 error.message if error else 'strategy worker is not ready'))
             return False
-        if not self._slots.acquire(blocking=False):
+        if not self._acquire_slot(max_pending):
             self._fail('CallbackQueueFull', 'strategy callback queue is full; strategy state cannot skip a bar', work)
             return False
         try:
@@ -407,7 +439,7 @@ class StrategyCallbackWorker:
             self._queue.put_nowait(work)
             return True
         except Exception as exc:
-            self._slots.release()
+            self._release_slot()
             self._fail(type(exc).__name__, str(exc), work)
             return False
 
@@ -506,7 +538,7 @@ class StrategyCallbackWorker:
                 except BaseException as exc:
                     self._fail(type(exc).__name__, str(exc), work)
                 finally:
-                    self._slots.release()
+                    self._release_slot()
                     self._queue.task_done()
                 # Completion releases capacity before making the result
                 # observable. The caller may submit its next bar immediately
@@ -549,7 +581,7 @@ class StrategyCallbackWorker:
                 self._queue.get_nowait()
             except queue.Empty:
                 break
-            self._slots.release()
+            self._release_slot()
             self._queue.task_done()
 
     close = stop
