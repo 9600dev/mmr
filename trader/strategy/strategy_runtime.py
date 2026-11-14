@@ -864,6 +864,7 @@ class StrategyRuntime():
             self._history_versions[key] = self._history_versions.get(key, 0) + 1
             self._history_retry_at.pop(key, None)
         self._hist_bars.pop((conId, bar_size), None)
+        self.__dict__.get('_hist_primed_at', {}).pop((conId, bar_size), None)
         getattr(self, '_frame_cache', {}).pop((conId, bar_size), None)
 
     def _primed_days(self) -> Dict[tuple, int]:
@@ -916,12 +917,42 @@ class StrategyRuntime():
                          getattr(strategy, 'name', '?'), declared, conId, bar_size, primed)
             self._invalidate_history(conId, bar_size)
 
+    #: How old the history half of a shared frame may get before it is read
+    #: again. It used to be read ONCE, while live bars are kept for
+    #: ``_tick_retention_days``: a service up for longer than that served a
+    #: frame with a hole between the day it started and the retained live bars
+    #: (AUDIT_2026-11-14 B3.4) — invisible to a strategy that only reads today,
+    #: silently wrong for any indicator spanning more than two days.
+    HISTORY_SNAPSHOT_MAX_AGE_S = 6 * 3600.0
+    HISTORY_SNAPSHOT_RETRY_S = 60.0
+
+    def _refresh_history_snapshot_if_due(self, conId: int, bar_size: BarSize) -> None:
+        """Re-read a primed history snapshot that has aged out. The current
+        snapshot keeps being served until the new one is in place."""
+        key = (conId, bar_size)
+        primed_at = self.__dict__.get('_hist_primed_at', {}).get(key)
+        now = time.monotonic()
+        if primed_at is None or now - primed_at < self.HISTORY_SNAPSHOT_MAX_AGE_S:
+            return
+        retry_at = self.__dict__.setdefault('_hist_refresh_retry_at', {})
+        if now < retry_at.get(key, 0.0):
+            return
+        retry_at[key] = now + self.HISTORY_SNAPSHOT_RETRY_S
+        if hasattr(self, '_history_pool'):
+            job = self._history_jobs.get(key)
+            if job is None or job.done():
+                self._history_jobs[key] = self._history_pool.submit(self._prime_hist_bars, conId, bar_size)
+        else:
+            self._prime_hist_bars(conId, bar_size)
+
     def _prime_hist_bars(self, conId: int, bar_size: BarSize) -> None:
         """Only successful reads populate the cache; failed reads are retryable.
 
         The window is the MAXIMUM declared lookback across every strategy
         configured for the conId (``_declared_lookback_days``); a re-prime
-        that widens the window over the previous one is logged.
+        that widens the window over the previous one is logged. A REFRESH of an
+        existing snapshot never replaces bars with nothing: an empty read over
+        a snapshot that has bars is kept out and logged.
         """
         from trader.data.duckdb_store import DuckDBDataStore
         from trader.data.market_data import normalize_historical
@@ -938,6 +969,12 @@ class StrategyRuntime():
                 norm = normalize_historical(df).dropna(subset=['close'])
                 norm.index = self._utc_index(norm.index)
             if version == getattr(self, '_history_versions', {}).get(key, 0):
+                current = self._hist_bars.get(key)
+                self.__dict__.setdefault('_hist_primed_at', {})[key] = time.monotonic()
+                if norm.empty and current is not None and not current.empty:
+                    logging.warning('history refresh for conId %s %s read NO bars where the current snapshot has '
+                                    '%d — keeping the current snapshot', conId, bar_size, len(current))
+                    return
                 self._hist_bars[key] = norm
                 previous_days = self._primed_days().get(key)
                 self._primed_days()[key] = requested_days
@@ -1014,6 +1051,8 @@ class StrategyRuntime():
                     self._history_jobs[key] = self._history_pool.submit(self._prime_hist_bars, conId, bar_size)
             else:
                 self._prime_hist_bars(conId, bar_size)
+        else:
+            self._refresh_history_snapshot_if_due(conId, bar_size)
         freq = BarSize.to_pandas_freq(bar_size)
         daily = pd.Timedelta(freq) >= pd.Timedelta(days=1)
         ticks = self.streams.get(conId)
