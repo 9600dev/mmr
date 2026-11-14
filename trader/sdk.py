@@ -912,8 +912,20 @@ class MMR:
                     _l = _o.lmtPrice if _o.lmtPrice and _o.lmtPrice < 1e300 else 0
                     if _l:
                         own_by_sym.setdefault(tl[0].contract.symbol, []).append((_o.action, float(_l)))
-                for i, snap_dict in enumerate(batch_snaps or []):
-                    sym = sym_order[i]
+                # Match each quote to its order by conId. The server OMITS
+                # symbols whose snapshot failed, so pairing by list position
+                # shifted every later quote onto the wrong order: order AAA
+                # showed BBB's bid/ask (and own-quote stripping compared
+                # against the wrong symbol) whenever an earlier one failed.
+                sym_by_conid = {int(getattr(con, 'conId', 0) or 0): sym
+                                for sym, con in contract_cache.items()}
+                for snap_dict in batch_snaps or []:
+                    try:
+                        sym = sym_by_conid.get(int(snap_dict.get('conId') or 0))
+                    except (TypeError, ValueError, AttributeError):
+                        sym = None
+                    if sym is None:
+                        continue
                     q = normalize_ib_quote(dict(snap_dict))
                     _b, _a, _notes = discount_own_quotes(
                         q['bid'] if q.get('bid') == q.get('bid') and q.get('bid') else 0.0,

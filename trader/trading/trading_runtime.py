@@ -4152,6 +4152,17 @@ class Trader():
             setattr(result_obs, 'execution_outcome', outcome)
             return result_obs
 
+        if not allow_open and plan.open_qty > 0 and plan.reduce_qty <= 0:
+            # The RPC layer classified this order against the position it read
+            # BEFORE the snapshot waits above. If the position has since gone
+            # (its stop filled, another close landed) the order is now a pure
+            # open, and `allow_open=False` was only enforced inside the flip
+            # branch — so it went on to the executioner without the approval
+            # it requires.
+            return rx.throw(ValueError(
+                'Opening exposure requires an approved proposal matching this exact order '
+                '(the position this order was to reduce is no longer held)'))
+
         return await self.executioner.place_order(
             contract_order=contract_order,
             condition=ExecutorCondition.SANITY_CHECK,

@@ -319,6 +319,30 @@ class TestOrders:
         assert 'ask' in df.columns
         assert 'last' in df.columns
 
+    def test_order_quotes_are_matched_by_conid_not_list_position(self):
+        """The server omits symbols whose snapshot failed. Paired by position,
+        every later quote landed on the wrong order: AAA showed BBB's market."""
+        mock_client = _make_mock_rpc()
+        trades = {}
+        for order_id, (con_id, symbol) in enumerate([(1, 'AAA'), (2, 'BBB'), (3, 'CCC')], start=10):
+            trades[order_id] = [FakeTrade(
+                contract=FakeContract(conId=con_id, symbol=symbol),
+                order=FakeOrder(orderId=order_id, action='BUY', orderType='LMT',
+                                lmtPrice=1.0, totalQuantity=1),
+                orderStatus=FakeOrderStatus(status='Submitted', filled=0, remaining=1))]
+        mock_client.rpc.return_value.get_trades.return_value = trades
+        # AAA's snapshot failed, so only two rows come back.
+        mock_client.rpc.return_value.get_snapshots_batch.return_value = [
+            {'symbol': 'BBB', 'conId': 2, 'bid': 50.0, 'ask': 50.2, 'last': 50.1},
+            {'symbol': 'CCC', 'conId': 3, 'bid': 70.0, 'ask': 70.2, 'last': 70.1},
+        ]
+
+        df = _make_mmr_with_mock(mock_client).orders().set_index('symbol')
+
+        assert pd.isna(df.loc['AAA', 'bid'])
+        assert df.loc['BBB', 'bid'] == 50.0
+        assert df.loc['CCC', 'bid'] == 70.0
+
     def test_orders_empty(self):
         mock_client = _make_mock_rpc()
         mock_client.rpc.return_value.get_trades.return_value = {}

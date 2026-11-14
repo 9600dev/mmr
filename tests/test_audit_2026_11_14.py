@@ -886,3 +886,24 @@ class TestBooleanEnvCoercion:
         from trader.container import ContainerResolutionError
         with pytest.raises(ContainerResolutionError):
             self._coerce(raw)
+
+
+@pytest.mark.asyncio
+async def test_direct_path_refuses_a_pure_open_when_opening_is_not_allowed():
+    """allow_open=False was only enforced inside the flip branch: an order the
+    RPC layer classified as (partly) a reduction, whose position had gone by the
+    time the server re-read it, went through as an unapproved open."""
+    from review.test_review_order_contract import _stock, _trader
+    from trader.objects import Action
+
+    trader = _trader(held=0, gate_enabled=True)           # nothing held any more
+    try:
+        observable = await trader._place_order_simple(
+            _stock(), Action.SELL, equity_amount=None, quantity=50, limit_price=None,
+            market_order=True, stop_loss_percentage=0.0, allow_open=False)
+        errors = []
+        observable.subscribe(on_next=lambda _: None, on_error=errors.append)
+        assert len(errors) == 1 and 'approved proposal' in str(errors[0])
+        assert trader.placed == []
+    finally:
+        trader.order_tracker.close(timeout=1)
