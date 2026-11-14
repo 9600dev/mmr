@@ -339,3 +339,31 @@ async def test_a_failed_manual_close_that_displaced_nothing_reads_as_before(tmp_
 
     assert not result.is_success() and 'broker refused the request' in str(result.error)
     assert 'CANCELLED' not in str(result.error) and 're-placed' not in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_a_failure_to_account_for_displaced_exits_never_replaces_the_failure(tmp_path):
+    """The accounting is extra information on a failure reply. If it breaks,
+    the caller must still get the original failure — and be told that exits
+    were cancelled — not an exception from the RPC."""
+    from trader.messaging.trader_service_api import TraderServiceApi
+
+    trader = _fast(_coordinated_trader(tmp_path, held=100))
+    stop = await trader.place_standalone_order(_stock(), 'SELL', 100, 'STP', aux_price=8)
+    assert stop.is_success(), stop.error
+    _fail_placement_when(trader, lambda c, o: o.orderType == 'MKT', ValueError('broker refused the request'))
+
+    async def broken(displaced, symbol, *, restore):
+        raise RuntimeError('order journal unavailable')
+
+    trader._account_for_displaced = broken
+    try:
+        result = await TraderServiceApi(trader).place_order_simple(
+            _stock(), 'SELL', equity_amount=None, quantity=100, limit_price=None, market_order=True)
+    finally:
+        trader.order_tracker.close(timeout=1)
+
+    assert not result.is_success()
+    assert 'broker refused the request' in result.error
+    assert 'were CANCELLED' in result.error and 'could not be accounted for' in result.error
+    assert 'order journal unavailable' in result.error and 'mmr orders' in result.error
