@@ -857,3 +857,32 @@ class TestShortOpenValuation:
         result, trader = await self._place(limit=1.0, quote=None)
         assert not result.is_success()
         assert trader.placed == []
+
+
+# --------------------------------------------------------------------------
+# A boolean env var is parsed strictly
+# --------------------------------------------------------------------------
+
+class TestBooleanEnvCoercion:
+    def _coerce(self, raw):
+        import inspect
+        from trader.container import Container
+        parameter = inspect.Parameter('require_proposal_approval',
+                                      inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=bool)
+        return Container._coerce_env_value(object.__new__(Container), raw, parameter)
+
+    @pytest.mark.parametrize('raw', ['True ', 'true\r', ' YES', 'on', '1'])
+    def test_whitespace_and_case_do_not_turn_true_into_false(self, raw):
+        """An env var overrides the YAML: REQUIRE_PROPOSAL_APPROVAL='True\\r'
+        used to resolve to False and switch the approval gate off."""
+        assert self._coerce(raw) is True
+
+    @pytest.mark.parametrize('raw', ['false', 'No ', '0', 'OFF'])
+    def test_explicit_false(self, raw):
+        assert self._coerce(raw) is False
+
+    @pytest.mark.parametrize('raw', ['enabled', 'y', 'tru', ''])
+    def test_anything_else_refuses(self, raw):
+        from trader.container import ContainerResolutionError
+        with pytest.raises(ContainerResolutionError):
+            self._coerce(raw)
