@@ -10,14 +10,20 @@ from trader.common.reactivex import ObservableIterHelper
 from typing import Any, Callable, cast, Coroutine, Dict, Generic, Optional, Tuple, Type, TypeVar
 
 import asyncio
+import builtins
+import collections
 import datetime as dt
 import dill
 import functools
+import importlib
 import inspect
 import io
 import msgpack
 import math
+import numpy as np
+import pickle
 import queue
+import re
 import pandas as pd
 import pyarrow as pa
 import reactivex as rx
@@ -43,18 +49,15 @@ TSub = TypeVar('TSub')
 # Dill deserialization policy
 # ---------------------------------------------------------------------------
 
-# dill.loads() can execute arbitrary Python on untrusted input. MMR's ZMQ
-# sockets bind to 127.0.0.1 by default, so the attack surface is same-host
-# processes, but a poisoned peer must never get code execution inside the
-# trading process. Three layers, innermost first:
+# dill.loads() can execute arbitrary Python on untrusted input, and a payload
+# is decoded BEFORE the RPC method check, so any peer that can reach a ZMQ
+# port hands this module a pickle. A poisoned peer must never get code
+# execution, a file write, or a state change inside the trading process.
+# Three layers, innermost first:
 #
 #   1. _RestrictedUnpickler — ALWAYS ON, the actual boundary. Every dill
-#      payload (EXT_OBJECT and the raw-dill legacy fallbacks) is loaded with
-#      a find_class module-prefix allowlist. find_class resolves globals
-#      BEFORE any REDUCE opcode can call them, so a hostile global
-#      (os.system, builtins.eval, dill._dill._create_function, ...) is
-#      refused before embedded code runs — unlike the top-level type check
-#      in layer 2, which only sees the object after the fact.
+#      payload (EXT_OBJECT and the raw-dill legacy fallbacks) is loaded by it.
+#      See "The boundary" below.
 #
 #   2. _dill_type_whitelist — optional registry callers can populate to
 #      additionally restrict the TOP-LEVEL type of the loaded object (by
@@ -92,206 +95,667 @@ class DillDeserializationError(RuntimeError):
     or cannot be decoded at all."""
 
 
-# Module prefixes a dill payload may reference. Derived by round-trip testing
-# the real wire types (Ticker/Trade/Contract on PubSub+RPC, SuccessFail,
-# Signal on the MessageBus, tz-aware datetimes, numpy/pandas scalars) — see
-# tests/test_serialization.py::TestDomainTypeRoundTrip.
-_DILL_ALLOWED_MODULE_PREFIXES: Tuple[str, ...] = (
-    'trader',
-    'ib_async',
-    'eventkit',
-    'numpy',
-    'pandas',
-    'datetime',
-    'zoneinfo',
-    'pytz',
-    'dateutil',
-    'decimal',
-    'fractions',
-    'collections',
-    'enum',
-    'dataclasses',
-    'uuid',
-    'copyreg',
-    '_codecs',
-)
+# The boundary (rewritten 2026-11-14, docs/AUDIT_2026-11-14.md B2.1)
+# ------------------------------------------------------------------
+# A pickle is a program for a small stack machine. Four of its instructions
+# reach outside the byte stream:
+#
+#   GLOBAL / STACK_GLOBAL   import a module and fetch a name
+#   REDUCE                  call an object on the stack with arguments
+#   NEWOBJ / NEWOBJ_EX      cls.__new__(cls, *args)
+#   BUILD                   obj.__setstate__(state), or write obj.__dict__ /
+#                           setattr(obj, ...) directly
+#
+# The previous boundary policed only the first — WHICH NAMES may be fetched,
+# by module prefix — and trusted the other three with whatever reached the
+# stack. Each of these returned normally from unpack():
+#
+#   numpy.memmap(path, 'uint8', 'w+', 0, (1,))        truncated a file: "any
+#       class under an allowed prefix" admits constructors with side effects
+#   getattr(numpy.ndarray, 'tofile')(arr, path)        wrote chosen bytes to a
+#       file: the guarded getattr returned ANY non-dunder attribute
+#   getattr(pandas.DataFrame, 'eval')(df, '...')       ran an expression
+#   RiskLimits + BUILD                                 setattr on the live CLASS
+#       (max_position_size_pct = 1e18 for every later RiskLimits())
+#   dill._dill._create_namedtuple('Popen', (), 'subprocess')(argv)
+#       ran a command: that "pure-data" helper imports the module it is told
+#       to and returns ANY class in it (found while fixing the four above)
+#
+# What is enforced now, at the instruction that does the work:
+#
+#   names   EXACT (module, qualname) pairs in _DILL_GLOBALS. No prefixes: a
+#           name that is not listed is never imported. An attribute lookup is
+#           an EXACT (owner, attribute) pair in _DILL_ATTRIBUTES.
+#   calls   REDUCE may call only an object this module itself resolved from
+#           those tables (checked by identity, so a callable produced some
+#           other way is refused whatever its name), only if the entry grants
+#           _CALL, and only with arguments its check accepts. A class that is
+#           built by allocation (every dataclass) is NOT callable: its
+#           __init__ / __post_init__ never run on wire data.
+#   helpers that call or import on the pickle's behalf (_create_namedtuple,
+#           _create_array, _load_type, getattr, numpy.dtype) are replaced by
+#           stand-ins that apply the same tables to their arguments.
+#   NEWOBJ  only for a class whose entry grants _NEW.
+#   BUILD   only on an object THIS load allocated (NEWOBJ, or a REDUCE whose
+#           entry is _FRESH). That is what stops state being written onto a
+#           class, a function, a module — or onto a shared instance such as an
+#           enum member or a cached timezone, which the old gate also allowed.
+#   numpy   state is checked before numpy applies it (numpy does not check it
+#           itself; see _checked_dtype_state / _checked_array_state).
+#   APPEND(S) / SETITEM(S) / ADDITEMS only on a real list / dict / set / deque.
+#   INST, OBJ, EXT*, PERSID, BINPERSID are refused: pickle protocols 2+ never
+#           emit them for these types.
+#
+# REDUCE, NEWOBJ and BUILD can only be intercepted in the pure-Python
+# unpickler (the C one exposes find_class and nothing else), so that is the
+# base class. Measured on the hot payloads (2026-11-14, M-series laptop): a
+# Ticker decodes in 0.14 ms instead of 0.02 ms, a Trade in 0.23 ms instead of
+# 0.04 ms, a 20-trade reply in 3.4 ms instead of 0.6 ms. dill.dumps of the
+# same objects costs 0.28 / 0.43 / 5.1 ms, so decoding is still the cheaper
+# half of a round trip.
+#
+# WHY EXACT LISTS AND NOT A NARROW PREFIX. A prefix is a promise about code
+# nobody here has read; every hole above was an unread member of an allowed
+# package. The price is brittleness, and it is paid in the right place:
+# tests/test_serialization_security.py round-trips a representative instance
+# of every production wire type (tests/wire_corpus.py) and asserts that every
+# class ib_async's data modules define is listed, so a library upgrade that
+# adds or moves a class fails the suite instead of dropping live messages. A
+# refused name is reported with its exact (module, name), so the fix is one
+# reviewed line here.
+#
+# Deliberately NOT listed. Refused by the previous gate too: pandas objects —
+# a DataFrame crosses as Arrow IPC (EXT_DATAFRAME), never as a pickle, and
+# rebuilding one from a pickle means driving pandas._libs block / index
+# internals with attacker-chosen state; pd.Timestamp / Timedelta / NaT inside
+# a pickled object (top level they are datetimes); pytz and dateutil-file
+# timezones (their rebuilders are functions over shared caches — zoneinfo,
+# datetime.timezone and dateutil tzutc / tzoffset / tzlocal ARE listed);
+# `range` (dill encodes it as dill._dill._eval_repr, i.e. eval). Accepted
+# before and refused now: numpy structured / sub-array dtypes (see above),
+# and anything else that happened to live under an old prefix. Dropped as
+# unused: copyreg._reconstructor / __newobj__ and _codecs.encode (protocol
+# < 2 artefacts, never emitted at dill's protocol 4), numpy.core.* (numpy 1
+# spelling; both ends run the same lock).
 
-# Curated builtins. Notable omissions: eval, exec, compile, __import__, open,
-# getattr, setattr, delattr, vars, globals — the classic pickle-escape
-# gadgets. getattr IS required by legit payloads (ZoneInfo pickles via
-# getattr(cls, '_unpickle')) so it resolves to _guarded_getattr instead.
-_DILL_SAFE_BUILTINS = frozenset((
-    'bool', 'bytearray', 'bytes', 'complex', 'dict', 'float', 'frozenset',
-    'int', 'list', 'object', 'range', 'set', 'slice', 'str', 'tuple',
-    # exception types cross the wire inside SuccessFail.fail and RPC errors
-    'BaseException', 'Exception', 'ArithmeticError', 'AssertionError',
-    'AttributeError', 'BufferError', 'ConnectionError', 'EOFError',
-    'FileNotFoundError', 'IndexError', 'InterruptedError', 'KeyError',
-    'LookupError', 'MemoryError', 'NotImplementedError', 'OSError',
-    'OverflowError', 'PermissionError', 'RecursionError', 'RuntimeError',
-    'StopAsyncIteration', 'StopIteration', 'TimeoutError', 'TypeError',
-    'ValueError', 'ZeroDivisionError',
-))
-
-# Types dill._dill._load_type may resolve. Deliberately excludes CodeType,
-# FunctionType, MethodType, CellType, ModuleType, ... — resolving those lets
-# a pickle build and then call arbitrary code with plain REDUCE opcodes.
-_DILL_SAFE_LOADED_TYPES = frozenset((
-    type(None), type(NotImplemented), type(Ellipsis),
-    bool, bytearray, bytes, complex, dict, float, frozenset, int, list,
-    object, range, set, slice, str, tuple,
-))
+_CALL = 1     # REDUCE may call it
+_NEW = 2      # NEWOBJ / NEWOBJ_EX may allocate an instance (cls.__new__ only)
+_FRESH = 4    # what a REDUCE call returns is newly allocated: BUILD may fill it
 
 
-def _guarded_getattr(obj, name, *default):
-    # Dunder access is the escape hatch (cls.__globals__, obj.__class__,
-    # type.__subclasses__, ...); legit pickle use is non-dunder classmethod
-    # lookup like ZoneInfo._unpickle.
-    if name.startswith('__'):
+class _Global(typing.NamedTuple):
+    caps: int
+    # Arguments a REDUCE may pass; None accepts any (pure value constructors).
+    check: Optional[Callable[[tuple], bool]] = None
+    # Guarded replacement handed to the pickle instead of the real object.
+    stand_in: Optional[Callable] = None
+
+
+def _args(*kinds) -> Callable[[tuple], bool]:
+    """Check: exactly these positional argument types, in this order."""
+    def check(args: tuple) -> bool:
+        return len(args) == len(kinds) and all(isinstance(a, k) for a, k in zip(args, kinds))
+    return check
+
+
+def _one_arg(args: tuple) -> bool:
+    # Enum lookup by value. A second argument selects Enum's functional API,
+    # which creates a new class.
+    return len(args) == 1
+
+
+def _defaultdict_args(args: tuple) -> bool:
+    # The factory is called later, by whoever reads a missing key.
+    return len(args) == 1 and (args[0] is None or any(
+        args[0] is kind for kind in (list, dict, set, int, float, str, tuple, bool)))
+
+
+def _slice_args(args: tuple) -> bool:
+    return len(args) == 3 and all(a is None or type(a) is int for a in args)
+
+
+def _packed_time_args(args: tuple) -> bool:
+    # datetime / time pickle as (packed_bytes,) or (packed_bytes, tzinfo).
+    return (len(args) in (1, 2) and type(args[0]) is bytes
+            and (len(args) == 1 or isinstance(args[1], dt.tzinfo)))
+
+
+def _timezone_args(args: tuple) -> bool:
+    return (len(args) in (1, 2) and type(args[0]) is dt.timedelta
+            and (len(args) == 1 or type(args[1]) is str))
+
+
+def _deque_args(args: tuple) -> bool:
+    # deque(items, maxlen), or deque() followed by APPENDS when unbounded.
+    return not args or (len(args) == 2 and type(args[0]) in (tuple, list)
+                        and (args[1] is None or type(args[1]) is int))
+
+
+def _tzoffset_args(args: tuple) -> bool:
+    return (len(args) == 2 and (args[0] is None or isinstance(args[0], str))
+            and isinstance(args[1], (dt.timedelta, int, float)))
+
+
+def _reconstruct_args(args: tuple) -> bool:
+    # numpy's own shape: _reconstruct(ndarray, (0,), b'b'), state follows.
+    # EXACTLY ndarray — a subclass here is how memmap / recarray get built.
+    return (len(args) == 3 and args[0] is np.ndarray
+            and type(args[1]) is tuple and args[1] == (0,)
+            and type(args[2]) is bytes and args[2] == b'b')
+
+
+# numpy applies pickled state WITHOUT validating it, and its own docs call
+# unpickling unsafe. Reproduced on numpy 2.5 while writing this boundary:
+# ndarray.__setstate__ with an object dtype and a list shorter than the shape,
+# and a structured dtype with an object field laid over raw bytes, both
+# SEGFAULT the process the first time the array is printed. So numpy never
+# sees state from the wire that has not been checked here first:
+#   * only PLAIN dtypes exist on this path — no fields, no sub-arrays, no
+#     StringDType. (Structured arrays are therefore refused; nothing in MMR
+#     ships one.)
+#   * a dtype's state must be EXACTLY what numpy itself emits for that plain
+#     dtype, and numpy is handed its own tuple, not the pickle's.
+#   * an array's state must agree with itself: shape x itemsize == len(bytes),
+#     or for object arrays len(list) == number of elements.
+_PLAIN_DTYPE_CODE = re.compile(r'[A-Za-z][0-9]*\Z')
+_PLAIN_DTYPE_KINDS = 'biufcmMOSUV'
+
+
+def _plain_dtype(obj) -> bool:
+    return (isinstance(obj, np.dtype) and obj.kind in _PLAIN_DTYPE_KINDS
+            and obj.names is None and obj.subdtype is None)
+
+
+def _checked_dtype_state(target, state) -> tuple:
+    # (version, byteorder, subarray, names, fields, itemsize, alignment, flags
+    #  [, (None, (unit, n, 1, 1))])  — the last only for datetime64/timedelta64.
+    bad = DillDeserializationError(
+        'refusing numpy dtype state in dill payload: not the state of a plain dtype')
+    if not _plain_dtype(target) or type(state) is not tuple or len(state) not in (8, 9) \
+            or type(state[1]) is not str or state[1] not in ('<', '>', '|'):
+        raise bad
+    unit = ''
+    if len(state) == 9:
+        meta = state[8]
+        if not (type(meta) is tuple and len(meta) == 2 and type(meta[1]) is tuple and len(meta[1]) == 4
+                and type(meta[1][0]) is bytes and type(meta[1][1]) is int):
+            raise bad
+        if meta[1][0] != b'generic':
+            unit = f'[{meta[1][1]}{meta[1][0].decode("ascii", "replace")}]'
+    # Rebuild the dtype the state CLAIMS to describe through numpy's public,
+    # validating constructor, and compare what numpy would have pickled.
+    candidate = np.dtype(state[1] + target.str[1:].split('[')[0] + unit)
+    emitted: Any = candidate.__reduce__()[2]
+    if not _plain_dtype(candidate) or (candidate.kind, candidate.itemsize) != (target.kind, target.itemsize) \
+            or type(emitted) is not tuple or emitted != state:
+        raise bad
+    return emitted
+
+
+def _checked_array_state(state) -> tuple:
+    # (version, shape, dtype, is_fortran, data)
+    if type(state) is tuple and len(state) == 5 and type(state[0]) is int and state[0] == 1 \
+            and type(state[1]) is tuple and all(type(n) is int and n >= 0 for n in state[1]) \
+            and _plain_dtype(state[2]) and type(state[3]) is bool:
+        count, dtype, data = math.prod(state[1]), state[2], state[4]
+        if dtype.hasobject:
+            if type(data) is list and len(data) == count:
+                return state
+        elif type(data) is bytes and len(data) == count * dtype.itemsize and (dtype.itemsize or not count):
+            return state
+    raise DillDeserializationError(
+        'refusing numpy array state in dill payload: shape, dtype and data do not agree')
+
+
+def _scalar_args(args: tuple) -> bool:
+    return (len(args) == 2 and _plain_dtype(args[0]) and not args[0].hasobject
+            and type(args[1]) is bytes and len(args[1]) == args[0].itemsize)
+
+
+def _clip(text, limit: int = 120) -> str:
+    # Names in a refusal come from the payload; keep them printable and short.
+    text = repr(text)
+    return text if len(text) <= limit else text[:limit] + '...'
+
+
+def _describe(obj) -> str:
+    if isinstance(obj, type):
+        return f'class {obj.__module__}.{obj.__qualname__}'
+    if isinstance(obj, (types.FunctionType, types.BuiltinFunctionType, types.MethodType)):
+        return f'function {getattr(obj, "__module__", "?")}.{getattr(obj, "__qualname__", "?")}'
+    if isinstance(obj, types.ModuleType):
+        return f'module {obj.__name__}'
+    return f'a {type(obj).__module__}.{type(obj).__qualname__} instance'
+
+
+def _guarded_getattr(*args):
+    # Legit pickles use getattr for exactly one thing here: ZoneInfo pickles
+    # as getattr(ZoneInfo, '_unpickle')(key, from_cache). "Any non-dunder
+    # attribute" also handed out ndarray.tofile and DataFrame.eval.
+    if len(args) != 2 or type(args[1]) is not str:
+        raise DillDeserializationError('refusing getattr in dill payload: expected (owner, name)')
+    owner, name = args
+    entry = _policy_by_id.get(id(owner))
+    key = entry[2] if entry is not None and entry[0] is owner else None
+    spec = _DILL_ATTRIBUTES.get((key, name)) if key is not None else None
+    if spec is None:
         raise DillDeserializationError(
-            f'refusing getattr({type(obj).__name__}, {name!r}) in dill payload: '
-            'dunder attribute access is not permitted')
-    return getattr(obj, name, *default)
+            f'refusing getattr({_describe(owner)}, {_clip(name)}) in dill payload: '
+            'not on the attribute allowlist')
+    target = _resolved_attributes.get((key, name))
+    if target is None:
+        with _resolve_lock:
+            target = _resolved_attributes.get((key, name))
+            if target is None:
+                target = getattr(owner, name)
+                _policy_by_id[id(target)] = (target, spec, (key, name))
+                _resolved_attributes[(key, name)] = target
+    return target
 
 
-def _guarded_load_type(name):
-    loaded = dill._dill._load_type(name)
-    if isinstance(loaded, type) and (
-            issubclass(loaded, BaseException) or loaded in _DILL_SAFE_LOADED_TYPES):
+# Types dill._dill._load_type may hand back that are only ever REFERENCED.
+# Everything else it resolves must be a listed builtin (a value type or an
+# exception) — never CodeType / FunctionType / MethodType / CellType /
+# ModuleType, which let a pickle assemble and call arbitrary code.
+_DILL_INERT_LOADED_TYPES = (type(None), type(NotImplemented), type(Ellipsis))
+
+
+def _guarded_load_type(*args):
+    if len(args) != 1 or type(args[0]) is not str:
+        raise DillDeserializationError('refusing dill._dill._load_type in dill payload: expected (name,)')
+    try:
+        loaded = dill._dill._load_type(args[0])
+    except KeyError:
+        loaded = None
+    if any(loaded is kind for kind in _DILL_INERT_LOADED_TYPES):
+        return loaded
+    if isinstance(loaded, type) and loaded.__module__ == 'builtins' \
+            and ('builtins', loaded.__name__) in _DILL_GLOBALS \
+            and _resolve_global('builtins', loaded.__name__) is loaded:
         return loaded
     raise DillDeserializationError(
-        f'refusing dill._dill._load_type({name!r}) in dill payload')
+        f'refusing dill._dill._load_type({_clip(args[0])}) in dill payload')
 
 
-# Globals legit payloads need but that are too powerful to hand over as-is —
-# find_class resolves them to guarded stand-ins.
-_DILL_GLOBAL_SUBSTITUTIONS: Dict[Tuple[str, str], Callable] = {
-    ('builtins', 'getattr'): _guarded_getattr,
-    ('dill._dill', '_load_type'): _guarded_load_type,
+def _guarded_create_namedtuple(*args):
+    # dill pickles a namedtuple CLASS as _create_namedtuple(name, fields,
+    # module[, defaults]). The real helper imports `module` and returns any
+    # class it finds there (subprocess.Popen included), or else manufactures a
+    # new class. Here it is a lookup in the same table as every other name.
+    if len(args) not in (3, 4) or type(args[0]) is not str or type(args[2]) is not str:
+        raise DillDeserializationError(
+            'refusing dill._dill._create_namedtuple in dill payload: expected (name, fields, module)')
+    cls = _resolve_global(args[2], args[0])
+    if not (isinstance(cls, type) and issubclass(cls, tuple) and hasattr(cls, '_fields')):
+        raise DillDeserializationError(
+            f'refusing dill._dill._create_namedtuple({_clip(args[0])}, ..., {_clip(args[2])}): '
+            'not a namedtuple class')
+    return cls
+
+
+def _guarded_create_array(*args):
+    # dill pickles an ndarray as _create_array(f, args, state, npdict), and
+    # the real helper CALLS f. Only numpy's own rebuilder, only its own
+    # argument shape, and no instance __dict__ (plain ndarrays have none).
+    if len(args) not in (3, 4) or (len(args) == 4 and args[3] is not None) \
+            or args[0] is not _resolve_global('numpy._core.multiarray', '_reconstruct') \
+            or type(args[1]) is not tuple or not _reconstruct_args(args[1]):
+        raise DillDeserializationError(
+            'refusing dill._dill._create_array in dill payload: not a plain numpy.ndarray rebuild')
+    state = _checked_array_state(args[2])
+    array = args[0](*args[1])
+    array.__setstate__(state)
+    return array
+
+
+def _guarded_numpy_dtype(*args):
+    # numpy pickles a dtype as dtype(<code>, False, True) followed by BUILD,
+    # which rewrites the byte order IN PLACE. copy=True is what makes the
+    # target a private object; dtype('f8') alone is the process-wide float64
+    # singleton, and NEWOBJ would return that singleton too (so no _NEW).
+    # The code is one type letter and a size: 'i4,O' or '(2,3)f8' would build
+    # a structured / sub-array dtype straight from the string.
+    if len(args) != 3 or type(args[0]) is not str or args[1] is not False or args[2] is not True \
+            or not _PLAIN_DTYPE_CODE.match(args[0]):
+        raise DillDeserializationError(
+            'refusing numpy.dtype in dill payload: expected (code, False, True)')
+    made = np.dtype(args[0], False, True)
+    if made is np.dtype(args[0]) or not _plain_dtype(made):
+        raise DillDeserializationError('refusing numpy.dtype in dill payload: not a private plain dtype')
+    return made
+
+
+# ---- The allowlist. Harvested by instrumenting find_class / REDUCE / NEWOBJ /
+# BUILD / getattr over the full test suite plus a representative instance of
+# every type that crosses RPC, PubSub and the MessageBus (tests/wire_corpus.py),
+# then read entry by entry. To admit a new wire type add ONE line here and one
+# instance to that corpus. Before granting _CALL, read the constructor: it
+# runs on attacker-chosen arguments. Before granting _NEW, check the class has
+# no __del__, no __setstate__ with side effects and no property setters: BUILD
+# writes its attributes (TestAllowlistShape asserts the mechanical parts).
+_DILL_GLOBALS: Dict[Tuple[str, str], _Global] = {}
+
+
+def _allow(module: str, names: str, caps: int,
+           check: Optional[Callable[[tuple], bool]] = None) -> None:
+    spec = _Global(caps, check)
+    for name in names.split():
+        _DILL_GLOBALS[(module, name)] = spec
+
+
+# builtins: value types. A protocol-4 pickle builds ints, strings, bytes,
+# lists, tuples, dicts and sets with its own opcodes, so these are only ever
+# REFERENCED (defaultdict(list), a type stored as a value) — they are not
+# callable from the wire. That matters: list(range(10**9)) is two allowed
+# names and eight gigabytes, and str(x) / dict(x) run x's own methods.
+# Absent on purpose: eval, exec, compile, __import__, open, setattr, delattr,
+# vars, globals, type, and the real getattr (see _guarded_getattr).
+_allow('builtins', 'bool bytes dict float frozenset int list object range set str tuple', 0)
+# The three builtins pickle does rebuild by calling them, in the shape it uses.
+_allow('builtins', 'bytearray', _CALL, _args(bytes))
+_allow('builtins', 'complex', _CALL, _args(float, float))
+_allow('builtins', 'slice', _CALL, _slice_args)
+# builtins: every exception class EXCEPT the three that end a process when
+# raised. They cross inside SuccessFail.fail and RPC error args; constructing
+# one stores its arguments and nothing else. dill names them through
+# _load_type, which resolves against these same entries.
+_allow('builtins', ' '.join(sorted(
+    name for name, obj in vars(builtins).items()
+    if isinstance(obj, type) and issubclass(obj, BaseException) and obj.__name__ == name
+    and not issubclass(obj, (SystemExit, KeyboardInterrupt, GeneratorExit)))), _CALL | _FRESH)
+
+# Standard-library values, each in exactly the argument shape its own
+# __reduce__ produces — these constructors accept far more than that.
+_allow('datetime', 'date', _CALL, _args(bytes))
+_allow('datetime', 'datetime time', _CALL, _packed_time_args)
+_allow('datetime', 'timedelta', _CALL, _args(int, int, int))
+_allow('datetime', 'timezone', _CALL, _timezone_args)
+_allow('decimal', 'Decimal', _CALL, _args(str))
+_allow('fractions', 'Fraction', _CALL, _args(int, int))
+_allow('uuid', 'UUID', _NEW)
+_allow('collections', 'Counter', _CALL, _args(dict))
+_allow('collections', 'OrderedDict', _CALL, _args())
+_allow('collections', 'deque', _CALL, _deque_args)
+_allow('collections', 'defaultdict', _CALL, _defaultdict_args)
+# Timezones. ZoneInfo is listed only as the owner of the _unpickle lookup in
+# _DILL_ATTRIBUTES (the key is validated by zoneinfo against path traversal).
+# tzutc / tzoffset return cached shared instances, so they are not _FRESH.
+_allow('zoneinfo', 'ZoneInfo', 0)
+_allow('dateutil.tz.tz', 'tzutc', _CALL, _args())
+_allow('dateutil.tz.tz', 'tzoffset', _CALL, _tzoffset_args)
+_allow('dateutil.tz.tz', 'tzlocal', _NEW)
+
+# numpy: plain arrays and scalars. `ndarray` is listed only so it can be
+# NAMED as the first argument of _reconstruct; it grants nothing itself.
+# Absent on purpose: memmap, recarray, matrix, ma.*, lib.npyio, fromfile,
+# load, save, and every other numpy name.
+_allow('numpy', 'ndarray', 0)
+_allow('numpy._core.multiarray', '_reconstruct', _CALL | _FRESH, _reconstruct_args)
+_allow('numpy._core.multiarray', 'scalar', _CALL, _scalar_args)
+_DILL_GLOBALS[('numpy', 'dtype')] = _Global(_CALL | _FRESH, stand_in=_guarded_numpy_dtype)
+
+# Helpers that call, import or look things up on the pickle's behalf: the
+# real ones are never handed out.
+_DILL_GLOBALS[('builtins', 'getattr')] = _Global(_CALL, stand_in=_guarded_getattr)
+_DILL_GLOBALS[('dill._dill', '_load_type')] = _Global(_CALL, stand_in=_guarded_load_type)
+_DILL_GLOBALS[('dill._dill', '_create_namedtuple')] = _Global(_CALL, stand_in=_guarded_create_namedtuple)
+_DILL_GLOBALS[('dill._dill', '_create_array')] = _Global(_CALL, stand_in=_guarded_create_array)
+
+# ib_async: the IB data model (contract.py, order.py, objects.py) plus the
+# Ticker. All plain dataclasses / NamedTuples / list subclasses, allocated and
+# then filled — never constructed. Events are the exception: Ticker and Trade
+# carry eventkit Events, which pickle as Event(name, flag) with no listeners.
+# Absent on purpose: IB, Client, Wrapper and the tick-pipeline operators
+# (Tickfilter, TimeBars, ...), which are machinery, not data.
+_allow('ib_async.contract',
+       'Bag Bond CFD ComboLeg Commodity ContFuture Contract ContractDescription '
+       'ContractDetails Crypto DeltaNeutralContract Forex Future FuturesOption Index '
+       'MutualFund Option ScanData Stock Warrant TagValue TradingSession', _NEW)
+_allow('ib_async.order',
+       'BracketOrder ExecutionCondition LimitOrder MarginCondition MarketOrder Order '
+       'OrderComboLeg OrderCondition OrderState OrderStateNumeric OrderStatus '
+       'PercentChangeCondition PriceCondition StopLimitOrder StopOrder TimeCondition '
+       'Trade VolumeCondition', _NEW)
+_allow('ib_async.objects',
+       'AccountValue BarData BarDataList CommissionReport ConnectionStats DOMLevel '
+       'DepthMktDataDescription Dividends DynamicObject EfpData Execution ExecutionFilter '
+       'FamilyCode Fill FundamentalRatios HistogramData HistoricalNews HistoricalSchedule '
+       'HistoricalSession HistoricalTick HistoricalTickBidAsk HistoricalTickLast IBDefaults '
+       'MktDepthData NewsArticle NewsBulletin NewsProvider NewsTick OptionChain '
+       'OptionComputation PnL PnLSingle PortfolioItem Position PriceIncrement RealTimeBar '
+       'RealTimeBarList ScanDataList ScannerSubscription SmartComponent SoftDollarTier '
+       'TickAttrib TickAttribBidAsk TickAttribLast TickByTickAllLast TickByTickBidAsk '
+       'TickByTickMidPoint TickData TradeLogEntry WshEventData', _NEW)
+_allow('ib_async.ticker', 'Ticker', _NEW)
+_allow('ib_async.ticker', 'TickerUpdateEvent', _CALL, _args(str, bool))
+_allow('eventkit.event', 'Event', _CALL, _args(str, bool))
+
+# trader: the wire types, by name. RPC arguments and results
+# (trader_service_api / strategy_service_api), PubSub ('ticker', Ticker) and
+# ('dataclass', UpdateEvent | RemoveEvent), MessageBus ('signal', Signal).
+# Nothing else in the package is reachable — RiskLimits, RPCClient, the
+# stores and the runtimes included.
+_allow('trader.common.reactivex', 'SuccessFail', _NEW)
+_allow('trader.common.reactivex', 'SuccessFailEnum', _CALL, _one_arg)
+_allow('trader.common.dataclass_cache', 'UpdateEvent RemoveEvent', _NEW)
+_allow('trader.common.exceptions', 'TraderException TraderConnectionException', _CALL | _FRESH)
+_allow('trader.data.data_access', 'PortfolioSummary SecurityDefinition', _NEW)
+_allow('trader.data.universe', 'Universe', _NEW)
+_allow('trader.objects', 'TradeLogSimple', _NEW)
+_allow('trader.objects',
+       'Action BarSize BasketCondition ExecutorCondition ReportType TickList WhatToShow',
+       _CALL, _one_arg)
+_allow('trader.trading.proposal', 'ExecutionSpec TradeProposal', _NEW)
+_allow('trader.trading.strategy', 'Signal StrategyConfig', _NEW)
+_allow('trader.trading.strategy', 'StrategyState', _CALL, _one_arg)
+
+# (owner, attribute) pairs the guarded getattr may return. The owner is named
+# by its _DILL_GLOBALS key and matched by identity.
+_DILL_ATTRIBUTES: Dict[Tuple[Tuple[str, str], str], _Global] = {
+    (('zoneinfo', 'ZoneInfo'), '_unpickle'): _Global(_CALL, _args(str, int)),
 }
 
-# Explicit whitelist of the non-type reconstruction FUNCTIONS that pickling
-# genuinely needs. Module-prefix allowlisting (below) is the right test for the
-# CLASS of a reconstructed object — a type is inert until instantiated and the
-# REDUCE that follows merely builds an instance of it — but it is the WRONG
-# test for a REDUCE callable that is a plain FUNCTION: pandas.read_pickle,
-# pandas.read_parquet, numpy.load, os.system, builtins.eval and even
-# trader.messaging.RPCClient are all reachable under an allowed prefix, and
-# each runs code / has side effects the instant REDUCE calls it (read_pickle in
-# particular re-enters UNRESTRICTED stdlib pickle.load — a full sandbox escape).
-# So a payload may name a non-type callable ONLY if it is one of these
-# hand-audited, pure-data reconstruction helpers. Derived empirically by
-# collecting every (module, qualname) find_class actually sees while
-# round-tripping the real wire types — see
-# tests/test_serialization.py::TestDomainTypeRoundTrip.
-_DILL_ALLOWED_RECONSTRUCTORS: frozenset = frozenset((
-    ('copyreg', '_reconstructor'),
-    ('copyreg', '__newobj__'),
-    # dill's own pure-data builders (namedtuple classes, numpy arrays). The
-    # code-constructing ones (_create_function, _create_code, _create_type,
-    # _create_cell, _import_module, ...) are deliberately absent.
-    ('dill._dill', '_create_namedtuple'),
-    ('dill._dill', '_create_array'),
-    # numpy array/scalar rebuilders (pure data) + the byte-blob decoder pickle
-    # uses to carry raw array/string payloads.
-    ('numpy', '_reconstruct'),
-    ('numpy.core.multiarray', '_reconstruct'),
-    ('numpy.core.multiarray', 'scalar'),
-    ('numpy._core.multiarray', '_reconstruct'),
-    ('numpy._core.multiarray', 'scalar'),
-    ('_codecs', 'encode'),
-))
-
-# Types in an allowlisted package that are nonetheless refused: messaging
-# infrastructure whose construction has side effects (opens ZMQ contexts /
-# sockets, binds ports) and which is NEVER legitimate wire content. The
-# type-first rule would otherwise admit them because they're classes under the
-# `trader` prefix; a crafted `(RPCClient, args)` REDUCE would run __init__ and
-# stand up a live socket inside the trading process. Denied explicitly so an
-# operator sees a refusal instead of a resurrected client.
-_DILL_DENIED_GLOBALS: frozenset = frozenset((
-    ('trader.messaging.clientserver', 'RPCClient'),
-    ('trader.messaging.clientserver', 'RPCServer'),
-    ('trader.messaging.clientserver', 'MessageBusClient'),
-    ('trader.messaging.clientserver', 'MessageBusServer'),
-    ('trader.messaging.clientserver', 'TopicPubSub'),
-    ('trader.messaging.clientserver', 'MultithreadedTopicPubSub'),
-))
-
-# Memoizes ALLOWED (module, name) pairs only, so hot-path lookups skip the
-# resolve-and-typecheck gate while hostile garbage — which is never cached —
-# can't grow the dict unboundedly.
-_dill_allowed_cache: Dict[Tuple[str, str], bool] = {}
+# Everything the tables have resolved so far. A REDUCE / NEWOBJ target is
+# looked up HERE, by identity — never by its name or by where it sits on the
+# stack — so only an object this module fetched through the tables can be
+# called. Entries are (object, spec, key); holding the object keeps its id
+# from being reused.
+_policy_by_id: Dict[int, Tuple[Any, _Global, Any]] = {}
+_resolved_globals: Dict[Tuple[str, str], Any] = {}
+_resolved_attributes: Dict[Tuple[Any, str], Any] = {}
+_resolve_lock = threading.Lock()
 
 
-def _dill_module_allowed(module: str) -> bool:
-    return any(
-        module == prefix or module.startswith(prefix + '.')
-        for prefix in _DILL_ALLOWED_MODULE_PREFIXES
-    )
+def _policy_of(obj) -> Optional[_Global]:
+    entry = _policy_by_id.get(id(obj))
+    return entry[1] if entry is not None and entry[0] is obj else None
 
 
-class _RestrictedUnpickler(dill.Unpickler):
-    """The deserialization boundary: find_class runs before any REDUCE opcode
-    can call a global, so refusing here means embedded code never executes.
+def _resolve_global(module, name):
+    key = (module, name)
+    target = _resolved_globals.get(key)
+    if target is not None:
+        return target
+    # The table is consulted BEFORE any import, so a module an attacker names
+    # is never loaded.
+    spec = _DILL_GLOBALS.get(key) if type(module) is str and type(name) is str else None
+    if spec is None:
+        raise DillDeserializationError(
+            f'refusing to deserialize global {_clip(f"{module}.{name}")}: not on the allowlist '
+            '(_DILL_GLOBALS in trader/messaging/clientserver.py)')
+    with _resolve_lock:
+        target = _resolved_globals.get(key)
+        if target is None:
+            if spec.stand_in is not None:
+                target = spec.stand_in
+            else:
+                try:
+                    target = importlib.import_module(module)
+                    for part in name.split('.'):
+                        target = getattr(target, part)
+                except (ImportError, AttributeError) as ex:
+                    raise DillDeserializationError(
+                        f'cannot resolve allowlisted global {module}.{name}: {ex}') from ex
+            if spec.caps & _NEW and not isinstance(target, type):
+                raise DillDeserializationError(
+                    f'allowlisted global {module}.{name} is not a class; refusing to allocate it')
+            _policy_by_id[id(target)] = (target, spec, key)
+            _resolved_globals[key] = target
+    return target
 
-    The gate is TYPE-FIRST. Resolving the class of a reconstructed instance is
-    the legitimate case, so a resolved object is admitted when it is a class in
-    an allowlisted package. A non-type callable (a plain function) is admitted
-    only if it is one of the hand-audited pure-data reconstruction helpers —
-    every other function, EVEN under an allowed prefix, is refused, which is
-    what closes the pandas.read_pickle / numpy.load / RPCClient escape."""
+
+def _refused_opcode(opcode_name: str):
+    def refuse(self):
+        raise DillDeserializationError(
+            f'refusing pickle opcode {opcode_name} in dill payload')
+    return refuse
+
+
+_NOT_FRESH = object()
+
+# The pure-Python unpickler: the only one whose per-opcode handlers
+# (load_reduce, load_build, ...) and stack can be overridden. Typed Any because
+# typeshed describes just its public surface.
+_PyUnpickler: Any = pickle._Unpickler
+
+
+class _RestrictedUnpickler(_PyUnpickler):
+    """The deserialization boundary. See "The boundary" above: names are an
+    exact allowlist, and REDUCE / NEWOBJ / BUILD are each checked at the
+    instruction that performs them rather than trusted once a name resolved."""
+
+    def __init__(self, file):
+        super().__init__(file)
+        # Objects this load allocated: the only legal BUILD targets.
+        self._fresh: Dict[int, Any] = {}
 
     def find_class(self, module, name):
-        key = (module, name)
+        return _resolve_global(module, name)
 
-        # Powerful-but-needed globals resolve to guarded stand-ins. The
-        # substitution dict is itself the cache for these.
-        substitute = _DILL_GLOBAL_SUBSTITUTIONS.get(key)
-        if substitute is not None:
-            return substitute
+    def persistent_load(self, pid):
+        raise DillDeserializationError('refusing persistent id in dill payload')
 
-        # Hot path: only ALLOWED pairs are ever memoized (refusals never are),
-        # so a cache hit is always safe to resolve.
-        if key not in _dill_allowed_cache:
-            if not self._resolution_allowed(module, name):
-                raise DillDeserializationError(
-                    f'refusing to deserialize global {module}.{name}: '
-                    'not a permitted reconstruction target')
-            _dill_allowed_cache[key] = True
+    def load_reduce(self):
+        stack = self.stack
+        args = stack.pop()
+        func = stack[-1]
+        spec = _policy_of(func)
+        if spec is None or not spec.caps & _CALL:
+            raise DillDeserializationError(
+                f'refusing to call {_describe(func)} from a dill payload: not a permitted callable')
+        if type(args) is not tuple or (spec.check is not None and not spec.check(args)):
+            raise DillDeserializationError(
+                f'refusing to call {_describe(func)} from a dill payload: unexpected arguments')
+        result = func(*args)
+        if spec.caps & _FRESH:
+            self._fresh[id(result)] = result
+        stack[-1] = result
 
-        return super().find_class(module, name)
+    def _allocate(self, cls, args, kwargs):
+        spec = _policy_of(cls)
+        if spec is None or not spec.caps & _NEW or not isinstance(cls, type) \
+                or type(args) is not tuple or type(kwargs) is not dict:
+            raise DillDeserializationError(
+                f'refusing to allocate {_describe(cls)} from a dill payload: not a permitted class')
+        obj = cls.__new__(cls, *args, **kwargs)
+        if type(obj) is not cls:
+            raise DillDeserializationError(
+                f'refusing dill payload: allocating {_describe(cls)} returned another type')
+        self._fresh[id(obj)] = obj
+        return obj
 
-    def _resolution_allowed(self, module: str, name: str) -> bool:
-        # Explicitly-denied infrastructure types (side-effectful construction,
-        # never legitimate wire content) — refused even though they're classes
-        # under an allowed prefix.
-        if (module, name) in _DILL_DENIED_GLOBALS:
-            return False
-        # Hand-audited pure-data reconstruction functions.
-        if (module, name) in _DILL_ALLOWED_RECONSTRUCTORS:
-            return True
-        # Safe builtins subset — every entry resolves to a data type or an
-        # exception type; the code-exec gadgets (eval/exec/open/__import__/...)
-        # are absent by omission.
-        if module == 'builtins':
-            return name in _DILL_SAFE_BUILTINS
-        # Everything else must resolve to a TYPE living in an allowlisted
-        # package. The module gate runs BEFORE resolution so an attacker-named
-        # module is never even imported. A type is inert (the REDUCE builds an
-        # instance); a plain function under the same prefix is a side-effecting
-        # callable and is refused here.
-        if not _dill_module_allowed(module):
-            return False
-        try:
-            obj = super().find_class(module, name)
-        except Exception:
-            return False
-        return isinstance(obj, type)
+    def load_newobj(self):
+        args = self.stack.pop()
+        cls = self.stack.pop()
+        self.append(self._allocate(cls, args, {}))
+
+    def load_newobj_ex(self):
+        kwargs = self.stack.pop()
+        args = self.stack.pop()
+        cls = self.stack.pop()
+        self.append(self._allocate(cls, args, kwargs))
+
+    def load_build(self):
+        # BUILD sets state on whatever is under it — an instance, but equally
+        # a class, a function, or a shared singleton an earlier call returned.
+        target = self.stack[-2]
+        if self._fresh.get(id(target), _NOT_FRESH) is not target:
+            raise DillDeserializationError(
+                f'refusing BUILD on {_describe(target)} in dill payload: state may only be '
+                'set on an object this payload allocated')
+        state = self.stack[-1]
+        if isinstance(target, np.dtype):
+            self.stack[-1] = _checked_dtype_state(target, state)
+        elif isinstance(target, np.ndarray):
+            self.stack[-1] = _checked_array_state(state)
+        elif type(state) is tuple and len(state) == 2 and not hasattr(target, '__setstate__'):
+            # (dict, slots) state is applied with setattr, which reaches
+            # __class__ and property setters. No listed class pickles this way.
+            raise DillDeserializationError(
+                f'refusing BUILD with slot state on {_describe(target)} in dill payload')
+        super().load_build()
+
+    def _require(self, target, kinds, opcode_name):
+        # These opcodes call .append / .extend / .add / __setitem__ on whatever
+        # is on the stack; a class is not an instance of any of these.
+        if not isinstance(target, kinds):
+            raise DillDeserializationError(
+                f'refusing {opcode_name} on {_describe(target)} in dill payload')
+
+    def load_append(self):
+        self._require(self.stack[-2], (list, collections.deque), 'APPEND')
+        super().load_append()
+
+    def load_appends(self):
+        self._require(self.metastack[-1][-1], (list, collections.deque), 'APPENDS')
+        super().load_appends()
+
+    def load_setitem(self):
+        self._require(self.stack[-3], dict, 'SETITEM')
+        super().load_setitem()
+
+    def load_setitems(self):
+        self._require(self.metastack[-1][-1], dict, 'SETITEMS')
+        super().load_setitems()
+
+    def load_additems(self):
+        self._require(self.metastack[-1][-1], set, 'ADDITEMS')
+        super().load_additems()
+
+    dispatch = {
+        **_PyUnpickler.dispatch,
+        pickle.REDUCE[0]: load_reduce,
+        pickle.NEWOBJ[0]: load_newobj,
+        pickle.NEWOBJ_EX[0]: load_newobj_ex,
+        pickle.BUILD[0]: load_build,
+        pickle.APPEND[0]: load_append,
+        pickle.APPENDS[0]: load_appends,
+        pickle.SETITEM[0]: load_setitem,
+        pickle.SETITEMS[0]: load_setitems,
+        pickle.ADDITEMS[0]: load_additems,
+        # Old-style instantiation, the copyreg extension registry and
+        # persistent ids: never emitted for these types at protocol >= 2.
+        **{getattr(pickle, opcode_name)[0]: _refused_opcode(opcode_name)
+           for opcode_name in ('INST', 'OBJ', 'EXT1', 'EXT2', 'EXT4', 'PERSID', 'BINPERSID')},
+    }
 
 
 def _restricted_dill_loads(data: bytes):
-    return _RestrictedUnpickler(io.BytesIO(data)).load()
+    try:
+        return _RestrictedUnpickler(io.BytesIO(data)).load()
+    except DillDeserializationError:
+        raise
+    except Exception as ex:
+        # A malformed stream, or a permitted constructor rejecting its
+        # arguments: one structured error type for "this payload did not
+        # decode", whatever the unpickler happened to raise. The text can
+        # quote the payload, so it is clipped.
+        try:
+            detail = str(ex)
+        except Exception:
+            detail = ''
+        raise DillDeserializationError(
+            f'dill payload could not be decoded: {type(ex).__name__}: {_clip(detail, 300)}') from ex
 
 
 def _safe_dill_loads(data: bytes):
