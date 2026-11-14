@@ -34,6 +34,13 @@ class VwapReclaim(Strategy):
     EOD_MINUTE = 45
     MIN_BARS = 60
     RTH_OPEN_MIN = 9 * 60 + 30
+    # Session VWAP, the "open" reference and the day's low are all built from
+    # whatever bars of today the frame holds. A frame whose today starts late
+    # (a deploy or reload after the open, a start whose history backfill
+    # failed) gives a VWAP of the partial session and an "open" that is not the
+    # open. Entries are refused for the whole day unless its first in-session
+    # bar is no later than this many minutes after RTH_OPEN_MIN.
+    SESSION_START_TOLERANCE_MIN = 2
 
     def precompute(self, prices: pd.DataFrame) -> Dict[str, Any]:
         if len(prices) < self.MIN_BARS:
@@ -60,9 +67,23 @@ class VwapReclaim(Strategy):
 
         # Cumulative intraday minimum of low (resets daily)
         day_low = prices["low"].groupby(et_date).cummin().to_numpy()
-        # First VWAP of each day (snapshot at RTH open — close approximation)
+        # First VWAP of each day (snapshot at RTH open — close approximation).
+        # Masked to bars at/after the day's first in-session bar: transform
+        # ("first") alone also writes it onto the pre-market bars BEFORE that
+        # bar exists (a value at i depending on a later bar). on_bar only reads
+        # it inside the entry window, so signals are unchanged.
         rth_mask_ser = pd.Series(rth_mask, index=prices.index)
-        open_vwap_per_day = prices["close"].where(rth_mask_ser).groupby(et_date).transform("first").to_numpy()
+        session_started = rth_mask_ser.groupby(et_date).cummax()
+        open_vwap_per_day = (prices["close"].where(rth_mask_ser).groupby(et_date).transform("first")
+                             .where(session_started).to_numpy())
+
+        # The day is tradeable only if its first in-session bar is at the open
+        # (within SESSION_START_TOLERANCE_MIN). NaN — hence False — before that
+        # bar and outside the session, so the flag at i uses bars <= i only.
+        session_minute = pd.Series(et_minute, index=prices.index, dtype=float).where(rth_mask_ser)
+        first_session_minute = session_minute.groupby(et_date).cummin()
+        session_ok = (first_session_minute
+                      <= self.RTH_OPEN_MIN + self.SESSION_START_TOLERANCE_MIN).to_numpy()
 
         vol_avg = prices["volume"].rolling(self.VOL_WINDOW).mean().to_numpy()
 
@@ -78,6 +99,7 @@ class VwapReclaim(Strategy):
             "vol_avg": vol_avg,
             "rth": rth_mask,
             "entry_window": entry_mask,
+            "session_ok": session_ok,
             "et_minute": et_minute,
         }
 
@@ -101,6 +123,8 @@ class VwapReclaim(Strategy):
             return None
         if not state["entry_window"][index]:
             return None
+        if not state["session_ok"][index]:
+            return None  # today's bars start after the open — VWAP/open/low are partial
 
         close = state["close"][index]
         vwap = state["vwap"][index]

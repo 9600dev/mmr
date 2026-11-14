@@ -6,14 +6,21 @@ breaks above the range-high with above-average volume; SELL when close
 breaks below the range-low. Trades are filtered to regular trading hours
 (09:30–16:00 ET); pre-market and after-hours bars don't participate.
 
+The range is the high/low of the bars PRESENT in the window, so it is only
+trusted for entries when the window is complete enough: its first bar within
+RANGE_START_TOLERANCE_MIN minutes of the session open and at least
+RANGE_MIN_BAR_FRACTION of its expected bars. A day whose frame starts late (a
+deploy or reload after the open, a failed history backfill) takes no entry.
+
 Uses the precompute hook so the per-day range and volume average are
 computed once over the full series.
 """
 
 from trader.trading.strategy import Signal, Strategy
-from trader.objects import Action
+from trader.objects import Action, BarSize
 from typing import Any, Dict, Optional
 
+import math
 import numpy as np
 import pandas as pd
 
@@ -32,6 +39,24 @@ class OpeningRangeBreakout(Strategy):
     RTH_OPEN_MIN = 9 * 60 + 30     # session open, minutes since SESSION_TZ midnight
     RTH_CLOSE_MIN = 16 * 60        # session close, minutes since SESSION_TZ midnight
     MIN_BARS = 40
+    # Opening-range validity (entries only). The range is the high/low of the
+    # bars PRESENT in the window, so a frame whose today starts late — a deploy
+    # or reload between the open and the end of the window, or a start whose
+    # history backfill failed — used to yield the range of a PARTIAL window and
+    # trade breakouts of it (today from 09:50: range high 100.02 and a BUY,
+    # against a real range high of 101.5). A day's range is valid only when
+    #   * the window's first bar is no later than RANGE_START_TOLERANCE_MIN
+    #     minutes after the session open, AND
+    #   * the window holds at least RANGE_MIN_BAR_FRACTION of the bars a
+    #     complete one has (RANGE_MINUTES / the bar interval).
+    # Otherwise orb_high/orb_low are NaN for that day and no entry is taken.
+    # The exit (close below the low of the window bars that WERE seen) is
+    # unchanged, so a position carried into such a day can still be closed.
+    # A venue with a staggered open (ASX: groups open 10:00–10:09) needs a
+    # wider tolerance or a per-instrument RTH_OPEN_MIN when its bars come from
+    # trades only.
+    RANGE_START_TOLERANCE_MIN = 2
+    RANGE_MIN_BAR_FRACTION = 0.8
     # Exit management. Without these, the ONLY exit is a fresh volume-
     # confirmed cross below the day's range-low — a slow low-volume bleed or
     # an overnight gap below the next day's range never fires it, so losers
@@ -75,6 +100,25 @@ class OpeningRangeBreakout(Strategy):
         params = getattr(self, 'params', None) or {}
         return params[key] if key in params else default
 
+    def _bar_minutes(self) -> float:
+        """Bar interval in minutes, from the deployment context (the backtester
+        and the live runtime both install one); 1 minute without a context."""
+        try:
+            bar_size = getattr(getattr(self, '_context', None), 'bar_size', None)
+            if bar_size is not None:
+                minutes = pd.Timedelta(BarSize.to_pandas_freq(bar_size)).total_seconds() / 60.0
+                if minutes > 0 and math.isfinite(minutes):
+                    return minutes
+        except Exception:
+            pass
+        return 1.0
+
+    def _min_window_bars(self, range_min: int) -> int:
+        """Bars the opening-range window must hold for the range to be valid."""
+        expected = max(1, math.ceil(range_min / self._bar_minutes() - 1e-9))
+        fraction = float(self._cfg('RANGE_MIN_BAR_FRACTION', self.RANGE_MIN_BAR_FRACTION))
+        return max(1, math.ceil(fraction * expected - 1e-9))
+
     def precompute(self, prices: pd.DataFrame) -> Dict[str, Any]:
         if len(prices) < self.MIN_BARS:
             return {}
@@ -83,6 +127,8 @@ class OpeningRangeBreakout(Strategy):
         rth_open = int(self._cfg('RTH_OPEN_MIN', self.RTH_OPEN_MIN))
         rth_close = int(self._cfg('RTH_CLOSE_MIN', self.RTH_CLOSE_MIN))
         range_min = int(self._cfg('RANGE_MINUTES', self.RANGE_MINUTES))
+        start_tolerance = int(self._cfg('RANGE_START_TOLERANCE_MIN', self.RANGE_START_TOLERANCE_MIN))
+        min_window_bars = self._min_window_bars(range_min)
 
         # Convert to the session timezone so "market open" has a stable
         # definition year-round and works on any exchange (US/ASX/LSE/…).
@@ -110,8 +156,16 @@ class OpeningRangeBreakout(Strategy):
         # a bar AT index i knows the ORB of its containing day provided the
         # ORB window has closed by i's timestamp — otherwise leave NaN so
         # on_bar refuses to trade before the range is complete.
+        #
+        # orb_high/orb_low are the VALIDATED range (entries): NaN for the whole
+        # day when the window started late or is too sparse (see
+        # RANGE_START_TOLERANCE_MIN / RANGE_MIN_BAR_FRACTION). exit_low is the
+        # low of whatever window bars were seen, valid or not, and only ever
+        # closes a position. Everything here is known once the window has
+        # closed, so a value at bar i depends on bars <= i only.
         orb_high = np.full(len(prices), np.nan, dtype=float)
         orb_low = np.full(len(prices), np.nan, dtype=float)
+        exit_low = np.full(len(prices), np.nan, dtype=float)
 
         # Groupby day, compute running max/min over the ORB window, carry
         # forward after the window closes. Simple single pass.
@@ -120,24 +174,43 @@ class OpeningRangeBreakout(Strategy):
         running_lo = np.inf
         locked_hi = np.nan
         locked_lo = np.nan
+        seen_lo = np.nan
+        decided = False
+        first_minute = -1          # session minute of today's first window bar
+        last_minute = -1           # last window minute counted (duplicates count once)
+        window_bars = 0
         for i in range(len(prices)):
             d = et_date[i]
             if d != current_day:
                 current_day = d
                 running_hi, running_lo = -np.inf, np.inf
                 locked_hi, locked_lo = np.nan, np.nan
+                seen_lo = np.nan
+                decided = False
+                first_minute, last_minute, window_bars = -1, -1, 0
 
             if orb_mask[i]:
                 if high[i] > running_hi: running_hi = high[i]
                 if low[i] < running_lo:  running_lo = low[i]
+                if high[i] == high[i] and et_minute[i] != last_minute:
+                    if window_bars == 0:
+                        first_minute = et_minute[i]
+                    last_minute = et_minute[i]
+                    window_bars += 1
                 # Still inside the ORB window — don't publish the range yet
                 # (we only act on breakouts AFTER the range is fully formed).
             elif et_minute[i] >= rth_open + range_min:
-                # Window closed for today; freeze the range.
-                if running_hi != -np.inf and np.isnan(locked_hi):
-                    locked_hi, locked_lo = running_hi, running_lo
+                # Window closed for today; freeze the range — once, and for
+                # entries only if the window was complete enough to trust.
+                if running_hi != -np.inf and not decided:
+                    decided = True
+                    seen_lo = running_lo
+                    if (first_minute - rth_open <= start_tolerance
+                            and window_bars >= min_window_bars):
+                        locked_hi, locked_lo = running_hi, running_lo
                 orb_high[i] = locked_hi
                 orb_low[i]  = locked_lo
+                exit_low[i] = seen_lo
 
         vol_avg = prices['volume'].rolling(20).mean().to_numpy()
 
@@ -147,6 +220,7 @@ class OpeningRangeBreakout(Strategy):
             'vol_avg':   vol_avg,
             'orb_high':  orb_high,
             'orb_low':   orb_low,
+            'exit_low':  exit_low,
             'rth':       rth_mask.astype(bool),
         }
 
@@ -174,10 +248,14 @@ class OpeningRangeBreakout(Strategy):
         if not state['rth'][index]:
             return None  # pre/post-market — don't trade
 
+        # The exit level exists as soon as the window has closed with at least
+        # one bar in it; the entry levels only when that window was valid.
+        exit_l = state['exit_low'][index]
+        if np.isnan(exit_l):
+            return None  # opening range hasn't closed yet today
         orb_h = state['orb_high'][index]
         orb_l = state['orb_low'][index]
-        if np.isnan(orb_h) or np.isnan(orb_l):
-            return None  # opening range hasn't closed yet today
+        entry_ok = not (np.isnan(orb_h) or np.isnan(orb_l))
 
         close = state['close'][index]
         prev_close = state['close'][index - 1] if index > 0 else close
@@ -188,16 +266,18 @@ class OpeningRangeBreakout(Strategy):
 
         vol_ok = volume > vol_avg * self.VOLUME_MULT
 
-        # BUY: close crosses above ORB high with volume
-        if close > orb_h and prev_close <= orb_h and vol_ok:
+        # BUY: close crosses above ORB high with volume — never off a partial
+        # or late-starting opening range.
+        if entry_ok and close > orb_h and prev_close <= orb_h and vol_ok:
             close_by, max_hold = self._exit_rules()
             return Signal(
                 source_name=self.name, action=Action.BUY,
                 probability=0.60, risk=0.40,
                 close_by_time=close_by, max_hold_bars=max_hold,
             )
-        # SELL: close crosses below ORB low
-        if close < orb_l and prev_close >= orb_l and vol_ok:
+        # SELL: close crosses below the low of the opening-range bars seen
+        # today (== ORB low whenever the range is valid).
+        if close < exit_l and prev_close >= exit_l and vol_ok:
             return Signal(
                 source_name=self.name, action=Action.SELL,
                 probability=0.60, risk=0.40,
