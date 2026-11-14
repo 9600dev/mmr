@@ -27,7 +27,11 @@ dependencies = [
     "dill>=0.4",
     "duckdb>=1.4",
     "durations>=0.3",
-    "eventkit>=1.0.0",
+    # The `eventkit` MODULE comes from `aeventkit`, the fork ib_async depends on.
+    # Do NOT also list the legacy `eventkit` distribution: both install the same
+    # top-level package and overwrite each other, so install order decided which
+    # slot layout a build got (see ibreactive._event_slots).
+    "aeventkit>=2.1",
     "exchange-calendars>=4.13",
     "expression>=5.6",
     "ib_async>=2.1",

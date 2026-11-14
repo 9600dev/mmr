@@ -17,7 +17,10 @@ from ib_async import IB
 
 from trader.listeners import ib_informational
 from trader.listeners.ib_informational import ib_log_level
-from trader.listeners.ibreactive import IBAIORx, _restore_event_handlers, _snapshot_event_handlers
+from trader.listeners.ibreactive import (
+    EventLayoutError, IBAIORx, _event_slots, _restore_event_handlers,
+    _snapshot_event_handlers,
+)
 
 
 # --------------------------------------------------------------------------
@@ -127,7 +130,9 @@ def test_farm_status_keeps_monitor_phrase(rx, caplog):
 # --------------------------------------------------------------------------
 
 def _errorevent_handler_slots(ib):
-    return [s for s in ib.errorEvent._slots.slots if s.func.__name__ == '__handle_error']
+    # (obj, weakref, func) triples via the layout-agnostic reader: aeventkit and
+    # the legacy eventkit store listeners differently (see _event_slots).
+    return [slot for slot in _event_slots(ib.errorEvent) if slot[2].__name__ == '__handle_error']
 
 
 def test_snapshot_restore_rebinds_name_mangled_handler(rx):
@@ -142,7 +147,8 @@ def test_snapshot_restore_rebinds_name_mangled_handler(rx):
             rx.ib.errorEvent += rx._IBAIORx__handle_error
         slots = _errorevent_handler_slots(rx.ib)
         assert len(slots) == 1
-        assert slots[0].weakref is not None and slots[0].weakref() is rx  # bound, not unbound
+        _obj, weak, _func = slots[0]
+        assert weak is not None and weak() is rx  # bound, not unbound
 
 
 def test_error_after_reconnect_is_handled_once_without_eventkit_exception(rx, caplog):
@@ -252,3 +258,63 @@ def test_history_worker_uses_central_levels(caplog):
     levels = [r.levelno for r in caplog.records if r.name == 'ib_history']
     assert levels == [logging.INFO, logging.ERROR]
     assert isinstance(worker.ib_client.wrapper._logger, ib_informational._HandledErrorLogger)
+
+
+# --------------------------------------------------------------------------
+# The listener storage layout must be READ, whichever eventkit is installed
+# --------------------------------------------------------------------------
+#
+# `aeventkit` (ib_async's dependency) and the legacy `eventkit` both install a
+# top-level `eventkit` package with different slot layouts. The snapshot used
+# to read only one and swallow the AttributeError on the other, so a reconnect
+# restored nothing and the service ran on with no IB handlers at all.
+
+class _LegacyEvent:
+    """eventkit 1.x layout: ``_slots`` is a list of ``[obj, weakref, func]``."""
+
+    def __init__(self, slots):
+        self._slots = slots
+
+
+class _Owner:
+    def method(self, *args):
+        return args
+
+
+def test_event_slots_reads_the_legacy_list_layout():
+    import weakref
+    owner = _Owner()
+    event = _LegacyEvent([[None, weakref.ref(owner), _Owner.method]])
+    ((obj, weak, func),) = _event_slots(event)
+    assert obj is None and weak() is owner and func is _Owner.method
+
+
+def test_event_slots_reads_the_installed_layout():
+    from eventkit import Event
+    owner = _Owner()
+    event = Event('probe')
+    event += owner.method
+    ((_obj, weak, func),) = _event_slots(event)
+    assert weak() is owner and func is _Owner.method
+
+
+def test_unreadable_slot_layout_raises_instead_of_restoring_nothing(rx):
+    class _Opaque:
+        _slots = 42          # not iterable: a layout this code has never seen
+
+    with pytest.raises(EventLayoutError):
+        _event_slots(_Opaque())
+    rx.ib.errorEvent = _Opaque()
+    with pytest.raises(EventLayoutError):
+        _snapshot_event_handlers(rx.ib)
+
+
+def test_the_installed_eventkit_is_the_one_ib_async_depends_on():
+    """Pin the dependency itself: the legacy `eventkit` distribution must not be
+    installed next to `aeventkit` (they overwrite each other's files)."""
+    import importlib.metadata as md
+    installed = {(d.metadata['Name'] or '').lower() for d in md.distributions()}
+    assert 'aeventkit' in installed
+    assert 'eventkit' not in installed, (
+        'the legacy `eventkit` distribution is installed alongside `aeventkit`; '
+        'both provide the `eventkit` package and install order decides which wins')
