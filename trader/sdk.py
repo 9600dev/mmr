@@ -1987,7 +1987,9 @@ class MMR:
             mine = [e for e in events if e.order_id in set(p.order_ids)
                     and (floor is None or e.timestamp is None or e.timestamp >= floor)]
             qty = p.quantity if (p.quantity is not None and p.quantity == p.quantity) else None
-            out[p.id] = fill_outcome(mine, p.order_ids, qty)
+            # The proposal's action names the entry side: bracket / stop legs
+            # trade the other side and are not fills of the proposal.
+            out[p.id] = fill_outcome(mine, p.order_ids, qty, action=p.action)
         return out
 
     def proposals(self, status: Optional[str] = None, limit: int = 50) -> pd.DataFrame:
@@ -2090,7 +2092,8 @@ class MMR:
         if p.status == 'EXECUTED':
             detail['fill'] = self._proposal_fill_outcomes([p]).get(
                 p.id, {'outcome': 'unknown', 'filled_quantity': None,
-                       'avg_fill_price': None, 'orders': {}})
+                       'avg_fill_price': None, 'exit_filled_quantity': None,
+                       'exit_avg_fill_price': None, 'orders': {}})
 
         # Include snapshot from metadata if present
         snapshot = p.metadata.get('snapshot')

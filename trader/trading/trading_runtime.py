@@ -4656,7 +4656,8 @@ class Trader():
                 for p in executed:
                     mine = [e for e in events if e.order_id in set(p.order_ids)]
                     qty = p.quantity if (p.quantity is not None and p.quantity == p.quantity) else None
-                    known_outcomes[p.id] = fill_outcome(mine, p.order_ids, qty)['outcome']
+                    known_outcomes[p.id] = fill_outcome(
+                        mine, p.order_ids, qty, action=p.action)['outcome']
         except Exception as ex:
             logging.warning('reconcile: order-journal outcome lookup failed: %s', ex)
 
