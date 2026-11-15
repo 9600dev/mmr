@@ -475,6 +475,19 @@ class TestWalkForwardCli:
         asset = px[px.index < last].iloc[-1] / px[px.index < first].iloc[-1] - 1
         assert 0 < payload['oos_compounded_return'] <= asset
 
+    def test_a_cell_whose_backtest_fails_is_dropped_not_fatal(self, stack, capsys, caplog):
+        """The handler catches the failure and logs it — with a module that had
+        never imported ``logging``, so the first failing cell ended the whole
+        walk-forward with ``NameError: name 'logging' is not defined``."""
+        with caplog.at_level(logging.WARNING):
+            cli._handle_walk_forward(self._args(stack, {'LOOKBACK': [20, 'not a number']}), now=self.NOW)
+        payload = _json_payload(capsys)
+        assert payload['folds'] == 4
+        assert {row['chosen']['LOOKBACK'] for row in payload['per_fold']} == {20}
+        failures = [record.getMessage() for record in caplog.records
+                    if record.getMessage().startswith('walk-forward: ')]
+        assert failures and all('not a number' in message for message in failures)
+
     def test_the_report_names_its_execution_semantics(self, stack, capsys):
         cli._handle_walk_forward(self._args(stack, {'LOOKBACK': [20]}), now=self.NOW)
         live = _json_payload(capsys)['execution']

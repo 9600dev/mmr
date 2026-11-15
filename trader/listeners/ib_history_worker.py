@@ -96,6 +96,51 @@ def use_rth_for(bar_size, sec_type: Optional[str]) -> bool:
     return str(bar_size) in _DAILY_OR_LONGER and (sec_type or '').upper() in _RTH_SEC_TYPES
 
 
+# What IB puts in a trade field that does not exist for the bar it is sending.
+IB_NOT_APPLICABLE = -1
+
+# The trade fields of a bar, and what each holds when the bar was not built
+# from trades. Volume is zero — no trade is aggregated in a quote bar, and a
+# zero-volume bar is an ordinary, legal bar — while a WAP and a trade count
+# simply do not exist (stored NULL). A NULL volume is not available as the
+# answer: beside real prices it is a corrupt row (bar_quality: a bar with
+# prices and no volume). The count is NULL and not 0 for a second reason:
+# `bar_count = 0 AND average IS NULL` is how a TwelveData row is recognised
+# (scripts/repair_download_listings.py moves and deletes rows on it).
+_QUOTE_BAR_TRADE_FIELDS = (('volume', 0.0), ('average', np.nan), ('bar_count', np.nan))
+
+
+def state_quote_bar_trade_fields(frame: pd.DataFrame, what_to_show: WhatToShow) -> pd.DataFrame:
+    """Say what IB's -1 means on a bar that was not built from trades.
+
+    For a MIDPOINT / BID / ASK request IB fills volume, WAP (``average``) and
+    the trade count with -1: there is no such number for a bar built from
+    quotes. Passed on as delivered, that is a bar with a negative volume —
+    which is, correctly, a row that cannot describe a market
+    (``bar_quality.check_bar``: ``negative_volume``) — so ``TickData.write``
+    refused every bar of every forex series (strategy priming asks for
+    MIDPOINT on CASH contracts), and what it would have stored otherwise is a
+    VWAP of minus one.
+
+    The rule was right and stays as it is: -1 was never a volume. This is the
+    one place that knows both IB's convention and what was asked for, so the
+    translation happens here and the stored row's ``what_to_show`` goes on
+    saying what the bar was built from.
+
+    Exact, in both directions: only the value -1, and only when the request
+    was not for TRADES. A -1 on a trades bar, or any other negative number on
+    a quote bar, is not IB saying "not applicable" and is left for the
+    bar-quality check to refuse.
+    """
+    if what_to_show == WhatToShow.TRADES or len(frame) == 0:
+        return frame
+    out = frame.copy()
+    for column, stated in _QUOTE_BAR_TRADE_FIELDS:
+        if column in out.columns:
+            out[column] = out[column].mask(out[column] == IB_NOT_APPLICABLE, stated)
+    return out
+
+
 _STEP_DAYS = {'S': 1 / 86400, 'D': 1, 'W': 7, 'M': 31, 'Y': 365}
 
 
@@ -461,6 +506,9 @@ class IBHistoryWorker():
             )
 
         all_data: pd.DataFrame = pd.concat(bars)
+        # Every frame leaving this worker has passed through here, markers
+        # included (their fields are NaN, which is not the sentinel).
+        all_data = state_quote_bar_trade_fields(all_data, what_to_show)
 
         # A no-data marker says "nothing traded that day". Markers are computed
         # per CHUNK, and a day that straddles a chunk boundary has its bars in

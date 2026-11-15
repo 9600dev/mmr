@@ -9,6 +9,7 @@ from trader.data.universe import UniverseAccessor
 from trader.data.data_access import SecurityDefinition
 from typing import Dict, List, Optional
 
+import asyncio
 import datetime as dt
 import pytz
 import threading
@@ -18,6 +19,10 @@ logging = setup_logging(module_name='massive_reactive')
 
 
 class MassiveReactive:
+    # How long stop() waits for the close, and then for the thread. The
+    # client's own close handshake timeout is 1 s.
+    STOP_TIMEOUT_S = 5.0
+
     def __init__(
         self,
         massive_api_key: str,
@@ -39,6 +44,14 @@ class MassiveReactive:
         self._symbol_cache: Dict[str, Optional[SecurityDefinition]] = {}
         self._ws_client: Optional[WebSocketClient] = None
         self._thread: Optional[threading.Thread] = None
+        # The stream thread's event loop and the task running the connection,
+        # published under _lifecycle so stop() and a just-started thread agree
+        # on which of them acts: the thread sees _stopped and never connects,
+        # or stop() sees the loop and closes on it.
+        self._lifecycle = threading.Lock()
+        self._stopped = False
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._stream_task: Optional['asyncio.Task[None]'] = None
 
     def _get_market(self) -> Market:
         market_map = {
@@ -201,26 +214,89 @@ class MassiveReactive:
         if symbols:
             subscriptions = ['{}.{}'.format(data_type, s) for s in symbols]
 
-        self._ws_client = WebSocketClient(
+        client = WebSocketClient(
             api_key=self.massive_api_key,
             feed=self._get_feed(),
             market=self._get_market(),
             subscriptions=subscriptions,
         )
+        self._ws_client = client
+        with self._lifecycle:
+            self._stopped = False
+            self._loop = None
+            self._stream_task = None
+
+        async def _on_messages(messages):
+            self._handle_messages(messages)
+
+        async def _stream():
+            # What WebSocketClient.run() does — asyncio.run(client.connect(...))
+            # — with the loop and the task kept, because stop() needs both:
+            # the socket belongs to this loop, so close() has to be awaited
+            # HERE, and nothing outside the thread could reach run()'s loop.
+            with self._lifecycle:
+                if self._stopped:
+                    return      # stop() got in before there was anything to close
+                self._loop = asyncio.get_running_loop()
+                self._stream_task = asyncio.current_task()
+            await client.connect(_on_messages)
 
         def _run():
-            self._ws_client.run(self._handle_messages)
+            try:
+                asyncio.run(_stream())
+            except asyncio.CancelledError:
+                pass            # how stop() ends the stream; see _close_stream
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
         logging.info('MassiveReactive started with subscriptions: {}'.format(subscriptions))
 
+    @staticmethod
+    async def _close_stream(client, stream_task) -> None:
+        """Runs on the stream's own loop."""
+        try:
+            await client.close()
+        finally:
+            # A clean close ends connect() by itself, but two cases do not:
+            # close() has nothing to close while the handshake is still in
+            # progress, and a close the server does not answer in time reads
+            # as a lost connection, which the client reconnects. Stopping
+            # means the stream ends, so the task is cancelled either way.
+            stream_task.cancel()
+
     def stop(self):
-        if self._ws_client:
+        """Close the websocket and end the stream thread, then complete the subjects.
+
+        ``WebSocketClient.close`` is a coroutine function. Until 2026-11-15 it
+        was called here and the coroutine dropped, so nothing was closed: the
+        connection stayed open and the thread kept receiving behind completed
+        subjects (docs/AUDIT_2026-11-14.md B2.4).
+        """
+        client = self._ws_client
+        with self._lifecycle:
+            self._stopped = True
+            loop, stream_task, thread = self._loop, self._stream_task, self._thread
+        if client is not None and loop is not None and stream_task is not None:
+            closing = self._close_stream(client, stream_task)
+            on_stream_thread = thread is threading.current_thread()
             try:
-                self._ws_client.close()
-            except Exception:
-                pass
+                future = asyncio.run_coroutine_threadsafe(closing, loop)
+            except RuntimeError:
+                closing.close()     # the loop has already finished: nothing is open
+            else:
+                # Called from a message handler, this IS the stream's thread:
+                # the close is scheduled and runs when the handler returns.
+                # Waiting for it here would be waiting for ourselves.
+                if not on_stream_thread:
+                    try:
+                        future.result(timeout=self.STOP_TIMEOUT_S)
+                    except Exception as ex:
+                        logging.warning('massive stream did not close cleanly: %r', ex)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=self.STOP_TIMEOUT_S)
+            if thread.is_alive():
+                logging.warning('massive stream thread still running %ss after stop()',
+                                self.STOP_TIMEOUT_S)
         self.agg_subject.on_completed()
         self.trade_subject.on_completed()
         self.quote_subject.on_completed()

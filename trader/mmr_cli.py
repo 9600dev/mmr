@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 import argparse
 import asyncio
 import json
+import logging
 import os
 import pathlib
 import shlex
@@ -309,6 +310,36 @@ def print_list(items, title=None):
     for item in items:
         table.add_row(str(item))
     console.print(table)
+
+
+def _status_pnl_display(pnl: dict) -> dict:
+    """`mmr status` PnL rows (Rich markup), each amount with its currency.
+
+    ``sdk.status()['pnl']`` sums per-position PnL that IB reports in each
+    INSTRUMENT's currency. One currency: the sum, labelled. Several: the
+    figure per currency — a single number adding USD to AUD is not shown.
+    A block without the currency fields (an older SDK behind the container
+    proxy) is rendered unlabelled rather than guessed at.
+    """
+    def _amount(val, currency=''):
+        if val is None or val != val:  # NaN
+            return '[dim]-[/dim]'
+        color = 'green' if val >= 0 else 'red'
+        sign = '+' if val >= 0 else '-'
+        suffix = f' {currency}' if currency else ''
+        return f'[{color}]{sign}${abs(val):,.2f}[/{color}]{suffix}'
+
+    by_currency = pnl.get('by_currency') or {}
+    rows = {}
+    for label, key in (('DailyPnL', 'daily'), ('UnrealizedPnL', 'unrealized'),
+                       ('RealizedPnL', 'realized'), ('TotalPnL', 'total')):
+        if pnl.get('mixed_currencies') and by_currency:
+            rows[label] = '  '.join(_amount((by_currency[ccy] or {}).get(key), ccy)
+                                    for ccy in sorted(by_currency))
+        else:
+            currency = pnl.get('currency')
+            rows[label] = _amount(pnl.get(key), currency if isinstance(currency, str) else '')
+    return rows
 
 
 def print_json_result(data, title=None):
@@ -757,6 +788,20 @@ def build_parser() -> argparse.ArgumentParser:
              'stamped with the strategy\'s SESSION_TZ / RTH_OPEN_MIN / RTH_CLOSE_MIN '
              '(default 09:30-16:00 America/New_York) for intraday sizes, daily bars '
              'for "1 day" and longer. Default: both.')
+    # The deployment's ``params:`` from strategy_runtime.yaml. Without them the
+    # gauntlet tests the CLASS defaults — for an ASX deployment of a class that
+    # defaults to New York hours, the wrong session.
+    strat_gauntlet_p.add_argument(
+        '--param', action='append', default=[], metavar='KEY=VALUE',
+        help='Run the gauntlet with a deployment parameter, exactly as `backtest '
+             '--param` applies it. Repeatable. SESSION_TZ / RTH_OPEN_MIN / '
+             'RTH_CLOSE_MIN also set the session the frames are stamped with: '
+             '--param SESSION_TZ=Australia/Sydney --param RTH_OPEN_MIN=600 '
+             '--param RTH_CLOSE_MIN=960. Recorded with the verdict.')
+    strat_gauntlet_p.add_argument(
+        '--params', default=None, metavar='JSON',
+        help='JSON object of deployment parameters (the `params:` mapping of the '
+             'strategy_runtime.yaml entry). Merged with --param; --param wins.')
 
     # strategies create
     strat_create_p = strat_sub.add_parser('create', help='Create a strategy template file')
@@ -2386,6 +2431,12 @@ def _dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
                                     else:
                                         market_str += f'  [green]at/below bid[/green]'
 
+                    # Why a quote is absent or one-sided: the venue is shut, or
+                    # a side was our own resting order (not the market).
+                    notes = row.get('quote_notes')
+                    if isinstance(notes, (list, tuple)) and notes:
+                        market_str += f'  [dim]({escape("; ".join(str(n) for n in notes))})[/dim]'
+
                     # Color the action
                     action_color = 'green' if action == 'BUY' else 'red'
 
@@ -2648,17 +2699,7 @@ def _dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
                     display['Cushion'] = f"{result['cushion']:.4f}"
                 display['positions'] = result.get('positions', '?')
                 if result.get('pnl'):
-                    pnl = result['pnl']
-                    def _pnl_str(val):
-                        if val is None or val != val:  # NaN
-                            return '[dim]-[/dim]'
-                        color = 'green' if val >= 0 else 'red'
-                        sign = '+' if val >= 0 else '-'
-                        return f'[{color}]{sign}${abs(val):,.2f}[/{color}]'
-                    display['DailyPnL'] = _pnl_str(pnl.get('daily'))
-                    display['UnrealizedPnL'] = _pnl_str(pnl.get('unrealized'))
-                    display['RealizedPnL'] = _pnl_str(pnl.get('realized'))
-                    display['TotalPnL'] = _pnl_str(pnl.get('total'))
+                    display.update(_status_pnl_display(result['pnl']))
                 for k in ('open_orders', 'streaming', 'pending_proposals'):
                     if k in result:
                         display[k] = result[k]
@@ -3121,6 +3162,13 @@ def _handle_proposals(mmr: MMR, args: argparse.Namespace):
                     _px_s = f' @ {_px:.4g}' if _px else ''
                     console.print(f'  fill outcome:     {_outcome_markup(fill.get("outcome"))}'
                                   f'  (filled {fill.get("filled_quantity") or 0:g}{_px_s})')
+                    # Bracket / stop legs trade the other side; their fills
+                    # are not part of the entry's fill above.
+                    _exit_q = fill.get('exit_filled_quantity')
+                    if _exit_q:
+                        _exit_px = fill.get('exit_avg_fill_price')
+                        _exit_px_s = f' @ {_exit_px:.4g}' if _exit_px else ''
+                        console.print(f'  exit legs filled: {_exit_q:g}{_exit_px_s}')
                 rejection_reason = detail.get('rejection_reason')
                 if rejection_reason:
                     console.print(f'  rejection_reason: {rejection_reason}')
@@ -4240,6 +4288,10 @@ def _handle_session(mmr: MMR, args: argparse.Namespace):
             'max_position_pct': f'{cfg.max_position_pct:.0%}',
             'max_total_exposure_pct': f'{cfg.max_total_exposure_pct:.0%}',
             'max_positions': str(cfg.max_positions),
+            # Offline command: the account is not read here, so there is no
+            # currency code to give — only what the amounts are denominated in.
+            'currency_note': 'amounts are in the account base currency '
+                             '(the _usd suffix is historical)',
         }
         print_dict(limits, title='Hard Limits')
         return
@@ -4251,6 +4303,13 @@ def _handle_session(mmr: MMR, args: argparse.Namespace):
         print_json_result(summary, title='Session Status')
         return
 
+    # Amounts are account-base-currency amounts (CAD on a CAD account); the
+    # bare '$' and the '_usd' key names said otherwise. Label each one.
+    base_ccy = summary.get('base_currency') or ''
+
+    def _money(value) -> str:
+        return f'${value:,.0f} {base_ccy}' if base_ccy else f'${value:,.0f}'
+
     # Config section
     cfg = summary['config']
     config_table = Table(title='Position Sizing Config', show_header=False)
@@ -4258,16 +4317,16 @@ def _handle_session(mmr: MMR, args: argparse.Namespace):
     config_table.add_column('Value')
     config_table.add_row('Risk Level', f'[bold]{cfg["risk_level"]}[/bold]')
     if cfg.get('base_position_pct', 0) > 0 and cfg.get('effective_base_usd', 0) != cfg['base_position_usd']:
-        config_table.add_row('Base Position', f'${cfg["effective_base_usd"]:,.0f} ({cfg["base_position_pct"]:.1%} of net liq)')
+        config_table.add_row('Base Position', f'{_money(cfg["effective_base_usd"])} ({cfg["base_position_pct"]:.1%} of net liq)')
     else:
-        config_table.add_row('Base Position', f'${cfg["base_position_usd"]:,.0f} (fixed)')
+        config_table.add_row('Base Position', f'{_money(cfg["base_position_usd"])} (fixed)')
     _eff_loss = cfg.get('effective_daily_loss_limit_usd', cfg['daily_loss_limit_usd'])
     if _eff_loss != cfg['daily_loss_limit_usd']:
-        config_table.add_row('Daily Loss Limit', f'${_eff_loss:,.0f} (risk gate; sizing config ${cfg["daily_loss_limit_usd"]:,.0f})')
+        config_table.add_row('Daily Loss Limit', f'{_money(_eff_loss)} (risk gate; sizing config {_money(cfg["daily_loss_limit_usd"])})')
     else:
-        config_table.add_row('Daily Loss Limit', f'${cfg["daily_loss_limit_usd"]:,.0f}')
-    config_table.add_row('Min Position', f'${cfg["min_position_usd"]:,.0f}')
-    config_table.add_row('Max Position', f'${cfg["max_position_usd"]:,.0f}')
+        config_table.add_row('Daily Loss Limit', _money(cfg["daily_loss_limit_usd"]))
+    config_table.add_row('Min Position', _money(cfg["min_position_usd"]))
+    config_table.add_row('Max Position', _money(cfg["max_position_usd"]))
     config_table.add_row('Max Position %', f'{cfg["max_position_pct"]:.0%} of net liq')
     config_table.add_row('Max Exposure', f'{cfg["max_total_exposure_pct"]:.0%} of net liq')
     config_table.add_row('Max Positions', str(cfg['max_positions']))
@@ -4281,16 +4340,23 @@ def _handle_session(mmr: MMR, args: argparse.Namespace):
         port_table = Table(title='Portfolio State', show_header=False)
         port_table.add_column('Key', style='bold')
         port_table.add_column('Value')
-        port_table.add_row('Net Liquidation', f'${port["net_liquidation"]:,.0f}')
-        port_table.add_row('Position Value', f'${port["gross_position_value"]:,.0f}')
-        port_table.add_row('Available Funds', f'${port["available_funds"]:,.0f}')
+        port_table.add_row('Net Liquidation', _money(port["net_liquidation"]))
+        port_table.add_row('Position Value', _money(port["gross_position_value"]))
+        port_table.add_row('Available Funds', _money(port["available_funds"]))
         pnl_color = 'green' if port['daily_pnl'] >= 0 else 'red'
         pnl_sign = '+' if port['daily_pnl'] > 0 else ''
-        port_table.add_row('Daily P&L', f'[{pnl_color}]{pnl_sign}${port["daily_pnl"]:,.0f}[/{pnl_color}]')
+        # Not a base-currency figure: per-position PnL in each instrument's
+        # currency, added up. Say which, or that it mixes several.
+        pnl_ccy = port.get('daily_pnl_currency')
+        if pnl_ccy == 'MIXED':
+            pnl_unit = f' ({"+".join(port.get("daily_pnl_currencies") or [])} added, not converted)'
+        else:
+            pnl_unit = f' {pnl_ccy}' if pnl_ccy else ''
+        port_table.add_row('Daily P&L', f'[{pnl_color}]{pnl_sign}${port["daily_pnl"]:,.0f}[/{pnl_color}]{pnl_unit}')
         port_table.add_row('Exposure', f'{port["exposure_pct"]:.0%}')
         port_table.add_row('Positions', str(port['position_count']))
         if port['pending_proposal_value'] > 0:
-            port_table.add_row('Pending Proposals', f'${port["pending_proposal_value"]:,.0f}')
+            port_table.add_row('Pending Proposals', _money(port["pending_proposal_value"]))
         console.print(port_table)
     else:
         console.print('[dim]No portfolio data (trader_service not connected)[/dim]')
@@ -4301,7 +4367,7 @@ def _handle_session(mmr: MMR, args: argparse.Namespace):
     cap_table.add_column('Key', style='bold')
     cap_table.add_column('Value')
     if port['net_liquidation'] > 0:
-        cap_table.add_row('Remaining Budget', f'${cap["remaining_usd"]:,.0f}')
+        cap_table.add_row('Remaining Budget', _money(cap["remaining_usd"]))
     cap_table.add_row('Remaining Positions', f'{cap["remaining_positions"]}')
     console.print(cap_table)
 
@@ -4316,8 +4382,11 @@ def _handle_session(mmr: MMR, args: argparse.Namespace):
                         ('Low (0.2)', 'low_confidence')]:
         s = sizes[key]
         note = s['capped_by'] if s['capped_by'] else ''
-        size_table.add_row(label, f'${s["amount_usd"]:,.0f}', note)
+        size_table.add_row(label, _money(s["amount_usd"]), note)
     console.print(size_table)
+    if not base_ccy:
+        console.print('[dim]Amounts are in the account base currency, which was not read '
+                      '(trader_service unavailable); it is not necessarily USD.[/dim]')
 
     # Warnings
     if summary['warnings']:
@@ -5174,9 +5243,11 @@ def _gauntlet_load_class(module_file: Path, class_name: str, code_hash: str):
     return cls, None
 
 
-def _gauntlet_new_instance(cls, frame=None):
+def _gauntlet_new_instance(cls, frame=None, params: Optional[Dict[str, Any]] = None):
     """Instantiate + install a strategy with a minimal context (no storage,
-    no universe accessor) — the same shape the backtester uses."""
+    no universe accessor) — the same shape the backtester uses. ``params``
+    are applied the way the backtester and the live runtime apply a
+    deployment's ``params:`` (``apply_param_overrides``)."""
     import datetime as _dt
     import logging as _logging
 
@@ -5205,7 +5276,26 @@ def _gauntlet_new_instance(cls, frame=None):
         class_name=cls.__name__,
         params={},
     ))
+    if params:
+        from trader.strategy.parameters import apply_param_overrides
+        apply_param_overrides(instance, params)
     return instance
+
+
+def _gauntlet_effective_params(cls, params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """``params`` as the strategy will hold them: coerced to the class
+    attribute types, the way a backtest override or a deployment's
+    ``params:`` is. Raises ``ValueError`` for an unknown upper-case key, a
+    value of the wrong type, an invalid ``SESSION_TZ`` — and for a session
+    that cannot exist (see ``_gauntlet_session_spec``). Refused BEFORE any
+    stage runs: a gauntlet run on a parameter that was silently dropped
+    would record a verdict about a different deployment."""
+    if not params:
+        return {}
+    from trader.strategy.parameters import apply_param_overrides
+    applied = apply_param_overrides(_gauntlet_new_instance(cls), dict(params))
+    _gauntlet_session_spec(cls, applied)
+    return applied
 
 
 # S2 and S3 learn nothing from a frame the strategy does not act on. Until
@@ -5224,7 +5314,10 @@ _GAUNTLET_VACUITY_HINT = (
     '/ RTH_CLOSE_MIN on the class; if it runs on daily bars, pass --bar-size.')
 
 
-def _gauntlet_session_spec(cls) -> Dict[str, Any]:
+_GAUNTLET_SESSION_KEYS = ('SESSION_TZ', 'RTH_OPEN_MIN', 'RTH_CLOSE_MIN')
+
+
+def _gauntlet_session_spec(cls, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The session the intraday frames are stamped with: the strategy's own
     ``SESSION_TZ`` / ``RTH_OPEN_MIN`` / ``RTH_CLOSE_MIN`` class attributes
     where it declares usable ones, else 09:30-16:00 America/New_York.
@@ -5232,7 +5325,17 @@ def _gauntlet_session_spec(cls) -> Dict[str, Any]:
     An unusable declaration (unknown zone, open not before close) falls back
     to the default rather than raising here: the strategy reads the same
     attribute and fails on it in its own words, or ignores it and is then
-    exercised on the default session."""
+    exercised on the default session.
+
+    ``params`` (a deployment's effective ``params:``) override the class
+    attribute key by key. A deployment that sets them trades THAT session,
+    so that is the one the frames must carry: an ASX deployment of a class
+    whose defaults are New York hours used to be tested on New York hours.
+    A session ASKED FOR is never replaced by a fallback — if it cannot exist
+    this raises ``ValueError``."""
+    if params and any(key in params for key in _GAUNTLET_SESSION_KEYS):
+        return _gauntlet_requested_session(cls, params)
+
     import zoneinfo
 
     tz, open_minute, close_minute = _GAUNTLET_DEFAULT_SESSION
@@ -5253,6 +5356,37 @@ def _gauntlet_session_spec(cls) -> Dict[str, Any]:
     declared_close = _minute(getattr(cls, 'RTH_CLOSE_MIN', None), close_minute)
     if declared_open < declared_close:
         open_minute, close_minute = declared_open, declared_close
+    return {'tz': tz, 'open_minute': open_minute, 'close_minute': close_minute}
+
+
+def _gauntlet_requested_session(cls, params: Dict[str, Any]) -> Dict[str, Any]:
+    """The session named by ``params`` over the class's own (then the
+    default), validated strictly. See ``_gauntlet_session_spec``."""
+    import zoneinfo
+
+    fallback = _gauntlet_session_spec(cls)
+    tz = params.get('SESSION_TZ', fallback['tz'])
+    open_minute = params.get('RTH_OPEN_MIN', fallback['open_minute'])
+    close_minute = params.get('RTH_CLOSE_MIN', fallback['close_minute'])
+
+    def _problem() -> Optional[str]:
+        if not isinstance(tz, str) or not tz:
+            return f'SESSION_TZ {tz!r} is not a timezone name'
+        try:
+            zoneinfo.ZoneInfo(tz)
+        except Exception:                                 # noqa: BLE001
+            return f'SESSION_TZ {tz!r} is not a known IANA timezone'
+        for name, value in (('RTH_OPEN_MIN', open_minute), ('RTH_CLOSE_MIN', close_minute)):
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 24 * 60:
+                return f'{name} {value!r} is not a minute of the day (0-1440)'
+        if open_minute >= close_minute:
+            return (f'RTH_OPEN_MIN {open_minute} is not before RTH_CLOSE_MIN {close_minute} '
+                    f'(a param left out takes the class value)')
+        return None
+
+    problem = _problem()
+    if problem:
+        raise ValueError(f'gauntlet params describe a session that cannot exist: {problem}')
     return {'tz': tz, 'open_minute': open_minute, 'close_minute': close_minute}
 
 
@@ -5359,7 +5493,8 @@ def _gauntlet_lookahead_coverage(reports: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _gauntlet_check_lookahead(cls, bar_size: Optional[str] = None) -> Dict[str, Any]:
+def _gauntlet_check_lookahead(cls, bar_size: Optional[str] = None,
+                              params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """S2: walk-forward consistency of ``precompute`` — the series is cut at
     the end AND at interior points (day boundaries, inside and after the
     opening range, mid-session, the close) and past values must not move.
@@ -5380,13 +5515,15 @@ def _gauntlet_check_lookahead(cls, bar_size: Optional[str] = None) -> Dict[str, 
                     'lookahead check is vacuous',
         }
 
-    session = _gauntlet_session_spec(cls)
+    session = _gauntlet_session_spec(cls, params)
     frames = _gauntlet_frames(session, bar_size, battery=False)
     result: Dict[str, Any] = {'frames': list(frames), 'session': session,
                               'bar_size': bar_size}
+    if params:
+        result['params'] = dict(params)
     reports: Dict[str, Any] = {}
     for frame_name, frame in frames.items():
-        instance = _gauntlet_new_instance(cls, frame)
+        instance = _gauntlet_new_instance(cls, frame, params)
         try:
             state = instance.precompute(frame)
         except Exception as ex:
@@ -5430,7 +5567,8 @@ def _gauntlet_check_lookahead(cls, bar_size: Optional[str] = None) -> Dict[str, 
     return {**result, 'status': 'pass', 'note': note}
 
 
-def _gauntlet_run_battery(cls, bar_size: Optional[str] = None) -> Dict[str, Any]:
+def _gauntlet_run_battery(cls, bar_size: Optional[str] = None,
+                          params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """S3: run the strategy over every synthetic frame through the same
     dispatch the backtester uses (precompute once, then on_bar per index —
     the default on_bar falls back to on_prices over expanding windows).
@@ -5469,7 +5607,7 @@ def _gauntlet_run_battery(cls, bar_size: Optional[str] = None) -> Dict[str, Any]
             # including the final bar.
             indices = sorted(set(np.linspace(0, n - 1, num=min(n, 40), dtype=int).tolist()))
         try:
-            instance = _gauntlet_new_instance(cls, frame)
+            instance = _gauntlet_new_instance(cls, frame, params)
             state = instance.precompute(frame) or {}
             signals = 0
             for idx in indices:
@@ -5484,7 +5622,7 @@ def _gauntlet_run_battery(cls, bar_size: Optional[str] = None) -> Dict[str, Any]
         except Exception as ex:
             return {'status': 'fail', 'detail': f'{type(ex).__name__}: {ex}'}
 
-    session = _gauntlet_session_spec(cls)
+    session = _gauntlet_session_spec(cls, params)
     frames = _gauntlet_frames(session, bar_size, battery=True)
     frames_result = {name: _run_frame(frame, fast_path) for name, frame in frames.items()}
 
@@ -5510,6 +5648,8 @@ def _gauntlet_run_battery(cls, bar_size: Optional[str] = None) -> Dict[str, Any]
         'session': session,
         'bar_size': bar_size,
     }
+    if params:
+        result['params'] = dict(params)
     if _failed():
         result['status'] = 'fail'
     elif result['signals'] == 0:
@@ -5684,13 +5824,21 @@ def _gauntlet_check_dsr(code_hash: str, duckdb_path: str,
 def _gauntlet_run(module_file: Path, class_name: str, duckdb_path: str,
                   min_psr: Optional[float] = None,
                   min_dsr: Optional[float] = None,
-                  bar_size: Optional[str] = None) -> Dict[str, Any]:
+                  bar_size: Optional[str] = None,
+                  params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Run all gauntlet stages against ``module_file`` and return
-    ``{'code_hash', 'verdict', 'checks'}``. Does not persist — the caller
-    records the result.
+    ``{'code_hash', 'verdict', 'checks', 'params'}``. Does not persist — the
+    caller records the result.
 
     ``bar_size`` (e.g. ``'1 min'``, ``'1 day'``) selects the frames S2/S3
-    run on; None runs both the intraday-session and the daily families."""
+    run on; None runs both the intraday-session and the daily families.
+
+    ``params`` is a deployment's ``params:`` mapping. S2 and S3 then build
+    the strategy with them and stamp their frames with the session they name
+    (``_gauntlet_session_spec``); the effective (coerced) values come back as
+    ``params`` and inside the s2/s3 checks. A parameter the class does not
+    have, or a session that cannot exist, raises ``ValueError`` before either
+    stage runs. None / empty: the class defaults, as always."""
     from trader.data.backtest_store import compute_strategy_hash
 
     _gauntlet_frame_families(bar_size)      # an unknown bar size refuses here
@@ -5703,6 +5851,8 @@ def _gauntlet_run(module_file: Path, class_name: str, duckdb_path: str,
 
     checks: Dict[str, Any] = {}
     checks['s1_imports'] = _gauntlet_scan_imports(source)
+    # As given until the class has been imported and they can be coerced.
+    effective: Dict[str, Any] = dict(params or {})
 
     if checks['s1_imports']['status'] != 'pass':
         skipped = {
@@ -5717,8 +5867,9 @@ def _gauntlet_run(module_file: Path, class_name: str, duckdb_path: str,
             checks['s2_lookahead'] = {'status': 'fail', 'detail': err}
             checks['s3_battery'] = {'status': 'fail', 'detail': err}
         else:
-            checks['s2_lookahead'] = _gauntlet_check_lookahead(cls, bar_size)
-            checks['s3_battery'] = _gauntlet_run_battery(cls, bar_size)
+            effective = _gauntlet_effective_params(cls, params)
+            checks['s2_lookahead'] = _gauntlet_check_lookahead(cls, bar_size, effective or None)
+            checks['s3_battery'] = _gauntlet_run_battery(cls, bar_size, effective or None)
 
     checks['s4_psr'] = _gauntlet_check_psr(code_hash, duckdb_path, min_psr)
     checks['s5_dsr'] = _gauntlet_check_dsr(code_hash, duckdb_path, min_dsr)
@@ -5753,6 +5904,7 @@ def _gauntlet_run(module_file: Path, class_name: str, duckdb_path: str,
         'checks': checks,
         'edge_credible': edge['edge_credible'],
         'warnings': edge['warnings'],
+        'params': effective,
     }
 
 
@@ -5924,14 +6076,21 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
         return
 
     try:
+        # The backtest's own parsing: --params JSON merged with --param K=V.
+        params = _parse_backtest_param_args(getattr(args, 'params', None),
+                                            getattr(args, 'param', None) or [])
         result = _gauntlet_run(resolved, args.class_name, duckdb_path,
                                min_psr=getattr(args, 'min_psr', None),
                                min_dsr=getattr(args, 'min_dsr', None),
-                               bar_size=getattr(args, 'bar_size', None))
+                               bar_size=getattr(args, 'bar_size', None),
+                               params=params or None)
     except ValueError as ex:
         print_status(str(ex), success=False)
         return
 
+    notes = list(result.get('warnings') or [])
+    if result.get('params'):
+        notes.insert(0, 'params: ' + json.dumps(result['params'], sort_keys=True, default=str))
     store = GauntletStore(duckdb_path)
     run_id = store.record(GauntletRecord(
         strategy_name=getattr(args, 'name', None) or args.class_name,
@@ -5940,7 +6099,7 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
         code_hash=result['code_hash'],
         verdict=result['verdict'],
         checks=result['checks'],
-        notes='; '.join(result.get('warnings') or []),
+        notes='; '.join(notes),
     ))
 
     if _json_mode:
@@ -5951,6 +6110,7 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
                 'edge_credible': result.get('edge_credible'),
                 'warnings': result.get('warnings') or [],
                 'code_hash': result['code_hash'],
+                'params': result.get('params') or {},
                 'checks': result['checks'],
             },
             'title': 'Strategy Gauntlet',
@@ -5995,6 +6155,12 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
             status_cell = '[yellow]pass (record-only, below bar)[/yellow]'
         tbl.add_row(stage, status_cell, '; '.join(detail_parts) or '—')
     console.print(tbl)
+    if result.get('params'):
+        session = (result['checks'].get('s3_battery') or {}).get('session')
+        console.print('[dim]run with params: '
+                      + escape(json.dumps(result['params'], sort_keys=True, default=str))
+                      + (f' — session frames {escape(_gauntlet_session_label(session))}'
+                         if session else '') + '[/dim]')
     edge_credible = result.get('edge_credible')
     warnings = result.get('warnings') or []
     if warnings:
@@ -6257,10 +6423,12 @@ def _handle_strategy_deploy(args: argparse.Namespace, mmr=None):
                 try:
                     rpc_mmr.connect()
                     target_universe = 'downloads'
-                    try:
-                        u = accessor.get(target_universe)
-                    except Exception:
-                        u = None
+                    # Not wrapped: get() returns an EMPTY universe for a name
+                    # that does not exist, so it only raises when the stored
+                    # one could not be read — and replacing a universe that
+                    # could not be read with a new one-member universe is how
+                    # `downloads` would be lost. The outer handler reports it.
+                    u = accessor.get(target_universe)
                     # Resolve each conid via IB. SDK.resolve(int) is
                     # local-DB-only by design — we have to go through
                     # resolve_contract (live IB reqContractDetails) for
@@ -6553,15 +6721,19 @@ def _armed_intraday_strategies(config_path) -> list:
 def _early_close_check(exchanges: str, armed_intraday, today=None):
     """``(status, detail)`` when a watched venue closes EARLY today, else None.
 
-    The intraday strategies carry their own session close (16:00 for the US
-    classes), so on a 13:00 close an entry signalled after it is held by IB
-    until the next session and an end-of-day flatten fires three hours late —
-    the position is carried over the close it was meant to avoid
-    (docs/AUDIT_2026-11-14.md B3.5). Nothing in the runtime knows; this makes
-    the day announce itself. FAIL when an intraday strategy is armed (the
-    stack is not trade-ready AS CONFIGURED today), WARN otherwise. A calendar
-    that cannot be read is a WARN, never silence. ``today`` is for tests: a
-    date applied to every venue.
+    Always a WARN: the day announces itself, and the stack is trade-ready on
+    it. The executor judges every open on the venue's regular session (an
+    entry after a 13:00 close is refused, not sent to wait for the next
+    session) and moves ``close_by_time`` exits earlier by as much as the close
+    is (``market_session.bar_open_refusal`` / ``close_by_on``). Until
+    2026-11-15 neither existed — strategies carry their own 16:00 close and
+    nothing else knew — and this row was a FAIL with an armed intraday
+    strategy (docs/AUDIT_2026-11-14.md B1.11 / B3.5).
+
+    What is still worth knowing on the day, and why the row stays: a SELL the
+    STRATEGY signals after the early close goes out and waits at IB for the
+    next open, like any after-hours exit. A calendar that cannot be read is a
+    WARN, never silence. ``today`` is for tests: a date applied to every venue.
     """
     import pandas as _pd
     from trader.data.market_session import _calendar, calendar_name_for, early_close
@@ -6582,14 +6754,13 @@ def _early_close_check(exchanges: str, armed_intraday, today=None):
             closing.append(f'{exchange} closes early today at {close.tz_convert(zone):%H:%M} {zone}')
     armed = list(armed_intraday or [])
     if closing and armed:
-        return ('FAIL', '; '.join(closing) + f'. {len(armed)} armed intraday strateg'
-                + ('y assumes its' if len(armed) == 1 else 'ies assume their')
-                + f' usual session close ({", ".join(armed)}): an entry after the early close is held by IB '
-                  'until the next session and a time exit fires too late. Disarm for today '
-                  '(docs/AUDIT_2026-11-14.md B3.5)')
+        return ('WARN', '; '.join(closing) + '. The executor refuses entries after the early close and '
+                'moves close_by_time exits earlier by as much ('
+                + f'{len(armed)} intraday auto_execute strateg' + ('y' if len(armed) == 1 else 'ies')
+                + f': {", ".join(armed)}). A SELL a strategy signals after the early close still waits '
+                  'at IB for the next session')
     if closing:
-        return ('WARN', '; '.join(closing) + '. No intraday strategy is armed; do not arm one today '
-                '(strategies assume their usual session close — docs/AUDIT_2026-11-14.md B3.5)')
+        return ('WARN', '; '.join(closing) + '. No intraday strategy is armed')
     if unreadable:
         return ('WARN', 'could not read the session calendar for ' + ', '.join(unreadable)
                 + ' — an early close today would go unreported')
@@ -6693,6 +6864,11 @@ def _handle_strategy_pnl(args: argparse.Namespace):
     ORDER_FILLED events tagged with the strategy name via orderRef, paired
     long-only. Missing fill prices leave affected PnL unavailable. Unrealized
     marks also need trader_service and every open lot's price and cost basis.
+
+    ``trades`` counts exit ORDERS (an exit filled in three partials is one
+    trade). Every figure is GROSS: fill events record no commission, and the
+    output says so (``pnl_basis`` / ``commissions`` in JSON, the table title
+    and a note otherwise) instead of leaving the numbers to be read as net.
     """
     import pandas as pd
     from trader.container import Container
@@ -6766,14 +6942,24 @@ def _handle_strategy_pnl(args: argparse.Namespace):
             'unrealized': round(unrealized, 2) if unrealized is not None else None,
         })
 
+    # The ledger is price x quantity over fill events, and those events carry
+    # no commission. Say so next to the numbers; the keys keep their names.
+    commissions_note = ('not recorded in fill events — realized and unrealized '
+                        'figures are gross (before commissions)')
     if _json_mode:
         print_dict({'strategies': strategies,
                     'unmatched_sells': report['unmatched_sells'],
                     'unevaluable_trades': report.get('unevaluable_trades', 0),
+                    'pnl_basis': report.get('pnl_basis', 'gross'),
+                    'commissions_included': report.get('commissions_included', False),
+                    'commissions': commissions_note,
                     'rows': rows}, title='Strategy PnL')
         return
     display_rows = [{k: '-' if v is None else v for k, v in row.items()} for row in rows]
-    print_df(pd.DataFrame(display_rows), title='Per-strategy PnL (attributed fills)')
+    print_df(pd.DataFrame(display_rows),
+             title='Per-strategy PnL (attributed fills; gross, before commissions)')
+    console.print(f'[dim]commissions: {commissions_note}. '
+                  "'trades' counts exit orders, not partial fills.[/dim]")
     if report.get('unevaluable_trades'):
         console.print(f"[dim]{report['unevaluable_trades']} matched close(s) lack "
                       'a usable fill price or cost basis — affected PnL and '
@@ -7250,10 +7436,10 @@ def _handle_backtests(args: argparse.Namespace):
             }
             stats, stats_reason = _compute_bt_stats(r)
             stats_data = {
-                'n_trades':              stats.n_trades,
-                # n_trades counts ROUND TRIPS (entry..exit P&L); the run's
-                # total_trades counts every fill/leg incl. pyramid adds.
-                'n_round_trips':         stats.n_trades,
+                # n_trades / n_round_trips / n_exits / n_lots / n_fills /
+                # trade_unit: the run's total_trades counts every fill incl.
+                # pyramid adds; the tests below are per EXIT.
+                **_bt_trade_count_fields(stats),
                 'n_bar_returns':         stats.n_bar_returns,
                 'probabilistic_sharpe':  stats.psr,
                 't_stat':                stats.t_stat,
@@ -7405,7 +7591,7 @@ def _handle_backtests(args: argparse.Namespace):
                     'max_drawdown': rec.max_drawdown,
                 },
                 'statistical_confidence': {
-                    'n_trades': stats.n_trades,
+                    **_bt_trade_count_fields(stats),
                     'n_bar_returns': stats.n_bar_returns,
                     'probabilistic_sharpe': stats.psr,
                     't_stat': stats.t_stat,
@@ -7746,6 +7932,42 @@ def _curve_periods_per_year(curve) -> Optional[float]:
     if float(deltas.median()) >= 20 * 3600:
         return 252.0
     return None
+
+
+def _bt_trade_count_fields(stats) -> Dict[str, Any]:
+    """The trade counts of a statistical-confidence block, each by name.
+
+    Three different things are called "trades" (audit 2026-11-14, B4.5):
+    FILLS (the run's ``total_trades``: every BUY and SELL, a pyramid add
+    included), FIFO LOTS, and EXITS (closing orders). The per-trade tests
+    (t-test, bootstrap CI on mean P&L, skew/kurtosis, losing streak) are per
+    EXIT — lots closed by one exit are not independent samples — so
+    ``n_trades`` and its older alias ``n_round_trips`` are the exit count.
+    Both keys are kept for existing consumers.
+    """
+    return {
+        'n_trades':      stats.n_trades,
+        'n_round_trips': stats.n_trades,
+        'n_exits':       stats.n_exits,
+        'n_lots':        stats.n_lots,
+        'n_fills':       stats.n_fills,
+        'trade_unit':    'exit',
+    }
+
+
+def _bt_result_count_fields(result) -> Dict[str, int]:
+    """``n_fills`` / ``n_exits`` / ``n_lots`` of a just-finished backtest.
+
+    Reported beside ``total_trades`` (which is the fill count for a
+    per-instrument run) so a reader does not have to know which of the three
+    a number called "trades" is.
+    """
+    from trader.simulation.backtest_stats import trade_counts
+    counts = trade_counts([{
+        'timestamp': str(t.timestamp), 'conid': t.conid, 'action': str(t.action),
+        'quantity': t.quantity, 'price': t.price, 'commission': t.commission,
+    } for t in (result.trades or [])])
+    return {'n_fills': counts.n_fills, 'n_exits': counts.n_exits, 'n_lots': counts.n_lots}
 
 
 def _compute_bt_stats(record):
@@ -8322,6 +8544,11 @@ def _freshness_check(
     Empty list means "everything is fresh enough". We check the `1 day`
     bar series only — even for 1-min sweeps, having yesterday's daily
     bar means the 1-min feed is probably also caught up.
+
+    Only a row with a close is a bar. The IB worker also stores an all-NULL
+    "the source had nothing for this day" marker per empty day, and the
+    newest of those used to be read as the series' last bar: a conid whose
+    real bars ended weeks ago passed as current.
     """
     from trader.container import Container
     from trader.data.bar_staleness import sessions_behind
@@ -8340,9 +8567,15 @@ def _freshness_check(
             stale.append({'conid': int(cid), 'last_bar': None,
                            'reason': f'read error: {ex}'})
             continue
+        markers = 0
+        if df is not None and len(df) and 'close' in df.columns:
+            rows = len(df)
+            df = df[df['close'].notna()]
+            markers = rows - len(df)
         if df is None or len(df) == 0:
             stale.append({'conid': int(cid), 'last_bar': None,
-                           'reason': 'no data'})
+                           'reason': (f'no data ({markers} no-data marker row(s), no bar)'
+                                      if markers else 'no data')})
             continue
         last_ts = df.index.max()
         # Weekday sessions behind, via the same helper `data status` uses. The
@@ -9516,6 +9749,37 @@ def _handle_sweep_watch(args: argparse.Namespace):
         )
 
 
+def _session_calendars_for(conids, accessor) -> Optional[Dict[int, Optional[str]]]:
+    """``conid -> session calendar`` for ``BacktestConfig.session_calendars``:
+    the calendar the live executor would judge that instrument's orders on
+    (``market_session.order_calendar`` over the universe definition).
+
+    A conid that is in no universe, trades round the clock, or is listed on a
+    venue with no calendar here maps to None — the rules do not apply to it,
+    exactly as they do not live. Returns None when NO conid has a calendar, so
+    such a run is configured (and stamped) like one from before the rules
+    existed: nothing about it differs.
+    """
+    from trader.data.market_session import order_calendar
+
+    calendars: Dict[int, Optional[str]] = {}
+    for conid in conids or []:
+        name = None
+        try:
+            definitions = accessor.resolve_symbol(int(conid), first_only=True)
+        except Exception as exc:                          # noqa: BLE001
+            logging.warning('backtest: could not look up conId %s for its session calendar (%s); '
+                            'no regular-session rules for it', conid, exc)
+            definitions = []
+        if definitions:
+            definition = definitions[0]
+            name = order_calendar(getattr(definition, 'exchange', '') or '',
+                                  getattr(definition, 'primaryExchange', '') or '',
+                                  getattr(definition, 'secType', '') or '')
+        calendars[int(conid)] = name
+    return calendars if any(calendars.values()) else None
+
+
 def _stamp_execution_params(params: Dict[str, Any], config) -> Dict[str, Any]:
     """Record the execution semantics a run used, in its persisted params.
 
@@ -9536,6 +9800,12 @@ def _stamp_execution_params(params: Dict[str, Any], config) -> Dict[str, Any]:
             config.trade_notional or config.initial_capital * 0.02)
         if config.pyramid_max_adds is not None:
             params['_pyramid_max_adds'] = config.pyramid_max_adds
+    # Regular-session rules change which entries are taken and where an
+    # after-hours exit fills; a run with them is not comparable with one
+    # without. The calendars in force, 'none' for an instrument with none.
+    calendars = getattr(config, 'session_calendars', None)
+    if calendars:
+        params['_session_calendars'] = ','.join(sorted({name or 'none' for name in calendars.values()}))
     return params
 
 
@@ -9625,6 +9895,13 @@ def _handle_walk_forward(args: argparse.Namespace, now=None):
     storage = TickStorage(cfg.get('history_duckdb_path', '')
                           or cfg.get('duckdb_path', ''))
     bar_size = BarSize.parse_str(args.bar_size)
+    # Live semantics include the executor's regular-session rules.
+    session_calendars = None
+    if args.live_semantics and not getattr(args, 'panel', False):
+        from trader.data.universe import UniverseAccessor
+        session_calendars = _session_calendars_for(
+            args.conids, UniverseAccessor(cfg.get('duckdb_path', ''),
+                                          cfg.get('universe_library', 'Universes')))
 
     def _config(start, end, measure_start):
         config = BacktestConfig(
@@ -9641,6 +9918,7 @@ def _handle_walk_forward(args: argparse.Namespace, now=None):
             # window and open the next.
             measure_from=dt.datetime.combine(measure_start, dt.time.min),
             measure_to=dt.datetime.combine(end, dt.time.min),
+            session_calendars=session_calendars,
         )
         if args.live_semantics and args.trade_notional:
             config.trade_notional = args.trade_notional
@@ -9847,6 +10125,9 @@ def _handle_backtest_sweep(args: argparse.Namespace):
         slippage_model=get_slippage_model('fixed', bps=args.slippage_bps),
         execution_mode='live' if getattr(args, 'live_semantics', False) else 'accumulate',
     )
+    if config.execution_mode != 'accumulate':
+        # Live semantics include the executor's regular-session rules.
+        config.session_calendars = _session_calendars_for(conids, accessor)
     backtester = Backtester(storage, config)
     code_hash = compute_strategy_hash(args.strategy)
 
@@ -10076,6 +10357,13 @@ def _handle_backtest(args: argparse.Namespace):
         trade_notional=getattr(args, 'trade_notional', None),
         pyramid_max_adds=getattr(args, 'pyramid_max_adds', None),
     )
+    if config.execution_mode != 'accumulate':
+        # Live semantics include the executor's regular-session rules: an open
+        # outside the venue's regular session is refused, an exit decided
+        # outside it fills at the next regular open, and close_by_time moves on
+        # an early close. Calendars come from the universe definitions.
+        config.session_calendars = _session_calendars_for(
+            conids, UniverseAccessor(duckdb_path, cfg.get('universe_library', 'Universes')))
 
     backtester = Backtester(storage, config)
 
@@ -10133,6 +10421,7 @@ def _handle_backtest(args: argparse.Namespace):
         'win_rate':           win_rate_display,
         'time_in_market':     f'{result.time_in_market_pct:.1%}',
         'total_trades':       result.total_trades,
+        **_bt_result_count_fields(result),
         'start_date':         str(result.start_date)[:10],
         'end_date':           str(result.end_date)[:10],
         'final_equity':       f'{result.equity_curve.iloc[-1]:,.2f}' if len(result.equity_curve) > 0 else str(config.initial_capital),
@@ -10277,6 +10566,9 @@ def _handle_backtest(args: argparse.Namespace):
                 'win_rate':           (result.win_rate if result.total_trades > 0 else None),
                 'time_in_market_pct': result.time_in_market_pct,
                 'total_trades':       result.total_trades,
+                # total_trades is FILLS. Exits are what win_rate /
+                # profit_factor / expectancy_bps are counted over.
+                **_bt_result_count_fields(result),
                 'start_date':         str(result.start_date)[:10],
                 'end_date':           str(result.end_date)[:10],
                 'final_equity':       float(result.equity_curve.iloc[-1]) if len(result.equity_curve) > 0 else config.initial_capital,
@@ -10665,10 +10957,10 @@ def _resolve_download_listing(symbol: str, source: str, accessor, rpc_mmr,
     # Persist into a "downloads" universe so the resolution sticks for future
     # runs — matches the auto-register behaviour of `propose --group`.
     sec_def = discovered[0]
-    try:
-        universe = accessor.get('downloads')
-    except Exception:
-        universe = None
+    # get() gives an empty universe for a missing name; it raises only when
+    # the stored universe could not be read, and that must not be answered by
+    # writing a new one over it.
+    universe = accessor.get('downloads')
     if universe is None:
         from trader.data.universe import Universe
         universe = Universe(name='downloads', security_definitions=[sec_def])
@@ -11491,11 +11783,10 @@ def _handle_data_migrate_symbols(args: argparse.Namespace):
                 sec_def = resolved[0]
                 conid = str(sec_def.conId)
 
-                # Register in universe
-                try:
-                    u = accessor.get('downloads')
-                except Exception:
-                    u = None
+                # Register in universe. A `downloads` that cannot be read is
+                # this symbol's failure (reported below), never a reason to
+                # write a new universe over it.
+                u = accessor.get('downloads')
                 if u is None:
                     u = Universe(name='downloads', security_definitions=[sec_def])
                 else:

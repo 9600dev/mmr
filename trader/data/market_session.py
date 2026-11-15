@@ -50,6 +50,7 @@ FAIL OPEN, ON PURPOSE
 from __future__ import annotations
 
 import datetime as dt
+import math
 import threading
 
 from typing import Any, Dict, NamedTuple, Optional, Tuple
@@ -295,12 +296,14 @@ def early_close(calendar_name: str, day: dt.date) -> Optional[pd.Timestamp]:
 
     ``None`` means an ordinary session or no session at all. A lookup that
     fails RAISES: this answers "is today unusual?", and "could not find out" is
-    not "no" (the same reason ``SessionLookup`` is tri-state). Nothing on the
-    bar or order path calls it — the strategies carry their own session close
-    (16:00 for a US class), which is exactly what an early close breaks: an
-    entry after 13:00 is held by IB until the next session and an end-of-day
-    flatten fires three hours late (AUDIT_2026-11-14 B3.5). ``mmr verify`` /
-    ``mmr preflight`` use it to say so on the day.
+    not "no" (the same reason ``SessionLookup`` is tri-state).
+
+    The strategies carry their own session close (16:00 for a US class), which
+    is exactly what an early close breaks: an entry after 13:00 was held by IB
+    until the next session and an end-of-day flatten fired three hours late
+    (AUDIT_2026-11-14 B3.5). ``mmr verify`` / ``mmr preflight`` use this to
+    announce the day, and :func:`early_close_shift` / :func:`close_by_on` use
+    it to move a close-by time (the executor and the backtester).
     """
     calendar: Any = _calendar(calendar_name)
     stamp = day.isoformat()
@@ -314,3 +317,259 @@ def early_close(calendar_name: str, day: dt.date) -> Optional[pd.Timestamp]:
     if not isinstance(close, pd.Timestamp) or pd.isna(close):      # NaT is not a Timestamp
         raise ValueError(f'{calendar_name} reports an early close on {day} with no readable time')
     return close.tz_localize('UTC') if close.tz is None else close.tz_convert('UTC')
+
+
+# ---------------------------------------------------------------------------
+# The REGULAR session: where a market order actually executes.
+#
+# Everything above is about which bars a strategy may SEE, and deliberately
+# includes extended hours. An order is a different question. IB holds a market
+# order sent outside the regular session until the next one opens: an entry
+# decided on Friday's 15:59 bar, or at 13:30 on a 13:00-close day, fills on
+# Monday morning on a signal nobody would still act on, and a 15:45 flatten on
+# that half day fires three hours after the close (AUDIT_2026-11-14 B1.11 /
+# B3.5). The two helpers below are what the executor and the backtester use to
+# refuse the first and move the second.
+# ---------------------------------------------------------------------------
+
+_regular_cache: Dict[Tuple[str, dt.date], SessionLookup] = {}
+
+
+def regular_session(calendar_name: str, day: dt.date) -> SessionLookup:
+    """The regular trading intervals (UTC) on *day*: no pre- or post-market, a
+    lunch break excluded, an early close as early as it is.
+
+    Same tri-state as :func:`session_window`: ``window=None, evaluable=True``
+    is a day with no session; ``evaluable=False`` is a lookup that failed (and
+    is not cached).
+    """
+    key = (calendar_name, day)
+    with _lock:
+        if key in _regular_cache:
+            return _regular_cache[key]
+    try:
+        calendar: Any = _calendar(calendar_name)
+        stamp = day.isoformat()
+        schedule = calendar.schedule(start_date=stamp, end_date=stamp)
+        window: Optional[Window] = None
+        intervals: Tuple[Window, ...] = ()
+        if len(schedule):
+            row = schedule.iloc[0]
+            opens = _utc_stamps(row, schedule.columns, ('market_open',))
+            closes = _utc_stamps(row, schedule.columns, ('market_close',))
+            if not opens or not closes or not opens[0] < closes[0]:
+                raise ValueError(f'unreadable regular hours in {list(schedule.columns)}')
+            window = (opens[0], closes[0])
+            intervals = (window,)
+            pause_starts = _utc_stamps(row, schedule.columns, ('break_start',))
+            pause_ends = _utc_stamps(row, schedule.columns, ('break_end',))
+            if pause_starts and pause_ends and window[0] < pause_starts[0] < pause_ends[0] < window[1]:
+                intervals = ((window[0], pause_starts[0]), (pause_ends[0], window[1]))
+    except Exception as ex:
+        logging.warning('market_session: could not read the regular %s session for %s (%s) — NOT caching',
+                        calendar_name, day, ex)
+        return SessionLookup(None, False)
+    lookup = SessionLookup(window, True, intervals)
+    with _lock:
+        _regular_cache[key] = lookup
+    return lookup
+
+
+def _judge_regular(order_at, calendar_name: str) -> Tuple[Optional[bool], str]:
+    """(inside?, why not). ``None`` = could not be determined; the text then
+    says what failed. One judgement behind both readings below, so "refuse an
+    open" and "an exit waits" can never disagree about where the session is."""
+    try:
+        instant = pd.Timestamp(order_at)
+        if not isinstance(instant, pd.Timestamp) or pd.isna(instant):
+            raise ValueError('no timestamp')
+        zone = getattr(_calendar(calendar_name), 'tz')
+        instant = instant.tz_localize(zone) if instant.tz is None else instant
+        instant = instant.tz_convert('UTC')
+        local = instant.tz_convert(zone)
+    except Exception as ex:
+        return None, f'regular session not evaluable for {calendar_name} ({type(ex).__name__}: {ex})'
+    day = local.date()
+    lookup = regular_session(calendar_name, day)
+    if not lookup.evaluable:
+        return None, f'regular session not evaluable for {calendar_name} on {day}'
+    if lookup.window is None:
+        return False, (f'{calendar_name} has no regular session on {day}: '
+                       f'a market order sent now is held until the next one')
+    for start, end in lookup.intervals:
+        if start <= instant < end:
+            return True, ''
+    opening, closing = lookup.window
+    at = f'{local:%H:%M} {zone}'
+    if instant < opening:
+        return False, (f'{calendar_name} regular session has not opened ({opening.tz_convert(zone):%H:%M}); '
+                       f'a market order sent at {at} is held until it does')
+    if instant >= closing:
+        return False, (f'{calendar_name} regular session closed at {closing.tz_convert(zone):%H:%M}; '
+                       f'a market order sent at {at} is held until the next session')
+    return False, f'{calendar_name} is in its trading break at {at}; a market order sent now is held until it ends'
+
+
+def regular_session_refusal(order_at, calendar_name: Optional[str]) -> Optional[str]:
+    """Why a market order sent at *order_at* would NOT execute in the venue's
+    regular session — or None when it would.
+
+    ``order_at`` is the instant the order goes out: for a bar-driven decision,
+    the END of the bar (a 15:59 one-minute bar is acted on at 16:00:00, which
+    is the close). The session is half-open, ``open <= order_at < close``, and
+    a lunch break is outside it.
+
+    ``calendar_name`` empty/None means the venue has no calendar here (an
+    unmapped exchange, or an instrument that trades round the clock): the rule
+    does not apply and the answer is None. Every other uncertainty is a refusal
+    — an unreadable instant, a calendar that cannot answer — because this
+    guards OPENS only, where refusing is the benign direction.
+
+    A timestamp WITHOUT a zone is read as the venue's own wall clock, the
+    reading the other time-of-day rules already give it (``check_time_exit``
+    takes ``bar_ts.time()``; the backtester treats a naive frame as session
+    wall time). The live runtime always supplies an aware instant.
+    """
+    if not calendar_name:
+        return None
+    inside, why = _judge_regular(order_at, calendar_name)
+    if inside is None:
+        return f'{why} — refusing to open (fail-closed)'
+    return None if inside else why
+
+
+def in_regular_session(instant, calendar_name: Optional[str]) -> Optional[bool]:
+    """Is *instant* inside the venue's regular session? ``None`` when that
+    cannot be said: no calendar for the venue, an unreadable instant, a
+    calendar that cannot answer.
+
+    The three-valued reading of the judgement :func:`regular_session_refusal`
+    makes, for callers that must NOT turn "unknown" into "outside" — an exit
+    is delayed only by a session known to be shut.
+    """
+    if not calendar_name:
+        return None
+    return _judge_regular(instant, calendar_name)[0]
+
+
+# IB routing destinations: where an order is SENT, not where the instrument is
+# listed. `_EXCHANGE_CALENDARS` maps SMART to the NYSE session so that bar
+# gating has a default (and fails open); an order rule that refuses must not
+# guess a listing from a router — an ASX name routed SMART is not on New York
+# hours.
+_ROUTERS = frozenset({'SMART', 'IBKRATS', 'BEST'})
+
+
+def listing_calendar(exchange: str, primary_exchange: str = '') -> Optional[str]:
+    """The session calendar of the venue an instrument is LISTED on, or None
+    when only a routing destination is known or the venue is not mapped."""
+    for code in (primary_exchange, exchange):
+        key = str(code or '').strip().upper()
+        if key and key not in _ROUTERS and key in _EXCHANGE_CALENDARS:
+            return _EXCHANGE_CALENDARS[key]
+    return None
+
+
+def order_calendar(exchange: str, primary_exchange: str = '', sec_type: str = '') -> Optional[str]:
+    """The calendar an ORDER for this instrument is judged on, or None when the
+    regular-session rules do not apply to it: an instrument that trades round
+    the clock (``CASH`` / ``CRYPTO``), or a listing venue that is unknown or
+    has no calendar here."""
+    if str(sec_type or '').strip().upper() in _ALWAYS_OPEN_SEC_TYPES:
+        return None
+    return listing_calendar(exchange, primary_exchange)
+
+
+def bar_open_refusal(bar_ts, bar_seconds, calendar_name: Optional[str]) -> Optional[str]:
+    """Why an OPEN decided on the bar starting at *bar_ts* could not execute
+    in the regular session of *calendar_name* — or None.
+
+    The order goes out when the bar completes, so the instant judged is
+    ``bar_ts + bar_seconds`` (see :func:`regular_session_refusal`). A
+    daily-or-slower bar is outside the rule (it is decided after the close by
+    design and fills at the next open), and so is an instrument with no
+    calendar (:func:`order_calendar`). An interval that is not a positive
+    finite number is a refusal: without it there is no order instant.
+
+    The live executor and the backtester both call this, with the same two
+    numbers, which is what makes a validated entry one the executor will take.
+    """
+    try:
+        seconds = float(bar_seconds)
+    except (TypeError, ValueError):
+        seconds = float('nan')
+    if not math.isfinite(seconds) or seconds <= 0:
+        return ('bar interval unknown — cannot tell when the order would be sent; '
+                'refusing to open (fail-closed)')
+    if seconds >= 86400:
+        return None
+    if not calendar_name:
+        return None
+    try:
+        order_at = pd.Timestamp(bar_ts) + pd.Timedelta(seconds=seconds)
+    except Exception as ex:
+        return (f'regular session not evaluable for {calendar_name} ({type(ex).__name__}: {ex}) — '
+                f'refusing to open (fail-closed)')
+    return regular_session_refusal(order_at, calendar_name)
+
+
+def intraday_open_refusal(bar_ts, bar_seconds, exchange: str, primary_exchange: str = '',
+                          sec_type: str = '') -> Optional[str]:
+    """:func:`bar_open_refusal` for an instrument named by its venue fields.
+
+    A routing destination such as SMART is not a listing: with nothing else to
+    go on the rule does not apply.
+    """
+    return bar_open_refusal(bar_ts, bar_seconds, order_calendar(exchange, primary_exchange, sec_type))
+
+
+_early_shift_cache: Dict[Tuple[str, dt.date], dt.timedelta] = {}
+
+
+def early_close_shift(calendar_name: str, day: dt.date) -> dt.timedelta:
+    """How much earlier than usual the venue's regular session ends on *day*:
+    three hours for a 13:00 New York close, zero on an ordinary day and on a
+    day with no session. Never negative.
+
+    A calendar that cannot answer RAISES (and nothing is remembered); an
+    answer is remembered, because the backtester asks once per bar.
+    """
+    key = (calendar_name, day)
+    with _lock:
+        if key in _early_shift_cache:
+            return _early_shift_cache[key]
+    shift = dt.timedelta(0)
+    actual = early_close(calendar_name, day)
+    if actual is not None:
+        calendar: Any = _calendar(calendar_name)
+        usual: dt.time = calendar.close_time
+        # Wall-clock arithmetic in the venue's own zone: both closes are on `day`.
+        usual_at = dt.datetime.combine(day, usual.replace(tzinfo=None))
+        actual_at = actual.tz_convert(calendar.tz).to_pydatetime().replace(tzinfo=None)
+        shift = max(usual_at - actual_at, dt.timedelta(0))
+    with _lock:
+        _early_shift_cache[key] = shift
+    return shift
+
+
+def close_by_on(close_by: dt.time, calendar_name: Optional[str], day: dt.date) -> dt.time:
+    """The time of day a holding that asked to be closed by *close_by* must be
+    closed by ON *day*.
+
+    On an ordinary day, and for a venue with no calendar here, that is
+    *close_by*. On a day the venue closes early it is earlier by exactly as
+    much as the close is — a 15:45 flatten on a 13:00 close (16:00 usually)
+    becomes 12:45, keeping the strategy's own margin before the bell. It never
+    moves later, and never earlier than midnight. A calendar that cannot
+    answer RAISES; the caller keeps the unshifted time (an exit is never held
+    up by a lookup).
+    """
+    if not calendar_name:
+        return close_by
+    shift = early_close_shift(calendar_name, day)
+    if shift <= dt.timedelta(0):
+        return close_by
+    moved = dt.datetime.combine(day, close_by.replace(tzinfo=None)) - shift
+    if moved.date() != day:
+        return dt.time(0, 0)
+    return moved.time()

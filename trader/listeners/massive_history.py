@@ -1,5 +1,6 @@
 from massive import RESTClient
 from trader.common.logging_helper import setup_logging
+from trader.data.listing_guard import vendor_ticker
 from trader.objects import BarSize, WhatToShow
 
 import datetime as dt
@@ -23,6 +24,8 @@ class MassiveHistoryWorker:
         timezone: str = 'US/Eastern',
     ) -> pd.DataFrame:
         multiplier, timespan = BarSize.to_massive_timespan(bar_size)
+        # Callers hand over IB's symbol ('BRK B'); Massive spells it 'BRK.B'.
+        ticker = vendor_ticker(ticker)
 
         # Massive API expects date strings or timestamps
         from_ = start_date.strftime('%Y-%m-%d')

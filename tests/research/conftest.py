@@ -104,6 +104,16 @@ def research_env(tmp_path, monkeypatch):
                    low DOUBLE, close DOUBLE, volume DOUBLE, dollar_volume DOUBLE, dv_rank INTEGER,
                    PRIMARY KEY(day, ticker))""")
     con.executemany('INSERT INTO pit_daily_bars VALUES (?,?,?,?,?,?,?,?,?)', make_pit_rows())
+    # The split history the fundamentals loader needs to put share counts on
+    # the price basis (scripts/fetch_splits.py writes it; every real history
+    # store has it). Empty: the synthetic names never split.
+    con.execute("""CREATE TABLE corporate_splits(ticker VARCHAR, conid VARCHAR, execution_date DATE,
+                   split_to DOUBLE, split_from DOUBLE, fetched_at TIMESTAMPTZ,
+                   PRIMARY KEY(ticker, execution_date))""")
+    # ...and the day those prices are split-adjusted through, which the loader
+    # refuses to guess (it is not the last stored day in a cut snapshot).
+    con.execute('CREATE TABLE pit_price_basis(adjusted_through DATE, recorded_at TIMESTAMPTZ, note VARCHAR)')
+    con.execute("INSERT INTO pit_price_basis VALUES ('2018-06-01', now(), 'synthetic')")
     con.close()
     con = duckdb.connect(str(main))
     con.execute("""CREATE TABLE fundamentals(conid VARCHAR, ticker VARCHAR, period_end DATE,

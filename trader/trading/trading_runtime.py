@@ -3714,13 +3714,15 @@ class Trader():
 
     async def resize_position(self, contract: Contract, target_quantity: float,
                               client_intent_id: str = '') -> SuccessFail:
-        """Submit a coordinated trim, preserving the protection of pending shares.
+        """Submit a trim of a position that has no working exits on that side.
 
-        An existing protective tranche equal to the requested trim can share
-        IB's reduce-with-block OCA group with the trim. A single larger stop
-        cannot be atomically split into two orders with this API, so that shape
-        is deferred *before* any order modification. Success means submitted;
-        callers reconcile executions before treating the target as achieved.
+        A position WITH working exits (a protective stop, in one tranche or
+        several) is deferred before any order is changed: IB cannot move a
+        working order into an OCA group with the trim (error 10327, validated
+        on paper 2026-11-15 — see ``_resize_position``), so there is no
+        broker-side handoff of protection, and one full-size stop cannot be
+        split atomically either. Success means submitted; callers reconcile
+        executions before treating the target as achieved.
         """
         return await self._run_order_intent(
             'resize', client_intent_id, self._resize_position,
@@ -3751,54 +3753,37 @@ class Trader():
                    if t.contract.conId == contract.conId and t.order.account == self.ib_account
                    and t.order.action == action
                    and t.orderStatus.status not in {'Cancelled', 'ApiCancelled', 'Filled', 'Inactive'}]
-        protective = None
         if working:
-            # Only independent protective tranches with exact quantities have a
-            # proved handoff here. Arbitrary bracket/OCA webs need a separately
-            # specified coordinator; guessing their ownership is unsafe.
-            if any(t.order.orderType not in {'STP', 'TRAIL'} or t.order.ocaGroup
-                   or t.order.parentId or t.orderStatus.status not in {'Submitted', 'PreSubmitted'}
-                   for t in working):
-                return SuccessFail.fail(error='DEFERRED: unsupported protective order topology')
-            quantities = [float(t.orderStatus.remaining) for t in working]
-            if (not all(math.isfinite(q) and q > 0 for q in quantities)
-                    or abs(sum(quantities) - abs(held)) > 1e-8):
-                return SuccessFail.fail(error='DEFERRED: protective coverage does not exactly match broker inventory')
-            protective = next((t for t in working
-                               if abs(float(t.orderStatus.remaining) - trim_qty) < 1e-8), None)
-            if protective is None:
-                return SuccessFail.fail(error='DEFERRED: partial trim requires an existing matching protective tranche; no orders changed')
+            # A position with working exits on this side is NOT resized here,
+            # and nothing about those orders is touched.
+            #
+            # The September 2026 protocol handed a matching protective tranche
+            # to the trim by MODIFYING the working stop into a reduce-with-block
+            # OCA group with it, and docs/REMEDIATION_2026-09-08.md said that
+            # needed validating on paper. Validated 2026-11-15 (paper gateway,
+            # a one-share GTC stop): IB answers the modification with error
+            # 10327, "OCA group type revision is not allowed". An OCA group
+            # exists only from an order's creation. Two consequences:
+            #   * the confirmation could never succeed, so every protected
+            #     trim ended UNKNOWN (the unit fake applied the edit locally,
+            #     which is why the tests passed);
+            #   * the rejected modification is not harmless. ib_async marks
+            #     the session's Trade Cancelled on any order-level error, while
+            #     the stop is still WORKING at the broker — until the next
+            #     open-orders refresh, this process believes a live stop is
+            #     gone.
+            # So the modification is not sent. Replacing the tranche (cancel,
+            # then a new stop created in an OCA group with the trim) is a
+            # different protocol with its own restore-on-failure rules, and is
+            # not implemented: the operator cancels or replaces the protection
+            # explicitly.
+            return SuccessFail.fail(error=(
+                f'DEFERRED: {len(working)} working {action} order(s) protect this position and there is '
+                'no handoff to a trim: IB refuses to add a working order to an OCA group (error 10327). '
+                'No orders changed. Cancel or replace the protection explicitly (cancel / protect), '
+                'or use close'))
 
-        oca_group = ''
-        if protective is not None:
-            oca_group = f'mmr-resize-{uuid.uuid4().hex}'
-            edit = copy.copy(protective.order)
-            edit.ocaGroup, edit.ocaType = oca_group, 2
-            edit.transmit = True
-            modified = await self.executioner.subscribe_place_order_direct(
-                mint_approved_order(contract, edit, is_exit=True,
-                                    exit_reason=ExitReason.VALIDATED_STANDALONE))
-            try:
-                await asyncio.wait_for(modified.pipe(ops.take(1)), timeout=8.0)
-                confirmed = await single_flight(
-                    self.client.ib, 'openOrders', self.client.ib.reqOpenOrdersAsync, 10.0)
-                positions = await single_flight(
-                    self.client.ib, 'positions', self.client.ib.reqPositionsAsync, 10.0)
-            except Exception as ex:
-                return SuccessFail.fail(error=f'UNKNOWN: protective OCA modification requires reconciliation: {ex}')
-            match = next((t for t in confirmed if t.order.orderId == edit.orderId
-                          and t.order.clientId == edit.clientId
-                          and t.order.account == self.ib_account
-                          and t.contract.conId == contract.conId), None)
-            new_held = sum(float(p.position) for p in positions
-                           if p.account == self.ib_account and p.contract.conId == contract.conId)
-            if (match is None or match.order.ocaGroup != oca_group or match.order.ocaType != 2
-                    or match.orderStatus.status not in {'Submitted', 'PreSubmitted'}
-                    or float(match.orderStatus.remaining) != trim_qty or new_held != held):
-                return SuccessFail.fail(error='UNKNOWN: broker has not confirmed the matching protected tranche; trim not submitted')
-
-        order = MarketOrder(action, trim_qty, account=self.ib_account, transmit=True,
-                            ocaGroup=oca_group, ocaType=2 if oca_group else 0)
+        order = MarketOrder(action, trim_qty, account=self.ib_account, transmit=True)
         observable = await self.executioner.subscribe_place_order_direct(
             mint_approved_order(contract, order, is_exit=True,
                                 exit_reason=ExitReason.POSITION_CLASSIFIED))
@@ -3809,7 +3794,7 @@ class Trader():
         return SuccessFail.success(obj={
             'status': 'SUBMITTED', 'order_ids': [trade.order.orderId],
             'target_quantity': target_quantity,
-            'protection': 'OCA_REDUCE_WITH_BLOCK' if protective else 'NO_EXISTING_PROTECTION'})
+            'protection': 'NO_EXISTING_PROTECTION'})
 
     async def _place_standalone_order(
         self,
@@ -4637,7 +4622,8 @@ class Trader():
                 for p in executed:
                     mine = [e for e in events if e.order_id in set(p.order_ids)]
                     qty = p.quantity if (p.quantity is not None and p.quantity == p.quantity) else None
-                    known_outcomes[p.id] = fill_outcome(mine, p.order_ids, qty)['outcome']
+                    known_outcomes[p.id] = fill_outcome(
+                        mine, p.order_ids, qty, action=p.action)['outcome']
         except Exception as ex:
             logging.warning('reconcile: order-journal outcome lookup failed: %s', ex)
 

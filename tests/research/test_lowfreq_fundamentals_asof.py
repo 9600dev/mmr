@@ -39,16 +39,20 @@ def _add_bbb_filing(path, accepted_utc: str, shares: float, period_end: str):
 
 def test_as_of_uses_the_dst_aware_close(research_env):
     from trader.research.lowfreq import load_equity_panel
-    _add_bbb_filing(research_env['main'], '2017-07-14 20:30:00', 5e8, '2017-06-30')   # 16:30 EDT: after close
-    _add_bbb_filing(research_env['main'], '2017-12-14 20:30:00', 7e8, '2017-09-30')   # 15:30 EST: before close
-    _add_bbb_filing(research_env['main'], '2018-01-18 21:00:00', 9e8, '2017-12-31')   # exactly AT the EST close
+    # The share counts are markers for WHICH filing is in force. They step by
+    # 10%: a count that jumps 3.5x between filings is what a unit error looks
+    # like, and the loader (rightly) holds such a figure back
+    # (share_basis.plausible_share_counts) - which is not what is under test.
+    _add_bbb_filing(research_env['main'], '2017-07-14 20:30:00', 2.2e8, '2017-06-30')   # 16:30 EDT: after close
+    _add_bbb_filing(research_env['main'], '2017-12-14 20:30:00', 2.4e8, '2017-09-30')   # 15:30 EST: before close
+    _add_bbb_filing(research_env['main'], '2018-01-18 21:00:00', 2.6e8, '2017-12-31')   # exactly AT the EST close
     shares = load_equity_panel('2016-08-01', '2018-03-01').fields['shares_diluted']['BBB']
     assert shares.loc['2017-07-14'] == pytest.approx(2e8), 'accepted after the 20:00 UTC summer close: not yet known'
-    assert shares.loc['2017-07-17'] == pytest.approx(5e8)
+    assert shares.loc['2017-07-17'] == pytest.approx(2.2e8)
     assert shares.loc['2017-12-13'] == pytest.approx(2e8)
-    assert shares.loc['2017-12-14'] == pytest.approx(7e8), 'accepted 15:30 EST, before the winter close: known same day'
-    assert shares.loc['2018-01-18'] == pytest.approx(7e8), 'accepted at the close instant is not strictly before it'
-    assert shares.loc['2018-01-19'] == pytest.approx(9e8)
+    assert shares.loc['2017-12-14'] == pytest.approx(2.4e8), 'accepted 15:30 EST, before the winter close: known same day'
+    assert shares.loc['2018-01-18'] == pytest.approx(2.4e8), 'accepted at the close instant is not strictly before it'
+    assert shares.loc['2018-01-19'] == pytest.approx(2.6e8)
 
 
 def test_session_close_honours_early_closes():

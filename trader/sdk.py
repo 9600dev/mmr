@@ -17,6 +17,7 @@ from ib_async.order import Order, Trade
 from ib_async.ticker import Ticker
 from trader.common.reactivex import SuccessFail
 from trader.data.data_access import PortfolioSummary, SecurityDefinition
+from trader.data.listing_guard import vendor_ticker
 from trader.data.universe import Universe
 from trader.messaging.clientserver import consume, RPCClient, TopicPubSub, pack, unpack
 from trader.messaging.data_service_api import DataServiceApi
@@ -66,6 +67,16 @@ def compute_resize_deltas(
 
     Each adjustment: {symbol, conId, current_qty, target_qty, delta_qty, action,
                       current_value, target_value, mkt_price}
+
+    Rounding: the target quantity is truncated TOWARD ZERO, deliberately.
+    * Trim (``max_bound``): every target is at or below the proportional one,
+      so the resized book is never worth more than the bound.
+    * Grow (``min_bound``): never buys more than the proportional target, so
+      the book can land short of the bound by less than one share per
+      position. A grow adds exposure; overshooting is the wrong side to err
+      on, and would breach ``max_bound`` when both are given.
+    A grow never REDUCES a holding: a fractional quantity whose truncated
+    target falls below it (1.5 shares x 1.2 -> 1) is left alone.
     """
     import math
 
@@ -102,6 +113,11 @@ def compute_resize_deltas(
         delta_qty = target_qty - current_qty
 
         if delta_qty == 0:
+            continue
+        if scale_factor > 1.0 and abs(target_qty) < abs(current_qty):
+            # Truncating to a whole number put the target BELOW a fractional
+            # holding: the "grow" would sell part of it (or all of it, when
+            # the target truncates to 0). Growing never reduces; hold.
             continue
 
         # For long positions: selling reduces, buying increases
@@ -141,6 +157,51 @@ def _gate_daily_loss_limit() -> Optional[float]:
     except Exception as ex:  # sizing must not fail because the gate config is odd
         logger.warning('could not read risk_limits.max_daily_loss: %s', ex)
         return None
+
+
+def label_session_currency(summary: dict, base_currency: str,
+                           pnl_currencies: Optional[List[str]]) -> dict:
+    """State the currency of a ``session_summary`` dict, in place.
+
+    The sizer's amounts are account-base-currency amounts: its limits are
+    compared against NetLiquidation and a proposal's ``amount`` is converted
+    from the instrument currency to base before shares are computed. The keys
+    were named ``*_usd`` when the account was assumed to be USD and consumers
+    read them, so they keep their names; the currency is stated next to them
+    (``base_currency``, ``currency`` in each block with amounts, and
+    ``currency_note``). None means it was not read — never a guessed 'USD'.
+
+    ``portfolio.daily_pnl`` is NOT a base-currency figure: it sums each
+    position's daily PnL in that instrument's currency. It gets its own label:
+    ``daily_pnl_currency`` is the single currency, 'MIXED' when positions span
+    several (``daily_pnl_currencies`` lists them), None when there is nothing
+    to sum or the portfolio was not read.
+    """
+    base = base_currency or None
+    summary['base_currency'] = base
+    for section in ('config', 'portfolio', 'capacity'):
+        if isinstance(summary.get(section), dict):
+            summary[section]['currency'] = base
+    for size in (summary.get('recommended_sizes') or {}).values():
+        if isinstance(size, dict):
+            size['currency'] = base
+
+    portfolio = summary.get('portfolio')
+    if isinstance(portfolio, dict):
+        currencies = list(pnl_currencies or [])
+        portfolio['daily_pnl_currencies'] = currencies
+        portfolio['daily_pnl_currency'] = (
+            None if not currencies else currencies[0] if len(currencies) == 1 else 'MIXED')
+
+    unit = (f'the account base currency ({base})' if base else
+            'the account base currency, which was not read (trader_service unavailable '
+            'or no NetLiquidation currency) and is not necessarily USD')
+    summary['currency_note'] = (
+        f"Amounts are in {unit}, including every key with the historical '_usd' suffix "
+        '(config limits, capacity.remaining_usd, recommended_sizes.*.amount_usd). '
+        "portfolio.daily_pnl is the exception: it adds each position's daily PnL in that "
+        "instrument's currency without conversion (see portfolio.daily_pnl_currency).")
+    return summary
 
 
 _PLACEHOLDER_AUTHORS = {'na', 'n/a', 'n.a.', 'none', 'null', 'unknown', 'nan', '-'}
@@ -195,6 +256,61 @@ def normalize_ib_quote(q: dict) -> dict:
         q.setdefault('change_pct', float('nan'))
     q['source'] = 'ib'
     return q
+
+
+def _utc_now() -> dt.datetime:
+    """The wall clock, as one seam (session-dependent reads are tested against
+    fixed instants)."""
+    return dt.datetime.now(dt.timezone.utc)
+
+
+_VENUE_CLOSED_NOTE = 'venue session closed: quote not requested'
+
+
+def _stock_venue_closed(contract: Any, now: dt.datetime) -> bool:
+    """True only when ``contract`` is a stock whose venue is KNOWN to be
+    outside its trading session at ``now`` (extended hours are in session).
+
+    For deciding whether a live quote is worth asking for: outside the session
+    IB sends no bid/ask, and the snapshot path waits out its partial-wait for
+    them. Anything this cannot establish is False — "ask as before":
+
+    * not a stock. Options and futures keep hours the stock calendar does not
+      describe (index options trade overnight), FX and crypto never close;
+    * a listing venue (``primaryExchange``) with no calendar, even when the
+      route is SMART — SMART must not stand in for a venue that is named;
+    * no listing venue and a route with no calendar;
+    * no listing venue and route SMART for a non-USD contract. SMART is a
+      routing destination; ``market_session`` reads it as the US session,
+      which is believed only for USD. An order loaded from IB after a restart
+      carries exactly this shape (the openOrder message has no
+      primaryExchange), so without the currency test an ASX order would be
+      judged on New York's clock. Residual: a USD-denominated line listed
+      outside the US, routed SMART and loaded that way, is judged on the US
+      session;
+    * a calendar that cannot be read (``in_session`` fails open) or any error.
+    """
+    try:
+        if str(getattr(contract, 'secType', '') or '').strip().upper() != 'STK':
+            return False
+        from trader.data import market_session
+        primary = str(getattr(contract, 'primaryExchange', '') or '').strip().upper()
+        route = str(getattr(contract, 'exchange', '') or '').strip().upper()
+        if primary:
+            venue = primary
+        elif route == 'SMART':
+            if str(getattr(contract, 'currency', '') or '').strip().upper() != 'USD':
+                return False
+            venue = route
+        else:
+            venue = route
+        if market_session.calendar_name_for(venue) is None:
+            return False
+        return not market_session.in_session(now, venue, '', 'STK')
+    except Exception as ex:
+        logger.debug('venue session unknown for %s: %s', getattr(contract, 'symbol', '?'), ex)
+        return False
+
 
 class MMR:
     """Synchronous Python SDK for the MMR trader_service.
@@ -897,7 +1013,14 @@ class MMR:
         return out
 
     def orders(self) -> pd.DataFrame:
-        """Open orders with full detail (symbol, name, prices, account %)."""
+        """Open orders with full detail (symbol, name, prices, account %).
+
+        ``bid`` / ``ask`` / ``last`` are a live quote, requested only for
+        instruments that can have one: a stock whose venue is known to be
+        outside its session (extended hours count as in session) is not asked
+        for, and its row says so in ``quote_notes``. Unknown venues and
+        non-stocks are asked as always.
+        """
         trades_raw: dict[int, list[Trade]] = self._rpc.rpc(
             return_type=dict[int, list[Trade]]
         ).get_trades()
@@ -933,12 +1056,25 @@ class MMR:
             contract_cache.setdefault(con.symbol, con)
 
         # Batch snapshot for bid/ask context — single RPC instead of N.
+        #
+        # Only for instruments that can have a quote. Outside its venue's
+        # session a stock gets no bid/ask from IB, and the snapshot path waits
+        # out its partial-wait (4 s) for them: the listing took ~5 s off-hours
+        # for market context it could not show. Those rows are not asked for
+        # (so they carry no ``last`` either) and say so in ``quote_notes``;
+        # everything in session (extended hours included) or of unknown venue
+        # is asked as before.
         order_contracts = []
         sym_order = []
+        venue_closed: set = set()
+        now = _utc_now()
         for sym, con in contract_cache.items():
-            order_contracts.append(self._to_contract(con))
             sym_order.append(sym)
             name_cache[sym] = ''  # company name not available without per-symbol resolve
+            if _stock_venue_closed(con, now):
+                venue_closed.add(sym)
+                continue
+            order_contracts.append(self._to_contract(con))
 
         if order_contracts:
             try:
@@ -986,6 +1122,9 @@ class MMR:
                         'bid': (_b or None) if _notes else q.get('bid'),
                         'ask': (_a or None) if _notes else q.get('ask'),
                         'last': q.get('last'),
+                        # ...and say so: a blank bid beside a working order
+                        # otherwise reads as "no market".
+                        'notes': list(_notes),
                     }
             except Exception:
                 pass
@@ -1028,6 +1167,10 @@ class MMR:
                 'bid': bid,
                 'ask': ask,
                 'last': last,
+                # Why a row has no quote when none was asked for (a failed
+                # snapshot leaves bid/ask/last empty too, and is not this).
+                'quote_notes': ([_VENUE_CLOSED_NOTE] if t.contract.symbol in venue_closed
+                                else (snap.get('notes') or None)),
             })
 
         df = pd.DataFrame(rows)
@@ -1355,11 +1498,28 @@ class MMR:
         than silently swallowed — callers (e.g. ``session_status``) surface them so
         consumers can distinguish "account is empty" from "the RPC call failed".
         """
+        return self._portfolio_state_with_currencies()[0]
+
+    def _portfolio_state_with_currencies(self) -> tuple:
+        """``(state, base_currency, pnl_currencies)`` — the state plus what
+        currency its numbers are in.
+
+        ``base_currency`` is the currency IB reports NetLiquidation in ('' when
+        the account values could not be read or carry none): the unit of
+        net_liquidation, gross_position_value and available_funds.
+        ``pnl_currencies`` is the sorted set of INSTRUMENT currencies summed
+        into ``state.daily_pnl`` (per-position PnL is reported in each
+        instrument's currency and is not converted here), or None when the
+        portfolio could not be read.
+        """
         from trader.trading.position_sizing import PortfolioState
         state = PortfolioState()
+        base_currency = ''
+        pnl_currencies: Optional[List[str]] = None
         try:
             acct_vals = consume(self._rpc.rpc(return_type=dict).get_account_values())
             if acct_vals:
+                base_currency = str((acct_vals.get('NetLiquidation') or {}).get('currency', '') or '')
                 state.net_liquidation = float(acct_vals.get('NetLiquidation', {}).get('value', 0))
                 state.gross_position_value = float(acct_vals.get('GrossPositionValue', {}).get('value', 0))
                 state.available_funds = float(acct_vals.get('AvailableFunds', {}).get('value', 0))
@@ -1374,8 +1534,14 @@ class MMR:
 
         try:
             portfolio_df = self.portfolio()
+            pnl_currencies = []
             if portfolio_df is not None and not portfolio_df.empty:
                 state.position_count = len(portfolio_df)
+                if 'currency' in portfolio_df.columns:
+                    pnl_currencies = sorted({str(c or '') or 'UNKNOWN'
+                                             for c in portfolio_df['currency']})
+                else:
+                    pnl_currencies = ['UNKNOWN']
                 if 'dailyPNL' in portfolio_df.columns:
                     col = portfolio_df['dailyPNL']
                     # .sum() skips NaN, so a position whose PnL subscription is
@@ -1403,14 +1569,22 @@ class MMR:
             logger.warning('proposal_store query failed: %s', e)
             state.rpc_errors.append(f'proposal_store: {type(e).__name__}: {e}')
 
-        return state
+        return state, base_currency, pnl_currencies
 
     def session_status(self) -> dict:
-        """Return position sizing config, portfolio state, capacity, and recommended sizes."""
+        """Return position sizing config, portfolio state, capacity, and recommended sizes.
+
+        Amounts are in the ACCOUNT BASE CURRENCY, including every key with the
+        historical ``_usd`` suffix; the result says which currency that is
+        (``base_currency``, and ``currency`` in each block that carries
+        amounts). ``portfolio.daily_pnl`` is the exception and is labelled
+        separately — see ``label_session_currency``.
+        """
         from trader.trading.position_sizing import PositionSizingConfig, PositionSizer
         config = PositionSizingConfig.load()
-        state = self._get_portfolio_state()
-        return PositionSizer(config, _gate_daily_loss_limit()).session_summary(state)
+        state, base_currency, pnl_currencies = self._portfolio_state_with_currencies()
+        summary = PositionSizer(config, _gate_daily_loss_limit()).session_summary(state)
+        return label_session_currency(summary, base_currency, pnl_currencies)
 
     def reconcile(self) -> dict:
         """Report-only broker-truth reconciliation. Requires trader_service.
@@ -1546,11 +1720,20 @@ class MMR:
         return out
 
     def portfolio_diff(self) -> dict:
-        """Compare current portfolio to the last stored snapshot.
+        """Compare the current portfolio with each position's stored baseline.
 
-        Returns {changed, new, removed, unchanged_count, prev_timestamp}.
-        Stores current snapshot in DuckDB for next call. First call returns
-        all positions as 'new' (no previous snapshot exists).
+        Returns {changed, new, removed, unchanged_count, prev_timestamp,
+        timestamp}. First call returns all positions as 'new' (no baseline
+        exists). A position is 'changed' when its value is more than 0.5% from
+        its baseline or its quantity differs.
+
+        The baseline is per symbol and advances ONLY when that symbol is
+        reported (as new or changed): an unchanged position keeps the value it
+        was last reported at, so a move that arrives in steps smaller than the
+        threshold accumulates and is reported once it crosses it. ``prev_value``
+        is therefore the last reported value, and each changed entry carries
+        ``baseline_timestamp`` (when that was); ``prev_timestamp`` remains the
+        time of the previous call.
         """
         import math
         from trader.data.duckdb_store import DuckDBObjectStore
@@ -1590,11 +1773,24 @@ class MMR:
             except Exception:
                 pass
 
-        # Compute diff
+        # Compute diff, and the baseline the NEXT call compares against.
+        #
+        # A symbol's baseline advances only when that symbol was REPORTED (new
+        # or changed). It used to be overwritten with the current snapshot on
+        # every call, so each call compared with the one before it and a
+        # position sliding 0.4% per monitoring cycle was "unchanged" for ever
+        # (100.00 -> 81.84 over 50 cycles, nothing reported). Per symbol, not
+        # per snapshot: in a real book something moves on most calls, and
+        # re-baselining everything then would hide the quiet drifter again.
+        now = str(dt.datetime.now())
         new_symbols = []
         removed_symbols = []
         changed = []
         unchanged_count = 0
+        baseline: Dict[str, dict] = {}
+
+        def _public(record: dict) -> dict:
+            return {k: v for k, v in record.items() if k != 'baseline_timestamp'}
 
         all_symbols = set(list(current.keys()) + list(prev.keys()))
         for sym in sorted(all_symbols):
@@ -1603,11 +1799,19 @@ class MMR:
 
             if cur and not prv:
                 new_symbols.append({'symbol': sym, **cur})
+                baseline[sym] = {**cur, 'baseline_timestamp': now}
             elif prv and not cur:
-                removed_symbols.append({'symbol': sym, **prv})
+                removed_symbols.append({'symbol': sym, **_public(prv)})
             elif cur and prv:
-                # Check if value changed by more than 0.5%
-                pct_change = abs(cur['value'] - prv['value']) / prv['value'] if prv['value'] > 0 else 0
+                # Value moved more than 0.5% from the baseline. A value that
+                # appears where the baseline had none is a change, not "0%".
+                if prv['value'] > 0:
+                    pct_change = abs(cur['value'] - prv['value']) / prv['value']
+                else:
+                    pct_change = math.inf if cur['value'] > 0 else 0.0
+                # Records stored before baselines were per symbol carry no
+                # timestamp of their own; the snapshot's is when they were set.
+                measured_from = prv.get('baseline_timestamp', prev_ts)
                 if pct_change > 0.005 or cur['position'] != prv['position']:
                     changed.append({
                         'symbol': sym,
@@ -1617,17 +1821,26 @@ class MMR:
                         'daily_pnl': cur['daily_pnl'],
                         'position': cur['position'],
                         'prev_position': prv['position'],
+                        # prev_value is the last REPORTED value, which can be
+                        # older than the previous call (prev_timestamp).
+                        'baseline_timestamp': measured_from,
                     })
+                    baseline[sym] = {**cur, 'baseline_timestamp': now}
                 else:
                     unchanged_count += 1
+                    # Not reported, so not re-baselined: value and position
+                    # stay where they were. daily_pnl is not compared; keep
+                    # it current so a later 'removed' entry shows the latest.
+                    baseline[sym] = {**prv, 'daily_pnl': cur['daily_pnl'],
+                                     'baseline_timestamp': measured_from}
 
-        # Store current snapshot for next diff
+        # Store the baseline for the next diff
         if duckdb_path:
             try:
                 obj_store = DuckDBObjectStore(duckdb_path)
                 obj_store.write('_portfolio_snapshot', {
-                    'positions': current,
-                    'timestamp': str(dt.datetime.now()),
+                    'positions': baseline,
+                    'timestamp': now,
                 })
             except Exception:
                 pass
@@ -1641,7 +1854,7 @@ class MMR:
             'removed': removed_symbols,
             'unchanged_count': unchanged_count,
             'prev_timestamp': prev_ts,
-            'timestamp': str(dt.datetime.now()),
+            'timestamp': now,
         }
 
     def _group_store(self):
@@ -1987,7 +2200,9 @@ class MMR:
             mine = [e for e in events if e.order_id in set(p.order_ids)
                     and (floor is None or e.timestamp is None or e.timestamp >= floor)]
             qty = p.quantity if (p.quantity is not None and p.quantity == p.quantity) else None
-            out[p.id] = fill_outcome(mine, p.order_ids, qty)
+            # The proposal's action names the entry side: bracket / stop legs
+            # trade the other side and are not fills of the proposal.
+            out[p.id] = fill_outcome(mine, p.order_ids, qty, action=p.action)
         return out
 
     def proposals(self, status: Optional[str] = None, limit: int = 50) -> pd.DataFrame:
@@ -2090,7 +2305,8 @@ class MMR:
         if p.status == 'EXECUTED':
             detail['fill'] = self._proposal_fill_outcomes([p]).get(
                 p.id, {'outcome': 'unknown', 'filled_quantity': None,
-                       'avg_fill_price': None, 'orders': {}})
+                       'avg_fill_price': None, 'exit_filled_quantity': None,
+                       'exit_avg_fill_price': None, 'orders': {}})
 
         # Include snapshot from metadata if present
         snapshot = p.metadata.get('snapshot')
@@ -2826,7 +3042,8 @@ class MMR:
                 # NYSE ADR in USD (2026-11-05). Refuse rather than mislead.
                 raise ValueError('twelvedata snapshots cannot honour --exchange/--currency '
                                  '(it picks its own listing); use --source ib')
-            td_symbol = str(symbol).upper()
+            # IB's 'BRK B' (what `portfolio` shows) is 'BRK.B' at the vendor.
+            td_symbol = vendor_ticker(str(symbol).upper())
             payload = self._twelvedata_client.quote(symbol=td_symbol).as_json()
             def _f(k):
                 v = payload.get(k)
@@ -2920,18 +3137,23 @@ class MMR:
                                  '(it picks its own listing); use --source ib')
             results: list[dict] = []
             chunk_size = 120
+            # IB's 'BRK B' is 'BRK.B' at the vendor. Every symbol is spelled
+            # before the first request, so one that cannot be is refused
+            # without half a batch having been asked for.
+            asked = [vendor_ticker(s.upper()) for s in symbols]
             for i in range(0, len(symbols), chunk_size):
                 chunk = symbols[i:i + chunk_size]
-                joined = ','.join(s.upper() for s in chunk)
+                asked_chunk = asked[i:i + chunk_size]
+                joined = ','.join(asked_chunk)
                 raw = self._twelvedata_client.quote(symbol=joined).as_json()
                 # TD returns either a single dict (one symbol) or
                 # {SYMBOL: {...}} keyed by uppercase ticker (multiple).
                 if isinstance(raw, dict) and 'symbol' in raw and len(chunk) == 1:
-                    payload_map = {raw.get('symbol', chunk[0].upper()): raw}
+                    payload_map = {raw.get('symbol', asked_chunk[0]): raw}
                 else:
                     payload_map = raw if isinstance(raw, dict) else {}
-                for sym in chunk:
-                    payload = payload_map.get(sym.upper()) or payload_map.get(sym) or {}
+                for sym, asked_sym in zip(chunk, asked_chunk):
+                    payload = payload_map.get(asked_sym) or payload_map.get(sym) or {}
                     if not payload:
                         results.append({'symbol': sym.upper(), 'last': float('nan')})
                         continue
@@ -3390,8 +3612,16 @@ class MMR:
             margin_used: dict {init_margin: float, net_liq: float, currency: str}, nullable
             cushion: float, nullable
             positions: int (count of non-zero positions)
-            pnl: dict {daily, unrealized, realized, total} as floats
-                (in account base currency; same as NetLiquidation\'s)
+            pnl: dict {daily, unrealized, realized, total} as floats, each the
+                sum over positions of a figure IB reports in the INSTRUMENT\'s
+                currency — NOT converted, and not NetLiquidation\'s currency
+                unless every position happens to be in it. The block says
+                what it is: ``currency`` is the single currency, \'MIXED\' when
+                positions span several (then ``note`` explains and the four
+                sums add unlike amounts), None with no positions;
+                ``currencies`` lists them; ``mixed_currencies`` is the bool;
+                ``by_currency`` holds the same four figures per currency.
+                For a base-currency daily figure use ``portfolio_snapshot``.
             open_orders: int
             streaming: int (count of contracts being streamed)
             pending_proposals: int
@@ -3486,13 +3716,16 @@ class MMR:
             positions = []
             for p in (summaries or []):
                 if isinstance(p, (list, tuple)) and not hasattr(p, 'account'):
-                    _, position, _, _, _, unrealized, realized, _, daily = p
+                    contract, position, _, _, _, unrealized, realized, _, daily = p
                 else:
-                    position, unrealized, realized, daily = (
-                        p.position, p.unrealizedPNL, p.realizedPNL, p.dailyPNL
+                    contract, position, unrealized, realized, daily = (
+                        p.contract, p.position, p.unrealizedPNL, p.realizedPNL, p.dailyPNL
                     )
                 if abs(position) > 0:
-                    positions.append((unrealized, realized, daily))
+                    currency = (contract.get('currency') if isinstance(contract, dict)
+                                else getattr(contract, 'currency', ''))
+                    positions.append((unrealized, realized, daily,
+                                      str(currency or '') or 'UNKNOWN'))
 
             result['positions'] = len(positions)
 
@@ -3506,16 +3739,41 @@ class MMR:
                     return None
                 return None if val != val else val  # NaN check
 
-            unrealized = sum(_safe(u) or 0.0 for u, _, _ in positions)
-            realized = sum(_safe(r) or 0.0 for _, r, _ in positions)
-            daily = sum(_safe(d) or 0.0 for _, _, d in positions)
+            unrealized = sum(_safe(u) or 0.0 for u, _, _, _ in positions)
+            realized = sum(_safe(r) or 0.0 for _, r, _, _ in positions)
+            daily = sum(_safe(d) or 0.0 for _, _, d, _ in positions)
 
-            result['pnl'] = {
+            # IB reports each position's PnL in the INSTRUMENT's currency, so
+            # the sums above add USD to AUD in a multi-currency book. The keys
+            # and their values stay as they were (consumers read them); the
+            # block now says what currency they are in, or that they mix.
+            by_currency: Dict[str, Dict[str, float]] = {}
+            for u, r, d, ccy in positions:
+                bucket = by_currency.setdefault(
+                    ccy, {'daily': 0.0, 'unrealized': 0.0, 'realized': 0.0, 'total': 0.0})
+                bucket['daily'] += _safe(d) or 0.0
+                bucket['unrealized'] += _safe(u) or 0.0
+                bucket['realized'] += _safe(r) or 0.0
+                bucket['total'] = bucket['unrealized'] + bucket['realized']
+            currencies = sorted(by_currency)
+            mixed = len(currencies) > 1
+
+            pnl: Dict[str, Any] = {
                 'daily': daily,
                 'unrealized': unrealized,
                 'realized': realized,
                 'total': unrealized + realized,
+                'currency': 'MIXED' if mixed else (currencies[0] if currencies else None),
+                'currencies': currencies,
+                'mixed_currencies': mixed,
+                'by_currency': by_currency,
             }
+            if mixed:
+                pnl['note'] = (
+                    'daily / unrealized / realized / total add amounts in different '
+                    f'currencies ({", ".join(currencies)}) and are not converted; read '
+                    'by_currency, or portfolio-snapshot for a base-currency daily figure')
+            result['pnl'] = pnl
         except Exception:
             result['positions'] = None
 

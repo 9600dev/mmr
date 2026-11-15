@@ -160,6 +160,29 @@ jobs:
       catch_up_minutes: 240      # a snapshot up to 4 h late is still last
                                  # night's; later than that, wait for tonight
       timeout_minutes: 60
+    # ---- paper sleeves: the daily books, and the monthly decision ----
+    # docs/LOWFREQ_LIVE.md's "every session after the close" and "once a
+    # month" steps as one job (scripts/sleeve_upkeep.py): refresh the
+    # point-in-time bars, reconcile fills into each sleeve's journal, track its
+    # paper ledger — and, when the session was the first of its month, refresh
+    # fundamentals, write the targets file and save a dry-run plan. It never
+    # proposes or approves. Without it nothing kept a sleeve's books: found on
+    # 2026-11-15 with bars six weeks stale, no journal and an empty ledger.
+    # A no-op when there is no sleeve. The monthly part needs SEC_API_KEY in
+    # the container (docker-compose.yml forwards it from the host).
+    - name: sleeve_upkeep
+      description: paper sleeves — bars, reconcile, ledger; targets + dry-run plan on a month's first session
+      command: python3
+      arguments: scripts/sleeve_upkeep.py
+      start: "30 23 * * 1-5"     # 23:30 ET Mon-Fri: after the US refresh
+                                 # (23:00), late enough for the vendor's daily
+                                 # bars, hours before the next open.
+      start_on_pycron_start: False
+      restart_if_found: False
+      restart_if_finished: False
+      catch_up_minutes: 240      # until 03:30 ET; the decision must exist
+                                 # before the next session opens
+      timeout_minutes: 45
     # ---- pre-open readiness preflights ----
     # `mmr preflight` runs the verify checks (live IB round-trip via ping_ib,
     # armed roster RUNNING, services responsive) and appends one

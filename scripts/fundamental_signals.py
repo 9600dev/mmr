@@ -15,6 +15,38 @@ THE LEAK CHECK
     shifted FORWARD by a week: a real signal degrades under that shift, a
     leaked one barely moves, because a leak does not depend on when the news
     actually arrived.
+
+WHAT THE LEAK CHECK CANNOT SEE (2026-11-15)
+    A delay probe moves WHEN a number is known. It says nothing about whether
+    the number is right, on the same basis as the price beside it, or the
+    same company's. The defects below passed it for three months;
+    `prepare_rows` and `build` repair them and docs/RESEARCH_LOG.md
+    (2026-11-15) has the measurements:
+      notices        rows dated to an NT 10-K / NT 10-Q (a notice that the
+                     report will be late) put the numbers before they were filed
+      annual_shares  the retired vendor's fiscal-Q4 "share count" is
+                     annual average - mean(Q1..Q3): not a share count
+      split_basis    as-reported shares x split-ADJUSTED prices understate the
+                     market cap by every later split - lookahead toward the
+                     names that went on to split
+      units          ~1% of quarterly share counts are printed in thousands
+                     or millions, and a series' first figure is as likely to
+                     be wrong as any: a level is believed when two consecutive
+                     filings agree on it
+      periods        a trailing-twelve-month sum over "the last four rows",
+                     which are not four consecutive quarters when one is
+                     missing or one was restated
+      continuity     a ticker is not one company for ever (B: Barnes Group,
+                     then Barrick), and a filing is not current for ever:
+                     filings more than 200 days apart are separate series, a
+                     filing is used for at most 200 days, and a share count is
+                     carried over at most two later filings that have none
+      turnover       a market cap smaller than two typical days of the name's
+                     own trading is contradicted by the tape, whatever the
+                     filters above believed (point-in-time panel only)
+    `MMR_FUNDAMENTALS_CORRECTIONS` (comma-separated, or `none`) selects a
+    subset - the decomposition instrument for those measurements, not a
+    setting: everything else runs with all of them.
 """
 from __future__ import annotations
 
@@ -55,6 +87,369 @@ def session_close_utc(days) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(regular)
 
 
+CORRECTIONS = ('notices', 'annual_shares', 'split_basis', 'units', 'periods', 'continuity', 'turnover')
+# Consecutive fiscal quarters end this many days apart: 13 weeks for most, 12
+# or 16 for a filer on a 16/12/12/12-week year (KR), 14 in a 53-week year.
+QUARTER_MIN_DAYS = 70
+QUARTER_MAX_DAYS = 120
+FLOW_FIELDS = ('revenue', 'net_income', 'gross_profit', 'cash_from_operations')
+# With `continuity`, a share count is carried over at most this many later
+# filings that have none of their own (a 10-K, and one quarter the vendor
+# missed). BKR's quarterly counts stopped arriving in 2021.
+MAX_CARRIED_FILINGS = 2
+# Sessions of dollar volume the turnover check takes its typical day from
+# (the median), and how many of them it needs before it says anything.
+TURNOVER_WINDOW = 21
+TURNOVER_MIN_SESSIONS = 5
+
+
+def enabled_corrections() -> frozenset:
+    """Every correction, unless ``MMR_FUNDAMENTALS_CORRECTIONS`` names a subset
+    (``none`` for the rows exactly as stored). An unknown name raises: a typo
+    must not quietly measure something else."""
+    raw = os.environ.get('MMR_FUNDAMENTALS_CORRECTIONS')
+    if raw is None:
+        return frozenset(CORRECTIONS)
+    names = {part.strip() for part in raw.split(',') if part.strip()}
+    unknown = names - set(CORRECTIONS) - {'none'}
+    if unknown:
+        raise ValueError(f'MMR_FUNDAMENTALS_CORRECTIONS names unknown correction(s) {sorted(unknown)}; '
+                         f'known: {", ".join(CORRECTIONS)}, none')
+    return frozenset(names - {'none'})
+
+
+def prepare_rows(rows: pd.DataFrame, key: str, *, events=None, through=None,
+                 unreflected=frozenset(), corrections=frozenset(CORRECTIONS)) -> pd.DataFrame:
+    """The stored fundamentals rows, made fit to build as-of frames from.
+
+    ``rows`` needs ``key``, ``ticker``, ``period_end``, ``known_at``,
+    ``form_type``, ``shares_diluted`` and the flow fields; an optional
+    ``source`` column says which vendor endpoint a row came from (absent or
+    NULL = the retired one). ``events`` is ``share_basis.split_events(...)``,
+    ``through`` the last day the prices are adjusted to, ``unreflected`` the
+    ``(ticker, execution_date)`` splits the stored prices do NOT carry.
+    Returns the rows sorted by ``(key, known_at)`` with ``shares_diluted``
+    replaced by the share count usable at that row, a ``<flow>_ttm`` column
+    per flow field, ``series_run`` (which of the key's filing series the row
+    belongs to) and ``valid_until`` (the instant the row stops being the
+    latest word; NaT = no limit). See the module docstring for what each
+    correction is and ``trader/data/share_basis.py`` for why.
+    """
+    from trader.data import share_basis
+
+    rows = rows.copy()
+    if 'notices' in corrections:
+        rows = rows[~rows['form_type'].map(share_basis.is_late_filing_notice)]
+    rows = rows.sort_values([key, 'known_at']).reset_index(drop=True)
+    shares = pd.to_numeric(rows['shares_diluted'], errors='coerce').astype(float)
+
+    # One key is not one issuer for ever. A new series starts wherever two
+    # consecutive filings are further apart than an issuer's can be; nothing
+    # below (the level a count is compared with, a carried count) crosses it.
+    known = pd.to_datetime(rows['known_at'], utc=True)
+    if 'continuity' in corrections:
+        gap = known.groupby(rows[key], sort=False).diff()
+        starts = (gap > pd.Timedelta(days=share_basis.MAX_DAYS_BETWEEN_FILINGS)).astype(int)
+        rows['series_run'] = starts.groupby(rows[key], sort=False).cumsum()
+        rows['valid_until'] = known + pd.Timedelta(days=share_basis.MAX_DAYS_BETWEEN_FILINGS)
+    else:
+        rows['series_run'] = 0
+        rows['valid_until'] = pd.Series(pd.NaT, index=rows.index, dtype=known.dtype)
+    series = [key, 'series_run']
+
+    if 'annual_shares' in corrections:
+        legacy = (rows['source'].isna() | (rows['source'].astype(str).str.strip() == '')
+                  if 'source' in rows.columns else pd.Series(True, index=rows.index))
+        shares = shares.mask(rows['form_type'].map(share_basis.is_annual_report) & legacy)
+
+    if 'split_basis' in corrections:
+        if events is None:
+            raise RuntimeError(
+                'share counts cannot be put on the price basis without the split history: the '
+                "'corporate_splits' table is missing from the history database. Run "
+                'scripts/fetch_splits.py, or name the corrections to apply in '
+                'MMR_FUNDAMENTALS_CORRECTIONS (see the module docstring).')
+        # The day the stored count is on the basis of. A legacy row: the
+        # FILING day (not the possibly delayed day it is treated as known). A
+        # row from the replacement endpoint: the day it was FETCHED, because
+        # that endpoint serves counts already adjusted to the day it is asked.
+        accepted = rows['accepted_at'] if 'accepted_at' in rows.columns else rows['known_at']
+        filed = pd.to_datetime(accepted, utc=True).dt.tz_convert('America/New_York').dt.date
+        if 'source' in rows.columns and 'fetched_at' in rows.columns:
+            from trader.data.statements_v1 import SOURCE as _V1
+            fetched = pd.to_datetime(rows['fetched_at'], utc=True).dt.tz_convert('America/New_York').dt.date
+            current = (rows['source'].astype(str) == _V1) & pd.notna(rows['fetched_at'])
+            filed = filed.where(~current, fetched)
+        factors = []
+        for ticker, day in zip(rows['ticker'].astype(str), filed):
+            carried = [(d, r) for d, r in events.get(ticker, ()) if (ticker, d) not in unreflected]
+            factors.append(share_basis.split_factor_after(carried, day, through) if carried else 1.0)
+        basis = pd.Series(factors, index=rows.index, dtype=float)
+    else:
+        basis = pd.Series(1.0, index=rows.index, dtype=float)
+
+    if 'units' in corrections:
+        # The scale is read from the number as PRINTED and the level compared
+        # on the common basis: one call does both (see plausible_share_counts).
+        cleaned = shares.copy()
+        for _, index in rows.groupby(series, sort=False).groups.items():
+            values = share_basis.plausible_share_counts(
+                [None if pd.isna(v) else float(v) for v in shares.loc[index]],
+                basis=list(basis.loc[index]))
+            cleaned.loc[index] = [float('nan') if v is None else v for v in values]
+        shares = cleaned
+    else:
+        shares = shares * basis
+
+    rows['shares_diluted'] = shares
+    if corrections & {'annual_shares', 'units'}:
+        # The count usable at a row is the last one believed: a 10-K carries
+        # the preceding 10-Q's, a rejected figure the one before it - within
+        # the series, and with `continuity` not for ever.
+        limit = MAX_CARRIED_FILINGS if 'continuity' in corrections else None
+        rows['shares_diluted'] = rows.groupby(series, sort=False)['shares_diluted'].ffill(limit=limit)
+
+    # Trailing-twelve-month sums for FLOW items; balance-sheet items are
+    # point-in-time and must not be summed.
+    if 'periods' in corrections:
+        for f, sums in _trailing_sums(rows, key).items():
+            rows[f + '_ttm'] = sums
+    else:
+        for f in FLOW_FIELDS:
+            rows[f + '_ttm'] = (rows.groupby(key, sort=False)[f]
+                                .rolling(4, min_periods=4).sum()
+                                .reset_index(level=0, drop=True))
+    return rows
+
+
+def _trailing_sums(rows: pd.DataFrame, key: str) -> dict:
+    """``{flow: array}``: at each row, the sum of the flow over the four most
+    recent DISTINCT fiscal quarters known by then - each at its latest known
+    version - or NaN unless those four are consecutive quarters.
+
+    "The last four rows" is not that. A quarter the store never got makes
+    four rows span fifteen months, and a restatement stored beside the
+    original counts one quarter twice. ``rows`` must be in ``(key, known_at)``
+    order with a fresh positional index.
+    """
+    ends = pd.to_datetime(rows['period_end']).to_numpy(dtype='datetime64[D]')
+    values = {f: pd.to_numeric(rows[f], errors='coerce').to_numpy(dtype=float) for f in FLOW_FIELDS}
+    out = {f: np.full(len(rows), np.nan) for f in FLOW_FIELDS}
+    for positions in rows.groupby(key, sort=False).indices.values():
+        latest = {}                                   # period end -> position of its newest version
+        for pos in positions:
+            latest[ends[pos]] = pos
+            recent = sorted(latest)[-4:]
+            if len(recent) < 4:
+                continue
+            steps = np.diff(np.array(recent)).astype(int)
+            if not all(QUARTER_MIN_DAYS <= step <= QUARTER_MAX_DAYS for step in steps):
+                continue
+            for f in FLOW_FIELDS:
+                out[f][pos] = sum(values[f][latest[end]] for end in recent)
+    return out
+
+
+AS_OF_FIELDS = ('net_income_ttm', 'stockholders_equity', 'gross_profit_ttm', 'total_assets',
+                'cash_from_operations_ttm', 'shares_diluted', 'revenue_ttm')
+
+
+def as_of_frames(rows: pd.DataFrame, key: str, px: pd.DataFrame, fields=AS_OF_FIELDS) -> dict:
+    """``{field: frame on px's shape}``: at each session, the field as the
+    newest filing known STRICTLY before that session's close has it.
+
+    ``rows`` is what ``prepare_rows`` returns. A row whose ``valid_until`` has
+    passed answers nothing (NaT = no limit): a filing with no successor is
+    not the latest word for ever, and under a ticker that has changed hands
+    it is another company's.
+    """
+    # hillclimb(C01): changed because 16:00 ET is 20:00 UTC under EDT and 21:00
+    # UTC under EST; a fixed 21:00 UTC treated a filing accepted at 20:30 UTC on
+    # a summer day as known at that day's close, one session early.
+    closes = session_close_utc(px.index).tz_convert(None).to_numpy()
+    frames = {f: pd.DataFrame(index=px.index, columns=px.columns, dtype=float) for f in fields}
+    for keyval, grp in rows.groupby(key):
+        col = str(keyval)
+        if col not in px.columns:
+            continue
+        g = grp.dropna(subset=['known_at']).sort_values('known_at')
+        # searchsorted with side='left' gives the count of filings STRICTLY
+        # before each date, which is the as-of rule: a filing accepted at the
+        # instant asked about was not actionable at it.
+        known = pd.to_datetime(g['known_at'], utc=True).dt.tz_convert(None).to_numpy()
+        pos = np.searchsorted(known, closes, side='left') - 1
+        valid = pos >= 0
+        if 'valid_until' in g.columns:
+            until = pd.to_datetime(g['valid_until'], utc=True).dt.tz_convert(None).to_numpy()[pos[valid]]
+            valid[valid] = np.isnat(until) | (closes[valid] < until)
+        for f in fields:
+            vals = np.full(len(closes), np.nan)
+            vals[valid] = g[f].to_numpy()[pos[valid]]
+            frames[f][col] = vals
+    return frames
+
+
+def price_basis_day(hist_db):
+    """The day the stored point-in-time prices are split-adjusted THROUGH, or
+    None when the store does not say.
+
+    ``pit_daily_bars`` rows are adjusted as of the day they were fetched, and
+    that day is not the last stored day: a research snapshot cut at
+    2024-06-28 still carries prices fetched - and adjusted - in July 2026.
+    ``pit_price_basis`` records it (written by the build, and by
+    ``scripts/pit_split_adjust.py`` each time it makes the table uniform).
+    """
+    try:
+        row = hist_db.execute('SELECT max(adjusted_through) FROM pit_price_basis', fetch='one')
+    except Exception as ex:
+        if 'pit_price_basis' in str(ex):
+            return None
+        raise
+    day = row[0] if row else None
+    if day is None:
+        return None
+    return day.date() if hasattr(day, 'date') else day
+
+
+def refused_tickers(hist_db) -> frozenset:
+    """Tickers whose stored prices ``scripts/pit_split_adjust.py`` could not
+    put on the common split basis (``pit_split_refusals``): prices that carry
+    a split nobody lists any more, a restructuring that is not a split. Their
+    price is on an unknown basis, so no share factor can make it a market cap.
+    Empty when the table does not exist (nothing has been refused)."""
+    try:
+        rows = hist_db.execute('SELECT DISTINCT ticker FROM pit_split_refusals', fetch='all')
+    except Exception as ex:
+        if 'pit_split_refusals' in str(ex):
+            return frozenset()
+        raise
+    return frozenset(str(row[0]) for row in rows or [])
+
+
+def without_refused(frame: pd.DataFrame, refused) -> pd.DataFrame:
+    """``frame`` with the columns of refused tickers set to NaN (unknown), so
+    they drop out of every ratio and of coverage rather than being ranked on a
+    market cap that is not one."""
+    columns = [c for c in frame.columns if str(c) in refused]
+    if not columns:
+        return frame
+    out = frame.copy()
+    out[columns] = np.nan
+    return out
+
+
+def contradicted_by_trading(shares: pd.DataFrame, px: pd.DataFrame, dollar_volume: pd.DataFrame) -> pd.DataFrame:
+    """``shares`` with a cell set to NaN wherever the market cap it implies
+    is smaller than a few days of the name's own trading
+    (``share_basis.unbelievable_cap``): the typical day is the median dollar
+    volume of the last ``TURNOVER_WINDOW`` stored sessions up to that day, so
+    the check looks at nothing later than the cell it judges."""
+    from trader.data.share_basis import MAX_DAILY_TURNOVER
+
+    volume = dollar_volume.reindex(index=px.index, columns=px.columns).astype(float)
+    typical = volume.rolling(TURNOVER_WINDOW, min_periods=TURNOVER_MIN_SESSIONS).median()
+    cap = px.astype(float) * shares.astype(float)
+    # The same rule as share_basis.unbelievable_cap, on frames (pinned cell
+    # for cell in tests/test_fundamental_signals_corrections.py).
+    known = np.isfinite(cap) & np.isfinite(typical) & (cap > 0) & (typical > 0)
+    contradicted = known & (typical > MAX_DAILY_TURNOVER * cap)
+    return shares.where(~contradicted)
+
+
+def _dollar_volume(hist_db, px: pd.DataFrame) -> pd.DataFrame:
+    """Stored dollar volume on the panel's shape (point-in-time panel only).
+    Every stored day of a name counts, not only the months it was a member:
+    the typical day is a fact about the name, not about the universe."""
+    days = pd.DatetimeIndex(pd.to_datetime(px.index))
+    frame = hist_db.execute_atomic(lambda conn: conn.execute(
+        'SELECT day, ticker, dollar_volume FROM pit_daily_bars WHERE day BETWEEN ? AND ?',
+        [days.min().date(), days.max().date()]).fetchdf())
+    frame['day'] = pd.to_datetime(frame['day'])
+    wide = frame.pivot_table(index='day', columns='ticker', values='dollar_volume', aggfunc='last')
+    wide = wide.reindex(index=days, columns=px.columns)
+    wide.index = px.index
+    return wide
+
+
+def _split_inputs(hist_db, tickers, pit: bool, px: pd.DataFrame, key: str, rows: pd.DataFrame):
+    """``(events, through, unreflected)`` for ``prepare_rows`` — or
+    ``(None, None, frozenset())`` when there is no ``corporate_splits`` table.
+
+    ``through`` is the day the prices are adjusted to. For the point-in-time
+    panel the store must SAY (``price_basis_day``): it is not the last stored
+    day - a snapshot cut in 2024 carries prices adjusted in 2026 - and guessing
+    it leaves out every split in between, which is most of the correction,
+    silently. A store that does not say is refused. The present-day panel is
+    re-fetched whole and is adjusted to its own last day.
+
+    A split is ``unreflected`` when the stored prices show the raw jump on its
+    execution day (the vendor's adjusted series missed it): multiplying the
+    share count by it would then adjust one side only. Unknown counts as
+    reflected, which is what an adjusted series is 98% of the time.
+    """
+    from trader.data import share_basis
+
+    try:
+        frame = hist_db.execute(
+            'SELECT ticker, execution_date, split_from, split_to FROM corporate_splits', fetch='df')
+    except Exception as ex:
+        if 'corporate_splits' in str(ex):
+            return None, None, frozenset()
+        raise
+    wanted = set(tickers)
+    events = {t: ev for t, ev in share_basis.split_events(
+        (frame if frame is not None else pd.DataFrame()).to_dict('records')).items() if t in wanted}
+    days = pd.DatetimeIndex(pd.to_datetime(px.index))
+    last = days.max().date() if len(days) else None
+    first = days.min().date() if len(days) else None
+    if pit:
+        through = price_basis_day(hist_db)
+        if through is None:
+            raise RuntimeError(
+                'the history database does not say what day pit_daily_bars is split-adjusted through '
+                "(table 'pit_price_basis' is missing or empty), so share counts cannot be put on the "
+                'price basis. scripts/pit_split_adjust.py --apply records it; for a frozen snapshot, '
+                'record the day its prices were fetched.')
+    else:
+        through = last
+
+    closes = {}
+    if pit and events:
+        # The panel carries a price only on member days; the check needs the
+        # stored series itself.
+        bars = hist_db.execute_atomic(lambda conn: conn.execute(
+            'SELECT ticker, day, close FROM pit_daily_bars WHERE ticker IN (SELECT unnest(?)) ORDER BY ticker, day',
+            [sorted(events)]).fetchdf())
+        for ticker, grp in bars.groupby('ticker'):
+            closes[ticker] = pd.Series(grp['close'].to_numpy(dtype=float),
+                                       index=pd.DatetimeIndex(pd.to_datetime(grp['day'])))
+    elif events:
+        by_ticker = dict(zip(rows['ticker'].astype(str), rows[key].astype(str)))
+        for ticker in events:
+            column = by_ticker.get(ticker)
+            if column in px.columns:
+                series = px[column].dropna()
+                closes[ticker] = pd.Series(series.to_numpy(dtype=float),
+                                           index=pd.DatetimeIndex(pd.to_datetime(series.index)).tz_localize(None))
+
+    unreflected = set()
+    for ticker, ticker_events in events.items():
+        series = closes.get(ticker)
+        if series is None or not len(series):
+            continue
+        for day, ratio in ticker_events:
+            if first is None or last is None or not (first < day <= last):
+                continue                      # no stored price on both sides: cannot be told
+            stamp = pd.Timestamp(day)
+            earlier = series[series.index < stamp]
+            on = series[series.index == stamp]
+            if not len(earlier) or not len(on):
+                continue
+            if share_basis.split_reflected_in_prices(float(earlier.iloc[-1]), float(on.iloc[0]), ratio) is False:
+                unreflected.add((ticker, day))
+    return events, through, frozenset(unreflected)
+
+
 def build(delay_days: int = 0, pit: bool = False, with_frames: bool = False):
     """(price panel, {signal name: as-of frame}) with acceptance delayed by
     ``delay_days`` - 0 is the honest read, positive is the leak probe.
@@ -82,50 +477,40 @@ def build(delay_days: int = 0, pit: bool = False, with_frames: bool = False):
         key = 'conid'
     cfg = Container.instance().config()
     db = DuckDBConnection(cfg.get('duckdb_path', ''))
-    rows = db.execute(
-        """SELECT conid, ticker, period_end, accepted_at, revenue, net_income,
-                  gross_profit, total_assets, stockholders_equity,
-                  cash_from_operations, shares_diluted
-           FROM fundamentals ORDER BY conid, accepted_at""", fetch='df')
+    # SELECT *: a `source` column exists only in a store written since the
+    # statements endpoint was replaced; its absence means every row is legacy.
+    rows = db.execute('SELECT * FROM fundamentals ORDER BY conid, accepted_at', fetch='df')
     if rows is None or len(rows) == 0:
         return px, {}
     rows = rows[rows[key].astype(str) != '']
 
     rows['known_at'] = (pd.to_datetime(rows['accepted_at'], utc=True)
                         + pd.Timedelta(days=delay_days))
-    # Trailing-twelve-month sums for FLOW items; balance-sheet items are
-    # point-in-time and must not be summed.
-    rows = rows.sort_values([key, 'known_at'])
-    for f in ('revenue', 'net_income', 'gross_profit', 'cash_from_operations'):
-        rows[f + '_ttm'] = (rows.groupby(key)[f]
-                            .rolling(4, min_periods=4).sum()
-                            .reset_index(level=0, drop=True))
+    corrections = enabled_corrections()
+    events, through, unreflected = None, None, frozenset()
+    refused = frozenset()
+    dollar_volume = None
+    hist_db = DuckDBConnection(cfg.get('history_duckdb_path', '') or cfg.get('duckdb_path', ''))
+    if 'split_basis' in corrections:
+        events, through, unreflected = _split_inputs(
+            hist_db, set(rows['ticker'].astype(str)), pit, px, key, rows)
+        if pit:
+            refused = refused_tickers(hist_db)
+    if pit and 'turnover' in corrections:
+        dollar_volume = _dollar_volume(hist_db, px)
+    rows = prepare_rows(rows, key, events=events, through=through,
+                        unreflected=unreflected, corrections=corrections)
 
-    # hillclimb(C01): changed because 16:00 ET is 20:00 UTC under EDT and 21:00
-    # UTC under EST; a fixed 21:00 UTC treated a filing accepted at 20:30 UTC on
-    # a summer day as known at that day's close, one session early.
-    idx = session_close_utc(px.index)
     out = {}
-    fields = ['net_income_ttm', 'stockholders_equity', 'gross_profit_ttm',
-              'total_assets', 'cash_from_operations_ttm', 'shares_diluted',
-              'revenue_ttm']
-    frames = {f: pd.DataFrame(index=px.index, columns=px.columns, dtype=float)
-              for f in fields}
-    for keyval, grp in rows.groupby(key):
-        col = str(keyval)
-        if col not in px.columns:
-            continue
-        g = grp.dropna(subset=['known_at']).sort_values('known_at')
-        # searchsorted with side='left' gives the count of filings STRICTLY
-        # before each date, which is the as-of rule: a filing accepted at the
-        # instant asked about was not actionable at it.
-        pos = np.searchsorted(g['known_at'].values, idx.values, side='left') - 1
-        valid = pos >= 0
-        for f in fields:
-            vals = np.full(len(idx), np.nan)
-            vals[valid] = g[f].to_numpy()[pos[valid]]
-            frames[f][col] = vals
+    frames = as_of_frames(rows, key, px, AS_OF_FIELDS)
 
+    # A ticker whose prices could not be put on the common split basis has no
+    # market cap here, whatever its share count says.
+    frames['shares_diluted'] = without_refused(frames['shares_diluted'], refused)
+    if dollar_volume is not None:
+        # ...and a cap smaller than a few days of the name's own trading is
+        # not one either, whichever filter believed the count behind it.
+        frames['shares_diluted'] = contradicted_by_trading(frames['shares_diluted'], px, dollar_volume)
     mcap = px * frames['shares_diluted']
     out['earnings_yield'] = frames['net_income_ttm'] / mcap
     out['book_to_price'] = frames['stockholders_equity'] / mcap

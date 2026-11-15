@@ -62,6 +62,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from trader.common.logging_helper import setup_logging
 from trader.data.duckdb_store import DuckDBConnection
 from trader.data.event_store import EventStore, EventType, TradingEvent
+from trader.data.market_session import close_by_on, intraday_open_refusal, order_calendar
 from trader.strategy.execution_intents import IntentStore, TERMINAL, merge_exit_scopes, timestamp_text
 # ManagementWork lives with the queue so admission can use isinstance; it is
 # re-exported here because callers and tests import it from this module.
@@ -81,6 +82,12 @@ logging = setup_logging(module_name='auto_executor')
 
 class AutoExecutionError(Exception):
     pass
+
+
+class OutsideRegularSession(AutoExecutionError):
+    """An open refused because the order could not execute in the venue's
+    regular session. A policy refusal like the manifest gate's, not a fault:
+    logged at WARNING, where the other deliberate refusals are ERROR."""
 
 
 # Management runs at 1 Hz (the runtime pulse) plus every idle worker wake, and
@@ -1828,8 +1835,9 @@ class AutoExecutor:
         except AutoExecutionError as ex:
             # Deliberate refusal (stale conId, precision round-trip failure) —
             # no order was placed. Log the decision so the refusal is auditable.
-            logging.error('auto-executor: refused %s conId %s: %s',
-                          work.strategy_name, work.conid, ex)
+            log = logging.warning if isinstance(ex, OutsideRegularSession) else logging.error
+            log('auto-executor: refused %s conId %s: %s',
+                work.strategy_name, work.conid, ex)
             self.state.log_decision(work.strategy_name, work.conid, work.bar_ts,
                                     str(work.action), 'refused', str(ex))
 
@@ -1880,6 +1888,19 @@ class AutoExecutor:
         if observed is not None and observed < 0:
             raise AutoExecutionError('long-only automated entry cannot overlap an existing broker short position')
         ident = self._resolve_exact(work.conid)
+        # OPENS ONLY. IB holds a market order sent outside the regular session
+        # until the next one opens: an entry decided on the day's last bar, or
+        # after a 13:00 early close, filled the next morning (or on Monday) on
+        # a signal nobody would still act on. The stale-bar gate cannot see
+        # this — the bar is fresh, it is the ORDER that would be stale. Judged
+        # on the listing venue the conId just resolved to; a daily bar, a
+        # round-the-clock instrument and an unmapped venue are outside the rule
+        # (trader.data.market_session.intraday_open_refusal). Closes never
+        # come through here.
+        outside = intraday_open_refusal(work.bar_ts, work.bar_size_seconds,
+                                        ident['exchange'], sec_type=ident['sec_type'])
+        if outside is not None:
+            raise OutsideRegularSession(outside)
         payload = dict(bar_ts=timestamp_text(work.bar_ts), quantity=directive.quantity,
                        amount=work.trade_amount if not directive.quantity and work.trade_amount > 0 else None,
                        probability=max(0.0, min(1.0, work.probability)), risk=work.risk,
@@ -3462,7 +3483,8 @@ class AutoExecutor:
         if not pos or not self._entry_matches(work.entry_bar_ts, pos):
             return
         trigger = check_time_exit(
-            work.bar_ts, self._bar_count(work, durable=True), pos['close_by_time'], pos['max_hold_bars'])
+            work.bar_ts, self._bar_count(work, durable=True),
+            self._close_by_today(work.conid, pos['close_by_time'], work.bar_ts), pos['max_hold_bars'])
         if trigger is None:
             return
         if not state_available:
@@ -3493,6 +3515,42 @@ class AutoExecutor:
                           work.strategy_name, work.conid, ex)
             self.state.log_decision(work.strategy_name, work.conid, work.bar_ts,
                                     'SELL', 'refused', str(ex))
+
+    def _venue_calendar(self, conid: int) -> Optional[str]:
+        """The session calendar of the venue ``conid`` is listed on, or None
+        when it has none here (unmapped venue, round-the-clock instrument).
+        Remembered per instrument; a lookup that fails raises and is not."""
+        cache = self._volatile('_venue_calendars', dict)
+        key = int(conid)
+        if key not in cache:
+            definitions = self._get_sdk().resolve(key, sec_type='')
+            if not definitions:
+                raise AutoExecutionError(f'conId {conid} not found in universe DB')
+            definition = definitions[0]
+            cache[key] = order_calendar(getattr(definition, 'exchange', '') or '',
+                                        getattr(definition, 'primaryExchange', '') or '',
+                                        getattr(definition, 'secType', '') or '')
+        return cache[key]
+
+    def _close_by_today(self, conid: int, close_by: Optional[dt.time], bar_ts: Any) -> Optional[dt.time]:
+        """``close_by`` for the session ``bar_ts`` belongs to: earlier, by as
+        much as the close is, on a day the venue closes early.
+
+        A 15:45 flatten on a 13:00 close used to fire at 15:45 — in the
+        post-market, where IB holds the order until the next session — so the
+        position was carried over the close it was meant to avoid. Any failure
+        to find out returns ``close_by`` unchanged: an exit is never held up
+        (or dropped) by a calendar lookup.
+        """
+        if close_by is None:
+            return None
+        try:
+            return close_by_on(close_by, self._venue_calendar(conid), bar_ts.date())
+        except Exception as exc:
+            self._warn_once(('close-by-calendar', int(conid)), logging.warning,
+                            'auto-executor: early-close calendar unavailable for conId %s (%s); '
+                            'time exits use the stored close_by_time unshifted', conid, exc)
+            return close_by
 
     # -- protective stops -------------------------------------------------------
 

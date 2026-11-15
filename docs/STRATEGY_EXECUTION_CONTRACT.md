@@ -396,11 +396,16 @@ recovery after process loss depends on the available broker evidence.
 In-place modifications retain their
 verified physical identity so they are not counted as a second order.
 A stale exit classification cannot authorize an opposite opening at the final
-placement boundary. Resizing is server-coordinated: supported protected trims
-use a matching existing protective tranche and broker OCA reduce-with-block.
-An unsupported topology, including splitting one full-position stop into new
-tranches during a partial trim, returns DEFERRED before changing those orders.
-Growth requires the reviewed opening pipeline.
+placement boundary. Resizing is server-coordinated and trims only a position
+with NO working exits on that side. A protected position returns DEFERRED
+before any order is changed: the handoff this document used to describe
+(modifying a matching protective tranche into a reduce-with-block OCA group
+with the trim) was validated on the paper gateway on 2026-11-15 and IB refuses
+it — error 10327, "OCA group type revision is not allowed" — while the
+rejected modification leaves the client library reporting a still-working stop
+as cancelled. The operator cancels or replaces the protection explicitly
+(`cancel` / `protect`) or uses `close`. Growth requires the reviewed opening
+pipeline.
 
 Time exits, pending-order reconciliation and protective repair are managed
 independently of strategy callbacks, through a periodic manager and retained

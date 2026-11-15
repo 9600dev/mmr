@@ -8,6 +8,7 @@ When ``--location`` is provided, ``IBIdeaScanner`` uses IB's scanner API +
 """
 
 import logging
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -217,12 +218,41 @@ def list_presets() -> pd.DataFrame:
 # ------------------------------------------------------------------
 # Module-level scoring functions (shared by IdeaScanner & IBIdeaScanner)
 # ------------------------------------------------------------------
+#
+# Direction. Every preset but `volatile` has one, and it is the sign of the
+# preset's own change filter: momentum / gap-up / breakout want an UP day
+# (min_change_pct > 0), gap-down a DOWN day (max_change_pct < 0),
+# mean-reversion a day that is not up (max_change_pct = 0). These functions
+# used to take abs() of the change and of the gap, which is only harmless
+# while that filter runs first. It does not always: IBIdeaScanner drops the
+# change filter when the symbols are given explicitly (--tickers / --universe),
+# and any path drops it when the caller overrides it. There a -8% day on heavy
+# volume earned what a +8% day earns and came back as a momentum BUY.
+#
+# So direction is part of the score, not of whichever filter happened to run:
+# a move against the preset earns nothing, and the preset's actionable signal
+# (BUY, or SELL for gap-down) requires the day to have gone the preset's way.
+# For a row the preset's change filter would have kept, the change points and
+# the signal are what they were. One thing does differ for such a row: a GAP
+# against the preset (a gap down on a day that ended up, under gap-up; a gap
+# up on a day that ended down, under gap-down) no longer earns gap points.
+
+def _up(pct) -> float:
+    """How far a signed percentage went up; 0 for a fall, zero or unknown."""
+    return max(pct or 0.0, 0.0)
+
+
+def _down(pct) -> float:
+    """How far a signed percentage went down, as a positive number."""
+    return max(-(pct or 0.0), 0.0)
+
 
 def _score_momentum(c: Dict) -> tuple:
     """Score based on change%, relative volume, RSI headroom, and EMA position."""
     score = 0.0
+    change = c.get('change_pct', 0)
     # Change contribution (0-30 points)
-    score += min(abs(c.get('change_pct', 0)), 15) * 2
+    score += min(_up(change), 15) * 2
     # Relative volume (0-25 points)
     score += min((c.get('rel_vol') or 0), 5) * 5
     # RSI headroom: higher RSI = less room but shows momentum
@@ -237,35 +267,34 @@ def _score_momentum(c: Dict) -> tuple:
     if ema_9 is not None and ema_9 > 0 and c['price'] > ema_9:
         score += 10
 
-    signal = 'BUY' if score >= 40 else ('WATCH' if score >= 20 else 'WATCH')
+    signal = 'BUY' if score >= 40 and _up(change) > 0 else 'WATCH'
     return (min(score, 100), signal)
 
 
 def _score_gap_up(c: Dict) -> tuple:
     """Score based on gap size and relative volume."""
     score = 0.0
-    # Gap contribution (0-40 points)
-    gap = abs((c.get('gap_pct') or 0))
-    score += min(gap, 20) * 2
+    change = c.get('change_pct', 0)
+    # Gap contribution (0-40 points) — a gap UP; a gap down is not one.
+    score += min(_up(c.get('gap_pct')), 20) * 2
     # Relative volume (0-30 points)
     score += min((c.get('rel_vol') or 0), 6) * 5
     # Change contribution (0-20 points)
-    score += min(abs(c.get('change_pct', 0)), 10) * 2
+    score += min(_up(change), 10) * 2
     # RSI — not too overbought
     rsi = c.get('rsi')
     if rsi is not None and rsi < 70:
         score += 10
 
-    signal = 'BUY' if score >= 40 else 'WATCH'
+    signal = 'BUY' if score >= 40 and _up(change) > 0 else 'WATCH'
     return (min(score, 100), signal)
 
 
 def _score_gap_down(c: Dict) -> tuple:
     """Score based on gap size, RSI oversold level, and SMA distance."""
     score = 0.0
-    # Gap size (0-40 points)
-    gap = abs((c.get('gap_pct') or 0))
-    score += min(gap, 20) * 2
+    # Gap size (0-40 points) — a gap DOWN; a gap up is not one.
+    score += min(_down(c.get('gap_pct')), 20) * 2
     # RSI oversold bonus (0-30 points)
     rsi = c.get('rsi')
     if rsi is not None and rsi < 40:
@@ -278,7 +307,7 @@ def _score_gap_down(c: Dict) -> tuple:
     # Relative volume
     score += min((c.get('rel_vol') or 0), 4) * 2.5
 
-    signal = 'SELL' if score >= 40 else 'WATCH'
+    signal = 'SELL' if score >= 40 and _down(c.get('change_pct', 0)) > 0 else 'WATCH'
     return (min(score, 100), signal)
 
 
@@ -308,7 +337,9 @@ def _score_mean_reversion(c: Dict) -> tuple:
     # Relative volume (0-20 points)
     score += min((c.get('rel_vol') or 0), 4) * 5
 
-    signal = 'BUY' if score >= 35 else 'WATCH'
+    # A bounce candidate has not bounced yet: the preset's own filter is
+    # max_change_pct = 0.0, so BUY means the day is not up.
+    signal = 'BUY' if score >= 35 and _up(c.get('change_pct', 0)) == 0 else 'WATCH'
     return (min(score, 100), signal)
 
 
@@ -337,9 +368,10 @@ def _score_breakout(c: Dict) -> tuple:
     score += min((c.get('rel_vol') or 0), 6) * 5
 
     # Change contribution (0-15 points)
-    score += min(abs(c.get('change_pct', 0)), 5) * 3
+    change = c.get('change_pct', 0)
+    score += min(_up(change), 5) * 3
 
-    signal = 'BUY' if score >= 45 else 'WATCH'
+    signal = 'BUY' if score >= 45 and _up(change) > 0 else 'WATCH'
     return (min(score, 100), signal)
 
 
@@ -350,7 +382,8 @@ def _score_volatile(c: Dict) -> tuple:
     score += min(c.get('range_pct', 0), 20) * 2
     # Relative volume (0-25 points)
     score += min((c.get('rel_vol') or 0), 5) * 5
-    # Absolute change % (0-25 points)
+    # Absolute change % (0-25 points). Unsigned on purpose: the size of the
+    # move is this preset's subject, and its signal below reads the sign.
     score += min(abs(c.get('change_pct', 0)), 10) * 2.5
     # RSI extremes bonus
     rsi = c.get('rsi')
@@ -473,18 +506,45 @@ def merge_filters(scan_preset: ScanPreset, custom_filters: Optional[Dict[str, An
 # ------------------------------------------------------------------
 
 def compute_rsi(closes: List[float], period: int = 14) -> Optional[float]:
-    """Compute RSI from a list of closing prices."""
-    if len(closes) < period + 1:
+    """Wilder's RSI of the last close, from closing prices in time order.
+
+    The standard definition (Wilder, 1978), which is what a vendor's RSI
+    endpoint returns and therefore what the preset thresholds (``rsi < 30``,
+    ``50 < rsi < 80``) are written against: the first average gain and
+    average loss are the plain means of the first ``period`` changes, and
+    each later change is smoothed in,
+
+        avg = (previous_avg * (period - 1) + this_change) / period
+
+    Until 2026-11-15 this was Cutler's variant — the plain mean of the LAST
+    ``period`` gains and losses — so the IB path and the TwelveData scanner
+    (which compute RSI here) read the same thresholds differently from the
+    Massive path (which asks the vendor). The two agree only when there are
+    exactly ``period + 1`` closes.
+
+    Wilder's average never fully forgets the start of the series. Over the
+    42 to 60 daily closes the scanners fetch, the seed average still carries
+    (13/14)**27 = 13.5% down to (13/14)**45 = 3.6% of the weight, so this can
+    differ somewhat from a vendor's figure computed over a longer history.
+    Fetching more bars narrows that; the definition is the same.
+
+    Closes that are None or not finite are skipped, as the callers already
+    skip them. ``None`` when there are fewer than ``period + 1`` usable
+    closes, or when the price never moved (0/0 is unknown, not 50 or 100).
+    """
+    values = [float(c) for c in closes if c is not None]
+    values = [v for v in values if math.isfinite(v)]
+    if period < 1 or len(values) < period + 1:
         return None
-    deltas = pd.Series(closes).diff()
-    gain = deltas.clip(lower=0).rolling(period).mean()
-    loss = (-deltas.clip(upper=0)).rolling(period).mean()
-    rs = gain / loss
-    rsi = 100 - 100 / (1 + rs)
-    val = rsi.iloc[-1]
-    if pd.isna(val):
-        return None
-    return round(float(val), 2)
+    changes = [later - earlier for earlier, later in zip(values, values[1:])]
+    avg_gain = sum(max(change, 0.0) for change in changes[:period]) / period
+    avg_loss = sum(max(-change, 0.0) for change in changes[:period]) / period
+    for change in changes[period:]:
+        avg_gain = (avg_gain * (period - 1) + max(change, 0.0)) / period
+        avg_loss = (avg_loss * (period - 1) + max(-change, 0.0)) / period
+    if avg_loss == 0.0:
+        return None if avg_gain == 0.0 else 100.0
+    return round(100.0 - 100.0 / (1.0 + avg_gain / avg_loss), 2)
 
 
 def compute_ema(closes: List[float], window: int) -> Optional[float]:

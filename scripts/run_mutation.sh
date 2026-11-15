@@ -497,6 +497,31 @@
 #       and 'XXXX' maps to no calendar so the fallthrough is identical.
 #     * the isinstance(day, dt.date) guard's return — unreachable: NaT is
 #       filtered by the isna check before .date() is called. Defensive only.
+#   market_session.py, THE REGULAR-SESSION CODE (2026-11-15: regular_session,
+#   _judge_regular, listing_calendar, order_calendar, bar_open_refusal,
+#   intraday_open_refusal, early_close_shift, close_by_on). A targeted pass on
+#   the module scored 480 killed / 56 survived = 89.6%: the 29 survivors above
+#   plus 27 in the new functions. 11 of those were message text (the failed-
+#   lookup warning, "no timestamp", the bar-parse reason) and are killed by
+#   TestWhatAFailureSays, added after that pass; the other 16 are equivalent:
+#     * regular_session 34 — `not opens or not closes` -> `and`: with exactly
+#       one of them empty the next clause indexes the empty list, and the
+#       IndexError lands in the same broad except as the ValueError did.
+#     * _judge_regular 3 — or->and on `not isinstance(Timestamp) or isna`:
+#       pd.Timestamp(x) is a Timestamp or NaT, and NaT is not a Timestamp, so
+#       the two tests never disagree.
+#     * _judge_regular 23 — 'UTC' -> 'utc'. EQUIVALENT (as above).
+#     * _judge_regular 39 — the reason returned beside True is never read.
+#     * _judge_regular 42 — `instant < opening` -> `<=`: at the opening
+#       instant the interval loop above has already returned True.
+#     * listing_calendar 1, order_calendar 1/2, intraday_open_refusal 1/2 —
+#       default '' -> 'XXXX': 'XXXX' maps to no calendar and is no
+#       round-the-clock type, so it falls through exactly as '' does.
+#     * listing_calendar 6, order_calendar 6 — `x or ''` -> `x or 'XXXX'`:
+#       same fallthrough.
+#     * bar_open_refusal 6 — float('nan') -> float('NAN'). Same value.
+#     * close_by_on 7 — `shift <= 0` -> `< 0`: a zero shift moves the time by
+#       nothing. close_by_on 19/20 — dt.time(0, 0) -> dt.time(0).
 #
 #   order_structure.py SURVIVOR CLASSIFICATION (2026-07-26, 84.3% -> 96.6%).
 #   The last structural check before IB, extracted pure from OrderValidator and

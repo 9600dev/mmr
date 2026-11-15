@@ -76,7 +76,20 @@ gateway exists.
 
 6. **Reconcile.** After the fills, `reconcile --sleeve <name>` journals every IB
    execution of the sleeve's EXECUTED proposals into `sleeve_fills` (D13), once
-   each; `--dry-run` previews it. Until it runs the sleeve reads as flat.
+   each; `--dry-run` previews it. Until it runs the sleeve reads as flat — and a
+   flat sleeve is bought again. So live `plan` and `propose` first ask whether
+   `reconcile` would add shares now (`fills.check_journal_current`, read-only):
+
+   * `UNRECONCILED_EXECUTIONS` — the broker shows executions the journal does
+     not hold; the refusal lists each ticker's shortfall. Run `reconcile`.
+   * `JOURNAL_UNCONFIRMED` — the execution evidence cannot settle it (the
+     reason `reconcile` itself would refuse is quoted). Fix that first.
+
+   `status` prints the same condition as a warning above its table
+   (`journal.current` in `--json`) rather than refusing. A sleeve with no
+   EXECUTED order is not checked against the broker, and `plan --offline` is
+   unaffected. The scheduled `sleeve_upkeep` job runs `reconcile` every weekday
+   evening (`docs/LOWFREQ_LIVE.md`); this check is what catches a day it did not.
 
 7. **Check.** `status <sleeve>` prints holdings, market value, open proposals
    and per-name drift against the latest targets file.

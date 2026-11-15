@@ -319,9 +319,16 @@ class TestOrders:
         assert 'ask' in df.columns
         assert 'last' in df.columns
 
-    def test_order_quotes_are_matched_by_conid_not_list_position(self):
+    def test_order_quotes_are_matched_by_conid_not_list_position(self, monkeypatch):
         """The server omits symbols whose snapshot failed. Paired by position,
         every later quote landed on the wrong order: AAA showed BBB's market."""
+        # Quotes are only requested while the venue is in session (these are
+        # NASDAQ stocks); pin the clock to a regular-session instant so the
+        # test does not depend on when it runs. Monday 10:00 New York.
+        import datetime as _dt
+        from trader import sdk as _sdk
+        monkeypatch.setattr(_sdk, '_utc_now',
+                            lambda: _dt.datetime(2026, 11, 16, 15, 0, tzinfo=_dt.timezone.utc))
         mock_client = _make_mock_rpc()
         trades = {}
         for order_id, (con_id, symbol) in enumerate([(1, 'AAA'), (2, 'BBB'), (3, 'CCC')], start=10):
@@ -342,6 +349,38 @@ class TestOrders:
         assert pd.isna(df.loc['AAA', 'bid'])
         assert df.loc['BBB', 'bid'] == 50.0
         assert df.loc['CCC', 'bid'] == 70.0
+
+    def test_a_quote_that_is_our_own_resting_order_says_so(self, monkeypatch):
+        """A resting BUY of ours is often the best bid on a thin name. The
+        listing blanks that side (it is not the market) — and until 2026-11-15
+        said nothing, so the blank read as "no bid". The reason is carried in
+        ``quote_notes``, as ``snapshot`` does."""
+        import datetime as _dt
+        from trader import sdk as _sdk
+        monkeypatch.setattr(_sdk, '_utc_now',
+                            lambda: _dt.datetime(2026, 11, 16, 15, 0, tzinfo=_dt.timezone.utc))
+        mock_client = _make_mock_rpc()
+        trades = {}
+        for order_id, (con_id, symbol, limit) in enumerate([(1, 'AAA', 10.0), (2, 'BBB', 49.0)], start=10):
+            trades[order_id] = [FakeTrade(
+                contract=FakeContract(conId=con_id, symbol=symbol),
+                order=FakeOrder(orderId=order_id, action='BUY', orderType='LMT',
+                                lmtPrice=limit, totalQuantity=1),
+                orderStatus=FakeOrderStatus(status='Submitted', filled=0, remaining=1))]
+        mock_client.rpc.return_value.get_trades.return_value = trades
+        mock_client.rpc.return_value.get_snapshots_batch.return_value = [
+            # AAA's "bid" is our own 10.00 limit, far below the 12.40 last.
+            {'symbol': 'AAA', 'conId': 1, 'bid': 10.0, 'ask': 12.41, 'last': 12.40},
+            # BBB's bid is somebody else's.
+            {'symbol': 'BBB', 'conId': 2, 'bid': 50.0, 'ask': 50.2, 'last': 50.1},
+        ]
+
+        df = _make_mmr_with_mock(mock_client).orders().set_index('symbol')
+
+        assert pd.isna(df.loc['AAA', 'bid']) and df.loc['AAA', 'ask'] == 12.41
+        assert df.loc['AAA', 'quote_notes'] == ['bid 10 is our own resting BUY limit — ignored for spread']
+        assert df.loc['BBB', 'bid'] == 50.0
+        assert df.loc['BBB', 'quote_notes'] is None
 
     def test_orders_empty(self):
         mock_client = _make_mock_rpc()
