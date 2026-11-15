@@ -196,6 +196,61 @@ def normalize_ib_quote(q: dict) -> dict:
     q['source'] = 'ib'
     return q
 
+
+def _utc_now() -> dt.datetime:
+    """The wall clock, as one seam (session-dependent reads are tested against
+    fixed instants)."""
+    return dt.datetime.now(dt.timezone.utc)
+
+
+_VENUE_CLOSED_NOTE = 'venue session closed: quote not requested'
+
+
+def _stock_venue_closed(contract: Any, now: dt.datetime) -> bool:
+    """True only when ``contract`` is a stock whose venue is KNOWN to be
+    outside its trading session at ``now`` (extended hours are in session).
+
+    For deciding whether a live quote is worth asking for: outside the session
+    IB sends no bid/ask, and the snapshot path waits out its partial-wait for
+    them. Anything this cannot establish is False — "ask as before":
+
+    * not a stock. Options and futures keep hours the stock calendar does not
+      describe (index options trade overnight), FX and crypto never close;
+    * a listing venue (``primaryExchange``) with no calendar, even when the
+      route is SMART — SMART must not stand in for a venue that is named;
+    * no listing venue and a route with no calendar;
+    * no listing venue and route SMART for a non-USD contract. SMART is a
+      routing destination; ``market_session`` reads it as the US session,
+      which is believed only for USD. An order loaded from IB after a restart
+      carries exactly this shape (the openOrder message has no
+      primaryExchange), so without the currency test an ASX order would be
+      judged on New York's clock. Residual: a USD-denominated line listed
+      outside the US, routed SMART and loaded that way, is judged on the US
+      session;
+    * a calendar that cannot be read (``in_session`` fails open) or any error.
+    """
+    try:
+        if str(getattr(contract, 'secType', '') or '').strip().upper() != 'STK':
+            return False
+        from trader.data import market_session
+        primary = str(getattr(contract, 'primaryExchange', '') or '').strip().upper()
+        route = str(getattr(contract, 'exchange', '') or '').strip().upper()
+        if primary:
+            venue = primary
+        elif route == 'SMART':
+            if str(getattr(contract, 'currency', '') or '').strip().upper() != 'USD':
+                return False
+            venue = route
+        else:
+            venue = route
+        if market_session.calendar_name_for(venue) is None:
+            return False
+        return not market_session.in_session(now, venue, '', 'STK')
+    except Exception as ex:
+        logger.debug('venue session unknown for %s: %s', getattr(contract, 'symbol', '?'), ex)
+        return False
+
+
 class MMR:
     """Synchronous Python SDK for the MMR trader_service.
 
@@ -897,7 +952,14 @@ class MMR:
         return out
 
     def orders(self) -> pd.DataFrame:
-        """Open orders with full detail (symbol, name, prices, account %)."""
+        """Open orders with full detail (symbol, name, prices, account %).
+
+        ``bid`` / ``ask`` / ``last`` are a live quote, requested only for
+        instruments that can have one: a stock whose venue is known to be
+        outside its session (extended hours count as in session) is not asked
+        for, and its row says so in ``quote_notes``. Unknown venues and
+        non-stocks are asked as always.
+        """
         trades_raw: dict[int, list[Trade]] = self._rpc.rpc(
             return_type=dict[int, list[Trade]]
         ).get_trades()
@@ -933,12 +995,25 @@ class MMR:
             contract_cache.setdefault(con.symbol, con)
 
         # Batch snapshot for bid/ask context — single RPC instead of N.
+        #
+        # Only for instruments that can have a quote. Outside its venue's
+        # session a stock gets no bid/ask from IB, and the snapshot path waits
+        # out its partial-wait (4 s) for them: the listing took ~5 s off-hours
+        # for market context it could not show. Those rows are not asked for
+        # (so they carry no ``last`` either) and say so in ``quote_notes``;
+        # everything in session (extended hours included) or of unknown venue
+        # is asked as before.
         order_contracts = []
         sym_order = []
+        venue_closed: set = set()
+        now = _utc_now()
         for sym, con in contract_cache.items():
-            order_contracts.append(self._to_contract(con))
             sym_order.append(sym)
             name_cache[sym] = ''  # company name not available without per-symbol resolve
+            if _stock_venue_closed(con, now):
+                venue_closed.add(sym)
+                continue
+            order_contracts.append(self._to_contract(con))
 
         if order_contracts:
             try:
@@ -1028,6 +1103,9 @@ class MMR:
                 'bid': bid,
                 'ask': ask,
                 'last': last,
+                # Why a row has no quote when none was asked for (a failed
+                # snapshot leaves bid/ask/last empty too, and is not this).
+                'quote_notes': [_VENUE_CLOSED_NOTE] if t.contract.symbol in venue_closed else None,
             })
 
         df = pd.DataFrame(rows)

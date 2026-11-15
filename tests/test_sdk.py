@@ -319,9 +319,16 @@ class TestOrders:
         assert 'ask' in df.columns
         assert 'last' in df.columns
 
-    def test_order_quotes_are_matched_by_conid_not_list_position(self):
+    def test_order_quotes_are_matched_by_conid_not_list_position(self, monkeypatch):
         """The server omits symbols whose snapshot failed. Paired by position,
         every later quote landed on the wrong order: AAA showed BBB's market."""
+        # Quotes are only requested while the venue is in session (these are
+        # NASDAQ stocks); pin the clock to a regular-session instant so the
+        # test does not depend on when it runs. Monday 10:00 New York.
+        import datetime as _dt
+        from trader import sdk as _sdk
+        monkeypatch.setattr(_sdk, '_utc_now',
+                            lambda: _dt.datetime(2026, 11, 16, 15, 0, tzinfo=_dt.timezone.utc))
         mock_client = _make_mock_rpc()
         trades = {}
         for order_id, (con_id, symbol) in enumerate([(1, 'AAA'), (2, 'BBB'), (3, 'CCC')], start=10):
