@@ -6693,6 +6693,11 @@ def _handle_strategy_pnl(args: argparse.Namespace):
     ORDER_FILLED events tagged with the strategy name via orderRef, paired
     long-only. Missing fill prices leave affected PnL unavailable. Unrealized
     marks also need trader_service and every open lot's price and cost basis.
+
+    ``trades`` counts exit ORDERS (an exit filled in three partials is one
+    trade). Every figure is GROSS: fill events record no commission, and the
+    output says so (``pnl_basis`` / ``commissions`` in JSON, the table title
+    and a note otherwise) instead of leaving the numbers to be read as net.
     """
     import pandas as pd
     from trader.container import Container
@@ -6766,14 +6771,24 @@ def _handle_strategy_pnl(args: argparse.Namespace):
             'unrealized': round(unrealized, 2) if unrealized is not None else None,
         })
 
+    # The ledger is price x quantity over fill events, and those events carry
+    # no commission. Say so next to the numbers; the keys keep their names.
+    commissions_note = ('not recorded in fill events — realized and unrealized '
+                        'figures are gross (before commissions)')
     if _json_mode:
         print_dict({'strategies': strategies,
                     'unmatched_sells': report['unmatched_sells'],
                     'unevaluable_trades': report.get('unevaluable_trades', 0),
+                    'pnl_basis': report.get('pnl_basis', 'gross'),
+                    'commissions_included': report.get('commissions_included', False),
+                    'commissions': commissions_note,
                     'rows': rows}, title='Strategy PnL')
         return
     display_rows = [{k: '-' if v is None else v for k, v in row.items()} for row in rows]
-    print_df(pd.DataFrame(display_rows), title='Per-strategy PnL (attributed fills)')
+    print_df(pd.DataFrame(display_rows),
+             title='Per-strategy PnL (attributed fills; gross, before commissions)')
+    console.print(f'[dim]commissions: {commissions_note}. '
+                  "'trades' counts exit orders, not partial fills.[/dim]")
     if report.get('unevaluable_trades'):
         console.print(f"[dim]{report['unevaluable_trades']} matched close(s) lack "
                       'a usable fill price or cost basis — affected PnL and '

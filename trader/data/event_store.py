@@ -235,9 +235,19 @@ class EventStore:
         tagging shipped carry 'proposal' and land under that key. Pairing
         exploits the auto-executor's long-only invariant — see
         ``pair_fills_long_only``.
+
+        ``closed_trades`` / ``wins`` count EXIT ORDERS, not fill rows: the
+        order tracker writes one ORDER_FILLED row per cumulative-fill delta,
+        so an exit filled in three partials is three rows and one trade.
+
+        Every figure is GROSS (``pnl_basis: 'gross'``): price x quantity and
+        nothing else. ORDER_FILLED events carry no commission (the order
+        tracker never reads IB's commission report), so there is nothing here
+        to net off; ``commissions_included`` says so rather than leaving the
+        numbers to be read as net.
         """
         rows = self.db.execute(
-            "SELECT strategy_name, conid, action, quantity, price, timestamp, metadata "
+            "SELECT strategy_name, conid, action, quantity, price, timestamp, metadata, order_id "
             "FROM trading_events WHERE event_type = ? ORDER BY timestamp ASC, id ASC",
             [EventType.ORDER_FILLED.value],
             fetch='all',
@@ -261,7 +271,8 @@ class EventStore:
                 # inventory movement in pairing, but never use a placeholder
                 # or explicitly unproven price as its cost basis.
                 kept.append((*r[:4], fill_price_or_none(
-                    r[4], price_evaluable=meta.get('price_evaluable', True)), r[5]))
+                    r[4], price_evaluable=meta.get('price_evaluable', True)), r[5],
+                    fill_order_key(meta, r[7])))
         closed, open_lots, unmatched = pair_fills_long_only(kept)
 
         today = dt.date.today()
@@ -307,6 +318,8 @@ class EventStore:
             'excluded_fills': excluded,
             'unevaluable_trades': sum(
                 b['unevaluable_trades'] for b in strategies.values()),
+            'pnl_basis': 'gross',
+            'commissions_included': False,
         }
 
     def list_fills(self, strategy: Optional[str] = None,
@@ -379,12 +392,29 @@ def fill_price_or_none(price: Any, *, price_evaluable: bool = True) -> Optional[
     return value if math.isfinite(value) and 0 < value < sys.float_info.max else None
 
 
+def fill_order_key(metadata: Any, order_id: Any) -> Optional[str]:
+    """The broker order an ORDER_FILLED row belongs to, or None if unknown.
+
+    The order tracker derives fill rows as cumulative deltas per
+    ``broker_identity``, so rows sharing one are by construction partial fills
+    of one order. The numeric order id is the fallback for rows without it;
+    IB has re-issued ids after a gateway recreate, which is why it is second.
+    Zero is "not recorded", never an order.
+    """
+    identity = metadata.get('broker_identity') if isinstance(metadata, dict) else None
+    if isinstance(identity, str) and identity:
+        return f'broker:{identity}'
+    if isinstance(order_id, int) and not isinstance(order_id, bool) and order_id > 0:
+        return f'order:{order_id}'
+    return None
+
+
 def pair_fills_long_only(fills) -> tuple:
     """Pair BUY/SELL fills into round trips under the long-only invariant.
 
     ``fills``: iterable of (strategy_name, conid, action, quantity, price,
-    timestamp) in CHRONOLOGICAL order. A BUY opens/extends the (strategy,
-    conid) lot at a volume-weighted entry; a SELL realizes
+    timestamp[, order_key]) in CHRONOLOGICAL order. A BUY opens/extends the
+    (strategy, conid) lot at a volume-weighted entry; a SELL realizes
     ``(exit - entry) x min(sell_qty, lot_qty)``. A SELL with no lot (manual
     interleaving, fills predating attribution) is counted, never guessed at.
     Missing or invalid prices produce ``None`` basis/PnL, but their known
@@ -392,13 +422,30 @@ def pair_fills_long_only(fills) -> tuple:
     remains unknown until the lot is flat; an unknown exit price does not
     alter the basis of the remaining shares.
 
+    A closed trade is one SELL ORDER against a lot, not one fill row.
+    ``order_key`` (see ``fill_order_key``) names the order a row belongs to:
+    consecutive SELL rows of one (strategy, conid) that share it are partial
+    fills of one exit and are merged into ONE closed trade — quantity and PnL
+    summed, exit price volume-weighted, ``closed_at`` the last fill, ``fills``
+    the number of rows. If any of them is unpriced the trade's PnL is unknown.
+    A BUY in between ends the merge (the cost basis changed). Rows with no
+    ``order_key`` cannot be grouped and stay one trade each. The cap on an
+    oversized SELL applies to the order as well: once its earlier fills have
+    flattened the lot, the rest of the same order is the capped excess and is
+    not an unmatched sell.
+
     Returns ``(closed_trades, open_lots, unmatched_sells)``. Pure function —
     tests drive it with fabricated rows.
     """
     lots: Dict[tuple, list] = {}
     closed: List[dict] = []
+    # (strategy, conid) -> (order_key, closed trade) while that lot's most
+    # recent fill was a SELL; a BUY clears it.
+    last_exit: Dict[tuple, tuple] = {}
     unmatched_sells = 0
-    for strategy, conid, action, quantity, price, ts in fills:
+    for row in fills:
+        strategy, conid, action, quantity, price, ts = row[:6]
+        order_key = row[6] if len(row) > 6 else None
         try:
             qty = float(quantity or 0.0)
         except (TypeError, ValueError, OverflowError):
@@ -409,6 +456,7 @@ def pair_fills_long_only(fills) -> tuple:
         key = (strategy, conid)
         side = (action or '').upper()
         if side == 'BUY':
+            last_exit.pop(key, None)
             if key in lots:
                 held_qty, held_px = lots[key]
                 new_qty = held_qty + qty
@@ -418,19 +466,37 @@ def pair_fills_long_only(fills) -> tuple:
             else:
                 lots[key] = [qty, px]
         elif side == 'SELL':
+            previous = last_exit.get(key)
+            same_order = (order_key is not None and previous is not None
+                          and previous[0] == order_key)
             if key not in lots or lots[key][0] <= 0:
-                unmatched_sells += 1
+                if not same_order:
+                    unmatched_sells += 1
                 continue
             held_qty, held_px = lots[key]
             close_qty = min(qty, held_qty)
             pnl = (px - held_px) * close_qty if px is not None and held_px is not None else None
             if pnl is not None and not math.isfinite(pnl):
                 pnl = None
-            closed.append({
-                'strategy': strategy, 'conid': conid, 'quantity': close_qty,
-                'entry_price': held_px, 'exit_price': px,
-                'pnl': pnl, 'closed_at': ts,
-            })
+            if same_order and previous is not None:
+                trade = previous[1]
+                merged_qty = trade['quantity'] + close_qty
+                trade['exit_price'] = (
+                    (trade['exit_price'] * trade['quantity'] + px * close_qty) / merged_qty
+                    if trade['exit_price'] is not None and px is not None else None)
+                trade['pnl'] = (trade['pnl'] + pnl
+                                if trade['pnl'] is not None and pnl is not None else None)
+                trade['quantity'] = merged_qty
+                trade['closed_at'] = ts
+                trade['fills'] += 1
+            else:
+                trade = {
+                    'strategy': strategy, 'conid': conid, 'quantity': close_qty,
+                    'entry_price': held_px, 'exit_price': px,
+                    'pnl': pnl, 'closed_at': ts, 'fills': 1,
+                }
+                closed.append(trade)
+            last_exit[key] = (order_key, trade)
             remaining = held_qty - close_qty
             if remaining <= 1e-9:
                 del lots[key]
