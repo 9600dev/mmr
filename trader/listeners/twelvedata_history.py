@@ -1,4 +1,5 @@
 from trader.common.logging_helper import setup_logging
+from trader.data.listing_guard import vendor_ticker
 from trader.objects import BarSize, WhatToShow
 from twelvedata import TDClient
 
@@ -80,6 +81,10 @@ class TwelveDataHistoryWorker:
     ) -> pd.DataFrame:
         interval = BarSize.to_twelvedata_interval(bar_size)
         chunk_days = _CHUNK_DAYS_FOR_BAR_SIZE.get(bar_size)
+        # Callers hand over IB's symbol ('BRK B'); TwelveData spells it
+        # 'BRK.B'. Done here, before the chunk loop, so a symbol that cannot be
+        # spelled is the caller's failure and not one more skipped chunk.
+        ticker = vendor_ticker(ticker)
 
         if chunk_days is None:
             # Daily or coarser — single call is always enough.
