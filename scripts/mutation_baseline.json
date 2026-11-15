@@ -14,10 +14,10 @@
       "score": 0.978022
     },
     "trader/data/market_session.py": {
-      "killed": 205,
-      "survived": 26,
+      "killed": 230,
+      "survived": 29,
       "timeout": 0,
-      "score": 0.887446
+      "score": 0.888031
     },
     "trader/data/proposal_transitions.py": {
       "killed": 8,
@@ -29,13 +29,13 @@
       "killed": 557,
       "survived": 73,
       "timeout": 0,
-      "score": 0.88413
+      "score": 0.884127
     },
     "trader/rebalance/fills.py": {
-      "killed": 464,
-      "survived": 56,
+      "killed": 516,
+      "survived": 60,
       "timeout": 0,
-      "score": 0.892308
+      "score": 0.895833
     },
     "trader/rebalance/plan.py": {
       "killed": 444,
@@ -80,16 +80,16 @@
       "score": 0.986264
     },
     "trader/simulation/walk_forward.py": {
-      "killed": 135,
+      "killed": 155,
       "survived": 1,
       "timeout": 3,
-      "score": 0.992806
+      "score": 0.993711
     },
     "trader/strategy/auto_executor.py": {
-      "killed": 6430,
-      "survived": 965,
-      "timeout": 2,
-      "score": 0.869542
+      "killed": 7931,
+      "survived": 1741,
+      "timeout": 1,
+      "score": 0.820014
     },
     "trader/trading/exit_class.py": {
       "killed": 29,
@@ -98,10 +98,10 @@
       "score": 0.935484
     },
     "trader/trading/order_lifecycle.py": {
-      "killed": 1820,
-      "survived": 86,
+      "killed": 1772,
+      "survived": 135,
       "timeout": 6,
-      "score": 0.955021
+      "score": 0.92943
     },
     "trader/trading/order_math.py": {
       "killed": 119,
@@ -122,10 +122,10 @@
       "score": 0.966292
     },
     "trader/trading/position_sizing.py": {
-      "killed": 552,
-      "survived": 29,
+      "killed": 629,
+      "survived": 55,
       "timeout": 0,
-      "score": 0.950086
+      "score": 0.919591
     },
     "trader/trading/protective_stop.py": {
       "killed": 62,
@@ -134,10 +134,10 @@
       "score": 0.929577
     },
     "trader/trading/risk_gate.py": {
-      "killed": 557,
-      "survived": 38,
+      "killed": 602,
+      "survived": 36,
       "timeout": 0,
-      "score": 0.936134
+      "score": 0.943574
     }
   }
 }

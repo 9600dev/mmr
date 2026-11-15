@@ -390,6 +390,10 @@ class TestUnjournaledQuantities:
     def test_quantities_are_read_as_numbers(self):
         assert unjournaled_quantities({'AAPL': '25'}, {'AAPL': '10'}) == {'AAPL': 15.0}
 
+    def test_a_shortfall_of_exactly_the_tolerance_is_still_dust(self):
+        assert unjournaled_quantities({'AAPL': 1e-9}, {}) == {}
+        assert unjournaled_quantities({'AAPL': 2e-9}, {}) == {'AAPL': 2e-9}
+
 
 def _filled_sleeve(**kwargs):
     """Two EXECUTED buys that filled: AAPL 25 (order 901) and MSFT 7 (order 902)."""
@@ -490,6 +494,20 @@ class TestCheckJournalCurrent:
         message = refusal.value.message
         assert 'for 14 ticker(s): T00 +1, T01 +2,' in message and 'T11 +12, and 2 more.' in message
         assert 'T12' not in message and 'T13' not in message
+
+    def test_thirteen_tickers_say_one_more(self):
+        names = [f'T{i:02d}' for i in range(13)]
+        proposals, observations, receipts = [], [], []
+        for index, name in enumerate(names, start=1):
+            order, got = filled_order(900 + index, name, 'BUY', index, exec_id=f'e{index}')
+            proposals.append(executed(index, name, 'BUY', index))
+            observations.append(order)
+            receipts.append(got)
+        gw = FakeGateway(proposals=proposals, evidence=evidence(observations, receipts))
+        with pytest.raises(Refusal) as refusal:
+            check_journal_current('s2p', gw, now=NOW)
+        assert 'for 13 ticker(s): ' in refusal.value.message and 'T11 +12, and 1 more.' in refusal.value.message
+        assert 'T12' not in refusal.value.message
 
     def test_exactly_twelve_tickers_are_all_listed_with_no_more_clause(self):
         names = [f'T{i:02d}' for i in range(12)]
