@@ -6436,6 +6436,23 @@ class TestOpensNeedTheRegularSession:
         _signal_at(ex, monkeypatch, _ny('2026-11-28 03:00'))             # a Saturday
         assert [call['action'] for call in sdk.propose_calls] == ['BUY']
 
+    @pytest.mark.parametrize('sec_type', ['CASH', 'CRYPTO'])
+    def test_it_is_the_instrument_that_trades_round_the_clock_not_the_venue(self, executor, monkeypatch, sec_type):
+        """The test above passes on IDEALPRO's having no calendar. Here the
+        venue has one and it is shut: only the security type says the order
+        can execute now, so the type has to reach the session check."""
+        ex, sdk = executor
+        _list_on(sdk, exchange='NASDAQ', primary='NASDAQ', sec_type=sec_type)
+        _signal_at(ex, monkeypatch, _ny('2026-11-28 03:00'))             # a Saturday
+        assert [call['action'] for call in sdk.propose_calls] == ['BUY']
+
+    def test_a_stock_on_that_venue_at_that_instant_is_refused(self, executor, monkeypatch):
+        ex, sdk = executor
+        _list_on(sdk, exchange='NASDAQ', primary='NASDAQ', sec_type='STK')
+        refused = _signal_at(ex, monkeypatch, _ny('2026-11-28 03:00'))
+        assert sdk.propose_calls == []
+        assert [row[1] for row in _decisions(ex, refused)] == ['refused']
+
     def test_a_listing_this_system_has_no_calendar_for_is_outside_the_rule(self, executor, monkeypatch):
         """SMART is where the order is routed, not where the instrument is
         listed. The rule refuses, so it must not guess a venue."""
@@ -6622,6 +6639,19 @@ class TestVenueCalendar:
     def test_a_missing_security_type_is_not_round_the_clock(self, executor):
         ex, sdk = executor
         _list_on(sdk, exchange='NASDAQ', primary='NASDAQ', sec_type=None)
+        assert ex._venue_calendar(1111) == 'NASDAQ'
+
+    @pytest.mark.parametrize('missing', ['exchange', 'primaryExchange', 'secType'])
+    def test_a_definition_that_lacks_a_field_is_read_as_blank(self, executor, missing):
+        """The lookup answers; it does not raise. An AttributeError here is
+        a calendar "failure": the opening side then refuses, and
+        ``_close_by_today`` leaves a close-by time unshifted on an early
+        close - both for a definition that names its venue perfectly well."""
+        ex, sdk = executor
+        fields = dict(symbol='WDS', exchange='NASDAQ', primaryExchange='NASDAQ', currency='USD',
+                      secType='STK', conId=1111)
+        del fields[missing]
+        sdk.secdef = SimpleNamespace(**fields)
         assert ex._venue_calendar(1111) == 'NASDAQ'
 
     def test_the_exact_conid_is_what_is_resolved(self, executor, monkeypatch):

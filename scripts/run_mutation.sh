@@ -523,6 +523,41 @@
 #     * close_by_on 7 — `shift <= 0` -> `< 0`: a zero shift moves the time by
 #       nothing. close_by_on 19/20 — dt.time(0, 0) -> dt.time(0).
 #
+#   auto_executor.py, THE SESSION CODE (2026-11-15, audit A7.1: the
+#   OutsideRegularSession refusal in _execute_open, the WARNING / ERROR switch
+#   in _process_signal_durable, _venue_calendar, _close_by_today, and the
+#   close-by shift in _process_bar). The module's recorded floor is from
+#   7d338b7, BEFORE this code, and no full pass has been run since (the module
+#   alone is about 12 hours) - so `check` does not speak for these lines. A
+#   targeted pass over the five functions did (scratch worktree, e7b9cd7): 652
+#   mutants, 590 killed / 62 survived. 44 of the survivors are on lines the
+#   recorded pass had already measured (message text, False -> None flags, the
+#   session_tz default) and are part of the module's baselined 1,741. On the
+#   lines this change added, 18:
+#     * _execute_open 31/35 - `sec_type=ident['sec_type']` -> None / dropped.
+#       REAL. The session check then judges a round-the-clock instrument by
+#       its venue's calendar; the one test of a CASH instrument used IDEALPRO,
+#       which has no calendar, and passed either way. Killed by
+#       test_it_is_the_instrument_that_trades_round_the_clock_not_the_venue.
+#     * _venue_calendar 34/45/57 - a getattr default DELETED. REAL in the
+#       order_structure sense above: a definition lacking a field raises
+#       instead of reading as blank. Killed by
+#       test_a_definition_that_lacks_a_field_is_read_as_blank.
+#     Both confirmed by a second pass with those tests (the three session
+#     functions: _execute_open 111 / 6, none on the added lines;
+#     _venue_calendar 51 / 11; _close_by_today 24 / 2). The 13 left there are
+#     equivalent:
+#     * _venue_calendar 6/7 - the name of the per-process cache slot
+#       ('_venue_calendars'); nothing else reads it.
+#     * _venue_calendar 31/42/54 - getattr default '' -> None: the next
+#       operator is `or ''`.
+#     * _venue_calendar 37/49/61 (default '' -> 'XXXX') and 38/50/62
+#       (`x or ''` -> `x or 'XXXX'`): 'XXXX' maps to no calendar and is no
+#       round-the-clock type, so it falls through exactly as '' does - the
+#       same equivalence as listing_calendar 1/6 above.
+#     * _close_by_today 19/20 - the text of the warn-once key
+#       ('close-by-calendar'); no other site uses that key.
+#
 #   order_structure.py SURVIVOR CLASSIFICATION (2026-07-26, 84.3% -> 96.6%).
 #   The last structural check before IB, extracted pure from OrderValidator and
 #   moved to the placement chokepoint. First measurement: 14 survivors, ALL of
