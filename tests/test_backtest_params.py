@@ -197,3 +197,64 @@ class TestApplyOverridesParamsDict:
         inst = _make_installed(_FakeParamsDictStrategy)
         Backtester.apply_param_overrides(inst, {'use_volume': 'true'})
         assert inst.params['use_volume'] is True
+
+
+class TestVbtMacdBBFractionalBandWidth:
+    """``VbtMacdBB.BB_ALPHA`` is a band width in standard deviations — a real
+    number. It was declared ``2`` (an int), so once a fractional float for an
+    int-typed tunable was refused instead of truncated (audit 2026-11-14,
+    B4.6), the grid ``[1.5, 2.0, 2.5]`` could not be run for this class at
+    all (B7). The default is declared ``2.0``."""
+
+    @staticmethod
+    def _strategy():
+        from strategies.vbt_macd_bb import VbtMacdBB
+        return _make_installed(VbtMacdBB)
+
+    @staticmethod
+    def _frame(n=200):
+        import numpy as np
+        import pandas as pd
+        rng = np.random.default_rng(3)
+        close = 100 + np.cumsum(rng.normal(0, 0.5, n))
+        index = pd.date_range('2026-01-05 14:30', periods=n, freq='1min', tz='UTC', name='date')
+        return pd.DataFrame({'open': close, 'high': close + 0.1, 'low': close - 0.1,
+                             'close': close, 'volume': 1000.0}, index=index)
+
+    def test_default_is_a_float(self):
+        from strategies.vbt_macd_bb import VbtMacdBB
+        assert type(VbtMacdBB.BB_ALPHA) is float and VbtMacdBB.BB_ALPHA == 2.0
+
+    @pytest.mark.parametrize('raw, expected', [(1.5, 1.5), (2.0, 2.0), (2.5, 2.5), ('1.5', 1.5), (3, 3.0)])
+    def test_fractional_override_is_accepted_and_used_as_given(self, raw, expected):
+        inst = self._strategy()
+        applied = Backtester.apply_param_overrides(inst, {'BB_ALPHA': raw})
+        assert applied['BB_ALPHA'] == expected and type(applied['BB_ALPHA']) is float
+        assert inst.BB_ALPHA == expected
+
+    def test_the_audit_grid_runs_as_three_different_strategies(self):
+        import numpy as np
+        frame = self._frame()
+        widths = []
+        for alpha in (1.5, 2.0, 2.5):
+            inst = self._strategy()
+            Backtester.apply_param_overrides(inst, {'BB_ALPHA': alpha})
+            state = inst.precompute(frame)
+            widths.append(float(np.nanmean(state['upper'] - state['lower'])))
+        assert widths[0] < widths[1] < widths[2]
+        assert widths[0] / widths[1] == pytest.approx(0.75) and widths[2] / widths[1] == pytest.approx(1.25)
+
+    def test_default_bands_are_the_two_sigma_bands(self):
+        """Declaring 2.0 instead of 2 changes no number."""
+        import numpy as np
+        import vectorbt as vbt
+        frame = self._frame()
+        inst = self._strategy()
+        state = inst.precompute(frame)
+        bands = vbt.BBANDS.run(frame['close'], window=inst.BB_WINDOW, alpha=2)
+        np.testing.assert_array_equal(state['upper'], np.asarray(bands.upper).ravel())
+        np.testing.assert_array_equal(state['lower'], np.asarray(bands.lower).ravel())
+
+    def test_other_int_tunables_of_the_class_still_refuse_a_fraction(self):
+        with pytest.raises(ValueError, match='BB_WINDOW'):
+            Backtester.apply_param_overrides(self._strategy(), {'BB_WINDOW': 20.5})

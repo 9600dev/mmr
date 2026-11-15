@@ -33,7 +33,10 @@ class VbtMacdBB(Strategy):
     MACD_SLOW = 26
     MACD_SIGNAL = 9
     BB_WINDOW = 20
-    BB_ALPHA = 2
+    # Band width in standard deviations. A float: an override is coerced to
+    # the type of this default, and a fractional value for an int default is
+    # refused, so ``2`` made the grid [1.5, 2.0, 2.5] unrunnable.
+    BB_ALPHA = 2.0
     MIN_BARS = 35
 
     def __init__(self):
