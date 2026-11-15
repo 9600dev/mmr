@@ -1622,11 +1622,20 @@ class MMR:
         return out
 
     def portfolio_diff(self) -> dict:
-        """Compare current portfolio to the last stored snapshot.
+        """Compare the current portfolio with each position's stored baseline.
 
-        Returns {changed, new, removed, unchanged_count, prev_timestamp}.
-        Stores current snapshot in DuckDB for next call. First call returns
-        all positions as 'new' (no previous snapshot exists).
+        Returns {changed, new, removed, unchanged_count, prev_timestamp,
+        timestamp}. First call returns all positions as 'new' (no baseline
+        exists). A position is 'changed' when its value is more than 0.5% from
+        its baseline or its quantity differs.
+
+        The baseline is per symbol and advances ONLY when that symbol is
+        reported (as new or changed): an unchanged position keeps the value it
+        was last reported at, so a move that arrives in steps smaller than the
+        threshold accumulates and is reported once it crosses it. ``prev_value``
+        is therefore the last reported value, and each changed entry carries
+        ``baseline_timestamp`` (when that was); ``prev_timestamp`` remains the
+        time of the previous call.
         """
         import math
         from trader.data.duckdb_store import DuckDBObjectStore
@@ -1666,11 +1675,24 @@ class MMR:
             except Exception:
                 pass
 
-        # Compute diff
+        # Compute diff, and the baseline the NEXT call compares against.
+        #
+        # A symbol's baseline advances only when that symbol was REPORTED (new
+        # or changed). It used to be overwritten with the current snapshot on
+        # every call, so each call compared with the one before it and a
+        # position sliding 0.4% per monitoring cycle was "unchanged" for ever
+        # (100.00 -> 81.84 over 50 cycles, nothing reported). Per symbol, not
+        # per snapshot: in a real book something moves on most calls, and
+        # re-baselining everything then would hide the quiet drifter again.
+        now = str(dt.datetime.now())
         new_symbols = []
         removed_symbols = []
         changed = []
         unchanged_count = 0
+        baseline: Dict[str, dict] = {}
+
+        def _public(record: dict) -> dict:
+            return {k: v for k, v in record.items() if k != 'baseline_timestamp'}
 
         all_symbols = set(list(current.keys()) + list(prev.keys()))
         for sym in sorted(all_symbols):
@@ -1679,11 +1701,19 @@ class MMR:
 
             if cur and not prv:
                 new_symbols.append({'symbol': sym, **cur})
+                baseline[sym] = {**cur, 'baseline_timestamp': now}
             elif prv and not cur:
-                removed_symbols.append({'symbol': sym, **prv})
+                removed_symbols.append({'symbol': sym, **_public(prv)})
             elif cur and prv:
-                # Check if value changed by more than 0.5%
-                pct_change = abs(cur['value'] - prv['value']) / prv['value'] if prv['value'] > 0 else 0
+                # Value moved more than 0.5% from the baseline. A value that
+                # appears where the baseline had none is a change, not "0%".
+                if prv['value'] > 0:
+                    pct_change = abs(cur['value'] - prv['value']) / prv['value']
+                else:
+                    pct_change = math.inf if cur['value'] > 0 else 0.0
+                # Records stored before baselines were per symbol carry no
+                # timestamp of their own; the snapshot's is when they were set.
+                measured_from = prv.get('baseline_timestamp', prev_ts)
                 if pct_change > 0.005 or cur['position'] != prv['position']:
                     changed.append({
                         'symbol': sym,
@@ -1693,17 +1723,26 @@ class MMR:
                         'daily_pnl': cur['daily_pnl'],
                         'position': cur['position'],
                         'prev_position': prv['position'],
+                        # prev_value is the last REPORTED value, which can be
+                        # older than the previous call (prev_timestamp).
+                        'baseline_timestamp': measured_from,
                     })
+                    baseline[sym] = {**cur, 'baseline_timestamp': now}
                 else:
                     unchanged_count += 1
+                    # Not reported, so not re-baselined: value and position
+                    # stay where they were. daily_pnl is not compared; keep
+                    # it current so a later 'removed' entry shows the latest.
+                    baseline[sym] = {**prv, 'daily_pnl': cur['daily_pnl'],
+                                     'baseline_timestamp': measured_from}
 
-        # Store current snapshot for next diff
+        # Store the baseline for the next diff
         if duckdb_path:
             try:
                 obj_store = DuckDBObjectStore(duckdb_path)
                 obj_store.write('_portfolio_snapshot', {
-                    'positions': current,
-                    'timestamp': str(dt.datetime.now()),
+                    'positions': baseline,
+                    'timestamp': now,
                 })
             except Exception:
                 pass
@@ -1717,7 +1756,7 @@ class MMR:
             'removed': removed_symbols,
             'unchanged_count': unchanged_count,
             'prev_timestamp': prev_ts,
-            'timestamp': str(dt.datetime.now()),
+            'timestamp': now,
         }
 
     def _group_store(self):

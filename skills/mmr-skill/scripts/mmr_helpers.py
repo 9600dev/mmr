@@ -3615,13 +3615,18 @@ class MMRHelpers:
     @staticmethod
     async def portfolio_diff() -> dict:
         """
-        Portfolio changes since last snapshot. Returns JSON with:
+        Portfolio changes since each position was last reported. Returns JSON with:
         {changed, new, removed, unchanged_count, prev_timestamp}.
-        Stores current snapshot automatically — next call diffs against it.
         Requires trader_service.
 
         On first call (no previous snapshot), all positions appear as 'new'.
-        'changed' only includes positions that moved >0.5% in value.
+        'changed' only includes positions whose value is >0.5% away from their
+        baseline (or whose quantity changed). The baseline is per position and
+        moves only when that position is reported, so an unchanged position
+        keeps accumulating: a slow drift shows up once it adds up to 0.5%.
+        'prev_value' is the last reported value; 'baseline_timestamp' on each
+        changed entry says when that was (it can predate 'prev_timestamp',
+        which is the previous call).
 
         Example:
         diff = await MMRHelpers.portfolio_diff()
