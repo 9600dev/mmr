@@ -624,12 +624,25 @@ class _RestrictedUnpickler(_PyUnpickler):
     exact allowlist, and REDUCE / NEWOBJ / BUILD are each checked at the
     instruction that performs them rather than trusted once a name resolved."""
 
-    def __init__(self, file):
+    def __init__(self, file, only: Optional[typing.FrozenSet[Tuple[str, str]]] = None,
+                 described_as: str = ''):
         super().__init__(file)
         # Objects this load allocated: the only legal BUILD targets.
         self._fresh: Dict[int, Any] = {}
+        # A caller's narrower list of names (see restricted_loads). None on
+        # the wire, where _DILL_GLOBALS alone decides.
+        self._only = only
+        self._only_described_as = described_as
 
     def find_class(self, module, name):
+        # Every GLOBAL / STACK_GLOBAL lands here, and nothing else in a
+        # narrowed load can resolve a name: the stand-ins that look names up
+        # themselves (_load_type, _create_namedtuple, getattr) are names too,
+        # and have to pass this line first.
+        if self._only is not None and (module, name) not in self._only:
+            raise DillDeserializationError(
+                f'refusing to deserialize global {_clip((module, name))}: '
+                f'not among {self._only_described_as}')
         return _resolve_global(module, name)
 
     def persistent_load(self, pid):
@@ -740,9 +753,10 @@ class _RestrictedUnpickler(_PyUnpickler):
     }
 
 
-def _restricted_dill_loads(data: bytes):
+def _restricted_dill_loads(data: bytes, only: Optional[typing.FrozenSet[Tuple[str, str]]] = None,
+                           described_as: str = ''):
     try:
-        return _RestrictedUnpickler(io.BytesIO(data)).load()
+        return _RestrictedUnpickler(io.BytesIO(data), only, described_as).load()
     except DillDeserializationError:
         raise
     except Exception as ex:
@@ -756,6 +770,25 @@ def _restricted_dill_loads(data: bytes):
             detail = ''
         raise DillDeserializationError(
             f'dill payload could not be decoded: {type(ex).__name__}: {_clip(detail, 300)}') from ex
+
+
+def restricted_loads(data: bytes, only: typing.Collection[Tuple[str, str]], described_as: str):
+    """The same boundary for a pickle that did not arrive on the wire: a blob
+    read back from a store (trader/data/duckdb_store.py is the caller).
+
+    `only` is the exact set of (module, name) pairs that store writes, and
+    this load resolves no other name. It can only NARROW: a listed name is
+    still resolved through _DILL_GLOBALS, which goes on deciding what may be
+    done with it (allocate, call, with which arguments), so a pair missing
+    from that table is refused however a caller lists it. `described_as`
+    finishes the sentence "refusing to deserialize global (m, n): not among
+    ..." so the refusal says which list to read.
+
+    The wire-only switches do not apply here: MMR_DILL_STRICT turns dill off
+    for messages, and set_dill_whitelist names the top-level types of
+    messages. A stored universe is neither.
+    """
+    return _restricted_dill_loads(data, frozenset(only), described_as)
 
 
 def _safe_dill_loads(data: bytes):
