@@ -470,7 +470,9 @@ class TestDispatchHold:
         assert len(strategy.calls) >= 1
 
     def test_an_instrument_with_no_planned_backfill_is_not_held(self, tmp_path):
-        """A strategy deployed after startup: nothing planned, nothing to wait for."""
+        """Nothing planned (no service is running a backfill pass here), nothing
+        to wait for. A strategy deployed after startup on a RUNNING service is
+        planned and held: tests/test_late_strategy_backfill.py."""
         rt, strategy, contract, start = self._primed_frame_runtime(tmp_path)
         _feed(rt, contract, start, minutes=2)
         assert len(strategy.calls) >= 1

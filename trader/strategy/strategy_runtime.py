@@ -567,6 +567,15 @@ class StrategyRuntime():
         self._backfill_pending: set = set()
         self._backfill_failures: Dict[tuple, dict] = {}
         self._backfill_done: set = set()
+        # ``_backfill_days``: the window (days) each instrument was last primed
+        # with. ``_backfill_serving``: a backfill pass will run for whatever is
+        # planned (set by ``_run_services``), so the reconcile pass may plan —
+        # and hold — the instruments of a strategy loaded after startup.
+        # ``_backfill_startup_done``: the startup pass has ended; later passes
+        # are scheduled as background tasks.
+        self._backfill_days: Dict[tuple, int] = {}
+        self._backfill_serving = False
+        self._backfill_startup_done = False
         # (conId, strategy name) -> (bar timestamp, close) of the bar last
         # dispatched, so a signal's audit row carries the price it acted on.
         self._dispatched_closes: Dict[tuple, tuple] = {}
@@ -1214,8 +1223,8 @@ class StrategyRuntime():
                 # part of today that preceded this process. Hold the bar
                 # (watermark untouched; position management above already ran)
                 # rather than hand a strategy a session that starts mid-way.
-                if ((getattr(strategy, 'historical_days_prior', 0) or 0) > 0
-                        and self._backfill_due(conId, strategy.bar_size)):
+                declared_days = getattr(strategy, 'historical_days_prior', 0) or 0
+                if declared_days > 0 and self._backfill_due(conId, strategy.bar_size, days=declared_days):
                     self._note_backfill_hold(strategy.name or '?', conId)
                     continue
                 dkey = (conId, strategy.name)
@@ -2173,6 +2182,17 @@ class StrategyRuntime():
         warning and stalled live ticker dispatch.
         """
         await asyncio.to_thread(self._reconcile_sync)
+        # A strategy loaded by this reconcile (a deploy / reload RPC lands here
+        # too) had its instruments marked pending; start their backfill now
+        # rather than at the next 30 s tick. First attempts only: the bounded
+        # retry of recorded failures stays on the loop's own cadence, so a
+        # burst of reload RPCs cannot spend its attempts. Before the startup
+        # pass has ended that pass owns everything pending.
+        if self.__dict__.get('_backfill_startup_done'):
+            try:
+                self._schedule_backfill_retry(first_attempts_only=True)
+            except Exception as ex:
+                logging.error('could not schedule the history backfill: {}'.format(ex))
 
     def _reconcile_sync(self):
         """Synchronous reconcile body. Called from ``_reconcile`` via
@@ -2209,6 +2229,18 @@ class StrategyRuntime():
                 # Don't advance _config_mtime — re-try on next reconcile
                 return
             self._config_mtime = current_mtime
+
+        # 1b. A strategy loaded after startup (just now, or by a deploy RPC's
+        # own config load) gets the same history backfill as one loaded at
+        # startup, and is held on each instrument until it finishes. Planned
+        # BEFORE the subscription below, i.e. before its first possible bar.
+        # Only while a service is running a pass: otherwise nothing would ever
+        # release the hold.
+        if self.__dict__.get('_backfill_serving'):
+            try:
+                self._plan_late_backfills()
+            except Exception:
+                logging.exception('could not plan the history backfill of late-loaded strategies')
 
         # 2. Re-subscribe all strategies (idempotent — only conIds trader_service
         # is not already publishing trigger publish_contract). Checked FIRST so
@@ -2401,21 +2433,27 @@ class StrategyRuntime():
                 state.setdefault('_backfill_failures', {}),
                 state.setdefault('_backfill_done', set()))
 
-    def _backfill_due(self, conId: int, bar_size) -> bool:
+    def _backfill_due(self, conId: int, bar_size, days: Optional[int] = None) -> bool:
         """True while history for (conId, bar_size) is still expected to arrive:
         its first backfill attempt has not finished, or an attempt failed and
         the bounded retry has attempts left.
 
         False once it succeeded, once the retries are exhausted (the hold must
         end: a permanently held strategy would stop trading over a history
-        problem it may not even depend on), and for an instrument this process
-        never planned a backfill for (a strategy deployed after startup).
+        problem it may not even depend on), and for an instrument nobody
+        planned a backfill for.
+
+        ``days`` is the window the asking strategy declares. An instrument
+        already primed in this process can be planned again, for a strategy
+        deployed later that declares MORE history; a strategy whose own window
+        was primed is not waiting for that and is not held.
         """
         key = (conId, bar_size)
-        if key in getattr(self, '_backfill_pending', ()):
-            return True
-        record = getattr(self, '_backfill_failures', {}).get(key)
-        return record is not None and record.get('attempts', 0) < _MAX_BACKFILL_ATTEMPTS
+        if key not in getattr(self, '_backfill_pending', ()):
+            record = getattr(self, '_backfill_failures', {}).get(key)
+            if record is None or record.get('attempts', 0) >= _MAX_BACKFILL_ATTEMPTS:
+                return False
+        return days is None or days > self.__dict__.get('_backfill_days', {}).get(key, 0)
 
     def _note_backfill_hold(self, name: str, conId: int) -> None:
         """Say so ONCE per strategy (a universe strategy holds hundreds of conIds)."""
@@ -2442,14 +2480,15 @@ class StrategyRuntime():
             } for key, record in list(failures.items())],
         }
 
-    def _backfill_targets(self) -> List[tuple]:
+    def _backfill_targets(self, strategies: Optional[List[Strategy]] = None) -> List[tuple]:
         """``(strategy, conId, SecurityDefinition | None)`` for every instrument a
-        loaded strategy is configured for. An explicit conId is resolved at
-        fetch time, inside that instrument's own error handling; a universe
-        that cannot be read costs that strategy its backfill, not the others'.
+        loaded strategy (or each of ``strategies``) is configured for. An
+        explicit conId is resolved at fetch time, inside that instrument's own
+        error handling; a universe that cannot be read costs that strategy its
+        backfill, not the others'.
         """
         targets: List[tuple] = []
-        for strategy in list(self.strategy_implementations):
+        for strategy in list(self.strategy_implementations if strategies is None else strategies):
             for conId in strategy.conids or []:
                 targets.append((strategy, conId, None))
             if strategy.universe:
@@ -2470,10 +2509,52 @@ class StrategyRuntime():
         bar, not from whenever the backfill happens to reach it. Called before
         the first subscription."""
         pending, failures, done = self._backfill_state()
-        for strategy, conId, _ in self._backfill_targets():
+        strategies = list(self.strategy_implementations)
+        for strategy, conId, _ in self._backfill_targets(strategies):
             key = (conId, strategy.bar_size)
             if key not in failures and key not in done:
                 pending.add(key)
+        for strategy in strategies:
+            setattr(strategy, '_backfill_planned', True)
+
+    def _plan_late_backfills(self) -> None:
+        """Plan the backfill of every strategy loaded since the last planning —
+        one deployed AFTER startup — so its instruments go pending -> fetch ->
+        release exactly like a startup strategy's, with the same bounded retry.
+
+        Such a strategy used to be subscribed and dispatched bars straight
+        away, with whatever the store already held (audit 2026-11-14, B7).
+
+        An instrument already primed in this process with at least the window
+        the late strategy declares needs nothing (its live bars kept forming
+        whoever was subscribed). One primed with LESS is fetched again with the
+        wider window; ``_backfill_due(days=...)`` then holds only the
+        strategies still waiting for it. An instrument with a recorded failure
+        is left to the bounded retry that already owns it (if that gave up, it
+        stays given up until the service restarts, as for any strategy).
+        """
+        late = [strategy for strategy in list(self.strategy_implementations)
+                if not getattr(strategy, '_backfill_planned', False)]
+        if not late:
+            return
+        pending, failures, done = self._backfill_state()
+        primed = self.__dict__.setdefault('_backfill_days', {})
+        planned: Dict[tuple, str] = {}
+        for strategy, conId, _ in self._backfill_targets(late):
+            key = (conId, strategy.bar_size)
+            if key in failures:
+                continue
+            if key in done and primed.get(key, 0) >= (strategy.historical_days_prior or 1):
+                continue
+            done.discard(key)
+            pending.add(key)
+            planned.setdefault(key, strategy.name or '?')
+        for strategy in late:
+            setattr(strategy, '_backfill_planned', True)
+        if planned:
+            logging.info('planned the history backfill of %d instrument(s) for strategies loaded after '
+                         'startup (%s); they are held until it finishes or its retries are exhausted',
+                         len(planned), ', '.join(sorted(set(planned.values()))))
 
     def _record_backfill_failure(self, key: tuple, strategy_name: str, security, ex) -> Dict[str, Any]:
         """Count one failed backfill attempt for ``key`` (bookkeeping only)."""
@@ -2533,15 +2614,14 @@ class StrategyRuntime():
             what, len(keys), conids, records[0]['error'], gave_up, len(keys) - gave_up,
             _MAX_BACKFILL_ATTEMPTS)
 
-    def _abandon_pending_backfills(self, reason: str) -> None:
-        """The startup pass ended with instruments it never primed (IB
-        unreachable through every reconnect, an unexpected error). Hand them to
-        the reconcile loop's bounded retry rather than leave them pending — and
+    def _abandon_pending_backfills(self, reason: str, what: str = 'did not finish at startup') -> None:
+        """A pass ended with instruments it never primed (IB unreachable
+        through every reconnect, an unexpected error). Hand them to the
+        reconcile loop's bounded retry rather than leave them pending — and
         their strategies held — forever."""
         pending, _, _ = self._backfill_state()
         self._charge_backfill_attempt(sorted(pending, key=str),
-                                      reason or 'the startup pass did not reach it',
-                                      'did not finish at startup')
+                                      reason or 'the pass did not reach it', what)
         pending.clear()
 
     async def get_historical_data(self, retry_failed: bool = False) -> None:
@@ -2618,6 +2698,7 @@ class StrategyRuntime():
                 continue
             pending.discard(key)
             done.add(key)
+            self.__dict__.setdefault('_backfill_days', {})[key] = widest[key]
             if failures.pop(key, None) is not None:
                 logging.info('history backfill for %s (conId %s, %s) strategy %s succeeded on retry',
                              getattr(security, 'symbol', '?'), conId, strategy.bar_size, name)
@@ -2630,25 +2711,52 @@ class StrategyRuntime():
                 failures.pop(key, None)
         logging.debug('finished get_historical_data()')
 
-    def _schedule_backfill_retry(self) -> None:
-        """Start ONE background retry pass when a failed backfill still has
-        attempts left. A task, not an await: an IB history fetch can take
-        minutes and must delay neither the next reconcile nor the pulse (a
-        pulse missing for two intervals reads as a wedged service)."""
-        if not self._retryable_backfills():
+    def _schedule_backfill_retry(self, first_attempts_only: bool = False) -> None:
+        """Start ONE background pass when a failed backfill still has attempts
+        left, or an instrument planned after startup has not been fetched yet
+        (``first_attempts_only``: only for the latter). A task, not an await:
+        an IB history fetch can take minutes and must delay neither the next
+        reconcile nor the pulse (a pulse missing for two intervals reads as a
+        wedged service)."""
+        pending, _, _ = self._backfill_state()
+        if not pending and (first_attempts_only or not self._retryable_backfills()):
             return
         task = getattr(self, '_backfill_task', None)
         if task is not None and not task.done():
             return
-        self._backfill_task = asyncio.get_running_loop().create_task(self._retry_backfills())
+        self._backfill_task = asyncio.get_running_loop().create_task(
+            self._retry_backfills(retry_failed=not first_attempts_only))
 
-    async def _retry_backfills(self) -> None:
+    async def _retry_backfills(self, retry_failed: bool = True) -> None:
+        """One background pass: the bounded retry of recorded failures, then
+        the FIRST attempt for instruments planned after startup. In that order,
+        so an instrument that fails its first attempt here is retried on a
+        later tick, not in the same breath."""
+        if retry_failed and self._retryable_backfills():
+            try:
+                await self.get_historical_data(retry_failed=True)
+            except Exception as ex:
+                # Whatever broke, the retry stays BOUNDED: charge the attempt.
+                logging.exception('history backfill retry pass failed')
+                self._charge_backfill_attempt(self._retryable_backfills(), ex, 'retry pass crashed')
+        pending, _, _ = self._backfill_state()
+        if not pending:
+            return
+        error = ''
         try:
-            await self.get_historical_data(retry_failed=True)
+            await self.get_historical_data()
+        except (IBConnectivityError, ConnectionError) as ex:
+            error = '{}: {}'.format(type(ex).__name__, ex or 'IB not connected')
+            try:
+                await self._reconnect_historical_client()
+            except Exception as reconnect_ex:
+                logging.error('reconnect failed: {}'.format(reconnect_ex))
         except Exception as ex:
-            # Whatever broke, the retry stays BOUNDED: charge the attempt.
-            logging.exception('history backfill retry pass failed')
-            self._charge_backfill_attempt(self._retryable_backfills(), ex, 'retry pass crashed')
+            logging.exception('history backfill pass for late-loaded strategies failed')
+            error = '{}: {}'.format(type(ex).__name__, ex)
+        # As at startup: whatever this pass did not prime becomes a recorded
+        # failure with one attempt used, never something pending for ever.
+        self._abandon_pending_backfills(error, 'did not finish for strategies loaded after startup')
 
     async def _management_loop(self):
         """Broker reconciliation/protection must not depend on signal code."""
@@ -2668,6 +2776,8 @@ class StrategyRuntime():
         try:
             await self._run_services()
         finally:
+            self._backfill_serving = False
+            self._backfill_startup_done = False
             for task_name in ('_management_task', '_backfill_task'):
                 task = getattr(self, task_name, None)
                 if task is not None:
@@ -2750,7 +2860,10 @@ class StrategyRuntime():
         await asyncio.to_thread(self.config_loader, self.strategy_config_file)
 
         # Before any tick can be dispatched: hold every instrument whose
-        # history the backfill below is about to fetch.
+        # history the backfill below is about to fetch. From here on a
+        # reconcile may plan (and hold) the instruments of a strategy loaded
+        # later: a pass will run for them.
+        self._backfill_serving = True
         self._mark_backfill_pending()
 
         logging.debug('subscribing to streams for all conids')
@@ -2820,6 +2933,7 @@ class StrategyRuntime():
         # Anything the startup pass never primed goes to the reconcile loop's
         # bounded retry (it used to be dropped for the life of the process).
         self._abandon_pending_backfills(backfill_error)
+        self._backfill_startup_done = True
 
         # Stay alive and periodically reconcile subscriptions
         logging.info('entering reconciliation loop (30s interval)')

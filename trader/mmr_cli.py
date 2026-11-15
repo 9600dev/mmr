@@ -788,6 +788,20 @@ def build_parser() -> argparse.ArgumentParser:
              'stamped with the strategy\'s SESSION_TZ / RTH_OPEN_MIN / RTH_CLOSE_MIN '
              '(default 09:30-16:00 America/New_York) for intraday sizes, daily bars '
              'for "1 day" and longer. Default: both.')
+    # The deployment's ``params:`` from strategy_runtime.yaml. Without them the
+    # gauntlet tests the CLASS defaults — for an ASX deployment of a class that
+    # defaults to New York hours, the wrong session.
+    strat_gauntlet_p.add_argument(
+        '--param', action='append', default=[], metavar='KEY=VALUE',
+        help='Run the gauntlet with a deployment parameter, exactly as `backtest '
+             '--param` applies it. Repeatable. SESSION_TZ / RTH_OPEN_MIN / '
+             'RTH_CLOSE_MIN also set the session the frames are stamped with: '
+             '--param SESSION_TZ=Australia/Sydney --param RTH_OPEN_MIN=600 '
+             '--param RTH_CLOSE_MIN=960. Recorded with the verdict.')
+    strat_gauntlet_p.add_argument(
+        '--params', default=None, metavar='JSON',
+        help='JSON object of deployment parameters (the `params:` mapping of the '
+             'strategy_runtime.yaml entry). Merged with --param; --param wins.')
 
     # strategies create
     strat_create_p = strat_sub.add_parser('create', help='Create a strategy template file')
@@ -5229,9 +5243,11 @@ def _gauntlet_load_class(module_file: Path, class_name: str, code_hash: str):
     return cls, None
 
 
-def _gauntlet_new_instance(cls, frame=None):
+def _gauntlet_new_instance(cls, frame=None, params: Optional[Dict[str, Any]] = None):
     """Instantiate + install a strategy with a minimal context (no storage,
-    no universe accessor) — the same shape the backtester uses."""
+    no universe accessor) — the same shape the backtester uses. ``params``
+    are applied the way the backtester and the live runtime apply a
+    deployment's ``params:`` (``apply_param_overrides``)."""
     import datetime as _dt
     import logging as _logging
 
@@ -5260,7 +5276,26 @@ def _gauntlet_new_instance(cls, frame=None):
         class_name=cls.__name__,
         params={},
     ))
+    if params:
+        from trader.strategy.parameters import apply_param_overrides
+        apply_param_overrides(instance, params)
     return instance
+
+
+def _gauntlet_effective_params(cls, params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """``params`` as the strategy will hold them: coerced to the class
+    attribute types, the way a backtest override or a deployment's
+    ``params:`` is. Raises ``ValueError`` for an unknown upper-case key, a
+    value of the wrong type, an invalid ``SESSION_TZ`` — and for a session
+    that cannot exist (see ``_gauntlet_session_spec``). Refused BEFORE any
+    stage runs: a gauntlet run on a parameter that was silently dropped
+    would record a verdict about a different deployment."""
+    if not params:
+        return {}
+    from trader.strategy.parameters import apply_param_overrides
+    applied = apply_param_overrides(_gauntlet_new_instance(cls), dict(params))
+    _gauntlet_session_spec(cls, applied)
+    return applied
 
 
 # S2 and S3 learn nothing from a frame the strategy does not act on. Until
@@ -5279,7 +5314,10 @@ _GAUNTLET_VACUITY_HINT = (
     '/ RTH_CLOSE_MIN on the class; if it runs on daily bars, pass --bar-size.')
 
 
-def _gauntlet_session_spec(cls) -> Dict[str, Any]:
+_GAUNTLET_SESSION_KEYS = ('SESSION_TZ', 'RTH_OPEN_MIN', 'RTH_CLOSE_MIN')
+
+
+def _gauntlet_session_spec(cls, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The session the intraday frames are stamped with: the strategy's own
     ``SESSION_TZ`` / ``RTH_OPEN_MIN`` / ``RTH_CLOSE_MIN`` class attributes
     where it declares usable ones, else 09:30-16:00 America/New_York.
@@ -5287,7 +5325,17 @@ def _gauntlet_session_spec(cls) -> Dict[str, Any]:
     An unusable declaration (unknown zone, open not before close) falls back
     to the default rather than raising here: the strategy reads the same
     attribute and fails on it in its own words, or ignores it and is then
-    exercised on the default session."""
+    exercised on the default session.
+
+    ``params`` (a deployment's effective ``params:``) override the class
+    attribute key by key. A deployment that sets them trades THAT session,
+    so that is the one the frames must carry: an ASX deployment of a class
+    whose defaults are New York hours used to be tested on New York hours.
+    A session ASKED FOR is never replaced by a fallback — if it cannot exist
+    this raises ``ValueError``."""
+    if params and any(key in params for key in _GAUNTLET_SESSION_KEYS):
+        return _gauntlet_requested_session(cls, params)
+
     import zoneinfo
 
     tz, open_minute, close_minute = _GAUNTLET_DEFAULT_SESSION
@@ -5308,6 +5356,37 @@ def _gauntlet_session_spec(cls) -> Dict[str, Any]:
     declared_close = _minute(getattr(cls, 'RTH_CLOSE_MIN', None), close_minute)
     if declared_open < declared_close:
         open_minute, close_minute = declared_open, declared_close
+    return {'tz': tz, 'open_minute': open_minute, 'close_minute': close_minute}
+
+
+def _gauntlet_requested_session(cls, params: Dict[str, Any]) -> Dict[str, Any]:
+    """The session named by ``params`` over the class's own (then the
+    default), validated strictly. See ``_gauntlet_session_spec``."""
+    import zoneinfo
+
+    fallback = _gauntlet_session_spec(cls)
+    tz = params.get('SESSION_TZ', fallback['tz'])
+    open_minute = params.get('RTH_OPEN_MIN', fallback['open_minute'])
+    close_minute = params.get('RTH_CLOSE_MIN', fallback['close_minute'])
+
+    def _problem() -> Optional[str]:
+        if not isinstance(tz, str) or not tz:
+            return f'SESSION_TZ {tz!r} is not a timezone name'
+        try:
+            zoneinfo.ZoneInfo(tz)
+        except Exception:                                 # noqa: BLE001
+            return f'SESSION_TZ {tz!r} is not a known IANA timezone'
+        for name, value in (('RTH_OPEN_MIN', open_minute), ('RTH_CLOSE_MIN', close_minute)):
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 24 * 60:
+                return f'{name} {value!r} is not a minute of the day (0-1440)'
+        if open_minute >= close_minute:
+            return (f'RTH_OPEN_MIN {open_minute} is not before RTH_CLOSE_MIN {close_minute} '
+                    f'(a param left out takes the class value)')
+        return None
+
+    problem = _problem()
+    if problem:
+        raise ValueError(f'gauntlet params describe a session that cannot exist: {problem}')
     return {'tz': tz, 'open_minute': open_minute, 'close_minute': close_minute}
 
 
@@ -5414,7 +5493,8 @@ def _gauntlet_lookahead_coverage(reports: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _gauntlet_check_lookahead(cls, bar_size: Optional[str] = None) -> Dict[str, Any]:
+def _gauntlet_check_lookahead(cls, bar_size: Optional[str] = None,
+                              params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """S2: walk-forward consistency of ``precompute`` — the series is cut at
     the end AND at interior points (day boundaries, inside and after the
     opening range, mid-session, the close) and past values must not move.
@@ -5435,13 +5515,15 @@ def _gauntlet_check_lookahead(cls, bar_size: Optional[str] = None) -> Dict[str, 
                     'lookahead check is vacuous',
         }
 
-    session = _gauntlet_session_spec(cls)
+    session = _gauntlet_session_spec(cls, params)
     frames = _gauntlet_frames(session, bar_size, battery=False)
     result: Dict[str, Any] = {'frames': list(frames), 'session': session,
                               'bar_size': bar_size}
+    if params:
+        result['params'] = dict(params)
     reports: Dict[str, Any] = {}
     for frame_name, frame in frames.items():
-        instance = _gauntlet_new_instance(cls, frame)
+        instance = _gauntlet_new_instance(cls, frame, params)
         try:
             state = instance.precompute(frame)
         except Exception as ex:
@@ -5485,7 +5567,8 @@ def _gauntlet_check_lookahead(cls, bar_size: Optional[str] = None) -> Dict[str, 
     return {**result, 'status': 'pass', 'note': note}
 
 
-def _gauntlet_run_battery(cls, bar_size: Optional[str] = None) -> Dict[str, Any]:
+def _gauntlet_run_battery(cls, bar_size: Optional[str] = None,
+                          params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """S3: run the strategy over every synthetic frame through the same
     dispatch the backtester uses (precompute once, then on_bar per index —
     the default on_bar falls back to on_prices over expanding windows).
@@ -5524,7 +5607,7 @@ def _gauntlet_run_battery(cls, bar_size: Optional[str] = None) -> Dict[str, Any]
             # including the final bar.
             indices = sorted(set(np.linspace(0, n - 1, num=min(n, 40), dtype=int).tolist()))
         try:
-            instance = _gauntlet_new_instance(cls, frame)
+            instance = _gauntlet_new_instance(cls, frame, params)
             state = instance.precompute(frame) or {}
             signals = 0
             for idx in indices:
@@ -5539,7 +5622,7 @@ def _gauntlet_run_battery(cls, bar_size: Optional[str] = None) -> Dict[str, Any]
         except Exception as ex:
             return {'status': 'fail', 'detail': f'{type(ex).__name__}: {ex}'}
 
-    session = _gauntlet_session_spec(cls)
+    session = _gauntlet_session_spec(cls, params)
     frames = _gauntlet_frames(session, bar_size, battery=True)
     frames_result = {name: _run_frame(frame, fast_path) for name, frame in frames.items()}
 
@@ -5565,6 +5648,8 @@ def _gauntlet_run_battery(cls, bar_size: Optional[str] = None) -> Dict[str, Any]
         'session': session,
         'bar_size': bar_size,
     }
+    if params:
+        result['params'] = dict(params)
     if _failed():
         result['status'] = 'fail'
     elif result['signals'] == 0:
@@ -5739,13 +5824,21 @@ def _gauntlet_check_dsr(code_hash: str, duckdb_path: str,
 def _gauntlet_run(module_file: Path, class_name: str, duckdb_path: str,
                   min_psr: Optional[float] = None,
                   min_dsr: Optional[float] = None,
-                  bar_size: Optional[str] = None) -> Dict[str, Any]:
+                  bar_size: Optional[str] = None,
+                  params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Run all gauntlet stages against ``module_file`` and return
-    ``{'code_hash', 'verdict', 'checks'}``. Does not persist — the caller
-    records the result.
+    ``{'code_hash', 'verdict', 'checks', 'params'}``. Does not persist — the
+    caller records the result.
 
     ``bar_size`` (e.g. ``'1 min'``, ``'1 day'``) selects the frames S2/S3
-    run on; None runs both the intraday-session and the daily families."""
+    run on; None runs both the intraday-session and the daily families.
+
+    ``params`` is a deployment's ``params:`` mapping. S2 and S3 then build
+    the strategy with them and stamp their frames with the session they name
+    (``_gauntlet_session_spec``); the effective (coerced) values come back as
+    ``params`` and inside the s2/s3 checks. A parameter the class does not
+    have, or a session that cannot exist, raises ``ValueError`` before either
+    stage runs. None / empty: the class defaults, as always."""
     from trader.data.backtest_store import compute_strategy_hash
 
     _gauntlet_frame_families(bar_size)      # an unknown bar size refuses here
@@ -5758,6 +5851,8 @@ def _gauntlet_run(module_file: Path, class_name: str, duckdb_path: str,
 
     checks: Dict[str, Any] = {}
     checks['s1_imports'] = _gauntlet_scan_imports(source)
+    # As given until the class has been imported and they can be coerced.
+    effective: Dict[str, Any] = dict(params or {})
 
     if checks['s1_imports']['status'] != 'pass':
         skipped = {
@@ -5772,8 +5867,9 @@ def _gauntlet_run(module_file: Path, class_name: str, duckdb_path: str,
             checks['s2_lookahead'] = {'status': 'fail', 'detail': err}
             checks['s3_battery'] = {'status': 'fail', 'detail': err}
         else:
-            checks['s2_lookahead'] = _gauntlet_check_lookahead(cls, bar_size)
-            checks['s3_battery'] = _gauntlet_run_battery(cls, bar_size)
+            effective = _gauntlet_effective_params(cls, params)
+            checks['s2_lookahead'] = _gauntlet_check_lookahead(cls, bar_size, effective or None)
+            checks['s3_battery'] = _gauntlet_run_battery(cls, bar_size, effective or None)
 
     checks['s4_psr'] = _gauntlet_check_psr(code_hash, duckdb_path, min_psr)
     checks['s5_dsr'] = _gauntlet_check_dsr(code_hash, duckdb_path, min_dsr)
@@ -5808,6 +5904,7 @@ def _gauntlet_run(module_file: Path, class_name: str, duckdb_path: str,
         'checks': checks,
         'edge_credible': edge['edge_credible'],
         'warnings': edge['warnings'],
+        'params': effective,
     }
 
 
@@ -5979,14 +6076,21 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
         return
 
     try:
+        # The backtest's own parsing: --params JSON merged with --param K=V.
+        params = _parse_backtest_param_args(getattr(args, 'params', None),
+                                            getattr(args, 'param', None) or [])
         result = _gauntlet_run(resolved, args.class_name, duckdb_path,
                                min_psr=getattr(args, 'min_psr', None),
                                min_dsr=getattr(args, 'min_dsr', None),
-                               bar_size=getattr(args, 'bar_size', None))
+                               bar_size=getattr(args, 'bar_size', None),
+                               params=params or None)
     except ValueError as ex:
         print_status(str(ex), success=False)
         return
 
+    notes = list(result.get('warnings') or [])
+    if result.get('params'):
+        notes.insert(0, 'params: ' + json.dumps(result['params'], sort_keys=True, default=str))
     store = GauntletStore(duckdb_path)
     run_id = store.record(GauntletRecord(
         strategy_name=getattr(args, 'name', None) or args.class_name,
@@ -5995,7 +6099,7 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
         code_hash=result['code_hash'],
         verdict=result['verdict'],
         checks=result['checks'],
-        notes='; '.join(result.get('warnings') or []),
+        notes='; '.join(notes),
     ))
 
     if _json_mode:
@@ -6006,6 +6110,7 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
                 'edge_credible': result.get('edge_credible'),
                 'warnings': result.get('warnings') or [],
                 'code_hash': result['code_hash'],
+                'params': result.get('params') or {},
                 'checks': result['checks'],
             },
             'title': 'Strategy Gauntlet',
@@ -6050,6 +6155,12 @@ def _handle_strategies_gauntlet(args: argparse.Namespace):
             status_cell = '[yellow]pass (record-only, below bar)[/yellow]'
         tbl.add_row(stage, status_cell, '; '.join(detail_parts) or '—')
     console.print(tbl)
+    if result.get('params'):
+        session = (result['checks'].get('s3_battery') or {}).get('session')
+        console.print('[dim]run with params: '
+                      + escape(json.dumps(result['params'], sort_keys=True, default=str))
+                      + (f' — session frames {escape(_gauntlet_session_label(session))}'
+                         if session else '') + '[/dim]')
     edge_credible = result.get('edge_credible')
     warnings = result.get('warnings') or []
     if warnings:
@@ -7325,10 +7436,10 @@ def _handle_backtests(args: argparse.Namespace):
             }
             stats, stats_reason = _compute_bt_stats(r)
             stats_data = {
-                'n_trades':              stats.n_trades,
-                # n_trades counts ROUND TRIPS (entry..exit P&L); the run's
-                # total_trades counts every fill/leg incl. pyramid adds.
-                'n_round_trips':         stats.n_trades,
+                # n_trades / n_round_trips / n_exits / n_lots / n_fills /
+                # trade_unit: the run's total_trades counts every fill incl.
+                # pyramid adds; the tests below are per EXIT.
+                **_bt_trade_count_fields(stats),
                 'n_bar_returns':         stats.n_bar_returns,
                 'probabilistic_sharpe':  stats.psr,
                 't_stat':                stats.t_stat,
@@ -7480,7 +7591,7 @@ def _handle_backtests(args: argparse.Namespace):
                     'max_drawdown': rec.max_drawdown,
                 },
                 'statistical_confidence': {
-                    'n_trades': stats.n_trades,
+                    **_bt_trade_count_fields(stats),
                     'n_bar_returns': stats.n_bar_returns,
                     'probabilistic_sharpe': stats.psr,
                     't_stat': stats.t_stat,
@@ -7821,6 +7932,42 @@ def _curve_periods_per_year(curve) -> Optional[float]:
     if float(deltas.median()) >= 20 * 3600:
         return 252.0
     return None
+
+
+def _bt_trade_count_fields(stats) -> Dict[str, Any]:
+    """The trade counts of a statistical-confidence block, each by name.
+
+    Three different things are called "trades" (audit 2026-11-14, B4.5):
+    FILLS (the run's ``total_trades``: every BUY and SELL, a pyramid add
+    included), FIFO LOTS, and EXITS (closing orders). The per-trade tests
+    (t-test, bootstrap CI on mean P&L, skew/kurtosis, losing streak) are per
+    EXIT — lots closed by one exit are not independent samples — so
+    ``n_trades`` and its older alias ``n_round_trips`` are the exit count.
+    Both keys are kept for existing consumers.
+    """
+    return {
+        'n_trades':      stats.n_trades,
+        'n_round_trips': stats.n_trades,
+        'n_exits':       stats.n_exits,
+        'n_lots':        stats.n_lots,
+        'n_fills':       stats.n_fills,
+        'trade_unit':    'exit',
+    }
+
+
+def _bt_result_count_fields(result) -> Dict[str, int]:
+    """``n_fills`` / ``n_exits`` / ``n_lots`` of a just-finished backtest.
+
+    Reported beside ``total_trades`` (which is the fill count for a
+    per-instrument run) so a reader does not have to know which of the three
+    a number called "trades" is.
+    """
+    from trader.simulation.backtest_stats import trade_counts
+    counts = trade_counts([{
+        'timestamp': str(t.timestamp), 'conid': t.conid, 'action': str(t.action),
+        'quantity': t.quantity, 'price': t.price, 'commission': t.commission,
+    } for t in (result.trades or [])])
+    return {'n_fills': counts.n_fills, 'n_exits': counts.n_exits, 'n_lots': counts.n_lots}
 
 
 def _compute_bt_stats(record):
@@ -10274,6 +10421,7 @@ def _handle_backtest(args: argparse.Namespace):
         'win_rate':           win_rate_display,
         'time_in_market':     f'{result.time_in_market_pct:.1%}',
         'total_trades':       result.total_trades,
+        **_bt_result_count_fields(result),
         'start_date':         str(result.start_date)[:10],
         'end_date':           str(result.end_date)[:10],
         'final_equity':       f'{result.equity_curve.iloc[-1]:,.2f}' if len(result.equity_curve) > 0 else str(config.initial_capital),
@@ -10418,6 +10566,9 @@ def _handle_backtest(args: argparse.Namespace):
                 'win_rate':           (result.win_rate if result.total_trades > 0 else None),
                 'time_in_market_pct': result.time_in_market_pct,
                 'total_trades':       result.total_trades,
+                # total_trades is FILLS. Exits are what win_rate /
+                # profit_factor / expectancy_bps are counted over.
+                **_bt_result_count_fields(result),
                 'start_date':         str(result.start_date)[:10],
                 'end_date':           str(result.end_date)[:10],
                 'final_equity':       float(result.equity_curve.iloc[-1]) if len(result.equity_curve) > 0 else config.initial_capital,

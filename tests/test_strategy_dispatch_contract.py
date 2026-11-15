@@ -53,7 +53,10 @@ def test_asx_summer_daily_session_crosses_midnight_utc_without_splitting():
     buffer = LiveBarBuffer(ticks, '1D', daily_sessions=DailySessionBuckets('ASX'))
     assert list(buffer.completed.index) == [pd.Timestamp('2026-01-06', tz='UTC')]
     bar = buffer.completed.iloc[0]
-    assert (bar.open, bar.high, bar.low, bar.close, bar.volume) == (100, 110, 100, 105, 20)
+    # Volume is the DAY's cumulative volume (the counter's last reading in the
+    # session), not the 20 that traded after the feed was joined: this
+    # assertion read 20 until the B3.7 fix (tests/test_live_daily_volume.py).
+    assert (bar.open, bar.high, bar.low, bar.close, bar.volume) == (100, 110, 100, 105, 1020)
     assert buffer.bucket == pd.Timestamp('2026-01-07', tz='UTC')
 
 
@@ -63,7 +66,9 @@ def test_daily_quote_outside_session_cannot_change_ohlcv():
                    prices=[100, 101, 999], volumes=[1000, 1010, 9999])
     buffer = LiveBarBuffer(ticks, '1D', daily_sessions=DailySessionBuckets('NASDAQ'))
     assert buffer.current['high'] == 101
-    assert buffer.current['volume'] == 10
+    # The day's cumulative volume at the last IN-SESSION tick (was 10, the
+    # volume since joining, until the B3.7 fix); the 9999 never lands.
+    assert buffer.current['volume'] == 1010
 
 
 def test_weekend_gap_cannot_evict_the_bar_being_completed():

@@ -43,6 +43,19 @@ def _ib_nan(val) -> float:
     return f
 
 
+def _ib_price(val) -> float:
+    """A bid, ask or last PRICE from a live Ticker, or NaN when it is not one.
+
+    IB reports "no bid" / "no ask" / "no last" as ``-1`` (sometimes ``0``),
+    not NaN, so ``_ib_nan`` alone lets the sentinel through as a price: a book
+    of bid 100 / ask -1 had a "midpoint" of 49.5 and a live bar opened at half
+    the market (audit 2026-11-14, B3.7). A non-positive value is not a quote
+    here; the live bar buffer already refuses a non-positive price.
+    """
+    f = _ib_nan(val)
+    return f if f > 0 else np.nan
+
+
 def normalize_ticker(ticker: Ticker) -> pd.DataFrame:
     """Convert a live IB Ticker into a single-row normalized DataFrame.
 
@@ -53,13 +66,14 @@ def normalize_ticker(ticker: Ticker) -> pd.DataFrame:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=dt.timezone.utc)
 
-    bid = _ib_nan(ticker.bid)
-    ask = _ib_nan(ticker.ask)
-    last = _ib_nan(ticker.last)
+    bid = _ib_price(ticker.bid)
+    ask = _ib_price(ticker.ask)
+    last = _ib_price(ticker.last)
     last_size = _ib_nan(ticker.lastSize)
 
     # For open/high/low/close: use last trade price when available,
-    # otherwise midpoint of bid/ask, otherwise NaN.
+    # otherwise midpoint of bid/ask, otherwise NaN. A midpoint needs BOTH
+    # sides: one side alone is not a price, so a one-sided book is NaN.
     mid = np.nan
     if not np.isnan(bid) and not np.isnan(ask):
         mid = (bid + ask) / 2.0
@@ -102,6 +116,11 @@ def resample_ticks_to_bars(ticks: pd.DataFrame, freq: str,
     the most recent tick — is dropped, so callers only ever see COMPLETED bars.
     That keeps crossing logic (``close`` crossed a level on THIS bar vs the prior)
     from re-firing on every tick while a bar is still building.
+
+    The volume rule is the INTRADAY one. For a daily ``freq`` it is wrong (a
+    day's volume is the counter itself, not its difference from yesterday's
+    total); live daily bars are built by ``LiveBarBuffer``, which does not call
+    this for them.
     """
     if ticks is None or ticks.empty:
         return ticks if ticks is not None else pd.DataFrame(columns=NORMALIZED_COLUMNS)
