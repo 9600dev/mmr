@@ -6257,10 +6257,12 @@ def _handle_strategy_deploy(args: argparse.Namespace, mmr=None):
                 try:
                     rpc_mmr.connect()
                     target_universe = 'downloads'
-                    try:
-                        u = accessor.get(target_universe)
-                    except Exception:
-                        u = None
+                    # Not wrapped: get() returns an EMPTY universe for a name
+                    # that does not exist, so it only raises when the stored
+                    # one could not be read — and replacing a universe that
+                    # could not be read with a new one-member universe is how
+                    # `downloads` would be lost. The outer handler reports it.
+                    u = accessor.get(target_universe)
                     # Resolve each conid via IB. SDK.resolve(int) is
                     # local-DB-only by design — we have to go through
                     # resolve_contract (live IB reqContractDetails) for
@@ -10676,10 +10678,10 @@ def _resolve_download_listing(symbol: str, source: str, accessor, rpc_mmr,
     # Persist into a "downloads" universe so the resolution sticks for future
     # runs — matches the auto-register behaviour of `propose --group`.
     sec_def = discovered[0]
-    try:
-        universe = accessor.get('downloads')
-    except Exception:
-        universe = None
+    # get() gives an empty universe for a missing name; it raises only when
+    # the stored universe could not be read, and that must not be answered by
+    # writing a new one over it.
+    universe = accessor.get('downloads')
     if universe is None:
         from trader.data.universe import Universe
         universe = Universe(name='downloads', security_definitions=[sec_def])
@@ -11502,11 +11504,10 @@ def _handle_data_migrate_symbols(args: argparse.Namespace):
                 sec_def = resolved[0]
                 conid = str(sec_def.conId)
 
-                # Register in universe
-                try:
-                    u = accessor.get('downloads')
-                except Exception:
-                    u = None
+                # Register in universe. A `downloads` that cannot be read is
+                # this symbol's failure (reported below), never a reason to
+                # write a new universe over it.
+                u = accessor.get('downloads')
                 if u is None:
                     u = Universe(name='downloads', security_definitions=[sec_def])
                 else:
