@@ -2,9 +2,10 @@
 rows and a market cap (docs/RESEARCH_LOG.md, 2026-11-15).
 
 The leak probe this script carries moves WHEN a number is known. It cannot see
-a number that is wrong, or one on a different basis from the price beside it.
-Four such defects sat in the stored rows; `prepare_rows` repairs them and each
-repair can be switched off to measure what it was worth.
+a number that is wrong, one on a different basis from the price beside it, or
+another company's. Such defects sat in the stored rows; `prepare_rows` and
+`build` repair them and each repair can be switched off to measure what it
+was worth.
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ from trader.data.duckdb_store import DuckDBConnection
 from trader.data.share_basis import split_events
 
 REPO = Path(__file__).resolve().parents[1]
-ALL = frozenset({'notices', 'annual_shares', 'split_basis', 'units', 'periods'})
+ALL = frozenset({'notices', 'annual_shares', 'split_basis', 'units', 'periods', 'continuity', 'turnover'})
 
 
 def _load(name: str):
@@ -104,7 +105,7 @@ class TestRowsAsStored:
     def test_names_are_kept_apart(self):
         out = _prepare(_quarters('AAA', 4) + _quarters('BBB', 4, shares=7e6))
         assert out.groupby('ticker')['revenue_ttm'].count().to_dict() == {'AAA': 1, 'BBB': 1}
-        assert set(out.loc[out['ticker'] == 'BBB', 'shares_diluted'].round(-5)) <= {7.0e6, 7.1e6, 7.2e6}
+        assert set(out.loc[out['ticker'] == 'BBB', 'shares_diluted'].dropna().round(-5)) == {7.1e6, 7.2e6}
 
 
 class TestLateFilingNotices:
@@ -233,12 +234,33 @@ class TestSplitBasis:
         assert out['shares_diluted'].iloc[0] == 632e6
 
 
+def _counts(out, ticker=None):
+    """shares_diluted as a list with None for unknown."""
+    frame = out if ticker is None else out[out['ticker'] == ticker]
+    return [None if pd.isna(v) else float(v) for v in frame['shares_diluted']]
+
+
 class TestUnits:
-    def test_a_count_in_millions_is_replaced_by_the_one_before(self):
+    def test_a_series_has_no_count_until_two_filings_agree(self):
+        """TEVA's first stored figure is 2,000,000; every one after is a
+        billion."""
+        rows = _quarters('TEVA', 3, shares=1_018e6)
+        rows[0]['shares_diluted'] = 2_000_000.0
+        assert _counts(_prepare(rows, corrections={'units'})) == pytest.approx([None, 1_028.18e6, 1_038.36e6])
+
+    def test_a_count_printed_in_millions_is_read_in_units(self):
+        """MCD from 2024: 725.9, 722.0 - quarter after quarter."""
         rows = _quarters('MCD', 5, shares=730e6)
-        rows[3]['shares_diluted'] = 725.9
+        rows[3]['shares_diluted'] = 751.9
+        rows[4]['shares_diluted'] = 759.2
         out = _prepare(rows, corrections={'units'})
-        assert out['shares_diluted'].tolist() == pytest.approx([730e6, 737.3e6, 744.6e6, 744.6e6, 759.2e6])
+        assert _counts(out) == pytest.approx([None, 737.3e6, 744.6e6, 751.9e6, 759.2e6])
+
+    def test_a_number_no_scale_explains_is_replaced_by_the_count_before(self):
+        rows = _quarters('STRL', 4, shares=16e6)
+        rows[2]['shares_diluted'] = 0.01
+        out = _prepare(rows, corrections={'units'})
+        assert _counts(out) == pytest.approx([None, 16.16e6, 16.16e6, 16.48e6])
 
     def test_a_split_is_not_a_unit_error_once_the_basis_is_right(self):
         """Run after the split basis: 632M then 2,532M is one level, not two."""
@@ -247,15 +269,229 @@ class TestUnits:
                 _row('NVDA', '2021-08-01', '2021-08-20 16:25', shares=2_532e6),
                 _row('NVDA', '2021-10-31', '2021-11-18 16:25', shares=2_540e6)]
         out = _prepare(rows, corrections={'split_basis', 'units'}, events=NVDA_EVENTS)
-        assert out['shares_diluted'].tolist() == pytest.approx([630e6 * 40, 632e6 * 40, 2_532e6 * 10, 2_540e6 * 10])
+        assert _counts(out) == pytest.approx([None, 632e6 * 40, 2_532e6 * 10, 2_540e6 * 10])
         # ...and without the basis the same four are a level change, the first of which is held back.
         alone = _prepare(rows, corrections={'units'})
-        assert alone['shares_diluted'].tolist() == pytest.approx([630e6, 632e6, 632e6, 2_540e6])
+        assert _counts(alone) == pytest.approx([None, 632e6, 632e6, 2_540e6])
 
     def test_one_names_error_does_not_touch_another(self):
-        rows = _quarters('AAA', 3) + _quarters('BBB', 3, shares=100.0)
+        rows = _quarters('AAA', 3) + _quarters('BBB', 3, shares=100.0)             # BBB prints millions
         out = _prepare(rows, corrections={'units'})
-        assert out.loc[out['ticker'] == 'BBB', 'shares_diluted'].tolist() == pytest.approx([100.0, 101.0, 102.0])
+        assert _counts(out, 'AAA') == pytest.approx([None, 101e6, 102e6])
+        assert _counts(out, 'BBB') == pytest.approx([None, 101e6, 102e6])
+
+
+class TestContinuity:
+    """A ticker is not one company for ever, and a filing is not current for
+    ever. B was Barnes Group (51M shares) until January 2025 and is Barrick
+    since May; CTRA was Contura Energy (19M) and is Coterra (800M); EXE's and
+    BKR's last filings under an earlier owner are from 2015 and 2013."""
+
+    def _handover(self):
+        """Contura's last three quarters, then - fourteen months on - Coterra's."""
+        old = _quarters('CTRA', 3, start='2020-03-31', shares=18.2e6)
+        new = _quarters('CTRA', 3, start='2022-03-31', shares=814e6)
+        return old + new
+
+    def test_filings_further_apart_than_an_issuers_can_be_are_separate_series(self):
+        out = _prepare(self._handover(), corrections={'continuity'})
+        assert out['series_run'].tolist() == [0, 0, 0, 1, 1, 1]
+
+    def test_the_limit_is_two_hundred_days_and_exactly_that_is_one_series(self):
+        from trader.data.share_basis import MAX_DAYS_BETWEEN_FILINGS
+        assert MAX_DAYS_BETWEEN_FILINGS == 200
+        first = _row('AAA', '2023-03-31', '2023-05-05 16:30')
+        # Elapsed time, not wall clock: New York left daylight saving in between, so 200 days after
+        # 16:30 on 5 May is 15:30 on 21 November.
+        at_limit = _row('AAA', '2023-09-30', '2023-11-21 15:30')
+        assert at_limit['known_at'] - first['known_at'] == pd.Timedelta(days=200)
+        assert _prepare([first, at_limit], corrections={'continuity'})['series_run'].tolist() == [0, 0]
+        beyond = _row('AAA', '2023-09-30', '2023-11-21 15:31')
+        assert _prepare([first, beyond], corrections={'continuity'})['series_run'].tolist() == [0, 1]
+
+    def test_a_missing_report_does_not_break_a_series(self):
+        """Q3's 10-Q in early November, Q1's in early May, the 10-K missing:
+        about 182 days. 1.6% of consecutive filings in the store."""
+        rows = [_row('AAA', '2023-09-30', '2023-11-04 16:30'), _row('AAA', '2024-03-31', '2024-05-04 16:30')]
+        assert _prepare(rows, corrections={'continuity'})['series_run'].tolist() == [0, 0]
+
+    def test_the_new_companys_count_is_not_measured_against_the_old_ones(self):
+        """Without the break, Coterra's first 814M is "an error" beside
+        Contura's 18M and the 18M is carried on to it."""
+        without = _prepare(self._handover(), corrections={'units'})
+        assert _counts(without) == pytest.approx([None, 18.382e6, 18.564e6, 18.564e6, 822.14e6, 830.28e6])
+        out = _prepare(self._handover(), corrections={'units', 'continuity'})
+        assert _counts(out) == pytest.approx([None, 18.382e6, 18.564e6, None, 822.14e6, 830.28e6])
+
+    def test_a_count_is_not_carried_from_one_series_into_the_next(self):
+        """BKR: 9,675,000 in 2013 (another company), then filings from 2020
+        with no count at all."""
+        rows = _quarters('BKR', 3, start='2012-12-31', shares=9.6e6) + [
+            _row('BKR', '2020-03-31', '2020-04-24 07:40', shares=None),
+            _row('BKR', '2020-06-30', '2020-07-24 07:40', shares=None)]
+        assert _counts(_prepare(rows, corrections={'units'}))[-2:] == pytest.approx([9.792e6, 9.792e6])
+        assert _counts(_prepare(rows, corrections={'units', 'continuity'}))[-2:] == [None, None]
+
+    def test_within_a_series_a_count_is_carried_over_two_filings_at_most(self):
+        rows = _quarters('AAA', 6)
+        for row in rows[2:]:
+            row['shares_diluted'] = None
+        assert _counts(_prepare(rows, corrections={'units', 'continuity'})) == pytest.approx(
+            [None, 101e6, 101e6, 101e6, None, None])
+        assert _counts(_prepare(rows, corrections={'units'})) == pytest.approx(
+            [None, 101e6, 101e6, 101e6, 101e6, 101e6])
+
+    def test_one_names_gap_does_not_split_another(self):
+        rows = self._handover() + _quarters('AAA', 6, start='2020-03-31')
+        out = _prepare(rows, corrections={'continuity'})
+        assert out.loc[out['ticker'] == 'AAA', 'series_run'].tolist() == [0] * 6
+        assert out.loc[out['ticker'] == 'CTRA', 'series_run'].tolist() == [0, 0, 0, 1, 1, 1]
+
+    def test_a_filing_is_the_latest_word_for_two_hundred_days(self):
+        rows = _quarters('AAA', 2)
+        out = _prepare(rows, corrections={'continuity'})
+        assert (out['valid_until'] - out['known_at']).tolist() == [pd.Timedelta(days=200)] * 2
+        assert _prepare(rows, corrections=())['valid_until'].isna().all()
+        assert _prepare(rows, corrections=())['series_run'].tolist() == [0, 0]
+
+    def test_a_trailing_sum_never_spans_the_handover(self):
+        """Already true of `periods` (the quarters are not consecutive); held
+        here because a sum of two companies' revenue is the same mistake."""
+        out = _prepare(_quarters('CTRA', 4, start='2020-03-31') + _quarters('CTRA', 3, start='2022-03-31'))
+        assert out['revenue_ttm'].notna().tolist() == [False, False, False, True, False, False, False]
+
+
+class TestAsOfFrames:
+    """Which filing answers for a session."""
+
+    DAYS = pd.to_datetime(['2023-05-05', '2023-05-08', '2023-08-07', '2023-11-20', '2023-11-21', '2024-03-01'])
+
+    def _px(self, *names):
+        return pd.DataFrame(1.0, index=self.DAYS, columns=list(names))
+
+    def test_a_filing_answers_from_the_first_close_after_it(self):
+        rows = _prepare([_row('AAA', '2023-03-31', '2023-05-05 16:30', revenue=1e9)], corrections=())
+        frames = fs.as_of_frames(rows, 'ticker', self._px('AAA'), fields=('revenue',))
+        # accepted 16:30 on the 5th: after that day's close, so known from the 8th - and, unlimited, for ever
+        assert frames['revenue']['AAA'].tolist() == pytest.approx([np.nan, 1e9, 1e9, 1e9, 1e9, 1e9], nan_ok=True)
+
+    def test_and_stops_answering_when_it_is_no_longer_the_latest_word(self):
+        """B: Barnes Group's last 10-Q, October 2024; the ticker is Barrick's
+        from May 2025 and Barrick files no 10-Q."""
+        rows = _prepare([_row('AAA', '2023-03-31', '2023-05-05 15:30', revenue=1e9)], corrections={'continuity'})
+        # 200 days of elapsed time: 14:30 New York on 21 November (the clocks went back in between)
+        assert rows['valid_until'].iloc[0] == pd.Timestamp('2023-11-21 14:30', tz='America/New_York')
+        frames = fs.as_of_frames(rows, 'ticker', self._px('AAA'), fields=('revenue',))
+        # ...so it answers at the close of the 20th and not at the close of the 21st.
+        assert frames['revenue']['AAA'].tolist() == pytest.approx([1e9, 1e9, 1e9, 1e9, np.nan, np.nan], nan_ok=True)
+
+    def test_a_successor_takes_over_and_restarts_the_clock(self):
+        rows = _prepare([_row('AAA', '2023-03-31', '2023-05-05 15:30', revenue=1e9),
+                         _row('AAA', '2023-06-30', '2023-08-04 16:30', revenue=2e9)], corrections={'continuity'})
+        frames = fs.as_of_frames(rows, 'ticker', self._px('AAA'), fields=('revenue',))
+        # the second is good until 2024-02-20
+        assert frames['revenue']['AAA'].tolist() == pytest.approx([1e9, 1e9, 2e9, 2e9, 2e9, np.nan], nan_ok=True)
+
+    def test_a_name_with_no_filings_and_a_filer_outside_the_panel(self):
+        rows = _prepare(_quarters('ZZZ', 2), corrections=())
+        frames = fs.as_of_frames(rows, 'ticker', self._px('AAA'), fields=('revenue',))
+        assert list(frames['revenue'].columns) == ['AAA'] and frames['revenue']['AAA'].isna().all()
+
+    def test_every_field_the_signals_need_is_placed(self):
+        rows = _prepare(_quarters('AAA', 5))
+        for field in ('stockholders_equity', 'total_assets'):
+            rows[field] = 1.0
+        frames = fs.as_of_frames(rows, 'ticker', pd.DataFrame(1.0, index=pd.to_datetime(['2024-06-28']), columns=['AAA']))
+        assert set(frames) == set(fs.AS_OF_FIELDS) and 'shares_diluted' in frames
+        assert frames['revenue_ttm']['AAA'].iloc[0] == pytest.approx(rows['revenue_ttm'].iloc[-1])
+
+
+class TestContradictedByTrading:
+    """The last check: a market cap smaller than two typical days of the
+    name's own trading. TEVA in mid-2018 with a "count" of 2,000,000 was a $48M
+    company trading $246M a day."""
+
+    DAYS = pd.bdate_range('2024-01-02', periods=30)
+
+    def _frames(self, shares, volume, price=10.0):
+        px = pd.DataFrame({'AAA': price}, index=self.DAYS)
+        return (pd.DataFrame({'AAA': shares}, index=self.DAYS, dtype=float), px,
+                pd.DataFrame({'AAA': volume}, index=self.DAYS, dtype=float))
+
+    def test_a_cap_the_tape_contradicts_is_unknown(self):
+        shares, px, volume = self._frames(2e6, 246e6)                  # cap $20M, $246M a day
+        out = fs.contradicted_by_trading(shares, px, volume)
+        assert out['AAA'].iloc[:4].tolist() == [2e6] * 4               # fewer than five sessions: no typical day yet
+        assert out['AAA'].iloc[4:].isna().all()
+
+    def test_an_ordinary_name_is_untouched(self):
+        shares, px, volume = self._frames(1e9, 246e6)                  # cap $10B, 2.5% a day
+        assert fs.contradicted_by_trading(shares, px, volume).equals(shares)
+
+    def test_the_threshold_is_half_the_cap_on_a_typical_day(self):
+        shares, px, volume = self._frames(1e8, 0.5e9)                  # exactly half of $1B
+        assert fs.contradicted_by_trading(shares, px, volume).equals(shares)
+        shares, px, volume = self._frames(1e8, 0.5e9 + 1)
+        assert fs.contradicted_by_trading(shares, px, volume)['AAA'].iloc[4:].isna().all()
+
+    def test_one_frantic_day_is_not_a_typical_one(self):
+        """The median of the window: a squeeze day does not cost a name its cap."""
+        volume = [20e6] * 30
+        volume[20] = 5e9
+        shares, px, frame = self._frames(1e8, volume)
+        assert fs.contradicted_by_trading(shares, px, frame).equals(shares)
+
+    def test_it_looks_at_nothing_later_than_the_cell_it_judges(self):
+        quiet = [20e6] * 30
+        later = [20e6] * 15 + [5e9] * 15
+        shares, px, a = self._frames(1e8, quiet)
+        _, _, b = self._frames(1e8, later)
+        first = fs.contradicted_by_trading(shares, px, a)
+        second = fs.contradicted_by_trading(shares, px, b)
+        assert first['AAA'].iloc[:15].equals(second['AAA'].iloc[:15])
+        assert second['AAA'].iloc[-1:].isna().all()                    # ...and does see it once it is typical
+
+    def test_the_window_is_twenty_one_sessions(self):
+        assert fs.TURNOVER_WINDOW == 21
+        volume = [5e9] * 9 + [20e6] * 21                              # frantic, then 21 quiet sessions
+        shares, px, frame = self._frames(1e8, volume)
+        out = fs.contradicted_by_trading(shares, px, frame)
+        assert out['AAA'].iloc[4:9].isna().all()
+        assert out['AAA'].iloc[-1] == 1e8                              # the frantic days have left the window
+
+    def test_unknown_volume_or_count_contradicts_nothing(self):
+        shares, px, volume = self._frames(2e6, float('nan'))
+        assert fs.contradicted_by_trading(shares, px, volume).equals(shares)
+        shares, px, volume = self._frames(float('nan'), 246e6)
+        assert fs.contradicted_by_trading(shares, px, volume)['AAA'].isna().all()
+
+    def test_it_is_the_scalar_rule_cell_for_cell(self):
+        """Two implementations of one rule: the frame version must call
+        unknown exactly the caps ``share_basis.unbelievable_cap`` does."""
+        from trader.data.share_basis import unbelievable_cap
+        nan, inf = float('nan'), float('inf')
+        cases = [(shares, price, volume)
+                 for shares in (2e6, 1e8, 1e9, 0.0, -1e6, nan, inf)
+                 for price in (10.0, 0.5, nan)
+                 for volume in (246e6, 0.5e9, 0.5e9 + 1, 1e3, 0.0, -5.0, nan, inf)]
+        days = pd.bdate_range('2024-01-02', periods=fs.TURNOVER_MIN_SESSIONS)
+        names = [f'N{i}' for i in range(len(cases))]
+        shares = pd.DataFrame({n: c[0] for n, c in zip(names, cases)}, index=days, dtype=float)
+        px = pd.DataFrame({n: c[1] for n, c in zip(names, cases)}, index=days, dtype=float)
+        volume = pd.DataFrame({n: c[2] for n, c in zip(names, cases)}, index=days, dtype=float)
+        out = fs.contradicted_by_trading(shares, px, volume).iloc[-1]
+        removed = 0
+        for name, (count, price, vol) in zip(names, cases):
+            expected = unbelievable_cap(count * price, vol)
+            was_known = not pd.isna(count)
+            assert (was_known and pd.isna(out[name])) == expected, (count, price, vol)
+            removed += expected
+        assert removed >= 6                                            # the grid does exercise the rule
+
+    def test_volume_is_matched_to_the_panel_by_day_and_name(self):
+        shares, px, volume = self._frames(2e6, 246e6)
+        other = volume.rename(columns={'AAA': 'BBB'})
+        assert fs.contradicted_by_trading(shares, px, other).equals(shares)       # BBB's trading says nothing of AAA
 
 
 class TestConsecutiveQuarters:
@@ -334,7 +570,10 @@ class TestTogether:
         assert out['form_type'].tolist() == ['10-K', '10-Q', '10-Q', '10-Q', '10-K']
         counts = out['shares_diluted'].tolist()
         assert np.isnan(counts[0])                                     # nothing before it to carry
-        assert counts[1:] == pytest.approx([632e6 * 40, 632e6 * 40, 2_540e6 * 10, 2_540e6 * 10])
+        assert np.isnan(counts[1])                                     # one filing is not yet a level
+        # 2,532.0 is 2,532M printed in millions: read in units and put on the basis, where it agrees with
+        # the 632M before the split; the 10-K carries the last 10-Q's
+        assert counts[2:] == pytest.approx([2_532e6 * 10, 2_540e6 * 10, 2_540e6 * 10])
 
     def test_keyed_by_conid_too(self):
         rows = _quarters('AAA', 4, conid='1001') + _quarters('BBB', 4, conid='1002', shares=5e6)
@@ -368,6 +607,22 @@ def _bars(db, ticker, closes, start='2021-07-12'):
         day = (pd.Timestamp(start) + pd.offsets.BDay(n)).date()
         db.execute('INSERT INTO pit_daily_bars VALUES (?,?,?,?,?,?,?,?,?)',
                    [day, ticker, close, close, close, close, 1e6, close * 1e6, 1], fetch='none')
+
+
+class TestDollarVolume:
+    def test_it_is_the_stored_volume_on_the_panels_shape(self, hist):
+        _bars(hist, 'AAA', [10.0, 11.0, 12.0])                         # 2021-07-12 .. 14, $close x 1e6 a day
+        _bars(hist, 'ZZZ', [5.0, 5.0, 5.0])                            # stored, not in the panel
+        px = pd.DataFrame({'AAA': [1.0, 1.0], 'BBB': [1.0, 1.0]}, index=pd.to_datetime(['2021-07-12', '2021-07-14']))
+        out = fs._dollar_volume(hist, px)
+        assert list(out.columns) == ['AAA', 'BBB'] and out.index.equals(px.index)
+        assert out['AAA'].tolist() == [10e6, 12e6]
+        assert out['BBB'].isna().all()                                 # a panel name with no stored bar
+
+    def test_a_day_the_panel_has_and_the_store_does_not_is_unknown(self, hist):
+        _bars(hist, 'AAA', [10.0])
+        px = pd.DataFrame({'AAA': [1.0, 1.0]}, index=pd.to_datetime(['2021-07-12', '2021-07-13']))
+        assert fs._dollar_volume(hist, px)['AAA'].tolist() == pytest.approx([10e6, np.nan], nan_ok=True)
 
 
 class TestPriceBasisDay:

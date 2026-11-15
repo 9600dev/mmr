@@ -13,8 +13,10 @@ accumulates honest out-of-sample evidence at zero capital risk.
 > it.** The development result that started it (+12.0%/yr over its benchmark)
 > came from a market cap computed on two bases at once — split-adjusted prices
 > times as-reported share counts — which is lookahead toward every stock that
-> later split. On a correct market cap the candidate FAILS in development and
-> held out (`docs/RESEARCH_LOG.md`, 2026-11-15). The sleeve's 15 holdings were
+> later split. On a correct market cap the development result is +9.8%/yr at
+> t 1.42 (no evidential gate met), the held-out result is +1.7%/yr at t 0.29
+> (FAIL) and the signal's rank IC is zero (`docs/RESEARCH_LOG.md`, 2026-11-15
+> and the addendum under it). The sleeve's 15 holdings were
 > bought on 2026-09-30 from targets computed the old way; targets generated
 > from 2026-11-15 on use the corrected market cap, so the next rebalance will
 > turn much of the book over. What follows is the operating runbook for the

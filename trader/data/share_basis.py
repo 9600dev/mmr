@@ -1,9 +1,10 @@
 """Share counts a market cap can be computed from.
 
 A market capitalisation is ``price x shares``, and it is only a market cap
-when the two numbers are on the SAME basis. Three things stood between the
-stored fundamentals and that, and until 2026-11-15 nothing in the research
-path knew about any of them (docs/RESEARCH_LOG.md, 2026-11-15):
+when the two numbers are on the SAME basis and belong to the SAME company.
+Five things stood between the stored fundamentals and that, and until
+2026-11-15 nothing in the research path knew about any of them
+(docs/RESEARCH_LOG.md, 2026-11-15 and its addendum):
 
 SPLIT BASIS
     ``pit_daily_bars`` prices are split-ADJUSTED (the vendor's ``adjusted=True``
@@ -26,9 +27,14 @@ SPLIT BASIS
 
     and ``adjusted_price(t) x shares_on_price_basis`` is the true market cap
     at any t at or after f. Only splits the stored prices actually reflect may
-    enter K: one executed after the last stored day is not in any price yet,
-    and the vendor's adjusted series is occasionally missing one (the price
-    then still shows the raw jump on the execution day).
+    enter K: one executed after the day the prices are adjusted through is
+    not in any price yet, and the vendor's adjusted series is occasionally
+    missing one (the price then still shows the raw jump on the execution
+    day). WHICH splits a stored series reflects is measured, never assumed
+    (``trader/data/pit_adjustment.py``): the vendor applies splits by ticker
+    symbol, including a later company's to an earlier company's bars (PARA
+    2025: 13.05 traded, 2,610 "adjusted"), and adds records late. Price and
+    count then carry the same factors and the product is still the cap.
 
 FISCAL-YEAR-END ROWS
     The retired statements endpoint derived a fiscal Q4 by subtraction from
@@ -42,9 +48,29 @@ FISCAL-YEAR-END ROWS
     and are never used; the count known at a 10-K is the last 10-Q's.
 
 UNITS
-    About 1% of the quarterly share counts are off by a power of a thousand
-    (MCD 2024-03-31: 725.9, reported in millions). ``plausible_share_counts``
-    is a causal filter for that: it never looks at a later filing.
+    Filers report share counts in units, in thousands or in millions, and the
+    stored number is the one printed: about 1.2% of quarterly counts are below
+    a million (MCD from 2024: 725.9, 722.0, 720.0 - millions; OKE 2012:
+    105,926 - thousands; TXN 2011: 1,194 - millions again), some printed in
+    thousands are large enough to pass for a count (COP 2018-2020:
+    1,084,561), a handful are a thousand times too large, and the first
+    figure of a series is as often wrong as any (TEVA 2,000,000, XOM
+    4,000,000). ``plausible_share_counts`` reads the scale, believes a level
+    when two consecutive filings agree on it, and is causal: it never looks
+    at a later filing.
+
+ONE TICKER, SEVERAL COMPANIES
+    The point-in-time tables are keyed by ticker, and tickers change hands: B
+    was Barnes Group (51M shares) until January 2025 and is Barrick since
+    May; CTRA was Contura Energy (19M) and is Coterra (800M). The old
+    company's last count priced the new one - for as long as nothing replaced
+    it, which for a foreign filer is for ever. ``MAX_DAYS_BETWEEN_FILINGS`` bounds
+    both how long a filing is the latest word and how far apart two filings
+    of one issuer can be.
+
+THE TAPE
+    Whatever the rules above believed, a market cap smaller than two typical
+    days of the name's own trading is not one (``unbelievable_cap``).
 
 Everything here is a pure function of its arguments.
 """
@@ -63,6 +89,14 @@ SplitEvent = Tuple[dt.date, float]          # (execution date, split_to / split_
 PLAUSIBLE_FACTOR = 3.0
 # How many accepted counts the reference median is taken over.
 REFERENCE_FILINGS = 4
+# What a share count of a listed company in this universe can be. Below a
+# million the number is in thousands or millions (the smallest real counts in
+# a liquid universe are BRK.A's 1.4M and NVR's 3M; a company with fewer - SEB,
+# 0.97M - gets no count here, which is the cost of the rule). Above two hundred
+# billion it is a thousand times too large (the largest real one, on a
+# split-adjusted basis, is about 25 billion).
+MIN_SHARES = 1e6
+MAX_SHARES = 2e11
 
 
 def _as_date(value: Any) -> Optional[dt.date]:
@@ -146,58 +180,157 @@ def split_reflected_in_prices(before: Optional[float], on: Optional[float], rati
     return abs(move) <= abs(move + math.log(ratio))
 
 
+def share_count_readings(value: float) -> List[float]:
+    """What a printed share count can mean, the natural reading first.
+
+    Filers print in units, thousands or millions, so the true count is the
+    printed number or LARGER by a power of a thousand - never smaller. Below a
+    thousand the natural reading is millions; below a million, thousands; from
+    a million up, the number itself. The larger readings follow, because the
+    natural one is not always right: TXN's 1,194 is millions, and COP's
+    1,084,561 is thousands although it could be a share count as it stands.
+
+    A number is read DOWN only when it cannot be a share count at all (above
+    ``MAX_SHARES``: a thousand or a million times too large). Reading a
+    possible count down to fit the filings around it is how a wrong first
+    figure takes over a series: XOM's first stored count is a wrong
+    4,000,000, and every correct 4.7 billion after it fitted that as 4.7
+    million.
+
+    Only readings that are a possible share count are returned, so the list
+    is empty for a number no scale makes sense of (0.01).
+    """
+    if value > MAX_SHARES:
+        scales: Tuple[float, ...] = (1e-3, 1e-6)
+    elif value < 1e3:
+        scales = (1e6, 1e3)
+    elif value < MIN_SHARES:
+        scales = (1e3, 1e6)
+    else:
+        scales = (1.0, 1e3, 1e6)
+    return [value * scale for scale in scales if MIN_SHARES <= value * scale <= MAX_SHARES]
+
+
 def plausible_share_counts(counts: Sequence[Optional[float]],
                            factor: float = PLAUSIBLE_FACTOR,
-                           reference: int = REFERENCE_FILINGS) -> List[Optional[float]]:
-    """Each count in filing order, or None where it cannot be believed.
+                           reference: int = REFERENCE_FILINGS,
+                           basis: Optional[Sequence[float]] = None) -> List[Optional[float]]:
+    """The share count each filing reports, in filing order - in UNITS,
+    whatever scale it was printed in - or None where it cannot be believed.
+
+    ``basis``, when given, is one multiplier per count (its split factor,
+    ``split_factor_after``): the scale is read from the number AS PRINTED, the
+    comparison with earlier filings is made on the common basis, and the
+    result is on that basis. Without it a 4:1 split looks like a change of
+    level; with the multiplier applied before reading the scale, 725.9 x 2
+    looks like a count in thousands.
 
     CAUSAL: the verdict on a count uses only the counts before it, so the
     answer for a filing never changes when later filings arrive (an as-of
     read must not depend on the future).
 
-    A count is kept when it is within ``factor`` of the median of the last
-    ``reference`` kept counts. One that is not is held back - it may be a
-    unit error (a count in millions among counts in units) or it may be a
-    real change of level (a merger, the first correct figure after a run of
-    wrong ones). The NEXT count decides: if it agrees with the held one, the
-    level has moved and it is kept (the held one stays rejected - at the time
-    it could not be told apart from an error); if it agrees with the old
-    level, the held one was the error.
+    Each printed number has a few possible readings
+    (``share_count_readings``). With counts already believed, the reading
+    within ``factor`` of the median of the last ``reference`` of them is the
+    count. If none is, the number is held back - it may be an error, or a
+    real change of level (a merger; the first right figure after a run of
+    wrong ones). The NEXT filing decides: a reading of it that agrees with a
+    reading of the held one means the level has moved, and it is kept (the
+    held one stays rejected - when it arrived it could not be told from an
+    error); one that agrees with the old level means the held one was the
+    error.
 
-    A count that is None, not finite or not positive is never a share count.
-    The first usable count has nothing to be compared with and is kept; if it
-    was the error, the second and third correct it by the rule above.
+    The FIRST number of a series is held back the same way, for the same
+    reason: nothing says yet whether it is a count. TEVA's first stored
+    figure is 2,000,000 and XOM's 4,000,000, against a billion and four
+    billion in every filing after. So a level is believed when two
+    consecutive filings agree on it, at the start of a series as at a change
+    of level, and a series costs one filing before it has a count.
+
+    A value that is None, not finite, not positive, or has no possible
+    reading is never a share count and is skipped: it neither confirms nor
+    contradicts.
+
+    What this cannot see is a level that is wrong in every filing the same
+    way (a series printed in thousands from its first row, each number large
+    enough to be a count as it stands). ``unbelievable_cap`` is for that.
     """
     kept: List[float] = []
-    held: Optional[float] = None
+    held: List[float] = []              # the readings of a number not yet believed
     out: List[Optional[float]] = []
-    for raw in counts:
+    for position, raw in enumerate(counts):
         try:
             value = float(raw) if raw is not None else float('nan')
         except (TypeError, ValueError):
             value = float('nan')
-        if not math.isfinite(value) or value <= 0:
+        readings = share_count_readings(value) if math.isfinite(value) and value > 0 else []
+        if basis is not None:
+            multiplier = float(basis[position])
+            readings = ([r * multiplier for r in readings]
+                        if math.isfinite(multiplier) and multiplier > 0 else [])
+        if not readings:
             out.append(None)
             continue
-        if not kept:
-            kept.append(value)
-            out.append(value)
-            continue
-        recent = sorted(kept[-reference:])
-        middle = len(recent) // 2
-        median = recent[middle] if len(recent) % 2 else (recent[middle - 1] + recent[middle]) / 2.0
-        if median / factor <= value <= median * factor:
-            kept.append(value)
-            held = None
-            out.append(value)
-        elif held is not None and held / factor <= value <= held * factor:
-            kept = [value]              # the level moved; the old one is history
-            held = None
-            out.append(value)
+        if kept:
+            recent = sorted(kept[-reference:])
+            middle = len(recent) // 2
+            median = recent[middle] if len(recent) % 2 else (recent[middle - 1] + recent[middle]) / 2.0
+            same_level = next((r for r in readings if median / factor <= r <= median * factor), None)
+            if same_level is not None:
+                kept.append(same_level)
+                held = []
+                out.append(same_level)
+                continue
+        confirmed = next((r for r in readings
+                          if any(h / factor <= r <= h * factor for h in held)), None)
+        if confirmed is not None:
+            kept = [confirmed]          # two filings agree: this is the level now
+            held = []
+            out.append(confirmed)
         else:
-            held = value
+            held = readings
             out.append(None)
     return out
+
+
+# Consecutive periodic reports of one issuer are at most about 140 days apart
+# (a 10-Q is due 40-45 days after its quarter, a 10-K 60-90 days after the
+# year). Measured over 78,279 consecutive filings in the store: median 91
+# days, 90% within 116, a second mode at 180-200 (one report missing, 1.6%),
+# 1.1% longer. Past this many days two things stop being true: that the
+# newest filing still describes the company, and that the next filing under
+# the ticker is the same company's. Tickers change hands: B was Barnes Group
+# until January 2025 and is Barrick since May; CTRA was Contura Energy (19 M
+# shares) and is Coterra (800 M); EXE, BKR and STRC likewise.
+MAX_DAYS_BETWEEN_FILINGS = 200
+
+# A market cap smaller than this many days of the name's own trading is not a
+# market cap. A liquid stock turns over 0.2% to 3% of its value on a typical
+# day, and a count wrong by a factor of a hundred or a thousand turns that
+# into 50% to 3,000%. The few names that really trade more than this for
+# weeks (KODK in August 2020, AMC in early 2021, a micro-cap issuing stock
+# faster than it reports) are the ones whose last filed count no longer
+# describes them either.
+MAX_DAILY_TURNOVER = 0.5
+
+
+def unbelievable_cap(market_cap: Optional[float], typical_dollar_volume: Optional[float],
+                     max_turnover: float = MAX_DAILY_TURNOVER) -> bool:
+    """Is this "market cap" too small for the trading that goes on in the
+    name? True when a typical day's dollar volume exceeds ``max_turnover`` of
+    it - the last line of defence against a share count that every filter
+    believed (a level that was wrong in every filing, a count overtaken by
+    issuance). False when either number is unknown: this refuses a cap that
+    is contradicted, it does not demand proof."""
+    if market_cap is None or typical_dollar_volume is None:
+        return False
+    try:
+        cap, volume = float(market_cap), float(typical_dollar_volume)
+    except (TypeError, ValueError):
+        return False
+    if not (math.isfinite(cap) and math.isfinite(volume)) or cap <= 0 or volume <= 0:
+        return False
+    return volume > max_turnover * cap
 
 
 def is_late_filing_notice(form_type: Any) -> bool:

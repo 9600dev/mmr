@@ -1070,3 +1070,196 @@ Code: `trader/data/share_basis.py`, `scripts/fundamental_signals.py`
 **The paper sleeve (`paper_s2p`)** holds 15 names bought on 2026-09-30 from
 targets computed with the uncorrected market cap. It is a paper exercise of
 the monthly machinery; as of this entry it has no research result behind it.
+
+## 2026-11-15 (later) — the correction above was incomplete, and one sentence of it was wrong
+
+Found by doing what that entry's first "method error" says to do: print the
+market caps the corrected loader computes and look at them. On the full
+snapshot, with the loader as committed (`7241376`): MCD at $210 thousand (714
+"shares"), KO, PCAR, CHD and ECA likewise, COP at a thousandth of its size for
+two years, BKR and PARA at a twentieth to a hundredth, a largest sales-to-price
+above 100,000 at every one of 96 month-ends, 37 names flagged in all — one to
+four names of every month's top quintile (about 65 names) were there because
+their market cap was wrong. The "all corrections" rows above carry that.
+
+### What was still wrong
+
+| defect | what it is | measured |
+|---|---|---|
+| **an asserted price basis** | The snapshots were recorded as "adjusted through 2026-07-29" with the vendor's complete split list. The vendor applies splits by TICKER SYMBOL and adds records late: PARA's 2025 bars (Paramount, last traded 2025-08-06) are multiplied by the 20:1 and 10:1 reverse splits of whatever is listed as PARA in 2026 — 13.05 traded, 2,610 "adjusted" today, 13.05 in the snapshot. | 45 tickers in the development snapshot (48 in the full one) hold prices that do not carry a split the list dates before the build (PARA, DDR, ESV, CGNX, JCI, LPI, WLL ...); the loader multiplied their share counts by splits their prices never had. |
+| **one ticker, several companies** | Both tables are ticker-keyed. B was Barnes Group (51M shares) until January 2025 and is Barrick since May; CTRA was Contura Energy (19M) until 2021 and is Coterra (800M); EXE, BKR, STRC likewise. The old company's last count priced the new one until something replaced it, and the new company's first count was rejected as a unit error beside the old level. | CTRA 2021-12..2022-08 at $0.5B; BKR 2020-03..2026-07 on a 2013 count of another company; EXE on a 2014 one. |
+| **units** | The filter of the first correction believed a new level when the next filing agreed with it. A filer who prints millions prints them every quarter. Counts printed in thousands can pass for a count, and the first figure of a series — taken on trust — is as often wrong as any. | MCD since 2024 (725.9, 722.0, 720.0), KO 2018-19, PCAR, CHD, ECA; COP 2018-20 (1,084,561); TEVA's first figure 2,000,000 and XOM's 4,000,000. |
+
+### What the loader does now
+
+- **The price basis is measured**, for the snapshots as for the live table:
+  both went through `scripts/pit_split_adjust.py --apply --full` (stored /
+  vendor close is 1 or the product of the ticker's last m splits). 144 tickers
+  rescaled in the development snapshot (99 for splits executed after its
+  build, 45 for the reason above), 220 in the full one; 14 / 15 refused and
+  left out of every market cap; basis recorded through 2026-11-15 and the split
+  tables refreshed to the vendor's current list. Price and count then carry
+  the same factors, whoever they belong to, and the product is the cap. Returns
+  are unchanged by a rescale except where it removes a fake jump (CGNX
+  2017-12-04, ESV 2019-04-11, DDR 2018-05-21 — the residue the entry above
+  listed as left in the series), which is why the first row below is not the
+  first row above to the digit.
+- **`units`**: a printed count is read in units, thousands or millions — only
+  ever up (reading a possible count DOWN to fit its neighbours let XOM's wrong
+  first figure take over its whole series in an intermediate version) — and a
+  level is believed when two consecutive filings agree on it under some
+  reading, at the start of a series as at a change of level.
+- **`continuity`** (new): filings more than 200 days apart are separate series
+  (the reference level and a carried count never cross the gap), a filing
+  answers for at most 200 days, and a count is carried over at most two later
+  filings that have none. 200 is from the store: of 78,279 consecutive filings
+  the median gap is 91 days, 90% are within 116, 1.6% sit at 180-200 (one
+  report missing) and 1.1% are longer.
+- **`turnover`** (new): a market cap smaller than two typical days (median of
+  the last 21 sessions) of the name's own dollar volume is unknown. It is the
+  check for a level that is wrong in every filing the same way. It also removes
+  real squeezes — 427 member-days of 637,441 (0.07%), 32 names: KODK in August
+  2020, AMC in early 2021, micro-caps — where the last filed count no longer
+  describes the company either. That is a selection as well as a repair, so it
+  is a separate stage below.
+
+After: no name is flagged at any of the 96 month-ends, the largest
+sales-to-price is 16, and the caps of well-known names on known dates are
+within a few percent of the real figure (the difference is diluted against
+basic shares):
+
+| | computed | real, about |
+|---|---|---|
+| AAPL 2024-06-28 | $3,257B | $3,230B |
+| NVDA 2021-06-30 (before both splits) | $506B | $498B |
+| MSFT 2022-12-30 | $1,795B | $1,790B |
+| MCD 2025-06-30 | $210B | $209B |
+| COP 2020-06-30 | $45.6B | $45B |
+| TEVA 2018-08-31 | $23.3B | $23B |
+| PARA 2025-06-30 | $8.7B | $8.6B |
+| CTRA 2022-12-30 | $19.6B | $19B |
+| GME 2021-01-29 | $21.2B | $22.7B |
+| B (Barrick) 2025-12-31, CTRA 2021-12-31, BKR 2020-06-30 | unknown | — |
+
+### The registered candidate, re-run again
+
+Same registry entry, harness and scratch-root procedure as above; `n_trials`
+stays 20. Development walk-forward, OOS 2019-2023, on the re-based snapshot:
+
+| corrections applied | OOS Sharpe | covered-EW | active /yr | t(NW) | positive years | 2019 / 20 / 21 / 22 / 23 | max DD vs benchmark | label |
+|---|---|---|---|---|---|---|---|---|
+| none (rows as stored) | 0.874 | 0.567 | +11.84% | 1.98 | 5/5 | +2.1 +4.7 +27.3 +7.8 +5.3 | -36.8 / -32.7 | PROMISING |
+| notices | 0.875 | 0.566 | +11.88% | 1.99 | 5/5 | +2.1 +4.9 +27.4 +7.8 +5.3 | -36.8 / -32.7 | PROMISING |
+| + fiscal-year-end shares | 0.882 | 0.568 | +11.92% | 2.03 | 4/5 | +3.1 +4.8 +25.0 +15.3 -0.7 | -36.8 / -34.4 | PROMISING |
+| + split basis | 0.755 | 0.568 | +8.96% | 1.28 | 3/5 | +1.3 -3.6 +25.9 +19.0 -6.9 | -39.2 / -34.4 | PROMISING |
+| + units | 0.771 | 0.573 | +9.18% | 1.34 | 3/5 | +1.5 -3.8 +26.4 +18.7 -6.1 | -38.8 / -34.5 | PROMISING |
+| + consecutive quarters | 0.755 | 0.574 | +8.90% | 1.29 | 3/5 | +1.9 -5.4 +26.2 +18.6 -5.8 | -39.8 / -34.8 | PROMISING |
+| + continuity | 0.765 | 0.574 | +9.28% | 1.34 | 3/5 | +1.8 -4.3 +27.6 +17.0 -5.0 | -39.2 / -34.7 | PROMISING |
+| + turnover (ALL) | **0.787** | **0.578** | **+9.81%** | **1.42** | **3/5** | +1.8 -3.3 +27.9 +17.5 -4.9 | -39.2 / -34.8 | **PROMISING** |
+| split basis alone | 0.797 | 0.567 | +9.40% | 1.46 | 4/5 | +0.7 -1.1 +23.7 +11.4 +2.8 | -35.4 / -32.7 | PROMISING |
+
+Held out (fixed cell, 2024-07-01..2026-07-28):
+
+| | OOS Sharpe | covered-EW | active /yr | t(NW) | 2024 / 25 / 26 | verdict |
+|---|---|---|---|---|---|---|
+| rows as stored | 1.314 | 1.169 | +0.37% | 0.07 | -4.4 +6.1 -0.9 | FAIL |
+| all but turnover | 1.284 | 1.070 | +1.24% | 0.21 | -2.3 -1.4 +6.3 | FAIL |
+| ALL | 1.292 | 1.049 | +1.70% | 0.29 | -1.2 -1.3 +6.0 | FAIL |
+
+Information coefficient (h = 21, full snapshot, scored on sales-to-price's
+cells):
+
+| variant | IC as stored | t(NW) | IC corrected | t(NW) |
+|---|---|---|---|---|
+| sales_to_price | 0.0209 | 2.18 | **-0.0023** | **-0.15** |
+| revenue frozen per name | 0.0183 | 1.77 | -0.0047 | -0.30 |
+| shares frozen per name | 0.0154 | 1.43 | -0.0058 | -0.39 |
+| 1/marketcap alone | 0.0175 | 2.06 | **0.0005** | **0.04** |
+| 1/price alone | 0.0173 | 1.72 | 0.0199 | 1.95 |
+
+### What changes, and what does not
+
+**Corrected: "FAIL in development" was a label, not a finding.** The entry
+above reports the fully corrected candidate as FAIL in development. The
+harness's rule (`verdict.py`) makes that label out of four gates, and the one
+that failed was the drawdown gate: -40.4% against the benchmark's -34.7%, 0.7
+points past its 5-point tolerance. With the remaining defects repaired the
+drawdown is -39.2% against -34.8% and the label is PROMISING — as it was at
+t 1.29 two rows earlier in the same table. Nothing about the evidence moved
+with it. The sentence in the consequences list above, "withdrawn: FAIL on
+corrected data", should read: **withdrawn; on corrected data the development
+result is +9.8%/yr at t 1.42 (DSR 0.46, positive in three of five years),
+which the harness labels PROMISING, and the held-out result is FAIL.**
+
+**Unchanged: the withdrawal.** What was registered and reported on 2026-09-29
+was t 2.01, +12.0%/yr, positive in all five years. With a market cap that is
+one, no gate that measures evidence is met in development (t >= 2: 1.42; DSR
+>= 0.90: 0.46), the held-out window fails every version (+1.7%/yr, t 0.29, one
+positive year of three), and the rank IC of the signal is zero (-0.0023, t
+-0.15) — as is size's (0.0005, t 0.04). The development spread that remains is
+the same two years as before: 2021 and 2022, when value beat growth. A
+long-only book that earns in exactly those years and gives some back in 2020
+and 2023 is a value tilt held through a value rally, with an IC that says it
+ranks nothing. **There is still no surviving positive result.**
+
+Of the other stages after the split basis, `units`, the consecutive-quarter
+rule and `continuity` each move t by about 0.05, in either direction.
+`turnover` adds +0.5%/yr in development and +0.5%/yr held out; it removes
+names in a squeeze, some of which are distressed and expensive to hold, so
+part of that is a (causal, implementable) selection rather than a repair. The
+row without it is in both tables for that reason.
+
+### Limits
+
+- **Identity is inferred, not checked.** A 200-day silence separates two
+  series; nothing verifies that two filings 90 days apart are one issuer's, and
+  a ticker handed over in under 200 days is priced with the old company's
+  figures until the limit (B: about a week in May 2025). The vendor's ticker
+  details carry a CIK as of a date; using it is the real fix and is not done.
+- **Coverage is about two thirds of members** (roughly 270-330 of 500 at a
+  month-end) and the missing third is not random: ETFs and foreign filers have
+  no 10-Q; a company filed under another symbol has nothing here (GOOGL is
+  stored as GOOG, META before 2022 as FB); the retired vendor has no share
+  count at all for some filers (XOM, BKR); a new series has no count until its
+  second filing. The benchmark is equal-weight over the SAME covered names, so
+  the comparison is fair; the universe it describes is narrower than "the
+  top 500".
+- The 3x level tolerance, the 200 days, the two carried filings and the 50%
+  turnover line are judgement calls, fixed from the store's own distributions
+  and from named cases before the re-run was looked at. The table shows how
+  little any of them moves the result.
+- 14-15 tickers are refused by the split measurement and have no market cap;
+  spin-offs and reverse splits the vendor does not list are still one-day moves
+  in the price series.
+
+### Method errors worth not repeating
+
+- **I wrote down the check and did not run it.** The entry above says the
+  check that would have caught the split basis is to print a known company's
+  market cap. Run on that entry's own output, the same day, it showed MCD worth
+  less than a house. A correction is a result like any other and gets the same
+  treatment before it is logged.
+- **"The next observation agrees" is not confirmation when the error is
+  systematic.** A filer's printing scale is the same every quarter.
+- **A fact about a snapshot that was not measured is an assumption.** "Adjusted
+  through the build day" was true of the request and false of 45 tickers'
+  answers.
+- **A verdict label one gate wide is not a finding.** FAIL and PROMISING here
+  were 1.2 points of drawdown apart. Report the gate inputs; the label follows
+  them and nothing should follow the label.
+
+### Reproduce
+
+As above, on the default configurations (the snapshots themselves are now on
+the measured basis; the pre-measurement state is kept in
+`~/.local/share/mmr/research_{dev,full}_splits`). Stages add `continuity` and
+`turnover` to the list:
+
+```
+MMR_FUNDAMENTALS_CORRECTIONS=notices,annual_shares,split_basis,units,periods,continuity,turnover
+```
+
+Code: `trader/data/share_basis.py` (`share_count_readings`,
+`plausible_share_counts`, `unbelievable_cap`, `MAX_DAYS_BETWEEN_FILINGS`),
+`scripts/fundamental_signals.py` (`prepare_rows`, `as_of_frames`,
+`contradicted_by_trading`).
