@@ -2417,6 +2417,12 @@ def _dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
                                     else:
                                         market_str += f'  [green]at/below bid[/green]'
 
+                    # Why a quote is absent or one-sided: the venue is shut, or
+                    # a side was our own resting order (not the market).
+                    notes = row.get('quote_notes')
+                    if isinstance(notes, (list, tuple)) and notes:
+                        market_str += f'  [dim]({escape("; ".join(str(n) for n in notes))})[/dim]'
+
                     # Color the action
                     action_color = 'green' if action == 'BUY' else 'red'
 

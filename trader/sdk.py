@@ -1121,6 +1121,9 @@ class MMR:
                         'bid': (_b or None) if _notes else q.get('bid'),
                         'ask': (_a or None) if _notes else q.get('ask'),
                         'last': q.get('last'),
+                        # ...and say so: a blank bid beside a working order
+                        # otherwise reads as "no market".
+                        'notes': list(_notes),
                     }
             except Exception:
                 pass
@@ -1165,7 +1168,8 @@ class MMR:
                 'last': last,
                 # Why a row has no quote when none was asked for (a failed
                 # snapshot leaves bid/ask/last empty too, and is not this).
-                'quote_notes': [_VENUE_CLOSED_NOTE] if t.contract.symbol in venue_closed else None,
+                'quote_notes': ([_VENUE_CLOSED_NOTE] if t.contract.symbol in venue_closed
+                                else (snap.get('notes') or None)),
             })
 
         df = pd.DataFrame(rows)
