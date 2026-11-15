@@ -1108,3 +1108,45 @@ class TestEarlyCloseShift:
                 ms.early_close_shift('NYSE', day)
         assert ('NYSE', day) not in ms._early_shift_cache
         assert ms.early_close_shift('NYSE', day) == dt.timedelta(hours=3)
+
+
+class TestWhatAFailureSays:
+    """Found by mutation testing the regular-session code (2026-11-15): the
+    decisions were pinned, the words were not. A refusal is read by an
+    operator and a failed lookup by whoever is asking why opens stopped."""
+
+    def test_a_failed_lookup_names_the_venue_the_day_and_the_cause(self, caplog):
+        import logging as std_logging
+        import trader.data.market_session as ms
+        with caplog.at_level(std_logging.WARNING), \
+                mock.patch.object(ms, '_calendar', side_effect=RuntimeError('boom')):
+            ms.regular_session('NYSE', dt.date(2026, 11, 25))
+        messages = [record.getMessage() for record in caplog.records if 'regular' in record.getMessage()]
+        assert messages == [
+            'market_session: could not read the regular NYSE session for 2026-11-25 (boom) — NOT caching']
+
+    def test_unreadable_hours_name_the_columns_that_were_there(self, caplog):
+        import logging as std_logging
+        import trader.data.market_session as ms
+        fake = _FakeCalendar(market_open=pd.NaT, market_close=_utc('2026-11-25 21:00'))
+        with caplog.at_level(std_logging.WARNING), mock.patch.object(ms, '_calendar', return_value=fake):
+            ms.regular_session('NYSE', dt.date(2026, 11, 25))
+        messages = [record.getMessage() for record in caplog.records if 'regular' in record.getMessage()]
+        assert messages == [
+            "market_session: could not read the regular NYSE session for 2026-11-25 "
+            "(unreadable regular hours in ['market_open', 'market_close']) — NOT caching"]
+
+    @pytest.mark.parametrize('instant', [None, pd.NaT])
+    def test_a_missing_instant_is_named_as_that(self, instant):
+        from trader.data.market_session import regular_session_refusal
+        assert regular_session_refusal(instant, 'NYSE') == (
+            'regular session not evaluable for NYSE (ValueError: no timestamp) — refusing to open (fail-closed)')
+
+    def test_a_bar_that_is_not_a_time_names_what_went_wrong(self):
+        from trader.data.market_session import bar_open_refusal
+        try:
+            pd.Timestamp('not a time')
+        except Exception as ex:                          # whatever pandas calls it in this version
+            expected = f'({type(ex).__name__}: {ex})'
+        reason = bar_open_refusal('not a time', 60, 'NASDAQ')
+        assert reason == f'regular session not evaluable for NASDAQ {expected} — refusing to open (fail-closed)'

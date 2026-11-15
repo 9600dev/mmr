@@ -50,12 +50,27 @@ WHAT IT RECORDS (history DuckDB, created by the first ``--apply``)
                             ``--accept-refusals`` once the dry run has been
                             read.
 
-EXIT STATUS
-    0 nothing refused; 1 something was refused (or a write failed); 2 usage.
+WHICH SPLITS A RUN LOOKS AT
+    With a basis on record, the splits executed since ``OVERLAP_DAYS`` before
+    it - everything older was settled by the run that recorded it, and the
+    overlap picks up a split the vendor listed late. With no basis on record,
+    or with ``--full``, every split of every stored ticker (about 1,400 vendor
+    requests). ``--since`` and ``--tickers`` narrow it by hand. The window
+    always reaches back past the recorded basis, so a nightly run cannot leave
+    a gap however long the job was down.
 
-    python scripts/pit_split_adjust.py                      # dry run, everything
-    python scripts/pit_split_adjust.py --apply --accept-refusals     # first repair
-    python scripts/pit_split_adjust.py --since 2026-11-01 --apply    # nightly
+EXIT STATUS
+    0  nothing is refused that was not already on record in
+       pit_split_refusals. A ticker refused by an earlier run and refused
+       again is printed and left alone; it is a known exception, and a job
+       that failed on it every night would be a job nobody reads.
+    1  a ticker is refused for the FIRST time, or a vendor request or a write
+       failed (those are never "already known").
+    2  usage.
+
+    python scripts/pit_split_adjust.py                               # dry run
+    python scripts/pit_split_adjust.py --full --apply --accept-refusals   # first repair
+    python scripts/pit_split_adjust.py --apply --accept-refusals     # nightly (scripts/sleeve_upkeep.py)
     python scripts/pit_split_adjust.py --tickers MNST APH
 """
 from __future__ import annotations
@@ -90,6 +105,10 @@ BASIS_DDL = """CREATE TABLE IF NOT EXISTS pit_price_basis (
         adjusted_through DATE, recorded_at TIMESTAMPTZ, note VARCHAR)"""
 
 _CHUNK = 400
+# How far before the recorded basis a default run looks (see the module docstring).
+OVERLAP_DAYS = 45
+# Refusals that are never "already on record": the next run may well succeed.
+TRANSIENT_REASONS = frozenset({'fetch_failed', 'write_failed'})
 
 
 class RowsChanged(RuntimeError):
@@ -108,6 +127,8 @@ class RunResult:
     basis: Optional[dt.date] = None
     basis_explanation: str = ''
     basis_recorded: bool = False
+    # tickers refused for the first time, or for a reason that is transient
+    unreported: List[str] = field(default_factory=list)
 
     @property
     def adjusted(self) -> List[pa.TickerPlan]:
@@ -115,7 +136,7 @@ class RunResult:
 
     @property
     def exit_code(self) -> int:
-        return 1 if self.refused else 0
+        return 1 if self.unreported else 0
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -137,6 +158,7 @@ class RunResult:
                              'residual': n.residual} for p in self.plans for n in p.price_notes],
             'basis': {'adjusted_through': self.basis.isoformat() if self.basis else None,
                       'recorded': self.basis_recorded, 'explanation': self.basis_explanation},
+            'unreported_refusals': list(self.unreported),
             'exit_code': self.exit_code,
         }
 
@@ -222,6 +244,12 @@ def recorded_basis(db) -> Optional[dt.date]:
         return None
     row = db.execute('SELECT max(adjusted_through) FROM pit_price_basis', fetch='one')
     return row[0] if row else None
+
+
+def default_since(basis: Optional[dt.date]) -> Optional[dt.date]:
+    """Where a run with no scope given starts: ``OVERLAP_DAYS`` before the
+    basis on record, or None (everything) when no basis is on record."""
+    return None if basis is None else basis - dt.timedelta(days=OVERLAP_DAYS)
 
 
 # -- writing ------------------------------------------------------------------
@@ -394,7 +422,10 @@ def run(db, split_rows: Iterable[Mapping[str, Any]], client, *, run_date: dt.dat
     new_refused: List[dt.date] = []
     for plan in result.refused:
         known = set(json.loads(standing[plan.ticker][2])) if plan.ticker in standing else set()
-        new_refused.extend(d for d in plan.unverified_splits if d.isoformat() not in known)
+        fresh = [d for d in plan.unverified_splits if d.isoformat() not in known]
+        new_refused.extend(fresh)
+        if fresh or plan.ticker not in standing or plan.reason in TRANSIENT_REASONS:
+            result.unreported.append(plan.ticker)
     claim = run_date
     if splits_current_through is not None and splits_current_through < claim:
         claim = splits_current_through
@@ -438,8 +469,8 @@ def run(db, split_rows: Iterable[Mapping[str, Any]], client, *, run_date: dt.dat
         f'{len(result.refused)} refused, {sum(len(p.price_notes) for p in result.plans)} price notes')
     if refused_now:
         log(f'{len(refused_now)} refused ticker(s) are left exactly as they were'
-            + (f'; {len(new_refused)} of their splits had not been reported by an earlier run' if new_refused else
-               '; all were already on record in pit_split_refusals'))
+            + (f'; NOT already on record (this is why the exit status is 1): {", ".join(sorted(result.unreported))}'
+               if result.unreported else '; all were already on record in pit_split_refusals'))
     if claim < run_date:
         log(f'the split table was last fetched {claim}: nothing can be said about splits after that day')
     if decision.adjusted_through is not None:
@@ -460,7 +491,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument('--apply', action='store_true', help='write the changes (default: dry run, writes nothing)')
     ap.add_argument('--tickers', nargs='+', metavar='TICKER', help='only these tickers')
     ap.add_argument('--since', metavar='YYYY-MM-DD',
-                    help='only tickers with a split executed on or after this day (for a nightly job)')
+                    help='only tickers with a split executed on or after this day (default: '
+                         f'{OVERLAP_DAYS} days before the basis on record; everything when there is none)')
+    ap.add_argument('--full', action='store_true',
+                    help='every split of every stored ticker, whatever basis is on record')
     ap.add_argument('--run-date', metavar='YYYY-MM-DD',
                     help='the market date of this run (default: today in New York); later-dated splits are ignored')
     ap.add_argument('--db', metavar='PATH', help='history DuckDB (default: history_duckdb_path from the config)')
@@ -474,6 +508,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument('--json', action='store_true', help='print one JSON document instead of text')
     args = ap.parse_args(argv)
 
+    if args.full and (args.since or args.tickers):
+        ap.error('--full looks at everything; it cannot be combined with --since or --tickers')
     try:
         since = dt.date.fromisoformat(args.since) if args.since else None
         run_date = dt.date.fromisoformat(args.run_date) if args.run_date else dt.datetime.now(MARKET_TZ).date()
@@ -518,6 +554,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         current_through = splits_fetched_through(db)
 
     lines: List[str] = []
+    if since is None and not args.full and not args.tickers:
+        since = default_since(recorded_basis(db))
+        if since is not None and not args.json:
+            print(f'looking at splits executed since {since} ({OVERLAP_DAYS} days before the basis on record); '
+                  '--full looks at every split', flush=True)
     result = run(db, split_rows, RESTClient(key), run_date=run_date, apply=args.apply, tickers=args.tickers,
                  since=since, splits_current_through=current_through, accept_refusals=args.accept_refusals,
                  sleep=args.sleep,

@@ -213,7 +213,7 @@ class TestRefresh:
         out = fs.refresh(db, vendor, 'k', today=TODAY, conids={'NVDA': '4815747'}, log=lines.append)
         assert vendor.calls[0]['params']['execution_date.gte'] == fs.FIRST_DAY.isoformat()
         assert vendor.calls[0]['params']['execution_date.lte'] == '2026-11-15'
-        assert out == {'listed': 5, 'written': 5, 'dropped': 0, 'stored': 5,
+        assert out == {'listed': 5, 'written': 5, 'dropped': 0, 'withdrawn': 0, 'stored': 5,
                        'since': fs.FIRST_DAY, 'until': TODAY}
         assert [r[0] for r in _stored(db)] == ['AAPL', 'NVDA', 'GE', 'NVDA', 'MNST']
         assert ('NVDA', '4815747', dt.date(2021, 7, 20), 4.0, 1.0) in _stored(db)
@@ -263,3 +263,82 @@ class TestUniverseConids:
                 return SimpleNamespace(security_definitions=members)
 
         assert fs.universe_conids(Accessor()) == {'AAPL': '265598', 'NVDA': '4815747'}
+
+
+class TestWithdrawnSplits:
+    """The vendor's adjusted prices follow its CURRENT list. A row it no longer
+    lists is in no price it serves and must not be in a share factor - CGNX had
+    one dated 2017-11-16 beside the real 2017-12-04, and counted both."""
+
+    def _seed(self, db, vendor_rows):
+        vendor = FakeVendor(vendor_rows, page=50)
+        fs.refresh(db, vendor, 'k', today=TODAY, log=lambda m: None)
+        return vendor
+
+    def _withdrawn(self, db):
+        return db.execute('SELECT ticker, execution_date, split_to, split_from FROM corporate_splits_withdrawn '
+                          'ORDER BY execution_date, ticker', fetch='all')
+
+    def test_a_row_the_vendor_stops_listing_is_moved_not_deleted(self, db):
+        vendor = self._seed(db, ROWS + [_split('CGNX', '2017-11-16', 1, 2), _split('CGNX', '2017-12-04', 1, 2)])
+        vendor.rows = [r for r in vendor.rows if not (r['ticker'] == 'CGNX' and r['execution_date'] == '2017-11-16')]
+        lines = []
+        out = fs.refresh(db, vendor, 'k', full=True, today=TODAY, log=lines.append)
+        assert out['withdrawn'] == 1
+        assert ('CGNX', None, dt.date(2017, 11, 16), 2.0, 1.0) not in _stored(db)
+        assert ('CGNX', None, dt.date(2017, 12, 4), 2.0, 1.0) in _stored(db)
+        assert self._withdrawn(db) == [('CGNX', dt.date(2017, 11, 16), 2.0, 1.0)]
+        assert lines[-1] == ('splits: 1 stored row(s) the vendor no longer lists moved to '
+                             'corporate_splits_withdrawn: CGNX 2017-11-16')
+
+    def test_only_the_window_just_read_is_reconciled(self, db):
+        """A default run reads the last 45 days; an older row it did not ask
+        about is not "no longer listed"."""
+        vendor = self._seed(db, ROWS)
+        vendor.rows = [r for r in vendor.rows if r['ticker'] != 'AAPL']          # 2020: outside the overlap
+        out = fs.refresh(db, vendor, 'k', today=TODAY, log=lambda m: None)
+        assert out['withdrawn'] == 0 and 'AAPL' in [r[0] for r in _stored(db)]
+
+    def test_a_row_dated_after_today_is_outside_every_window(self, db):
+        fs.store_splits(db, [('SOON', dt.date(2026, 12, 7), 2.0, 1.0)])           # left by the older script
+        fs.refresh(db, FakeVendor(ROWS, page=50), 'k', full=True, today=TODAY, log=lambda m: None)
+        assert 'SOON' in [r[0] for r in _stored(db)]
+
+    def test_a_row_from_before_the_first_day_is_left_alone(self, db):
+        fs.store_splits(db, [('NVDA', dt.date(2007, 9, 11), 3.0, 2.0)])
+        fs.refresh(db, FakeVendor(ROWS, page=50), 'k', full=True, today=TODAY, log=lambda m: None)
+        assert ('NVDA', None, dt.date(2007, 9, 11), 3.0, 2.0) in _stored(db)
+
+    def test_a_short_answer_is_not_a_list_of_corrections(self, db, monkeypatch):
+        """HTTP 200, a results list, and most of the table missing from it."""
+        monkeypatch.setattr(fs, 'WITHDRAW_LIMIT', 2)
+        vendor = self._seed(db, ROWS)
+        before = _stored(db)
+        vendor.rows = vendor.rows[:1]                                            # four of five gone
+        with pytest.raises(fs.SplitsUnavailable, match='4 stored rows in that window are not among them') as stop:
+            fs.refresh(db, vendor, 'k', full=True, today=TODAY, log=lambda m: None)
+        assert 'nothing was changed' in str(stop.value) and '--accept-withdrawals' in str(stop.value)
+        assert 'NVDA 2021-07-20' in str(stop.value)
+        assert _stored(db) == before
+
+    def test_the_limit_is_inclusive_and_can_be_accepted(self, db, monkeypatch):
+        monkeypatch.setattr(fs, 'WITHDRAW_LIMIT', 2)
+        vendor = self._seed(db, ROWS)
+        vendor.rows = vendor.rows[:3]                                            # two gone: at the limit
+        assert fs.refresh(db, vendor, 'k', full=True, today=TODAY, log=lambda m: None)['withdrawn'] == 2
+        vendor.rows = vendor.rows[:0]                                            # three more
+        with pytest.raises(fs.SplitsUnavailable):
+            fs.refresh(db, vendor, 'k', full=True, today=TODAY, log=lambda m: None)
+        out = fs.refresh(db, vendor, 'k', full=True, today=TODAY, log=lambda m: None, accept_withdrawals=True)
+        assert out['withdrawn'] == 3 and _stored(db) == [] and len(self._withdrawn(db)) == 5
+
+    def test_the_real_limit(self):
+        assert fs.WITHDRAW_LIMIT == 25
+
+    def test_no_longer_listed_compares_ticker_and_day(self, db):
+        fs.store_splits(db, [('X', dt.date(2026, 10, 1), 2.0, 1.0), ('Y', dt.date(2026, 10, 1), 2.0, 1.0),
+                             ('X', dt.date(2026, 10, 9), 3.0, 1.0)])
+        listed = [('X', dt.date(2026, 10, 1), 5.0, 1.0)]                         # same key, corrected ratio
+        assert fs.no_longer_listed(db, listed, dt.date(2026, 10, 1), dt.date(2026, 10, 9)) == [
+            ('Y', dt.date(2026, 10, 1)), ('X', dt.date(2026, 10, 9))]
+        assert fs.no_longer_listed(db, listed, dt.date(2026, 10, 2), dt.date(2026, 10, 8)) == []

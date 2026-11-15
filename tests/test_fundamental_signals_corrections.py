@@ -457,3 +457,33 @@ class TestSplitInputs:
         rows = pd.DataFrame({'ticker': ['CGNX'], 'conid': ['555']})
         _, _, unreflected = fs._split_inputs(hist, {'CGNX'}, False, px, 'conid', rows)
         assert unreflected == frozenset({('CGNX', dt.date(2021, 7, 20))})
+
+
+class TestRefusedTickers:
+    """`scripts/pit_split_adjust.py` leaves a series it cannot explain exactly
+    as it was and names the ticker in `pit_split_refusals`. Its price is on an
+    unknown basis, so it has no market cap here."""
+
+    def test_no_table_is_nobody_refused(self, hist):
+        assert fs.refused_tickers(hist) == frozenset()
+
+    def test_the_tickers_on_record(self, hist):
+        hist.execute('CREATE TABLE pit_split_refusals(ticker VARCHAR, reason VARCHAR, detail VARCHAR, '
+                     'unverified_splits VARCHAR, refused_at TIMESTAMPTZ)', fetch='none')
+        assert fs.refused_tickers(hist) == frozenset()
+        for ticker in ('XRX', 'SDRL', 'XRX'):
+            hist.execute("INSERT INTO pit_split_refusals VALUES (?, 'unexplained_quotient', '', '[]', now())",
+                         [ticker], fetch='none')
+        assert fs.refused_tickers(hist) == frozenset({'XRX', 'SDRL'})
+
+    def test_a_refused_ticker_has_no_share_count_and_so_no_market_cap(self):
+        frame = pd.DataFrame({'AAPL': [1.0, 2.0], 'XRX': [3.0, 4.0], 'SDRL': [5.0, 6.0]})
+        out = fs.without_refused(frame, frozenset({'XRX', 'SDRL', 'NOT_HELD'}))
+        assert out['AAPL'].tolist() == [1.0, 2.0]
+        assert out['XRX'].isna().all() and out['SDRL'].isna().all()
+        assert frame['XRX'].tolist() == [3.0, 4.0], 'the frame handed in is not changed'
+
+    def test_nobody_refused_is_the_same_frame(self):
+        frame = pd.DataFrame({'AAPL': [1.0]})
+        assert fs.without_refused(frame, frozenset()) is frame
+        assert fs.without_refused(frame, frozenset({'XRX'})) is frame

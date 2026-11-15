@@ -12,21 +12,33 @@ pycron runs each weekday evening:
 
   every run, for the last COMPLETED NYSE session D
     1. scripts/build_pit_universe.py --incremental --end D          (once)
-    2. python -m trader.rebalance reconcile --sleeve S              (per sleeve)
-    3. python -m trader.lowfreq_live track --sleeve S
+    2. scripts/fetch_splits.py                                      (once)
+    3. scripts/pit_split_adjust.py --apply --accept-refusals        (once)
+    4. python -m trader.rebalance reconcile --sleeve S              (per sleeve)
+    5. python -m trader.lowfreq_live track --sleeve S
 
   additionally, when D is the first session of its month and S has no D.json
-    4. scripts/fetch_fundamentals.py --incremental                  (once; needs SEC_API_KEY)
-    5. python -m trader.lowfreq_live targets <family>/<id> --sleeve S --capital C --as-of D
+    6. scripts/fetch_fundamentals.py --incremental                  (once; needs SEC_API_KEY)
+    7. python -m trader.lowfreq_live targets <family>/<id> --sleeve S --capital C --as-of D
        (candidate, capital and params are taken from the sleeve's newest targets file)
-    6. python -m trader.rebalance plan --sleeve S   -> saved under ~/.local/share/mmr/reports/
+    8. python -m trader.rebalance plan --sleeve S   -> saved under ~/.local/share/mmr/reports/
 
-It never proposes, approves or trades: step 6 is the dry run, and turning it
+Steps 2 and 3 keep prices and share counts on one split basis: bars are
+adjusted as of the day they were fetched, so a split executed since leaves
+the days before it on the old basis (a split-sized jump in the series, and a
+market cap wrong by the ratio) until step 3 puts them on today's.
+
+It never proposes, approves or trades: step 8 is the dry run, and turning it
 into PENDING proposals (`rebalance propose`) and approving them stays the
 operator's act (D15). A step that fails stops the later steps of THAT sleeve —
 each one reads what the one before wrote — and the job exits non-zero, which
-pycron reports. A sleeve is any directory under the targets directory holding
-at least one `<as_of>.json`.
+pycron reports. Two steps can finish with a complaint that is REPORTED (the
+job still exits non-zero) without stopping what follows, because what follows
+has its own gate and a month's decision is not retried the next night:
+fundamentals when some names could not be read (`targets` refuses stale
+fundamentals itself), and the split adjustment when it refused a series it
+could not explain (everything it could, it did). A sleeve is any directory
+under the targets directory holding at least one `<as_of>.json`.
 
     python scripts/sleeve_upkeep.py                  # what pycron runs
     python scripts/sleeve_upkeep.py --dry-run        # print the steps, run nothing
@@ -49,13 +61,23 @@ REPO = Path(__file__).resolve().parent.parent
 REPORTS = Path('~/.local/share/mmr/reports').expanduser()
 
 
+# Exit statuses that mean "done, with a complaint" rather than "did not run".
+FUNDAMENTALS_SOME_NAMES_FAILED = 1      # scripts/fetch_fundamentals.py (2 = aborted: an outage)
+ADJUST_SOMETHING_REFUSED = 1            # scripts/pit_split_adjust.py: a NEW refusal (2 = could not run)
+
+
 @dataclass(frozen=True)
 class Step:
-    """One command of the upkeep. ``sleeve`` is '' for a step shared by all."""
+    """One command of the upkeep. ``sleeve`` is '' for a step shared by all.
+
+    ``continue_on``: non-zero exit statuses after which the LATER steps still
+    run. The step is reported as failed and the job exits non-zero either way.
+    """
     name: str
     argv: Sequence[str]
     sleeve: str = ''
     save_output_to: Optional[Path] = None
+    continue_on: Sequence[int] = ()
 
 
 @dataclass
@@ -147,13 +169,20 @@ def plan_steps(session: dt.date, sleeves: Sequence[str], targets_dir: Path, *, f
     steps: List[Step] = []
     if not skip_bars:
         steps.append(Step('bars', (python, 'scripts/build_pit_universe.py', '--incremental', '--end', day)))
+        steps.append(Step('splits', (python, 'scripts/fetch_splits.py')))
+        # --accept-refusals: a series the tool cannot explain is recorded in
+        # pit_split_refusals and left out by every reader of market caps, so
+        # the basis moves on the same night instead of the next.
+        steps.append(Step('adjust', (python, 'scripts/pit_split_adjust.py', '--apply', '--accept-refusals'),
+                          continue_on=(ADJUST_SOMETHING_REFUSED,)))
     due = [sleeve for sleeve in sleeves
            if first_of_month and not (targets_dir / sleeve / f'{day}.json').exists()]
     for sleeve in sleeves:
         steps.append(Step('reconcile', (python, '-m', 'trader.rebalance', 'reconcile', '--sleeve', sleeve), sleeve))
         steps.append(Step('track', (python, '-m', 'trader.lowfreq_live', 'track', '--sleeve', sleeve), sleeve))
     if due:
-        steps.append(Step('fundamentals', (python, 'scripts/fetch_fundamentals.py', '--incremental')))
+        steps.append(Step('fundamentals', (python, 'scripts/fetch_fundamentals.py', '--incremental'),
+                          continue_on=(FUNDAMENTALS_SOME_NAMES_FAILED,)))
     for sleeve in due:
         spec = sleeve_spec(targets_dir, sleeve)
         argv = [python, '-m', 'trader.lowfreq_live', 'targets', spec.candidate, '--sleeve', sleeve,
@@ -171,8 +200,9 @@ Runner = Callable[[Step], 'tuple[int, str]']
 
 def run_steps(steps: Sequence[Step], runner: Runner) -> List[Outcome]:
     """Run in order. A failed sleeve step stops that sleeve's later steps; a
-    failed SHARED step (bars, fundamentals) stops every step that reads it —
-    which is everything after it."""
+    failed SHARED step (bars, splits, the adjustment, fundamentals) stops every
+    step that reads it — which is everything after it — unless its exit status
+    is one the step says to continue on (``Step.continue_on``)."""
     outcomes: List[Outcome] = []
     failed_sleeves: set = set()
     shared_failure = ''
@@ -185,6 +215,8 @@ def run_steps(steps: Sequence[Step], runner: Runner) -> List[Outcome]:
             continue
         code, output = runner(step)
         outcomes.append(Outcome(step, code, output))
+        if code != 0 and code in step.continue_on:
+            continue                        # reported as failed; what follows has its own gate
         if code != 0:
             if step.sleeve:
                 failed_sleeves.add(step.sleeve)
@@ -236,7 +268,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument('--session', default=None,
                         help='treat this YYYY-MM-DD as the last completed session (default: from the NYSE calendar)')
     parser.add_argument('--targets-dir', default=None, help='override ~/.local/share/mmr/data/targets')
-    parser.add_argument('--skip-bars', action='store_true', help='do not refresh pit_daily_bars')
+    parser.add_argument('--skip-bars', action='store_true',
+                        help='do not refresh the stored prices (bars, split history, split adjustment)')
     parser.add_argument('--dry-run', action='store_true', help='print the steps and run nothing')
     args = parser.parse_args(argv)
 

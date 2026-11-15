@@ -9,6 +9,18 @@ virtual decisive benchmark (`eq_ew_covered`, D05) from the same stored bars,
 and the benchmark is executed by `Backtester.run_panel` itself, so the sleeve
 accumulates honest out-of-sample evidence at zero capital risk.
 
+> **2026-11-15: the strategy this sleeve runs has no research result behind
+> it.** The development result that started it (+12.0%/yr over its benchmark)
+> came from a market cap computed on two bases at once — split-adjusted prices
+> times as-reported share counts — which is lookahead toward every stock that
+> later split. On a correct market cap the candidate FAILS in development and
+> held out (`docs/RESEARCH_LOG.md`, 2026-11-15). The sleeve's 15 holdings were
+> bought on 2026-09-30 from targets computed the old way; targets generated
+> from 2026-11-15 on use the corrected market cap, so the next rebalance will
+> turn much of the book over. What follows is the operating runbook for the
+> machinery, which is sound; whether to keep running a book on this signal is
+> a decision, not a default.
+
 Every command below is complete and runs from the host. `EXEC` carries the
 persistent environment: the harness reads only the databases named by
 `LOWFREQ_RESEARCH_CONFIG` (D03), which in the container is the live config
@@ -24,8 +36,9 @@ EXEC="docker exec -u trader -w /home/trader/mmr \
 
 pycron runs `scripts/sleeve_upkeep.py` at 23:30 ET every weekday (job
 `sleeve_upkeep`). For the last completed NYSE session it does the "every
-session" steps below for every sleeve that has a targets file — bars,
-`reconcile`, `track` — and, when that session was the first of its month and
+session" steps below for every sleeve that has a targets file — bars, the
+split history, the split adjustment of the stored prices, `reconcile`,
+`track` — and, when that session was the first of its month and
 the sleeve has no targets file for it, the monthly steps 1 and 2 plus a
 dry-run `plan`, saved to
 `~/.local/share/mmr/reports/sleeve_<sleeve>_<session>_plan.txt`. Candidate,
@@ -61,8 +74,26 @@ the close, generate targets, propose, review, approve before the next open.
 
 ```
 $EXEC python3 scripts/build_pit_universe.py --incremental --end D
+$EXEC python3 scripts/fetch_splits.py
+$EXEC python3 scripts/pit_split_adjust.py --apply --accept-refusals
 $EXEC python3 scripts/fetch_fundamentals.py --incremental
 ```
+
+The two middle lines keep price and share count on one basis. Every stored
+bar is split-adjusted as of the day it was fetched, so a split executed since
+the last fetch leaves the days before it on the old basis: a split-sized jump
+in the series (MNST 97.74 -> 48.62 on 2026-07-29) and a market cap wrong by
+the ratio. `fetch_splits.py` brings `corporate_splits` up to today (one or two
+requests; it fails loudly), and `pit_split_adjust.py --apply` puts the stored
+prices on today's basis against the vendor's current adjusted series and
+records the day in `pit_price_basis`. `targets` and `track` refuse a store
+that does not record that day. Without `--apply` it prints what it would
+change. A series it cannot explain is left exactly as it was and named in
+`pit_split_refusals` (`--accept-refusals`: record it and move on the same
+night); those tickers get no market cap, so they are never ranked or held.
+Exit status 1 means a refusal that was not already on record, or a vendor or
+write failure - read the output; a ticker refused before and refused again is
+listed and is not a failure.
 
 `--end D` is required: without it the refresh stops at yesterday and `targets`
 refuses with STALE BARS. `build_pit_universe.py --incremental` resumes from
@@ -71,8 +102,19 @@ rewritten (a session whose bars are not yet published comes back empty and is
 fetched on the next run). `fetch_fundamentals.py --incremental` asks sec-api,
 for every current point-in-time top-500 member, only for filings accepted
 after the newest acceptance instant already stored for that name (newest per
-period wins, decided by the instant), and appends them with `INSERT OR IGNORE`.
-Both are idempotent: a second run fetches and writes nothing.
+period wins, decided by the instant; a late-filing notice is not a filing),
+and appends them with `INSERT OR IGNORE`. Both are idempotent: a second run
+fetches and writes nothing.
+
+The numbers come from the vendor's `/stocks/financials/v1` endpoints, which
+serve the LATEST version of a period: once a later filing restates a quarter
+as a comparative, that is what comes back. A row is stored only when the
+vendor's numbers were taken from the filing being dated, so this must run
+within months of a filing (monthly is ample) and it cannot backfill a name's
+history. Its summary line counts what it refused and why. It exits non-zero
+when the vendor or sec-api could not be read for any name — until 2026-11-15
+the vendor's endpoint had been retired for some time and every run reported
+"0 new rows".
 
 ### 2. Generate targets (the D08 file)
 

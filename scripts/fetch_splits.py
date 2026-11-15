@@ -28,6 +28,17 @@ WHAT A RUN DOES
     remembered. Rows it stored - back to 1978, and a few with future dates -
     are left as they are; readers compare dates.
 
+WITHDRAWN ROWS
+    The vendor's adjusted prices are adjusted by its CURRENT list, so a row it
+    no longer lists (a split it re-dated, or recorded by mistake) is in no
+    price it serves today and must not be in a share factor either. A stored
+    row inside the window just read that the vendor did not return is moved
+    to ``corporate_splits_withdrawn`` - moved, not deleted: it is the record
+    of what an older price was adjusted by. A response that would withdraw
+    more than ``WITHDRAW_LIMIT`` rows is far more likely a short answer than
+    that many corrections: the run stops, stores nothing, and lists them;
+    ``--accept-withdrawals`` goes ahead once they have been read.
+
 WHAT IS STORED
     ticker, execution date, ``split_to``, ``split_from`` (a 4:1 split is
     from 1 to 4; a 1-for-10 reverse split from 10 to 1; the vendor also lists
@@ -39,7 +50,8 @@ WHAT IS STORED
 FAILING
     A request that does not come back 200 with a ``results`` list RAISES:
     nothing from that run is stored and the exit status is 2. A partial table
-    that looked complete would be a market cap silently wrong.
+    that looked complete would be a market cap silently wrong. So does an
+    answer that would withdraw an implausible number of stored rows.
 """
 from __future__ import annotations
 
@@ -55,6 +67,12 @@ FIRST_DAY = dt.date(2009, 1, 1)             # before the first stored filing
 OVERLAP_DAYS = 45
 PAGE_LIMIT = 1000
 MAX_PAGES = 500
+WITHDRAW_LIMIT = 25
+
+WITHDRAWN_DDL = """CREATE TABLE IF NOT EXISTS corporate_splits_withdrawn (
+        ticker VARCHAR, conid VARCHAR, execution_date DATE,
+        split_to DOUBLE, split_from DOUBLE, fetched_at TIMESTAMPTZ,
+        withdrawn_at TIMESTAMPTZ)"""
 
 SPLITS_DDL = """CREATE TABLE IF NOT EXISTS corporate_splits (
         ticker VARCHAR, conid VARCHAR, execution_date DATE,
@@ -147,6 +165,35 @@ def store_splits(db, rows, conids=None) -> int:
     return len(rows)
 
 
+def no_longer_listed(db, rows, since: dt.date, until: dt.date) -> list:
+    """``(ticker, execution_date)`` of stored rows dated inside
+    ``[since, until]`` that are not among ``rows`` (what the vendor just
+    listed for that window), oldest first."""
+    db.execute(SPLITS_DDL, fetch='none')
+    listed = {(ticker, day) for ticker, day, _to, _from in rows}
+    stored = db.execute('SELECT ticker, execution_date FROM corporate_splits '
+                        'WHERE execution_date BETWEEN ? AND ? ORDER BY execution_date, ticker',
+                        [since, until], fetch='all') or []
+    return [(ticker, day.date() if isinstance(day, dt.datetime) else day) for ticker, day in stored
+            if (ticker, day.date() if isinstance(day, dt.datetime) else day) not in listed]
+
+
+def withdraw(db, keys) -> int:
+    """Move ``(ticker, execution_date)`` rows to ``corporate_splits_withdrawn``."""
+    if not keys:
+        return 0
+    db.execute(WITHDRAWN_DDL, fetch='none')
+
+    def _move(conn):
+        for ticker, day in keys:
+            conn.execute('INSERT INTO corporate_splits_withdrawn '
+                         'SELECT ticker, conid, execution_date, split_to, split_from, fetched_at, now() '
+                         'FROM corporate_splits WHERE ticker = ? AND execution_date = ?', [ticker, day])
+            conn.execute('DELETE FROM corporate_splits WHERE ticker = ? AND execution_date = ?', [ticker, day])
+    db.execute_atomic(_move)
+    return len(keys)
+
+
 def resume_from(db, today: dt.date) -> dt.date:
     """Where a default run starts: ``OVERLAP_DAYS`` before the newest stored
     execution date that is not in the future, or ``FIRST_DAY`` when there is
@@ -162,17 +209,30 @@ def resume_from(db, today: dt.date) -> dt.date:
     return max(FIRST_DAY, newest - dt.timedelta(days=OVERLAP_DAYS))
 
 
-def refresh(db, client, key: str, *, full: bool = False, today=None, conids=None, log=print) -> dict:
+def refresh(db, client, key: str, *, full: bool = False, today=None, conids=None, log=print,
+            accept_withdrawals: bool = False) -> dict:
     today = today or dt.date.today()
     since = FIRST_DAY if full else resume_from(db, today)
     fetched = fetch_splits(client, key, since, today)
     rows, dropped = usable_rows(fetched, today)
+    gone = no_longer_listed(db, rows, since, today)
+    if len(gone) > WITHDRAW_LIMIT and not accept_withdrawals:
+        shown = ', '.join(f'{ticker} {day}' for ticker, day in gone[:12])
+        raise SplitsUnavailable(
+            f'the vendor listed {len(fetched)} splits from {since} to {today} and {len(gone)} stored rows in '
+            f'that window are not among them ({shown}{", ..." if len(gone) > 12 else ""}). More than '
+            f'{WITHDRAW_LIMIT} looks like a short answer, not corrections; nothing was changed. Re-run, or '
+            'pass --accept-withdrawals once the list has been read')
     written = store_splits(db, rows, conids)
+    withdrawn = withdraw(db, gone)
     total = db.execute('SELECT count(*), max(execution_date) FROM corporate_splits WHERE execution_date <= ?',
                        [today], fetch='one')
     log(f'splits: {len(fetched)} listed from {since} to {today}, {written} stored, {dropped} not usable; '
         f'{total[0]} executed splits in the table, newest {total[1]}')
-    return {'listed': len(fetched), 'written': written, 'dropped': dropped,
+    if withdrawn:
+        log(f'splits: {withdrawn} stored row(s) the vendor no longer lists moved to corporate_splits_withdrawn: '
+            + ', '.join(f'{ticker} {day}' for ticker, day in gone[:20]) + (', ...' if withdrawn > 20 else ''))
+    return {'listed': len(fetched), 'written': written, 'dropped': dropped, 'withdrawn': withdrawn,
             'stored': int(total[0]), 'since': since, 'until': today}
 
 
@@ -190,6 +250,9 @@ def main() -> int:
     ap.add_argument('--full', action='store_true',
                     help=f're-read everything from {FIRST_DAY} (default: from {OVERLAP_DAYS} days before '
                          f'the newest stored split, or everything when the table is empty)')
+    ap.add_argument('--accept-withdrawals', action='store_true',
+                    help=f'go ahead when more than {WITHDRAW_LIMIT} stored rows in the window are no longer '
+                         'listed by the vendor (they are moved to corporate_splits_withdrawn)')
     args = ap.parse_args()
 
     import logging as _logging
@@ -212,7 +275,7 @@ def main() -> int:
     try:
         with httpx.Client() as client:
             refresh(db, client, key, full=args.full, conids=conids,
-                    log=lambda m: print(m, flush=True))
+                    log=lambda m: print(m, flush=True), accept_withdrawals=args.accept_withdrawals)
     except SplitsUnavailable as ex:
         print(f'FAILED: {ex}; nothing from this run was stored', file=sys.stderr)
         return 2

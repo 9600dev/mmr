@@ -914,8 +914,10 @@ class TestBasis:
         first, lines = run(db, vendor, apply=True)
         assert first.exit_code == 1 and first.basis is None and self.basis(db) == []
         assert any('refused for the first time' in line for line in lines)
-        second, _ = run(db, vendor, apply=True)
-        assert second.exit_code == 1, 'still refused, still non-zero'
+        second, lines = run(db, vendor, apply=True)
+        assert second.refused and second.unreported == []
+        assert second.exit_code == 0, 'a refusal already on record is a known exception, not a failed run'
+        assert any('all were already on record in pit_split_refusals' in line for line in lines)
         [(through, note)] = self.basis(db)
         assert through == RUN_DATE and 'NOT on this basis (pit_split_refusals): GONE' in note
 
@@ -1024,3 +1026,172 @@ class TestCommandLine:
         cli.db.execute('DROP TABLE corporate_splits', fetch='none')
         assert psa.main(['--db', cli.path]) == 2
         assert 'no corporate_splits table' in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# A nightly job: which refusals fail the run, and which splits a run looks at
+# ---------------------------------------------------------------------------
+
+class TestWhatFailsARun:
+    """Ten tickers are refused in the live table and always will be (SDRL: a
+    2018 restructuring that is not a split). A job that exits 1 on them every
+    night is a job nobody reads; one that exits 0 on a NEW refusal is worse."""
+
+    def _refused(self, db, ticker='GONE', split=FORWARD):
+        store(db, ticker, Series([split]))
+        add_splits(db, ticker, [(split[0], 1, split[1])])
+
+    def test_a_first_refusal_fails_the_run_and_names_the_ticker(self, db):
+        vendor = FakeVendor()
+        self._refused(db)
+        result, lines = run(db, vendor, apply=True, accept_refusals=True)
+        assert result.unreported == ['GONE'] and result.exit_code == 1
+        assert any('NOT already on record (this is why the exit status is 1): GONE' in line for line in lines)
+
+    def test_the_same_refusal_the_next_night_does_not(self, db):
+        vendor = FakeVendor()
+        self._refused(db)
+        run(db, vendor, apply=True, accept_refusals=True)
+        again, lines = run(db, vendor, apply=True, accept_refusals=True)
+        assert [p.ticker for p in again.refused] == ['GONE'], 'still refused, still printed'
+        assert again.unreported == [] and again.exit_code == 0
+        assert any(line.startswith('REFUSED  GONE') for line in lines)
+
+    def test_a_dry_run_does_not_put_a_refusal_on_record(self, db):
+        vendor = FakeVendor()
+        self._refused(db)
+        for _ in range(2):
+            result, _ = run(db, vendor)
+            assert result.exit_code == 1 and result.unreported == ['GONE']
+
+    def test_a_new_split_on_a_ticker_already_refused_fails_the_run_again(self, db):
+        vendor = FakeVendor()
+        store(db, 'GONE', Series([FORWARD, (D(2026, 9, 15), 3.0)]))
+        add_splits(db, 'GONE', [(FORWARD[0], 1, 2)])
+        run(db, vendor, apply=True, accept_refusals=True)
+        add_splits(db, 'GONE', [(D(2026, 9, 15), 1, 3)])
+        result, _ = run(db, vendor, apply=True, accept_refusals=True)
+        assert result.unreported == ['GONE'] and result.exit_code == 1
+
+    def test_a_vendor_failure_is_never_already_known(self, db):
+        """It is put on record like any refusal - and reported every night it
+        happens, because tomorrow's request may succeed."""
+        vendor = FakeVendor()
+        setup_junction(db, vendor)
+        vendor.fail['MNST'] = RuntimeError('503')
+        for _ in range(2):
+            result, _ = run(db, vendor, apply=True, accept_refusals=True)
+            assert [p.reason for p in result.refused] == ['fetch_failed']
+            assert result.unreported == ['MNST'] and result.exit_code == 1
+        del vendor.fail['MNST']
+        fixed, _ = run(db, vendor, apply=True, accept_refusals=True)
+        assert fixed.exit_code == 0 and fixed.rows_changed == 42 and table(db, 'pit_split_refusals') == []
+
+    def test_one_new_refusal_among_standing_ones_is_the_one_named(self, db):
+        vendor = FakeVendor()
+        self._refused(db, 'OLD1')
+        self._refused(db, 'OLD2', REVERSE)
+        run(db, vendor, apply=True, accept_refusals=True)
+        self._refused(db, 'NEW')
+        result, _ = run(db, vendor, apply=True, accept_refusals=True)
+        assert sorted(p.ticker for p in result.refused) == ['NEW', 'OLD1', 'OLD2']
+        assert result.unreported == ['NEW'] and result.exit_code == 1
+
+    def test_the_json_document_carries_them(self, db):
+        vendor = FakeVendor()
+        self._refused(db)
+        result, _ = run(db, vendor)
+        document = result.as_dict()
+        assert document['unreported_refusals'] == ['GONE'] and document['exit_code'] == 1
+
+
+class TestTheDefaultWindowFollowsTheBasis:
+    def test_no_basis_on_record_is_everything(self):
+        assert psa.default_since(None) is None
+
+    def test_with_a_basis_it_reaches_back_past_it(self):
+        assert psa.OVERLAP_DAYS == 45
+        assert psa.default_since(D(2026, 10, 1)) == D(2026, 8, 17)
+
+    @pytest.fixture
+    def cli(self, db, monkeypatch, tmp_path):
+        vendor = FakeVendor()
+        monkeypatch.setenv('MASSIVE_API_KEY', 'not-a-key')
+        import massive
+        monkeypatch.setattr(massive, 'RESTClient', lambda key: vendor)
+        return SimpleNamespace(db=db, vendor=vendor, path=db.db_path, tmp=tmp_path)
+
+    def _old_and_new(self, cli):
+        """OLD split executed 2026-06-15 (long before any basis), NEW after it."""
+        old = Series([(D(2026, 6, 15), 2.0)])
+        store(cli.db, 'OLD', old, fetched=lambda day: RUN_DATE)            # fetched in one go: clean
+        add_splits(cli.db, 'OLD', [(D(2026, 6, 15), 1, 2)])
+        cli.vendor.serve('OLD', old)
+        setup_junction(cli.db, cli.vendor, 'NEW', (D(2026, 9, 20), 2.0))
+
+    def test_the_first_run_looks_at_every_split(self, cli, capsys):
+        self._old_and_new(cli)
+        assert psa.main(['--db', cli.path, '--run-date', RUN_DATE.isoformat(), '--apply']) == 0
+        assert sorted({t for t, _ in cli.vendor.calls}) == ['NEW', 'OLD']
+        assert psa.recorded_basis(cli.db) == RUN_DATE
+
+    def test_a_later_run_looks_only_at_splits_since_before_the_basis(self, cli, capsys):
+        self._old_and_new(cli)
+        argv = ['--db', cli.path, '--apply']
+        psa.main(argv + ['--run-date', RUN_DATE.isoformat()])
+        cli.vendor.calls.clear()
+        capsys.readouterr()
+        # the nightly order: the split table is refreshed first (fetch_splits.py) ...
+        cli.db.execute("UPDATE corporate_splits SET fetched_at = CAST('2026-10-02 08:00:00-04:00' AS TIMESTAMPTZ)",
+                       fetch='none')
+        assert psa.main(argv + ['--run-date', '2026-10-02']) == 0
+        assert sorted({t for t, _ in cli.vendor.calls}) == ['NEW']          # 09-20 is inside 45 days; 06-15 is not
+        out = capsys.readouterr().out
+        assert 'looking at splits executed since 2026-08-17 (45 days before the basis on record)' in out
+        assert psa.recorded_basis(cli.db) == D(2026, 10, 2), 'the window reaches the basis, so it advances'
+
+    def test_the_basis_does_not_pass_the_day_the_split_table_was_last_fetched(self, cli, capsys):
+        """Nothing can be said about splits after that day, whatever the window."""
+        self._old_and_new(cli)
+        argv = ['--db', cli.path, '--apply']
+        psa.main(argv + ['--run-date', RUN_DATE.isoformat()])
+        assert psa.main(argv + ['--run-date', '2026-10-09']) == 0
+        assert psa.recorded_basis(cli.db) == RUN_DATE
+        assert 'the split table was last fetched 2026-10-01' in capsys.readouterr().out
+
+    def test_however_long_the_job_was_down_the_window_reaches_the_basis(self, cli, capsys):
+        """A fixed "last N days" would leave the splits in between unexamined
+        and the basis stuck. The window starts from the basis itself."""
+        self._old_and_new(cli)
+        argv = ['--db', cli.path, '--apply']
+        psa.main(argv + ['--run-date', RUN_DATE.isoformat()])
+        late = Series([(D(2026, 12, 1), 2.0)])
+        store(cli.db, 'LATE', late, fetched=lambda day: D(2026, 11, 1))     # fetched before its split
+        add_splits(cli.db, 'LATE', [(D(2026, 12, 1), 1, 2)], fetched_at='2027-05-01 08:00:00-04:00')
+        cli.vendor.serve('LATE', late, as_of=D(2027, 5, 1))
+        cli.vendor.calls.clear()
+        assert psa.main(argv + ['--run-date', '2027-05-01']) == 0
+        assert 'LATE' in {t for t, _ in cli.vendor.calls}
+        assert largest_step(cli.db, 'LATE') < 0.03
+        assert psa.recorded_basis(cli.db) == D(2027, 5, 1)
+
+    def test_full_looks_at_everything_whatever_is_on_record(self, cli, capsys):
+        self._old_and_new(cli)
+        argv = ['--db', cli.path, '--apply', '--run-date']
+        psa.main(argv + [RUN_DATE.isoformat()])
+        cli.vendor.calls.clear()
+        assert psa.main(argv + ['2026-10-02', '--full']) == 0
+        assert sorted({t for t, _ in cli.vendor.calls}) == ['NEW', 'OLD']
+
+    @pytest.mark.parametrize('extra', [['--since', '2026-09-01'], ['--tickers', 'NEW']])
+    def test_full_cannot_be_narrowed(self, cli, capsys, extra):
+        with pytest.raises(SystemExit) as stop:
+            psa.main(['--db', cli.path, '--full'] + extra)
+        assert stop.value.code == 2
+
+    def test_an_explicit_since_is_used_as_given(self, cli, capsys):
+        self._old_and_new(cli)
+        psa.main(['--db', cli.path, '--apply', '--run-date', RUN_DATE.isoformat()])
+        cli.vendor.calls.clear()
+        psa.main(['--db', cli.path, '--run-date', '2026-10-02', '--since', '2026-06-01'])
+        assert sorted({t for t, _ in cli.vendor.calls}) == ['NEW', 'OLD']

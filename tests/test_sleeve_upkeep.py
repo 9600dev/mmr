@@ -116,29 +116,41 @@ class TestPlanSteps:
     def test_an_ordinary_session_refreshes_reconciles_and_tracks(self, tmp_path):
         _targets(tmp_path)
         steps = upkeep.plan_steps(dt.date(2026, 11, 13), ['paper_s2p'], tmp_path, first_of_month=False, python=PY)
-        assert _names(steps) == [('bars', ''), ('reconcile', 'paper_s2p'), ('track', 'paper_s2p')]
+        assert _names(steps) == [('bars', ''), ('splits', ''), ('adjust', ''), ('reconcile', 'paper_s2p'), ('track', 'paper_s2p')]
         assert steps[0].argv == (PY, 'scripts/build_pit_universe.py', '--incremental', '--end', '2026-11-13')
-        assert steps[1].argv == (PY, '-m', 'trader.rebalance', 'reconcile', '--sleeve', 'paper_s2p')
-        assert steps[2].argv == (PY, '-m', 'trader.lowfreq_live', 'track', '--sleeve', 'paper_s2p')
+        assert steps[1].argv == (PY, 'scripts/fetch_splits.py')
+        assert steps[2].argv == (PY, 'scripts/pit_split_adjust.py', '--apply', '--accept-refusals')
+        assert steps[3].argv == (PY, '-m', 'trader.rebalance', 'reconcile', '--sleeve', 'paper_s2p')
+        assert steps[4].argv == (PY, '-m', 'trader.lowfreq_live', 'track', '--sleeve', 'paper_s2p')
+
+    def test_prices_are_put_on_one_split_basis_before_anything_reads_them(self, tmp_path):
+        """Bars are adjusted as of the day they were fetched: a split executed
+        since leaves the days before it on the old basis until `adjust` runs."""
+        _targets(tmp_path)
+        steps = upkeep.plan_steps(dt.date(2026, 12, 1), ['paper_s2p'], tmp_path, first_of_month=True, python=PY)
+        names = [step.name for step in steps]
+        assert names.index('bars') < names.index('splits') < names.index('adjust')
+        for reader in ('track', 'targets', 'plan'):
+            assert names.index('adjust') < names.index(reader)
 
     def test_the_months_first_session_also_writes_the_decision_and_a_dry_run(self, tmp_path):
         _targets(tmp_path)
         steps = upkeep.plan_steps(dt.date(2026, 12, 1), ['paper_s2p'], tmp_path, first_of_month=True,
                                   python=PY, reports_dir=tmp_path / 'reports')
-        assert _names(steps) == [('bars', ''), ('reconcile', 'paper_s2p'), ('track', 'paper_s2p'),
+        assert _names(steps) == [('bars', ''), ('splits', ''), ('adjust', ''), ('reconcile', 'paper_s2p'), ('track', 'paper_s2p'),
                                  ('fundamentals', ''), ('targets', 'paper_s2p'), ('plan', 'paper_s2p')]
-        assert steps[3].argv == (PY, 'scripts/fetch_fundamentals.py', '--incremental')
-        assert steps[4].argv == (PY, '-m', 'trader.lowfreq_live', 'targets', 'equity/s2p_top_quintile',
+        assert steps[5].argv == (PY, 'scripts/fetch_fundamentals.py', '--incremental')
+        assert steps[6].argv == (PY, '-m', 'trader.lowfreq_live', 'targets', 'equity/s2p_top_quintile',
                                  '--sleeve', 'paper_s2p', '--capital', '50000', '--as-of', '2026-12-01',
                                  '--params', '{"quantile": 0.2}')
-        assert steps[5].argv == (PY, '-m', 'trader.rebalance', 'plan', '--sleeve', 'paper_s2p')
-        assert steps[5].save_output_to == tmp_path / 'reports' / 'sleeve_paper_s2p_2026-12-01_plan.txt'
+        assert steps[7].argv == (PY, '-m', 'trader.rebalance', 'plan', '--sleeve', 'paper_s2p')
+        assert steps[7].save_output_to == tmp_path / 'reports' / 'sleeve_paper_s2p_2026-12-01_plan.txt'
 
     def test_a_decision_already_written_for_the_session_is_not_written_again(self, tmp_path):
         _targets(tmp_path)
         _targets(tmp_path, as_of='2026-12-01')
         steps = upkeep.plan_steps(dt.date(2026, 12, 1), ['paper_s2p'], tmp_path, first_of_month=True, python=PY)
-        assert _names(steps) == [('bars', ''), ('reconcile', 'paper_s2p'), ('track', 'paper_s2p')]
+        assert _names(steps) == [('bars', ''), ('splits', ''), ('adjust', ''), ('reconcile', 'paper_s2p'), ('track', 'paper_s2p')]
 
     def test_params_are_passed_only_when_the_sleeve_has_them(self, tmp_path):
         _targets(tmp_path, strategy={'family': 'equity', 'id': 's2p_top_quintile', 'params': {}})
@@ -151,12 +163,12 @@ class TestPlanSteps:
         _targets(tmp_path, 'beta', capital_usd=25_000.5)
         _targets(tmp_path, 'beta', as_of='2026-12-01')                      # beta already decided
         steps = upkeep.plan_steps(dt.date(2026, 12, 1), ['alpha', 'beta'], tmp_path, first_of_month=True, python=PY)
-        assert _names(steps) == [('bars', ''), ('reconcile', 'alpha'), ('track', 'alpha'),
+        assert _names(steps) == [('bars', ''), ('splits', ''), ('adjust', ''), ('reconcile', 'alpha'), ('track', 'alpha'),
                                  ('reconcile', 'beta'), ('track', 'beta'),
                                  ('fundamentals', ''), ('targets', 'alpha'), ('plan', 'alpha')]
         assert '10000' in next(step for step in steps if step.name == 'targets').argv
 
-    def test_bars_can_be_skipped(self, tmp_path):
+    def test_the_price_steps_can_be_skipped_together(self, tmp_path):
         _targets(tmp_path)
         steps = upkeep.plan_steps(dt.date(2026, 11, 13), ['paper_s2p'], tmp_path, first_of_month=False,
                                   python=PY, skip_bars=True)
@@ -190,7 +202,7 @@ class TestRunning:
     def test_everything_runs_in_order_and_the_plan_is_saved(self, tmp_path):
         runner = _Recorder()
         outcomes = upkeep.run_steps(self._steps(tmp_path), runner)
-        assert all(outcome.returncode == 0 for outcome in outcomes) and len(runner.ran) == len(outcomes) == 10
+        assert all(outcome.returncode == 0 for outcome in outcomes) and len(runner.ran) == len(outcomes) == 12
         saved = tmp_path / 'reports' / 'sleeve_alpha_2026-12-01_plan.txt'
         assert saved.read_text() == 'plan output\nlast line of plan'
         ok, lines = upkeep.summarise(outcomes)
@@ -216,15 +228,59 @@ class TestRunning:
         runner = _Recorder({('bars', ''): 3})
         outcomes = upkeep.run_steps(self._steps(tmp_path), runner)
         assert runner.ran == [('bars', '')]
-        assert [o.skipped_because for o in outcomes[1:]] == ['bars failed'] * 9
+        assert [o.skipped_because for o in outcomes[1:]] == ['bars failed'] * 11
         assert upkeep.summarise(outcomes)[0] is False
 
-    def test_failed_fundamentals_keeps_the_daily_work_and_stops_the_decision(self, tmp_path):
-        runner = _Recorder({('fundamentals', ''): 1})
+    def test_a_split_history_that_cannot_be_read_stops_everything_that_reads_prices(self, tmp_path):
+        runner = _Recorder({('splits', ''): 2})
+        outcomes = upkeep.run_steps(self._steps(tmp_path), runner)
+        assert runner.ran == [('bars', ''), ('splits', '')]
+        assert [o.skipped_because for o in outcomes[2:]] == ['splits failed'] * 10
+
+    def test_an_outage_at_the_fundamentals_vendor_keeps_the_daily_work_and_stops_the_decision(self, tmp_path):
+        """Exit 2: the ingest aborted. Nothing to decide on."""
+        runner = _Recorder({('fundamentals', ''): 2})
         outcomes = upkeep.run_steps(self._steps(tmp_path), runner)
         assert {('track', 'alpha'), ('track', 'beta')} <= set(runner.ran)
         assert not any(name in ('targets', 'plan') for name, _ in runner.ran)
         assert upkeep.summarise(outcomes)[0] is False
+
+    def test_a_few_unreadable_names_are_reported_and_the_decision_is_still_attempted(self, tmp_path):
+        """Exit 1: some names failed. `targets` has its own staleness gate, and a
+        month's decision is not retried the next night - one bad ticker in six
+        hundred must not cost it. The job still fails, so pycron reports it."""
+        runner = _Recorder({('fundamentals', ''): upkeep.FUNDAMENTALS_SOME_NAMES_FAILED})
+        outcomes = upkeep.run_steps(self._steps(tmp_path), runner)
+        assert {('targets', 'alpha'), ('plan', 'alpha'), ('targets', 'beta'), ('plan', 'beta')} <= set(runner.ran)
+        assert not any(o.returncode is None for o in outcomes)
+        ok, lines = upkeep.summarise(outcomes)
+        assert ok is False and any(line.startswith('FAILED  fundamentals (exit 1):') for line in lines)
+
+    def test_an_adjustment_that_refused_a_series_is_reported_and_the_rest_runs(self, tmp_path):
+        runner = _Recorder({('adjust', ''): upkeep.ADJUST_SOMETHING_REFUSED})
+        outcomes = upkeep.run_steps(self._steps(tmp_path), runner)
+        assert len(runner.ran) == 12 and not any(o.returncode is None for o in outcomes)
+        ok, lines = upkeep.summarise(outcomes)
+        assert ok is False and any(line.startswith('FAILED  adjust (exit 1):') for line in lines)
+
+    def test_an_adjustment_that_could_not_run_stops_what_reads_prices(self, tmp_path):
+        runner = _Recorder({('adjust', ''): 2})
+        outcomes = upkeep.run_steps(self._steps(tmp_path), runner)
+        assert runner.ran == [('bars', ''), ('splits', ''), ('adjust', '')]
+        assert [o.skipped_because for o in outcomes[3:]] == ['adjust failed'] * 9
+
+    def test_only_the_named_statuses_continue(self, tmp_path):
+        steps = [upkeep.Step('first', ('x',), continue_on=(1,)), upkeep.Step('second', ('y',))]
+        for code, ran_second in ((1, True), (2, False), (3, False)):
+            runner = _Recorder({('first', ''): code})
+            upkeep.run_steps(steps, runner)
+            assert (('second', '') in runner.ran) is ran_second, code
+
+    def test_a_sleeve_step_can_continue_too(self, tmp_path):
+        steps = [upkeep.Step('a', ('x',), 'alpha', continue_on=(1,)), upkeep.Step('b', ('y',), 'alpha')]
+        runner = _Recorder({('a', 'alpha'): 1})
+        outcomes = upkeep.run_steps(steps, runner)
+        assert runner.ran == [('a', 'alpha'), ('b', 'alpha')] and upkeep.summarise(outcomes)[0] is False
 
     def test_a_failed_plan_is_not_saved_as_a_plan(self, tmp_path):
         runner = _Recorder({('plan', 'alpha'): 1})
@@ -276,6 +332,8 @@ class TestCommandLine:
         code = upkeep.main(['--targets-dir', str(tmp_path), '--session', '2026-11-13'])
         assert code == 1 and 'sleeve upkeep FAILED' in capsys.readouterr().out
         assert [argv[1:3] for argv, _ in calls] == [['scripts/build_pit_universe.py', '--incremental'],
+                                                    ['scripts/fetch_splits.py'],
+                                                    ['scripts/pit_split_adjust.py', '--apply'],
                                                     ['-m', 'trader.rebalance']]
         environment = calls[0][1]['env']
         assert environment['LOWFREQ_RESEARCH_CONFIG'].endswith('trader.yaml')    # the harness reads it (D03)

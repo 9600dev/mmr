@@ -227,6 +227,33 @@ def price_basis_day(hist_db):
     return day.date() if hasattr(day, 'date') else day
 
 
+def refused_tickers(hist_db) -> frozenset:
+    """Tickers whose stored prices ``scripts/pit_split_adjust.py`` could not
+    put on the common split basis (``pit_split_refusals``): prices that carry
+    a split nobody lists any more, a restructuring that is not a split. Their
+    price is on an unknown basis, so no share factor can make it a market cap.
+    Empty when the table does not exist (nothing has been refused)."""
+    try:
+        rows = hist_db.execute('SELECT DISTINCT ticker FROM pit_split_refusals', fetch='all')
+    except Exception as ex:
+        if 'pit_split_refusals' in str(ex):
+            return frozenset()
+        raise
+    return frozenset(str(row[0]) for row in rows or [])
+
+
+def without_refused(frame: pd.DataFrame, refused) -> pd.DataFrame:
+    """``frame`` with the columns of refused tickers set to NaN (unknown), so
+    they drop out of every ratio and of coverage rather than being ranked on a
+    market cap that is not one."""
+    columns = [c for c in frame.columns if str(c) in refused]
+    if not columns:
+        return frame
+    out = frame.copy()
+    out[columns] = np.nan
+    return out
+
+
 def _split_inputs(hist_db, tickers, pit: bool, px: pd.DataFrame, key: str, rows: pd.DataFrame):
     """``(events, through, unreflected)`` for ``prepare_rows`` — or
     ``(None, None, frozenset())`` when there is no ``corporate_splits`` table.
@@ -344,10 +371,13 @@ def build(delay_days: int = 0, pit: bool = False, with_frames: bool = False):
                         + pd.Timedelta(days=delay_days))
     corrections = enabled_corrections()
     events, through, unreflected = None, None, frozenset()
+    refused = frozenset()
     if 'split_basis' in corrections:
         hist_db = DuckDBConnection(cfg.get('history_duckdb_path', '') or cfg.get('duckdb_path', ''))
         events, through, unreflected = _split_inputs(
             hist_db, set(rows['ticker'].astype(str)), pit, px, key, rows)
+        if pit:
+            refused = refused_tickers(hist_db)
     rows = prepare_rows(rows, key, events=events, through=through,
                         unreflected=unreflected, corrections=corrections)
 
@@ -376,6 +406,9 @@ def build(delay_days: int = 0, pit: bool = False, with_frames: bool = False):
             vals[valid] = g[f].to_numpy()[pos[valid]]
             frames[f][col] = vals
 
+    # A ticker whose prices could not be put on the common split basis has no
+    # market cap here, whatever its share count says.
+    frames['shares_diluted'] = without_refused(frames['shares_diluted'], refused)
     mcap = px * frames['shares_diluted']
     out['earnings_yield'] = frames['net_income_ttm'] / mcap
     out['book_to_price'] = frames['stockholders_equity'] / mcap
