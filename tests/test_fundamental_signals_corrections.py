@@ -389,30 +389,46 @@ class TestSplitInputs:
     def _rows(self, *tickers):
         return pd.DataFrame({'ticker': list(tickers), 'conid': [''] * len(tickers)})
 
+    def _basis(self, hist, day='2026-07-29'):
+        hist.execute('CREATE TABLE IF NOT EXISTS pit_price_basis(adjusted_through DATE, recorded_at TIMESTAMPTZ, '
+                     'note VARCHAR)', fetch='none')
+        hist.execute('INSERT INTO pit_price_basis VALUES (?, now(), ?)', [day, 'build'], fetch='none')
+
     def test_no_split_table_is_no_events(self, hist):
         assert fs._split_inputs(hist, {'NVDA'}, True, self.PX, 'ticker', self._rows('NVDA')) == (
             None, None, frozenset())
 
     def test_events_are_read_for_the_names_asked_about_only(self, hist):
         _splits_table(hist, [('NVDA', '2021-07-20', 1, 4), ('AAPL', '2020-08-31', 1, 4)])
+        self._basis(hist)
         events, through, unreflected = fs._split_inputs(hist, {'NVDA'}, True, self.PX, 'ticker', self._rows('NVDA'))
         assert events == {'NVDA': [(dt.date(2021, 7, 20), 4.0)]}
         assert unreflected == frozenset()
 
-    def test_without_a_recorded_basis_the_prices_are_taken_to_be_adjusted_to_their_last_day(self, hist):
+    def test_a_point_in_time_store_that_does_not_say_its_basis_is_refused(self, hist):
+        """The last stored day is not it: a snapshot cut at 2024-06-28 still
+        carries prices adjusted in July 2026, and reading the basis as the cut
+        leaves out two years of splits without a word."""
         _splits_table(hist, [('NVDA', '2021-07-20', 1, 4)])
-        _, through, _ = fs._split_inputs(hist, {'NVDA'}, True, self.PX, 'ticker', self._rows('NVDA'))
-        assert through == dt.date(2024, 6, 28)
-
-    def test_a_recorded_basis_wins_for_the_point_in_time_panel(self, hist):
-        """A snapshot cut at 2024-06-28 still carries prices adjusted in July 2026."""
-        _splits_table(hist, [('NVDA', '2021-07-20', 1, 4)])
+        with pytest.raises(RuntimeError, match="does not say what day pit_daily_bars is split-adjusted through"):
+            fs._split_inputs(hist, {'NVDA'}, True, self.PX, 'ticker', self._rows('NVDA'))
         hist.execute('CREATE TABLE pit_price_basis(adjusted_through DATE, recorded_at TIMESTAMPTZ, note VARCHAR)',
                      fetch='none')
-        hist.execute("INSERT INTO pit_price_basis VALUES ('2026-07-29', now(), 'build')", fetch='none')
+        with pytest.raises(RuntimeError, match='pit_price_basis'):          # the table, and nothing in it
+            fs._split_inputs(hist, {'NVDA'}, True, self.PX, 'ticker', self._rows('NVDA'))
+
+    def test_the_recorded_basis_is_the_bound_for_the_point_in_time_panel(self, hist):
+        _splits_table(hist, [('NVDA', '2021-07-20', 1, 4)])
+        self._basis(hist)
         _, through, _ = fs._split_inputs(hist, {'NVDA'}, True, self.PX, 'ticker', self._rows('NVDA'))
         assert through == dt.date(2026, 7, 29)
-        # ...and is about pit_daily_bars only: another panel is adjusted to its own last day.
+
+    def test_the_present_day_panel_is_adjusted_to_its_own_last_day(self, hist):
+        """It is re-fetched whole; `pit_price_basis` is about pit_daily_bars only."""
+        _splits_table(hist, [('NVDA', '2021-07-20', 1, 4)])
+        _, through, _ = fs._split_inputs(hist, {'NVDA'}, False, self.PX, 'ticker', self._rows('NVDA'))
+        assert through == dt.date(2024, 6, 28)
+        self._basis(hist)
         _, through, _ = fs._split_inputs(hist, {'NVDA'}, False, self.PX, 'ticker', self._rows('NVDA'))
         assert through == dt.date(2024, 6, 28)
 
@@ -422,12 +438,14 @@ class TestSplitInputs:
         _bars(hist, 'CGNX', [138.0, 137.5, 139.0, 138.2, 137.9, 138.49, 63.31, 64.0])        # raw jump on the 20th
         _bars(hist, 'NVDA', [200.0, 201.0, 199.0, 198.0, 200.5, 201.2, 199.9, 202.0])        # adjusted: ordinary day
         px = pd.DataFrame({'CGNX': [1.0, 1.0], 'NVDA': [1.0, 1.0]}, index=pd.to_datetime(['2021-07-12', '2021-07-21']))
+        self._basis(hist)
         _, _, unreflected = fs._split_inputs(hist, {'CGNX', 'NVDA'}, True, px, 'ticker', self._rows('CGNX', 'NVDA'))
         assert unreflected == frozenset({('CGNX', dt.date(2021, 7, 20))})
 
     def test_a_split_outside_the_stored_days_cannot_be_checked_and_counts_as_carried(self, hist):
         _splits_table(hist, [('NVDA', '2025-03-03', 1, 2)])
         _bars(hist, 'NVDA', [200.0, 201.0])
+        self._basis(hist)
         _, _, unreflected = fs._split_inputs(hist, {'NVDA'}, True, self.PX, 'ticker', self._rows('NVDA'))
         assert unreflected == frozenset()
 

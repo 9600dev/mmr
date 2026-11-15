@@ -231,10 +231,12 @@ def _split_inputs(hist_db, tickers, pit: bool, px: pd.DataFrame, key: str, rows:
     """``(events, through, unreflected)`` for ``prepare_rows`` — or
     ``(None, None, frozenset())`` when there is no ``corporate_splits`` table.
 
-    ``through`` is the day the prices are adjusted to: ``price_basis_day`` for
-    the point-in-time panel when the store records it, else the last day of
-    the panel (which leaves out any later split - the cautious reading when
-    nothing says the prices carry it).
+    ``through`` is the day the prices are adjusted to. For the point-in-time
+    panel the store must SAY (``price_basis_day``): it is not the last stored
+    day - a snapshot cut in 2024 carries prices adjusted in 2026 - and guessing
+    it leaves out every split in between, which is most of the correction,
+    silently. A store that does not say is refused. The present-day panel is
+    re-fetched whole and is adjusted to its own last day.
 
     A split is ``unreflected`` when the stored prices show the raw jump on its
     execution day (the vendor's adjusted series missed it): multiplying the
@@ -256,8 +258,16 @@ def _split_inputs(hist_db, tickers, pit: bool, px: pd.DataFrame, key: str, rows:
     days = pd.DatetimeIndex(pd.to_datetime(px.index))
     last = days.max().date() if len(days) else None
     first = days.min().date() if len(days) else None
-    basis = price_basis_day(hist_db) if pit else None
-    through = basis if basis is not None else last
+    if pit:
+        through = price_basis_day(hist_db)
+        if through is None:
+            raise RuntimeError(
+                'the history database does not say what day pit_daily_bars is split-adjusted through '
+                "(table 'pit_price_basis' is missing or empty), so share counts cannot be put on the "
+                'price basis. scripts/pit_split_adjust.py --apply records it; for a frozen snapshot, '
+                'record the day its prices were fetched.')
+    else:
+        through = last
 
     closes = {}
     if pit and events:

@@ -421,8 +421,9 @@ def run_incremental(db, hist_db, client, vendor, key: str, months: int = 3,
         if sleep:
             time.sleep(sleep)
     log(f'done: {written} new rows, {no_new} names with nothing new, {failed} sec-api failures, '
-        f'{vendor_failed} names whose statements could not be read, {no_statement} filings the vendor '
-        f'has no statement for yet, {other_filing} whose statement the vendor took from another filing')
+        f'{vendor_failed} names whose statements could not be read, {no_statement} dated filings with '
+        f'no vendor income statement (not parsed yet, or older than the vendor serves), {other_filing} '
+        f'whose statement the vendor took from another filing')
     return {'written': written, 'no_new': no_new, 'failed': failed, 'names': len(todo),
             'vendor_failed': vendor_failed, 'no_statement': no_statement,
             'other_filing': other_filing, 'aborted': aborted}
@@ -548,9 +549,9 @@ def main() -> int:
                       f'nofilings={no_filings} failed={failed}', flush=True)
             time.sleep(args.sleep)
 
-    print(f'done: {written} rows written, {no_statement} filings the vendor has no statement '
-          f'for, {other_filing} whose statement the vendor took from another filing (not stored: this ingest '
-          f'cannot backfill history), {no_values} tickers whose statements could not be read, '
+    print(f'done: {written} rows written, {no_statement} dated filings with no vendor income '
+          f'statement, {other_filing} whose statement the vendor took from another filing (not stored: '
+          f'this ingest cannot backfill history), {no_values} tickers whose statements could not be read, '
           f'{no_filings} with no 10-K/Q filings (funds/trusts), {failed} sec-api failures',
           flush=True)
     return 1 if (no_values or failed) else 0

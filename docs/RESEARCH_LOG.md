@@ -860,3 +860,213 @@ $25,000 sleeve capital each name is $403, three names cost more than that
 and cannot be bought at all under floor-and-refuse sizing, and 19 % stays in
 cash; at $100,000 all 62 are bought and cash is 4.7 %. The paper sleeve should
 start at $100k (or with a quintile cap on names), not $25k.
+
+---
+
+## 2026-11-15 — correction: the market cap under every price ratio was wrong, and nothing fundamental survives it
+
+Found while porting the fundamentals ingest off a retired vendor endpoint
+(audit `docs/AUDIT_2026-11-14.md` A7.5). Comparing the replacement endpoint
+field by field with the stored rows showed share counts that disagreed by the
+ratio of a later stock split, which is how the first defect below surfaced;
+the other three were found measuring it. **None is a timing leak, so the
+leak probe this program relies on (delay every acceptance instant by a week,
+see whether the signal degrades) could not see any of them**: it moves WHEN a
+number is known, not whether the number is right or on the same basis as the
+price beside it.
+
+### What was wrong
+
+`market cap = pit_daily_bars.close x fundamentals.shares_diluted` is the
+denominator of sales-to-price, book-to-price, earnings yield, cash-flow yield
+and of `1/marketcap`.
+
+| defect | what it is | measured |
+|---|---|---|
+| **split basis** | `pit_daily_bars` prices are split-ADJUSTED (the vendor's `adjusted=True`, as of the fetch); a filing's share count is AS REPORTED on the filing day. Their product understates the market cap by the cumulative ratio of every LATER split. | NVDA on 2021-07-01: stored close 20.21 (it traded at 808), stored shares 632M: $12.8B against a true $511B, a factor of 40. 100 names that were top-500 for more than 250 sessions have split since 2016-08: CMG 50x, NVDA 40x, BKNG 25x, AMZN and GOOG 20x, ANET 16x, TSLA and ORLY 15x, MNST 12x, AVGO / KLAC / LRCX / TTD / SHOP 10x. Reverse splits err the other way (MARA, NVAX, LCID: cap overstated 10-20x). |
+| **fiscal-year-end share counts** | The retired endpoint derived a fiscal Q4 by subtraction from the annual figures. Right for a flow; for a weighted-average share count it stored `annual average - mean(Q1..Q3)`. | AAPL FY2025: -47,029,000. Of 19,153 stored 10-K rows, 3,022 have no count, 7,393 a non-positive one, and 7,152 of the 8,709 that can be compared with the previous period are outside 0.5-2x of it. Negative for a company buying back stock (dropped from coverage for the quarter after its 10-K); small and POSITIVE for one issuing stock (market cap near zero, top of every price ratio). |
+| **late-filing notices** | The sec-api form filter `formType:"10-Q"` also matches `NT 10-Q`, a notice that the report will be late, filed BEFORE it. Rows dated to one put the numbers ahead of their filing. | 952 stored rows (758 in the dev snapshot), 304 tickers. |
+| **units** | Quarterly share counts off by a power of a thousand. | 432 of 44,489 (0.97%) outside [1/3, 3] of the centred five-filing median; 270 tickers. MCD 2024-03-31: 725.9. |
+| **trailing sums** | "TTM" was the sum of the last four ROWS. | 1,800 of 66,663 period-to-period steps skip a quarter, so those sums span fifteen months or more. |
+
+The first is lookahead in the plain sense: it ranks the 2019 universe by which
+names would have split by 2026, and stocks split after they have gone up.
+
+What it did to the book, on six month-ends (as-stored top quintile against
+the corrected one, same code path, full snapshot):
+
+| date | covered | top quintile | in the as-stored book ONLY | of those, market cap wrong by >1.5x |
+|---|---|---|---|---|
+| 2019-06-28 | 293 | 59 | 18 | 18: AXP, VFC, MCHP, GIS, TTWO (unit / 10-K errors), CMG 50x, NVDA 40x, BKNG 25x, AMZN 20x, ANET 16x, ORLY 15x, TSLA 15x, AVGO, KLAC, LRCX 10x |
+| 2020-06-30 | 281 | 56 | 14 | 14: incl. CMG, CRM, NVDA, BKNG, AMZN, TSLA, AVGO, KLAC, LRCX |
+| 2021-01-29 | 248 | 50 | 19 | 17: incl. NFLX, AVGO, ADI, DIS, DE, CMG, NVDA, BKNG, AMZN, KLAC, LRCX |
+| 2022-01-31 | 283 | 57 | 20 | 20: incl. NFLX, INTC, DIS, SBUX, BA, CMG, BKNG, AMZN, ANET, KLAC, LRCX, MSTR |
+| 2023-06-30 | 344 | 69 | 13 | 13: incl. ORCL, CMG, BKNG, ORLY, AVGO, KLAC, LRCX, NFLX, SMCI |
+| 2024-05-31 | 324 | 65 | 18 | 16: incl. MCD, GOOG, MRVL, CRWD, SNOW, CRM, CMG, BKNG, KLAC, LRCX, NFLX, SMCI |
+
+A quarter to a third of the "cheapest on sales" book was mega-cap growth
+winners that were not cheap on sales.
+
+### The registered candidate, re-run
+
+`equity/s2p_top_quintile`, the same registry entry and harness
+(`trader.research.lowfreq evaluate`), on copy-on-write clones of the frozen
+research snapshots with the complete split history added to their
+`corporate_splits` table and the prices' adjustment date recorded
+(`pit_price_basis`, 2026-07-29). Results went to scratch roots; the committed
+ledger (`research/lowfreq/equity/trials.jsonl`) was not written to — this is a
+data correction to an existing trial, not a new one, and `n_trials` stays 20.
+Each correction was added in turn (`MMR_FUNDAMENTALS_CORRECTIONS`), so its
+effect can be read off. Development walk-forward, OOS 2019-2023:
+
+| corrections applied | OOS Sharpe | covered-EW | active /yr | t(NW) | positive years | 2019 / 20 / 21 / 22 / 23 | verdict |
+|---|---|---|---|---|---|---|---|
+| none (rows as stored) | 0.878 | 0.564 | +11.99% | 2.01 | 5/5 | +2.1 +4.8 +27.7 +8.1 +5.2 | PROMISING |
+| notices | 0.879 | 0.564 | +12.03% | 2.02 | 5/5 | +2.1 +4.9 +27.7 +8.0 +5.2 | PROMISING |
+| + fiscal-year-end shares | 0.880 | 0.564 | +11.97% | 2.04 | 4/5 | +3.2 +4.9 +25.2 +15.6 -1.1 | PROMISING |
+| + split basis | 0.754 | 0.564 | +9.01% | 1.29 | 3/5 | +1.3 -3.5 +26.0 +19.0 -6.9 | PROMISING |
+| + units | 0.738 | 0.565 | +8.58% | 1.24 | 3/5 | +1.4 -3.7 +24.6 +18.0 -6.1 | PROMISING |
+| + consecutive quarters (ALL) | **0.727** | **0.570** | **+8.44%** | **1.20** | **3/5** | +1.3 -6.0 +25.7 +18.7 -6.0 | **FAIL** |
+| split basis alone | 0.797 | 0.564 | +9.45% | 1.47 | 4/5 | +0.7 -1.0 +23.7 +11.5 +2.8 | PROMISING |
+
+The first row reproduces the 2026-09-29 entry to the digit, so the scratch
+setup is the registered one. With every correction the candidate fails three
+gates (active t >= 2, DSR 0.39, drawdown -40.4% against -34.7%). What is left
+is a value tilt: strongly positive in the two years value beat growth (2021,
+2022), negative in the two it did not (2020, 2023).
+
+Held out (fixed cell, 2024-07-01..2026-07-28):
+
+| | OOS Sharpe | covered-EW | active /yr | t(NW) | verdict |
+|---|---|---|---|---|---|
+| rows as stored (the 2026-09-29 entry) | 1.301 | 1.169 | +0.15% | 0.03 | FAIL |
+| all corrections | 1.336 | 1.051 | +2.09% | 0.37 | FAIL |
+
+The puzzle the 2026-09-29 held-out entry left — +12%/yr in development,
++0.15%/yr held out — has its explanation: the development figure was inflated
+by knowledge of splits that had happened by the time the prices were fetched;
+in the held-out window almost none had happened yet.
+
+### The information coefficient, decomposed again
+
+`scripts/fundamental_signals.py --pit --decompose --horizons 21`, full
+snapshot (2016-08..2026-07), every variant scored on sales-to-price's cells:
+
+| variant | IC as stored | t(NW) | IC corrected | t(NW) |
+|---|---|---|---|---|
+| sales_to_price | 0.0204 | 2.13 | **-0.0020** | **-0.13** |
+| revenue frozen per name | 0.0178 | 1.72 | -0.0054 | -0.34 |
+| shares frozen per name | 0.0151 | 1.40 | -0.0053 | -0.37 |
+| 1/marketcap alone | 0.0168 | 1.98 | **0.0022** | **0.22** |
+| 1/price alone | 0.0168 | 1.66 | 0.0211 | 2.05 |
+
+With a market cap that is a market cap, sales-to-price ranks nothing and
+neither does size. `1/price` still scores, and that is the same defect seen
+from the other side, not a finding: the LEVEL of a split-adjusted price is
+itself forward-looking (a low adjusted price marks a stock that later split),
+so any signal that uses an adjusted price level rather than a return carries
+it. Returns are unaffected by a consistent adjustment, which is why the
+price-return work (12-1 momentum, Sharpe 0.26) is not touched by this entry.
+
+### Consequences for earlier entries
+
+Every figure below was computed with the uncorrected market cap. None has been
+re-run except where stated.
+
+- **2026-07-29, "fundamentals carry no signal; the denominator does"** —
+  `sales_to_price` IC 0.0425 (t 2.58), `1/marketcap` 0.0637: the conclusion
+  that the ratio's power was its denominator stands, and the denominator's
+  power was this defect.
+- **2026-08-17, "size is NOT survivorship"** (`1/marketcap` t 3.34 with
+  delisted names) — **withdrawn**. Corrected: IC 0.0022, t 0.22.
+- **2026-08-17 (later), "the size tilt is TRADEABLE: first construction to
+  survive its benchmark"** (Sharpe 1.26 vs 1.04, excess positive 9 of 10
+  years) — **withdrawn**. Already marked pre-D06/D07 on 2026-09-29; the
+  spread itself does not survive a correct denominator.
+- **2026-09-29, "sales-to-price PROMISING at N = 20"** (+12.0%/yr, t 2.01,
+  positive in all five counted years; and the controls `s2p_frozen_revenue`,
+  `size_smallcap`, `revenue_raw` beside it) — **withdrawn: FAIL on corrected
+  data** (table above). The controls were not re-run; they share the
+  denominator and their figures should not be quoted.
+- **2026-09-29, held-out verdict** — the verdict (FAIL) stands; its numbers
+  move to the second row above.
+- The insider-purchase null (2026-09-29) used `eq_ew_pit` and a
+  **size-matched** control built on the same market cap. Not re-run. The null
+  is unlikely to become a positive, but the size matching was matching on a
+  wrong size for later-split names.
+
+**Where the program stands: there is no surviving positive result.** The one
+durable figure is still pre-registered 12-1 momentum at Sharpe 0.26.
+
+### Limits of this correction, stated before anyone leans on it
+
+- The cleaning rules are judgement calls: a share count is believed when it
+  is within 3x of the median of the last four believed counts (a second
+  agreeing count confirms a real change of level), and consecutive quarters
+  end 70-120 days apart. They were fixed before any re-run was looked at and
+  the table shows they barely matter (split basis alone moves t from 2.04 to
+  about 1.3-1.5; the two rules together move it 1.29 to 1.20).
+- Split ratios come from the vendor's table, which also lists spin-off price
+  adjustments (A 1000 -> 1398) and applies them to its prices; they are
+  applied here for the same reason. A split the vendor's adjusted prices never
+  carried (the raw jump is in the stored series: WLL 2017-11-09, CGNX
+  2017-12-04, ESV 2019-04-11) is left out of the share factor — and remains a
+  fake -54% / +322% day in the price series of both the book and its
+  benchmark.
+- The snapshots' prices were taken to be adjusted through 2026-07-29 (the
+  build). The live `pit_daily_bars` is NOT uniformly adjusted: days appended
+  after a split meet days fetched before it (MNST 97.74 -> 48.62 on
+  2026-07-29, APH 143.85 -> 75.16, five ETFs on 2026-10-02). Being repaired
+  (`scripts/pit_split_adjust.py`); no research figure above reads those days.
+- Ticker recycling (two companies under one ticker) is unchanged and can pair
+  a split with the wrong company's filings.
+
+### Method errors worth not repeating
+
+- **A probe tests the failure it was built for.** The +7-day delay catches a
+  number known too early. It passed a number that was wrong by a factor of
+  forty. The check that would have caught this in July is one line: print the
+  market cap the pipeline computes for a name everyone knows, on a date
+  everyone remembers, and look at it.
+- **An adjusted price LEVEL is forward-looking.** Use adjusted prices for
+  returns and for nothing else; anything that needs a level needs the same
+  basis on both sides.
+- **A vendor's "quarterly" row at a fiscal year end is derived, and the
+  derivation only makes sense for flows.**
+- **`except Exception` around a vendor call turns a retired endpoint into a
+  quiet year.** The ingest reported "0 new rows" for as long as the endpoint
+  answered 404.
+
+### Reproduce
+
+```
+# one stage (development walk-forward); drop names from the list to stage it
+LOWFREQ_RESEARCH_ROOT=<scratch copy of research/lowfreq> \
+MMR_FUNDAMENTALS_CORRECTIONS=notices,annual_shares,split_basis,units,periods \
+  uv run python -m trader.research.lowfreq evaluate equity/s2p_top_quintile
+# held out: LOWFREQ_RESEARCH_CONFIG=~/.local/share/mmr/research_full/trader_research.yaml,
+#           plus  --fixed-params '{}' --start 2024-07-01 --end 2026-07-28
+# decomposition
+TRADER_CONFIG=~/.local/share/mmr/research_full/trader_research.yaml \
+  uv run python scripts/fundamental_signals.py --pit --decompose --horizons 21
+```
+
+Two reference tables were ADDED to the history database of both research
+snapshots (`~/.local/share/mmr/research_dev`, `research_full`) on 2026-11-15,
+because the corrected loader cannot run without them and refuses to guess:
+`corporate_splits` now holds the complete split history through 2026-07-29
+(the snapshots' own table stopped at their data cut - the splits their prices
+are adjusted for but they could not see; it is kept as
+`corporate_splits_as_snapshotted`), and `pit_price_basis` records that day as
+the one the prices are adjusted through. Nothing else in the snapshots was
+touched, and no strategy can read either table. The staged runs above were
+made on copy-on-write clones (`research_{dev,full}_splits`) carrying the same
+two tables; a run on the default configuration afterwards reproduces the
+"ALL" row. With `MMR_FUNDAMENTALS_CORRECTIONS` unset every correction is on,
+which is how everything else (the harness, `lowfreq_live targets`) now runs.
+Code: `trader/data/share_basis.py`, `scripts/fundamental_signals.py`
+(`prepare_rows`), `trader/data/statements_v1.py`, commit `c2e332e`.
+
+**The paper sleeve (`paper_s2p`)** holds 15 names bought on 2026-09-30 from
+targets computed with the uncorrected market cap. It is a paper exercise of
+the monthly machinery; as of this entry it has no research result behind it.
