@@ -5,6 +5,11 @@ propose; 2 usage / targets validation error. ``propose`` writes only PENDING
 proposals and ``reconcile`` (without ``--dry-run``) writes only the D13
 ``sleeve_fills`` journal; ``plan``, ``status`` and ``reconcile --dry-run``
 write nothing at all.
+
+Live ``plan`` and ``propose`` first check that the ``sleeve_fills`` journal is
+not behind the broker (``check_journal_current``): holdings are read from it,
+so an un-journaled execution is bought again. ``status`` reports the same
+condition as a warning instead of refusing.
 """
 from __future__ import annotations
 
@@ -14,7 +19,7 @@ import json
 import sys
 from typing import Callable, Optional
 
-from trader.rebalance.fills import reconcile_sleeve
+from trader.rebalance.fills import check_journal_current, reconcile_sleeve
 from trader.rebalance.plan import DEFAULT_BAND_PCT, PositionLimits, Refusal, make_plan
 from trader.rebalance.ports import Gateway
 from trader.rebalance.propose import check_no_open_batch, propose_plan
@@ -159,6 +164,11 @@ def _run(args, *, gateway_factory: Optional[GatewayFactory], limits: Optional[Po
             # Offline replays a (possibly historical) decision: without --today the staleness check
             # runs as of the file's own decision session. Live, today is today.
             today = args.today if args.today is not None or not args.offline else targets.as_of
+            if not args.offline:
+                # Holdings come from the journal: refuse to size anything on a
+                # journal the broker says is behind (the offline run plans an
+                # empty sleeve by definition and has no journal to check).
+                check_journal_current(targets.sleeve, gateway)
             plan = make_plan(targets, gateway, today=today, band_pct=args.band_pct,
                              limits=limits if limits is not None else load_limits(gateway, args.config),
                              sells_only=args.sells_only)
@@ -194,10 +204,23 @@ def _run(args, *, gateway_factory: Optional[GatewayFactory], limits: Optional[Po
                   else render_reconcile(report), file=out)
             return 0
         gateway = factory()
+        # status reports rather than refuses, but it must not present holdings
+        # from a journal that is behind as if they were the sleeve.
+        journal_problem = ''
+        try:
+            check_journal_current(args.sleeve, gateway)
+        except Refusal as exc:
+            journal_problem = f'{exc.code}: {exc.message}'
         status = sleeve_status(args.sleeve, gateway, targets_dir=args.targets_dir,
                                targets_file=args.targets_file)
-        print(json.dumps(status_to_dict(status), indent=2, default=str) if args.json
-              else render_status(status), file=out)
+        if args.json:
+            payload = status_to_dict(status)
+            payload['journal'] = {'current': not journal_problem, 'detail': journal_problem}
+            print(json.dumps(payload, indent=2, default=str), file=out)
+        else:
+            if journal_problem:
+                print(f'WARNING: the holdings below are NOT current — {journal_problem}\n', file=out)
+            print(render_status(status), file=out)
         return 0
     except TargetsError as exc:
         print(f'targets refused: {exc}', file=sys.stderr)

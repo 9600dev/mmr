@@ -271,3 +271,111 @@ class TestPrimingCarriesTheExchangeTimezone:
         runtime = self._runtime([])
         await runtime._fetch_history_with_resume(self._security('Australia/Sydney'), BarSize.Mins1, 5, 'orb_bhp')
         runtime.historical_data_client.get_contract_history.assert_not_awaited()
+
+
+# --------------------------------------------------------------------------
+# B3.5 — an early close announces itself in `mmr verify` / `mmr preflight`
+# --------------------------------------------------------------------------
+
+class TestEarlyCloseCheck:
+    """The intraday strategies carry their own session close (16:00 for the US
+    classes). On a 13:00 close nothing in the runtime knows; the stack check
+    now says so on the day — FAIL when an intraday strategy is armed."""
+
+    HALF_DAY = __import__('datetime').date(2026, 11, 27)        # the day after US Thanksgiving
+    ORDINARY = __import__('datetime').date(2026, 11, 25)
+
+    def test_an_ordinary_day_adds_no_check_row(self):
+        assert cli._early_close_check('NYSE,ASX', ['orb_googl'], today=self.ORDINARY) is None
+        assert cli._early_close_check('NYSE,ASX', [], today=self.ORDINARY) is None
+
+    def test_a_half_day_with_an_armed_intraday_strategy_fails_and_names_it(self):
+        status, detail = cli._early_close_check('NYSE,ASX', ['orb_googl', 'vwap_cat'], today=self.HALF_DAY)
+        assert status == 'FAIL'
+        assert 'NYSE closes early today at 13:00 America/New_York' in detail and 'ASX' not in detail
+        assert '2 armed intraday strategies assume their usual session close (orb_googl, vwap_cat)' in detail
+        assert 'held by IB until the next session' in detail and 'Disarm for today' in detail
+
+    def test_one_armed_strategy_reads_in_the_singular(self):
+        status, detail = cli._early_close_check('NYSE', ['orb_googl'], today=self.HALF_DAY)
+        assert status == 'FAIL' and '1 armed intraday strategy assumes its usual session close (orb_googl)' in detail
+
+    def test_a_half_day_with_nothing_armed_warns(self):
+        status, detail = cli._early_close_check('NYSE,ASX', [], today=self.HALF_DAY)
+        assert status == 'WARN'
+        assert 'NYSE closes early today at 13:00 America/New_York' in detail
+        assert 'No intraday strategy is armed; do not arm one today' in detail
+
+    def test_only_watched_venues_count_and_each_in_its_own_time(self):
+        christmas_eve = __import__('datetime').date(2026, 12, 24)
+        assert cli._early_close_check('ASX', [], today=self.HALF_DAY) is None
+        status, detail = cli._early_close_check('nyse, asx', [], today=christmas_eve)
+        assert status == 'WARN'
+        assert ('ASX closes early today at 14:10 Australia/Sydney; '
+                'NYSE closes early today at 13:00 America/New_York') in detail
+
+    def test_an_unmapped_venue_is_ignored_and_no_venues_is_no_row(self):
+        assert cli._early_close_check('NOSUCHVENUE', ['orb'], today=self.HALF_DAY) is None
+        assert cli._early_close_check('', ['orb'], today=self.HALF_DAY) is None
+
+    def test_an_unreadable_calendar_is_a_warning_never_silence(self, monkeypatch):
+        from trader.data import market_session
+
+        def broken(name, day):
+            raise RuntimeError('calendar unavailable')
+
+        monkeypatch.setattr(market_session, 'early_close', broken)
+        status, detail = cli._early_close_check('NYSE', ['orb_googl'], today=self.HALF_DAY)
+        assert status == 'WARN'
+        assert 'could not read the session calendar for NYSE (RuntimeError: calendar unavailable)' in detail
+        assert 'would go unreported' in detail
+
+    def test_a_real_early_close_outranks_another_venues_unreadable_calendar(self, monkeypatch):
+        from trader.data import market_session
+        real = market_session.early_close
+
+        def asx_broken(name, day):
+            if name == 'ASX':
+                raise RuntimeError('calendar unavailable')
+            return real(name, day)
+
+        monkeypatch.setattr(market_session, 'early_close', asx_broken)
+        status, detail = cli._early_close_check('NYSE,ASX', ['orb_googl'], today=self.HALF_DAY)
+        assert status == 'FAIL' and 'NYSE closes early today' in detail
+
+    def test_today_defaults_to_the_venues_own_date(self, monkeypatch):
+        """No `today`: each venue is asked about ITS current date."""
+        from trader.data import market_session
+        asked = []
+        monkeypatch.setattr(market_session, 'early_close', lambda name, day: asked.append((name, day)))
+        assert cli._early_close_check('NYSE,ASX', []) is None
+        import pandas as pd
+        assert asked == [('ASX', pd.Timestamp.now(tz='Australia/Sydney').date()),
+                         ('NYSE', pd.Timestamp.now(tz='America/New_York').date())]
+
+
+class TestArmedIntradayStrategies:
+    @staticmethod
+    def _config(tmp_path, text):
+        path = tmp_path / 'strategy_runtime.yaml'
+        path.write_text(text)
+        return path
+
+    def test_only_armed_strategies_on_an_intraday_bar_size_are_named(self, tmp_path):
+        path = self._config(tmp_path, '''
+strategies:
+  - {name: orb_googl, bar_size: "1 min", auto_execute: true}
+  - {name: vwap_cat, bar_size: "5 mins", auto_execute: true}
+  - {name: momentum_daily, bar_size: "1 day", auto_execute: true}
+  - {name: weekly, bar_size: " 1 Week ", auto_execute: true}
+  - {name: orb_off, bar_size: "1 min", auto_execute: false}
+  - {name: orb_unset, bar_size: "1 min"}
+  - {name: no_bar_size, auto_execute: true}
+''')
+        assert cli._armed_intraday_strategies(path) == ['orb_googl', 'vwap_cat', 'no_bar_size']
+
+    def test_a_missing_empty_or_malformed_file_is_no_strategies(self, tmp_path):
+        assert cli._armed_intraday_strategies(tmp_path / 'absent.yaml') == []
+        assert cli._armed_intraday_strategies(self._config(tmp_path, '')) == []
+        assert cli._armed_intraday_strategies(self._config(tmp_path, 'strategies: [just-a-string, 7]')) == []
+        assert cli._armed_intraday_strategies(self._config(tmp_path, 'strategies: {not: [closed')) == []

@@ -350,3 +350,89 @@ def test_session_lookup_exposes_both_hong_kong_trading_intervals():
         (_utc('2026-09-08 01:30'), _utc('2026-09-08 04:00')),
         (_utc('2026-09-08 05:00'), _utc('2026-09-08 08:00')),
     )
+
+
+class TestEarlyClose:
+    """Strategies carry their own session close; on a half day it is wrong.
+    `early_close` is how `mmr verify` / `preflight` say so on the day."""
+
+    def test_the_day_after_us_thanksgiving_closes_at_one(self):
+        from trader.data.market_session import early_close
+        close = early_close('NYSE', dt.date(2026, 11, 27))
+        assert close == pd.Timestamp('2026-11-27 13:00', tz='America/New_York')
+        assert str(close.tz) == 'UTC'
+
+    def test_an_ordinary_session_is_not_an_early_close(self):
+        from trader.data.market_session import early_close
+        assert early_close('NYSE', dt.date(2026, 11, 25)) is None
+        assert early_close('ASX', dt.date(2026, 11, 27)) is None
+
+    @pytest.mark.parametrize('day', [dt.date(2026, 11, 26), dt.date(2026, 11, 28)])
+    def test_a_day_with_no_session_is_not_an_early_close(self, day):
+        """Thanksgiving itself, and the Saturday after it."""
+        from trader.data.market_session import early_close
+        assert early_close('NYSE', day) is None
+
+    def test_another_venues_early_close_is_in_its_own_time(self):
+        from trader.data.market_session import early_close
+        close = early_close('ASX', dt.date(2026, 12, 24))
+        assert close == pd.Timestamp('2026-12-24 14:10', tz='Australia/Sydney')
+        assert early_close('NYSE', dt.date(2026, 12, 24)) == pd.Timestamp('2026-12-24 13:00', tz='America/New_York')
+
+    def test_a_calendar_that_cannot_be_read_raises_instead_of_saying_no(self):
+        from trader.data import market_session
+
+        class Broken:
+            def schedule(self, **kwargs):
+                raise RuntimeError('calendar unavailable')
+
+        with mock.patch.object(market_session, '_calendar', return_value=Broken()):
+            with pytest.raises(RuntimeError, match='calendar unavailable'):
+                market_session.early_close('NYSE', dt.date(2026, 11, 27))
+
+    def test_only_the_requested_day_is_asked_for(self):
+        from trader.data import market_session
+        asked = []
+        real = market_session._calendar('NYSE')
+
+        class Recording:
+            def schedule(self, **kwargs):
+                asked.append(kwargs)
+                return real.schedule(**kwargs)
+
+            def early_closes(self, schedule):
+                return real.early_closes(schedule)
+
+        with mock.patch.object(market_session, '_calendar', return_value=Recording()):
+            assert market_session.early_close('NYSE', dt.date(2026, 11, 27)) is not None
+        assert asked == [{'start_date': '2026-11-27', 'end_date': '2026-11-27'}]
+
+    def test_a_naive_close_from_the_calendar_is_read_as_utc(self):
+        from trader.data import market_session
+        frame = pd.DataFrame({'market_close': [pd.Timestamp('2026-11-27 18:00')]},
+                             index=pd.DatetimeIndex(['2026-11-27']))
+
+        class Naive:
+            def schedule(self, **kwargs):
+                return frame
+
+            def early_closes(self, schedule):
+                return schedule
+
+        with mock.patch.object(market_session, '_calendar', return_value=Naive()):
+            assert market_session.early_close('NYSE', dt.date(2026, 11, 27)) == pd.Timestamp('2026-11-27 18:00', tz='UTC')
+
+    def test_an_early_close_with_no_readable_time_raises(self):
+        from trader.data import market_session
+        frame = pd.DataFrame({'market_close': [pd.NaT]}, index=pd.DatetimeIndex(['2026-11-27']))
+
+        class Unreadable:
+            def schedule(self, **kwargs):
+                return frame
+
+            def early_closes(self, schedule):
+                return schedule
+
+        with mock.patch.object(market_session, '_calendar', return_value=Unreadable()):
+            with pytest.raises(ValueError, match='NYSE reports an early close on 2026-11-27 with no readable time'):
+                market_session.early_close('NYSE', dt.date(2026, 11, 27))

@@ -6482,6 +6482,11 @@ def _collect_stack_checks(exchanges: str = 'NYSE,ASX',
     else:
         record('strategy_roster', 'SKIP', 'strategy_service unreachable')
 
+    # -- early close: strategies carry their own session close (AUDIT B3.5) --
+    early = _early_close_check(exchanges, _armed_intraday_strategies(config_path))
+    if early is not None:
+        record('session_calendar', *early)
+
     # -- tick flow: mandatory while a watched market is open --
     if runtime_status is not None:
         wanted = {e.strip().upper() for e in (exchanges or '').split(',') if e.strip()}
@@ -6525,6 +6530,70 @@ def _collect_stack_checks(exchanges: str = 'NYSE,ASX',
                'not scheduled (expected when running outside the container)')
 
     return checks
+
+
+_DAILY_OR_SLOWER = frozenset({'1 day', '1 week', '1 month'})
+
+
+def _armed_intraday_strategies(config_path) -> list:
+    """Names of `auto_execute: true` strategies on an intraday bar size, from
+    strategy_runtime.yaml. An unreadable file is no strategies: the roster
+    check beside this one already reports that."""
+    import yaml as _yaml
+    try:
+        with open(config_path) as handle:
+            config = _yaml.safe_load(handle) or {}
+    except Exception:
+        return []
+    return [str(entry.get('name', '?')) for entry in (config.get('strategies') or [])
+            if isinstance(entry, dict) and entry.get('auto_execute')
+            and str(entry.get('bar_size', '')).strip().lower() not in _DAILY_OR_SLOWER]
+
+
+def _early_close_check(exchanges: str, armed_intraday, today=None):
+    """``(status, detail)`` when a watched venue closes EARLY today, else None.
+
+    The intraday strategies carry their own session close (16:00 for the US
+    classes), so on a 13:00 close an entry signalled after it is held by IB
+    until the next session and an end-of-day flatten fires three hours late —
+    the position is carried over the close it was meant to avoid
+    (docs/AUDIT_2026-11-14.md B3.5). Nothing in the runtime knows; this makes
+    the day announce itself. FAIL when an intraday strategy is armed (the
+    stack is not trade-ready AS CONFIGURED today), WARN otherwise. A calendar
+    that cannot be read is a WARN, never silence. ``today`` is for tests: a
+    date applied to every venue.
+    """
+    import pandas as _pd
+    from trader.data.market_session import _calendar, calendar_name_for, early_close
+
+    closing, unreadable = [], []
+    for exchange in sorted({e.strip().upper() for e in (exchanges or '').split(',') if e.strip()}):
+        name = calendar_name_for(exchange)
+        if name is None:
+            continue
+        try:
+            zone = _calendar(name).tz
+            day = today or _pd.Timestamp.now(tz=zone).date()
+            close = early_close(name, day)
+        except Exception as ex:
+            unreadable.append(f'{exchange} ({type(ex).__name__}: {ex})')
+            continue
+        if close is not None:
+            closing.append(f'{exchange} closes early today at {close.tz_convert(zone):%H:%M} {zone}')
+    armed = list(armed_intraday or [])
+    if closing and armed:
+        return ('FAIL', '; '.join(closing) + f'. {len(armed)} armed intraday strateg'
+                + ('y assumes its' if len(armed) == 1 else 'ies assume their')
+                + f' usual session close ({", ".join(armed)}): an entry after the early close is held by IB '
+                  'until the next session and a time exit fires too late. Disarm for today '
+                  '(docs/AUDIT_2026-11-14.md B3.5)')
+    if closing:
+        return ('WARN', '; '.join(closing) + '. No intraday strategy is armed; do not arm one today '
+                '(strategies assume their usual session close — docs/AUDIT_2026-11-14.md B3.5)')
+    if unreadable:
+        return ('WARN', 'could not read the session calendar for ' + ', '.join(unreadable)
+                + ' — an early close today would go unreported')
+    return None
 
 
 def _handle_verify(args: argparse.Namespace) -> bool:

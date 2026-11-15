@@ -52,7 +52,7 @@ from __future__ import annotations
 import datetime as dt
 import threading
 
-from typing import Dict, NamedTuple, Optional, Tuple
+from typing import Any, Dict, NamedTuple, Optional, Tuple
 
 import pandas as pd
 
@@ -288,3 +288,29 @@ def in_session(
         # every bar for this instrument off one library exception.
         return True
     return False
+
+
+def early_close(calendar_name: str, day: dt.date) -> Optional[pd.Timestamp]:
+    """The regular-session close (UTC) on *day* IF the venue closes early then.
+
+    ``None`` means an ordinary session or no session at all. A lookup that
+    fails RAISES: this answers "is today unusual?", and "could not find out" is
+    not "no" (the same reason ``SessionLookup`` is tri-state). Nothing on the
+    bar or order path calls it — the strategies carry their own session close
+    (16:00 for a US class), which is exactly what an early close breaks: an
+    entry after 13:00 is held by IB until the next session and an end-of-day
+    flatten fires three hours late (AUDIT_2026-11-14 B3.5). ``mmr verify`` /
+    ``mmr preflight`` use it to say so on the day.
+    """
+    calendar: Any = _calendar(calendar_name)
+    stamp = day.isoformat()
+    schedule = calendar.schedule(start_date=stamp, end_date=stamp)
+    if not len(schedule):
+        return None
+    early = calendar.early_closes(schedule)
+    if not len(early):
+        return None
+    close = pd.Timestamp(early.iloc[0]['market_close'])
+    if not isinstance(close, pd.Timestamp) or pd.isna(close):      # NaT is not a Timestamp
+        raise ValueError(f'{calendar_name} reports an early close on {day} with no readable time')
+    return close.tz_localize('UTC') if close.tz is None else close.tz_convert('UTC')

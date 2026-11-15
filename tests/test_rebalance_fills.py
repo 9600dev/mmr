@@ -355,3 +355,159 @@ def test_reconcile_honours_the_runtime_complete_verdict_unless_receipts_explain_
     gw = FakeGateway(proposals=[executed(3, 'NVDA', 'BUY', 4, status='PENDING')],
                      evidence=evidence(complete=False, orders_complete=False), positions={})
     assert reconcile_sleeve('s2p', gw).matched == ()
+
+
+# --------------------------------------------------------------------------
+# The journal must not be behind the broker before anything is sized on it
+# (AUDIT_2026-11-14 B5.2). Found live: fifteen filled orders from the first
+# rebalance, no journal at all, `status` reporting a market value of $0.00 —
+# the next plan would have bought the whole sleeve again.
+# --------------------------------------------------------------------------
+
+from rebalance_fakes import held                                           # noqa: E402
+from trader.rebalance.fills import check_journal_current, unjournaled_quantities   # noqa: E402
+
+
+class TestUnjournaledQuantities:
+    def test_executions_the_journal_lacks_are_missing_by_their_shortfall(self):
+        assert unjournaled_quantities({'AAPL': 25.0, 'MSFT': 7.0}, {}) == {'AAPL': 25.0, 'MSFT': 7.0}
+        assert unjournaled_quantities({'AAPL': 25.0}, {'AAPL': 10.0}) == {'AAPL': 15.0}
+
+    def test_a_journal_that_matches_or_holds_more_is_not_behind(self):
+        assert unjournaled_quantities({'AAPL': 25.0}, {'AAPL': 25.0}) == {}
+        assert unjournaled_quantities({'AAPL': 25.0}, {'AAPL': 40.0, 'TSLA': 3.0}) == {}
+        assert unjournaled_quantities({}, {'AAPL': 40.0}) == {}
+
+    def test_an_unjournaled_sell_is_not_a_shortfall(self):
+        """A missing SELL overstates holdings; the plan clamps that to IB."""
+        assert unjournaled_quantities({'AAPL': -5.0}, {}) == {}
+        assert unjournaled_quantities({'AAPL': 20.0}, {'AAPL': 25.0}) == {}
+
+    def test_rounding_dust_is_not_a_shortfall_but_a_real_fraction_is(self):
+        assert unjournaled_quantities({'AAPL': 25.0 + 1e-12}, {'AAPL': 25.0}) == {}
+        assert unjournaled_quantities({'AAPL': 25.5}, {'AAPL': 25.0}) == {'AAPL': 0.5}
+
+    def test_quantities_are_read_as_numbers(self):
+        assert unjournaled_quantities({'AAPL': '25'}, {'AAPL': '10'}) == {'AAPL': 15.0}
+
+
+def _filled_sleeve(**kwargs):
+    """Two EXECUTED buys that filled: AAPL 25 (order 901) and MSFT 7 (order 902)."""
+    aapl, aapl_receipt = filled_order(901, 'AAPL', 'BUY', 25, 200.0, exec_id='x1')
+    msft, msft_receipt = filled_order(902, 'MSFT', 'BUY', 7, 400.0, exec_id='x2')
+    return FakeGateway(
+        proposals=[executed(1, 'AAPL', 'BUY', 25), executed(2, 'MSFT', 'BUY', 7)],
+        evidence=evidence([aapl, msft], [aapl_receipt, msft_receipt]),
+        positions={'AAPL': 25, 'MSFT': 7}, **kwargs)
+
+
+class TestCheckJournalCurrent:
+    def test_a_sleeve_that_never_executed_anything_is_not_checked_against_the_broker(self):
+        for proposals in ([], [executed(1, 'AAPL', 'BUY', 25, status='PENDING')],
+                          [executed(2, 'AAPL', 'BUY', 25, status='FAILED')],
+                          [executed(3, 'AAPL', 'BUY', 25, order_ids=())]):       # EXECUTED, no broker order id
+            gw = FakeGateway(proposals=proposals, fail_evidence=True, fail_positions=True)
+            assert check_journal_current('s2p', gw, now=NOW) is None
+            assert gw.method_names == {'proposals_in_group'}
+
+    def test_filled_orders_with_no_journal_refuse_naming_what_is_missing(self):
+        gw = _filled_sleeve()
+        with pytest.raises(Refusal) as refusal:
+            check_journal_current('s2p', gw, now=NOW)
+        assert refusal.value.code == 'UNRECONCILED_EXECUTIONS'
+        message = refusal.value.message
+        assert 'not in the sleeve_fills journal for 2 ticker(s): AAPL +25, MSFT +7.' in message
+        assert 'bought again' in message
+        assert '`python -m trader.rebalance reconcile --sleeve s2p`' in message
+        assert gw.recorded == [] and 'record_fills' not in gw.method_names        # the check writes nothing
+
+    def test_after_reconcile_the_same_sleeve_is_current(self):
+        gw = _filled_sleeve()
+        reconcile_sleeve('s2p', gw, now=NOW)
+        assert check_journal_current('s2p', gw, now=NOW) is None
+
+    def test_a_partly_journaled_ticker_refuses_by_its_shortfall_only(self):
+        gw = _filled_sleeve(fills=held(AAPL=10, MSFT=7))
+        with pytest.raises(Refusal) as refusal:
+            check_journal_current('s2p', gw, now=NOW)
+        assert refusal.value.code == 'UNRECONCILED_EXECUTIONS'
+        assert 'for 1 ticker(s): AAPL +15.' in refusal.value.message and 'MSFT' not in refusal.value.message
+
+    def test_a_journal_holding_more_than_the_executions_is_not_refused_here(self):
+        gw = _filled_sleeve(fills=held(AAPL=40, MSFT=7, TSLA=3))
+        assert check_journal_current('s2p', gw, now=NOW) is None
+
+    def test_an_executed_order_that_positively_did_not_fill_leaves_nothing_missing(self):
+        gw = FakeGateway(proposals=[executed(1, 'AAPL', 'BUY', 25)],
+                         evidence=evidence([observed(901, 'AAPL', 'BUY', 'Cancelled', filled=0, total=25)], []))
+        assert check_journal_current('s2p', gw, now=NOW) is None
+
+    def test_an_unjournaled_round_trip_nets_to_what_is_actually_missing(self):
+        buy, buy_receipt = filled_order(901, 'AAPL', 'BUY', 25, exec_id='b1')
+        sell, sell_receipt = filled_order(902, 'AAPL', 'SELL', 25, exec_id='s1')
+        flat = FakeGateway(proposals=[executed(1, 'AAPL', 'BUY', 25), executed(2, 'AAPL', 'SELL', 25)],
+                           evidence=evidence([buy, sell], [buy_receipt, sell_receipt]))
+        assert check_journal_current('s2p', flat, now=NOW) is None                # nothing held, nothing missing
+        part, part_receipt = filled_order(902, 'AAPL', 'SELL', 10, exec_id='s2')
+        partial = FakeGateway(proposals=[executed(1, 'AAPL', 'BUY', 25), executed(2, 'AAPL', 'SELL', 10)],
+                              evidence=evidence([buy, part], [buy_receipt, part_receipt]), positions={'AAPL': 15})
+        with pytest.raises(Refusal) as refusal:
+            check_journal_current('s2p', partial, now=NOW)
+        assert 'for 1 ticker(s): AAPL +15.' in refusal.value.message
+
+    def test_unreadable_broker_evidence_is_not_a_current_journal(self):
+        gw = FakeGateway(proposals=[executed(1, 'AAPL', 'BUY', 25)], fail_evidence=True, fills=held(AAPL=25))
+        with pytest.raises(Refusal) as refusal:
+            check_journal_current('s2p', gw, now=NOW)
+        assert refusal.value.code == 'JOURNAL_UNCONFIRMED'
+        message = refusal.value.message
+        assert 'cannot confirm the sleeve_fills journal is current for sleeve s2p' in message
+        assert 'EXECUTIONS_UNREADABLE: ' in message and 'nothing planned' in message
+        assert '`python -m trader.rebalance reconcile --sleeve s2p`' in message
+        assert isinstance(refusal.value.__cause__, Refusal) and refusal.value.__cause__.code == 'EXECUTIONS_UNREADABLE'
+
+    def test_evidence_that_cannot_resolve_an_order_is_not_a_current_journal(self):
+        gw = FakeGateway(proposals=[executed(1, 'AAPL', 'BUY', 25)], positions={'AAPL': 25},
+                         evidence=evidence([], []), fills=held(AAPL=25))
+        with pytest.raises(Refusal) as refusal:
+            check_journal_current('s2p', gw, now=NOW)
+        assert refusal.value.code == 'JOURNAL_UNCONFIRMED'
+        assert 'EXECUTIONS_INCOMPLETE: ' in refusal.value.message
+        assert 'unknown to the broker tracker' in refusal.value.message
+
+    def test_a_long_list_is_cut_at_twelve_tickers_and_says_how_many_more(self):
+        names = [f'T{i:02d}' for i in range(14)]
+        proposals, observations, receipts = [], [], []
+        for index, name in enumerate(names, start=1):
+            order, got = filled_order(900 + index, name, 'BUY', index, exec_id=f'e{index}')
+            proposals.append(executed(index, name, 'BUY', index))
+            observations.append(order)
+            receipts.append(got)
+        gw = FakeGateway(proposals=proposals, evidence=evidence(observations, receipts),
+                         positions={name: index for index, name in enumerate(names, start=1)})
+        with pytest.raises(Refusal) as refusal:
+            check_journal_current('s2p', gw, now=NOW)
+        message = refusal.value.message
+        assert 'for 14 ticker(s): T00 +1, T01 +2,' in message and 'T11 +12, and 2 more.' in message
+        assert 'T12' not in message and 'T13' not in message
+
+    def test_exactly_twelve_tickers_are_all_listed_with_no_more_clause(self):
+        names = [f'T{i:02d}' for i in range(12)]
+        proposals, observations, receipts = [], [], []
+        for index, name in enumerate(names, start=1):
+            order, got = filled_order(900 + index, name, 'BUY', index, exec_id=f'e{index}')
+            proposals.append(executed(index, name, 'BUY', index))
+            observations.append(order)
+            receipts.append(got)
+        gw = FakeGateway(proposals=proposals, evidence=evidence(observations, receipts))
+        with pytest.raises(Refusal) as refusal:
+            check_journal_current('s2p', gw, now=NOW)
+        assert 'T11 +12. The sleeve' in refusal.value.message and 'more' not in refusal.value.message
+
+    def test_another_sleeves_proposals_and_journal_are_not_this_sleeves(self):
+        order, got = filled_order(901, 'AAPL', 'BUY', 25, exec_id='x1')
+        gw = FakeGateway(proposals=[executed(1, 'AAPL', 'BUY', 25, group='sleeve_other')],
+                         evidence=evidence([order], [got]))
+        assert check_journal_current('s2p', gw, now=NOW) is None
+        with pytest.raises(Refusal):
+            check_journal_current('other', gw, now=NOW)
