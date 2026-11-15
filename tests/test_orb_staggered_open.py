@@ -165,12 +165,27 @@ class TestGroupThatOpensAfterTheTolerance:
         assert _signals(orb, frame) == {'10:50': Action.SELL}
 
     def test_per_instrument_open_gives_the_traded_range(self):
-        """The documented remedy: RTH_OPEN_MIN = the group's own open."""
+        """The documented remedy: RTH_OPEN_MIN set for the instrument's group
+        (here every bar from 10:09 is a clean traded bar)."""
         frame = _morning(prev_close=25.00, events=[('10:45', 25.95)])
         orb = _orb(RTH_OPEN_MIN=609)
         state = orb.precompute(frame)
         assert (state['orb_high'][-1], state['orb_low'][-1]) == pytest.approx((25.82, 25.48))
         assert _signals(orb, frame) == {'10:45': Action.BUY}
+
+    def test_known_limit_the_opening_minute_itself_can_still_carry_yesterdays_close(self):
+        """NOT fixed by this rule, and pinned so nobody assumes it is: the
+        live bar of the minute in which the name opens has volume, but quote
+        updates that precede the opening trade inside that minute are in the
+        same bar (measured through the runtime: open 25.00 / low 25.00 / high
+        25.79 for a name that opened at 25.6). A strategy cannot tell. The
+        remedy is the first FULL minute after the group's open."""
+        frame = _morning(prev_close=25.00)
+        opening = pd.Timestamp(f'{DAY} 10:09', tz=SYD).tz_convert('UTC')
+        frame.loc[opening, ['open', 'low']] = [25.00, 25.00]          # as the live bar builder makes it
+        assert _orb(RTH_OPEN_MIN=609).precompute(frame)['orb_low'][-1] == pytest.approx(25.00)
+        state = _orb(RTH_OPEN_MIN=610).precompute(frame)
+        assert (state['orb_high'][-1], state['orb_low'][-1]) == pytest.approx((25.82, 25.48))
 
     def test_wider_tolerance_gives_the_traded_range_not_one_from_ten_oclock(self):
         """Window 10:00-10:30 with a 10-minute tolerance: 21 traded minutes of

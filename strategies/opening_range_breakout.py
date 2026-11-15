@@ -53,8 +53,9 @@ class OpeningRangeBreakout(Strategy):
     #     complete one has (RANGE_MINUTES / the bar interval), counting only
     #     bars that traded.
     # Otherwise orb_high/orb_low are NaN for that day and no entry is taken.
-    # The exit (close below the low of the window bars that WERE seen) is
-    # unchanged, so a position carried into such a day can still be closed.
+    # The exit (close below the low of the window bars that traded, valid
+    # range or not) still exists on such a day, so a position carried into it
+    # can still be closed.
     #
     # Only bars with traded volume (volume > 0) are part of the range: they
     # alone set its high/low, mark its start and count toward the fraction.
@@ -67,8 +68,17 @@ class OpeningRangeBreakout(Strategy):
     # is trades only — saw a window starting at the first trade. Now both see
     # the range of what traded. A name whose group opens later than the
     # tolerance therefore takes no entry (live and backtest alike) until the
-    # deployment sets RTH_OPEN_MIN to its group's open or widens the tolerance
+    # deployment sets RTH_OPEN_MIN for its group or widens the tolerance
     # (and, for a window that still starts at 10:00, lowers the fraction).
+    #
+    # NOT covered here: the minute in which the instrument opens. Its live bar
+    # has volume, so it counts — but quote updates that precede the opening
+    # trade inside that minute are in the same bar, so its open and one
+    # extreme can still be yesterday's close (measured through the runtime:
+    # 10:09 bar open 25.00 / low 25.00 / high 25.79 for a name that opened at
+    # 25.6). That is how the bar is built, not something a strategy can undo.
+    # Set RTH_OPEN_MIN to the first FULL minute after the group's open (610
+    # for the 10:09:15 group) to keep that bar out of the range.
     RANGE_START_TOLERANCE_MIN = 2
     RANGE_MIN_BAR_FRACTION = 0.8
     # Exit management. Without these, the ONLY exit is a fresh volume-

@@ -116,6 +116,11 @@ def resample_ticks_to_bars(ticks: pd.DataFrame, freq: str,
     the most recent tick — is dropped, so callers only ever see COMPLETED bars.
     That keeps crossing logic (``close`` crossed a level on THIS bar vs the prior)
     from re-firing on every tick while a bar is still building.
+
+    The volume rule is the INTRADAY one. For a daily ``freq`` it is wrong (a
+    day's volume is the counter itself, not its difference from yesterday's
+    total); live daily bars are built by ``LiveBarBuffer``, which does not call
+    this for them.
     """
     if ticks is None or ticks.empty:
         return ticks if ticks is not None else pd.DataFrame(columns=NORMALIZED_COLUMNS)
