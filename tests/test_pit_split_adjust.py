@@ -919,6 +919,21 @@ class TestBasis:
         [(through, note)] = self.basis(db)
         assert through == RUN_DATE and 'NOT on this basis (pit_split_refusals): GONE' in note
 
+    def test_accepting_the_refusals_records_the_basis_in_the_same_run(self, db):
+        """The operator has read the dry run; one apply instead of two."""
+        vendor = FakeVendor()
+        setup_junction(db, vendor)
+        store(db, 'GONE', Series([FORWARD]))
+        add_splits(db, 'GONE', [(FORWARD[0], 1, 2)])
+        dry, _ = run(db, vendor, accept_refusals=True)
+        assert dry.basis == RUN_DATE and not dry.basis_recorded and self.basis(db) == []
+        result, _ = run(db, vendor, apply=True, accept_refusals=True)
+        assert result.exit_code == 1, 'accepted is not the same as not refused'
+        [(through, note)] = self.basis(db)
+        assert through == RUN_DATE and 'NOT on this basis (pit_split_refusals): GONE' in note
+        assert '--accept-refusals' in note
+        assert [r[0] for r in table(db, 'pit_split_refusals')] == ['GONE']
+
     def test_a_new_refusal_holds_an_existing_basis_at_the_day_before_its_split(self, db):
         vendor = FakeVendor()
         setup_junction(db, vendor)
@@ -978,8 +993,16 @@ class TestCommandLine:
     def test_a_refusal_is_a_non_zero_exit(self, cli, capsys):
         store(cli.db, 'GONE', Series([FORWARD]))
         add_splits(cli.db, 'GONE', [(FORWARD[0], 1, 2)])
-        assert psa.main(['--db', cli.path, '--run-date', RUN_DATE.isoformat()]) == 1
+        argv = ['--db', cli.path, '--run-date', RUN_DATE.isoformat()]
+        assert psa.main(argv) == 1
         assert 'REFUSED  GONE' in capsys.readouterr().out
+        assert psa.main(argv + ['--apply']) == 1 and psa.recorded_basis(cli.db) is None
+
+    def test_accept_refusals_is_wired_through(self, cli, capsys):
+        store(cli.db, 'GONE', Series([FORWARD]))
+        add_splits(cli.db, 'GONE', [(FORWARD[0], 1, 2)])
+        argv = ['--db', cli.path, '--run-date', RUN_DATE.isoformat(), '--apply', '--accept-refusals']
+        assert psa.main(argv) == 1 and psa.recorded_basis(cli.db) == RUN_DATE
 
     def test_split_rows_can_come_from_a_json_file(self, cli, capsys):
         series = Series([FORWARD])

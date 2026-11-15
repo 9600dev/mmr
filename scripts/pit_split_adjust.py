@@ -45,13 +45,16 @@ WHAT IT RECORDS (history DuckDB, created by the first ``--apply``)
                             at every such split (no ``--tickers``; ``--since``
                             only when the basis on record reaches it). The run
                             that FIRST refuses a split does not record a basis
-                            past the day before it (``basis_to_record``).
+                            past the day before it (``basis_to_record``); the
+                            next run does, or the same run with
+                            ``--accept-refusals`` once the dry run has been
+                            read.
 
 EXIT STATUS
     0 nothing refused; 1 something was refused (or a write failed); 2 usage.
 
     python scripts/pit_split_adjust.py                      # dry run, everything
-    python scripts/pit_split_adjust.py --apply
+    python scripts/pit_split_adjust.py --apply --accept-refusals     # first repair
     python scripts/pit_split_adjust.py --since 2026-11-01 --apply    # nightly
     python scripts/pit_split_adjust.py --tickers MNST APH
 """
@@ -288,8 +291,8 @@ def _factor_text(factor: float) -> str:
 
 def run(db, split_rows: Iterable[Mapping[str, Any]], client, *, run_date: dt.date,
         apply: bool = False, tickers: Optional[Sequence[str]] = None, since: Optional[dt.date] = None,
-        splits_current_through: Optional[dt.date] = None, sleep: float = 0.0,
-        log: Callable[[str], None] = print) -> RunResult:
+        splits_current_through: Optional[dt.date] = None, accept_refusals: bool = False,
+        sleep: float = 0.0, log: Callable[[str], None] = print) -> RunResult:
     """Check (and with ``apply`` repair) the split basis of ``pit_daily_bars``.
 
     ``split_rows``  rows with ``ticker`` / ``execution_date`` / ``split_from`` /
@@ -297,6 +300,9 @@ def run(db, split_rows: Iterable[Mapping[str, Any]], client, *, run_date: dt.dat
     ``client``      ``list_aggs(ticker, 1, 'day', from, to, adjusted=..., ...)``.
     ``tickers``     only these (the basis is then not recorded).
     ``since``       only tickers with a split executed on or after this day.
+    ``accept_refusals``  record the basis even though this run refuses a split
+                    for the first time (the refused tickers are still refused,
+                    recorded and named in the basis row; the exit is still 1).
     """
     result = RunResult(run_date=run_date, applied=apply)
     events_by_ticker = split_events(split_rows)
@@ -399,7 +405,10 @@ def run(db, split_rows: Iterable[Mapping[str, Any]], client, *, run_date: dt.dat
         scope_gap = (f'only splits executed since {since} were considered and '
                      + (f'the basis on record ends {previous_basis}' if previous_basis else 'no basis is on record')
                      + ': run once without --since')
-    decision = pa.basis_to_record(claim, previous_basis, new_refused, scope_gap)
+    # --accept-refusals: the operator has read them (the dry run lists them) and
+    # takes them as exceptions now, instead of by running --apply a second time.
+    holding = [] if accept_refusals else new_refused
+    decision = pa.basis_to_record(claim, previous_basis, holding, scope_gap)
     result.basis, result.basis_explanation = decision.adjusted_through, decision.explanation
 
     refused_now = {p.ticker for p in result.refused}
@@ -414,6 +423,8 @@ def run(db, split_rows: Iterable[Mapping[str, Any]], client, *, run_date: dt.dat
                 note += f'; split table fetched through {claim}'
             if excluded:
                 note += f'; NOT on this basis (pit_split_refusals): {", ".join(excluded)}'
+            if accept_refusals and new_refused:
+                note += '; refusals first reported by this run accepted as exceptions (--accept-refusals)'
             if decision.adjusted_through < claim:
                 note += f'; {decision.explanation}'
             db.execute('INSERT INTO pit_price_basis VALUES (?, now(), ?)',
@@ -436,9 +447,10 @@ def run(db, split_rows: Iterable[Mapping[str, Any]], client, *, run_date: dt.dat
     else:
         log(f'basis: {decision.explanation}'
             + (f' (on record: {previous_basis})' if previous_basis else ' (none on record)'))
-        if not scope_gap and new_refused:
+        if not scope_gap and holding:
             log('       the refusals above ' + ('are now on record' if apply else 'would be put on record by --apply')
-                + '; the NEXT --apply records the basis with those tickers named as exceptions')
+                + '; the NEXT --apply records the basis with those tickers named as exceptions'
+                + ('' if apply else ' (or pass --accept-refusals with --apply to do both at once)'))
     return result
 
 
@@ -454,6 +466,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument('--db', metavar='PATH', help='history DuckDB (default: history_duckdb_path from the config)')
     ap.add_argument('--splits-json', metavar='PATH',
                     help='read split rows from this JSON file instead of the corporate_splits table')
+    ap.add_argument('--accept-refusals', action='store_true',
+                    help='record the basis even though this run refuses a split for the first time; the refused '
+                         'tickers stay refused and are named in the basis row (default: such a run records no '
+                         'basis past the day before that split, and the next run does)')
     ap.add_argument('--sleep', type=float, default=0.0, help='seconds between vendor requests')
     ap.add_argument('--json', action='store_true', help='print one JSON document instead of text')
     args = ap.parse_args(argv)
@@ -503,7 +519,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     lines: List[str] = []
     result = run(db, split_rows, RESTClient(key), run_date=run_date, apply=args.apply, tickers=args.tickers,
-                 since=since, splits_current_through=current_through, sleep=args.sleep,
+                 since=since, splits_current_through=current_through, accept_refusals=args.accept_refusals,
+                 sleep=args.sleep,
                  log=lines.append if args.json else (lambda m: print(m, flush=True)))
     if args.json:
         print(json.dumps(result.as_dict(), indent=1))
