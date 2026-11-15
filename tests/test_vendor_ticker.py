@@ -7,9 +7,11 @@ workers sent it verbatim: Massive answers an unknown ticker with an empty
 result and TwelveData with "not found", so the series was never filled and
 nothing said why.
 
-The vendors' convention, from this repository rather than from memory:
-Massive/Polygon `BRK.B` (trader/data/insider.py, the ticker-keyed PIT panel),
-TwelveData dotted suffixes (`FOO.U`, `BAR.R` in tests/test_twelvedata_sdk.py).
+The vendors' convention, from what is installed here rather than from memory:
+TwelveData's own SDK documents it on every `symbol` parameter ("use dot(.)
+delimiter. E.g. BRK.A or BRK.B will be correct", twelvedata/time_series.py);
+Massive/Polygon is `BRK.B` in trader/data/insider.py and in the ticker-keyed
+PIT panel built from its grouped-daily endpoint.
 """
 import datetime as dt
 from unittest.mock import MagicMock, patch

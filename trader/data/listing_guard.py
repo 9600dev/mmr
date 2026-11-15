@@ -24,7 +24,9 @@ def vendor_ticker(symbol: str) -> str:
     """The spelling TwelveData and Massive use for an IB symbol.
 
     IB writes a share class after a space — ``BRK B``, ``BF B`` — and both
-    vendors write it after a dot (``BRK.B``). Universes hold IB's spelling,
+    vendors write it after a dot (``BRK.B``; TwelveData's SDK says so on every
+    ``symbol`` parameter, and it is Polygon's spelling in the PIT panel and
+    ``trader/data/insider.py``). Universes hold IB's spelling,
     and it used to be sent verbatim: Massive answers a ticker it does not know
     with an empty result and TwelveData with "not found", so a class-share
     series (BRK B is a top-ten S&P 500 name) was never filled and nothing said
