@@ -8,6 +8,7 @@ The original counterexamples and added recovery cases use ordinary assertions.
 
 from types import SimpleNamespace
 import asyncio
+import copy
 import threading
 import datetime as dt
 import time
@@ -17,11 +18,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import reactivex as rx
-from ib_async import Option, OrderStatus, Position, Stock, Trade
+from ib_async import Option, OrderState, OrderStatus, Position, Stock, Trade
 
 from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.common.reactivex import EventSubject, SuccessFail
-from trader.listeners.ibreactive import IBAIORx
+from trader.listeners.ibreactive import IBAIORx, install_order_echo
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.sdk import MMR
 from trader.trading.executioner import TradeExecutioner
@@ -348,7 +349,22 @@ def test_resize_keeps_full_protection_until_trim_fills():
 
 
 def _coordinated_trader(tmp_path, held=100):
-    """Fresh broker snapshots and stable IDs, including modify-in-place ack."""
+    """Fresh broker snapshots and stable IDs, with ib_async's modify semantics.
+
+    A modification behaves as in the library (ib_async 2.1.0), not as a
+    convenient fake would:
+
+    * ``IB.placeOrder`` on an existing order id returns the EXISTING Trade and
+      keeps its original ``Order`` object — the edit exists only at the broker;
+    * the broker's echo (``Wrapper.openOrder``, here on ``reqOpenOrders``)
+      carries exactly six fields onto that Trade and drops the rest,
+      ``ocaGroup`` / ``ocaType`` included.
+
+    Until 2026-11-15 this fake replaced ``trade.order`` with the edit, so a
+    confirmation that read the OCA group off the Trade passed here and could
+    never pass against the library (audit B1.7; the library's behaviour is
+    pinned in tests/test_resize_oca_confirmation.py).
+    """
     trader = _trader(held=held, gate_enabled=False)
     trader.duckdb_path = str(tmp_path / 'orders.duckdb')
     trader.trading_runtime_ib_client_id = 7
@@ -361,7 +377,40 @@ def _coordinated_trader(tmp_path, held=100):
     broker.client = SimpleNamespace(getReqId=lambda: next(sequence))
     broker.openTrades = lambda: [t for t in trader.placed if t.orderStatus.status not in {
         'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}]
-    broker.reqOpenOrdersAsync = AsyncMock(side_effect=lambda: broker.openTrades())
+    # orderId -> the Order the broker last RECEIVED for it. Only a modification
+    # is kept: an unmodified order's record is what the session Trade shows.
+    modified_at_broker = {}
+
+    def library_open_order(order_id, contract, order, order_state):
+        """``Wrapper.openOrder`` for an order the session already tracks."""
+        trade = next((t for t in trader.placed if t.order.orderId == order.orderId
+                      and t.order.clientId == order.clientId), None)
+        if trade is not None:
+            trade.order.permId = order.permId
+            trade.order.totalQuantity = order.totalQuantity
+            trade.order.lmtPrice = order.lmtPrice
+            trade.order.auxPrice = order.auxPrice
+            trade.order.orderType = order.orderType
+            trade.order.orderRef = order.orderRef
+
+    broker.wrapper = SimpleNamespace(
+        openOrder=library_open_order,
+        orderKey=lambda client_id, order_id, perm_id: (
+            perm_id if order_id <= 0 else (client_id, order_id)))
+    # As IBAIORx does for every IB() it creates (pinned against the real
+    # class in tests/test_resize_oca_confirmation.py).
+    install_order_echo(broker)
+
+    def request_open_orders():
+        """The broker re-sends every open order; the answer is the session's Trades."""
+        trades = broker.openTrades()
+        for trade in trades:
+            echo = copy.copy(modified_at_broker.get(trade.order.orderId, trade.order))
+            broker.wrapper.openOrder(trade.order.orderId, trade.contract, echo,
+                                     OrderState(status=trade.orderStatus.status))
+        return trades
+
+    broker.reqOpenOrdersAsync = AsyncMock(side_effect=request_open_orders)
     broker.reqPositionsAsync = AsyncMock(side_effect=lambda: trader.get_positions())
     broker.isConnected = lambda: True
     broker.managedAccounts = lambda: [trader.ib_account]
@@ -372,7 +421,7 @@ def _coordinated_trader(tmp_path, held=100):
         order.clientId = 7
         old = next((t for t in trader.placed if t.order.orderId == order.orderId), None)
         if old is not None:
-            old.order = order
+            modified_at_broker[order.orderId] = copy.copy(order)
             trader.order_tracker.on_trade(old)
             return rx.of(old)
         trade = Trade(contract, order, OrderStatus(orderId=order.orderId, status='Submitted',
