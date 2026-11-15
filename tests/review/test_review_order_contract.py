@@ -22,7 +22,7 @@ from ib_async import Option, OrderState, OrderStatus, Position, Stock, Trade
 
 from trader.data.event_store import EventStore, EventType, TradingEvent
 from trader.common.reactivex import EventSubject, SuccessFail
-from trader.listeners.ibreactive import IBAIORx, install_order_echo
+from trader.listeners.ibreactive import IBAIORx
 from trader.messaging.trader_service_api import TraderServiceApi
 from trader.sdk import MMR
 from trader.trading.executioner import TradeExecutioner
@@ -362,8 +362,9 @@ def _coordinated_trader(tmp_path, held=100):
 
     Until 2026-11-15 this fake replaced ``trade.order`` with the edit, so a
     confirmation that read the OCA group off the Trade passed here and could
-    never pass against the library (audit B1.7; the library's behaviour is
-    pinned in tests/test_resize_oca_confirmation.py).
+    never pass against the library (audit B1.7). The resize path no longer
+    modifies anything — IB refuses the modification it relied on — so the
+    modification branch below is exercised by no production path today.
     """
     trader = _trader(held=held, gate_enabled=False)
     trader.duckdb_path = str(tmp_path / 'orders.duckdb')
@@ -397,10 +398,6 @@ def _coordinated_trader(tmp_path, held=100):
         openOrder=library_open_order,
         orderKey=lambda client_id, order_id, perm_id: (
             perm_id if order_id <= 0 else (client_id, order_id)))
-    # As IBAIORx does for every IB() it creates (pinned against the real
-    # class in tests/test_resize_oca_confirmation.py).
-    install_order_echo(broker)
-
     def request_open_orders():
         """The broker re-sends every open order; the answer is the session's Trades."""
         trades = broker.openTrades()
@@ -448,49 +445,39 @@ async def test_resize_defers_single_stop_partial_handoff_before_any_mutation(tmp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('first_fill', ['trim', 'stop'])
-async def test_matching_resize_tranche_retains_partial_fill_protection_and_capacity(tmp_path, first_fill):
-    """The requested broker OCA type 2 contract preserves the residual tranche.
-
-    Fake IB models documented reduce-with-block semantics; this is not a claim
-    of testing a real exchange's order support or market-gap execution prices.
+async def test_a_matching_protective_tranche_is_deferred_untouched(tmp_path):
+    """The September protocol handed a tranche equal to the trim to the trim by
+    MODIFYING the working stop into an OCA group with it. Validated on the
+    paper gateway 2026-11-15, as REMEDIATION_2026-09-08 said it must be: IB
+    refuses ("Error 10327: OCA group type revision is not allowed"), and the
+    rejected modification leaves the session believing a stop that is still
+    working has been cancelled. Nothing is sent; the stops stand as they were.
     """
     trader = _coordinated_trader(tmp_path)
     for _ in range(2):
         assert (await trader.place_standalone_order(_stock(), 'SELL', 50, 'STP', aux_price=8)).is_success()
+    sent_before = trader.client.subscribe_place_order.call_count
     result = await trader.resize_position(_stock(), 50, client_intent_id='paired-resize')
-    assert result.is_success(), result.error
-    assert result.obj['status'] == 'SUBMITTED'
-    stops = [t for t in trader.placed if t.order.orderType == 'STP']
-    trim = next(t for t in trader.placed if t.order.orderType == 'MKT')
-    paired = next(t for t in stops if t.order.ocaGroup)
-    untouched = next(t for t in stops if not t.order.ocaGroup)
-    assert paired.order.ocaGroup == trim.order.ocaGroup
-    assert paired.order.ocaType == trim.order.ocaType == 2
-    assert paired.order.totalQuantity == trim.order.totalQuantity == 50
-    assert len(trader.placed) == 3
-    # A 20-share execution reduces its peer by the same amount. The still-
-    # working stop protects all 80 held shares; executable capacity is also 80.
-    filled, sibling = (trim, paired) if first_fill == 'trim' else (paired, trim)
-    filled.orderStatus.filled = 20
-    filled.orderStatus.remaining = 30
-    sibling.order.totalQuantity = 30
-    sibling.orderStatus.remaining = 30
-    trader.inventory = 80
-    assert paired.orderStatus.remaining + untouched.orderStatus.remaining == trader.inventory
-    assert max(paired.orderStatus.remaining, trim.orderStatus.remaining) + untouched.orderStatus.remaining == trader.inventory
+    assert not result.is_success()
+    assert result.error.startswith('DEFERRED: 2 working SELL order(s) protect this position')
+    assert 'error 10327' in result.error and 'No orders changed' in result.error
+    # No modification, no trim, no cancel: the broker was sent nothing.
+    assert trader.client.subscribe_place_order.call_count == sent_before
+    trader.client.ib.cancelOrder.assert_not_called()
+    assert [(t.order.orderType, t.order.totalQuantity, t.order.ocaGroup, t.orderStatus.status)
+            for t in trader.placed] == [('STP', 50, '', 'Submitted')] * 2
 
 
 @pytest.mark.asyncio
-async def test_unconfirmed_oca_modification_never_publishes_resize_trim(tmp_path):
+async def test_an_unprotected_position_is_trimmed_with_a_plain_market_order(tmp_path):
     trader = _coordinated_trader(tmp_path)
-    for _ in range(2):
-        await trader.place_standalone_order(_stock(), 'SELL', 50, 'STP', aux_price=8)
-    trader.client.ib.reqOpenOrdersAsync.side_effect = [trader.placed[:], []]
-    result = await trader.resize_position(_stock(), 50, client_intent_id='unknown-oca')
-    assert not result.is_success() and 'UNKNOWN' in result.error
-    assert all(t.order.orderType == 'STP' for t in trader.placed)
-    assert trader.server_order_journal().get('unknown-oca')['status'] == 'UNKNOWN'
+    result = await trader.resize_position(_stock(), 60, client_intent_id='plain-resize')
+    assert result.is_success(), result.error
+    assert result.obj['status'] == 'SUBMITTED' and result.obj['protection'] == 'NO_EXISTING_PROTECTION'
+    trim, = trader.placed
+    assert (trim.order.orderType, trim.order.action, trim.order.totalQuantity) == ('MKT', 'SELL', 40)
+    assert not trim.order.ocaGroup and not trim.order.ocaType
+    assert result.obj['order_ids'] == [trim.order.orderId]
 
 
 @pytest.mark.asyncio

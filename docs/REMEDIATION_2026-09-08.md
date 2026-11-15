@@ -284,6 +284,16 @@ not broker latency, throughput capacity or an execution SLA.
    cannot be split atomically by this API and is deferred without mutation.
    Growing a position remains an opening-order proposal workflow. Actual
    venue/OCA behavior must be paper-validated.
+   **Paper-validated 2026-11-15: the protocol cannot run.** IB answers the
+   modification that puts a working stop into an OCA group with error 10327
+   ("OCA group type revision is not allowed"); the stop stays working at the
+   broker while ib_async marks the session's Trade Cancelled until the next
+   open-orders refresh. O12's matching-tranche handoff is withdrawn: a
+   protected position is deferred untouched (`docs/AUDIT_2026-11-14.md` A7.4).
+   The tests named in O11 / O12 for that handoff
+   (`test_unconfirmed_oca_modification_never_publishes_resize_trim`,
+   `test_matching_resize_tranche_retains_partial_fill_protection_and_capacity`)
+   are replaced by `test_a_matching_protective_tranche_is_deferred_untouched`.
 3. **Ownership is execution-derived, not universal custody accounting.** Manual
    holdings are not assigned to a strategy merely because they share a conId.
    External trading, transfers, corporate actions, busts and corrections can

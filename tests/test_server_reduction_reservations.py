@@ -399,7 +399,11 @@ async def test_capacity_read_failure_requires_a_complete_process_cache(
 
 
 @pytest.mark.asyncio
-async def test_visible_stop_and_native_same_quantity_oca_modification_count_once(reservation_server):
+async def test_a_protected_position_is_not_resized_and_nothing_is_reserved(reservation_server):
+    """This used to modify a matching stop tranche into an OCA group with the
+    trim. IB refuses that modification (error 10327, paper-validated
+    2026-11-15), so the resize defers and neither sends nor reserves anything.
+    """
     server = reservation_server.make()
     server.inventory = 100
     for index in range(2):
@@ -408,14 +412,10 @@ async def test_visible_stop_and_native_same_quantity_oca_modification_count_once
             order_ref='owner', client_intent_id=f'tranche-{index}')
         assert result.is_success(), result.error
     result = await server.resize_position(_stock(), 50, client_intent_id='oca-resize')
-    assert result.is_success(), result.error
-    assert len(server.placed) == 3
+    assert not result.is_success() and result.error.startswith('DEFERRED:')
+    assert [trade.order.orderType for trade in server.placed] == ['STP', 'STP']
+    assert not any(trade.order.ocaGroup for trade in server.placed)
     server.client.ib.cancelOrder.assert_not_called()
-    trim, = [trade for trade in server.placed if trade.order.orderType == 'MKT']
-    paired, = [trade for trade in server.placed if trade.order.orderType == 'STP'
-               and trade.order.ocaGroup == trim.order.ocaGroup]
-    assert paired.order.ocaType == trim.order.ocaType == 2
-    assert paired.order.totalQuantity == trim.order.totalQuantity == 50
     assert await server.unobserved_reduction_quantity(_stock(), 'SELL') == 0
 
 
