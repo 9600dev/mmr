@@ -1,12 +1,81 @@
 """Portfolio risk analysis — concentration, correlation, group budgets, and warnings."""
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypedDict  # noqa: F401
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, TypedDict  # noqa: F401
 
 import logging
 import math
 import threading
 import time
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+
+# A pair of positions is correlated over the sessions BOTH traded, and only if
+# those sessions give at least this many returns. Below it the pair has no
+# correlation (it is never clustered) rather than a number computed from a
+# handful of points. Ten is the bar the clustering has always used; it used to
+# be applied once, to a frame of the sessions EVERY position traded.
+MIN_CORRELATION_RETURNS = 10
+
+# Daily bars are keyed at the exchange's LOCAL midnight, stored in UTC: a US
+# session is 04:00/05:00 UTC that day, an ASX session 13:00/14:00 UTC the day
+# BEFORE. Adding this and flooring to the day recovers the session's calendar
+# date for any venue whose UTC offset is in (-11h, +13h], which is every
+# exchange (Honolulu -10 ... Auckland +13 in summer), and leaves a legacy
+# UTC-midnight stamp on its own date.
+_SESSION_DATE_SHIFT_HOURS = 13
+
+
+def session_dates(index: 'pd.DatetimeIndex') -> 'pd.DatetimeIndex':
+    """Calendar date of the session each daily-bar timestamp belongs to.
+
+    ``index`` holds daily bars stamped at exchange-local midnight (tz-aware,
+    or naive UTC). Returns naive midnights, comparable across venues: the US
+    and the ASX bar of 2026-11-05 are 16 hours apart as instants and equal
+    here. See ``_SESSION_DATE_SHIFT_HOURS`` for the range it is exact over.
+    """
+    import pandas as pd
+    stamps = pd.DatetimeIndex(index)
+    if stamps.tz is not None:
+        stamps = stamps.tz_convert('UTC').tz_localize(None)
+    return (stamps + pd.Timedelta(hours=_SESSION_DATE_SHIFT_HOURS)).floor('D')
+
+
+def pairwise_return_correlation(closes: 'pd.DataFrame', min_returns: int) -> 'pd.DataFrame':
+    """Correlation of returns for every pair of columns, over common sessions.
+
+    ``closes`` is one column of closes per symbol indexed by session date,
+    NaN where that symbol had no session. For each pair the rows where BOTH
+    have a close are taken and returns are computed between consecutive such
+    rows, so across one side's holiday both returns span the same interval.
+    Fewer than ``min_returns`` usable returns, or a side that did not move,
+    gives NaN. With identical calendars this equals
+    ``closes.pct_change().dropna().corr()``.
+    """
+    import numpy as np
+    import pandas as pd
+    values = closes.to_numpy(dtype=float)
+    present = np.isfinite(values)
+    n = values.shape[1]
+    out = np.full((n, n), np.nan)
+    for i in range(n):
+        for j in range(i + 1, n):
+            both = present[:, i] & present[:, j]
+            if int(both.sum()) < min_returns + 1:
+                continue
+            a, b = values[both, i], values[both, j]
+            with np.errstate(divide='ignore', invalid='ignore'):
+                ra, rb = a[1:] / a[:-1] - 1.0, b[1:] / b[:-1] - 1.0
+            usable = np.isfinite(ra) & np.isfinite(rb)
+            if int(usable.sum()) < min_returns:
+                continue
+            ra, rb = ra[usable], rb[usable]
+            if float(ra.std()) == 0.0 or float(rb.std()) == 0.0:
+                continue
+            out[i, j] = out[j, i] = float(np.corrcoef(ra, rb)[0, 1])
+    return pd.DataFrame(out, index=closes.columns, columns=closes.columns)
 
 
 class _PosRecord(TypedDict):
@@ -314,6 +383,13 @@ class PortfolioRiskAnalyzer:
         Returns (clusters, data_coverage_count). Each cluster dict carries
         ``combined_weight_pct`` (absolute, concentration view) and
         ``net_weight_pct`` (signed, true exposure after hedging).
+
+        Positions on different exchange calendars are compared on the session
+        dates both traded (``session_dates``), pair by pair, and a pair needs
+        ``MIN_CORRELATION_RETURNS`` common returns to have a correlation at
+        all. Same-date returns of venues in different time zones are not
+        simultaneous (the ASX session of a date closes ~15 hours before the
+        US one); the figure is the conventional same-date co-movement.
         """
         signed_weights = signed_weights or weights
         if not self._duckdb_path or len(symbols) < 2:
@@ -387,16 +463,26 @@ class PortfolioRiskAnalyzer:
             if data_coverage < 2:
                 return [], data_coverage
 
-            # Build DataFrame and correlate on daily RETURNS, not raw price
-            # levels. Two unrelated stocks that both drift upward show high
-            # price-level correlation (a spurious cluster); return correlation is
-            # the meaningful co-movement measure for risk clustering.
-            df = pd.DataFrame(close_series).dropna()
-            returns = df.pct_change().dropna()
-            if len(returns) < 10:
-                return [], data_coverage
-
-            corr = returns.corr()
+            # Correlate on daily RETURNS, not raw price levels. Two unrelated
+            # stocks that both drift upward show high price-level correlation
+            # (a spurious cluster); return correlation is the meaningful
+            # co-movement measure for risk clustering.
+            #
+            # Align on the SESSION DATE and correlate each pair over the
+            # sessions both traded. This used to be one frame of raw
+            # timestamps with every incomplete row dropped: daily bars are
+            # keyed at exchange-local midnight, so a US and an ASX series
+            # share no timestamp at all, the frame came out empty, and one
+            # ASX holding switched clustering off for every pair — including
+            # two US names. (Different holidays alone only thinned it.)
+            by_session = {}
+            for sym, series in close_series.items():
+                closes = series.dropna()
+                closes = pd.Series(closes.to_numpy(dtype=float),
+                                   index=session_dates(pd.DatetimeIndex(closes.index)))
+                by_session[sym] = closes[~closes.index.duplicated(keep='last')]
+            corr = pairwise_return_correlation(
+                pd.DataFrame(by_session).sort_index(), MIN_CORRELATION_RETURNS)
 
             # Greedy agglomeration: cluster symbols with pairwise corr > 0.7
             clustered = set()
