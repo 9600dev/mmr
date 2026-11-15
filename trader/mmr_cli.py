@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 import argparse
 import asyncio
 import json
+import logging
 import os
 import pathlib
 import shlex
@@ -6553,15 +6554,19 @@ def _armed_intraday_strategies(config_path) -> list:
 def _early_close_check(exchanges: str, armed_intraday, today=None):
     """``(status, detail)`` when a watched venue closes EARLY today, else None.
 
-    The intraday strategies carry their own session close (16:00 for the US
-    classes), so on a 13:00 close an entry signalled after it is held by IB
-    until the next session and an end-of-day flatten fires three hours late —
-    the position is carried over the close it was meant to avoid
-    (docs/AUDIT_2026-11-14.md B3.5). Nothing in the runtime knows; this makes
-    the day announce itself. FAIL when an intraday strategy is armed (the
-    stack is not trade-ready AS CONFIGURED today), WARN otherwise. A calendar
-    that cannot be read is a WARN, never silence. ``today`` is for tests: a
-    date applied to every venue.
+    Always a WARN: the day announces itself, and the stack is trade-ready on
+    it. The executor judges every open on the venue's regular session (an
+    entry after a 13:00 close is refused, not sent to wait for the next
+    session) and moves ``close_by_time`` exits earlier by as much as the close
+    is (``market_session.bar_open_refusal`` / ``close_by_on``). Until
+    2026-11-15 neither existed — strategies carry their own 16:00 close and
+    nothing else knew — and this row was a FAIL with an armed intraday
+    strategy (docs/AUDIT_2026-11-14.md B1.11 / B3.5).
+
+    What is still worth knowing on the day, and why the row stays: a SELL the
+    STRATEGY signals after the early close goes out and waits at IB for the
+    next open, like any after-hours exit. A calendar that cannot be read is a
+    WARN, never silence. ``today`` is for tests: a date applied to every venue.
     """
     import pandas as _pd
     from trader.data.market_session import _calendar, calendar_name_for, early_close
@@ -6582,14 +6587,13 @@ def _early_close_check(exchanges: str, armed_intraday, today=None):
             closing.append(f'{exchange} closes early today at {close.tz_convert(zone):%H:%M} {zone}')
     armed = list(armed_intraday or [])
     if closing and armed:
-        return ('FAIL', '; '.join(closing) + f'. {len(armed)} armed intraday strateg'
-                + ('y assumes its' if len(armed) == 1 else 'ies assume their')
-                + f' usual session close ({", ".join(armed)}): an entry after the early close is held by IB '
-                  'until the next session and a time exit fires too late. Disarm for today '
-                  '(docs/AUDIT_2026-11-14.md B3.5)')
+        return ('WARN', '; '.join(closing) + '. The executor refuses entries after the early close and '
+                'moves close_by_time exits earlier by as much ('
+                + f'{len(armed)} intraday auto_execute strateg' + ('y' if len(armed) == 1 else 'ies')
+                + f': {", ".join(armed)}). A SELL a strategy signals after the early close still waits '
+                  'at IB for the next session')
     if closing:
-        return ('WARN', '; '.join(closing) + '. No intraday strategy is armed; do not arm one today '
-                '(strategies assume their usual session close — docs/AUDIT_2026-11-14.md B3.5)')
+        return ('WARN', '; '.join(closing) + '. No intraday strategy is armed')
     if unreadable:
         return ('WARN', 'could not read the session calendar for ' + ', '.join(unreadable)
                 + ' — an early close today would go unreported')
@@ -9516,6 +9520,37 @@ def _handle_sweep_watch(args: argparse.Namespace):
         )
 
 
+def _session_calendars_for(conids, accessor) -> Optional[Dict[int, Optional[str]]]:
+    """``conid -> session calendar`` for ``BacktestConfig.session_calendars``:
+    the calendar the live executor would judge that instrument's orders on
+    (``market_session.order_calendar`` over the universe definition).
+
+    A conid that is in no universe, trades round the clock, or is listed on a
+    venue with no calendar here maps to None — the rules do not apply to it,
+    exactly as they do not live. Returns None when NO conid has a calendar, so
+    such a run is configured (and stamped) like one from before the rules
+    existed: nothing about it differs.
+    """
+    from trader.data.market_session import order_calendar
+
+    calendars: Dict[int, Optional[str]] = {}
+    for conid in conids or []:
+        name = None
+        try:
+            definitions = accessor.resolve_symbol(int(conid), first_only=True)
+        except Exception as exc:                          # noqa: BLE001
+            logging.warning('backtest: could not look up conId %s for its session calendar (%s); '
+                            'no regular-session rules for it', conid, exc)
+            definitions = []
+        if definitions:
+            definition = definitions[0]
+            name = order_calendar(getattr(definition, 'exchange', '') or '',
+                                  getattr(definition, 'primaryExchange', '') or '',
+                                  getattr(definition, 'secType', '') or '')
+        calendars[int(conid)] = name
+    return calendars if any(calendars.values()) else None
+
+
 def _stamp_execution_params(params: Dict[str, Any], config) -> Dict[str, Any]:
     """Record the execution semantics a run used, in its persisted params.
 
@@ -9536,6 +9571,12 @@ def _stamp_execution_params(params: Dict[str, Any], config) -> Dict[str, Any]:
             config.trade_notional or config.initial_capital * 0.02)
         if config.pyramid_max_adds is not None:
             params['_pyramid_max_adds'] = config.pyramid_max_adds
+    # Regular-session rules change which entries are taken and where an
+    # after-hours exit fills; a run with them is not comparable with one
+    # without. The calendars in force, 'none' for an instrument with none.
+    calendars = getattr(config, 'session_calendars', None)
+    if calendars:
+        params['_session_calendars'] = ','.join(sorted({name or 'none' for name in calendars.values()}))
     return params
 
 
@@ -9625,6 +9666,13 @@ def _handle_walk_forward(args: argparse.Namespace, now=None):
     storage = TickStorage(cfg.get('history_duckdb_path', '')
                           or cfg.get('duckdb_path', ''))
     bar_size = BarSize.parse_str(args.bar_size)
+    # Live semantics include the executor's regular-session rules.
+    session_calendars = None
+    if args.live_semantics and not getattr(args, 'panel', False):
+        from trader.data.universe import UniverseAccessor
+        session_calendars = _session_calendars_for(
+            args.conids, UniverseAccessor(cfg.get('duckdb_path', ''),
+                                          cfg.get('universe_library', 'Universes')))
 
     def _config(start, end, measure_start):
         config = BacktestConfig(
@@ -9641,6 +9689,7 @@ def _handle_walk_forward(args: argparse.Namespace, now=None):
             # window and open the next.
             measure_from=dt.datetime.combine(measure_start, dt.time.min),
             measure_to=dt.datetime.combine(end, dt.time.min),
+            session_calendars=session_calendars,
         )
         if args.live_semantics and args.trade_notional:
             config.trade_notional = args.trade_notional
@@ -9847,6 +9896,9 @@ def _handle_backtest_sweep(args: argparse.Namespace):
         slippage_model=get_slippage_model('fixed', bps=args.slippage_bps),
         execution_mode='live' if getattr(args, 'live_semantics', False) else 'accumulate',
     )
+    if config.execution_mode != 'accumulate':
+        # Live semantics include the executor's regular-session rules.
+        config.session_calendars = _session_calendars_for(conids, accessor)
     backtester = Backtester(storage, config)
     code_hash = compute_strategy_hash(args.strategy)
 
@@ -10076,6 +10128,13 @@ def _handle_backtest(args: argparse.Namespace):
         trade_notional=getattr(args, 'trade_notional', None),
         pyramid_max_adds=getattr(args, 'pyramid_max_adds', None),
     )
+    if config.execution_mode != 'accumulate':
+        # Live semantics include the executor's regular-session rules: an open
+        # outside the venue's regular session is refused, an exit decided
+        # outside it fills at the next regular open, and close_by_time moves on
+        # an early close. Calendars come from the universe definitions.
+        config.session_calendars = _session_calendars_for(
+            conids, UniverseAccessor(duckdb_path, cfg.get('universe_library', 'Universes')))
 
     backtester = Backtester(storage, config)
 

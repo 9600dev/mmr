@@ -3,6 +3,7 @@ from trader.common.logging_helper import setup_logging
 from trader.data.data_access import TickData, TickStorage
 from trader.data.event_store import EventType, TradingEvent
 from trader.data.market_data import normalize_historical
+from trader.data.market_session import bar_open_refusal, close_by_on, in_regular_session
 from trader.strategy.parameters import _coerce_param, _coerce_loose, session_bar_ts
 from trader.data.store import DateRange
 from trader.data.universe import UniverseAccessor
@@ -119,6 +120,39 @@ class BacktestConfig:
     # (audit 2026-11-14, B4.1). A naive bound is read on the frame's own clock.
     measure_from: Optional[dt.datetime] = None
     measure_to: Optional[dt.datetime] = None
+    # Regular-session rules, as the live executor and the broker apply them
+    # (audit 2026-11-14, B1.11 / B3.5). ``conid -> session calendar name``
+    # (``market_session.order_calendar``); None / absent for an instrument the
+    # rules do not apply to (round the clock, or a venue with no calendar).
+    # None (the default) = no session rules: results exactly as before.
+    #
+    # With a calendar for the conid and an INTRADAY bar size:
+    #   * a BUY whose order would go out outside the regular session is not
+    #     filled — the executor refuses it (IB would hold it until the next
+    #     open, a fill on a signal nobody would still act on). The replay used
+    #     to fill it at the next extended-hours bar's open, a print a market
+    #     order cannot get;
+    #   * a SELL decided outside the regular session fills at the open of the
+    #     first bar that STARTS inside one — where IB releases a held market
+    #     order — not at the next extended-hours print;
+    #   * ``close_by_time`` is earlier, by as much as the close is, on a day
+    #     the venue closes early (``market_session.close_by_on``).
+    # The single-instrument replay only; cross-sectional books trade daily.
+    session_calendars: Optional[Dict[int, Optional[str]]] = None
+
+
+def _bar_interval_seconds(bar_size: BarSize) -> Optional[float]:
+    """Seconds in one bar, or None for a size with no fixed length (a month).
+    The live runtime derives ``SignalWork.bar_size_seconds`` the same way (and
+    refuses to load a monthly strategy at all)."""
+    if bar_size == BarSize.Months1:
+        # Not left to pandas: it reads the month alias 'MS' as MILLISECONDS,
+        # which would make a monthly bar the fastest intraday one there is.
+        return None
+    try:
+        return float(pd.Timedelta(BarSize.to_pandas_freq(bar_size)).total_seconds())
+    except Exception:
+        return None
 
 
 @dataclass
@@ -585,13 +619,39 @@ class Backtester:
         # are bit-identical (pinned by tests/test_backtester_pin.py).
         timeline = _BarTimeline(combined)
         last_prices: Dict[int, float] = {}
-        # Pending signals: list of (signal, conid, signal_timestamp)
+        # Pending signals: list of (signal, conid, signal_timestamp, held).
+        # ``held``: a SELL whose order went out with the regular session shut —
+        # the broker keeps it until a session opens (decided once, at queue
+        # time; always False without session rules).
         pending_signals: List[tuple] = []
 
         # Per bar: was at least one position open? Populated inside the main
         # loop; used at the end to compute time_in_market_pct (a list rather
         # than a count so a measurement window can count its own bars).
         in_market: List[bool] = []
+
+        # Regular-session rules (see BacktestConfig.session_calendars). Off
+        # unless a calendar was supplied AND the bars are intraday: a daily bar
+        # is decided after the close by design.
+        calendars: Dict[int, Optional[str]] = dict(self.config.session_calendars or {})
+        bar_seconds = _bar_interval_seconds(self.config.bar_size)
+        session_rules = bool(calendars) and bar_seconds is not None and bar_seconds < 86400
+
+        def _sent_outside_regular(conid, signal_ts) -> bool:
+            """Would the order for a signal seen on the bar at ``signal_ts`` go
+            out while the venue's regular session is KNOWN to be shut? Unknown
+            (no calendar, a lookup that failed) is False: an exit is delayed
+            only by a session known to be closed."""
+            if not session_rules or bar_seconds is None:
+                return False
+            name = calendars.get(conid)
+            if not name:
+                return False
+            try:
+                order_at = pd.Timestamp(signal_ts) + pd.Timedelta(seconds=bar_seconds)
+            except Exception:
+                return False
+            return in_regular_session(order_at, name) is False
 
         # The strategy's runtime params, for the session clock that
         # ``close_by_time`` is compared on (SESSION_TZ; default New York).
@@ -657,6 +717,13 @@ class Backtester:
                         and (bar_ts.timestamp() - prev_ts.timestamp())
                         < self.config.cooldown_seconds):
                     return
+
+            # Mirror AutoExecutor._execute_open: an open whose order could not
+            # execute in the venue's regular session is refused. Same function,
+            # same two numbers (the signal bar and its interval).
+            if (session_rules and signal.action == Action.BUY
+                    and bar_open_refusal(signal_ts, bar_seconds, calendars.get(conid)) is not None):
+                return
 
             quantity = signal.quantity if signal.quantity > 0 else 0
             if quantity == 0:
@@ -748,11 +815,16 @@ class Backtester:
             # 1. Execute any signals queued from the previous bar at THIS bar's open
             if self.config.fill_policy == 'next_open' and pending_signals:
                 still_pending = []
-                for signal, conid, signal_ts in pending_signals:
+                for signal, conid, signal_ts, held in pending_signals:
                     span = bars_this_ts.get(conid)
                     if span is None:
                         # No bar for this conid yet — keep waiting (e.g. new listing)
-                        still_pending.append((signal, conid, signal_ts))
+                        still_pending.append((signal, conid, signal_ts, held))
+                        continue
+                    if held and in_regular_session(timestamp, calendars.get(conid)) is False:
+                        # Still shut: the order is sitting at the broker. It
+                        # fills at the open of the first bar inside a session.
+                        still_pending.append((signal, conid, signal_ts, held))
                         continue
                     open_price = timeline.open_at(span[0])
                     _execute_signal(signal, conid, signal_ts, timestamp,
@@ -802,9 +874,19 @@ class Backtester:
                         session_ts.time() if hasattr(session_ts, 'time')
                         else None
                     )
-                    if t_of_day is not None and t_of_day >= cond['close_by_time']:
+                    close_by = cond['close_by_time']
+                    if session_rules and t_of_day is not None:
+                        # Earlier on a day the venue closes early — the same
+                        # function the executor asks. A calendar that cannot
+                        # answer leaves the stored time in force, as it does
+                        # live (an exit is never held up by a lookup).
+                        try:
+                            close_by = close_by_on(close_by, calendars.get(conid), session_ts.date())
+                        except Exception:
+                            close_by = cond['close_by_time']
+                    if t_of_day is not None and t_of_day >= close_by:
                         triggered = True
-                        reason = f'close_by_time={cond["close_by_time"]}'
+                        reason = f'close_by_time={close_by}'
                 if not triggered:
                     continue
 
@@ -823,7 +905,8 @@ class Backtester:
                         last_prices.get(conid, 0.0),
                     )
                 else:
-                    pending_signals.append((synthetic, conid, timestamp))
+                    pending_signals.append(
+                        (synthetic, conid, timestamp, _sent_outside_regular(conid, timestamp)))
 
             # 3. Run the strategy on each conid at its current bar.
             #    on_bar is the fast path (reads precomputed state by index);
@@ -848,7 +931,9 @@ class Backtester:
                     )
                 else:
                     # Realistic path: queue for next bar's open
-                    pending_signals.append((signal, conid, timestamp))
+                    pending_signals.append(
+                        (signal, conid, timestamp,
+                         signal.action == Action.SELL and _sent_outside_regular(conid, timestamp)))
 
             # 4. Track equity (cash + mark-to-market positions)
             portfolio_value = cash

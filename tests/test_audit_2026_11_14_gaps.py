@@ -279,8 +279,9 @@ class TestPrimingCarriesTheExchangeTimezone:
 
 class TestEarlyCloseCheck:
     """The intraday strategies carry their own session close (16:00 for the US
-    classes). On a 13:00 close nothing in the runtime knows; the stack check
-    now says so on the day — FAIL when an intraday strategy is armed."""
+    classes). The executor now judges opens on the venue's regular session and
+    moves close-by exits on an early close, so the day is a WARN that says
+    what happens — it was a FAIL while nothing in the runtime knew."""
 
     HALF_DAY = __import__('datetime').date(2026, 11, 27)        # the day after US Thanksgiving
     ORDINARY = __import__('datetime').date(2026, 11, 25)
@@ -289,22 +290,28 @@ class TestEarlyCloseCheck:
         assert cli._early_close_check('NYSE,ASX', ['orb_googl'], today=self.ORDINARY) is None
         assert cli._early_close_check('NYSE,ASX', [], today=self.ORDINARY) is None
 
-    def test_a_half_day_with_an_armed_intraday_strategy_fails_and_names_it(self):
+    def test_a_half_day_with_an_armed_intraday_strategy_warns_and_says_what_happens(self):
         status, detail = cli._early_close_check('NYSE,ASX', ['orb_googl', 'vwap_cat'], today=self.HALF_DAY)
-        assert status == 'FAIL'
-        assert 'NYSE closes early today at 13:00 America/New_York' in detail and 'ASX' not in detail
-        assert '2 armed intraday strategies assume their usual session close (orb_googl, vwap_cat)' in detail
-        assert 'held by IB until the next session' in detail and 'Disarm for today' in detail
+        assert status == 'WARN'
+        assert detail == (
+            'NYSE closes early today at 13:00 America/New_York. The executor refuses entries after the '
+            'early close and moves close_by_time exits earlier by as much '
+            '(2 intraday auto_execute strategies: orb_googl, vwap_cat). A SELL a strategy signals after '
+            'the early close still waits at IB for the next session')
+
+    def test_the_stack_is_trade_ready_on_a_half_day(self):
+        """It used to be a FAIL, which made `verify` exit non-zero for the day."""
+        for armed in (['orb_googl'], []):
+            assert cli._early_close_check('NYSE', armed, today=self.HALF_DAY)[0] == 'WARN'
 
     def test_one_armed_strategy_reads_in_the_singular(self):
         status, detail = cli._early_close_check('NYSE', ['orb_googl'], today=self.HALF_DAY)
-        assert status == 'FAIL' and '1 armed intraday strategy assumes its usual session close (orb_googl)' in detail
+        assert status == 'WARN' and '(1 intraday auto_execute strategy: orb_googl)' in detail
 
     def test_a_half_day_with_nothing_armed_warns(self):
         status, detail = cli._early_close_check('NYSE,ASX', [], today=self.HALF_DAY)
-        assert status == 'WARN'
-        assert 'NYSE closes early today at 13:00 America/New_York' in detail
-        assert 'No intraday strategy is armed; do not arm one today' in detail
+        assert (status, detail) == (
+            'WARN', 'NYSE closes early today at 13:00 America/New_York. No intraday strategy is armed')
 
     def test_only_watched_venues_count_and_each_in_its_own_time(self):
         christmas_eve = __import__('datetime').date(2026, 12, 24)
@@ -341,7 +348,7 @@ class TestEarlyCloseCheck:
 
         monkeypatch.setattr(market_session, 'early_close', asx_broken)
         status, detail = cli._early_close_check('NYSE,ASX', ['orb_googl'], today=self.HALF_DAY)
-        assert status == 'FAIL' and 'NYSE closes early today' in detail
+        assert status == 'WARN' and 'NYSE closes early today' in detail and 'could not read' not in detail
 
     def test_today_defaults_to_the_venues_own_date(self, monkeypatch):
         """No `today`: each venue is asked about ITS current date."""

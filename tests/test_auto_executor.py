@@ -6254,3 +6254,400 @@ class TestIsolatedStep:
 
         with pytest.raises(KeyboardInterrupt):
             ex._isolated('time exit', {}, step)
+
+
+# ---------------------------------------------------------------------------
+# Session awareness (AUDIT_2026-11-14 B1.11 / B3.5): an OPEN whose order could
+# not execute in the venue's regular session is refused, and a close-by time
+# moves earlier on a day the venue closes early. Closes are never touched.
+# ---------------------------------------------------------------------------
+
+def _clock_after(monkeypatch, bar_ts, seconds=10):
+    """Pin "now" a few seconds after ``bar_ts`` so the stale-bar gate sees a
+    fresh bar whatever time of day the test is about (naive = UTC there)."""
+    stamp = pd.Timestamp(bar_ts)
+    stamp = stamp.tz_localize('UTC') if stamp.tzinfo is None else stamp.tz_convert('UTC')
+    frozen = (stamp + pd.Timedelta(seconds=seconds)).to_pydatetime()
+    monkeypatch.setattr(auto_executor_module.AutoExecutor, '_now_utc', lambda self: frozen)
+
+
+def _signal_at(ex, monkeypatch, bar_ts, **kwargs):
+    _clock_after(monkeypatch, bar_ts)
+    work = make_work(bar_ts=bar_ts, **kwargs)
+    ex._process_signal(work)
+    return work
+
+
+def _decisions(ex, work):
+    return ex.state.db.execute(
+        "SELECT action, decision, reason FROM auto_exec_bar_log "
+        "WHERE strategy=? AND conid=? AND bar_ts=?",
+        [work.strategy_name, work.conid, auto_executor_module._naive(work.bar_ts)], fetch='all')
+
+
+def _list_on(sdk, *, exchange, primary, currency='USD', sec_type='STK'):
+    sdk.secdef = SimpleNamespace(symbol='WDS', exchange=exchange, primaryExchange=primary,
+                                 currency=currency, secType=sec_type, conId=1111)
+
+
+def _ny(text):
+    return pd.Timestamp(text, tz='America/New_York')
+
+
+def _sydney(text):
+    return pd.Timestamp(text, tz='Australia/Sydney')
+
+
+class TestOpensNeedTheRegularSession:
+    """IB holds a market order sent outside the regular session until the next
+    one opens. An entry decided on the day's last bar, or after a 13:00 close,
+    filled the next morning on a signal nobody would still act on."""
+
+    def test_the_sessions_last_bar_is_refused_and_the_one_before_it_opens(self, executor, monkeypatch):
+        """ASX closes 16:10. The 16:09 bar completes AT the close."""
+        ex, sdk = executor
+        refused = _signal_at(ex, monkeypatch, _sydney('2026-07-06 16:09'))
+        assert sdk.propose_calls == [] and sdk.approve_calls == []
+        assert ex.state.open_position('orb_test', 1111) is None
+        assert ex.intents.all(strategy='orb_test', conid=1111) == []
+        assert _decisions(ex, refused) == [(
+            'BUY', 'refused',
+            'ASX regular session closed at 16:10; '
+            'a market order sent at 16:10 Australia/Sydney is held until the next session')]
+
+    def test_the_bar_before_the_last_opens(self, executor, monkeypatch):
+        ex, sdk = executor
+        _signal_at(ex, monkeypatch, _sydney('2026-07-06 16:08'))
+        assert [call['action'] for call in sdk.propose_calls] == ['BUY']
+        assert ex.state.open_position('orb_test', 1111)['quantity'] == 140.0
+
+    def test_a_bar_stamped_in_another_zone_is_the_same_instant(self, executor, monkeypatch):
+        """06:09 UTC is 16:09 in Sydney in July."""
+        ex, sdk = executor
+        _signal_at(ex, monkeypatch, pd.Timestamp('2026-07-06 06:09', tz='UTC'))
+        assert sdk.propose_calls == []
+        _signal_at(ex, monkeypatch, pd.Timestamp('2026-07-06 06:08', tz='UTC'))
+        assert len(sdk.propose_calls) == 1
+
+    @pytest.mark.parametrize('bar, reason', [
+        ('2026-11-25 08:00', 'NASDAQ regular session has not opened (09:30); '
+                             'a market order sent at 08:01 America/New_York is held until it does'),
+        ('2026-11-25 17:30', 'NASDAQ regular session closed at 16:00; '
+                             'a market order sent at 17:31 America/New_York is held until the next session'),
+        ('2026-11-25 15:59', 'NASDAQ regular session closed at 16:00; '
+                             'a market order sent at 16:00 America/New_York is held until the next session'),
+    ])
+    def test_extended_hours_bars_reach_the_strategy_but_do_not_open(self, executor, monkeypatch, bar, reason):
+        """The bar gate admits 04:00-20:00 ET on purpose. Seeing a bar is not
+        being able to trade on it."""
+        ex, sdk = executor
+        _list_on(sdk, exchange='SMART', primary='NASDAQ')
+        work = _signal_at(ex, monkeypatch, _ny(bar))
+        assert sdk.propose_calls == []
+        assert _decisions(ex, work) == [('BUY', 'refused', reason)]
+
+    def test_an_early_close_is_the_close(self, executor, monkeypatch):
+        """The day after Thanksgiving ends at 13:00. 13:30 is inside the bar
+        gate and inside a hard-coded 16:00 session; the order would sit until
+        Monday."""
+        ex, sdk = executor
+        _list_on(sdk, exchange='SMART', primary='NASDAQ')
+        work = _signal_at(ex, monkeypatch, _ny('2026-11-27 13:30'))
+        assert sdk.propose_calls == []
+        assert _decisions(ex, work) == [(
+            'BUY', 'refused',
+            'NASDAQ regular session closed at 13:00; '
+            'a market order sent at 13:31 America/New_York is held until the next session')]
+        last = _signal_at(ex, monkeypatch, _ny('2026-11-27 12:59'))
+        assert sdk.propose_calls == []
+        assert _decisions(ex, last)[0][1] == 'refused'
+
+    def test_the_morning_of_an_early_close_still_opens(self, executor, monkeypatch):
+        ex, sdk = executor
+        _list_on(sdk, exchange='SMART', primary='NASDAQ')
+        _signal_at(ex, monkeypatch, _ny('2026-11-27 12:58'))
+        assert [call['action'] for call in sdk.propose_calls] == ['BUY']
+
+    def test_a_refusal_does_not_use_up_the_next_bar(self, executor, monkeypatch):
+        """The bar that completes AT the open is the first that can trade."""
+        ex, sdk = executor
+        _list_on(sdk, exchange='SMART', primary='NASDAQ')
+        _signal_at(ex, monkeypatch, _ny('2026-11-25 09:28'))
+        assert sdk.propose_calls == []
+        _signal_at(ex, monkeypatch, _ny('2026-11-25 09:29'))
+        assert [call['action'] for call in sdk.propose_calls] == ['BUY']
+
+    def test_it_is_a_policy_refusal_logged_as_a_warning(self, executor, monkeypatch, caplog):
+        ex, sdk = executor
+        with caplog.at_level(logging.INFO):
+            _signal_at(ex, monkeypatch, _sydney('2026-07-06 16:09'))
+        refusals = [record for record in caplog.records if 'auto-executor: refused' in record.getMessage()]
+        assert [record.levelno for record in refusals] == [logging.WARNING]
+        message = refusals[0].getMessage()
+        assert message == ('auto-executor: refused orb_test conId 1111: '
+                           'ASX regular session closed at 16:10; '
+                           'a market order sent at 16:10 Australia/Sydney is held until the next session')
+
+    def test_other_refusals_are_still_errors(self, executor, monkeypatch, caplog):
+        ex, sdk = executor
+        monkeypatch.setattr(sdk, 'resolve', lambda *args, **kwargs: [])
+        with caplog.at_level(logging.INFO):
+            ex._process_signal(make_work())
+        refusals = [record for record in caplog.records if 'auto-executor: refused' in record.getMessage()]
+        assert [record.levelno for record in refusals] == [logging.ERROR]
+
+    def test_the_refusal_is_its_own_exception_type(self):
+        from trader.strategy.auto_executor import OutsideRegularSession
+        assert issubclass(OutsideRegularSession, AutoExecutionError)
+
+    def test_a_pyramid_add_is_an_open_too(self, executor, monkeypatch):
+        ex, sdk = executor
+        ex.cooldown_seconds = 0.0
+        _signal_at(ex, monkeypatch, _sydney('2026-07-06 15:00'), pyramid_max_adds=2)
+        assert ex.state.open_position('orb_test', 1111)['lots'] == 1
+        _signal_at(ex, monkeypatch, _sydney('2026-07-06 16:09'), pyramid_max_adds=2)
+        assert ex.state.open_position('orb_test', 1111)['lots'] == 1
+        assert [call['action'] for call in sdk.propose_calls] == ['BUY']
+
+    def test_a_sell_signal_after_the_close_still_closes(self, executor, monkeypatch):
+        """Refusing an exit is worse than a late one. The order waits at IB for
+        the next open, which is the earliest the position can be sold."""
+        ex, sdk = executor
+        _signal_at(ex, monkeypatch, _sydney('2026-07-06 15:00'))
+        _signal_at(ex, monkeypatch, _sydney('2026-07-06 16:30'), action=Action.SELL)
+        assert [call['action'] for call in sdk.propose_calls] == ['BUY', 'SELL']
+        assert ex.state.open_position('orb_test', 1111) is None
+
+    def test_a_time_exit_after_the_close_still_closes(self, executor, monkeypatch):
+        ex, sdk = executor
+        _signal_at(ex, monkeypatch, _sydney('2026-07-06 15:00'), max_hold_bars=5)
+        ex._process_bar(BarWork('orb_test', 1111, _sydney('2026-07-06 16:30'), 6))
+        assert [call['action'] for call in sdk.propose_calls] == ['BUY', 'SELL']
+
+    def test_a_daily_bar_is_decided_after_the_close_by_design(self, executor, monkeypatch):
+        ex, sdk = executor
+        _list_on(sdk, exchange='SMART', primary='NASDAQ')
+        _signal_at(ex, monkeypatch, _ny('2026-11-27 00:00'), bar_size_seconds=86400.0)
+        assert [call['action'] for call in sdk.propose_calls] == ['BUY']
+
+    def test_a_round_the_clock_instrument_has_no_session(self, executor, monkeypatch):
+        ex, sdk = executor
+        _list_on(sdk, exchange='IDEALPRO', primary='', sec_type='CASH')
+        _signal_at(ex, monkeypatch, _ny('2026-11-28 03:00'))             # a Saturday
+        assert [call['action'] for call in sdk.propose_calls] == ['BUY']
+
+    def test_a_listing_this_system_has_no_calendar_for_is_outside_the_rule(self, executor, monkeypatch):
+        """SMART is where the order is routed, not where the instrument is
+        listed. The rule refuses, so it must not guess a venue."""
+        ex, sdk = executor
+        _list_on(sdk, exchange='SMART', primary='')
+        _signal_at(ex, monkeypatch, _ny('2026-11-28 03:00'))
+        assert [call['action'] for call in sdk.propose_calls] == ['BUY']
+
+    def test_the_listing_venue_decides_not_the_router(self, executor, monkeypatch):
+        """10:30 in Sydney is the evening before in New York."""
+        ex, sdk = executor
+        _list_on(sdk, exchange='SMART', primary='ASX', currency='AUD')
+        _signal_at(ex, monkeypatch, _sydney('2026-11-25 10:30'))
+        assert [call['action'] for call in sdk.propose_calls] == ['BUY']
+
+    def test_the_same_instant_on_a_us_listing_is_refused(self, executor, monkeypatch):
+        ex, sdk = executor
+        _list_on(sdk, exchange='SMART', primary='NASDAQ')
+        _signal_at(ex, monkeypatch, _sydney('2026-11-25 10:30'))
+        assert sdk.propose_calls == []
+
+    def test_the_interval_carried_by_the_work_is_the_one_used(self, executor, monkeypatch):
+        """A five-minute bar starting 15:55 completes at 16:00."""
+        ex, sdk = executor
+        _list_on(sdk, exchange='SMART', primary='NASDAQ')
+        _signal_at(ex, monkeypatch, _ny('2026-11-25 15:55'), bar_size_seconds=300.0)
+        assert sdk.propose_calls == []
+        _signal_at(ex, monkeypatch, _ny('2026-11-25 15:50'), bar_size_seconds=300.0)
+        assert len(sdk.propose_calls) == 1
+
+
+class TestCloseByMovesWithAnEarlyClose:
+    """A 15:45 flatten on a 13:00 close fired at 15:45: in the post-market,
+    where IB holds the order — so the position was carried over the close it
+    was meant to avoid."""
+
+    def _hold(self, ex, sdk, monkeypatch, opened_at, close_by=dt.time(15, 45)):
+        _list_on(sdk, exchange='SMART', primary='NASDAQ')
+        _signal_at(ex, monkeypatch, opened_at, close_by_time=close_by)
+        assert ex.state.open_position('orb_test', 1111)['close_by_time'] == close_by
+
+    def test_the_flatten_fires_fifteen_minutes_before_the_early_bell(self, executor, monkeypatch):
+        ex, sdk = executor
+        self._hold(ex, sdk, monkeypatch, _ny('2026-11-27 10:00'))
+        ex._process_bar(BarWork('orb_test', 1111, _ny('2026-11-27 12:44'), 10))
+        assert len(sdk.propose_calls) == 1
+        ex._process_bar(BarWork('orb_test', 1111, _ny('2026-11-27 12:45'), 11))
+        assert [call['action'] for call in sdk.propose_calls] == ['BUY', 'SELL']
+        assert 'time exit: close_by_time=12:45:00' in sdk.propose_calls[1]['reasoning']
+        assert ex.state.open_position('orb_test', 1111) is None
+
+    def test_an_ordinary_day_is_unchanged(self, executor, monkeypatch):
+        ex, sdk = executor
+        self._hold(ex, sdk, monkeypatch, _ny('2026-11-25 10:00'))
+        ex._process_bar(BarWork('orb_test', 1111, _ny('2026-11-25 12:45'), 10))
+        ex._process_bar(BarWork('orb_test', 1111, _ny('2026-11-25 15:44'), 11))
+        assert len(sdk.propose_calls) == 1
+        ex._process_bar(BarWork('orb_test', 1111, _ny('2026-11-25 15:45'), 12))
+        assert [call['action'] for call in sdk.propose_calls] == ['BUY', 'SELL']
+        assert 'time exit: close_by_time=15:45:00' in sdk.propose_calls[1]['reasoning']
+
+    def test_the_stored_close_by_is_not_rewritten(self, executor, monkeypatch):
+        """The shift is per day. Held over the half day into Monday, the
+        holding's own 15:45 applies again."""
+        ex, sdk = executor
+        self._hold(ex, sdk, monkeypatch, _ny('2026-11-27 10:00'))
+        ex._process_bar(BarWork('orb_test', 1111, _ny('2026-11-27 12:30'), 5))
+        assert ex.state.open_position('orb_test', 1111)['close_by_time'] == dt.time(15, 45)
+        assert ex._close_by_today(1111, dt.time(15, 45), _ny('2026-11-30 12:45')) == dt.time(15, 45)
+
+    def test_a_calendar_failure_keeps_the_stored_time_and_says_so_once(self, executor, monkeypatch, caplog):
+        """An exit is never held up, or dropped, by a calendar lookup."""
+        ex, sdk = executor
+        self._hold(ex, sdk, monkeypatch, _ny('2026-11-27 10:00'))
+
+        def broken(*args, **kwargs):
+            raise RuntimeError('calendar unavailable')
+
+        monkeypatch.setattr(auto_executor_module, 'close_by_on', broken)
+        with caplog.at_level(logging.INFO):
+            ex._process_bar(BarWork('orb_test', 1111, _ny('2026-11-27 12:45'), 10))
+            assert len(sdk.propose_calls) == 1                 # unshifted: 12:45 is not yet 15:45
+            ex._process_bar(BarWork('orb_test', 1111, _ny('2026-11-27 15:45'), 11))
+        assert [call['action'] for call in sdk.propose_calls] == ['BUY', 'SELL']
+        notices = [record for record in caplog.records
+                   if 'early-close calendar unavailable' in record.getMessage()]
+        assert [record.levelno for record in notices] == [logging.WARNING]
+        assert notices[0].getMessage() == (
+            'auto-executor: early-close calendar unavailable for conId 1111 (calendar unavailable); '
+            'time exits use the stored close_by_time unshifted')
+
+
+class TestCloseByToday:
+    def test_no_close_by_asks_nothing(self, executor, monkeypatch):
+        ex, sdk = executor
+        monkeypatch.setattr(sdk, 'resolve', lambda *a, **k: pytest.fail('must not resolve'))
+        assert ex._close_by_today(1111, None, _ny('2026-11-27 12:45')) is None
+
+    def test_the_day_is_the_bars(self, executor):
+        ex, sdk = executor
+        _list_on(sdk, exchange='SMART', primary='NASDAQ')
+        assert ex._close_by_today(1111, dt.time(15, 45), _ny('2026-11-27 10:00')) == dt.time(12, 45)
+        assert ex._close_by_today(1111, dt.time(15, 45), _ny('2026-11-25 10:00')) == dt.time(15, 45)
+        assert ex._close_by_today(1111, dt.time(15, 45), pd.Timestamp('2026-11-27 10:00')) == dt.time(12, 45)
+
+    def test_the_venue_is_the_instruments(self, executor):
+        """ASX has no early close the day after US Thanksgiving; it has one on
+        Christmas Eve (14:10 for 16:10)."""
+        ex, sdk = executor
+        assert ex._close_by_today(1111, dt.time(15, 45), _sydney('2026-11-27 10:30')) == dt.time(15, 45)
+        assert ex._close_by_today(1111, dt.time(15, 45), _sydney('2026-12-24 10:30')) == dt.time(13, 45)
+
+    def test_an_instrument_with_no_calendar_is_unshifted(self, executor):
+        ex, sdk = executor
+        _list_on(sdk, exchange='IDEALPRO', primary='', sec_type='CASH')
+        assert ex._close_by_today(1111, dt.time(15, 45), _ny('2026-11-27 10:00')) == dt.time(15, 45)
+
+    def test_an_instrument_that_no_longer_resolves_is_unshifted_with_a_warning(self, executor, monkeypatch, caplog):
+        ex, sdk = executor
+        monkeypatch.setattr(sdk, 'resolve', lambda *a, **k: [])
+        with caplog.at_level(logging.WARNING):
+            assert ex._close_by_today(1111, dt.time(15, 45), _ny('2026-11-27 10:00')) == dt.time(15, 45)
+            assert ex._close_by_today(1111, dt.time(15, 45), _ny('2026-11-27 10:01')) == dt.time(15, 45)
+        notices = [record.getMessage() for record in caplog.records
+                   if 'early-close calendar unavailable' in record.getMessage()]
+        assert notices == ['auto-executor: early-close calendar unavailable for conId 1111 '
+                           '(conId 1111 not found in universe DB); '
+                           'time exits use the stored close_by_time unshifted']
+
+    def test_the_warning_is_per_instrument(self, executor, monkeypatch, caplog):
+        ex, sdk = executor
+        monkeypatch.setattr(sdk, 'resolve', lambda *a, **k: [])
+        with caplog.at_level(logging.WARNING):
+            ex._close_by_today(1111, dt.time(15, 45), _ny('2026-11-27 10:00'))
+            ex._close_by_today(2222, dt.time(15, 45), _ny('2026-11-27 10:00'))
+        notices = [record.getMessage() for record in caplog.records
+                   if 'early-close calendar unavailable' in record.getMessage()]
+        assert len(notices) == 2 and 'conId 2222' in notices[1]
+
+    def test_a_bar_that_carries_no_date_is_unshifted(self, executor):
+        ex, sdk = executor
+        _list_on(sdk, exchange='SMART', primary='NASDAQ')
+        assert ex._close_by_today(1111, dt.time(15, 45), '2026-11-27 10:00') == dt.time(15, 45)
+
+
+class TestVenueCalendar:
+    def _counting(self, sdk, monkeypatch):
+        calls = []
+        real = sdk.resolve
+
+        def resolve(*args, **kwargs):
+            calls.append((args, kwargs))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(sdk, 'resolve', resolve)
+        return calls
+
+    def test_it_is_the_listing_venues(self, executor):
+        ex, sdk = executor
+        assert ex._venue_calendar(1111) == 'ASX'
+
+    def test_the_primary_exchange_wins_over_the_router(self, executor):
+        ex, sdk = executor
+        _list_on(sdk, exchange='SMART', primary='ARCA')
+        assert ex._venue_calendar(1111) == 'NYSE'
+
+    def test_the_exchange_is_used_when_there_is_no_primary(self, executor):
+        ex, sdk = executor
+        _list_on(sdk, exchange='NASDAQ', primary='')
+        assert ex._venue_calendar(1111) == 'NASDAQ'
+
+    @pytest.mark.parametrize('exchange, primary', [('SMART', ''), ('SMART', None), (None, None), ('XYZ', '')])
+    def test_a_router_or_unknown_venue_has_none(self, executor, exchange, primary):
+        ex, sdk = executor
+        _list_on(sdk, exchange=exchange, primary=primary)
+        assert ex._venue_calendar(1111) is None
+
+    @pytest.mark.parametrize('sec_type', ['CASH', 'CRYPTO', ' cash '])
+    def test_a_round_the_clock_instrument_has_none_even_on_a_mapped_venue(self, executor, sec_type):
+        ex, sdk = executor
+        _list_on(sdk, exchange='NASDAQ', primary='NASDAQ', sec_type=sec_type)
+        assert ex._venue_calendar(1111) is None
+
+    def test_a_missing_security_type_is_not_round_the_clock(self, executor):
+        ex, sdk = executor
+        _list_on(sdk, exchange='NASDAQ', primary='NASDAQ', sec_type=None)
+        assert ex._venue_calendar(1111) == 'NASDAQ'
+
+    def test_the_exact_conid_is_what_is_resolved(self, executor, monkeypatch):
+        ex, sdk = executor
+        calls = self._counting(sdk, monkeypatch)
+        ex._venue_calendar('1111')
+        assert calls == [((1111,), {'sec_type': ''})]
+
+    def test_an_answer_is_remembered_per_instrument(self, executor, monkeypatch):
+        ex, sdk = executor
+        calls = self._counting(sdk, monkeypatch)
+        assert [ex._venue_calendar(1111) for _ in range(3)] == ['ASX'] * 3
+        assert len(calls) == 1
+
+    def test_no_calendar_is_an_answer_and_is_remembered_too(self, executor, monkeypatch):
+        ex, sdk = executor
+        _list_on(sdk, exchange='IDEALPRO', primary='', sec_type='CASH')
+        calls = self._counting(sdk, monkeypatch)
+        assert [ex._venue_calendar(1111) for _ in range(3)] == [None] * 3
+        assert len(calls) == 1
+
+    def test_a_failed_lookup_raises_and_is_not_remembered(self, executor, monkeypatch):
+        ex, sdk = executor
+        real = sdk.resolve
+        monkeypatch.setattr(sdk, 'resolve', lambda *a, **k: [])
+        with pytest.raises(AutoExecutionError, match='conId 1111 not found in universe DB'):
+            ex._venue_calendar(1111)
+        monkeypatch.setattr(sdk, 'resolve', real)
+        assert ex._venue_calendar(1111) == 'ASX'
