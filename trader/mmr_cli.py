@@ -3142,6 +3142,13 @@ def _handle_proposals(mmr: MMR, args: argparse.Namespace):
                     _px_s = f' @ {_px:.4g}' if _px else ''
                     console.print(f'  fill outcome:     {_outcome_markup(fill.get("outcome"))}'
                                   f'  (filled {fill.get("filled_quantity") or 0:g}{_px_s})')
+                    # Bracket / stop legs trade the other side; their fills
+                    # are not part of the entry's fill above.
+                    _exit_q = fill.get('exit_filled_quantity')
+                    if _exit_q:
+                        _exit_px = fill.get('exit_avg_fill_price')
+                        _exit_px_s = f' @ {_exit_px:.4g}' if _exit_px else ''
+                        console.print(f'  exit legs filled: {_exit_q:g}{_exit_px_s}')
                 rejection_reason = detail.get('rejection_reason')
                 if rejection_reason:
                     console.print(f'  rejection_reason: {rejection_reason}')

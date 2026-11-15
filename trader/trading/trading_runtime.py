@@ -28,7 +28,7 @@ from trader.trading.order_reference import split_order_reference
 from trader.trading.order_split import SplitPlan, split_order
 from trader.trading.order_structure import rejection_for_order
 from trader.trading.risk_gate import RiskGate, RiskGateResult, RiskInputs, RiskLimits
-from trader.listeners.ibreactive import IBAIORx, IBAIORxError, single_flight
+from trader.listeners.ibreactive import IBAIORx, IBAIORxError, broker_order_echo, single_flight
 from trader.messaging.clientserver import MessageBusServer, MultithreadedTopicPubSub, RPCClient, RPCServer
 from trader.objects import Action, ContractOrderPair, ExecutorCondition
 from trader.trading.book import BookSubject
@@ -3792,10 +3792,29 @@ class Trader():
                           and t.contract.conId == contract.conId), None)
             new_held = sum(float(p.position) for p in positions
                            if p.account == self.ib_account and p.contract.conId == contract.conId)
-            if (match is None or match.order.ocaGroup != oca_group or match.order.ocaType != 2
+            # The linkage is confirmed from the BROKER's echo of the order, not
+            # from the session's Trade. ib_async keeps a modification's edit
+            # off the Trade (placeOrder returns the existing Trade with its
+            # original Order) and drops ocaGroup / ocaType from the broker's
+            # openOrder echo, so ``match.order`` never shows the group — this
+            # check could not pass against the library — and a field written
+            # in process would not be broker evidence if it did. The group name
+            # is unique to this attempt, so an echo carrying it can only have
+            # been sent by the broker after it took this modification. No echo
+            # is no evidence.
+            echo = broker_order_echo(self.client.ib, edit)
+            if (match is None or echo is None
+                    or echo.ocaGroup != oca_group or echo.ocaType != 2
                     or match.orderStatus.status not in {'Submitted', 'PreSubmitted'}
                     or float(match.orderStatus.remaining) != trim_qty or new_held != held):
                 return SuccessFail.fail(error='UNKNOWN: broker has not confirmed the matching protected tranche; trim not submitted')
+            # Carry the confirmed linkage onto the session's Trade: the
+            # reduction coordinator reads working orders' OCA groups there to
+            # count a blocking pair once. Without it the trim below is one more
+            # independent reduction (150 working against 100 held) and the
+            # coordinator cancels, or defers against, the stops this resize
+            # exists to preserve.
+            match.order.ocaGroup, match.order.ocaType = echo.ocaGroup, echo.ocaType
 
         order = MarketOrder(action, trim_qty, account=self.ib_account, transmit=True,
                             ocaGroup=oca_group, ocaType=2 if oca_group else 0)
@@ -4637,7 +4656,8 @@ class Trader():
                 for p in executed:
                     mine = [e for e in events if e.order_id in set(p.order_ids)]
                     qty = p.quantity if (p.quantity is not None and p.quantity == p.quantity) else None
-                    known_outcomes[p.id] = fill_outcome(mine, p.order_ids, qty)['outcome']
+                    known_outcomes[p.id] = fill_outcome(
+                        mine, p.order_ids, qty, action=p.action)['outcome']
         except Exception as ex:
             logging.warning('reconcile: order-journal outcome lookup failed: %s', ex)
 

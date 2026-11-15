@@ -103,6 +103,66 @@ async def single_flight(ib, key: str, call, timeout: float = 10.0):
         return await asyncio.wait_for(call(), timeout)
 
 
+def install_order_echo(ib) -> None:
+    """Keep what the BROKER last said about each order (idempotent).
+
+    ib_async does not expose it for an order the session already tracks.
+    ``IB.placeOrder`` on an existing order id returns the existing ``Trade``
+    with its ORIGINAL ``Order`` object (the edit only travels on the wire), and
+    ``Wrapper.openOrder`` — the broker's echo — copies six fields onto that
+    Trade (``permId``, ``totalQuantity``, ``lmtPrice``, ``auxPrice``,
+    ``orderType``, ``orderRef``) and drops the rest. A modification of anything
+    else (``ocaGroup``, ``ocaType``...) is therefore never visible on the
+    session's Trade, whatever the broker did with it: the protected-resize
+    confirmation read ``Trade.order.ocaGroup`` and could not pass against the
+    library (docs/AUDIT_2026-11-14.md B1.7).
+
+    The wire-decoded ``Order`` handed to ``Wrapper.openOrder`` is the only place
+    the library holds the broker's statement, so it is recorded here, under the
+    library's own order key, before the library discards it. Read it with
+    ``broker_order_echo``. Nothing in process writes this record — a Trade whose
+    Order was edited locally is not evidence of what the broker holds.
+
+    The record lives on the wrapper: a reconnect builds a fresh ``IB()`` and
+    starts empty, like ``wrapper.trades``.
+    """
+    wrapper = getattr(ib, 'wrapper', None)
+    if wrapper is None or getattr(wrapper, '_mmr_order_echoes', None) is not None:
+        return
+    echoes: Dict[object, Order] = {}
+    original = wrapper.openOrder
+
+    def openOrder(orderId, contract, order, orderState):
+        try:
+            if not getattr(order, 'whatIf', False):     # a whatIf reply is not an order
+                echoes[wrapper.orderKey(order.clientId, order.orderId, order.permId)] = order
+        except Exception as ex:
+            # Recording must never cost the library its own handling.
+            logging.warning('could not record the broker echo for order %s: %s', orderId, ex)
+        return original(orderId, contract, order, orderState)
+
+    wrapper.openOrder = openOrder
+    wrapper._mmr_order_echoes = echoes
+
+
+def broker_order_echo(ib, order: Order) -> Optional[Order]:
+    """The broker's most recent ``openOrder`` statement for ``order`` on this
+    connection, as decoded from the wire.
+
+    None when the broker has made none, or when ``install_order_echo`` was not
+    run on ``ib``. None means NO EVIDENCE — never "unchanged".
+    """
+    wrapper = getattr(ib, 'wrapper', None)
+    echoes = getattr(wrapper, '_mmr_order_echoes', None)
+    if wrapper is None or not isinstance(echoes, dict):
+        return None
+    try:
+        key = wrapper.orderKey(order.clientId, order.orderId, order.permId)
+    except Exception:
+        return None
+    return echoes.get(key)
+
+
 class EventLayoutError(RuntimeError):
     """An eventkit ``Event`` whose listener storage this module cannot read."""
 
@@ -262,6 +322,7 @@ class IBAIORx():
         self.ib = IB()
         ib_informational.install(self.ib)
         ib_informational.quiet_handled_errors(self.ib)
+        install_order_echo(self.ib)
 
         def mapper(tickers: Set[Ticker]) -> Observable[Ticker]:
             # warning: for whatever reason, we can get either a Set of tickers or a single ticker.
@@ -506,6 +567,7 @@ class IBAIORx():
         self.ib = IB()
         ib_informational.install(self.ib)
         ib_informational.quiet_handled_errors(self.ib)
+        install_order_echo(self.ib)
         _restore_event_handlers(self.ib, preserved)
 
         self._shutdown = False
@@ -574,6 +636,7 @@ class IBAIORx():
         self.ib = IB()
         ib_informational.install(self.ib)
         ib_informational.quiet_handled_errors(self.ib)
+        install_order_echo(self.ib)
         _restore_event_handlers(self.ib, preserved)
 
         self._shutdown = False
