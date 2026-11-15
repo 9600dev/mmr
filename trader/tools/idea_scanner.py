@@ -217,12 +217,41 @@ def list_presets() -> pd.DataFrame:
 # ------------------------------------------------------------------
 # Module-level scoring functions (shared by IdeaScanner & IBIdeaScanner)
 # ------------------------------------------------------------------
+#
+# Direction. Every preset but `volatile` has one, and it is the sign of the
+# preset's own change filter: momentum / gap-up / breakout want an UP day
+# (min_change_pct > 0), gap-down a DOWN day (max_change_pct < 0),
+# mean-reversion a day that is not up (max_change_pct = 0). These functions
+# used to take abs() of the change and of the gap, which is only harmless
+# while that filter runs first. It does not always: IBIdeaScanner drops the
+# change filter when the symbols are given explicitly (--tickers / --universe),
+# and any path drops it when the caller overrides it. There a -8% day on heavy
+# volume earned what a +8% day earns and came back as a momentum BUY.
+#
+# So direction is part of the score, not of whichever filter happened to run:
+# a move against the preset earns nothing, and the preset's actionable signal
+# (BUY, or SELL for gap-down) requires the day to have gone the preset's way.
+# For a row the preset's change filter would have kept, the change points and
+# the signal are what they were. One thing does differ for such a row: a GAP
+# against the preset (a gap down on a day that ended up, under gap-up; a gap
+# up on a day that ended down, under gap-down) no longer earns gap points.
+
+def _up(pct) -> float:
+    """How far a signed percentage went up; 0 for a fall, zero or unknown."""
+    return max(pct or 0.0, 0.0)
+
+
+def _down(pct) -> float:
+    """How far a signed percentage went down, as a positive number."""
+    return max(-(pct or 0.0), 0.0)
+
 
 def _score_momentum(c: Dict) -> tuple:
     """Score based on change%, relative volume, RSI headroom, and EMA position."""
     score = 0.0
+    change = c.get('change_pct', 0)
     # Change contribution (0-30 points)
-    score += min(abs(c.get('change_pct', 0)), 15) * 2
+    score += min(_up(change), 15) * 2
     # Relative volume (0-25 points)
     score += min((c.get('rel_vol') or 0), 5) * 5
     # RSI headroom: higher RSI = less room but shows momentum
@@ -237,35 +266,34 @@ def _score_momentum(c: Dict) -> tuple:
     if ema_9 is not None and ema_9 > 0 and c['price'] > ema_9:
         score += 10
 
-    signal = 'BUY' if score >= 40 else ('WATCH' if score >= 20 else 'WATCH')
+    signal = 'BUY' if score >= 40 and _up(change) > 0 else 'WATCH'
     return (min(score, 100), signal)
 
 
 def _score_gap_up(c: Dict) -> tuple:
     """Score based on gap size and relative volume."""
     score = 0.0
-    # Gap contribution (0-40 points)
-    gap = abs((c.get('gap_pct') or 0))
-    score += min(gap, 20) * 2
+    change = c.get('change_pct', 0)
+    # Gap contribution (0-40 points) — a gap UP; a gap down is not one.
+    score += min(_up(c.get('gap_pct')), 20) * 2
     # Relative volume (0-30 points)
     score += min((c.get('rel_vol') or 0), 6) * 5
     # Change contribution (0-20 points)
-    score += min(abs(c.get('change_pct', 0)), 10) * 2
+    score += min(_up(change), 10) * 2
     # RSI — not too overbought
     rsi = c.get('rsi')
     if rsi is not None and rsi < 70:
         score += 10
 
-    signal = 'BUY' if score >= 40 else 'WATCH'
+    signal = 'BUY' if score >= 40 and _up(change) > 0 else 'WATCH'
     return (min(score, 100), signal)
 
 
 def _score_gap_down(c: Dict) -> tuple:
     """Score based on gap size, RSI oversold level, and SMA distance."""
     score = 0.0
-    # Gap size (0-40 points)
-    gap = abs((c.get('gap_pct') or 0))
-    score += min(gap, 20) * 2
+    # Gap size (0-40 points) — a gap DOWN; a gap up is not one.
+    score += min(_down(c.get('gap_pct')), 20) * 2
     # RSI oversold bonus (0-30 points)
     rsi = c.get('rsi')
     if rsi is not None and rsi < 40:
@@ -278,7 +306,7 @@ def _score_gap_down(c: Dict) -> tuple:
     # Relative volume
     score += min((c.get('rel_vol') or 0), 4) * 2.5
 
-    signal = 'SELL' if score >= 40 else 'WATCH'
+    signal = 'SELL' if score >= 40 and _down(c.get('change_pct', 0)) > 0 else 'WATCH'
     return (min(score, 100), signal)
 
 
@@ -308,7 +336,9 @@ def _score_mean_reversion(c: Dict) -> tuple:
     # Relative volume (0-20 points)
     score += min((c.get('rel_vol') or 0), 4) * 5
 
-    signal = 'BUY' if score >= 35 else 'WATCH'
+    # A bounce candidate has not bounced yet: the preset's own filter is
+    # max_change_pct = 0.0, so BUY means the day is not up.
+    signal = 'BUY' if score >= 35 and _up(c.get('change_pct', 0)) == 0 else 'WATCH'
     return (min(score, 100), signal)
 
 
@@ -337,9 +367,10 @@ def _score_breakout(c: Dict) -> tuple:
     score += min((c.get('rel_vol') or 0), 6) * 5
 
     # Change contribution (0-15 points)
-    score += min(abs(c.get('change_pct', 0)), 5) * 3
+    change = c.get('change_pct', 0)
+    score += min(_up(change), 5) * 3
 
-    signal = 'BUY' if score >= 45 else 'WATCH'
+    signal = 'BUY' if score >= 45 and _up(change) > 0 else 'WATCH'
     return (min(score, 100), signal)
 
 
@@ -350,7 +381,8 @@ def _score_volatile(c: Dict) -> tuple:
     score += min(c.get('range_pct', 0), 20) * 2
     # Relative volume (0-25 points)
     score += min((c.get('rel_vol') or 0), 5) * 5
-    # Absolute change % (0-25 points)
+    # Absolute change % (0-25 points). Unsigned on purpose: the size of the
+    # move is this preset's subject, and its signal below reads the sign.
     score += min(abs(c.get('change_pct', 0)), 10) * 2.5
     # RSI extremes bonus
     rsi = c.get('rsi')
