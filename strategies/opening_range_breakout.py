@@ -6,11 +6,13 @@ breaks above the range-high with above-average volume; SELL when close
 breaks below the range-low. Trades are filtered to regular trading hours
 (09:30–16:00 ET); pre-market and after-hours bars don't participate.
 
-The range is the high/low of the bars PRESENT in the window, so it is only
-trusted for entries when the window is complete enough: its first bar within
-RANGE_START_TOLERANCE_MIN minutes of the session open and at least
-RANGE_MIN_BAR_FRACTION of its expected bars. A day whose frame starts late (a
-deploy or reload after the open, a failed history backfill) takes no entry.
+The range is the high/low of the bars that TRADED in the window, so it is
+only trusted for entries when the window is complete enough: its first traded
+bar within RANGE_START_TOLERANCE_MIN minutes of the session open and at least
+RANGE_MIN_BAR_FRACTION of its expected bars traded. A day whose frame starts
+late (a deploy or reload after the open, a failed history backfill) takes no
+entry. A bar with no traded volume (a live bar built from quotes before the
+instrument has opened) is not part of the range at all.
 
 Uses the precompute hook so the per-day range and volume average are
 computed once over the full series.
@@ -45,16 +47,28 @@ class OpeningRangeBreakout(Strategy):
     # history backfill failed — used to yield the range of a PARTIAL window and
     # trade breakouts of it (today from 09:50: range high 100.02 and a BUY,
     # against a real range high of 101.5). A day's range is valid only when
-    #   * the window's first bar is no later than RANGE_START_TOLERANCE_MIN
-    #     minutes after the session open, AND
+    #   * the window's first TRADED bar is no later than
+    #     RANGE_START_TOLERANCE_MIN minutes after the session open, AND
     #   * the window holds at least RANGE_MIN_BAR_FRACTION of the bars a
-    #     complete one has (RANGE_MINUTES / the bar interval).
+    #     complete one has (RANGE_MINUTES / the bar interval), counting only
+    #     bars that traded.
     # Otherwise orb_high/orb_low are NaN for that day and no entry is taken.
     # The exit (close below the low of the window bars that WERE seen) is
     # unchanged, so a position carried into such a day can still be closed.
-    # A venue with a staggered open (ASX: groups open 10:00–10:09) needs a
-    # wider tolerance or a per-instrument RTH_OPEN_MIN when its bars come from
-    # trades only.
+    #
+    # Only bars with traded volume (volume > 0) are part of the range: they
+    # alone set its high/low, mark its start and count toward the fraction.
+    # A LIVE bar exists for every minute with a quote update, traded or not,
+    # and before an instrument has opened it is flat at yesterday's close with
+    # volume 0. The ASX opens in groups between 10:00:00 and about 10:09:15,
+    # so with RTH_OPEN_MIN = 600 those bars were inside the window: the live
+    # range began at 10:00 with yesterday's close as its low (gap up) or its
+    # high (gap down), while a backtest of the same morning — stored history
+    # is trades only — saw a window starting at the first trade. Now both see
+    # the range of what traded. A name whose group opens later than the
+    # tolerance therefore takes no entry (live and backtest alike) until the
+    # deployment sets RTH_OPEN_MIN to its group's open or widens the tolerance
+    # (and, for a window that still starts at 10:00, lowers the fraction).
     RANGE_START_TOLERANCE_MIN = 2
     RANGE_MIN_BAR_FRACTION = 0.8
     # Exit management. Without these, the ONLY exit is a fresh volume-
@@ -150,6 +164,9 @@ class OpeningRangeBreakout(Strategy):
         low = prices['low'].to_numpy()
         close = prices['close'].to_numpy()
         volume = prices['volume'].to_numpy()
+        # A bar is part of the opening range only if something traded in it
+        # (NaN volume compares False).
+        traded = np.asarray(volume, dtype=float) > 0
 
         # For each day, compute ORB high/low from the ORB-window bars, then
         # broadcast to every bar of that day. We carry the range forward so
@@ -160,9 +177,11 @@ class OpeningRangeBreakout(Strategy):
         # orb_high/orb_low are the VALIDATED range (entries): NaN for the whole
         # day when the window started late or is too sparse (see
         # RANGE_START_TOLERANCE_MIN / RANGE_MIN_BAR_FRACTION). exit_low is the
-        # low of whatever window bars were seen, valid or not, and only ever
-        # closes a position. Everything here is known once the window has
-        # closed, so a value at bar i depends on bars <= i only.
+        # low of the window bars that traded, valid range or not, and only ever
+        # closes a position; if NOTHING traded in the window it falls back to
+        # the low of the bars that were seen, so an exit level still exists
+        # whenever one did before. Everything here is known once the window
+        # has closed, so a value at bar i depends on bars <= i only.
         orb_high = np.full(len(prices), np.nan, dtype=float)
         orb_low = np.full(len(prices), np.nan, dtype=float)
         exit_low = np.full(len(prices), np.nan, dtype=float)
@@ -172,42 +191,52 @@ class OpeningRangeBreakout(Strategy):
         current_day = None
         running_hi = -np.inf
         running_lo = np.inf
+        quoted_lo = np.inf         # low of window bars that did NOT trade (exit fallback only)
         locked_hi = np.nan
         locked_lo = np.nan
         seen_lo = np.nan
         decided = False
-        first_minute = -1          # session minute of today's first window bar
+        first_minute = -1          # session minute of today's first TRADED window bar
         last_minute = -1           # last window minute counted (duplicates count once)
-        window_bars = 0
+        window_bars = 0            # window bars that traded
         for i in range(len(prices)):
             d = et_date[i]
             if d != current_day:
                 current_day = d
                 running_hi, running_lo = -np.inf, np.inf
+                quoted_lo = np.inf
                 locked_hi, locked_lo = np.nan, np.nan
                 seen_lo = np.nan
                 decided = False
                 first_minute, last_minute, window_bars = -1, -1, 0
 
             if orb_mask[i]:
-                if high[i] > running_hi: running_hi = high[i]
-                if low[i] < running_lo:  running_lo = low[i]
-                if high[i] == high[i] and et_minute[i] != last_minute:
-                    if window_bars == 0:
-                        first_minute = et_minute[i]
-                    last_minute = et_minute[i]
-                    window_bars += 1
+                if traded[i]:
+                    if high[i] > running_hi: running_hi = high[i]
+                    if low[i] < running_lo:  running_lo = low[i]
+                    if high[i] == high[i] and et_minute[i] != last_minute:
+                        if window_bars == 0:
+                            first_minute = et_minute[i]
+                        last_minute = et_minute[i]
+                        window_bars += 1
+                elif low[i] < quoted_lo:
+                    quoted_lo = low[i]
                 # Still inside the ORB window — don't publish the range yet
                 # (we only act on breakouts AFTER the range is fully formed).
             elif et_minute[i] >= rth_open + range_min:
                 # Window closed for today; freeze the range — once, and for
                 # entries only if the window was complete enough to trust.
-                if running_hi != -np.inf and not decided:
+                if not decided and running_hi != -np.inf:
                     decided = True
                     seen_lo = running_lo
                     if (first_minute - rth_open <= start_tolerance
                             and window_bars >= min_window_bars):
                         locked_hi, locked_lo = running_hi, running_lo
+                elif not decided and quoted_lo != np.inf:
+                    # Nothing traded in the window: no entry range, and the
+                    # exit level is the low of the bars that were seen.
+                    decided = True
+                    seen_lo = quoted_lo
                 orb_high[i] = locked_hi
                 orb_low[i]  = locked_lo
                 exit_low[i] = seen_lo
