@@ -104,7 +104,9 @@ IB_NOT_APPLICABLE = -1
 # zero-volume bar is an ordinary, legal bar — while a WAP and a trade count
 # simply do not exist (stored NULL). A NULL volume is not available as the
 # answer: beside real prices it is a corrupt row (bar_quality: a bar with
-# prices and no volume).
+# prices and no volume). The count is NULL and not 0 for a second reason:
+# `bar_count = 0 AND average IS NULL` is how a TwelveData row is recognised
+# (scripts/repair_download_listings.py moves and deletes rows on it).
 _QUOTE_BAR_TRADE_FIELDS = (('volume', 0.0), ('average', np.nan), ('bar_count', np.nan))
 
 

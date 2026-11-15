@@ -106,6 +106,13 @@ def test_quote_bars_from_ib_are_stored(tmp_duckdb_path, what_to_show):
     assert len(read_back) == 5 and (read_back['volume'] == 0.0).all()
     assert not (read_back[['open', 'high', 'low', 'close']] <= 0).any().any()
 
+    # Not mistakable for a TwelveData row, which is recognised by exactly this
+    # predicate (scripts/repair_download_listings.py re-keys and deletes on it).
+    vendor_signature = DuckDBConnection.get_instance(tmp_duckdb_path).execute(
+        'SELECT count(*) FROM tick_data WHERE symbol = ? AND bar_count = 0 AND average IS NULL',
+        [str(EURUSD.conId)], fetch='one')[0]
+    assert vendor_signature == 0
+
 
 def test_no_minus_one_is_stored_as_a_price_or_a_count(tmp_duckdb_path):
     """-1.0 in `average` is read by strategies as a VWAP of minus one dollar."""
