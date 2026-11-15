@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from trader.data.duckdb_store import DuckDBConnection
@@ -108,8 +109,15 @@ class FakeResponse:
         return {'filings': self._f}
 
 
+_RANGE = __import__('re').compile(r' AND filedAt:\{(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}) TO \*\]$')
+
+
 class FakeSec:
-    """sec-api Query API fake: honours the ``filedAt:{X TO *]`` range clause."""
+    """sec-api Query API fake: honours the ``filedAt:{X TO *]`` range clause —
+    and, like the real API, answers a MALFORMED range with HTTP 200 and no
+    filings. The first version of this fake split on ``filedAt:{`` and took
+    whatever followed, so the stray ``}`` the client appended (``... TO *]}``)
+    went unnoticed here while the real API returned nothing for every name."""
     def __init__(self, filings):
         self.filings = list(filings)      # dicts with periodOfReport, filedAt, formType, accessionNo
         self.queries = []
@@ -119,9 +127,12 @@ class FakeSec:
         self.queries.append(q)
         ticker = q.split('ticker:')[1].split(' ')[0]
         out = [f for f in self.filings if f['ticker'] == ticker]
-        if 'filedAt:{' in q:
-            after = q.split('filedAt:{')[1].split(' TO')[0]
-            out = [f for f in out if f['filedAt'] > after]
+        if 'filedAt:' in q:
+            clause = _RANGE.search(q)
+            if clause is None:
+                return FakeResponse([])                       # malformed: 200, nothing (observed live)
+            after = pd.Timestamp(clause.group(1), tz='UTC')
+            out = [f for f in out if pd.Timestamp(f['filedAt']) > after]
         return FakeResponse(out if json['from'] == '0' else [])
 
 
@@ -159,7 +170,7 @@ def test_fundamentals_incremental_appends_only_new_acceptances(tmp_path):
     # re-run with nothing new: the query carries the resume instant, nothing is written or rewritten
     res2 = ff.run_incremental(db, hist, sec, poly, key='k', log=lambda m: None)
     assert res2['written'] == 0 and res2['no_new'] == 1
-    assert 'filedAt:{2024-05-01T10:01:00 TO *]}' in sec.queries[-1]       # UTC of 06:01 EDT
+    assert sec.queries[-1].endswith(' AND filedAt:{2024-05-01T10:01:00 TO *]')    # UTC of 06:01 EDT; nothing after the bracket
     assert db.execute('SELECT ticker, period_end, accession_no, fetched_at FROM fundamentals', fetch='all') == row0
 
     # a new filing (and a RESTATEMENT of the old period under a new accession) arrive
@@ -213,3 +224,33 @@ def test_same_period_multiple_filings_newest_wins_and_rerun_is_idempotent(tmp_pa
     res2 = ff.run_incremental(db, hist, sec, poly, key='k', log=lambda m: None)
     assert res2['written'] == 0 and res2['no_new'] == 1
     assert db.execute('SELECT accession_no, accepted_at, fetched_at FROM fundamentals', fetch='all') == first
+
+
+def test_the_resume_filter_is_a_well_formed_range_and_new_filings_come_back():
+    """The clause closed with a stray ``}`` (an f-string escape), sec-api
+    answered the malformed range with 200 and no filings, and the incremental
+    refresh fetched NOTHING from the day it was written while reporting
+    "nothing new" for every name (found 2026-11-15: AAPL's stored filings were
+    two quarters behind)."""
+    sec = FakeSec([_filing('AAPL', '2026-06-27', '2026-07-31T06:01:02-04:00', 'q3'),
+                   _filing('AAPL', '2026-09-26', '2026-11-03T08:05:15-05:00', 'fy')])
+    stored = pd.Timestamp('2026-07-31T06:01:02-04:00')
+    index = ff.sec_filing_index(sec, 'AAPL', 'k', filed_after=stored)
+    query = sec.queries[0]
+    assert query == 'ticker:AAPL AND (formType:"10-Q" OR formType:"10-K") AND filedAt:{2026-07-31T10:01:02 TO *]'
+    assert query.count('{') == 1 and query.count('}') == 0 and query.count('[') == 0 and query.count(']') == 1
+    assert index == {'2026-09-26': ('2026-11-03T08:05:15-05:00', '10-Q', 'fy')}      # only the filing after it
+
+
+def test_a_malformed_filter_would_have_shown_as_nothing_new():
+    """What the fake now does with the old query, so the regression is visible."""
+    sec = FakeSec([_filing('AAPL', '2026-09-26', '2026-11-03T08:05:15-05:00', 'fy')])
+    response = sec.post('url', json={'query': 'ticker:AAPL AND filedAt:{2026-07-31T10:01:02 TO *]}', 'from': '0'},
+                        headers={}, timeout=1)
+    assert response.json() == {'filings': []}
+
+
+def test_without_a_resume_point_there_is_no_date_filter():
+    sec = FakeSec([_filing('AAPL', '2026-09-26', '2026-11-03T08:05:15-05:00', 'fy')])
+    assert ff.sec_filing_index(sec, 'AAPL', 'k') == {'2026-09-26': ('2026-11-03T08:05:15-05:00', '10-Q', 'fy')}
+    assert sec.queries == ['ticker:AAPL AND (formType:"10-Q" OR formType:"10-K")']

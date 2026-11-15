@@ -74,7 +74,16 @@ def sec_filing_index(client, ticker: str, key: str, forms=('10-Q', '10-K'),
         # Incremental mode (hillclimb C02): only filings accepted strictly
         # after the latest instant already stored for this name. Lucene range
         # on the same field the row is keyed by, so nothing older can come back.
-        query += f' AND filedAt:{{{_iso_instant(filed_after)} TO *]}}'
+        #
+        # The clause is `filedAt:{<instant> TO *]` — exclusive lower bound,
+        # open upper. Until 2026-11-15 the f-string closed with `]}}`, which
+        # renders a stray `}` after the bracket; sec-api answers a malformed
+        # range with HTTP 200 and NO filings, so every name read "nothing
+        # new" and the incremental refresh fetched nothing at all, from the
+        # day it was written, while reporting success (AAPL's stored filings
+        # stopped two quarters back). Built without an f-string so the braces
+        # on the page are the braces on the wire.
+        query += ' AND filedAt:{' + _iso_instant(filed_after) + ' TO *]'
     for start in (0, 50):
         body = {'query': query,
                 'from': str(start), 'size': '50',
