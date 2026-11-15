@@ -400,3 +400,61 @@ def reconcile_sleeve(sleeve: str, gateway: Gateway, *, dry_run: bool = False,
                            unfilled=tuple(match.unfilled), evidence_observed_at=evidence.observed_at,
                            replay_scope=evidence.replay_scope, working=tuple(match.working),
                            broker_snapshot_complete=bool(evidence.complete))
+
+
+def unjournaled_quantities(executed: Mapping[str, float], journal: Mapping[str, float]) -> dict[str, float]:
+    """Per ticker, the shares the broker executed for the sleeve that the journal does not hold.
+
+    Only the dangerous direction: executions the journal is missing make the
+    sleeve read as holding LESS than it does, and those shares are bought
+    again. A journal that holds more than the executions explain is clamped to
+    IB by the plan and is not this check's concern.
+    """
+    missing: dict[str, float] = {}
+    for ticker, quantity in executed.items():
+        short = float(quantity) - float(journal.get(ticker, 0.0))
+        if short > _EPS:
+            missing[ticker] = short
+    return missing
+
+
+def check_journal_current(sleeve: str, gateway: Gateway, *, now: Optional[dt.datetime] = None) -> None:
+    """Refuse when the ``sleeve_fills`` journal is behind the broker.
+
+    A sleeve's holdings are ``min(journal, IB)``. An EXECUTED proposal whose
+    executions were never journaled is therefore shares the sleeve does not
+    know it holds, and the next plan buys them again — the whole sleeve when
+    ``reconcile`` has never been run. Found live on 2026-11-14: fifteen filled
+    orders from the first rebalance, no journal at all, ``status`` reporting a
+    market value of $0.00, and ``plan`` held off only by stale targets.
+
+    The question is "would ``reconcile`` add shares now?", answered read-only
+    with the same matching: a successful match accounts for EVERY execution of
+    the sleeve's EXECUTED proposals, so its per-ticker sums are what the journal
+    must hold. A sleeve with no EXECUTED proposal carrying an order id has
+    nothing that can be missing and is not checked at all. When the broker
+    evidence cannot settle it (``reconcile`` itself would refuse), the journal
+    is not known to be current and that refuses too: ``JOURNAL_UNCONFIRMED``.
+    """
+    from trader.rebalance.plan import Refusal
+    order_to_proposal, _ = executed_order_ids(gateway.proposals_in_group(sleeve_group(sleeve)))
+    if not order_to_proposal:
+        return
+    try:
+        report = reconcile_sleeve(sleeve, gateway, dry_run=True, now=now)
+    except Refusal as exc:
+        raise Refusal('JOURNAL_UNCONFIRMED',
+                      f'cannot confirm the sleeve_fills journal is current for sleeve {sleeve} '
+                      f'({exc.code}: {exc.message}); nothing planned. Resolve it with '
+                      f'`python -m trader.rebalance reconcile --sleeve {sleeve}` first') from exc
+    missing = unjournaled_quantities(report.matched_by_symbol, report.holdings)
+    if not missing:
+        return
+    shown = ', '.join(f'{ticker} {quantity:+g}' for ticker, quantity in sorted(missing.items())[:12])
+    more = len(missing) - 12
+    raise Refusal('UNRECONCILED_EXECUTIONS',
+                  f'broker executions of sleeve {sleeve} are not in the sleeve_fills journal for '
+                  f'{len(missing)} ticker(s): {shown}{f", and {more} more" if more > 0 else ""}. The sleeve '
+                  f'would read as holding less than it does and those shares would be bought again. Run '
+                  f'`python -m trader.rebalance reconcile --sleeve {sleeve}` first')
+

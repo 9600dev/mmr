@@ -239,3 +239,84 @@ def test_module_is_runnable_as_python_dash_m(tmp_path):
     proc = subprocess.run([sys.executable, '-m', 'trader.rebalance', '--help'], capture_output=True, text=True)
     assert proc.returncode == 0
     assert all(word in proc.stdout for word in ('plan', 'propose', 'status', 'reconcile'))
+
+
+# --------------------------------------------------------------------------
+# AUDIT_2026-11-14 B5.2 — the journal must not be behind the broker.
+# The live sleeve had fifteen filled orders and no journal: `status` said
+# $0.00 and the next `plan` would have bought every one of them again.
+# --------------------------------------------------------------------------
+
+def _filled_but_unjournaled(**kwargs):
+    """Last month's batch filled (AAPL 25, MSFT 7) and `reconcile` was never run."""
+    aapl, aapl_receipt = filled_order(901, 'AAPL', 'BUY', 25, 200.0, exec_id='x1')
+    msft, msft_receipt = filled_order(902, 'MSFT', 'BUY', 7, 400.0, exec_id='x2')
+    return FakeGateway(
+        proposals=[executed(1, 'AAPL', 'BUY', 25), executed(2, 'MSFT', 'BUY', 7)],
+        evidence=evidence([aapl, msft], [aapl_receipt, msft_receipt]),
+        positions={'AAPL': 25, 'MSFT': 7}, prices=PRICES, **kwargs)
+
+
+@pytest.mark.parametrize('command', ['plan', 'propose'])
+def test_plan_and_propose_refuse_while_filled_orders_are_not_journaled(tmp_path, capsys, command):
+    path = write_targets(tmp_path)
+    gw = _filled_but_unjournaled()
+    code, out = _run([command, str(path), *TODAY], gw)
+    err = capsys.readouterr().err
+    assert code == 1 and out == ''
+    assert 'refused (UNRECONCILED_EXECUTIONS)' in err and 'AAPL +25, MSFT +7' in err
+    assert 'reconcile --sleeve s2p' in err
+    assert gw.propose_calls == [] and gw.recorded == [] and gw.groups == {}     # nothing created, nothing journaled
+    assert 'price' not in gw.method_names                                       # refused before sizing anything
+
+
+def test_the_same_sleeve_plans_what_is_really_missing_once_reconciled(tmp_path):
+    """Without the journal the plan was BUY 25 AAPL + BUY 7 MSFT again; with it, nothing."""
+    path = write_targets(tmp_path)
+    gw = _filled_but_unjournaled()
+    code, _ = _run(['reconcile', '--sleeve', 's2p'], gw)
+    assert code == 0 and len(gw.recorded) == 2
+    code, out = _run(['plan', str(path), *TODAY, '--json'], gw)
+    doc = json.loads(out)
+    assert code == 0 and doc['orders'] == []
+    assert doc['holdings_before'] == {'AAPL': 25, 'MSFT': 7} == doc['holdings_after']
+
+
+def test_status_warns_instead_of_reporting_an_empty_sleeve_as_fact(tmp_path):
+    write_targets(tmp_path, sleeve_dir=True)
+    gw = _filled_but_unjournaled()
+    code, out = _run(['status', 's2p', '--targets-dir', str(tmp_path)], gw)
+    assert code == 0
+    assert out.startswith('WARNING: the holdings below are NOT current — UNRECONCILED_EXECUTIONS: ')
+    assert 'AAPL +25, MSFT +7' in out and 'market value $0.00' in out            # the figures it warns about
+    code, out = _run(['status', 's2p', '--targets-dir', str(tmp_path), '--json'], gw)
+    doc = json.loads(out)
+    assert code == 0 and doc['journal']['current'] is False
+    assert doc['journal']['detail'].startswith('UNRECONCILED_EXECUTIONS: ')
+    assert gw.recorded == []                                                     # status never journals
+
+
+def test_status_of_a_current_sleeve_carries_no_warning(tmp_path):
+    write_targets(tmp_path, sleeve_dir=True)
+    gw = _filled_but_unjournaled()
+    _run(['reconcile', '--sleeve', 's2p'], gw)
+    code, out = _run(['status', 's2p', '--targets-dir', str(tmp_path)], gw)
+    assert code == 0 and 'WARNING' not in out and 'market value $7,800.00' in out
+    code, out = _run(['status', 's2p', '--targets-dir', str(tmp_path), '--json'], gw)
+    assert json.loads(out)['journal'] == {'current': True, 'detail': ''}
+
+
+def test_plan_refuses_when_the_broker_cannot_say_whether_executed_orders_filled(tmp_path, capsys):
+    path = write_targets(tmp_path)
+    gw = FakeGateway(proposals=[executed(1, 'AAPL', 'BUY', 25)], fills=held(AAPL=25),
+                     positions={'AAPL': 25}, prices=PRICES, fail_evidence=True)
+    code, out = _run(['plan', str(path), *TODAY], gw)
+    err = capsys.readouterr().err
+    assert code == 1 and out == '' and 'refused (JOURNAL_UNCONFIRMED)' in err and 'EXECUTIONS_UNREADABLE' in err
+
+
+def test_a_sleeve_with_no_executed_orders_is_planned_without_asking_for_executions(tmp_path):
+    path = write_targets(tmp_path)
+    gw = FakeGateway(prices=PRICES, fail_evidence=True)
+    code, _ = _run(['plan', str(path), *TODAY], gw)
+    assert code == 0 and 'execution_evidence' not in gw.method_names
