@@ -52,6 +52,7 @@ class _FakeClient:
 
     instances = []
     to_deliver = []      # messages handed to the processor once connected
+    ends_by_itself = False   # connect() returns at once (auth refused, reconnects exhausted)
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
@@ -75,7 +76,8 @@ class _FakeClient:
             if self.to_deliver:
                 await processor(list(self.to_deliver))
             self.connected.set()
-            await self._closed.wait()
+            if not self.ends_by_itself:
+                await self._closed.wait()
         finally:
             self.finished.set()
 
@@ -90,6 +92,7 @@ class _FakeClient:
 def fake_client(monkeypatch):
     _FakeClient.instances.clear()
     _FakeClient.to_deliver = []
+    _FakeClient.ends_by_itself = False
     monkeypatch.setattr(massive_reactive, 'WebSocketClient', _FakeClient)
     return _FakeClient
 
@@ -137,6 +140,24 @@ def test_stop_twice_is_harmless(fake_client):
         gc.collect()
     assert not [w for w in caught if 'never awaited' in str(w.message)]
     assert client.finished.is_set()
+
+
+def test_stop_after_the_stream_ended_by_itself_has_nothing_to_close(fake_client):
+    """The thread's loop is gone; no coroutine may be created and dropped."""
+    fake_client.ends_by_itself = True
+    reactive = _reactive()
+    done = _completions(reactive)
+    reactive.start(['AAPL'])
+    client, = fake_client.instances
+    assert client.finished.wait(WAIT)
+    reactive._thread.join(WAIT)
+    assert not reactive._thread.is_alive()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        reactive.stop()
+        gc.collect()
+    assert not [str(w.message) for w in caught if 'never awaited' in str(w.message)]
+    assert not client.close_awaited and sorted(done) == ['agg', 'quote', 'trade']
 
 
 def test_stop_immediately_after_start_does_not_leave_a_stream_behind(fake_client):
