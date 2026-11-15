@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-"""Ingest point-in-time fundamentals: sec-api.io for WHEN, Polygon for WHAT.
+"""Ingest point-in-time fundamentals: sec-api.io for WHEN, the vendor for WHAT.
 
 THE SPLIT, AND WHY
     Two sources, each used for the thing it is actually authoritative about.
 
     sec-api.io owns the TIMESTAMPS. Its Query API returns every filing with
     `filedAt` as a full tz-aware instant - `2026-05-01T06:01:00-04:00` - which
-    is the only thing that makes a fundamentals backtest honest. Polygon
-    exposes a filing DATE on 79% of records and nothing at all on the rest
-    (measured: 107 of 499 sampled), and a date cannot distinguish a 06:01
+    is the only thing that makes a fundamentals backtest honest. The statement
+    vendor exposes a filing DATE, and a date cannot distinguish a 06:01
     filing, tradeable at that day's close, from a 16:45 one that is not.
 
-    Polygon owns the NUMBERS. One call per ticker returns years of statements
+    The vendor (Massive, formerly Polygon) owns the NUMBERS: statements
     already parsed into consistent fields. Getting the same from sec-api means
-    one xbrl-to-json conversion per filing - roughly 19,000 calls for this
-    universe - to obtain values Polygon already has.
+    one xbrl-to-json conversion per filing.
 
     They join on (ticker, period end), which both report and neither can get
     wrong: it is the period the filing describes, not a judgement about it.
@@ -25,6 +23,27 @@ WHAT IS REFUSED
     within three weeks of right, and being wrong in the optimistic direction
     means trading on results that were not public. Dropped counts are printed
     rather than silently absorbed.
+
+    A statement whose numbers were taken from a LATER filing is refused too.
+    The vendor's current endpoints serve the latest version of a period: an
+    old quarter comes back as the comparative column of a filing a year on,
+    recast for whatever happened since (trader/data/statements_v1.py). Dated
+    to the original filing that would be knowledge the market did not have.
+    So this ingest only ever adds what was filed recently - run it often
+    enough that a filing is fetched before a later one supersedes it (months,
+    not days) - and CANNOT backfill history: a name new to the store starts
+    from its most recent filings.
+
+    A late-filing notice (NT 10-K / NT 10-Q) names a period and carries no
+    statements; it never dates a row.
+
+THE ENDPOINT CHANGED, AND NOTHING SAID SO
+    Until 2026-11-15 the numbers came from `/vX/reference/financials`. The
+    vendor retired it (HTTP 404), the call sat inside `except Exception`, and
+    every run reported "0 new rows" as if nothing had been filed. A statements
+    request that fails is now counted, named in the log, aborts the run after
+    `MAX_CONSECUTIVE_VENDOR_ERRORS` in a row, and makes the exit status
+    non-zero.
 """
 from __future__ import annotations
 
@@ -36,7 +55,63 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from trader.data.share_basis import is_late_filing_notice      # noqa: E402
+from trader.data import statements_v1                           # noqa: E402
+
 _SEC_QUERY = 'https://api.sec-api.io'
+FINANCIALS_URL = 'https://api.massive.com/stocks/financials/v1/'
+STATEMENT_PATHS = {'income': 'income-statements', 'balance': 'balance-sheets',
+                   'cashflow': 'cash-flow-statements'}
+# Quarters asked for per name. Only recent filings can be used (see the module
+# docstring), so this is far more than a run ever stores.
+STATEMENT_PERIODS = 16
+MAX_CONSECUTIVE_VENDOR_ERRORS = 10
+
+
+class StatementsUnavailable(RuntimeError):
+    """The statement vendor did not answer with a usable page."""
+
+
+def massive_key() -> str:
+    """Env first, YAML second; never printed."""
+    import yaml
+    from trader.container import default_config_path
+    env = os.environ.get('MASSIVE_API_KEY', '').strip()
+    if env:
+        return env
+    cfg = yaml.safe_load(open(default_config_path())) or {}
+    return str(cfg.get('massive_api_key', '') or '').strip()
+
+
+def fetch_statements(client, key: str, ticker: str, periods: int = STATEMENT_PERIODS) -> dict:
+    """``{'income': {period_end: row}, 'balance': {...}, 'cashflow': {...}}``
+    for the newest ``periods`` quarters of ``ticker``.
+
+    ``client`` needs ``get(url, params=..., headers=..., timeout=...)``. Any
+    of the three requests not answering HTTP 200 with a ``results`` list
+    raises ``StatementsUnavailable`` naming the statement and the status: a
+    vendor that cannot be read is not a company that filed nothing.
+    """
+    headers = {'Authorization': f'Bearer {key}'}     # never in the URL: request URLs are logged
+    out = {}
+    for name, path in STATEMENT_PATHS.items():
+        response = client.get(FINANCIALS_URL + path,
+                              params={'tickers': ticker, 'timeframe': 'quarterly',
+                                      'limit': periods, 'sort': 'period_end.desc'},
+                              headers=headers, timeout=30)
+        if response.status_code != 200:
+            raise StatementsUnavailable(f'{path} answered HTTP {response.status_code}')
+        body = response.json()
+        results = body.get('results') if isinstance(body, dict) else None
+        if not isinstance(results, list):
+            raise StatementsUnavailable(f'{path} response carries no results list')
+        rows = {}
+        for row in results:
+            period = row.get('period_end') if isinstance(row, dict) else None
+            if period:
+                rows.setdefault(str(period)[:10], row)       # newest first: the first seen wins
+        out[name] = rows
+    return out
 
 
 def _key() -> str:
@@ -104,6 +179,12 @@ def sec_filing_index(client, ticker: str, key: str, forms=('10-Q', '10-K'),
             period = f.get('periodOfReport')
             filed = f.get('filedAt')
             if not period or not filed:
+                continue
+            # The form filter above also matches "NT 10-Q" / "NT 10-K": a
+            # notice that the report will be LATE, filed before it. Dating a
+            # period to one says its numbers were public before they were
+            # (758 stored rows were, found 2026-11-15).
+            if is_late_filing_notice(f.get('formType')):
                 continue
             # The NEWEST acceptance per period wins, decided by the instant
             # itself rather than by response order: the API pages newest-first,
@@ -184,6 +265,26 @@ FUNDAMENTALS_DDL = """CREATE TABLE IF NOT EXISTS fundamentals (
         PRIMARY KEY (conid, period_end, accession_no))"""
 
 
+# The stored columns, in order. Every INSERT names them: the table gained
+# `source` after it was created, and a positional INSERT into a table with one
+# more column than it expects fails (or, worse, shifts).
+COLUMNS = ('conid', 'ticker', 'period_end', 'accepted_at', 'form_type', 'accession_no',
+           'revenue', 'net_income', 'gross_profit', 'operating_income', 'total_assets',
+           'total_liabilities', 'stockholders_equity', 'cash_from_operations',
+           'shares_diluted', 'fetched_at', 'source')
+
+
+def ensure_schema(db) -> None:
+    """Create the table, and add what was added since: ``source`` names the
+    endpoint a row's numbers came from. NULL = the retired `/vX` endpoint,
+    whose fiscal-year-end share counts are not share counts and whose counts
+    are on the basis of the FILING day; ``financials_v1`` = the current one,
+    whose counts are on the basis of the day they were FETCHED
+    (trader/data/statements_v1.py)."""
+    db.execute(FUNDAMENTALS_DDL, fetch='none')
+    db.execute('ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS source VARCHAR', fetch='none')
+
+
 def last_accepted(db, ticker: str):
     """Latest stored acceptance instant for ``ticker`` (None when unseen) -
     the incremental resume point."""
@@ -192,50 +293,57 @@ def last_accepted(db, ticker: str):
     return r[0] if r and r[0] is not None else None
 
 
-def ingest_ticker(db, poly, index: dict, conid: str, ticker: str,
+def _accepted_on(filed_at) -> dt.date:
+    """The New York calendar day a filing was accepted (EDGAR's clock)."""
+    import pandas as pd
+    stamp = pd.Timestamp(filed_at)
+    stamp = stamp.tz_localize('America/New_York') if stamp.tzinfo is None else stamp.tz_convert('America/New_York')
+    return stamp.date()
+
+
+def ingest_ticker(db, client, key: str, index: dict, conid: str, ticker: str,
                   append_only: bool = False) -> dict:
-    """Join Polygon's quarterly statements for ``ticker`` to the acceptance
+    """Join the vendor's quarterly statements for ``ticker`` to the acceptance
     index and write them. ``append_only`` (incremental mode) uses
     ``INSERT OR IGNORE``: a row whose (conid, period_end, accession_no) is
     already stored is left exactly as it was - older rows are never rewritten,
-    a restatement arrives as a NEW accession number and is simply added."""
-    from trader.data.fundamentals import extract_polygon
-    written = no_timestamp = 0
+    a restatement arrives as a NEW accession number and is simply added.
+
+    Returns counts: ``written``; ``no_statement`` (a dated filing the vendor
+    has no income statement for - yet, usually); ``other_filing`` (the vendor's
+    numbers for that period come from another filing, usually a later one's
+    comparative column, so they are not what this filing said); ``no_values`` 1 when the vendor could not be read, with
+    the reason in ``error``.
+    """
+    counts = {'written': 0, 'no_statement': 0, 'other_filing': 0, 'no_values': 0, 'error': None}
     try:
-        fins = list(poly.vx.list_stock_financials(
-            ticker=ticker, limit=60, timeframe='quarterly'))
-    except Exception:
-        return {'written': 0, 'no_timestamp': 0, 'no_values': 1}
+        statements = fetch_statements(client, key, ticker)
+    except StatementsUnavailable as ex:
+        counts['no_values'], counts['error'] = 1, str(ex)
+        return counts
     verb = 'INSERT OR IGNORE' if append_only else 'INSERT OR REPLACE'
-    for f in fins:
-        period = getattr(f, 'end_date', None)
-        if not period:
-            no_timestamp += 1
+    placeholders = ', '.join('now()' if column == 'fetched_at' else '?' for column in COLUMNS)
+    for period, (filed_at, form, acc) in sorted(index.items()):
+        values, reason = statements_v1.statement_values(
+            {name: statements[name].get(str(period)[:10]) for name in statements_v1.STATEMENTS},
+            _accepted_on(filed_at))
+        if values is None:
+            counts['other_filing' if reason == statements_v1.OTHER_FILING else 'no_statement'] += 1
             continue
-        hit = index.get(period)
-        if not hit:
-            # No filing carries this period end. It cannot be placed
-            # in time, so it is dropped rather than dated by guesswork.
-            no_timestamp += 1
-            continue
-        filed_at, form, acc = hit
-        st = getattr(f, 'financials', None)
-        vals = extract_polygon(st) if st else {}
         # RETURNING yields only the rows actually written: a key INSERT OR IGNORE
         # skipped is not new (the log once reported 160 "new rows" on a re-run
         # that wrote none, because the sec-api window re-offers the latest day).
         inserted = db.execute(
-            f'{verb} INTO fundamentals VALUES '
-            '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, now()) RETURNING conid',
+            f'{verb} INTO fundamentals ({", ".join(COLUMNS)}) VALUES ({placeholders}) RETURNING conid',
             [conid, ticker, period, filed_at, form, acc,
-             vals.get('revenue'), vals.get('net_income'),
-             vals.get('gross_profit'), vals.get('operating_income'),
-             vals.get('total_assets'), vals.get('total_liabilities'),
-             vals.get('stockholders_equity'),
-             vals.get('cash_from_operations'),
-             vals.get('shares_diluted')], fetch='all')
-        written += len(inserted or [])
-    return {'written': written, 'no_timestamp': no_timestamp, 'no_values': 0}
+             values.get('revenue'), values.get('net_income'),
+             values.get('gross_profit'), values.get('operating_income'),
+             values.get('total_assets'), values.get('total_liabilities'),
+             values.get('stockholders_equity'),
+             values.get('cash_from_operations'),
+             values.get('shares_diluted'), statements_v1.SOURCE], fetch='all')
+        counts['written'] += len(inserted or [])
+    return counts
 
 
 def incremental_todo(hist_db, months: int = 3) -> list:
@@ -259,18 +367,27 @@ def incremental_todo(hist_db, months: int = 3) -> list:
     return [('', t) for t in names]
 
 
-def run_incremental(db, hist_db, client, poly, key: str, months: int = 3,
-                    limit: int = 0, sleep: float = 0.0, log=print) -> dict:
+def run_incremental(db, hist_db, client, vendor, key: str, months: int = 3,
+                    limit: int = 0, sleep: float = 0.0, log=print, vendor_key: str = '') -> dict:
     """Incremental refresh (hillclimb C02, acceptance criterion 1): for each
     current PIT member ask sec-api only for filings accepted after the latest
     instant stored for that name, and append the dated statements. Idempotent:
-    a re-run with nothing new fetches nothing new and writes nothing."""
-    db.execute(FUNDAMENTALS_DDL, fetch='none')
+    a re-run with nothing new fetches nothing new and writes nothing.
+
+    ``client`` is the sec-api HTTP client, ``vendor`` the statement vendor's
+    (the same ``httpx.Client`` serves both). The result's ``vendor_failed``
+    counts names whose statements could not be read and ``aborted`` says the
+    run stopped early on ``MAX_CONSECUTIVE_VENDOR_ERRORS`` of those in a row -
+    an outage or a retired endpoint, not that many unlucky tickers.
+    """
+    ensure_schema(db)
     todo = incremental_todo(hist_db, months)
     if limit:
         todo = todo[:limit]
     log(f'incremental: {len(todo)} current point-in-time members')
-    written = failed = no_new = 0
+    written = failed = no_new = vendor_failed = other_filing = no_statement = 0
+    consecutive = 0
+    aborted = None
     for i, (conid, ticker) in enumerate(todo):
         since = last_accepted(db, ticker)
         try:
@@ -283,14 +400,32 @@ def run_incremental(db, hist_db, client, poly, key: str, months: int = 3,
         if not index:
             no_new += 1
             continue
-        res = ingest_ticker(db, poly, index, conid, ticker, append_only=True)
+        res = ingest_ticker(db, vendor, vendor_key, index, conid, ticker, append_only=True)
         written += res['written']
+        other_filing += res['other_filing']
+        no_statement += res['no_statement']
+        if res['no_values']:
+            vendor_failed += 1
+            consecutive += 1
+            log(f'  {ticker}: statements unavailable ({res["error"]})')
+            if consecutive >= MAX_CONSECUTIVE_VENDOR_ERRORS:
+                aborted = (f'{consecutive} consecutive statement-vendor errors at {ticker} '
+                           f'({i + 1}/{len(todo)}), last: {res["error"]}')
+                log(f'ABORT: {aborted}')
+                break
+        else:
+            consecutive = 0
         if (i + 1) % 25 == 0:
-            log(f'  {i+1}/{len(todo)} rows={written} nonew={no_new} failed={failed}')
+            log(f'  {i+1}/{len(todo)} rows={written} nonew={no_new} failed={failed} '
+                f'vendor_failed={vendor_failed}')
         if sleep:
             time.sleep(sleep)
-    log(f'done: {written} new rows, {no_new} names with nothing new, {failed} failed')
-    return {'written': written, 'no_new': no_new, 'failed': failed, 'names': len(todo)}
+    log(f'done: {written} new rows, {no_new} names with nothing new, {failed} sec-api failures, '
+        f'{vendor_failed} names whose statements could not be read, {no_statement} filings the vendor '
+        f'has no statement for yet, {other_filing} whose statement the vendor took from another filing')
+    return {'written': written, 'no_new': no_new, 'failed': failed, 'names': len(todo),
+            'vendor_failed': vendor_failed, 'no_statement': no_statement,
+            'other_filing': other_filing, 'aborted': aborted}
 
 
 def main() -> int:
@@ -318,32 +453,35 @@ def main() -> int:
         _logging.getLogger(noisy).setLevel(_logging.WARNING)
 
     import httpx
-    import yaml
-    from massive import RESTClient
-    from trader.container import Container, default_config_path
+    from trader.container import Container
     from trader.data.duckdb_store import DuckDBConnection
     from trader.data.universe import UniverseAccessor
-    from trader.data.fundamentals import extract_polygon
 
     key = _key()
     if not key:
         print('no SEC_API_KEY in env or sec_api_key in config', file=sys.stderr)
         return 1
+    vendor_key = massive_key()
+    if not vendor_key:
+        print('no MASSIVE_API_KEY in env or massive_api_key in config', file=sys.stderr)
+        return 1
 
     cfg = Container.instance().config()
-    ycfg = yaml.safe_load(open(default_config_path())) or {}
-    poly = RESTClient(os.environ.get('MASSIVE_API_KEY')
-                      or ycfg.get('massive_api_key'))
     db = DuckDBConnection(cfg.get('duckdb_path', ''))
-    db.execute(FUNDAMENTALS_DDL, fetch='none')
+    ensure_schema(db)
 
     if args.incremental:
         hist_db = DuckDBConnection(cfg.get('history_duckdb_path', ''))
         with httpx.Client() as client:
-            run_incremental(db, hist_db, client, poly, key, months=args.months,
-                            limit=args.limit, sleep=args.sleep,
-                            log=lambda m: print(m, flush=True))
-        return 0
+            res = run_incremental(db, hist_db, client, client, key, months=args.months,
+                                  limit=args.limit, sleep=args.sleep,
+                                  log=lambda m: print(m, flush=True), vendor_key=vendor_key)
+        if res['aborted']:
+            return 2
+        # Names the vendor or sec-api could not answer for are a FAILED run:
+        # "0 new rows" from a dead endpoint read as "nothing was filed" for
+        # months.
+        return 1 if (res['vendor_failed'] or res['failed']) else 0
 
     if args.pit_min_months > 0:
         hist_db = DuckDBConnection(cfg.get('history_duckdb_path', ''))
@@ -360,8 +498,8 @@ def main() -> int:
         todo = todo[:args.limit]
     print(f'{len(todo)} instruments', flush=True)
 
-    written = no_timestamp = no_values = failed = no_filings = 0
-    consecutive_errors = 0
+    written = no_statement = other_filing = no_values = failed = no_filings = 0
+    consecutive_errors = consecutive_vendor = 0
     with httpx.Client() as client:
         for i, (conid, ticker) in enumerate(todo):
             try:
@@ -386,51 +524,36 @@ def main() -> int:
             consecutive_errors = 0
             if not index:
                 # A clean answer with no 10-K/Q: an ETF/trust/unit, not an
-                # error. Skip the Polygon call — there is nothing to date.
+                # error. Skip the vendor call — there is nothing to date.
                 no_filings += 1
                 continue
-            try:
-                fins = list(poly.vx.list_stock_financials(
-                    ticker=ticker, limit=60, timeframe='quarterly'))
-            except Exception:
+            res = ingest_ticker(db, client, vendor_key, index, conid, ticker)
+            written += res['written']
+            no_statement += res['no_statement']
+            other_filing += res['other_filing']
+            if res['no_values']:
                 no_values += 1
-                continue
-            for f in fins:
-                period = getattr(f, 'end_date', None)
-                if not period:
-                    no_timestamp += 1
-                    continue
-                hit = index.get(period)
-                if not hit:
-                    # No filing carries this period end. It cannot be placed
-                    # in time, so it is dropped rather than dated by guesswork.
-                    no_timestamp += 1
-                    continue
-                filed_at, form, acc = hit
-                st = getattr(f, 'financials', None)
-                vals = extract_polygon(st) if st else {}
-                db.execute(
-                    'INSERT OR REPLACE INTO fundamentals VALUES '
-                    '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, now())',
-                    [conid, ticker, period, filed_at, form, acc,
-                     vals.get('revenue'), vals.get('net_income'),
-                     vals.get('gross_profit'), vals.get('operating_income'),
-                     vals.get('total_assets'), vals.get('total_liabilities'),
-                     vals.get('stockholders_equity'),
-                     vals.get('cash_from_operations'),
-                     vals.get('shares_diluted')], fetch='none')
-                written += 1
+                consecutive_vendor += 1
+                print(f'  {ticker}: statements unavailable ({res["error"]})', flush=True)
+                if consecutive_vendor >= MAX_CONSECUTIVE_VENDOR_ERRORS:
+                    print(f'ABORT: {consecutive_vendor} consecutive statement-vendor errors at '
+                          f'{ticker} ({i}/{len(todo)}), last: {res["error"]}. {written} rows '
+                          f'written so far.', flush=True)
+                    return 2
+            else:
+                consecutive_vendor = 0
             if (i + 1) % 25 == 0:
                 print(f'  {i+1}/{len(todo)}  rows={written} '
-                      f'undated={no_timestamp} novalues={no_values} '
+                      f'nostatement={no_statement} other_filing={other_filing} novalues={no_values} '
                       f'nofilings={no_filings} failed={failed}', flush=True)
             time.sleep(args.sleep)
 
-    print(f'done: {written} rows written, {no_timestamp} periods dropped for '
-          f'having no establishable filing time, {no_values} tickers with no '
-          f'values, {no_filings} with no 10-K/Q filings (funds/trusts), '
-          f'{failed} failed', flush=True)
-    return 0
+    print(f'done: {written} rows written, {no_statement} filings the vendor has no statement '
+          f'for, {other_filing} whose statement the vendor took from another filing (not stored: this ingest '
+          f'cannot backfill history), {no_values} tickers whose statements could not be read, '
+          f'{no_filings} with no 10-K/Q filings (funds/trusts), {failed} sec-api failures',
+          flush=True)
+    return 1 if (no_values or failed) else 0
 
 
 if __name__ == '__main__':
