@@ -110,6 +110,11 @@ services:
       # the canonical one.
       MASSIVE_API_KEY: ${MASSIVE_API_KEY:-}
       TWELVEDATA_API_KEY: ${TWELVEDATA_API_KEY:-}
+      # sec-api.io (filing acceptance timestamps for the point-in-time
+      # fundamentals). Only scripts/fetch_fundamentals.py reads it; the
+      # scheduled sleeve_upkeep job runs that on a month's first session and
+      # cannot without it. Empty when the host does not export it.
+      SEC_API_KEY: ${SEC_API_KEY:-}
     ports:
       # pycron job-status page (read-only GET). Deliberately bound to ALL host
       # interfaces (LAN-visible) per operator choice — it exposes job

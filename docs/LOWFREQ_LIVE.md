@@ -20,6 +20,35 @@ EXEC="docker exec -u trader -w /home/trader/mmr \
   -e SEC_API_KEY=<your sec-api.io key> mmr-mmr-1"
 ```
 
+## What runs by itself (since 2026-11-15)
+
+pycron runs `scripts/sleeve_upkeep.py` at 23:30 ET every weekday (job
+`sleeve_upkeep`). For the last completed NYSE session it does the "every
+session" steps below for every sleeve that has a targets file — bars,
+`reconcile`, `track` — and, when that session was the first of its month and
+the sleeve has no targets file for it, the monthly steps 1 and 2 plus a
+dry-run `plan`, saved to
+`~/.local/share/mmr/reports/sleeve_<sleeve>_<session>_plan.txt`. Candidate,
+capital and params come from the sleeve's newest targets file.
+
+**What is still yours:** step 3 from `propose` on. The job never proposes,
+approves or trades (D15). The morning after a month's first session, read the
+saved plan, then `propose`, review and approve before the open; the fills are
+journaled by that evening's run.
+
+A failed step stops the later steps of that sleeve and fails the job, which
+`scripts/pycron_status.py` and `scripts/monitor_health.sh` report. The monthly
+part needs `SEC_API_KEY` inside the container: `docker-compose.yml` forwards it
+from the host shell like the other vendor keys, so it must be exported where
+`./docker.sh` is run. By hand: `python3 scripts/sleeve_upkeep.py --dry-run`
+prints the commands for today, `--session YYYY-MM-DD` for another day.
+
+Why it exists: none of the manual steps had been run for six weeks. The bars
+stopped at the first rebalance, `sleeve_fills` had never been written (so the
+sleeve read as empty and the next plan would have bought it again — the
+rebalancer now refuses that, see `docs/REBALANCE.md`), the ledger was empty and
+November's decision session passed with no targets file.
+
 ## Once a month: the FIRST NYSE session of the month, after the close
 
 The strategy rebalances on the first session of each calendar month
