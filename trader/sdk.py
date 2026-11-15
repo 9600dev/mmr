@@ -66,6 +66,16 @@ def compute_resize_deltas(
 
     Each adjustment: {symbol, conId, current_qty, target_qty, delta_qty, action,
                       current_value, target_value, mkt_price}
+
+    Rounding: the target quantity is truncated TOWARD ZERO, deliberately.
+    * Trim (``max_bound``): every target is at or below the proportional one,
+      so the resized book is never worth more than the bound.
+    * Grow (``min_bound``): never buys more than the proportional target, so
+      the book can land short of the bound by less than one share per
+      position. A grow adds exposure; overshooting is the wrong side to err
+      on, and would breach ``max_bound`` when both are given.
+    A grow never REDUCES a holding: a fractional quantity whose truncated
+    target falls below it (1.5 shares x 1.2 -> 1) is left alone.
     """
     import math
 
@@ -102,6 +112,11 @@ def compute_resize_deltas(
         delta_qty = target_qty - current_qty
 
         if delta_qty == 0:
+            continue
+        if scale_factor > 1.0 and abs(target_qty) < abs(current_qty):
+            # Truncating to a whole number put the target BELOW a fractional
+            # holding: the "grow" would sell part of it (or all of it, when
+            # the target truncates to 0). Growing never reduces; hold.
             continue
 
         # For long positions: selling reduces, buying increases
