@@ -7250,10 +7250,10 @@ def _handle_backtests(args: argparse.Namespace):
             }
             stats, stats_reason = _compute_bt_stats(r)
             stats_data = {
-                'n_trades':              stats.n_trades,
-                # n_trades counts ROUND TRIPS (entry..exit P&L); the run's
-                # total_trades counts every fill/leg incl. pyramid adds.
-                'n_round_trips':         stats.n_trades,
+                # n_trades / n_round_trips / n_exits / n_lots / n_fills /
+                # trade_unit: the run's total_trades counts every fill incl.
+                # pyramid adds; the tests below are per EXIT.
+                **_bt_trade_count_fields(stats),
                 'n_bar_returns':         stats.n_bar_returns,
                 'probabilistic_sharpe':  stats.psr,
                 't_stat':                stats.t_stat,
@@ -7405,7 +7405,7 @@ def _handle_backtests(args: argparse.Namespace):
                     'max_drawdown': rec.max_drawdown,
                 },
                 'statistical_confidence': {
-                    'n_trades': stats.n_trades,
+                    **_bt_trade_count_fields(stats),
                     'n_bar_returns': stats.n_bar_returns,
                     'probabilistic_sharpe': stats.psr,
                     't_stat': stats.t_stat,
@@ -7746,6 +7746,42 @@ def _curve_periods_per_year(curve) -> Optional[float]:
     if float(deltas.median()) >= 20 * 3600:
         return 252.0
     return None
+
+
+def _bt_trade_count_fields(stats) -> Dict[str, Any]:
+    """The trade counts of a statistical-confidence block, each by name.
+
+    Three different things are called "trades" (audit 2026-11-14, B4.5):
+    FILLS (the run's ``total_trades``: every BUY and SELL, a pyramid add
+    included), FIFO LOTS, and EXITS (closing orders). The per-trade tests
+    (t-test, bootstrap CI on mean P&L, skew/kurtosis, losing streak) are per
+    EXIT — lots closed by one exit are not independent samples — so
+    ``n_trades`` and its older alias ``n_round_trips`` are the exit count.
+    Both keys are kept for existing consumers.
+    """
+    return {
+        'n_trades':      stats.n_trades,
+        'n_round_trips': stats.n_trades,
+        'n_exits':       stats.n_exits,
+        'n_lots':        stats.n_lots,
+        'n_fills':       stats.n_fills,
+        'trade_unit':    'exit',
+    }
+
+
+def _bt_result_count_fields(result) -> Dict[str, int]:
+    """``n_fills`` / ``n_exits`` / ``n_lots`` of a just-finished backtest.
+
+    Reported beside ``total_trades`` (which is the fill count for a
+    per-instrument run) so a reader does not have to know which of the three
+    a number called "trades" is.
+    """
+    from trader.simulation.backtest_stats import trade_counts
+    counts = trade_counts([{
+        'timestamp': str(t.timestamp), 'conid': t.conid, 'action': str(t.action),
+        'quantity': t.quantity, 'price': t.price, 'commission': t.commission,
+    } for t in (result.trades or [])])
+    return {'n_fills': counts.n_fills, 'n_exits': counts.n_exits, 'n_lots': counts.n_lots}
 
 
 def _compute_bt_stats(record):
@@ -10133,6 +10169,7 @@ def _handle_backtest(args: argparse.Namespace):
         'win_rate':           win_rate_display,
         'time_in_market':     f'{result.time_in_market_pct:.1%}',
         'total_trades':       result.total_trades,
+        **_bt_result_count_fields(result),
         'start_date':         str(result.start_date)[:10],
         'end_date':           str(result.end_date)[:10],
         'final_equity':       f'{result.equity_curve.iloc[-1]:,.2f}' if len(result.equity_curve) > 0 else str(config.initial_capital),
@@ -10277,6 +10314,9 @@ def _handle_backtest(args: argparse.Namespace):
                 'win_rate':           (result.win_rate if result.total_trades > 0 else None),
                 'time_in_market_pct': result.time_in_market_pct,
                 'total_trades':       result.total_trades,
+                # total_trades is FILLS. Exits are what win_rate /
+                # profit_factor / expectancy_bps are counted over.
+                **_bt_result_count_fields(result),
                 'start_date':         str(result.start_date)[:10],
                 'end_date':           str(result.end_date)[:10],
                 'final_equity':       float(result.equity_curve.iloc[-1]) if len(result.equity_curve) > 0 else config.initial_capital,

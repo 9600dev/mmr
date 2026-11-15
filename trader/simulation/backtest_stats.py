@@ -14,6 +14,9 @@ Five tests, computed from persisted run data:
 2. **t-test of mean per-trade P&L ≠ 0** — the classical frequentist test
    for whether the observed average trade P&L is statistically different
    from zero. p-value < 0.05 means "unlikely to be random walk".
+   A "trade" here, and in tests 3–5, is an EXIT: the P&L one closing order
+   realized, summed over every lot it closed (``exit_pnls``). Lots closed
+   by one exit are not independent observations.
 
 3. **Bootstrap 95% CI on total return and Sharpe** — nonparametric
    resampling (5000 replicates) of the per-trade P&L / bar-return series.
@@ -32,6 +35,11 @@ Five tests, computed from persisted run data:
 All functions are pure; they take numpy arrays (or lists) and return either
 a primitive or a typed dataclass. The UI layer in ``mmr_cli`` orchestrates
 fetching the persisted trades/equity curve and calling ``compute_all``.
+
+Three different things are called "trades" around a backtest; ``TradeCounts``
+names them: FILLS (``BacktestResult.total_trades`` — every BUY and SELL),
+FIFO LOTS (``round_trip_pnls``) and EXITS (``exit_pnls`` — closing orders).
+They are equal in pairs only for a strategy that never stacks.
 """
 
 import math
@@ -51,7 +59,7 @@ class BacktestStats:
     needs ≥ 10 data points to be meaningful, etc. ``None`` means "not
     enough data to compute this", not "zero".
     """
-    n_trades: int              # round-trip P&L count used for per-trade stats
+    n_trades: int              # sample size of the per-trade stats: EXITS (== n_exits)
     n_bar_returns: int         # bar-return count used for Sharpe-family stats
 
     psr: Optional[float]                     # probability, [0, 1]
@@ -72,11 +80,18 @@ class BacktestStats:
     losing_streak_actual: Optional[int]
     losing_streak_mc_95: Optional[float]     # 95th pct under random reordering
 
+    # The three counts by name (see ``TradeCounts``). ``n_trades`` above is
+    # kept and equals ``n_exits``; until the 2026-11-14 audit (B4.5) it was
+    # the lot count, which differs whenever one exit closes several lots.
+    n_exits: int = 0           # closing orders that realized P&L
+    n_lots: int = 0            # FIFO-matched (BUY fill, SELL fill) pairs
+    n_fills: int = 0           # every usable BUY and SELL fill
+
 
 def round_trip_pnls(trades: List[dict]) -> List[float]:
     """Pair BUY fills against subsequent SELL fills (FIFO per conId) to
-    produce the per-round-trip realized-P&L series used by the per-trade
-    stats.
+    produce the realized P&L of each matched LOT. The per-trade statistics
+    do NOT use this series directly — see ``exit_pnls``.
 
     Unmatched BUYs (still-open positions at end of backtest) are ignored —
     they're unrealized, not round-trips. Partial closes produce one P&L
@@ -88,6 +103,27 @@ def round_trip_pnls(trades: List[dict]) -> List[float]:
     Action enum produces at write time.
     """
     return [pnl for pnl, _, _ in round_trip_lots(trades)]
+
+
+def _usable_fill(t: dict) -> Optional[Tuple[int, float, float, float, bool]]:
+    """``(conid, quantity, price, commission, is_buy)`` for a fill the pairing
+    can use, else ``None`` (unparseable, non-positive quantity or price, or an
+    action that is neither BUY nor SELL). The one rule for "is this a fill"."""
+    try:
+        conid = int(t.get('conid', 0))
+        qty = float(t.get('quantity', 0))
+        price = float(t.get('price', 0))
+        comm = float(t.get('commission', 0.0))
+    except (TypeError, ValueError):
+        return None
+    if qty <= 0 or price <= 0:
+        return None
+    action_raw = str(t.get('action', '')).upper()
+    if 'BUY' in action_raw:
+        return conid, qty, price, comm, True
+    if 'SELL' in action_raw:
+        return conid, qty, price, comm, False
+    return None
 
 
 def round_trip_lots(trades: List[dict]) -> List[Tuple[float, dict, dict]]:
@@ -102,21 +138,14 @@ def round_trip_lots(trades: List[dict]) -> List[Tuple[float, dict, dict]]:
     lots: dict = {}  # conid -> deque of [qty_remaining, buy_price, buy_comm_per_share, buy fill]
     out: List[Tuple[float, dict, dict]] = []
     for t in sorted(trades, key=lambda x: x.get('timestamp', '')):
-        try:
-            conid = int(t.get('conid', 0))
-            qty = float(t.get('quantity', 0))
-            price = float(t.get('price', 0))
-            comm = float(t.get('commission', 0.0))
-        except (TypeError, ValueError):
+        fill = _usable_fill(t)
+        if fill is None:
             continue
-        if qty <= 0 or price <= 0:
-            continue
-        action_raw = str(t.get('action', '')).upper()
-        is_buy = 'BUY' in action_raw
+        conid, qty, price, comm, is_buy = fill
         comm_per_share = comm / qty
         if is_buy:
             lots.setdefault(conid, deque()).append([qty, price, comm_per_share, t])
-        elif 'SELL' in action_raw:
+        else:
             remaining = qty
             while remaining > 0 and lots.get(conid):
                 lot = lots[conid][0]
@@ -132,6 +161,63 @@ def round_trip_lots(trades: List[dict]) -> List[Tuple[float, dict, dict]]:
                 if lot[0] <= 1e-12:
                     lots[conid].popleft()
     return out
+
+
+def _exit_pnls(lots: List[Tuple[float, dict, dict]]) -> List[float]:
+    """Sum matched-lot P&Ls per closing order, in order of first appearance.
+
+    A closing order is identified from the fills themselves: the SELL's
+    instrument and timestamp. The backtester emits one SELL fill per exit;
+    partial fills of one closing order share both and are one exit. A SELL
+    without a timestamp is its own exit (nothing says it belongs with another).
+    """
+    totals: dict = {}
+    for pnl, _, closed in lots:
+        stamp = closed.get('timestamp')
+        key = (closed.get('conid'), stamp) if stamp not in (None, '') else id(closed)
+        totals[key] = totals.get(key, 0.0) + pnl
+    return list(totals.values())
+
+
+def exit_pnls(trades: List[dict]) -> List[float]:
+    """Realized P&L per EXIT — the unit of every per-trade statistic here.
+
+    ``round_trip_pnls`` yields one P&L per FIFO lot. When a position was
+    built from several BUYs (pyramiding) one SELL closes several lots, and
+    those P&Ls share the exit price and most of the holding period: they are
+    one outcome observed several times, not several outcomes. Fed to a t-test
+    as independent draws they shrink the standard error by about sqrt(lots per
+    exit) — on driftless random walks a three-lot stack was "significant at
+    p < 0.05" in 22% of runs, a five-lot stack in 36% (audit 2026-11-14,
+    B4.5). Summed per closing order the rate is the nominal 5%.
+
+    For a strategy that never stacks (one BUY, one SELL) this is exactly
+    ``round_trip_pnls``.
+    """
+    return _exit_pnls(round_trip_lots(trades))
+
+
+@dataclass(frozen=True)
+class TradeCounts:
+    """The three things a backtest calls "trades", by their own names."""
+    n_fills: int    # every usable BUY and SELL fill; a pyramid add is a fill.
+    #                 ``BacktestResult.total_trades`` of a per-instrument run.
+    n_lots: int     # FIFO-matched (BUY fill, SELL fill) pairs: ``round_trip_pnls``.
+    n_exits: int    # closing orders that realized P&L: ``exit_pnls``. The
+    #                 sample size of the per-trade tests, and what win rate /
+    #                 profit factor / expectancy are counted over.
+
+
+def trade_counts(trades: Optional[List[dict]]) -> TradeCounts:
+    """Fills, FIFO lots and exits of a trade log (``None`` / empty = zeros)."""
+    if not trades:
+        return TradeCounts(0, 0, 0)
+    lots = round_trip_lots(trades)
+    return TradeCounts(
+        n_fills=sum(1 for t in trades if _usable_fill(t) is not None),
+        n_lots=len(lots),
+        n_exits=len(_exit_pnls(lots)),
+    )
 
 
 def probabilistic_sharpe(
@@ -300,10 +386,14 @@ def compute_all(
     so it's on the same scale as the run's headline ``sharpe_ratio``. For
     raw (per-period) CIs, pass ``1.0``.
     """
-    # --- per-trade P&L series ---
-    pnls_list = round_trip_pnls(trades) if trades else []
+    # --- per-trade P&L series: one per EXIT, not one per FIFO lot. Lots
+    # closed by one exit share its price and most of the holding period;
+    # treating them as independent draws inflated every test below.
+    lots = round_trip_lots(trades) if trades else []
+    pnls_list = _exit_pnls(lots)
     pnls = np.array(pnls_list, dtype=float) if pnls_list else np.array([])
     n_trades = len(pnls)
+    n_fills = sum(1 for t in trades if _usable_fill(t) is not None) if trades else 0
 
     # --- per-bar return series ---
     if bar_returns is not None:
@@ -371,4 +461,7 @@ def compute_all(
         pnl_excess_kurtosis=pnl_kurt,
         losing_streak_actual=losing_actual,
         losing_streak_mc_95=losing_mc_95,
+        n_exits=n_trades,
+        n_lots=len(lots),
+        n_fills=n_fills,
     )
