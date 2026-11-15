@@ -17,6 +17,7 @@ from ib_async.order import Order, Trade
 from ib_async.ticker import Ticker
 from trader.common.reactivex import SuccessFail
 from trader.data.data_access import PortfolioSummary, SecurityDefinition
+from trader.data.listing_guard import vendor_ticker
 from trader.data.universe import Universe
 from trader.messaging.clientserver import consume, RPCClient, TopicPubSub, pack, unpack
 from trader.messaging.data_service_api import DataServiceApi
@@ -3041,7 +3042,8 @@ class MMR:
                 # NYSE ADR in USD (2026-11-05). Refuse rather than mislead.
                 raise ValueError('twelvedata snapshots cannot honour --exchange/--currency '
                                  '(it picks its own listing); use --source ib')
-            td_symbol = str(symbol).upper()
+            # IB's 'BRK B' (what `portfolio` shows) is 'BRK.B' at the vendor.
+            td_symbol = vendor_ticker(str(symbol).upper())
             payload = self._twelvedata_client.quote(symbol=td_symbol).as_json()
             def _f(k):
                 v = payload.get(k)
@@ -3135,18 +3137,23 @@ class MMR:
                                  '(it picks its own listing); use --source ib')
             results: list[dict] = []
             chunk_size = 120
+            # IB's 'BRK B' is 'BRK.B' at the vendor. Every symbol is spelled
+            # before the first request, so one that cannot be is refused
+            # without half a batch having been asked for.
+            asked = [vendor_ticker(s.upper()) for s in symbols]
             for i in range(0, len(symbols), chunk_size):
                 chunk = symbols[i:i + chunk_size]
-                joined = ','.join(s.upper() for s in chunk)
+                asked_chunk = asked[i:i + chunk_size]
+                joined = ','.join(asked_chunk)
                 raw = self._twelvedata_client.quote(symbol=joined).as_json()
                 # TD returns either a single dict (one symbol) or
                 # {SYMBOL: {...}} keyed by uppercase ticker (multiple).
                 if isinstance(raw, dict) and 'symbol' in raw and len(chunk) == 1:
-                    payload_map = {raw.get('symbol', chunk[0].upper()): raw}
+                    payload_map = {raw.get('symbol', asked_chunk[0]): raw}
                 else:
                     payload_map = raw if isinstance(raw, dict) else {}
-                for sym in chunk:
-                    payload = payload_map.get(sym.upper()) or payload_map.get(sym) or {}
+                for sym, asked_sym in zip(chunk, asked_chunk):
+                    payload = payload_map.get(asked_sym) or payload_map.get(sym) or {}
                     if not payload:
                         results.append({'symbol': sym.upper(), 'last': float('nan')})
                         continue

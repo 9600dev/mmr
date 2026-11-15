@@ -125,6 +125,47 @@ def test_nullable_numeric_prices_and_placeholders_preserve_mask_alignment():
     pd.testing.assert_series_equal(impossible_mask(frame), pd.Series([False, True, False], index=frame.index))
 
 
+# Quote bars. IB builds MIDPOINT / BID / ASK history from quotes and sends -1
+# in the three trade fields (volume, WAP, trade count) of every such bar. The
+# rules have no notion of what a bar was built from, and are not given one:
+# the row below is refused whatever its `what_to_show` says, and the fix for
+# forex history (docs/AUDIT_2026-11-14.md B5.8) is that the IB worker states
+# "no trades" before the frame reaches the write path. See
+# tests/test_ib_midpoint_history.py for that path end to end.
+QUOTE_BAR = {"open": 1.0800, "high": 1.0805, "low": 1.0795, "close": 1.0801}
+
+
+def test_the_minus_one_ib_sends_for_a_quote_bar_is_a_negative_volume():
+    bar = Bar(0.0, volume=-1.0, **QUOTE_BAR)
+    assert finding_keys(check_bar(bar, 3)) == [("negative_volume", "error", 3)]
+
+
+@pytest.mark.parametrize("what_to_show", [1, 2, 3, 4, None])
+def test_the_mask_makes_no_exception_for_what_a_bar_was_built_from(what_to_show):
+    frame = pd.DataFrame({**{name: [value] for name, value in QUOTE_BAR.items()},
+                          "volume": [-1.0], "average": [-1.0], "bar_count": [-1],
+                          "what_to_show": [what_to_show]}, index=[41])
+    pd.testing.assert_series_equal(impossible_mask(frame), pd.Series([True], index=[41]))
+
+
+@pytest.mark.parametrize("what_to_show", [1, 2, 3, 4])
+def test_a_quote_bar_that_states_no_trades_is_a_legal_bar(what_to_show):
+    assert check_bar(Bar(0.0, volume=0.0, **QUOTE_BAR), 0) == []
+    frame = pd.DataFrame({**{name: [value] for name, value in QUOTE_BAR.items()},
+                          "volume": [0.0], "average": [math.nan], "bar_count": [math.nan],
+                          "what_to_show": [what_to_show]}, index=[41])
+    pd.testing.assert_series_equal(impossible_mask(frame), pd.Series([False], index=[41]))
+
+
+def test_a_quote_bar_with_prices_and_no_volume_at_all_is_corrupt_not_legal():
+    """Why "no trades" is stated as zero: NULL beside real prices is refused."""
+    assert finding_keys(check_bar(Bar(0.0, volume=math.nan, **QUOTE_BAR), 0)) == [
+        ("volume_not_finite", "error", 0)]
+    frame = pd.DataFrame({**{name: [value] for name, value in QUOTE_BAR.items()},
+                          "volume": [math.nan], "what_to_show": [2]})
+    assert impossible_mask(frame).tolist() == [True]
+
+
 @pytest.mark.parametrize("interval", [math.inf, -math.inf, math.nan, 0.0, -1.0])
 def test_spacing_with_an_unusable_interval_does_not_invent_findings(interval):
     assert spacing_findings([flat(ts=0.0), flat(ts=90.0)], interval) == []

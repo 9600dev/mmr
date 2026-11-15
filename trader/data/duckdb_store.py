@@ -11,6 +11,9 @@ from typing import Any, Optional
 
 from trader.common.logging_helper import setup_logging
 from trader.data.store import DataStore, ObjectStore
+# No cycle: clientserver imports trader.common only, and resolves the trader
+# classes it allocates by name, at load time.
+from trader.messaging.clientserver import DillDeserializationError, restricted_loads
 
 logging = setup_logging(module_name='duckdb_store')
 
@@ -616,11 +619,39 @@ class DuckDBDataStore(DataStore):
         return pd.Timestamp(val).to_pydatetime()
 
 
+# What `object_store` holds, as the (module, name) pairs a pickle of it names:
+# universes — a `Universe` holding `SecurityDefinition`s, whose fields are
+# str / int / float / bool — and plain values (`_portfolio_snapshot` is a dict
+# of str and float; str, bytes, numbers, None, list, tuple, dict and set are
+# built by pickle opcodes and name nothing). A blob that names anything else
+# was not written by this store, and reading it is refused.
+#
+# The list only narrows the wire allowlist (`_DILL_GLOBALS` in
+# trader/messaging/clientserver.py still decides what may be done with each
+# name — both are allocate-only there, so `__init__` never runs on stored
+# bytes). To store a new type: add it there if it is missing, add its pair
+# here, and add an instance to tests/test_object_store_restricted_load.py.
+OBJECT_STORE_GLOBALS = frozenset({
+    ('trader.data.universe', 'Universe'),
+    ('trader.data.data_access', 'SecurityDefinition'),
+})
+
+
+def _load_stored_object(blob: bytes) -> Any:
+    return restricted_loads(
+        blob, OBJECT_STORE_GLOBALS,
+        'the types the object store writes (OBJECT_STORE_GLOBALS in trader/data/duckdb_store.py)')
+
+
 class DuckDBObjectStore(ObjectStore):
     """Key-value object storage backed by DuckDB.
 
     Objects are serialized with ``dill`` and stored as BLOBs in the
-    ``object_store`` table.
+    ``object_store`` table. They are read back through the restricted
+    unpickler, admitting only ``OBJECT_STORE_GLOBALS``: unpickling is running
+    a program, and a row in this table can come from a restored backup or a
+    copied database as easily as from ``write``. Until 2026-11-15 ``read`` was
+    a bare ``dill.loads`` (docs/AUDIT_2026-11-14.md B5.8).
     """
 
     TABLE_NAME = 'object_store'
@@ -652,10 +683,23 @@ class DuckDBObjectStore(ObjectStore):
         row = self._db.execute_atomic(_read)
         if row is None:
             return None
-        return dill.loads(row[0])
+        try:
+            return _load_stored_object(bytes(row[0]))
+        except DillDeserializationError as ex:
+            raise DillDeserializationError(
+                f'object_store key {key!r} in {self.db_path} was not loaded: {ex}') from ex
 
     def write(self, key: str, data: Any, **kwargs) -> None:
         blob = dill.dumps(data)
+        # Refuse here what read() would refuse. A blob that stores but never
+        # loads makes its key unreadable for every later reader (a universe
+        # that no longer resolves anything), and the place to find out is the
+        # writer's traceback, before the previous value is replaced.
+        try:
+            _load_stored_object(blob)
+        except DillDeserializationError as ex:
+            raise DillDeserializationError(
+                f'object_store key {key!r} was not written: {ex}') from ex
         self._db.execute_atomic(lambda conn: conn.execute(
             f"""
             INSERT OR REPLACE INTO {self.TABLE_NAME} (key, data)
