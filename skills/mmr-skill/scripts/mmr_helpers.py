@@ -449,6 +449,11 @@ class MMRHelpers:
         IMPORTANT: Always check ib_upstream_connected before trading. If False, IB Gateway
         cannot reach IBKR servers — resolve, snapshot, buy, sell will all timeout.
 
+        Currency: data["pnl"] sums per-position PnL in each INSTRUMENT's currency,
+        unconverted. data["pnl"]["currency"] is that currency, or "MIXED" when
+        positions span several (then use data["pnl"]["by_currency"], or
+        portfolio_snapshot() for a base-currency daily figure).
+
         Example:
         result = await MMRHelpers.status()
         # result["data"]["ib_upstream_connected"] → True (or False if Gateway can't reach IBKR)
@@ -3633,6 +3638,13 @@ class MMRHelpers:
         Full session status: position sizing config (including volatility settings),
         portfolio state, remaining capacity, and recommended position sizes at
         different confidence levels. Returns JSON.
+
+        Currency: amounts are in the ACCOUNT BASE CURRENCY, including every key
+        with the historical "_usd" suffix (remaining_usd, amount_usd, ...).
+        data["base_currency"] names it (None if it could not be read) and each
+        block carries "currency". portfolio["daily_pnl"] is the exception — an
+        unconverted sum in the instruments' currencies; see
+        portfolio["daily_pnl_currency"] ("MIXED" when positions span several).
 
         Example:
         status = await MMRHelpers.session_status()

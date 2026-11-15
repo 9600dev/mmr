@@ -311,6 +311,36 @@ def print_list(items, title=None):
     console.print(table)
 
 
+def _status_pnl_display(pnl: dict) -> dict:
+    """`mmr status` PnL rows (Rich markup), each amount with its currency.
+
+    ``sdk.status()['pnl']`` sums per-position PnL that IB reports in each
+    INSTRUMENT's currency. One currency: the sum, labelled. Several: the
+    figure per currency — a single number adding USD to AUD is not shown.
+    A block without the currency fields (an older SDK behind the container
+    proxy) is rendered unlabelled rather than guessed at.
+    """
+    def _amount(val, currency=''):
+        if val is None or val != val:  # NaN
+            return '[dim]-[/dim]'
+        color = 'green' if val >= 0 else 'red'
+        sign = '+' if val >= 0 else '-'
+        suffix = f' {currency}' if currency else ''
+        return f'[{color}]{sign}${abs(val):,.2f}[/{color}]{suffix}'
+
+    by_currency = pnl.get('by_currency') or {}
+    rows = {}
+    for label, key in (('DailyPnL', 'daily'), ('UnrealizedPnL', 'unrealized'),
+                       ('RealizedPnL', 'realized'), ('TotalPnL', 'total')):
+        if pnl.get('mixed_currencies') and by_currency:
+            rows[label] = '  '.join(_amount((by_currency[ccy] or {}).get(key), ccy)
+                                    for ccy in sorted(by_currency))
+        else:
+            currency = pnl.get('currency')
+            rows[label] = _amount(pnl.get(key), currency if isinstance(currency, str) else '')
+    return rows
+
+
 def print_json_result(data, title=None):
     """Print structured data as JSON (for handlers that build custom Rich tables)."""
     if _json_mode:
@@ -2648,17 +2678,7 @@ def _dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
                     display['Cushion'] = f"{result['cushion']:.4f}"
                 display['positions'] = result.get('positions', '?')
                 if result.get('pnl'):
-                    pnl = result['pnl']
-                    def _pnl_str(val):
-                        if val is None or val != val:  # NaN
-                            return '[dim]-[/dim]'
-                        color = 'green' if val >= 0 else 'red'
-                        sign = '+' if val >= 0 else '-'
-                        return f'[{color}]{sign}${abs(val):,.2f}[/{color}]'
-                    display['DailyPnL'] = _pnl_str(pnl.get('daily'))
-                    display['UnrealizedPnL'] = _pnl_str(pnl.get('unrealized'))
-                    display['RealizedPnL'] = _pnl_str(pnl.get('realized'))
-                    display['TotalPnL'] = _pnl_str(pnl.get('total'))
+                    display.update(_status_pnl_display(result['pnl']))
                 for k in ('open_orders', 'streaming', 'pending_proposals'):
                     if k in result:
                         display[k] = result[k]
@@ -4240,6 +4260,8 @@ def _handle_session(mmr: MMR, args: argparse.Namespace):
             'max_position_pct': f'{cfg.max_position_pct:.0%}',
             'max_total_exposure_pct': f'{cfg.max_total_exposure_pct:.0%}',
             'max_positions': str(cfg.max_positions),
+            # Offline command: the currency code is the account's, not read here.
+            'currency': 'account base currency (the _usd suffix is historical)',
         }
         print_dict(limits, title='Hard Limits')
         return
@@ -4251,6 +4273,13 @@ def _handle_session(mmr: MMR, args: argparse.Namespace):
         print_json_result(summary, title='Session Status')
         return
 
+    # Amounts are account-base-currency amounts (CAD on a CAD account); the
+    # bare '$' and the '_usd' key names said otherwise. Label each one.
+    base_ccy = summary.get('base_currency') or ''
+
+    def _money(value) -> str:
+        return f'${value:,.0f} {base_ccy}' if base_ccy else f'${value:,.0f}'
+
     # Config section
     cfg = summary['config']
     config_table = Table(title='Position Sizing Config', show_header=False)
@@ -4258,16 +4287,16 @@ def _handle_session(mmr: MMR, args: argparse.Namespace):
     config_table.add_column('Value')
     config_table.add_row('Risk Level', f'[bold]{cfg["risk_level"]}[/bold]')
     if cfg.get('base_position_pct', 0) > 0 and cfg.get('effective_base_usd', 0) != cfg['base_position_usd']:
-        config_table.add_row('Base Position', f'${cfg["effective_base_usd"]:,.0f} ({cfg["base_position_pct"]:.1%} of net liq)')
+        config_table.add_row('Base Position', f'{_money(cfg["effective_base_usd"])} ({cfg["base_position_pct"]:.1%} of net liq)')
     else:
-        config_table.add_row('Base Position', f'${cfg["base_position_usd"]:,.0f} (fixed)')
+        config_table.add_row('Base Position', f'{_money(cfg["base_position_usd"])} (fixed)')
     _eff_loss = cfg.get('effective_daily_loss_limit_usd', cfg['daily_loss_limit_usd'])
     if _eff_loss != cfg['daily_loss_limit_usd']:
-        config_table.add_row('Daily Loss Limit', f'${_eff_loss:,.0f} (risk gate; sizing config ${cfg["daily_loss_limit_usd"]:,.0f})')
+        config_table.add_row('Daily Loss Limit', f'{_money(_eff_loss)} (risk gate; sizing config {_money(cfg["daily_loss_limit_usd"])})')
     else:
-        config_table.add_row('Daily Loss Limit', f'${cfg["daily_loss_limit_usd"]:,.0f}')
-    config_table.add_row('Min Position', f'${cfg["min_position_usd"]:,.0f}')
-    config_table.add_row('Max Position', f'${cfg["max_position_usd"]:,.0f}')
+        config_table.add_row('Daily Loss Limit', _money(cfg["daily_loss_limit_usd"]))
+    config_table.add_row('Min Position', _money(cfg["min_position_usd"]))
+    config_table.add_row('Max Position', _money(cfg["max_position_usd"]))
     config_table.add_row('Max Position %', f'{cfg["max_position_pct"]:.0%} of net liq')
     config_table.add_row('Max Exposure', f'{cfg["max_total_exposure_pct"]:.0%} of net liq')
     config_table.add_row('Max Positions', str(cfg['max_positions']))
@@ -4281,16 +4310,23 @@ def _handle_session(mmr: MMR, args: argparse.Namespace):
         port_table = Table(title='Portfolio State', show_header=False)
         port_table.add_column('Key', style='bold')
         port_table.add_column('Value')
-        port_table.add_row('Net Liquidation', f'${port["net_liquidation"]:,.0f}')
-        port_table.add_row('Position Value', f'${port["gross_position_value"]:,.0f}')
-        port_table.add_row('Available Funds', f'${port["available_funds"]:,.0f}')
+        port_table.add_row('Net Liquidation', _money(port["net_liquidation"]))
+        port_table.add_row('Position Value', _money(port["gross_position_value"]))
+        port_table.add_row('Available Funds', _money(port["available_funds"]))
         pnl_color = 'green' if port['daily_pnl'] >= 0 else 'red'
         pnl_sign = '+' if port['daily_pnl'] > 0 else ''
-        port_table.add_row('Daily P&L', f'[{pnl_color}]{pnl_sign}${port["daily_pnl"]:,.0f}[/{pnl_color}]')
+        # Not a base-currency figure: per-position PnL in each instrument's
+        # currency, added up. Say which, or that it mixes several.
+        pnl_ccy = port.get('daily_pnl_currency')
+        if pnl_ccy == 'MIXED':
+            pnl_unit = f' ({"+".join(port.get("daily_pnl_currencies") or [])} added, not converted)'
+        else:
+            pnl_unit = f' {pnl_ccy}' if pnl_ccy else ''
+        port_table.add_row('Daily P&L', f'[{pnl_color}]{pnl_sign}${port["daily_pnl"]:,.0f}[/{pnl_color}]{pnl_unit}')
         port_table.add_row('Exposure', f'{port["exposure_pct"]:.0%}')
         port_table.add_row('Positions', str(port['position_count']))
         if port['pending_proposal_value'] > 0:
-            port_table.add_row('Pending Proposals', f'${port["pending_proposal_value"]:,.0f}')
+            port_table.add_row('Pending Proposals', _money(port["pending_proposal_value"]))
         console.print(port_table)
     else:
         console.print('[dim]No portfolio data (trader_service not connected)[/dim]')
@@ -4301,7 +4337,7 @@ def _handle_session(mmr: MMR, args: argparse.Namespace):
     cap_table.add_column('Key', style='bold')
     cap_table.add_column('Value')
     if port['net_liquidation'] > 0:
-        cap_table.add_row('Remaining Budget', f'${cap["remaining_usd"]:,.0f}')
+        cap_table.add_row('Remaining Budget', _money(cap["remaining_usd"]))
     cap_table.add_row('Remaining Positions', f'{cap["remaining_positions"]}')
     console.print(cap_table)
 
@@ -4316,8 +4352,11 @@ def _handle_session(mmr: MMR, args: argparse.Namespace):
                         ('Low (0.2)', 'low_confidence')]:
         s = sizes[key]
         note = s['capped_by'] if s['capped_by'] else ''
-        size_table.add_row(label, f'${s["amount_usd"]:,.0f}', note)
+        size_table.add_row(label, _money(s["amount_usd"]), note)
     console.print(size_table)
+    if not base_ccy:
+        console.print('[dim]Amounts are in the account base currency, which was not read '
+                      '(trader_service unavailable); it is not necessarily USD.[/dim]')
 
     # Warnings
     if summary['warnings']:
