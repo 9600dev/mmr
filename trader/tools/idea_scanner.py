@@ -8,6 +8,7 @@ When ``--location`` is provided, ``IBIdeaScanner`` uses IB's scanner API +
 """
 
 import logging
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -505,18 +506,45 @@ def merge_filters(scan_preset: ScanPreset, custom_filters: Optional[Dict[str, An
 # ------------------------------------------------------------------
 
 def compute_rsi(closes: List[float], period: int = 14) -> Optional[float]:
-    """Compute RSI from a list of closing prices."""
-    if len(closes) < period + 1:
+    """Wilder's RSI of the last close, from closing prices in time order.
+
+    The standard definition (Wilder, 1978), which is what a vendor's RSI
+    endpoint returns and therefore what the preset thresholds (``rsi < 30``,
+    ``50 < rsi < 80``) are written against: the first average gain and
+    average loss are the plain means of the first ``period`` changes, and
+    each later change is smoothed in,
+
+        avg = (previous_avg * (period - 1) + this_change) / period
+
+    Until 2026-11-15 this was Cutler's variant — the plain mean of the LAST
+    ``period`` gains and losses — so the IB path and the TwelveData scanner
+    (which compute RSI here) read the same thresholds differently from the
+    Massive path (which asks the vendor). The two agree only when there are
+    exactly ``period + 1`` closes.
+
+    Wilder's average never fully forgets the start of the series. Over the
+    42 to 60 daily closes the scanners fetch, the seed average still carries
+    (13/14)**27 = 13.5% down to (13/14)**45 = 3.6% of the weight, so this can
+    differ somewhat from a vendor's figure computed over a longer history.
+    Fetching more bars narrows that; the definition is the same.
+
+    Closes that are None or not finite are skipped, as the callers already
+    skip them. ``None`` when there are fewer than ``period + 1`` usable
+    closes, or when the price never moved (0/0 is unknown, not 50 or 100).
+    """
+    values = [float(c) for c in closes if c is not None]
+    values = [v for v in values if math.isfinite(v)]
+    if period < 1 or len(values) < period + 1:
         return None
-    deltas = pd.Series(closes).diff()
-    gain = deltas.clip(lower=0).rolling(period).mean()
-    loss = (-deltas.clip(upper=0)).rolling(period).mean()
-    rs = gain / loss
-    rsi = 100 - 100 / (1 + rs)
-    val = rsi.iloc[-1]
-    if pd.isna(val):
-        return None
-    return round(float(val), 2)
+    changes = [later - earlier for earlier, later in zip(values, values[1:])]
+    avg_gain = sum(max(change, 0.0) for change in changes[:period]) / period
+    avg_loss = sum(max(-change, 0.0) for change in changes[:period]) / period
+    for change in changes[period:]:
+        avg_gain = (avg_gain * (period - 1) + max(change, 0.0)) / period
+        avg_loss = (avg_loss * (period - 1) + max(-change, 0.0)) / period
+    if avg_loss == 0.0:
+        return None if avg_gain == 0.0 else 100.0
+    return round(100.0 - 100.0 / (1.0 + avg_gain / avg_loss), 2)
 
 
 def compute_ema(closes: List[float], window: int) -> Optional[float]:
