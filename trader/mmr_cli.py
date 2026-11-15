@@ -8322,6 +8322,11 @@ def _freshness_check(
     Empty list means "everything is fresh enough". We check the `1 day`
     bar series only — even for 1-min sweeps, having yesterday's daily
     bar means the 1-min feed is probably also caught up.
+
+    Only a row with a close is a bar. The IB worker also stores an all-NULL
+    "the source had nothing for this day" marker per empty day, and the
+    newest of those used to be read as the series' last bar: a conid whose
+    real bars ended weeks ago passed as current.
     """
     from trader.container import Container
     from trader.data.bar_staleness import sessions_behind
@@ -8340,9 +8345,15 @@ def _freshness_check(
             stale.append({'conid': int(cid), 'last_bar': None,
                            'reason': f'read error: {ex}'})
             continue
+        markers = 0
+        if df is not None and len(df) and 'close' in df.columns:
+            rows = len(df)
+            df = df[df['close'].notna()]
+            markers = rows - len(df)
         if df is None or len(df) == 0:
             stale.append({'conid': int(cid), 'last_bar': None,
-                           'reason': 'no data'})
+                           'reason': (f'no data ({markers} no-data marker row(s), no bar)'
+                                      if markers else 'no data')})
             continue
         last_ts = df.index.max()
         # Weekday sessions behind, via the same helper `data status` uses. The
