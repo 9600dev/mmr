@@ -4260,8 +4260,10 @@ def _handle_session(mmr: MMR, args: argparse.Namespace):
             'max_position_pct': f'{cfg.max_position_pct:.0%}',
             'max_total_exposure_pct': f'{cfg.max_total_exposure_pct:.0%}',
             'max_positions': str(cfg.max_positions),
-            # Offline command: the currency code is the account's, not read here.
-            'currency': 'account base currency (the _usd suffix is historical)',
+            # Offline command: the account is not read here, so there is no
+            # currency code to give — only what the amounts are denominated in.
+            'currency_note': 'amounts are in the account base currency '
+                             '(the _usd suffix is historical)',
         }
         print_dict(limits, title='Hard Limits')
         return

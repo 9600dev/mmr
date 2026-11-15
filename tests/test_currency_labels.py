@@ -147,6 +147,17 @@ def test_session_table_without_a_currency_says_so(monkeypatch):
     assert 'account base currency' in text
 
 
+def test_session_limits_says_what_the_usd_keys_are_denominated_in(monkeypatch):
+    # `session limits` is offline: it cannot name the currency, but it must not
+    # leave '$' + '_usd' to be read as US dollars.
+    from trader import mmr_cli
+    shown = []
+    monkeypatch.setattr(mmr_cli, 'print_dict', lambda d, **kwargs: shown.append(d))
+    mmr_cli._handle_session(SimpleNamespace(), SimpleNamespace(session_action='limits'))
+    assert {'min_position_usd', 'max_position_usd'} <= set(shown[0])
+    assert 'account base currency' in shown[0]['currency_note']
+
+
 # ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
