@@ -56,7 +56,8 @@ class IBNoDataError(Exception):
 
 
 
-def missing_session_days(index, start: dt.datetime, end: dt.datetime, tz_info: str) -> pd.DatetimeIndex:
+def missing_session_days(index, start: dt.datetime, end: dt.datetime, tz_info: str,
+                         now: Optional[dt.datetime] = None) -> pd.DatetimeIndex:
     """Calendar days in [start, end] (exchange tz) with NO bar at all, as midnight stamps.
 
     These get an all-NULL marker row so the gap finder doesn't re-request a
@@ -66,15 +67,25 @@ def missing_session_days(index, start: dt.datetime, end: dt.datetime, tz_info: s
     intraday — a 1-min window starting 04:00 ET produced a 04:00 candidate
     every day, and any day without a bar at exactly 04:00:00 got a NULL bar
     injected beside its real bars.
+
+    Only a day that is OVER can be said to have had no data. A request made
+    before the exchange's day has traded - a service restarted at 06:17 in
+    Sydney, four hours before the ASX opens - found no bar for "today" and
+    recorded that the source had nothing for it; the day's 372 real bars
+    arrived that evening and the marker stayed beside them (six instruments on
+    2026-11-16, which is what turned the nightly data audit red). So the
+    exchange's current day, and anything after it, never gets a marker;
+    ``now`` (default: the clock) is what "current" is measured against.
     """
     def _day(ts):
         t = pd.Timestamp(ts)
         t = t.tz_localize(tz_info) if t.tzinfo is None else t.tz_convert(tz_info)
         return t.normalize()
 
+    today = _day(now if now is not None else pd.Timestamp.now(tz='UTC'))
     present = {_day(ts) for ts in index} if len(index) else set()
     days = pd.date_range(start=_day(start), end=_day(end), freq='D')
-    return pd.DatetimeIndex([d for d in days if d not in present])
+    return pd.DatetimeIndex([d for d in days if d not in present and d < today])
 
 
 _DAILY_OR_LONGER = {'1 day', '1 week', '1 month'}

@@ -1080,20 +1080,23 @@ supervise web_dashboard env \
 WEB_SUP_PID=$!
 
 # pycron (cron-only) — the services above are launched directly, so load ONLY
-# the scheduled jobs from pycron.yaml (nightly db_backup, data_refresh_*).
-# Without this nothing ever fires them. Its web port (7425) doubles as a
-# double-start guard: a second instance fails the bind and exits before
-# scheduling anything.
+# the scheduled jobs from pycron.yaml. Without this nothing ever fires them.
+# A job is scheduled only if it is NAMED here: one defined in pycron.yaml and
+# missing from this list never runs, and nothing says so. sleeve_upkeep was
+# exactly that from the day it was added until 2026-11-16 (it had only ever
+# been run by hand). tests/test_ops_scripts.py holds this list to the
+# template's scheduled jobs. Its web port (7425) doubles as a double-start
+# guard: a second instance fails the bind and exits before scheduling anything.
 run_pycron() {
     $PY -m pycron.pycron --config "$HOME/.config/mmr/pycron.yaml" \
         -s db_backup -s data_refresh_us -s data_refresh_asx -s data_audit \
-        -s preflight_us -s preflight_asx \
+        -s sleeve_upkeep -s preflight_us -s preflight_asx \
         --no-health-check \
         >> "$HOME/.local/share/mmr/logs/pycron_cron.log" 2>&1
 }
 PYCRON_SUP_PID=""
 if [ "$IN_DOCKER" = true ]; then
-    step "Starting pycron (cron jobs: db_backup, data_refresh_*, preflight_*; supervised)..."
+    step "Starting pycron (cron jobs: db_backup, data_refresh_*, data_audit, sleeve_upkeep, preflight_*; supervised)..."
     supervise pycron run_pycron &
     PYCRON_SUP_PID=$!
 fi
