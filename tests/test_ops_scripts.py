@@ -17,6 +17,7 @@ replaced by shell functions that keep their "containers" in a text file (and,
 for the sync test, with real ``rsync`` between two temporary directories).
 """
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -358,6 +359,43 @@ def test_sync_all_filters_cover_the_dockerignore_secrets():
     # First match wins in rsync: the template must be let through before `.env.*`.
     assert block.index("--include='.env.example'") < block.index("--exclude='.env.*'")
     assert '"${SYNC_ALL_FILTERS[@]}"' in script[script.index('sync_all() {'):]
+
+
+# ── start_mmr.sh: which scheduled jobs the scheduler is told to load ─────────
+
+def _scheduled_jobs_started_by_the_script():
+    """The names after ``-s`` in start_mmr.sh's pycron command line."""
+    text = START_MMR.read_text()
+    body = text[text.index('run_pycron() {'):]
+    body = body[:body.index('\n}')]
+    return re.findall(r'-s\s+([A-Za-z0-9_]+)', body)
+
+
+def _template_jobs():
+    import yaml
+    doc = yaml.safe_load((ROOT / 'config_defaults' / 'pycron.yaml').read_text())
+    return doc['jobs']
+
+
+def test_every_scheduled_job_in_the_template_is_loaded_by_the_start_script():
+    """pycron only schedules the jobs it is started with (``-s NAME``). A job
+    defined in pycron.yaml and missing from that list never runs, and nothing
+    reports it: ``sleeve_upkeep`` was in the config, documented as nightly, and
+    had never been scheduled (found 2026-11-16; it had only been run by hand)."""
+    scheduled = {job['name'] for job in _template_jobs() if not job.get('start_on_pycron_start')}
+    assert scheduled == {'data_refresh_us', 'data_audit', 'data_refresh_asx', 'db_backup', 'sleeve_upkeep',
+                         'preflight_us', 'preflight_asx'}
+    started = _scheduled_jobs_started_by_the_script()
+    assert set(started) == scheduled
+    assert len(started) == len(set(started))
+
+
+def test_the_start_script_does_not_hand_the_services_to_the_scheduler():
+    """The long-running services are launched (and supervised) by the script
+    itself; a second copy from pycron would collide on the ZMQ ports."""
+    services = {job['name'] for job in _template_jobs() if job.get('start_on_pycron_start')}
+    assert services == {'data_service', 'trader_service', 'strategy_service', 'web_dashboard'}
+    assert not services & set(_scheduled_jobs_started_by_the_script())
 
 
 # ── start_mmr.sh: the restart circuit-breaker ────────────────────────────────

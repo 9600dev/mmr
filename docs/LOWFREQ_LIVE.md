@@ -37,7 +37,9 @@ EXEC="docker exec -u trader -w /home/trader/mmr \
 ## What runs by itself (since 2026-11-15)
 
 pycron runs `scripts/sleeve_upkeep.py` at 23:30 ET every weekday (job
-`sleeve_upkeep`). For the last completed NYSE session it does the "every
+`sleeve_upkeep`). *(It was defined on 2026-11-15 but not actually scheduled
+until 2026-11-16: `start_mmr.sh` names the jobs pycron loads and this one was
+missing from the list. `python scripts/pycron_status.py --all` must list it.)* For the last completed NYSE session it does the "every
 session" steps below for every sleeve that has a targets file — bars, the
 split history, the split adjustment of the stored prices, `reconcile`,
 `track` — and, when that session was the first of its month and
