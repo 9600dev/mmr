@@ -153,10 +153,13 @@ dead pipeline is silent too. The 10.5h gateway outage of 2026-07-05
 absence. The pulses make liveness positively visible:
 
 - `trader_service` every 30s: `pulse ib_connected=True ib_upstream=True open_orders=0
-  dropped_ticks=0 replay_required=False unsettled_reservations=0` (the last
-  three since 2026-09-14: ticks the bounded publisher queue rejected, whether
+  dropped_ticks=0 replay_required=False unsettled_reservations=0 ib_answering=True`
+  (three since 2026-09-14: ticks the bounded publisher queue rejected, whether
   the startup execution replay is still owed, and reservations currently
-  holding reduction capacity — see the reads below)
+  holding reduction capacity — see the reads below; `ib_answering` since
+  2026-11-16: the answer to a LIVE request the previous pulse started. The
+  first two flags follow error codes and the local socket and stay True on a
+  dead link; this one goes `False`.)
 - `strategy_service` every 30s (reconcile tick):
   `pulse strategies=5/5 ticks_60s=[208813719:42,…] bar_age_s=[208813719:75,…]
   trade_age_s=[208813719:61,…] oos_bars=[…] auto_exec_open=1`
@@ -250,6 +253,13 @@ arrives after the competing session is genuinely gone (~5+ min).
   past one reconcile cycle.
 - `ib_upstream=False` outside the nightly restart window, or `mmr verify`'s
   `ib_socket` check failing (live round-trip — trust it over the flags).
+- `ib_answering=False`, or the ERROR `IB has not answered a live request for
+  Ns ... while the socket reports connected=True` (logged once, after two
+  unanswered requests; `IB is answering again after Ns of silence` closes it).
+  The link between MMR and the gateway is dead or the gateway is hung. MMR
+  does NOT reconnect by itself for this: if it does not clear within a few
+  minutes, restart the stack (`./docker.sh -r` for the gateway). `mmr status`
+  shows the same as `ib_answering` / `ib_silent_s`.
 - `raised on_prices … disabling it` — a strategy crashed and was disabled;
   it will NOT re-enable itself.
 - Gateway recovery restarts (`[gateway recovery]` in

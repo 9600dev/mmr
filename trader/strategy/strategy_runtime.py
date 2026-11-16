@@ -1763,10 +1763,22 @@ class StrategyRuntime():
         # subscription, the alternative is silence.
         stale = len(self._published_conids)
         if stale:
-            logging.warning(
-                'trader_service boot %s -> %s — its market-data subscriptions '
-                'died with it; re-subscribing %d conId(s)',
-                previous or 'unknown', boot_id, stale)
+            if previous is None:
+                # Not a restart of the trader: this process's FIRST reading of
+                # its boot id, taken after it had already published. The line
+                # used to read "boot unknown -> <id> — its subscriptions died
+                # with it", which sends whoever reads it looking for a trader
+                # restart that did not happen (2026-11-16, 47 s after a
+                # strategy_service restart).
+                logging.warning(
+                    'first reading of the trader_service boot id (%s) came after %d subscription(s) had '
+                    'been published; they cannot be attributed to this trader process and are re-sent',
+                    boot_id, stale)
+            else:
+                logging.warning(
+                    'trader_service boot %s -> %s — its market-data subscriptions '
+                    'died with it; re-subscribing %d conId(s)',
+                    previous, boot_id, stale)
             self._published_conids.clear()
             return True
 

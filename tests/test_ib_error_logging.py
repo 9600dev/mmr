@@ -57,6 +57,20 @@ def test_365_after_cancel_is_info():
     assert ib_log_level(365, 'something else') == logging.ERROR
 
 
+def test_cancelling_an_order_that_is_already_cancelled_is_info():
+    """2026-11-16: closing a bracket cancels the take-profit; IB cancels the
+    stop with it (one OCA group); MMR's own cancel for the stop then gets
+    10148. That was an ERROR line for the order being exactly as asked."""
+    already = 'OrderId 2476 that needs to be cancelled cannot be cancelled, state: Cancelled.'
+    assert ib_log_level(10148, already) == logging.INFO
+
+
+def test_a_cancel_that_lost_the_race_with_a_fill_is_still_an_error():
+    assert ib_log_level(10148, 'OrderId 2476 that needs to be cancelled cannot be cancelled, state: Filled.') == logging.ERROR
+    assert ib_log_level(10148, 'OrderId 2476 that needs to be cancelled is not found.') == logging.ERROR
+    assert ib_log_level(10148, '') == logging.ERROR
+
+
 def test_an_order_held_until_the_venue_opens_is_a_warning_not_an_error():
     """Found 2026-11-14: a bracket placed on a Saturday wrote an ERROR line (and
     an errors_<ts>.log entry) for IB's notice that the order waits for the open.

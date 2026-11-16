@@ -1999,6 +1999,10 @@ class AutoExecutor:
             self.state.log_decision(intent['strategy'], intent['conid'],
                                     dt.datetime.fromisoformat(payload['bar_ts']), action,
                                     'open_failed' if action == 'BUY' else 'close_failed', error)
+            logging.error('auto-executor: %s for %s conId %s (%s): %s',
+                          'OPEN failed' if action == 'BUY' else 'CLOSE FAILED - position remains OPEN',
+                          intent['strategy'], intent['conid'],
+                          'refused, nothing sent' if explicit_rejection else 'outcome UNKNOWN', error)
             if explicit_rejection:
                 self._append_event(EventType.ORDER_REJECTED, intent['strategy'], intent['conid'],
                                    action, payload.get('quantity') or 0.0, error)
@@ -2025,6 +2029,14 @@ class AutoExecutor:
                                 dt.datetime.fromisoformat(payload['bar_ts']), action,
                                 'open' if action == 'BUY' else 'close', f'proposal #{proposal_id}; awaiting fills',
                                 intent_id=intent['intent_id'])
+        # The audit lines the trading monitor and docs/MONITORING.md are
+        # written around. They were lost when submission became intent-based:
+        # for two months a real open or close left nothing in this log but the
+        # signal that caused it.
+        logging.info('auto-executor: %s %s conId %s (%s) - proposal #%s, order(s) %s; awaiting fills',
+                     'OPENING' if action == 'BUY' else 'CLOSING', intent['strategy'], intent['conid'],
+                     payload.get('reason') or 'signal', proposal_id,
+                     ', '.join(str(int(oid)) for oid in order_ids) or 'none reported')
         self._last_exec[(intent['strategy'], intent['conid'])] = time.time()
         self._reconcile_intent(intent)
 
@@ -3047,6 +3059,7 @@ class AutoExecutor:
         if not unchanged:
             stamp = dict(terminal_observed_at=now) if status in ('FILLED', 'CANCELLED') else {}
             self.intents.update(intent, status=status, cumulative_filled=cumulative, **stamp)
+            self._log_terminal(intent, status, cumulative, quote_notional if cost_evaluable else None)
         elif status == 'CANCELLED' and not intent['payload'].get('reconciled_terminal'):
             # IB can report Cancelled and then a late fill, so a cancelled
             # intent keeps being read for a while. Unchanged under a complete
@@ -3060,6 +3073,26 @@ class AutoExecutor:
                 self.intents.update(intent, reconciled_terminal=True)
         if delta:
             self._load_open_view()
+
+    @staticmethod
+    def _log_terminal(intent, status, filled, quote_notional) -> None:
+        """One line when an intent's orders have finished at the broker: what
+        was opened or closed, how much, at what average price. A protective
+        stop that FILLS is the disaster stop firing and is a WARNING; one that
+        is merely cancelled (every exit cancels it) says nothing."""
+        if status not in ('FILLED', 'CANCELLED') or not filled > 0:
+            return
+        price = (f' at avg {quote_notional / filled:.4f}'
+                 if quote_notional is not None and quote_notional > 0 else ' (price not yet reported)')
+        part = '' if status == 'FILLED' else ' before the rest was cancelled'
+        kind = intent['kind']
+        if kind == 'PROTECTIVE':
+            logging.warning('auto-executor: PROTECTIVE STOP FILLED for %s conId %s - sold %s%s%s',
+                            intent['strategy'], intent['conid'], f'{filled:g}', price, part)
+            return
+        logging.info('auto-executor: %s %s conId %s - %s %s%s%s',
+                     'OPENED' if kind == 'OPEN' else 'CLOSED', intent['strategy'], intent['conid'],
+                     'bought' if kind == 'OPEN' else 'sold', f'{filled:g}', price, part)
 
     @staticmethod
     def _unsubmitted_close(intent):
@@ -3664,6 +3697,8 @@ class AutoExecutor:
             self.intents.update(intent, status='WORKING', order_ids=[order_id])
             self.state.set_protective(strategy, conid, order_id)
             self._retry_cleared('protective', strategy, conid)
+            logging.info('auto-executor: protective stop placed for %s conId %s - SELL %s STP %s GTC (order %s)',
+                         strategy, conid, f'{plan.quantity:g}', f'{plan.stop_price:g}', order_id)
         except Exception:
             logging.exception('auto-executor: protection repair deferred for %s conId %s', strategy, conid)
 

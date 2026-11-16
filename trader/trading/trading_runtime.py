@@ -110,6 +110,24 @@ class _AccountPnLSubscription:
     pending: list[tuple[PnL, Optional[float]]] = field(default_factory=list)
 
 
+class _LinkState(NamedTuple):
+    """What the last live requests to IB came back with (Trader.link_state)."""
+    answering: Optional[bool]       # None: none has completed yet
+    since: float                    # monotonic time of the first unanswered request in a row
+    failures: int                   # unanswered requests in a row
+    error: str
+
+
+def _named(ex: BaseException) -> str:
+    """An exception as a log reader needs it. ``asyncio.TimeoutError`` has no
+    text, so "snapshot incomplete: %s" printed nothing after the colon for the
+    one failure it is most often (found 2026-11-16: 31 such lines during a
+    network partition, none saying what had happened)."""
+    text = str(ex).strip()
+    name = type(ex).__name__
+    return f'{name}: {text}' if text else f'{name} (no reply within the request deadline)'
+
+
 def _is_transient_refusal(error: Any) -> bool:
     """A refusal that sent nothing and describes a condition that can CHANGE.
 
@@ -3070,7 +3088,7 @@ class Trader():
                     tracker.on_trade(trade)
             orders_complete = self.client.ib.isConnected()
         except Exception as ex:
-            logging.warning('open orders snapshot incomplete: %s', ex)
+            logging.warning('open orders snapshot incomplete: %s', _named(ex))
         try:
             positions = [p for p in await single_flight(
                              self.client.ib, 'positions', self.client.ib.reqPositionsAsync, 5.0)
@@ -3078,7 +3096,7 @@ class Trader():
             account_confirmed = self.ib_account in self.client.ib.managedAccounts()
             positions_complete = self.client.ib.isConnected() and account_confirmed
         except Exception as ex:
-            logging.warning('position snapshot incomplete: %s', ex)
+            logging.warning('position snapshot incomplete: %s', _named(ex))
         orders = []
         provenance_rows: dict[str, list[dict]] = {}
         reference_observations: dict[str, int] = {}
@@ -4265,7 +4283,7 @@ class Trader():
             tracker = getattr(self, 'order_tracker', None)
             logging.info(
                 'pulse ib_connected=%s ib_upstream=%s open_orders=%s dropped_ticks=%d '
-                'replay_required=%s unsettled_reservations=%s',
+                'replay_required=%s unsettled_reservations=%s ib_answering=%s',
                 ib_connected,
                 bool(ib_connected and self._ib_upstream_connected),
                 book.get_open_order_count() if book is not None else 0,
@@ -4274,9 +4292,14 @@ class Trader():
                 getattr(self, 'zmq_pubsub_dropped_ticks', 0),
                 tracker.health['replay_required'] if tracker is not None else None,
                 self._unsettled_reservation_count(),
+                # The first two flags are driven by error codes and the local
+                # socket; neither changes when the link itself goes dead. This
+                # one is the answer to a live request (see _probe_link).
+                self.link_state()['answering'],
             )
         except Exception as ex:
             logging.warning('pulse failed: %s', ex)
+        self._probe_link()
         # Every 10th pulse (~5 min): expire stale PENDING proposals so the
         # store, `mmr proposals` and the dashboard never offer an approvable
         # proposal whose prices are days old. Off the event loop (DuckDB I/O).
@@ -4286,6 +4309,63 @@ class Trader():
                 asyncio.get_event_loop().run_in_executor(None, self.sweep_stale_proposals)
             except RuntimeError:
                 pass
+
+    # ------------------------------------------------------------------
+    # Is IB answering? (found 2026-11-16 with the network to the gateway
+    # black-holed for 140 s: the socket stayed "connected", no error code
+    # arrived - there was nobody to send one - and the pulse and `status` said
+    # ib_connected=True ib_upstream=True throughout. Only `mmr verify`'s live
+    # round trip knew.) Every pulse starts one such round trip and the next
+    # pulse reports its answer. This makes the state VISIBLE; it does not
+    # reconnect - a half-open socket still needs that, see the audit.
+    # ------------------------------------------------------------------
+
+    LINK_SILENT_PROBES_BEFORE_ERROR = 2
+
+    def link_state(self) -> dict:
+        """``{'answering': True | False | None, 'silent_s': float, 'error': str}``.
+        None = no live request has completed yet (just started)."""
+        state: Optional[_LinkState] = getattr(self, '_link_state', None)
+        if state is None:
+            return {'answering': None, 'silent_s': 0.0, 'error': ''}
+        silent = max(0.0, time.monotonic() - state.since) if state.answering is False else 0.0
+        return {'answering': state.answering, 'silent_s': silent, 'error': state.error}
+
+    def _probe_link(self) -> None:
+        """Start one live round trip unless the last one is still out."""
+        task = getattr(self, '_link_probe_task', None)
+        if task is not None and not task.done():
+            return
+
+        async def probe():
+            result = await self.ping_ib()
+            self._record_link_probe(bool(result.get('ok')), str(result.get('error') or ''))
+
+        try:
+            self._link_probe_task = asyncio.get_event_loop().create_task(probe())
+        except RuntimeError:
+            pass                # no running loop (shutdown, a unit test of the pulse)
+
+    def _record_link_probe(self, ok: bool, error: str = '', now: Optional[float] = None) -> None:
+        """Keep the answer, and say so ONCE when IB stops answering and once
+        when it answers again."""
+        now = time.monotonic() if now is None else now
+        previous: _LinkState = getattr(self, '_link_state', None) or _LinkState(None, now, 0, '')
+        if ok:
+            if previous.failures >= self.LINK_SILENT_PROBES_BEFORE_ERROR:
+                logging.warning('IB is answering again after %.0fs of silence', now - previous.since)
+            self._link_state = _LinkState(True, now, 0, '')
+            return
+        failures = previous.failures + 1
+        since = previous.since if previous.failures else now
+        self._link_state = _LinkState(False, since, failures, error)
+        if failures == self.LINK_SILENT_PROBES_BEFORE_ERROR:
+            logging.error(
+                'IB has not answered a live request for %.0fs (%s) while the socket reports connected=%s: '
+                'the link to the gateway may be dead. ib_connected / ib_upstream cannot show this (they follow '
+                'error codes, and none can arrive); `mmr verify` fails its round trip. No reconnect is '
+                'attempted automatically.',
+                now - since, error or 'no reply', self.client.ib.isConnected())
 
     def sweep_stale_proposals(self) -> dict:
         """Expire stale PENDING proposals; report (never change) stale APPROVED ones."""
@@ -4397,6 +4477,13 @@ class Trader():
         }
         if not upstream_connected:
             status['ib_upstream_error'] = upstream_error
+        # Whether IB answered the last live request (None until the first
+        # completes). The two flags above stay True on a dead link.
+        link = self.link_state()
+        status['ib_answering'] = link['answering']
+        if link['answering'] is False:
+            status['ib_silent_s'] = round(link['silent_s'], 1)
+            status['ib_answering_error'] = link['error']
         # Unsettled physical reservations known to this process — from the
         # cache the last complete journal read left behind (maintained by
         # reserve/unreserve/settle), NOT a fresh SQLite read: status() must
