@@ -40,6 +40,27 @@ import zmq
 logger = logging.getLogger(__name__)
 
 
+def tick_is_for(tick: Any, con_id: int) -> bool:
+    """Is this published tick the instrument a subscriber asked for?
+
+    Every instrument's ticks are published on ONE topic, so a subscriber sees
+    all of them: `mmr listen F` printed GOOGL, XLK and every other stream the
+    services had open, and F somewhere among them (found live 2026-11-16).
+    A tick that carries a different conId is not it. One that carries no
+    contract at all cannot be told apart and is passed on, as is everything
+    when the subscriber's own conId is unknown (0).
+    """
+    if not con_id:
+        return True
+    carried = getattr(getattr(tick, 'contract', None), 'conId', None)
+    if not carried:
+        return True
+    try:
+        return int(carried) == int(con_id)
+    except (TypeError, ValueError):
+        return True
+
+
 class Subscription:
     """Handle returned by :meth:`MMR.subscribe_ticks`.  Call :meth:`stop` to unsubscribe."""
 
@@ -3224,6 +3245,7 @@ class MMR:
         self._rpc.rpc().publish_contract(contract, delayed)
 
         sub = Subscription()
+        wanted = int(getattr(contract, 'conId', 0) or 0)
 
         def _listener():
             ctx = zmq.Context()
@@ -3238,7 +3260,8 @@ class MMR:
                         frames = socket.recv_multipart()
                         if len(frames) >= 2:
                             obj = unpack(frames[1])
-                            callback(obj)
+                            if tick_is_for(obj, wanted):
+                                callback(obj)
                     except zmq.Again:
                         continue
                     except zmq.ZMQError:
@@ -3638,6 +3661,13 @@ class MMR:
             result['ib_upstream_connected'] = svc_status.get('ib_upstream_connected', True)
             if not result['ib_upstream_connected']:
                 result['ib_upstream_error'] = svc_status.get('ib_upstream_error', 'unknown')
+            # Whether IB answered the trader's last live request. The two
+            # flags above stay true on a dead link to the gateway.
+            if 'ib_answering' in svc_status:
+                result['ib_answering'] = svc_status['ib_answering']
+                if svc_status['ib_answering'] is False:
+                    result['ib_silent_s'] = svc_status.get('ib_silent_s')
+                    result['ib_answering_error'] = svc_status.get('ib_answering_error', '')
         except Exception:
             pass
 

@@ -92,6 +92,14 @@ _INFO_MESSAGES = (
     (162, 'API scanner subscription cancelled'),
     # 365 follows a cancelScannerSubscription for a scan IB already ended.
     (365, 'No scanner subscription found'),
+    # 10148 answers a cancel for an order that is ALREADY cancelled. The legs
+    # of a bracket are one OCA group: cancelling the take-profit cancels the
+    # stop at IB, and the cancel MMR then sends for the stop gets this. The
+    # order is in the state that was asked for (found 2026-11-16: one ERROR
+    # line, and an errors_<ts>.log entry, for every bracket that was closed).
+    # Any other state - above all "state: Filled", a cancel that lost the
+    # race with a fill - stays ERROR.
+    (10148, 'cannot be cancelled, state: Cancelled'),
 )
 
 # Same idea at WARNING: worth seeing, not a failure.
@@ -133,6 +141,53 @@ def ib_log_level(code: int, message: str = '') -> int:
         if code == warning_code and needle in (message or ''):
             return logging.WARNING
     return logging.ERROR
+
+
+# ---------------------------------------------------------------------------
+# What status to REPORT for an order ib_async has flagged with a warning.
+# ---------------------------------------------------------------------------
+
+# ib_async records an IB *warning* about an order by setting the trade's local
+# status to this value until the next orderStatus callback ("the order is
+# STILL LIVE at the broker", ib_async.wrapper.error).
+ORDER_WARNING_STATUS = 'ValidationError'
+
+
+def order_status_and_warnings(trade: Any) -> tuple:
+    """``(status to report, [IB messages about the order])`` for a Trade.
+
+    Every MARKET or STOP order this system sends carries the "outside regular
+    trading hours" attribute, IB answers with warning 2109 ("attribute ...
+    is ignored based on the order type") and ib_async flips the trade's status
+    to ``ValidationError`` for the moment in which the CLI reads it. So `buy`,
+    `sell` and `close` answered ``"status": "ValidationError"`` beside
+    ``"success": true`` for orders IB had accepted and went on to fill (found
+    live 2026-11-16) - a word that reads as a failure, to an operator and to an
+    agent alike.
+
+    When every message behind the marker is one this module classes as
+    informational (DEBUG / INFO: 2109, 10349, ...), the status reported is the
+    last one the broker actually gave before it, or ``PendingSubmit`` if there
+    was none. When ANY message is a real warning or error - 321 "missing order
+    exchange" arrived this way and the order was dead - the marker is reported
+    as it is: unknown is never treated as fine. The messages are returned in
+    both cases.
+    """
+    status = getattr(getattr(trade, 'orderStatus', None), 'status', None)
+    entries = list(getattr(trade, 'log', None) or [])
+    flagged = [entry for entry in entries if getattr(entry, 'status', None) == ORDER_WARNING_STATUS]
+    messages = [str(getattr(entry, 'message', '') or '') for entry in flagged]
+    messages = [message for message in messages if message]
+    if status != ORDER_WARNING_STATUS:
+        return status, messages
+    benign = bool(flagged) and all(
+        ib_log_level(int(getattr(entry, 'errorCode', 0) or 0), str(getattr(entry, 'message', '') or '')) <= logging.INFO
+        for entry in flagged)
+    if not benign:
+        return status, messages
+    earlier = [getattr(entry, 'status', None) for entry in entries]
+    earlier = [value for value in earlier if value and value != ORDER_WARNING_STATUS]
+    return (earlier[-1] if earlier else 'PendingSubmit'), messages
 
 
 # ---------------------------------------------------------------------------

@@ -51,6 +51,119 @@ class TestPlanRenderNeverCrashes:
         mmr.execute_resize_plan.assert_not_called()
 
 
+class TestJsonMode:
+    """`--json resize-positions --dry-run` drew the plan as a Rich table on
+    stderr and printed NOTHING on stdout (found live 2026-11-16); without
+    --dry-run it went on to input() and blocked the caller on a prompt."""
+
+    @pytest.fixture(autouse=True)
+    def _json(self, monkeypatch):
+        import trader.mmr_cli as cli
+        monkeypatch.setattr(cli, '_json_mode', True)
+        monkeypatch.setattr(cli, '_exit_code', 0, raising=False)
+        monkeypatch.setattr('builtins.input', lambda *a, **k: pytest.fail('asked for confirmation in JSON mode'))
+
+    @staticmethod
+    def _run(capsys, plan=None, **flags):
+        import json
+        from trader.mmr_cli import _handle_resize_positions
+        mmr = MagicMock()
+        mmr.compute_resize_plan.return_value = plan if plan is not None else _plan()
+        mmr.execute_resize_plan.return_value = {'successes': ['GOOGL: SELL 2 submitted'], 'failures': [], 'warnings': []}
+        args = argparse.Namespace(**{'max_bound': 400.0, 'min_bound': None, 'dry_run': False, 'yes': False, **flags})
+        _handle_resize_positions(mmr, args)
+        out = capsys.readouterr().out
+        return json.loads(out), mmr
+
+    def test_a_dry_run_is_one_json_document_with_the_plan(self, capsys):
+        doc, mmr = self._run(capsys, dry_run=True)
+        assert doc['success'] is True and doc['dry_run'] is True and doc['executed'] is False
+        assert (doc['current_total'], doc['target_total'], doc['scale_factor']) == (830.0, 400.0, 0.48)
+        assert [(a['symbol'], a['action'], a['delta_qty']) for a in doc['adjustments']] == [('GOOGL', 'SELL', -2.0)]
+        assert doc['adjustments'][0]['associated_orders'][0]['orderId'] == 227
+        assert 'no orders placed' in doc['message']
+        mmr.execute_resize_plan.assert_not_called()
+
+    def test_without_yes_nothing_is_executed_and_it_says_why(self, capsys):
+        import trader.mmr_cli as cli
+        doc, mmr = self._run(capsys)
+        assert doc['success'] is False and doc['executed'] is False
+        assert 'pass --yes' in doc['message']
+        assert doc['adjustments']                     # the plan is still shown
+        mmr.execute_resize_plan.assert_not_called()
+        assert cli._exit_code == 1
+
+    def test_with_yes_it_executes_and_reports_each_outcome(self, capsys):
+        doc, mmr = self._run(capsys, yes=True)
+        mmr.execute_resize_plan.assert_called_once()
+        assert doc['success'] is True and doc['executed'] is True
+        assert doc['results'] == {'successes': ['GOOGL: SELL 2 submitted'], 'failures': [], 'warnings': []}
+        assert doc['message'] == '1 succeeded, 0 failed'
+
+    def test_a_failed_leg_makes_the_command_fail(self, capsys):
+        import json
+        import trader.mmr_cli as cli
+        from trader.mmr_cli import _handle_resize_positions
+        mmr = MagicMock()
+        mmr.compute_resize_plan.return_value = _plan()
+        mmr.execute_resize_plan.return_value = {'successes': [], 'failures': ['GOOGL: DEFERRED'], 'warnings': ['x']}
+        _handle_resize_positions(mmr, argparse.Namespace(max_bound=400.0, min_bound=None, dry_run=False, yes=True))
+        doc = json.loads(capsys.readouterr().out)
+        assert doc['success'] is False and doc['results']['failures'] == ['GOOGL: DEFERRED']
+        assert doc['message'] == '0 succeeded, 1 failed' and cli._exit_code == 1
+
+    def test_nothing_to_do_is_a_success_with_an_empty_plan(self, capsys):
+        doc, mmr = self._run(capsys, plan={'current_total': 300.0, 'target_total': 300.0, 'scale_factor': 1.0,
+                                           'adjustments': []}, yes=True)
+        assert doc['success'] is True and doc['adjustments'] == [] and doc['executed'] is False
+        assert 'already within bounds' in doc['message']
+        mmr.execute_resize_plan.assert_not_called()
+
+    def test_missing_bounds_is_a_json_error(self, capsys):
+        import json
+        import trader.mmr_cli as cli
+        from trader.mmr_cli import _handle_resize_positions
+        _handle_resize_positions(MagicMock(), argparse.Namespace(max_bound=None, min_bound=None, dry_run=True, yes=False))
+        doc = json.loads(capsys.readouterr().out)
+        assert doc == {'success': False, 'message': 'Specify --max-bound and/or --min-bound'}
+        assert cli._exit_code == 1
+
+
+class TestConfirmation:
+    def test_a_terminal_user_is_still_asked_and_can_decline(self, monkeypatch, capsys):
+        import trader.mmr_cli as cli
+        from trader.mmr_cli import _handle_resize_positions
+        monkeypatch.setattr(cli, '_json_mode', False)
+        monkeypatch.setattr(cli, '_confirm', lambda prompt, assume_yes: False)
+        mmr = MagicMock()
+        mmr.compute_resize_plan.return_value = _plan()
+        _handle_resize_positions(mmr, argparse.Namespace(max_bound=400.0, min_bound=None, dry_run=False, yes=False))
+        mmr.execute_resize_plan.assert_not_called()
+        assert 'Cancelled' in capsys.readouterr().out
+
+    def test_a_non_interactive_caller_without_yes_is_refused_not_blocked(self, monkeypatch, capsys):
+        import trader.mmr_cli as cli
+        from trader.mmr_cli import _handle_resize_positions
+        monkeypatch.setattr(cli, '_json_mode', False)
+        monkeypatch.setattr(cli, '_confirm', lambda prompt, assume_yes: None)
+        mmr = MagicMock()
+        mmr.compute_resize_plan.return_value = _plan()
+        _handle_resize_positions(mmr, argparse.Namespace(max_bound=400.0, min_bound=None, dry_run=False, yes=False))
+        mmr.execute_resize_plan.assert_not_called()
+        assert 'pass --yes' in capsys.readouterr().out
+
+    def test_yes_skips_the_question(self, monkeypatch, capsys):
+        import trader.mmr_cli as cli
+        from trader.mmr_cli import _handle_resize_positions
+        monkeypatch.setattr(cli, '_json_mode', False)
+        monkeypatch.setattr('builtins.input', lambda *a, **k: pytest.fail('asked although --yes was given'))
+        mmr = MagicMock()
+        mmr.compute_resize_plan.return_value = _plan()
+        mmr.execute_resize_plan.return_value = {'successes': ['ok'], 'failures': [], 'warnings': []}
+        _handle_resize_positions(mmr, argparse.Namespace(max_bound=400.0, min_bound=None, dry_run=False, yes=True))
+        mmr.execute_resize_plan.assert_called_once()
+
+
 class TestCoordinatedProtection:
     """The supported server handoff preserves the residual protective tranche.
 

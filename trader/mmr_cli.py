@@ -692,6 +692,8 @@ def build_parser() -> argparse.ArgumentParser:
     resize_p.add_argument('--max-bound', type=float, default=None, help='Maximum portfolio value (trim positions)')
     resize_p.add_argument('--min-bound', type=float, default=None, help='Minimum portfolio value (grow positions)')
     resize_p.add_argument('--dry-run', action='store_true', help='Show plan without executing')
+    resize_p.add_argument('--yes', '-y', action='store_true',
+                          help='Do not ask for confirmation (required with --json or when stdin is not a terminal)')
 
     # strategies
     strat_p = sub.add_parser('strategies', aliases=['strat'], help='List or manage strategies',
@@ -2685,7 +2687,7 @@ def _dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
                 # Human path: format raw values into a Rich-friendly view.
                 # Keeps presentation concerns out of sdk.status().
                 display: dict = {}
-                for k in ('connected', 'account', 'ib_upstream_connected'):
+                for k in ('connected', 'account', 'ib_upstream_connected', 'ib_answering'):
                     if k in result:
                         display[k] = result[k]
                 for key, entry in (result.get('account_values') or {}).items():
@@ -2705,6 +2707,14 @@ def _dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
                         display[k] = result[k]
                 print_dict(display, title='Status')
 
+            if not _json_mode and result.get('ib_answering') is False:
+                console.print(
+                    f'\n[bold red]IB has not answered a live request for '
+                    f'{result.get("ib_silent_s") or 0:.0f}s[/bold red] '
+                    f'[dim]({result.get("ib_answering_error") or "no reply"})[/dim]\n'
+                    f'The socket still reports connected: the link to the gateway may be dead. '
+                    f'Run [cyan]mmr verify[/cyan].'
+                )
             if not _json_mode and not result.get('ib_upstream_connected', True):
                 console.print(
                     f'\n[bold red]IB Gateway is not connected to IBKR servers[/bold red]\n'
@@ -2873,7 +2883,20 @@ def _dispatch(mmr: MMR, args: argparse.Namespace) -> bool:
     return True
 
 
+def _order_status(trade) -> tuple:
+    """``(status, IB messages)`` to show for an order: ib_async's transient
+    'ValidationError' marker is not shown for an order IB accepted with a
+    purely informational notice (ib_informational.order_status_and_warnings)."""
+    from trader.listeners.ib_informational import order_status_and_warnings
+    return order_status_and_warnings(trade)
+
+
 def _print_trade_result(result, action: str, symbol: str):
+    status, ib_messages = _order_status(result.obj) if result.is_success() and result.obj else ('', [])
+    # Working exits this order CANCELLED to stay within the position: a sell
+    # limit placed beside a protective stop replaces the stop. `close` and
+    # `protect` always said so; `buy` / `sell` dropped it on the floor.
+    replaced = list(getattr(result, 'warnings', None) or []) if result.is_success() else []
     if _json_mode:
         if result.is_success():
             data = {
@@ -2881,7 +2904,9 @@ def _print_trade_result(result, action: str, symbol: str):
                 'action': action,
                 'symbol': symbol,
                 'orderId': getattr(result.obj, 'orderId', getattr(getattr(result.obj, 'order', None), 'orderId', '')) if result.obj else '',
-                'status': getattr(getattr(result.obj, 'orderStatus', None), 'status', '') if result.obj else '',
+                'status': status or '',
+                'replaced': replaced,
+                'ib_messages': ib_messages,
             }
         else:
             data = {
@@ -2898,8 +2923,10 @@ def _print_trade_result(result, action: str, symbol: str):
         if result.obj:
             print_dict({
                 'orderId': getattr(result.obj, 'orderId', getattr(getattr(result.obj, 'order', None), 'orderId', '')),
-                'status': getattr(getattr(result.obj, 'orderStatus', None), 'status', ''),
+                'status': status or '',
             })
+        for line in replaced:
+            console.print(f'[yellow]  replaced: {line}[/yellow]')
     else:
         console.print(f'[red]{action} {symbol}: failed[/red]')
         if result.error:
@@ -3696,9 +3723,10 @@ def _confirm(prompt: str, assume_yes: bool) -> Optional[bool]:
 def _trade_summary(result) -> dict:
     trade = getattr(result, 'obj', None)
     order = getattr(trade, 'order', None)
-    status = getattr(trade, 'orderStatus', None)
+    status, ib_messages = _order_status(trade)
     return {'order_id': getattr(order, 'orderId', None),
-            'broker_status': getattr(status, 'status', None),
+            'broker_status': status,
+            'ib_messages': ib_messages,
             # Working exits this placement CANCELLED to stay within the
             # position (e.g. a close cancels the stop; a protect cancels a
             # pending close). Always present so callers can rely on the key.
@@ -3928,12 +3956,13 @@ def _handle_protect(mmr: MMR, args: argparse.Namespace):
             'LMT': f'take-profit @ {value:g}'}[order_type]
     trade = getattr(result, 'obj', None) if ok else None
     order_id = getattr(getattr(trade, 'order', None), 'orderId', None)
-    broker_status = getattr(getattr(trade, 'orderStatus', None), 'status', None)
+    broker_status, ib_messages = _order_status(trade)
     replaced = list(getattr(result, 'warnings', None) or []) if ok else []
     if _json_mode:
         print(_json_dumps({'success': ok,
                           'order_id': order_id,
                           'broker_status': broker_status,
+                          'ib_messages': ib_messages,
                           'replaced': replaced,
                           'message': (f'{args.action} {order_type} ({desc}) for {qty:g} {symbol}'
                                       if ok else getattr(result, 'error', 'failed'))}))
@@ -3954,14 +3983,22 @@ def _handle_resize_positions(mmr: MMR, args: argparse.Namespace):
     dry_run = args.dry_run
 
     if max_bound is None and min_bound is None:
-        console.print('[yellow]Specify --max-bound and/or --min-bound[/yellow]')
+        print_status('Specify --max-bound and/or --min-bound', success=False)
         return
 
     if max_bound is not None and min_bound is not None and min_bound > max_bound:
-        console.print('[yellow]--min-bound cannot be greater than --max-bound[/yellow]')
+        print_status('--min-bound cannot be greater than --max-bound', success=False)
         return
 
     plan = mmr.compute_resize_plan(max_bound=max_bound, min_bound=min_bound)
+
+    if _json_mode:
+        # One JSON document on stdout, like every other command. This used to
+        # draw the plan as a Rich table (which --json sends to stderr) and
+        # print nothing at all on stdout - and without --dry-run it went on to
+        # input(), which blocks a non-interactive caller on a prompt.
+        _resize_json(mmr, plan, dry_run, bool(getattr(args, 'yes', False)))
+        return
 
     if not plan['adjustments']:
         console.print('[dim]Portfolio already within bounds. No adjustments needed.[/dim]')
@@ -4028,8 +4065,11 @@ def _handle_resize_positions(mmr: MMR, args: argparse.Namespace):
         console.print('\n[dim]Dry run — no orders placed.[/dim]')
         return
 
-    confirm = input('\nProceed? [y/N] ')
-    if confirm.lower() != 'y':
+    confirmed = _confirm('\nProceed? [y/N] ', bool(getattr(args, 'yes', False)))
+    if confirmed is None:
+        print_status('resize-positions: confirmation required — pass --yes for non-interactive use', success=False)
+        return
+    if not confirmed:
         console.print('[dim]Cancelled[/dim]')
         return
 
@@ -4045,6 +4085,40 @@ def _handle_resize_positions(mmr: MMR, args: argparse.Namespace):
     total_ok = len(results['successes'])
     total_fail = len(results['failures'])
     console.print(f'\n[bold]Done:[/bold] {total_ok} succeeded, {total_fail} failed')
+
+
+def _resize_json(mmr: MMR, plan: dict, dry_run: bool, assume_yes: bool) -> None:
+    """`--json resize-positions`: the plan, and - only with --yes and without
+    --dry-run - what executing it did. Amounts are in the account's base
+    currency, as `session` and `status` state theirs."""
+    adjustments = list(plan.get('adjustments') or [])
+    document = {
+        'success': True,
+        'dry_run': bool(dry_run),
+        'executed': False,
+        'current_total': plan.get('current_total'),
+        'target_total': plan.get('target_total'),
+        'scale_factor': plan.get('scale_factor'),
+        'adjustments': adjustments,
+    }
+    if not adjustments:
+        document['message'] = 'Portfolio already within bounds. No adjustments needed.'
+    elif dry_run:
+        document['message'] = 'Dry run — no orders placed.'
+    elif not assume_yes:
+        document['success'] = False
+        document['message'] = 'resize-positions: confirmation required — pass --yes for non-interactive use'
+        _set_exit_code(1)
+    else:
+        results = mmr.execute_resize_plan(plan)
+        document['executed'] = True
+        document['results'] = {key: list(results.get(key) or []) for key in ('successes', 'failures', 'warnings')}
+        if document['results']['failures']:
+            document['success'] = False
+            _set_exit_code(1)
+        document['message'] = (f"{len(document['results']['successes'])} succeeded, "
+                               f"{len(document['results']['failures'])} failed")
+    print(_json_dumps(document))
 
 
 def _handle_logs(args: argparse.Namespace):

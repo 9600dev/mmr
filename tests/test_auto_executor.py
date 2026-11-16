@@ -342,6 +342,105 @@ def executor(tmp_path):
     return ex, sdk
 
 
+class TestWhatTheLogSays:
+    """The trading monitor (scripts/monitor_trading.sh) and docs/MONITORING.md
+    are written around `auto-executor: OPENING / OPENED / CLOSING / CLOSED /
+    CLOSE FAILED` lines. Found live on 2026-11-16: the executor opened a
+    position, placed its stop and closed it again, five times, and wrote none
+    of them - they had gone when submission became intent-based."""
+
+    @staticmethod
+    def _lines(caplog, level=logging.INFO):
+        return [record.getMessage() for record in caplog.records
+                if record.levelno >= level and record.getMessage().startswith('auto-executor:')]
+
+    def test_an_open_is_announced_filled_and_protected(self, executor, caplog):
+        ex, sdk = executor
+        with caplog.at_level(logging.INFO):
+            ex._process_signal(make_work())
+        assert self._lines(caplog) == [
+            'auto-executor: OPENING orb_test conId 1111 (signal) - proposal #100, order(s) 1000; awaiting fills',
+            'auto-executor: OPENED orb_test conId 1111 - bought 140 at avg 100.0000',
+            'auto-executor: protective stop placed for orb_test conId 1111 - SELL 140 STP 92 GTC (order 900)',
+        ]
+
+    def test_a_close_is_announced_with_its_reason_and_its_fill(self, executor, caplog):
+        ex, sdk = executor
+        ex._process_signal(make_work())
+        with caplog.at_level(logging.INFO):
+            ex._process_signal(make_work(action=Action.SELL, bar_ts=TS + pd.Timedelta(minutes=30)))
+        lines = self._lines(caplog)
+        assert 'auto-executor: CLOSING orb_test conId 1111 (SELL signal) - proposal #101, order(s) 1010; awaiting fills' in lines
+        assert 'auto-executor: CLOSED orb_test conId 1111 - sold 140 at avg 100.0000' in lines
+        assert lines.index(next(l for l in lines if 'CLOSING' in l)) < lines.index(next(l for l in lines if 'CLOSED' in l))
+
+    def test_a_refused_open_is_an_error_that_says_nothing_was_sent(self, executor, caplog):
+        ex, sdk = executor
+        sdk.approve_results[100] = FakeResult(ok=False, error='rejected by risk gate: position concentration too high')
+        with caplog.at_level(logging.INFO):
+            ex._process_signal(make_work())
+        errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert errors == ['auto-executor: OPEN failed for orb_test conId 1111 (refused, nothing sent): '
+                          'rejected by risk gate: position concentration too high']
+        assert not any('OPENING' in line or 'OPENED' in line for line in self._lines(caplog))
+
+    def test_a_failed_close_says_the_position_is_still_open(self, executor, caplog):
+        ex, sdk = executor
+        ex._process_signal(make_work())
+        sdk.approve_results[101] = FakeResult(ok=False, error='the gateway did not answer in time (timeout)')
+        with caplog.at_level(logging.INFO):
+            ex._process_signal(make_work(action=Action.SELL, bar_ts=TS + pd.Timedelta(minutes=30)))
+        errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert errors == ['auto-executor: CLOSE FAILED - position remains OPEN for orb_test conId 1111 '
+                          '(outcome UNKNOWN): the gateway did not answer in time (timeout)']
+
+    @staticmethod
+    def _intent(kind):
+        return dict(kind=kind, strategy='orb_test', conid=1111)
+
+    @pytest.mark.parametrize('kind, status, filled, notional, level, expected', [
+        ('OPEN', 'FILLED', 140.0, 14_000.0, logging.INFO,
+         'auto-executor: OPENED orb_test conId 1111 - bought 140 at avg 100.0000'),
+        ('CLOSE', 'FILLED', 12.0, 138.96, logging.INFO,
+         'auto-executor: CLOSED orb_test conId 1111 - sold 12 at avg 11.5800'),
+        ('OPEN', 'FILLED', 0.5, None, logging.INFO,
+         'auto-executor: OPENED orb_test conId 1111 - bought 0.5 (price not yet reported)'),
+        ('OPEN', 'FILLED', 10.0, 0.0, logging.INFO,
+         'auto-executor: OPENED orb_test conId 1111 - bought 10 (price not yet reported)'),
+        ('OPEN', 'CANCELLED', 40.0, 4_000.0, logging.INFO,
+         'auto-executor: OPENED orb_test conId 1111 - bought 40 at avg 100.0000 before the rest was cancelled'),
+        ('PROTECTIVE', 'FILLED', 140.0, 12_880.0, logging.WARNING,
+         'auto-executor: PROTECTIVE STOP FILLED for orb_test conId 1111 - sold 140 at avg 92.0000'),
+        ('PROTECTIVE', 'CANCELLED', 30.0, 2_760.0, logging.WARNING,
+         'auto-executor: PROTECTIVE STOP FILLED for orb_test conId 1111 - sold 30 at avg 92.0000 '
+         'before the rest was cancelled'),
+    ])
+    def test_the_line_for_a_finished_intent(self, caplog, kind, status, filled, notional, level, expected):
+        with caplog.at_level(logging.INFO):
+            AutoExecutor._log_terminal(self._intent(kind), status, filled, notional)
+        assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(level, expected)]
+
+    @pytest.mark.parametrize('kind, status, filled', [
+        ('OPEN', 'WORKING', 40.0),            # still working: the fill is not finished
+        ('OPEN', 'UNKNOWN', 40.0),
+        ('PROTECTIVE', 'CANCELLED', 0.0),     # every exit cancels the stop: not news
+        ('CLOSE', 'CANCELLED', 0.0),
+        ('OPEN', 'FILLED', 0.0),
+    ])
+    def test_nothing_is_said_about_an_intent_that_did_not_trade_or_is_not_finished(self, caplog, kind, status, filled):
+        with caplog.at_level(logging.INFO):
+            AutoExecutor._log_terminal(self._intent(kind), status, filled, 1_000.0)
+        assert caplog.records == []
+
+    def test_a_fill_is_announced_once(self, executor, caplog):
+        ex, sdk = executor
+        with caplog.at_level(logging.INFO):
+            ex._process_signal(make_work())
+            ex._reconcile_intents('orb_test', 1111)
+            ex._reconcile_intents('orb_test', 1111)
+        assert sum('OPENED' in line for line in self._lines(caplog)) == 1
+
+
 class TestAutoExecutorPipeline:
     def test_buy_signal_opens_position(self, executor):
         ex, sdk = executor
